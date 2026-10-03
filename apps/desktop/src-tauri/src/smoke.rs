@@ -3,14 +3,19 @@
 //! and both floating panels under them, waits that long, hides the panels
 //! again, and exits 0 when the main window sent `page.ready`, at least one
 //! snapshot reached it in reply, the tray was built, and both panels were
-//! visible before the hide and hidden after it; 1 otherwise; a value that
+//! visible at the size their page reported before the hide and hidden
+//! after it; 1 otherwise; a value that
 //! is not a positive number ends the run at once with 2. Screenshots of the
 //! Xvfb root during the wait are the review evidence; the windows carry only
 //! fixture data, the prompt names a made-up app.
 
 use std::{
+    collections::HashMap,
     env, process,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -18,6 +23,7 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 use crate::{
+    panel_geometry::same_size,
     panels::{self, Panel, PromptRequest},
     windows::{self, BridgeWindow, Spec},
 };
@@ -32,6 +38,9 @@ pub struct Smoke {
     main_ready: AtomicBool,
     main_snapshots: AtomicUsize,
     tray_built: AtomicBool,
+    /// The size each panel's page last reported, checked against the
+    /// window at the end.
+    panel_sizes: Mutex<HashMap<String, (f64, f64)>>,
 }
 
 impl Smoke {
@@ -42,7 +51,8 @@ impl Smoke {
     }
 
     /// A panel's page reported its size; logged on a smoke run so the
-    /// screenshots can be read against the numbers.
+    /// screenshots can be read against the numbers, and kept so the end of
+    /// the run can check the window took it.
     pub fn note_panel_size(&self, label: &str, size: (f64, f64)) {
         if self.armed.load(Ordering::SeqCst) {
             eprintln!(
@@ -50,6 +60,16 @@ impl Smoke {
                 size.0, size.1
             );
         }
+        if let Ok(mut sizes) = self.panel_sizes.lock() {
+            sizes.insert(label.to_owned(), size);
+        }
+    }
+
+    fn panel_size(&self, label: &str) -> Option<(f64, f64)> {
+        self.panel_sizes
+            .lock()
+            .ok()
+            .and_then(|sizes| sizes.get(label).copied())
     }
 
     /// Records a window's `page.ready`; the main window's is the one the
@@ -99,7 +119,8 @@ pub enum Outcome {
     NoSnapshot,
     /// `tray::build` failed (the error was logged at startup).
     NoTray,
-    /// A panel did not show, or did not hide, as asked; the message says which.
+    /// A panel did not show, take its page's size, or hide, as asked; the
+    /// message says which.
     PanelsFailed(String),
 }
 
@@ -187,11 +208,11 @@ pub fn arm(app: &AppHandle) {
     // Both panels at once, under Settings, which the one rule never does
     // (`FloatingContent::resolve`); the run shows them to screenshot them.
     let prompt = PromptRequest {
-        app_name: "Zoom".into(),
+        app_name: "Acme Meet".into(),
         seconds: 60,
     };
     for (panel, query, y) in [
-        (Panel::Prompt, Some(prompt.query()), PANEL_PROMPT_Y),
+        (Panel::Prompt, Some(prompt.query(None)), PANEL_PROMPT_Y),
         (Panel::Bubble, None, PANEL_BUBBLE_Y),
     ] {
         if let Err(error) = panels::show_at(app, panel, query.as_deref(), (PANELS_X, y)) {
@@ -217,10 +238,11 @@ pub const PANELS_X: f64 = 1160.0;
 pub const PANEL_PROMPT_Y: f64 = 700.0;
 pub const PANEL_BUBBLE_Y: f64 = 800.0;
 
-/// Both panels exist and are visible, then hide on request and report
-/// hidden: the same `show` and `hide` the one rule drives, checked from
-/// outside.
+/// Both panels exist, are visible and have taken the size their page
+/// reported, then hide on request and report hidden: the same `show`,
+/// `resize` and `hide` the one rule drives, checked from outside.
 fn check_panels(app: &AppHandle) -> Result<(), String> {
+    let smoke = app.state::<Smoke>();
     for panel in Panel::ALL {
         let label = panel.label();
         let window = app
@@ -229,6 +251,25 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
         if !window.is_visible().map_err(|error| error.to_string())? {
             return Err(format!("the {label} panel was not visible"));
         }
+        let scale = window.scale_factor().map_err(|error| error.to_string())?;
+        let inner = window.inner_size().map_err(|error| error.to_string())?;
+        let window_size = (
+            f64::from(inner.width) / scale,
+            f64::from(inner.height) / scale,
+        );
+        let reported = smoke
+            .panel_size(label)
+            .ok_or_else(|| format!("the {label} panel never reported its size"))?;
+        if !same_size(window_size, reported) {
+            return Err(format!(
+                "the {label} panel measures {} by {} but its window is {} by {}",
+                reported.0, reported.1, window_size.0, window_size.1
+            ));
+        }
+        eprintln!(
+            "[steno-desktop] smoke: the {label} window is {} by {}",
+            window_size.0, window_size.1
+        );
         panels::hide(app, panel).map_err(|error| format!("hiding {label}: {error}"))?;
         if window.is_visible().map_err(|error| error.to_string())? {
             return Err(format!("the {label} panel stayed visible after hide"));

@@ -30,6 +30,7 @@ mod dialogs;
 mod fixtures;
 mod host;
 mod navigation;
+mod panel_geometry;
 mod panels;
 mod permissions;
 mod recording;

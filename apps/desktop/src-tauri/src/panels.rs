@@ -11,6 +11,10 @@
 //! `bridge::emit`; the host raises and clears the prompt
 //! (`set_prompt`, `WP6b` wires the detection controller to it).
 //!
+//! Each panel's window is created once and then hidden and shown; the
+//! prompt's is navigated to the new request each time one is raised, so
+//! the page remounts and its countdown starts afresh.
+//!
 //! Both panels hang from one anchor, the top-centre point of the frame, so
 //! the prompt turns into the bubble without moving; the user drags a
 //! panel by its background (`data-tauri-drag-region` in the page), the
@@ -18,26 +22,33 @@
 //! falls back to the default: top centre of the main screen, 8 pt under
 //! its top edge. The page measures itself and reports its size through
 //! `panel_call("resize")`; the shell sizes the window from that, as the
-//! Swift root reported through `contentSizeDidChange`.
+//! Swift root reported through `contentSizeDidChange`. The geometry is
+//! `panel_geometry.rs`.
 //!
 //! Swift: `FloatingPanel.swift`, `FloatingPanelModel.swift`,
 //! `FloatingContent.swift`.
 
-use std::{collections::HashMap, fs, path::PathBuf, sync::Mutex};
+use std::{
+    collections::HashMap,
+    fs,
+    path::PathBuf,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
-use serde::{Deserialize, Serialize};
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
-    WebviewWindowBuilder, webview::NewWindowResponse,
+    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Url, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, webview::NewWindowResponse,
 };
 
 use crate::{
+    bridge::{BridgeError, failed},
     navigation,
+    panel_geometry::{PROBE_SIZE, PanelAnchor, Rect, accepted_size, frame_hanging_from, same_size},
     recording::{RecorderState, RecordingState},
 };
-
-/// `Theme.Space.sm`: the default anchor's distance from the screen's top.
-pub const DEFAULT_TOP_INSET: f64 = 8.0;
 
 /// The two panels; the raw value is the window label and the route's
 /// last segment.
@@ -61,11 +72,19 @@ impl Panel {
         Self::ALL.into_iter().find(|panel| panel.label() == label)
     }
 
+    /// The hash route without its `#`.
     pub const fn route(self) -> &'static str {
         match self {
-            Self::Bubble => "#/panel/bubble",
-            Self::Prompt => "#/panel/prompt",
+            Self::Bubble => "/panel/bubble",
+            Self::Prompt => "/panel/prompt",
         }
+    }
+
+    /// Whether a new request reaches an existing window by navigating it:
+    /// the prompt carries its request in the route; the bubble reads the
+    /// recorder off the bridge and is only shown.
+    pub const fn navigates_per_request(self) -> bool {
+        matches!(self, Self::Prompt)
     }
 
     /// The size before the page has measured: the Swift maximum width
@@ -79,12 +98,26 @@ impl Panel {
         }
     }
 
-    /// `index.html#/panel/<label>?<query>`.
-    pub fn start_path(self, query: Option<&str>) -> String {
+    /// The document fragment: `/panel/<label>[?<query>]`.
+    pub fn fragment(self, query: Option<&str>) -> String {
         match query {
-            Some(query) if !query.is_empty() => format!("index.html{}?{query}", self.route()),
-            _ => format!("index.html{}", self.route()),
+            Some(query) if !query.is_empty() => format!("{}?{query}", self.route()),
+            _ => self.route().to_owned(),
         }
+    }
+
+    /// `index.html#/panel/<label>?<query>`, for a new window.
+    pub fn start_path(self, query: Option<&str>) -> String {
+        format!("index.html#{}", self.fragment(query))
+    }
+
+    /// The URL an existing window loads for a new request: the document it
+    /// already shows with the new fragment, so the origin (the app's or the
+    /// dev server's) is whatever the window has.
+    pub fn route_url(self, current: &Url, query: Option<&str>) -> Url {
+        let mut url = current.clone();
+        url.set_fragment(Some(&self.fragment(query)));
+        url
     }
 }
 
@@ -97,12 +130,19 @@ pub struct PromptRequest {
 }
 
 impl PromptRequest {
-    /// The prompt's query: `app=<name>&seconds=<n>`, form-encoded.
-    pub fn query(&self) -> String {
-        url::form_urlencoded::Serializer::new(String::new())
+    /// The prompt's query: `app=<name>&seconds=<n>`, form-encoded, plus
+    /// `raised=<serial>` when the shell numbers the request: a new number
+    /// is a new document for the page, so an identical request raised
+    /// again still remounts the prompt and restarts its countdown.
+    pub fn query(&self, raised: Option<u64>) -> String {
+        let mut query = url::form_urlencoded::Serializer::new(String::new());
+        query
             .append_pair("app", &self.app_name)
-            .append_pair("seconds", &self.seconds.to_string())
-            .finish()
+            .append_pair("seconds", &self.seconds.to_string());
+        if let Some(raised) = raised {
+            query.append_pair("raised", &raised.to_string());
+        }
+        query.finish()
     }
 }
 
@@ -130,115 +170,6 @@ impl FloatingContent {
     }
 }
 
-/// A rectangle in logical points, origin top-left (Tauri's convention,
-/// not `AppKit`'s).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct Rect {
-    pub x: f64,
-    pub y: f64,
-    pub width: f64,
-    pub height: f64,
-}
-
-impl Rect {
-    pub const fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    pub fn mid_x(&self) -> f64 {
-        self.x + self.width / 2.0
-    }
-
-    pub fn max_x(&self) -> f64 {
-        self.x + self.width
-    }
-
-    pub fn max_y(&self) -> f64 {
-        self.y + self.height
-    }
-
-    pub fn contains_point(&self, x: f64, y: f64) -> bool {
-        x >= self.x && x < self.max_x() && y >= self.y && y < self.max_y()
-    }
-
-    /// Whether `other` lies wholly inside, edges included.
-    pub fn contains(&self, other: &Rect) -> bool {
-        other.x >= self.x
-            && other.y >= self.y
-            && other.max_x() <= self.max_x()
-            && other.max_y() <= self.max_y()
-    }
-}
-
-/// Where the panel hangs: the top-centre point of its frame and the
-/// visible frame of the screen it was saved on.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct PanelAnchor {
-    pub top_center: (f64, f64),
-    pub screen: Rect,
-}
-
-impl PanelAnchor {
-    /// The default on a screen's visible frame: top centre, `DEFAULT_TOP_INSET`
-    /// under the top edge.
-    pub fn default_in(screen: Rect) -> Self {
-        Self {
-            top_center: (screen.mid_x(), screen.y + DEFAULT_TOP_INSET),
-            screen,
-        }
-    }
-
-    /// The frame of a panel of `size` hanging from the anchor.
-    pub fn frame_for(&self, size: (f64, f64)) -> Rect {
-        frame_hanging_from(self.top_center, size)
-    }
-
-    /// The anchor that describes a panel at `frame`, on the screen among
-    /// `screens` that holds its top-centre point (else `fallback`).
-    pub fn from_frame(frame: Rect, screens: &[Rect], fallback: Rect) -> Self {
-        let point = (frame.mid_x(), frame.y);
-        let screen = screens
-            .iter()
-            .copied()
-            .find(|screen| screen.contains_point(point.0, point.1))
-            .unwrap_or(fallback);
-        Self {
-            top_center: point,
-            screen,
-        }
-    }
-
-    /// A saved anchor is kept while a panel of `size` hanging from it lies
-    /// within one of the current screens; otherwise the default on
-    /// `fallback`.
-    pub fn validated(
-        saved: Option<Self>,
-        size: (f64, f64),
-        screens: &[Rect],
-        fallback: Rect,
-    ) -> Self {
-        if let Some(saved) = saved
-            && screens
-                .iter()
-                .any(|screen| screen.contains(&saved.frame_for(size)))
-        {
-            return saved;
-        }
-        Self::default_in(fallback)
-    }
-}
-
-/// Two sizes within a point of each other are the same size (the window
-/// system rounds to the pixel grid).
-fn matches(a: (f64, f64), b: (f64, f64)) -> bool {
-    (a.0 - b.0).abs() < 1.0 && (a.1 - b.1).abs() < 1.0
-}
-
 /// The panels' state, managed by the app.
 #[derive(Debug)]
 pub struct Panels {
@@ -248,6 +179,11 @@ pub struct Panels {
     sizes: Mutex<HashMap<Panel, (f64, f64)>>,
     prompt: Mutex<Option<PromptRequest>>,
     recording: Mutex<RecordingState>,
+    /// What `apply` last showed, so a snapshot that changes nothing does
+    /// not re-navigate the prompt.
+    showing: Mutex<Option<FloatingContent>>,
+    /// How many prompts have been raised; the next one's `raised` number.
+    raised: AtomicU64,
 }
 
 impl Default for Panels {
@@ -258,17 +194,24 @@ impl Default for Panels {
             sizes: Mutex::default(),
             prompt: Mutex::default(),
             recording: Mutex::new(RecordingState::Idle),
+            showing: Mutex::default(),
+            raised: AtomicU64::new(0),
         }
     }
 }
 
 impl Panels {
-    fn size_of(&self, panel: Panel) -> (f64, f64) {
+    /// The size the page last reported, if it has.
+    fn measured(&self, panel: Panel) -> Option<(f64, f64)> {
         self.sizes
             .lock()
             .ok()
             .and_then(|sizes| sizes.get(&panel).copied())
-            .unwrap_or(panel.initial_size())
+    }
+
+    /// The measured size, else the one to lay out with before measuring.
+    fn size_of(&self, panel: Panel) -> (f64, f64) {
+        self.measured(panel).unwrap_or(panel.initial_size())
     }
 
     pub fn content(&self) -> Option<FloatingContent> {
@@ -278,6 +221,23 @@ impl Panels {
             .lock()
             .map_or(RecordingState::Idle, |state| *state);
         FloatingContent::resolve(prompt.as_ref(), recording)
+    }
+
+    /// Records what is about to show; `false` when it already is.
+    fn note_showing(&self, content: Option<&FloatingContent>) -> bool {
+        self.showing.lock().is_ok_and(|mut showing| {
+            if showing.as_ref() == content {
+                false
+            } else {
+                *showing = content.cloned();
+                true
+            }
+        })
+    }
+
+    /// The query for a prompt raised now, numbered.
+    fn prompt_query(&self, request: &PromptRequest) -> String {
+        request.query(Some(self.raised.fetch_add(1, Ordering::SeqCst) + 1))
     }
 }
 
@@ -319,7 +279,8 @@ fn fallback_screen(screens: &[Rect]) -> Rect {
         .unwrap_or(Rect::new(0.0, 0.0, 1280.0, 800.0))
 }
 
-/// The anchor to lay out from, loading the saved one on first use.
+/// The anchor to lay out from, loading the saved one on first use and
+/// validating it for a panel of `size`.
 fn current_anchor(app: &AppHandle, size: (f64, f64)) -> PanelAnchor {
     let panels = app.state::<Panels>();
     let mut anchor = panels.anchor.lock().expect("anchor");
@@ -349,17 +310,31 @@ fn save_anchor(app: &AppHandle, anchor: PanelAnchor) {
     }
 }
 
+/// The window's top-centre point in logical points.
+fn top_center_of(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
+    let scale = window.scale_factor()?;
+    let position = window.outer_position()?;
+    let size = window.inner_size()?;
+    Ok((
+        f64::from(position.x) / scale + f64::from(size.width) / scale / 2.0,
+        f64::from(position.y) / scale,
+    ))
+}
+
 /// Shows `panel` at the anchor, creating its window when needed. The
-/// prompt is recreated so its route carries the new request; the bubble
-/// is reused.
+/// anchor is validated with the size the page reported, or with
+/// `PROBE_SIZE` before it has, never with the pre-measure maximum.
 pub fn show(app: &AppHandle, panel: Panel, query: Option<&str>) -> tauri::Result<WebviewWindow> {
-    let size = app.state::<Panels>().size_of(panel);
-    let frame = current_anchor(app, size).frame_for(size);
+    let panels = app.state::<Panels>();
+    let size = panels.size_of(panel);
+    let probe = panels.measured(panel).unwrap_or(PROBE_SIZE);
+    let frame = current_anchor(app, probe).frame_for(size);
     show_at(app, panel, query, (frame.x, frame.y))
 }
 
 /// `show` at an explicit position (the smoke run lays the panels out
-/// beside the windows).
+/// beside the windows). An existing window is reused: the prompt's is
+/// navigated to the new request first.
 pub fn show_at(
     app: &AppHandle,
     panel: Panel,
@@ -367,13 +342,12 @@ pub fn show_at(
     position: (f64, f64),
 ) -> tauri::Result<WebviewWindow> {
     if let Some(existing) = app.get_webview_window(panel.label()) {
-        if panel == Panel::Prompt {
-            existing.close()?;
-        } else {
-            existing.set_position(LogicalPosition::new(position.0, position.1))?;
-            existing.show()?;
-            return Ok(existing);
+        if panel.navigates_per_request() {
+            existing.navigate(panel.route_url(&existing.url()?, query))?;
         }
+        existing.set_position(LogicalPosition::new(position.0, position.1))?;
+        existing.show()?;
+        return Ok(existing);
     }
     let size = app.state::<Panels>().size_of(panel);
     let dev_server = navigation::dev_server(app);
@@ -391,7 +365,12 @@ pub fn show_at(
     .always_on_top(true)
     .visible_on_all_workspaces(true)
     .skip_taskbar(true)
-    .resizable(false)
+    // GTK ignores `resize` on a window it holds non-resizable and keeps
+    // the webview's natural size instead, so the panel would never take
+    // the size its page reports there; undecorated, the window has no
+    // edge for the user to resize by either way. macOS and Windows honour
+    // `set_size` on a fixed window.
+    .resizable(cfg!(target_os = "linux"))
     .focused(false)
     .accept_first_mouse(true)
     .on_navigation(move |url| navigation::allows(url, dev_server.as_ref()))
@@ -417,8 +396,13 @@ pub fn hide(app: &AppHandle, panel: Panel) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Shows what `content` says and hides the other panel.
+/// Shows what `content` says and hides the other panel; nothing when it
+/// is what already shows.
 pub fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
+    let panels = app.state::<Panels>();
+    if !panels.note_showing(content) {
+        return;
+    }
     let shown = content.map(FloatingContent::panel);
     for panel in Panel::ALL {
         if Some(panel) != shown
@@ -434,7 +418,7 @@ pub fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
         return;
     };
     let query = match content {
-        FloatingContent::Prompt(request) => Some(request.query()),
+        FloatingContent::Prompt(request) => Some(panels.prompt_query(request)),
         FloatingContent::Bubble => None,
     };
     if let Err(error) = show(app, content.panel(), query.as_deref()) {
@@ -479,43 +463,42 @@ pub fn dismiss_prompt(app: &AppHandle) {
 /// The page measured its content: the window takes that size around the
 /// top-centre point it already hangs from (the anchor in the normal flow,
 /// wherever the smoke put it otherwise), so a change of content never
-/// moves the panel.
-pub fn resize(app: &AppHandle, panel: Panel, size: (f64, f64)) -> tauri::Result<()> {
-    if size.0 <= 0.0 || size.1 <= 0.0 {
-        return Ok(());
-    }
+/// moves the panel. A report that is not a size is `invalidParams`; one
+/// larger than the screen is clamped to its work area.
+pub fn resize(app: &AppHandle, panel: Panel, reported: (f64, f64)) -> Result<(), BridgeError> {
+    let screens = screens(app);
+    let fallback = fallback_screen(&screens);
+    let window = app.get_webview_window(panel.label());
+    let top_center = window
+        .as_ref()
+        .map(top_center_of)
+        .transpose()
+        .map_err(failed)?;
+    let screen = top_center.map_or(fallback, |point| Rect::holding(&screens, point, fallback));
+    let size = accepted_size(reported, (screen.width, screen.height)).ok_or_else(|| {
+        BridgeError::invalid_params(format!(
+            "resize: {} by {} is not a size",
+            reported.0, reported.1
+        ))
+    })?;
     let panels = app.state::<Panels>();
     if let Ok(mut sizes) = panels.sizes.lock() {
-        if sizes.get(&panel).is_some_and(|last| matches(*last, size)) {
+        if sizes.get(&panel).is_some_and(|last| same_size(*last, size)) {
             return Ok(());
         }
         sizes.insert(panel, size);
     }
-    let Some(window) = app.get_webview_window(panel.label()) else {
+    let (Some(window), Some(top_center)) = (window, top_center) else {
         return Ok(());
     };
-    let scale = window.scale_factor()?;
-    let position = window.outer_position()?;
-    let current = window.inner_size()?;
-    let top_center = (
-        f64::from(position.x) / scale + f64::from(current.width) / scale / 2.0,
-        f64::from(position.y) / scale,
-    );
     let frame = frame_hanging_from(top_center, size);
-    window.set_size(LogicalSize::new(size.0, size.1))?;
-    window.set_position(LogicalPosition::new(frame.x, frame.y))?;
+    window
+        .set_size(LogicalSize::new(size.0, size.1))
+        .map_err(failed)?;
+    window
+        .set_position(LogicalPosition::new(frame.x, frame.y))
+        .map_err(failed)?;
     Ok(())
-}
-
-/// The frame of a panel of `size` whose top-centre point is `top_center`,
-/// on whole points.
-pub fn frame_hanging_from(top_center: (f64, f64), size: (f64, f64)) -> Rect {
-    Rect::new(
-        (top_center.0 - size.0 / 2.0).round(),
-        top_center.1.round(),
-        size.0,
-        size.1,
-    )
 }
 
 /// The window moved. A move with the size the page last reported is a
@@ -534,7 +517,7 @@ pub fn moved(app: &AppHandle, panel: Panel, position: PhysicalPosition<i32>) {
     );
     let panels = app.state::<Panels>();
     let reported = panels.size_of(panel);
-    if !matches(size, reported) {
+    if !same_size(size, reported) {
         return;
     }
     let frame = Rect::new(
@@ -612,8 +595,12 @@ mod macos {
 mod tests {
     use super::*;
 
-    const SCREEN: Rect = Rect::new(0.0, 25.0, 1440.0, 875.0);
-    const SECOND: Rect = Rect::new(1440.0, 0.0, 1920.0, 1080.0);
+    fn request(app_name: &str) -> PromptRequest {
+        PromptRequest {
+            app_name: app_name.into(),
+            seconds: 60,
+        }
+    }
 
     #[test]
     fn labels_and_routes_are_the_web_apps() {
@@ -634,23 +621,53 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_query_is_form_encoded() {
-        let request = PromptRequest {
-            app_name: "Microsoft Teams (work or school)".into(),
-            seconds: 60,
-        };
+    fn the_prompt_query_is_form_encoded_and_numbered_when_raised() {
+        let request = request("Microsoft Teams (work or school)");
         assert_eq!(
-            request.query(),
+            request.query(None),
             "app=Microsoft+Teams+%28work+or+school%29&seconds=60"
         );
+        assert_eq!(
+            request.query(Some(3)),
+            "app=Microsoft+Teams+%28work+or+school%29&seconds=60&raised=3"
+        );
+    }
+
+    /// The second prompt reuses the window: the prompt's window is
+    /// navigated, on whichever origin it already has, and each raised
+    /// request gets a new number so the page remounts even for the same
+    /// app; the bubble's window is only shown.
+    #[test]
+    fn a_second_prompt_reuses_the_window_by_navigating_it() {
+        assert!(Panel::Prompt.navigates_per_request());
+        assert!(!Panel::Bubble.navigates_per_request());
+        let panels = Panels::default();
+        let first = panels.prompt_query(&request("Zoom"));
+        let second = panels.prompt_query(&request("Zoom"));
+        assert_eq!(first, "app=Zoom&seconds=60&raised=1");
+        assert_eq!(second, "app=Zoom&seconds=60&raised=2");
+        for origin in [
+            "tauri://localhost/index.html#/panel/prompt?app=Zoom&seconds=60&raised=1",
+            "http://tauri.localhost/index.html#/panel/prompt",
+            "http://localhost:5173/index.html",
+        ] {
+            let current = Url::parse(origin).unwrap();
+            let next = Panel::Prompt.route_url(&current, Some(&second));
+            assert_eq!(next.scheme(), current.scheme());
+            assert_eq!(next.host_str(), current.host_str());
+            assert_eq!(next.port(), current.port());
+            assert_eq!(next.path(), "/index.html");
+            assert_eq!(
+                next.fragment(),
+                Some("/panel/prompt?app=Zoom&seconds=60&raised=2"),
+                "{origin}"
+            );
+        }
     }
 
     #[test]
     fn a_busy_recorder_wins_then_the_prompt_then_nothing() {
-        let prompt = PromptRequest {
-            app_name: "Zoom".into(),
-            seconds: 60,
-        };
+        let prompt = request("Zoom");
         for state in [
             RecordingState::Starting,
             RecordingState::Recording,
@@ -676,118 +693,14 @@ mod tests {
     }
 
     #[test]
-    fn the_default_anchor_is_top_centre_under_the_top_edge() {
-        let anchor = PanelAnchor::default_in(SCREEN);
-        assert_eq!(anchor.top_center, (720.0, 33.0));
-        assert_eq!(anchor.screen, SCREEN);
-        let frame = anchor.frame_for((480.0, 56.0));
-        assert_eq!(frame, Rect::new(480.0, 33.0, 480.0, 56.0));
-        // Both contents hang from the same point.
-        let bubble = anchor.frame_for((240.0, 40.0));
-        assert_eq!(bubble.mid_x(), frame.mid_x());
-        assert_eq!(bubble.y, frame.y);
-    }
-
-    #[test]
-    fn a_resize_keeps_the_top_centre() {
-        let before = Rect::new(1160.0, 700.0, 480.0, 56.0);
-        let after = frame_hanging_from((before.mid_x(), before.y), (384.0, 56.0));
-        assert_eq!(after, Rect::new(1208.0, 700.0, 384.0, 56.0));
-        assert_eq!(after.mid_x(), before.mid_x());
-        let taller = frame_hanging_from((after.mid_x(), after.y), (384.0, 68.0));
-        assert_eq!((taller.x, taller.y), (after.x, after.y));
-    }
-
-    #[test]
-    fn frames_land_on_whole_points() {
-        let anchor = PanelAnchor {
-            top_center: (100.3, 20.6),
-            screen: SCREEN,
-        };
-        let frame = anchor.frame_for((33.0, 40.0));
-        assert_eq!((frame.x, frame.y), (84.0, 21.0));
-    }
-
-    #[test]
-    fn a_dragged_frame_becomes_the_anchor_on_its_screen() {
-        let frame = Rect::new(1500.0, 100.0, 240.0, 40.0);
-        let anchor = PanelAnchor::from_frame(frame, &[SCREEN, SECOND], SCREEN);
-        assert_eq!(anchor.top_center, (1620.0, 100.0));
-        assert_eq!(anchor.screen, SECOND);
-        // Off every screen: the fallback is recorded as the screen.
-        let off =
-            PanelAnchor::from_frame(Rect::new(-500.0, -500.0, 240.0, 40.0), &[SCREEN], SCREEN);
-        assert_eq!(off.screen, SCREEN);
-    }
-
-    #[test]
-    fn a_saved_anchor_survives_while_its_panel_fits_a_current_screen() {
-        let saved = PanelAnchor {
-            top_center: (1620.0, 100.0),
-            screen: SECOND,
-        };
-        assert_eq!(
-            PanelAnchor::validated(Some(saved), (240.0, 40.0), &[SCREEN, SECOND], SCREEN),
-            saved
-        );
-        // The second screen is gone: back to the default on the main one.
-        assert_eq!(
-            PanelAnchor::validated(Some(saved), (240.0, 40.0), &[SCREEN], SCREEN),
-            PanelAnchor::default_in(SCREEN)
-        );
-        // A panel whose bottom would hang below the screen does not fit,
-        // even though its anchor point lies inside.
-        let low = PanelAnchor {
-            top_center: (720.0, 880.0),
-            screen: SCREEN,
-        };
-        assert_eq!(
-            PanelAnchor::validated(Some(low), (240.0, 40.0), &[SCREEN], SCREEN),
-            PanelAnchor::default_in(SCREEN)
-        );
-        assert_eq!(
-            PanelAnchor::validated(None, (240.0, 40.0), &[SCREEN], SCREEN),
-            PanelAnchor::default_in(SCREEN)
-        );
-    }
-
-    #[test]
-    fn the_anchor_round_trips_through_json() {
-        let anchor = PanelAnchor {
-            top_center: (720.0, 33.0),
-            screen: SCREEN,
-        };
-        let json = serde_json::to_string(&anchor).unwrap();
-        assert_eq!(serde_json::from_str::<PanelAnchor>(&json).unwrap(), anchor);
-    }
-
-    #[test]
-    fn sub_point_differences_are_the_same_size() {
-        assert!(matches((240.0, 40.0), (240.4, 39.6)));
-        assert!(!matches((240.0, 40.0), (241.0, 40.0)));
-        assert!(!matches((240.0, 40.0), (240.0, 68.0)));
-    }
-
-    #[test]
-    fn rects_contain_points_and_rects() {
-        assert!(SCREEN.contains_point(0.0, 25.0));
-        assert!(!SCREEN.contains_point(1440.0, 25.0));
-        assert!(SCREEN.contains(&Rect::new(0.0, 25.0, 1440.0, 875.0)));
-        assert!(!SCREEN.contains(&Rect::new(0.0, 24.0, 10.0, 10.0)));
-        assert_eq!(SCREEN.max_y(), 900.0);
-    }
-
-    #[test]
     fn the_panels_state_resolves_from_what_it_holds() {
         let panels = Panels::default();
         assert_eq!(panels.content(), None);
+        assert_eq!(panels.measured(Panel::Bubble), None);
         assert_eq!(panels.size_of(Panel::Bubble), Panel::Bubble.initial_size());
         assert_eq!(Panel::Bubble.initial_size(), (480.0, 40.0));
         assert_eq!(Panel::Prompt.initial_size(), (480.0, 56.0));
-        *panels.prompt.lock().unwrap() = Some(PromptRequest {
-            app_name: "Zoom".into(),
-            seconds: 60,
-        });
+        *panels.prompt.lock().unwrap() = Some(request("Zoom"));
         assert!(matches!(panels.content(), Some(FloatingContent::Prompt(_))));
         *panels.recording.lock().unwrap() = RecordingState::Recording;
         assert_eq!(panels.content(), Some(FloatingContent::Bubble));
@@ -796,6 +709,23 @@ mod tests {
             .lock()
             .unwrap()
             .insert(Panel::Bubble, (300.0, 68.0));
+        assert_eq!(panels.measured(Panel::Bubble), Some((300.0, 68.0)));
         assert_eq!(panels.size_of(Panel::Bubble), (300.0, 68.0));
+    }
+
+    /// A snapshot that changes nothing leaves the panel alone; a prompt
+    /// shown after a dismissal is a change, as is the same request after
+    /// the bubble.
+    #[test]
+    fn apply_moves_only_on_a_change_of_content() {
+        let panels = Panels::default();
+        let prompt = FloatingContent::Prompt(request("Zoom"));
+        assert!(!panels.note_showing(None));
+        assert!(panels.note_showing(Some(&prompt)));
+        assert!(!panels.note_showing(Some(&prompt)));
+        assert!(panels.note_showing(None));
+        assert!(panels.note_showing(Some(&prompt)));
+        assert!(panels.note_showing(Some(&FloatingContent::Bubble)));
+        assert!(panels.note_showing(Some(&prompt)));
     }
 }

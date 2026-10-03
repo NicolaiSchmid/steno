@@ -241,7 +241,7 @@ pub async fn panel_call(
             let size: ResizeParams = parse(&action, params)?;
             app.state::<Smoke>()
                 .note_panel_size(panel.label(), (size.width, size.height));
-            panels::resize(&app, panel, (size.width, size.height)).map_err(failed)?;
+            panels::resize(&app, panel, (size.width, size.height))?;
             Ok(Value::Null)
         }
         "dismissPrompt" => {
