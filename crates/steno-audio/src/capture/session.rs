@@ -36,7 +36,13 @@
 //! the state under the lock, releases it, and only then stops the threads.
 //! The rebuild runs on its own thread, takes the mutex for each step that
 //! touches the state and sleeps outside it on the injected [`Clock`], with
-//! a [`Cancel`] token `stop()` raises.
+//! a [`Cancel`] token `stop()` raises. Teardown raises that token and then
+//! joins the rebuild thread, lock released, before it stops the backend: the
+//! rebuild may be inside its own `backend.stop()` with the IOProc and the
+//! old processing thread still running, or may just have started the
+//! backend again, and the rings are cleared only once both are over. The
+//! rebuild never finalises through that join: when every restart failed it
+//! drops its own handle before `finish()` runs on it.
 //!
 //! The one long hold is deliberate: `start` and the rebuild's
 //! `restart_backend` keep the mutex across `backend.start()`, up to 200 ms
@@ -44,11 +50,15 @@
 //! waits for the aggregate. A `stop()` arriving meanwhile queues behind it
 //! and then finds a started backend to tear down, instead of racing a
 //! half-built one; a backend never calls back into the session from
-//! `start`, so the hold cannot deadlock.
+//! `start`, so the hold cannot deadlock. It can stall, though: every
+//! caller, `state()` included, waits as long as `backend.start()` takes
+//! (2.1 s measured against a backend whose start blocked for 2 s), so a HAL
+//! call that hangs there freezes the session's callers with it.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -140,12 +150,20 @@ struct Active {
     /// The loudest system-lane sample over every processing thread
     /// replaced so far; `finish()` takes the maximum with the current one.
     system_peak_so_far: f32,
-    /// The rebuild in flight, so `stop()` can abandon it.
-    rebuild: Option<Cancel>,
+    /// The rebuild in flight, so `stop()` can abandon it and wait for it.
+    rebuild: Option<Rebuild>,
     /// A change reported while that rebuild ran (the rebuilt backend's
     /// listeners are live before the gap is written); `resume` starts the
     /// next rebuild from it instead of losing it.
     pending_change: Option<DeviceChangeReason>,
+}
+
+/// A rebuild thread and the token that abandons it.
+struct Rebuild {
+    cancel: Cancel,
+    /// Returns the silence frames the rebuild wrote that no `resume`
+    /// accounted, because a stop overtook it.
+    thread: JoinHandle<usize>,
 }
 
 enum Restart {
@@ -609,7 +627,11 @@ impl Core {
     fn finish(&self) -> Option<(CaptureResult, Option<CaptureError>)> {
         let mut active = self.lock().active.take()?;
         if let Some(rebuild) = active.rebuild.take() {
-            rebuild.cancel();
+            rebuild.cancel.cancel();
+            // With `active` gone every step of the rebuild gives up; what
+            // it wrote of a gap before that is in the master.
+            let unaccounted = rebuild.thread.join().unwrap_or(0);
+            active.gap_seconds += (unaccounted * FRAME_SIZE) as f64 / SAMPLE_RATE;
         }
         self.backend.stop();
         let mut system_peak = active.system_peak_so_far;
@@ -671,6 +693,7 @@ impl Core {
         if !matches!(inner.state, CaptureState::Recording { .. }) {
             return;
         }
+        let generation = inner.rebuild_generation + 1;
         let Some(active) = inner.active.as_mut() else {
             return;
         };
@@ -679,16 +702,18 @@ impl Core {
             return;
         }
         let cancel = Cancel::new();
-        active.rebuild = Some(cancel.clone());
-        Self::emit(&mut inner, CaptureNotice::DeviceChanged(reason));
-        inner.rebuild_generation += 1;
-        let generation = inner.rebuild_generation;
-        drop(inner);
         let core = Arc::clone(self);
-        std::thread::Builder::new()
+        let token = cancel.clone();
+        // Spawned under the lock so the handle is in place before any
+        // `finish()` can look for it; the thread's first step waits for
+        // the lock.
+        let thread = std::thread::Builder::new()
             .name("steno-rebuild".into())
-            .spawn(move || core.rebuild(generation, &cancel))
+            .spawn(move || core.rebuild(generation, &token))
             .expect("spawn rebuild thread");
+        active.rebuild = Some(Rebuild { cancel, thread });
+        inner.rebuild_generation = generation;
+        Self::emit(&mut inner, CaptureNotice::DeviceChanged(reason));
     }
 
     fn still_rebuilding(inner: &Inner, generation: usize) -> bool {
@@ -701,8 +726,9 @@ impl Core {
     /// backoff; the gap from the moment the old backend was told to stop
     /// is written as silence before the new processing thread starts. The
     /// sink, the relay, the writer thread and the files stay. Nothing here
-    /// runs on a real-time thread.
-    fn rebuild(self: &Arc<Self>, generation: usize, cancel: &Cancel) {
+    /// runs on a real-time thread. Returns the silence frames written that
+    /// `resume` did not account because a stop came first.
+    fn rebuild(self: &Arc<Self>, generation: usize, cancel: &Cancel) -> usize {
         // The stopwatch runs from before the teardown: the HAL calls in
         // `stop()` take tens to hundreds of milliseconds during a device
         // transition, and that is dead time in the master too.
@@ -710,10 +736,10 @@ impl Core {
         let (sink, relay, processing) = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
-                return;
+                return 0;
             }
             let Some(active) = inner.active.as_mut() else {
-                return;
+                return 0;
             };
             (
                 Arc::clone(&active.sink),
@@ -753,15 +779,20 @@ impl Core {
                 let elapsed = self.clock.now().saturating_sub(started);
                 let gap_frames =
                     CaptureSession::gap_frames(elapsed.min(CaptureSession::MAXIMUM_GAP));
-                if !self.write_silence(gap_frames, &relay, generation, cancel)
+                let written = self.write_silence(gap_frames, &relay, generation, cancel);
+                if written < gap_frames
                     || !self.relay_has_room(&sink, &relay, generation, cancel)
+                    || !self.resume(stream, attempt, gap_frames, &sink, &relay, generation)
                 {
-                    return;
+                    return written;
                 }
-                self.resume(stream, attempt, gap_frames, &sink, &relay, generation);
+                0
             }
-            Restart::Abandoned => {}
-            Restart::Exhausted => self.device_lost(),
+            Restart::Abandoned => 0,
+            Restart::Exhausted => {
+                self.device_lost();
+                0
+            }
         }
     }
 
@@ -809,7 +840,7 @@ impl Core {
     /// The new processing thread on the kept sink and relay, built for
     /// `stream`'s latencies and publishing into the shared `LevelSlot`; the
     /// statistics and the notice follow. A change reported during the
-    /// rebuild starts the next one.
+    /// rebuild starts the next one. `false` when a stop came first.
     fn resume(
         self: &Arc<Self>,
         stream: CaptureStream,
@@ -818,15 +849,15 @@ impl Core {
         sink: &Arc<LaneFrameSink>,
         relay: &Arc<FrameRelay>,
         generation: usize,
-    ) {
+    ) -> bool {
         let pending = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
-                return;
+                return false;
             }
             let canceller = inner.echo_canceller.take();
             let Some(active) = inner.active.as_mut() else {
-                return;
+                return false;
             };
             // Exact for any gap length.
             let gap_seconds = (gap_frames * FRAME_SIZE) as f64 / SAMPLE_RATE;
@@ -856,6 +887,7 @@ impl Core {
         if let Some(pending) = pending {
             self.device_changed(pending);
         }
+        true
     }
 
     /// Zeros in every written channel for `frames` relay frames, through
@@ -865,35 +897,35 @@ impl Core {
     /// shrink into `dropped_samples`. A full relay (a long gap, or a writer
     /// still behind the old producer) is waited out in 5 ms steps on the
     /// clock; `has_room` is asked first because a refused `begin_frame`
-    /// counts as a dropped frame. Returns `false` when the rebuild was
-    /// abandoned meanwhile.
+    /// counts as a dropped frame. Returns the frames written, fewer than
+    /// `frames` when the rebuild was abandoned meanwhile.
     fn write_silence(
         &self,
         frames: usize,
         relay: &FrameRelay,
         generation: usize,
         cancel: &Cancel,
-    ) -> bool {
+    ) -> usize {
         if frames == 0 {
-            return true;
+            return 0;
         }
         let zeros = vec![0.0f32; relay.frame_size()];
-        let mut remaining = frames;
-        while remaining > 0 {
+        let mut written = 0;
+        while written < frames {
             if !Self::still_rebuilding(&self.lock(), generation) {
-                return false;
+                break;
             }
             if relay.has_room() && relay.begin_frame() {
                 for channel in 0..relay.channels() {
                     relay.write(channel, &zeros);
                 }
                 relay.end_frame();
-                remaining -= 1;
+                written += 1;
             } else if !self.clock.sleep(Duration::from_millis(5), cancel) {
-                return false;
+                break;
             }
         }
-        true
+        written
     }
 
     /// Waits, in 5 ms steps on the clock, until the relay has room for the
@@ -938,7 +970,7 @@ impl Core {
             };
             active.ended_on_device_loss = true;
             // This runs inside the rebuild thread; `finish()` must not
-            // cancel it, and it is over anyway.
+            // cancel or join it, and it is over anyway.
             active.rebuild = None;
             Self::set_state(&mut inner, &CaptureState::Stopping);
         }

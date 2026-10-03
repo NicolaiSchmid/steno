@@ -20,7 +20,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1309,6 +1309,138 @@ fn stop_during_a_rebuild_finalises_once() {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
 }
 
+/// The live backend's shape during a device transition: the IOProc keeps
+/// producing until `stop()` has torn the aggregate down, which takes
+/// `teardown` here, and a second `stop()` while the first is still under
+/// way returns at once because the first owns the teardown. The producer
+/// reports one device change after 100 ms on the first start, keeps going
+/// and counts its callbacks and every frame the rings accepted.
+struct SlowTeardown {
+    teardown: Duration,
+    running: Mutex<Option<(Arc<AtomicBool>, std::thread::JoinHandle<()>)>>,
+    tearing_down: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    starts: AtomicUsize,
+    callbacks: Arc<AtomicUsize>,
+    delivered: Arc<AtomicUsize>,
+}
+
+impl SlowTeardown {
+    fn new(teardown: Duration) -> (Self, Receiver<()>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let backend = Self {
+            teardown,
+            running: Mutex::new(None),
+            tearing_down: Mutex::new(Some(sender)),
+            starts: AtomicUsize::new(0),
+            callbacks: Arc::new(AtomicUsize::new(0)),
+            delivered: Arc::new(AtomicUsize::new(0)),
+        };
+        (backend, receiver)
+    }
+}
+
+impl CaptureBackend for SlowTeardown {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        _uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        let report = self.starts.fetch_add(1, Ordering::SeqCst) == 0;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let callbacks = Arc::clone(&self.callbacks);
+        let delivered = Arc::clone(&self.delivered);
+        let lane_count = lanes.len();
+        let producer = std::thread::spawn(move || {
+            let buffer = vec![0.25f32; 480];
+            let mut count = 0;
+            while !stopped.load(Ordering::Acquire) {
+                if sink.begin_callback(480) {
+                    for lane in 0..lane_count {
+                        sink.write_slice(lane, &buffer);
+                    }
+                    sink.end_callback();
+                    delivered.fetch_add(480, Ordering::SeqCst);
+                }
+                count += 1;
+                callbacks.fetch_add(1, Ordering::SeqCst);
+                if report && count == 10 {
+                    sink.report_device_change(DeviceChangeReason::DefaultInputChanged);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        *self.running.lock().unwrap() = Some((stop, producer));
+        Ok(CaptureStream::SYNTHETIC)
+    }
+
+    fn stop(&self) {
+        let Some((stop, producer)) = self.running.lock().unwrap().take() else {
+            return;
+        };
+        if let Some(sender) = self.tearing_down.lock().unwrap().take() {
+            let _ = sender.send(());
+        }
+        std::thread::sleep(self.teardown);
+        stop.store(true, Ordering::Release);
+        producer.join().unwrap();
+    }
+}
+
+/// `stop()` while the rebuild is inside a slow backend teardown waits for
+/// that teardown instead of clearing the rings under a running producer and
+/// the old processing thread: when `stop()` returns nothing produces any
+/// more, every frame delivered is in the master, nothing was dropped, the
+/// abandoned rebuild started nothing, and the session records again.
+#[test]
+fn stop_during_a_rebuilds_teardown_waits_for_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let (backend, tearing_down) = SlowTeardown::new(Duration::from_millis(300));
+    let backend = Arc::new(backend);
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        200,
+        Arc::new(ManualClock::new()),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    tearing_down
+        .recv_timeout(RECV)
+        .expect("the rebuild is tearing the backend down");
+
+    let result = session.stop().unwrap();
+    let callbacks = backend.callbacks.load(Ordering::SeqCst);
+    settle();
+    assert_eq!(
+        backend.callbacks.load(Ordering::SeqCst),
+        callbacks,
+        "the producer ran on after stop() returned"
+    );
+    let delivered = backend.delivered.load(Ordering::SeqCst);
+    assert_eq!(session.state(), CaptureState::Idle);
+    assert_eq!(backend.starts.load(Ordering::SeqCst), 1, "no restart");
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert_eq!(result.statistics.device_changes, 0);
+    assert_eq!(result.statistics.gap_seconds, 0.0);
+    let master = master_of(&result);
+    assert_eq!(master.frame_count(), delivered);
+    assert_eq!(result.statistics.duration, delivered as f64 / SAMPLE_RATE);
+
+    session.start(Uuid::new_v4()).unwrap();
+    std::thread::sleep(Duration::from_millis(50));
+    let again = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+    assert!(again.statistics.dropped_frames.is_empty());
+}
+
 /// In production the relay holds two seconds; a gap wider than that waits
 /// for the writer in 5 ms steps on the clock, and every frame of silence
 /// still arrives: 1.75 s of gap through a one-second relay.
@@ -1364,6 +1496,58 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_loses_nothing() {
         backend.frames_delivered() + 84_000
     );
     assert_eq!(result.statistics.duration, 3.25);
+    assert!(clock.wait_for_sleepers(0));
+}
+
+/// `stop()` while the gap waits for room in a 30-frame relay: the silence
+/// already written stays in the master and is reported in `gap_seconds`,
+/// though the rebuild never resumed, so `device_changes` stays 0.
+#[test]
+fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&[AudioLane::Mixed], 1.0)
+            .change_device_after(0.5)
+            .restarts_that_fail(3)
+            .real_time(true),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        30,
+        clock.clone(),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, 3);
+    // The fourth start succeeded; 1.75 s of gap does not fit the relay.
+    assert!(
+        clock.wait_for_sleepers(1),
+        "the gap waits for the relay on the clock"
+    );
+    let result = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+    let master = master_of(&result);
+    let silence = master.frame_count() - 24_000;
+    assert!(
+        silence >= 30 * 480,
+        "at least a relay of silence: {silence}"
+    );
+    assert!(master.channels[0][24_000..].iter().all(|s| *s == 0.0));
+    assert_eq!(result.statistics.gap_seconds, silence as f64 / SAMPLE_RATE);
+    assert_eq!(result.statistics.device_changes, 0);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert_eq!(
+        result.statistics.duration,
+        master.frame_count() as f64 / SAMPLE_RATE
+    );
     assert!(clock.wait_for_sleepers(0));
 }
 

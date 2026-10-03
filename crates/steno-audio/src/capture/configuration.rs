@@ -288,6 +288,7 @@ pub struct CaptureStatistics {
     /// Device changes the recording survived by rebuilding in place.
     pub device_changes: usize,
     /// Seconds of silence written to keep the master on wall time across
-    /// those rebuilds.
+    /// those rebuilds, and across one a stop overtook while it wrote the
+    /// gap (that one is not in `device_changes`).
     pub gap_seconds: f64,
 }
