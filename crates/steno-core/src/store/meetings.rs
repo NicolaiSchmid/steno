@@ -330,6 +330,12 @@ impl Store {
     /// receipt that admitted it. Persons stay. Fails with `MeetingBusy`
     /// while the meeting is `recording` or `processing`. Returns the files
     /// the rows named, for the caller to remove.
+    ///
+    /// The store commits with `synchronous = NORMAL`, so the delete need
+    /// not be on disk when this returns: a power loss or OS crash can roll
+    /// it back after the caller removed the files, as in the Swift app. A
+    /// delete that must be on disk first needs a commit with `FULL`, which
+    /// the store does not offer yet.
     pub fn delete_meeting(&self, id: Uuid) -> Result<DeletedMeeting> {
         self.write(|transaction| {
             let meeting = current(transaction, id)?;
