@@ -400,13 +400,16 @@ fn remove_stale_partials(directory: &Path, name: &str) {
         return;
     };
     for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
         let stale = entry
             .metadata()
             .and_then(|m| m.modified())
             .ok()
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age >= STALE_PARTIAL);
-        if stale && entry.file_name().to_string_lossy().starts_with(&prefix) {
+        if stale {
             let _ = fs::remove_file(entry.path());
         }
     }
