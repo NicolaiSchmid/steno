@@ -981,12 +981,14 @@ fn the_pages_destructive_prompt_reaches_the_dialog() {
     assert_eq!(*asked.lock().unwrap(), vec![prompt]);
 }
 
-/// The delete-recording prompt runs with the lock released; a selection
-/// that moves while it is up must not take the answer with it, or another
-/// meeting's recording is deleted. Swift held the detail model across the
-/// prompt (`MainWindowBridge.setKeepAudio(_:on:confirming:)`).
+/// The delete-recording prompt runs with the lock released, so the
+/// selection can move while it is up. The answer lands on the meeting it
+/// was asked for and the newly selected one is untouched, as in Swift,
+/// whose `MainWindowBridge.setKeepAudio(_:on:confirming:)` held the asked
+/// meeting's detail model across the prompt. A refusal for a meeting no
+/// longer selected comes back as the reply's error.
 #[test]
-fn keep_audio_off_applies_only_to_the_meeting_it_was_asked_for() {
+fn keep_audio_lands_on_the_meeting_it_was_asked_for_when_the_selection_moved() {
     let prompts = Arc::new(Mutex::new(Vec::new()));
     let harness = Harness::builder()
         .confirm_with({
@@ -1012,34 +1014,153 @@ fn keep_audio_off_applies_only_to_the_meeting_it_was_asked_for() {
 
     // A prompt asked under the lock deadlocks the selection: fail, do not hang.
     let host = harness.host.clone();
-    let error = within_five_seconds("the delete-recording prompt", move || {
+    let reply = within_five_seconds("the delete-recording prompt", move || {
         host.meeting_delete_recording_now()
     })
-    .unwrap_err();
-    assert_eq!(error.code, BridgeErrorCode::Failed);
+    .unwrap();
+    assert!(reply.confirmed);
+    assert_eq!(
+        harness.snapshot(BridgeTopic::MeetingDetail)["id"],
+        id(MEETING_IN_PERSON),
+        "the selection moved while the prompt was up"
+    );
     harness
         .host
         .meetings_select(MeetingIdParams {
             meeting_id: uuid(MEETING),
         })
         .unwrap();
-    let error = harness
+    let reply = harness
         .host
         .meeting_set_keep_audio(SetBoolParams { value: false })
-        .unwrap_err();
-    assert_eq!(error.code, BridgeErrorCode::Failed);
+        .unwrap();
+    assert!(reply.confirmed);
     assert_eq!(
         *prompts.lock().unwrap(),
         vec!["Delete this recording now?"; 2],
         "both commands asked"
     );
-    assert!(
-        harness.fakes.pipeline.retention.lock().unwrap().is_empty(),
-        "neither meeting's recording rule changed"
+    assert_eq!(
+        *harness.fakes.pipeline.retention.lock().unwrap(),
+        vec![(uuid(MEETING), AudioRetention::DeleteAfterProcessing); 2],
+        "both answers landed on the meeting they were asked for"
     );
+
+    // The pipeline's refusal for the meeting no longer selected is the
+    // reply's error; the selected meeting's error line stays empty.
+    harness
+        .fakes
+        .pipeline
+        .fail_calls(Some("meeting has no audio asset"));
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(MEETING),
+        })
+        .unwrap();
+    let error = harness.host.meeting_delete_recording_now().unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::Failed);
+    assert_eq!(
+        error.message,
+        "Retention could not be changed: meeting has no audio asset"
+    );
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["id"], id(MEETING_IN_PERSON));
+    assert_eq!(detail["error"], Value::Null);
+    assert!(
+        harness
+            .fakes
+            .pipeline
+            .retention
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(meeting, _)| *meeting == uuid(MEETING)),
+        "the newly selected meeting's rule never changed"
+    );
+}
+
+/// A meeting deleted while the prompt is up is `not_found` and nothing
+/// changes. Swift's `applyRetention` failed on the missing asset row; the
+/// host names the missing meeting instead.
+#[test]
+fn keep_audio_on_a_meeting_deleted_during_the_prompt_is_not_found() {
+    let store_slot = Arc::new(Mutex::new(None::<Arc<steno_core::Store>>));
+    let harness = Harness::builder()
+        .confirm_with({
+            let store_slot = store_slot.clone();
+            move |_, _| {
+                let store = store_slot.lock().unwrap().clone().unwrap();
+                store.delete_meeting(uuid(MEETING)).unwrap();
+                true
+            }
+        })
+        .seed(populate_sample)
+        .build();
+    *store_slot.lock().unwrap() = Some(harness.store.clone());
     assert_eq!(
         harness.snapshot(BridgeTopic::MeetingDetail)["id"],
-        id(MEETING_IN_PERSON)
+        id(MEETING)
+    );
+
+    let error = harness.host.meeting_delete_recording_now().unwrap_err();
+    assert_eq!(error.code, BridgeErrorCode::NotFound);
+    assert_eq!(error.message, "No meeting with that id is listed.");
+    assert!(
+        harness.fakes.pipeline.retention.lock().unwrap().is_empty(),
+        "nothing was changed"
+    );
+}
+
+/// The pipeline is the only judge of a keep change, as in Swift: its
+/// refusal goes on the selected meeting's error line (the reply still says
+/// the user went ahead), and a meeting still processing takes the rule,
+/// which `applyRetention` documents as safe; only a meeting delete refuses
+/// a busy meeting. Swift: `MeetingDetailViewModel.setKeepAudio(_:)`.
+#[test]
+fn a_refused_keep_change_shows_on_the_detail_and_a_busy_meeting_takes_the_rule() {
+    let harness = Harness::builder()
+        .seed(|store, fakes| {
+            populate_sample(store, fakes);
+            set_retention(store, AudioRetention::KeepDays(30));
+            let mut processing = sample_meeting();
+            processing.id = uuid(0x77);
+            processing.state = MeetingState::Processing;
+            processing.title = "Still processing".to_owned();
+            store.save_meeting(&processing).unwrap();
+        })
+        .build();
+    let _ = harness.snapshot(BridgeTopic::MeetingDetail);
+    harness
+        .fakes
+        .pipeline
+        .fail_calls(Some("meeting has no audio asset"));
+    let reply = harness
+        .host
+        .meeting_set_keep_audio(SetBoolParams { value: true })
+        .unwrap();
+    assert!(reply.confirmed);
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["id"], id(MEETING));
+    assert_eq!(
+        detail["error"],
+        "Retention could not be changed: meeting has no audio asset"
+    );
+
+    harness.fakes.pipeline.fail_calls(None);
+    harness
+        .host
+        .meetings_select(MeetingIdParams {
+            meeting_id: uuid(0x77),
+        })
+        .unwrap();
+    assert_eq!(harness.snapshot(BridgeTopic::MeetingDetail)["id"], id(0x77));
+    let reply = harness.host.meeting_delete_recording_now().unwrap();
+    assert!(reply.confirmed);
+    assert_eq!(
+        harness.fakes.pipeline.retention.lock().unwrap().last(),
+        Some(&(uuid(0x77), AudioRetention::KeepDays(30))),
+        "a processing meeting takes the rule; the pipeline stamps it later"
     );
 }
 

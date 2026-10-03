@@ -315,23 +315,6 @@ impl MeetingDetailViewModel {
             && all_delivered(&self.deliveries)
     }
 
-    /// `keep` sets `keepForever`; off restores the default retention from
-    /// Settings. Both go through the pipeline's `apply_retention`, so the
-    /// stamp and the `retentionApplied` post are the pipeline's.
-    pub fn set_keep_audio(&mut self, keep: bool, store: &Store, pipeline: &dyn Pipeline) {
-        let rule = if keep {
-            Ok(AudioRetention::KeepForever)
-        } else {
-            store
-                .settings()
-                .map(|settings| settings.default_retention)
-                .map_err(BoxError::from)
-        };
-        if let Err(error) = rule.and_then(|rule| pipeline.apply_retention(self.id, rule)) {
-            self.error = Some(format!("Retention could not be changed: {error}"));
-        }
-    }
-
     // Speakers
 
     /// A speaker changed: the owner marks the meeting dirty.
@@ -392,4 +375,29 @@ impl MeetingDetailViewModel {
         }
         self.is_busy = false;
     }
+}
+
+/// The keep flag on `meeting_id`, selected or not: `keep` sets
+/// `keepForever`; off restores the default retention from Settings. Both go
+/// through the pipeline's `apply_retention`, so the stamp and the
+/// `retentionApplied` post are the pipeline's, and so is the one refusal (a
+/// meeting without an audio asset); a processing meeting takes the rule and
+/// is stamped later. The error is the line the detail shows. Swift:
+/// `MeetingDetailViewModel.setKeepAudio(_:)`.
+pub fn set_keep_audio(
+    meeting_id: Uuid,
+    keep: bool,
+    store: &Store,
+    pipeline: &dyn Pipeline,
+) -> Result<(), String> {
+    let rule = if keep {
+        Ok(AudioRetention::KeepForever)
+    } else {
+        store
+            .settings()
+            .map(|settings| settings.default_retention)
+            .map_err(BoxError::from)
+    };
+    rule.and_then(|rule| pipeline.apply_retention(meeting_id, rule))
+        .map_err(|error| format!("Retention could not be changed: {error}"))
 }

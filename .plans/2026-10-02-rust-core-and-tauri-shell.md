@@ -225,7 +225,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] `meeting.setTab`, `meeting.setTags` (trimmed, lower-cased, de-duplicated,
   sorted), `meeting.setTemplate` (stores and re-runs; unknown ids change nothing),
   `meeting.rerunSummary`, `meeting.reexport`, `meeting.setKeepAudio` (asks first when
-  turning keep off would delete now), `meeting.deleteRecordingNow`,
+  turning keep off would delete now), `meeting.deleteRecordingNow` (both apply the
+  answer to the meeting asked about, even when the selection moved during the prompt),
   `meeting.saveNotes` (to the named meeting, selected or not),
   `meeting.revealRecording`, `meeting.revealExport` (through the `Opener` trait).
 - [x] `speakers.options`, `speakers.select` (confirm, merge, create with an attendee's
@@ -308,9 +309,6 @@ still has to draw the window side. `[ ]` is not ported yet.
     publishes its progress; a remove while it runs detaches it (its late progress is
     not shown, and the asset shows what the model store reports when it ends), where
     Swift's task kept reporting.
-  - `meeting.setKeepAudio` and `meeting.deleteRecordingNow` change nothing and reply
-    `failed` when the selection moved while the prompt was up, where Swift applied
-    the answer to the meeting it had asked about.
   - A retried re-export after a refusal happens on the next store change (Swift
     retried on the next `.ready` tick); a pending re-export when the detail goes away
     is attempted once (Swift retried after three seconds in a detached task).

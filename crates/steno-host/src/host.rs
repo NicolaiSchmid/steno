@@ -96,7 +96,9 @@ use uuid::Uuid;
 
 use crate::main_window::progress::MeetingEvent;
 use crate::main_window::snapshots::{self as main_snapshots, AppState};
-use crate::main_window::{MeetingDetailViewModel, MeetingListViewModel, ProcessingProgressModel};
+use crate::main_window::{
+    MeetingDetailViewModel, MeetingListViewModel, ProcessingProgressModel, detail,
+};
 use crate::onboarding::{self, OnboardingViewModel};
 use crate::publisher::{RECORDING_INTERVAL, TopicPublisher};
 use crate::services::Services;
@@ -1147,9 +1149,11 @@ impl Host {
     /// command arrived, after the delete-recording prompt when `confirming`;
     /// the reply says whether the user went ahead. The prompt runs with the
     /// lock released, so the selection can move while it is up (a recording
-    /// starts, a deep link lands): then nothing is applied, rather than
-    /// deleting another meeting's recording. Swift held the detail model
-    /// across the prompt (`setKeepAudio(_:on:confirming:)`).
+    /// starts, a deep link lands): the answer still lands on the meeting it
+    /// was asked for, as Swift's did (`setKeepAudio(_:on:confirming:)` held
+    /// that meeting's detail model). A meeting deleted meanwhile is
+    /// `not_found` and nothing changes. A refusal goes on the detail's error
+    /// line while that meeting is selected, else into a `failed` reply.
     fn set_keep_audio(
         &self,
         keep: bool,
@@ -1159,15 +1163,30 @@ impl Host {
         if confirming && !self.confirm(&delete_recording_prompt()) {
             return Ok(ConfirmReply { confirmed: false });
         }
-        self.detail_write(|detail| {
-            if detail.id != meeting_id {
-                return Err(BridgeError::failed(
-                    "Another meeting was selected before you confirmed. Nothing was changed.",
-                ));
+        let outcome = {
+            let mut inner = self.lock();
+            if self.shared.store.meeting(meeting_id)?.is_none() {
+                return Err(no_such_meeting());
             }
-            detail.set_keep_audio(keep, &self.shared.store, &*self.shared.services.pipeline);
-            Ok(ConfirmReply { confirmed: true })
-        })?
+            let applied = detail::set_keep_audio(
+                meeting_id,
+                keep,
+                &self.shared.store,
+                &*self.shared.services.pipeline,
+            );
+            let outcome = match (applied, inner.detail.as_mut()) {
+                (Ok(()), _) => Ok(ConfirmReply { confirmed: true }),
+                (Err(error), Some(detail)) if detail.id == meeting_id => {
+                    detail.error = Some(error);
+                    Ok(ConfirmReply { confirmed: true })
+                }
+                (Err(error), _) => Err(BridgeError::failed(error)),
+            };
+            self.reload_detail(&mut inner);
+            outcome
+        };
+        self.publish();
+        outcome
     }
 
     /// Page 1 moves on by itself once every step is handled, as the Swift
