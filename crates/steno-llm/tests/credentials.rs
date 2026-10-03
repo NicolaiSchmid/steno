@@ -562,6 +562,39 @@ async fn concurrent_callers_share_one_refresh() {
     assert_eq!(home.server.request_count(), 1);
 }
 
+/// `codex logout` during the round trip removes the file; the write-back
+/// must not recreate it with the new tokens. A file that is merely
+/// unreadable at that moment keeps the copy read before as its base.
+#[tokio::test]
+async fn a_sign_out_during_the_refresh_is_not_undone_by_the_write_back() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let fresh = CodexHome::access_token(3_600, "plus");
+    let file = home.file();
+    home.server.respond(Arc::new(move |_| {
+        std::fs::remove_file(&file).unwrap();
+        Some(scripts.token_refresh(&fresh, Some("rt_2"), None))
+    }));
+    assert_eq!(
+        home.store().current().await.unwrap_err(),
+        CodexCredentialError::NotSignedIn
+    );
+    assert!(!home.file().exists(), "the write-back recreated auth.json");
+    assert_eq!(home.server.request_count(), 1);
+
+    let second = CodexHome::new().await;
+    second.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let fresh = CodexHome::access_token(3_600, "plus");
+    let file = second.file();
+    second.server.respond(Arc::new(move |_| {
+        std::fs::write(&file, b"{half-written").unwrap();
+        Some(scripts.token_refresh(&fresh, Some("rt_2"), None))
+    }));
+    let credentials = second.store().current().await.unwrap();
+    assert_eq!(credentials.refresh_token, "rt_2");
+    assert_eq!(second.document()["agent_identity"], json!({"keep": true}));
+}
+
 /// Once the endpoint has turned a refresh token down for good, the callers
 /// that waited for that refresh get the same answer from the lock, not from
 /// the network: the dead token is posted once. Only a token the CLI

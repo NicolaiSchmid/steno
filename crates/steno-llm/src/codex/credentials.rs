@@ -592,8 +592,18 @@ impl CodexCredentialStore {
         })?;
         // Overlay the new tokens on what the file holds now, not on the copy
         // read before the round trip: the CLI may have written other keys
-        // meanwhile, and those must survive.
-        let mut document = self.read().map_or(file.document, |latest| latest.document);
+        // meanwhile, and those must survive. A file the user signed out of
+        // meanwhile (`codex logout`) stays signed out: the new tokens are
+        // dropped rather than written into a file the user just removed. A
+        // file that is merely unreadable at that moment (half-written by
+        // the CLI) falls back to the copy read before.
+        let mut document = match self.read() {
+            Ok(latest) => latest.document,
+            Err(CodexCredentialError::NotSignedIn) => {
+                return Err(CodexCredentialError::NotSignedIn.into());
+            }
+            Err(_) => file.document,
+        };
         let mut tokens = match document.get("tokens") {
             Some(Value::Object(existing)) => existing.clone(),
             _ => Map::new(),
