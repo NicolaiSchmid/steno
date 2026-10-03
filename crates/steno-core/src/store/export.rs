@@ -74,9 +74,8 @@ impl Store {
     /// # }
     /// ```
     pub fn export(&self, meeting_id: Uuid) -> Result<MeetingExport> {
-        self.read(|connection| {
-            let transaction = connection.unchecked_transaction()?;
-            export_rows(&transaction, meeting_id)?.ok_or(StoreError::MeetingNotFound(meeting_id))
+        self.snapshot(|transaction| {
+            export_rows(transaction, meeting_id)?.ok_or(StoreError::MeetingNotFound(meeting_id))
         })
     }
 }

@@ -51,5 +51,5 @@ pub use protocols::{
     Diarizer, EchoCanceller, HandoverIntake, LanguageModel, MeetingSummarizer, SecretKey,
     SecretStore, SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
 };
-pub use store::{DeletedMeeting, Store, StoreError};
+pub use store::{DeletedMeeting, SearchHit, Store, StoreError};
 pub use string_enum::UnknownCase;

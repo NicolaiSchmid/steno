@@ -1,11 +1,9 @@
 //! The SQLite store over the file the Swift app writes: the same
 //! migrations, recorded in `grdb_migrations` the way GRDB records them, the
 //! same column encodings, and the read and write paths the pipeline and the
-//! host need. The queries only the windows ask for (search, the sidebar
-//! list with its counts) arrive with the Tauri host in WP6: as new
-//! methods here, or next to the commands that call them, written with the
-//! [`convert`] codecs against the connection [`Store::read`] and
-//! [`Store::write`] hand out.
+//! host need. The queries the windows ask for (`search`, `export`,
+//! `speakers_for_meetings`, `recent_persons`) live here too, written with
+//! the [`convert`] codecs.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
 //!
 //! The migration procedure both sides follow is in
@@ -18,6 +16,7 @@ mod export;
 mod meetings;
 pub mod migrator;
 mod people;
+mod search;
 mod settings;
 mod tasks;
 mod transcript;
@@ -31,6 +30,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 pub use meetings::DeletedMeeting;
+pub use search::{SearchHit, fts5_pattern};
 
 use crate::model::MeetingStateKind;
 
@@ -59,6 +59,15 @@ pub enum StoreError {
     Io(#[from] std::io::Error),
     #[error("meeting {0} not found")]
     MeetingNotFound(Uuid),
+    #[error("speaker {0} not found")]
+    SpeakerNotFound(Uuid),
+    #[error("person {0} not found")]
+    PersonNotFound(Uuid),
+    #[error("speakers {0} and {1} belong to different meetings")]
+    SpeakersInDifferentMeetings(Uuid, Uuid),
+    /// `resolve_person` with nothing but whitespace.
+    #[error("a person needs a name")]
+    BlankPersonName,
     /// `delete_meeting` while the capture writer or the pipeline still holds
     /// the meeting's files.
     #[error("meeting {0} is {1} and cannot be deleted")]
@@ -180,9 +189,25 @@ impl Store {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs `body` on the connection outside a transaction.
+    /// Runs `body` inside one deferred transaction, so every query it makes
+    /// sees the same snapshot of the file (an export's seven selects read
+    /// one meeting, not a meeting another process is rewriting between
+    /// them), as GRDB's `reader.read` did. Nothing is written; the
+    /// transaction is rolled back when `body` returns. `body` must not
+    /// begin a transaction of its own: SQLite does not nest them, so its
+    /// `BEGIN` fails.
     pub fn read<T>(&self, body: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
-        body(&self.lock())
+        self.snapshot(|transaction| body(transaction))
+    }
+
+    /// [`Store::read`] for a body that wants the transaction itself, so its
+    /// signature says every query runs inside the one snapshot.
+    fn snapshot<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut connection = self.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let value = body(&transaction)?;
+        transaction.rollback()?;
+        Ok(value)
     }
 
     /// Runs `body` inside one transaction, committed when it returns `Ok`.

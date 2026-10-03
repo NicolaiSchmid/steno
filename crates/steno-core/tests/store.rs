@@ -365,3 +365,34 @@ fn a_malformed_speaker_embedding_is_a_read_error() {
     );
     assert!(error.to_string().contains("out of 5 byte blob"), "{error}");
 }
+
+/// `Store::read` is one snapshot: a write landing on the file from another
+/// connection halfway through a read is not seen by the read's later
+/// queries, as GRDB's `reader.read` guaranteed.
+#[test]
+fn a_read_sees_one_snapshot_while_another_store_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("steno.sqlite");
+    let reader = Store::open(&path).unwrap();
+    let writer = Store::open(&path).unwrap();
+    let meeting = common::populate(&reader);
+    let (before, after) = reader
+        .read(|connection| {
+            let count = |connection: &rusqlite::Connection| -> steno_core::store::Result<i64> {
+                Ok(connection.query_row("SELECT count(*) FROM meeting", [], |row| row.get(0))?)
+            };
+            let before = count(connection)?;
+            let mut other = meeting.clone();
+            other.id = uuid::Uuid::new_v4();
+            writer.save_meeting(&other).unwrap();
+            let after = count(connection)?;
+            Ok((before, after))
+        })
+        .unwrap();
+    assert_eq!(before, after, "the read's snapshot holds");
+    assert_eq!(
+        reader.all_meetings().unwrap().len(),
+        usize::try_from(before).unwrap() + 1,
+        "the next read sees the write"
+    );
+}

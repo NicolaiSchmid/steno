@@ -35,9 +35,10 @@
 //! reorder; the page must not read a reply as "the snapshots this call caused
 //! have arrived", nor the reverse. The Swift host has the same property
 //! (`evaluateJavaScript` for events, the message handler's reply for
-//! results). WP6 settles the convention when the real host lands; until then
-//! every snapshot is a full state, so arrival order only decides which full
-//! state the page shows last.
+//! results). The convention, settled in `steno_host::host`: every command
+//! publishes the topics it changed before it returns, and every snapshot is
+//! a full state, so arrival order only decides which full state the page
+//! shows last.
 //!
 //! [`BridgeHost`] and [`EventSink`] are separate traits because they have
 //! different owners: the shell implements the sink (it owns the windows the

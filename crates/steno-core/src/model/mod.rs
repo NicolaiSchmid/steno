@@ -42,7 +42,7 @@ pub use meeting::{
 };
 pub use people::{
     Embedding, Participant, ParticipantRole, Person, Speaker, SpeakerAssignment,
-    SpeakerAssignmentKind, SpeakerMatch, SpeakerNameSuggestion, TimeRange,
+    SpeakerAssignmentKind, SpeakerMatch, SpeakerNameSuggestion, TimeRange, fold_name,
 };
 pub use settings::{LlmProvider, ObsidianSettings, Settings};
 pub use speech::{
