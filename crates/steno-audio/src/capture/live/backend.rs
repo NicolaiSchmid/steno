@@ -22,7 +22,6 @@
 //! `AudioHardwareDestroyProcessTap`.
 
 use std::ffi::c_void;
-use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -63,9 +62,7 @@ const MAX_BUFFERS: usize = 16;
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
 /// buffer list and hands it to [`deliver`]: no allocation, no lock, no
-/// syscall. A panic inside must not unwind into the HAL, so the body runs
-/// under `catch_unwind` and a panic aborts the process; the barrier costs
-/// nothing on the path that does not panic.
+/// syscall; behind [`hal::abort_on_panic`].
 unsafe extern "C-unwind" fn io_proc(
     _device: Id,
     _now: NonNull<AudioTimeStamp>,
@@ -75,7 +72,7 @@ unsafe extern "C-unwind" fn io_proc(
     _output_time: NonNull<AudioTimeStamp>,
     client: *mut c_void,
 ) -> OSStatus {
-    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+    hal::abort_on_panic(|| {
         // SAFETY: `client` is the boxed `CallbackContext` registered in
         // `start`, alive until the IOProc is destroyed (which happens before
         // the box is dropped); `input` is the HAL's list, valid for the call.
@@ -100,10 +97,7 @@ unsafe extern "C-unwind" fn io_proc(
             }
             deliver(&views[..count], &ctx.sources, &ctx.sink);
         }
-    }));
-    if outcome.is_err() {
-        std::process::abort();
-    }
+    });
     0
 }
 

@@ -686,15 +686,26 @@ impl std::fmt::Debug for PropertyListener {
     }
 }
 
-/// The C listener: runs the boxed handler once per address. A panic in a
-/// handler must not unwind into the HAL, so it aborts the process instead.
+/// The body of a callback the HAL makes into us (the IOProc, a property
+/// listener). A panic must not unwind into the HAL, so it aborts the
+/// process instead; the barrier costs nothing on the path that does not
+/// panic.
+#[inline(always)]
+pub fn abort_on_panic(body: impl FnOnce()) {
+    if std::panic::catch_unwind(AssertUnwindSafe(body)).is_err() {
+        std::process::abort();
+    }
+}
+
+/// The C listener: runs the boxed handler once per address, behind
+/// [`abort_on_panic`].
 unsafe extern "C-unwind" fn listener_proc(
     _object: Id,
     count: u32,
     addresses: NonNull<AudioObjectPropertyAddress>,
     client: *mut c_void,
 ) -> OSStatus {
-    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+    abort_on_panic(|| {
         // SAFETY: `client` is the `*mut ListenerHandler` registered in
         // `add`, alive until `remove` has returned (the HAL calls no
         // listener after its removal); `addresses` has `count` entries.
@@ -705,10 +716,7 @@ unsafe extern "C-unwind" fn listener_proc(
                 handler(address.mSelector);
             }
         }
-    }));
-    if outcome.is_err() {
-        std::process::abort();
-    }
+    });
     0
 }
 
