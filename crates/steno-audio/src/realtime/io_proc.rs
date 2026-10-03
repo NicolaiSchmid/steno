@@ -22,19 +22,32 @@ pub struct BufferView {
 }
 
 /// The first sample of `channel` in `buffers`, `None` when the buffer is
-/// missing or has no data.
+/// missing, has no data, or is not shaped as the layout expects: the
+/// channel must sit inside the buffer's channel count, the stride must be
+/// that count, and the buffer must hold `frames` whole frames. The layout
+/// was resolved from the shapes the HAL reported at start; a buffer list
+/// shaped differently (an input that was reconfigured underneath the
+/// aggregate) becomes silence instead of a read past its end. Three
+/// integer compares, nothing else.
 #[inline(always)]
-fn samples(channel: &ChannelRef, buffers: &[BufferView]) -> Option<*const f32> {
+fn samples(channel: &ChannelRef, buffers: &[BufferView], frames: usize) -> Option<*const f32> {
     let buffer = buffers.get(channel.buffer)?;
     let data = buffer.data?;
-    // SAFETY: `offset` is below the buffer's channel count by construction
-    // of the layout, so the pointer stays inside the first frame.
+    if channel.offset >= buffer.channels
+        || channel.stride != buffer.channels
+        || buffer.byte_size < frames * buffer.channels * 4
+    {
+        return None;
+    }
+    // SAFETY: `offset` is below the buffer's channel count (checked above),
+    // so the pointer stays inside the first frame.
     Some(unsafe { data.add(channel.offset) })
 }
 
 /// One callback's input buffers into the sink's rings following `sources`.
 /// The frame count comes from the first source's buffer; a buffer the HAL
-/// delivered without data becomes silence so the lanes stay aligned.
+/// delivered without data, or shaped unlike the layout the pointers were resolved for,
+/// becomes silence so the lanes stay aligned.
 ///
 /// # Safety
 ///
@@ -57,11 +70,11 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
         return;
     }
     for (lane, source) in sources.iter().enumerate() {
-        match samples(&source.left, buffers) {
+        match samples(&source.left, buffers, frames) {
             Some(left) => {
                 let right = source
                     .right
-                    .and_then(|r| samples(&r, buffers).map(|p| (p, r.stride)));
+                    .and_then(|r| samples(&r, buffers, frames).map(|p| (p, r.stride)));
                 match right {
                     // SAFETY: the pointers come from `buffers`, valid for
                     // `frames` at their strides by the caller's guarantee.

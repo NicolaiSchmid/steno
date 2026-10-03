@@ -326,6 +326,113 @@ fn a_buffer_without_data_becomes_silence() {
     assert_eq!(read(&sink, 1, 4), vec![0.0; 4]);
 }
 
+/// The layout was resolved for a mono microphone and an interleaved stereo
+/// tap. A live buffer list shaped differently must never be read through
+/// those pointers: a tap that arrives mono (the stride no longer matches),
+/// a microphone channel beyond the buffer's channels, and a buffer shorter
+/// than the callback's frames each become silence, and the lanes stay
+/// aligned on the frames the first buffer carried.
+#[test]
+fn a_buffer_shaped_unlike_the_layout_becomes_silence() {
+    let layout = StreamLayout::resolve(
+        &[AudioLane::Mic, AudioLane::System],
+        &[2, 2],
+        &[vec![], vec![2]],
+        &[2],
+        Some(1),
+    )
+    .unwrap();
+    // Stereo mic (channel 0 of buffer 0 at stride 2) and a stereo tap.
+    assert_eq!(layout.sources[0].left, ChannelRef::new(0, 0, 2));
+    assert_eq!(layout.sources[1].left, ChannelRef::new(1, 0, 2));
+    assert_eq!(layout.sources[1].right, Some(ChannelRef::new(1, 1, 2)));
+
+    // The tap arrives mono: its stride is 1 where the layout says 2.
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    run_deliver(
+        &[
+            Buffer {
+                channels: 2,
+                samples: Some(vec![1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0]),
+            },
+            Buffer {
+                channels: 1,
+                samples: Some(vec![9.0; 4]),
+            },
+        ],
+        4,
+        &layout,
+        &sink,
+    );
+    assert_eq!(sink.available_to_read(), 4);
+    assert_eq!(read(&sink, 0, 4), vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        read(&sink, 1, 4),
+        vec![0.0; 4],
+        "mis-strided tap is silence"
+    );
+
+    // The tap buffer holds two frames where the microphone's holds four:
+    // its byte size is short of the callback's frames.
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    let mic = [1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0];
+    let short_tap = [9.0f32; 4];
+    let views = [
+        BufferView {
+            channels: 2,
+            data: Some(mic.as_ptr()),
+            byte_size: mic.len() * 4,
+        },
+        BufferView {
+            channels: 2,
+            data: Some(short_tap.as_ptr()),
+            byte_size: short_tap.len() * 4,
+        },
+    ];
+    // SAFETY: both pointers refer to vectors alive for the call and the byte
+    // sizes are the vectors' own.
+    unsafe { deliver(&views, &layout.sources, &sink) };
+    assert_eq!(sink.available_to_read(), 4);
+    assert_eq!(read(&sink, 0, 4), vec![1.0, 2.0, 3.0, 4.0]);
+    assert_eq!(
+        read(&sink, 1, 4),
+        vec![0.0; 4],
+        "short tap buffer is silence"
+    );
+
+    // The microphone's channel is beyond a buffer that shrank to mono; the
+    // frame count still comes from that first buffer.
+    let mono_layout = StreamLayout::resolve(
+        &[AudioLane::Mic, AudioLane::System],
+        &[2, 2],
+        &[vec![], vec![2]],
+        &[2],
+        Some(1),
+    )
+    .unwrap();
+    let mut shifted = mono_layout.clone();
+    shifted.sources[0].left = ChannelRef::new(0, 1, 2);
+    let sink = LaneFrameSink::new(&[AudioLane::Mic, AudioLane::System]);
+    run_deliver(
+        &[
+            Buffer {
+                channels: 1,
+                samples: Some(vec![1.0, 2.0, 3.0, 4.0]),
+            },
+            Buffer {
+                channels: 2,
+                samples: Some(vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0]),
+            },
+        ],
+        4,
+        &shifted,
+        &sink,
+    );
+    assert_eq!(sink.available_to_read(), 4);
+    assert_eq!(read(&sink, 0, 4), vec![0.0; 4], "channel beyond the buffer");
+    assert_eq!(read(&sink, 1, 4), vec![15.0, 35.0, 55.0, 75.0]);
+}
+
 /// Rings of four samples: the second callback of four is refused for both
 /// lanes and counted, and nothing is half-written.
 #[test]
