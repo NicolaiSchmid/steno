@@ -278,8 +278,11 @@ fn fallback_screen(screens: &[Rect]) -> Rect {
 }
 
 /// The anchor to lay out from, loading the saved one on first use and
-/// validating it for a panel of `size`.
+/// validating it for a panel of `size`. The screens are asked for before
+/// the lock is taken: off the main thread the query waits on it, and the
+/// main thread takes the same lock in `moved`.
 fn current_anchor(app: &AppHandle, size: (f64, f64)) -> PanelAnchor {
+    let screens = screens(app);
     let panels = app.state::<Panels>();
     let mut anchor = panels.anchor.lock().expect("anchor");
     if let Ok(mut loaded) = panels.anchor_loaded.lock()
@@ -290,7 +293,6 @@ fn current_anchor(app: &AppHandle, size: (f64, f64)) -> PanelAnchor {
             .and_then(|path| fs::read(path).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok());
     }
-    let screens = screens(app);
     let resolved = PanelAnchor::validated(*anchor, size, &screens, fallback_screen(&screens));
     *anchor = Some(resolved);
     resolved
@@ -405,8 +407,8 @@ pub fn hide(app: &AppHandle, panel: Panel) -> tauri::Result<()> {
 }
 
 /// Shows what `content` says and hides the other panel; nothing when it
-/// is what already shows.
-pub fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
+/// is what already shows. Runs on the main thread (`refresh`).
+fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
     let panels = app.state::<Panels>();
     if !panels.note_showing(content) {
         return;
@@ -437,9 +439,19 @@ pub fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
     }
 }
 
+/// Re-applies the one rule, on the main thread: every `apply` runs there
+/// one after another, so two threads can never interleave a show and a
+/// hide, and the window calls inside it (monitors, URLs, a new window)
+/// run at once instead of waiting on the main thread from a worker.
 fn refresh(app: &AppHandle) {
-    let content = app.state::<Panels>().content();
-    apply(app, content.as_ref());
+    let handle = app.clone();
+    let queued = app.run_on_main_thread(move || {
+        let content = handle.state::<Panels>().content();
+        apply(&handle, content.as_ref());
+    });
+    if let Err(error) = queued {
+        eprintln!("[steno-desktop] updating the panels failed: {error}");
+    }
 }
 
 /// A `recording` snapshot reached the main window.

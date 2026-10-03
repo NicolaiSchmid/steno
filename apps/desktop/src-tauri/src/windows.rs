@@ -193,11 +193,18 @@ impl Request {
 /// owed. A request published before the page listens is lost (a deep link
 /// at a cold launch reaches the main window before its page mounts; a
 /// second instance's link can reach it the same way), so it waits here
-/// and goes out right after the page's first snapshots. Managed state.
+/// and goes out right after the page's first snapshots. One lock over
+/// both, so a `page.ready` on one thread and a request on another cannot
+/// leave a request owed to a page that already listens. Managed state.
 #[derive(Debug, Default)]
 pub struct Pages {
-    ready: Mutex<HashSet<String>>,
-    owed: Mutex<HashMap<String, Request>>,
+    state: Mutex<PagesState>,
+}
+
+#[derive(Debug, Default)]
+struct PagesState {
+    ready: HashSet<String>,
+    owed: HashMap<String, Request>,
 }
 
 impl Pages {
@@ -205,34 +212,36 @@ impl Pages {
     /// any, to publish now. A page that mounts again (a reload) owes
     /// nothing new.
     pub fn ready(&self, label: &str) -> Option<Request> {
-        if let Ok(mut ready) = self.ready.lock() {
-            ready.insert(label.to_owned());
-        }
-        self.owed
+        let mut state = self.state.lock().ok()?;
+        state.ready.insert(label.to_owned());
+        state.owed.remove(label)
+    }
+
+    #[cfg(test)]
+    fn is_ready(&self, label: &str) -> bool {
+        self.state
             .lock()
-            .ok()
-            .and_then(|mut owed| owed.remove(label))
+            .is_ok_and(|state| state.ready.contains(label))
     }
 
-    pub fn is_ready(&self, label: &str) -> bool {
-        self.ready.lock().is_ok_and(|ready| ready.contains(label))
-    }
-
-    /// Keeps `request` for the page of `label`; a later one replaces it.
-    pub fn owe(&self, label: &str, request: Request) {
-        if let Ok(mut owed) = self.owed.lock() {
-            owed.insert(label.to_owned(), request);
+    /// `request` for the page of `label`: handed back to publish now when
+    /// the page listens, else kept for its `page.ready` (a later one
+    /// replaces it) and `None`.
+    pub fn publish_or_owe(&self, label: &str, request: Request) -> Option<Request> {
+        let mut state = self.state.lock().ok()?;
+        if state.ready.contains(label) {
+            return Some(request);
         }
+        state.owed.insert(label.to_owned(), request);
+        None
     }
 
     /// The window of `label` was destroyed: its page is gone and so is
     /// anything it was owed.
     pub fn gone(&self, label: &str) {
-        if let Ok(mut ready) = self.ready.lock() {
-            ready.remove(label);
-        }
-        if let Ok(mut owed) = self.owed.lock() {
-            owed.remove(label);
+        if let Ok(mut state) = self.state.lock() {
+            state.ready.remove(label);
+            state.owed.remove(label);
         }
     }
 }
@@ -245,11 +254,9 @@ pub fn request(
     window: &WebviewWindow,
     request: Request,
 ) -> Result<(), BridgeError> {
-    if pages.is_ready(window.label()) {
-        host.publish_request(window, request.field, &request.value)
-    } else {
-        pages.owe(window.label(), request);
-        Ok(())
+    match pages.publish_or_owe(window.label(), request) {
+        Some(now) => host.publish_request(window, now.field, &now.value),
+        None => Ok(()),
     }
 }
 
@@ -299,12 +306,10 @@ mod tests {
         let pages = Pages::default();
         let id = steno_core::json::parse_uuid("00000000-0000-0000-0000-00000000000c").unwrap();
         assert!(!pages.is_ready("main"));
-        pages.owe("main", Request::meeting(&id));
+        assert_eq!(pages.publish_or_owe("main", Request::meeting(&id)), None);
         // Only the latest request is owed.
-        pages.owe(
-            "main",
-            Request::section(steno_bridge::SettingsSection::Export),
-        );
+        let export = Request::section(steno_bridge::SettingsSection::Export);
+        assert_eq!(pages.publish_or_owe("main", export.clone()), None);
         assert!(!pages.is_ready("main"));
         assert_eq!(
             pages.ready("main"),
@@ -317,13 +322,20 @@ mod tests {
         // A reload mounts again and is owed nothing.
         assert_eq!(pages.ready("main"), None);
         assert!(pages.is_ready("main"));
+        // A page that listens gets the request back to publish at once,
+        // and owes nothing for its next mount.
+        assert_eq!(pages.publish_or_owe("main", export.clone()), Some(export));
+        assert_eq!(pages.ready("main"), None);
         // The other windows are their own.
         assert!(!pages.is_ready("settings"));
         assert_eq!(pages.ready("settings"), None);
-        pages.owe("settings", Request::meeting(&id));
-        pages.gone("settings");
-        assert!(!pages.is_ready("settings"));
-        assert_eq!(pages.ready("settings"), None);
+        assert_eq!(
+            pages.publish_or_owe("onboarding", Request::meeting(&id)),
+            None
+        );
+        pages.gone("onboarding");
+        assert!(!pages.is_ready("onboarding"));
+        assert_eq!(pages.ready("onboarding"), None);
         assert_eq!(
             Request::meeting(&id),
             Request {
