@@ -159,8 +159,10 @@ impl Engine {
         if receipt.state.kind() == HandoverStateKind::Complete {
             return HandoverResponse::empty(StatusCode::NO_CONTENT);
         }
+        // The router admits no negative index; the engine, driven directly,
+        // checks both ends before `index * chunk_size` is computed.
         let count = MetadataValidation::chunk_count(receipt.byte_count, receipt.chunk_size);
-        if index >= count {
+        if index < 0 || index >= count {
             return HandoverResponse::problem(
                 StatusCode::BAD_REQUEST,
                 format!("chunk index must be below {count}"),

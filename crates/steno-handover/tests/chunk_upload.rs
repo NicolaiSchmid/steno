@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use common::{FakeIntake, Phone, TestService, chunks, metadata_for, seeded_bytes, sha256};
+use common::{
+    EngineDevice, FakeIntake, Phone, TestService, chunks, metadata_for, seeded_bytes, sha256,
+};
 use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
 use steno_handover::upload::MetadataValidation;
 use steno_handover::wire;
@@ -613,6 +615,36 @@ async fn a_vanished_partial_is_404_on_chunk_and_a_re_announce_starts_over() {
     assert_eq!(phone.complete(metadata.recording_id).await.status, 200);
     let admission = &test.intake.entries()[0];
     assert_eq!(std::fs::read(&admission.file).unwrap(), bytes);
+    test.stop().await;
+}
+
+#[tokio::test]
+async fn a_negative_chunk_index_is_400_at_the_engine() {
+    // The router never matches a negative index; the engine is driven
+    // directly here and must not compute `index * chunk_size` for one.
+    let test = TestService::with_chunk_size(CHUNK_SIZE).await;
+    let device = EngineDevice::paired(&test, "Engine phone").await;
+    let bytes = seeded_bytes(CHUNK_SIZE as usize, 9);
+    let metadata = device.metadata(&bytes, CHUNK_SIZE);
+    assert_eq!(device.announce(&metadata).await.status, 201);
+
+    for index in [-1, i64::MIN] {
+        let response = device.upload(metadata.recording_id, index, &bytes).await;
+        assert_eq!(response.status, 400, "index {index}");
+        assert_eq!(
+            response.decode::<wire::Problem>().unwrap().error,
+            "chunk index must be below 1"
+        );
+    }
+    assert!(
+        device
+            .status(metadata.recording_id)
+            .await
+            .decode::<wire::RecordingStatus>()
+            .unwrap()
+            .received_chunks
+            .is_empty()
+    );
     test.stop().await;
 }
 
