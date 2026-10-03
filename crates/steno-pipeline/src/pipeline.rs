@@ -1411,3 +1411,31 @@ pub fn ensure_me_participant(
 pub fn write_wav_16k(path: &Path, buffer: &AudioBuffer16k) -> std::io::Result<()> {
     crate::fixtures::write_wav(path, &crate::fixtures::int16(&buffer.samples))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stage's own failure keeps its stage however it travels: bare, or
+    /// boxed as a boundary error by a crate behind a seam; anything else
+    /// becomes a failure of the stage that saw it. Swift:
+    /// `PipelineFailure.wrapping`.
+    #[test]
+    fn a_failure_keeps_its_stage_bare_or_boxed() {
+        let carried = PipelineFailure::new(PipelineStage::Transcribe, "the model is missing");
+        assert_eq!(
+            PipelineFailure::wrapping(&carried, PipelineStage::Decode),
+            carried
+        );
+        let boxed: BoxError = Box::new(carried.clone());
+        assert_eq!(
+            PipelineFailure::wrapping(&boxed, PipelineStage::Decode),
+            carried
+        );
+        let other: BoxError = "no such file".into();
+        assert_eq!(
+            PipelineFailure::wrapping(&other, PipelineStage::Decode),
+            PipelineFailure::new(PipelineStage::Decode, "no such file")
+        );
+    }
+}
