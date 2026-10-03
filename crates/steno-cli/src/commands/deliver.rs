@@ -6,7 +6,7 @@
 //! stored destination's receipt are touched. Prints one line per
 //! destination of this run.
 
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -49,11 +49,7 @@ impl ObsidianOptions {
     /// The destination for `--vault`, `None` when the stored settings decide.
     fn destination(&self) -> Option<Arc<dyn Destination>> {
         let vault = self.vault.as_ref()?;
-        let path = std::path::absolute(vault)
-            .unwrap_or_else(|_| vault.clone())
-            .to_string_lossy()
-            .trim_end_matches('/')
-            .to_owned();
+        let path = standardized(vault).to_string_lossy().into_owned();
         Some(Arc::new(ObsidianFolderDestination::with_id(
             ObsidianSettings {
                 vault_path: path.clone(),
@@ -67,9 +63,30 @@ impl ObsidianOptions {
     }
 }
 
+/// The absolute path with `.` and `..` resolved lexically and no trailing
+/// separator, so the same vault gets the same destination id however it
+/// was spelled. Swift: `URL.standardizedFileURL.path`, which does not
+/// resolve symlinks either.
+fn standardized(path: &Path) -> PathBuf {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut result = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(result.components().next_back(), Some(Component::Normal(_))) {
+                    result.pop();
+                }
+            }
+            other => result.push(other.as_os_str()),
+        }
+    }
+    result
+}
+
 #[derive(Debug, Args)]
 pub struct Deliver {
-    /// The meeting id printed by `steno process`.
+    /// The meeting id printed by steno process.
     #[arg(value_parser = parse_uuid)]
     pub meeting_id: Uuid,
     #[command(flatten)]
@@ -149,5 +166,23 @@ impl Deliver {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_vault_path_is_standardized_lexically() {
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(standardized(&cwd.join("vault/")), cwd.join("vault"));
+        assert_eq!(
+            standardized(&cwd.join("./notes/../vault/.")),
+            cwd.join("vault")
+        );
+        assert_eq!(standardized(Path::new("vault")), cwd.join("vault"));
+        let root = cwd.ancestors().last().unwrap().to_path_buf();
+        assert_eq!(standardized(&root.join("..")), root);
     }
 }

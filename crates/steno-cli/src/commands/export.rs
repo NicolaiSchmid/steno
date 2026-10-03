@@ -10,7 +10,7 @@ use crate::wiring::{DatabaseOptions, Failure, Outcome, parse_uuid};
 
 #[derive(Debug, Args)]
 pub struct Export {
-    /// The meeting id printed by `steno process`.
+    /// The meeting id printed by steno process.
     #[arg(value_parser = parse_uuid)]
     pub meeting_id: Uuid,
     /// Output directory; defaults to the current directory.
@@ -32,7 +32,12 @@ impl Export {
         let json = steno_adapters::ArtifactRenderer
             .render_json(&export)
             .map_err(Failure::runtime)?;
-        std::fs::write(&path, json).map_err(Failure::runtime)?;
+        // Written beside the target and renamed over it, so a reader never
+        // sees a half-written file.
+        let partial = self.out.join(".meeting.json.partial");
+        std::fs::write(&partial, json)
+            .and_then(|()| std::fs::rename(&partial, &path))
+            .map_err(Failure::runtime)?;
         println!("{}", path.display());
         Ok(())
     }
