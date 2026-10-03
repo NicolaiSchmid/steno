@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { DetectionPrompt, parsePromptRequest } from "./detection-prompt";
 import { RecordingBubble } from "./recording-bubble";
 
@@ -15,7 +16,9 @@ import { RecordingBubble } from "./recording-bubble";
  * the shell sizes the window to the last report, and a pill laid out
  * inside that viewport could never report a larger size (the bubble grows
  * when the recorder starts), so the pill is measured at its own width,
- * never the window's.
+ * never the window's. The document itself never scrolls (`html.panel` in
+ * `theme.css`): the window is the pill's size rounded up, and a fraction
+ * of overflow would otherwise summon WebKitGTK's scrollbars.
  */
 
 export const PANEL_ROUTES = ["/panel/bubble", "/panel/prompt"] as const;
@@ -23,6 +26,13 @@ export type PanelRoute = (typeof PANEL_ROUTES)[number];
 
 export function isPanelRoute(path: string): path is PanelRoute {
 	return (PANEL_ROUTES as readonly string[]).includes(path);
+}
+
+/** Marks the document as a panel's while `panel` holds. */
+export function usePanelDocument(panel: boolean): void {
+	useEffect(() => {
+		document.documentElement.classList.toggle("panel", panel);
+	}, [panel]);
 }
 
 export function PanelWindow({

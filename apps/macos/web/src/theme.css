@@ -296,6 +296,13 @@
 		font-size: 16px;
 	}
 
+	/* A floating panel's document is its pill and nothing else: the shell
+	   sizes the window from the pill's report, so there is nothing to scroll
+	   to and no scrollbar may appear for a rounding remainder. */
+	html.panel {
+		overflow: hidden;
+	}
+
 	body {
 		margin: 0;
 		/* The host window paints the canvas; the page never covers it with white. */

@@ -3,7 +3,11 @@ import { TooltipProvider } from "@/components/ui";
 import { StoriesPage } from "@/stories/stories-page";
 import { MainWindow } from "@/windows/main/main-window";
 import { OnboardingWindow } from "@/windows/onboarding/onboarding-window";
-import { isPanelRoute, PanelWindow } from "@/windows/panels/panel-window";
+import {
+	isPanelRoute,
+	PanelWindow,
+	usePanelDocument,
+} from "@/windows/panels/panel-window";
 import { isSectionId } from "@/windows/settings/sections";
 import { SettingsWindow } from "@/windows/settings/settings-window";
 
@@ -73,6 +77,7 @@ export function App() {
 	const route = useRoute();
 	const prefersDark = usePrefersDark();
 	useDocumentScheme(route.params.has("dark") || prefersDark);
+	usePanelDocument(isPanelRoute(route.path));
 
 	let page: React.ReactNode;
 	if (route.path === "/stories") {
