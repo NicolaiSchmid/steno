@@ -76,7 +76,11 @@
     },
     "linux": {
       "deb": {
-        "section": "sound"
+        "section": "sound",
+        "depends": [
+          "libayatana-appindicator3-1"
+        ],
+        "desktopTemplate": "linux/steno-desktop.desktop"
       },
       "appimage": {
         "bundleMediaFramework": false

@@ -15,3 +15,7 @@ apps/macos/web/fixtures/bridge/*.json text eol=lf
 # Goldens and fixtures compared byte for byte by the Swift and Rust tests:
 # never converted, so a Windows checkout keeps their LF line endings.
 Tests/Fixtures/** -text
+
+# The Linux desktop entry is a template the bundler fills on Linux; keep it
+# LF where it is checked out.
+apps/desktop/src-tauri/linux/*.desktop text eol=lf

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Steno
+Comment={{comment}}
+Exec={{exec}} %u
+Icon={{icon}}
+Terminal=false
+StartupWMClass={{exec}}
+Categories=AudioVideo;Audio;Recorder;Office;
+MimeType=x-scheme-handler/steno;

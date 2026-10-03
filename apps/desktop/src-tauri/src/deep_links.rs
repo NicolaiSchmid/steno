@@ -13,7 +13,19 @@
 //! A pairing link is logged and ignored: the Mac is the host, not the
 //! phone. Anything else is logged and ignored too. A second instance
 //! started with a link hands it to the first (`tauri-plugin-single-instance`
-//! with its `deep-link` feature) and exits.
+//! with its `deep-link` feature) and exits. Scheme and host are read
+//! case-insensitively, as RFC 3986 has them; the path is read as written,
+//! so a Settings section must be spelled as the contract spells it, while
+//! a meeting id reads in either case, as `UUID(uuidString:)` does.
+//!
+//! On Linux the installers register the scheme through the desktop entry
+//! (`linux/steno-desktop.desktop`: `Exec=… %u` and the
+//! `x-scheme-handler/steno` MIME type), which the bundler fills in for the
+//! `.deb` and the `AppImage` alike.
+//!
+//! Swift: `apps/macos/project.yml` (no `CFBundleURLTypes`: the Mac app
+//! registers no scheme), `Sources/StenoHandover/Pairing/PairingPayload.swift`
+//! (the phone's `steno://pair` link).
 
 use tauri::{AppHandle, Manager, Url};
 use tauri_plugin_deep_link::DeepLinkExt;
@@ -54,11 +66,12 @@ impl DeepLink {
     /// the pairing link is written; a path-only form (`steno:/meeting/…`)
     /// is not accepted.
     pub fn parse(url: &Url) -> Result<Self, DeepLinkError> {
-        if url.scheme() != SCHEME {
+        if !url.scheme().eq_ignore_ascii_case(SCHEME) {
             return Err(DeepLinkError::OtherScheme(url.to_string()));
         }
         let path = url.path().trim_matches('/');
-        match url.host_str() {
+        let host = url.host_str().map(str::to_ascii_lowercase);
+        match host.as_deref() {
             Some("meeting") => {
                 // The hyphenated 36-character form only, as `UUID(uuidString:)`
                 // and the `window.open` params read it.
@@ -225,6 +238,47 @@ mod tests {
         assert_eq!(
             link("steno://meeting/m-1").unwrap_err().to_string(),
             "not a meeting id: m-1"
+        );
+    }
+
+    /// RFC 3986: the scheme and the host are case-insensitive; the path is
+    /// not, except that a UUID reads in either case.
+    #[test]
+    fn scheme_and_host_read_in_any_case_and_the_path_as_written() {
+        let id: Uuid = "00000000-0000-0000-0000-00000000000a".parse().unwrap();
+        assert_eq!(
+            link("STENO://Meeting/00000000-0000-0000-0000-00000000000A").unwrap(),
+            DeepLink::Meeting(id)
+        );
+        assert_eq!(
+            link("Steno://SETTINGS/summaries").unwrap(),
+            DeepLink::Settings(Some(SettingsSection::Summaries))
+        );
+        assert_eq!(link("steno://PAIR/v1").unwrap(), DeepLink::Pair);
+        assert_eq!(
+            link("steno://settings/Summaries"),
+            Err(DeepLinkError::NotASection("Summaries".into()))
+        );
+    }
+
+    /// The desktop entry the Linux installers carry hands a `steno:` link
+    /// to the running binary (`%u`) and claims the scheme. Read by line, so
+    /// a checkout with CRLF endings (Windows CI) reads the same entry.
+    #[test]
+    fn the_desktop_entry_claims_the_scheme_and_takes_the_link() {
+        let entry = include_str!("../linux/steno-desktop.desktop");
+        let has_line = |line: &str| entry.lines().any(|candidate| candidate == line);
+        assert!(has_line("Exec={{exec}} %u"), "{entry}");
+        assert!(
+            has_line(&format!("MimeType=x-scheme-handler/{SCHEME};")),
+            "{entry}"
+        );
+        assert!(entry.contains("Categories="), "{entry}");
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(
+            config["bundle"]["linux"]["deb"]["desktopTemplate"],
+            "linux/steno-desktop.desktop"
         );
     }
 
