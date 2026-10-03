@@ -732,7 +732,7 @@ async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            LlmClientEvent::ModeDowngraded(mode) => Some(mode),
+            LlmClientEvent::ModeDowngraded { to: mode } => Some(mode),
             _ => None,
         })
         .collect();
@@ -781,12 +781,12 @@ async fn the_downgrade_runs_to_prompt_only_and_sticks() {
         StructuredOutputMode::PromptOnly
     );
     let events = harness.events();
-    assert!(events.contains(&LlmClientEvent::ModeDowngraded(
-        StructuredOutputMode::JsonObject
-    )));
-    assert!(events.contains(&LlmClientEvent::ModeDowngraded(
-        StructuredOutputMode::PromptOnly
-    )));
+    assert!(events.contains(&LlmClientEvent::ModeDowngraded {
+        to: StructuredOutputMode::JsonObject
+    }));
+    assert!(events.contains(&LlmClientEvent::ModeDowngraded {
+        to: StructuredOutputMode::PromptOnly
+    }));
     assert_eq!(
         harness.clock.pending_sleepers(),
         0,

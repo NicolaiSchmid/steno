@@ -921,9 +921,9 @@ async fn a_400_naming_response_format_flips_to_json_object_and_is_remembered() {
         format_kinds(&harness),
         [Some("json_schema"), Some("json_object")]
     );
-    assert!(harness.events().contains(&LlmClientEvent::ModeDowngraded(
-        StructuredOutputMode::JsonObject
-    )));
+    assert!(harness.events().contains(&LlmClientEvent::ModeDowngraded {
+        to: StructuredOutputMode::JsonObject
+    }));
     harness.client.complete_llm(&schema).await.unwrap();
     assert_eq!(harness.server.request_count(), 3);
     assert_eq!(format_kinds(&harness)[2], Some("json_object"));
@@ -1065,9 +1065,9 @@ async fn a_text_request_never_downgrades() {
         StructuredOutputMode::JsonSchema
     );
     assert_eq!(harness.server.request_count(), 1);
-    assert!(!harness.events().contains(&LlmClientEvent::ModeDowngraded(
-        StructuredOutputMode::JsonObject
-    )));
+    assert!(!harness.events().contains(&LlmClientEvent::ModeDowngraded {
+        to: StructuredOutputMode::JsonObject
+    }));
 }
 
 #[tokio::test]
@@ -1111,7 +1111,7 @@ async fn a_json_object_request_walks_the_whole_chain_and_ends_at_prompt_only() {
     let downgrades = harness
         .events()
         .iter()
-        .filter(|event| matches!(event, LlmClientEvent::ModeDowngraded(_)))
+        .filter(|event| matches!(event, LlmClientEvent::ModeDowngraded { .. }))
         .count();
     assert_eq!(downgrades, 2);
     harness
@@ -1153,7 +1153,7 @@ async fn concurrent_rejections_downgrade_the_mode_once_per_step() {
         .events()
         .into_iter()
         .filter_map(|event| match event {
-            LlmClientEvent::ModeDowngraded(mode) => Some(mode),
+            LlmClientEvent::ModeDowngraded { to: mode } => Some(mode),
             _ => None,
         })
         .collect();

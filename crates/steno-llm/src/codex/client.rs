@@ -11,10 +11,8 @@ use steno_core::{
 };
 
 use super::{CodexCredentialError, CodexCredentialStore, CodexCredentials};
-use crate::endpoint::WireFormat;
-use crate::transport::{
-    self, Attempt, HttpReply, LlmClientEvent, Observer, RememberedMode, notify,
-};
+use crate::endpoint::{RememberedMode, WireFormat};
+use crate::transport::{self, Attempt, HttpReply, LlmClientEvent, Observer, notify};
 use crate::wire::{
     self, CodexErrorEnvelope, CodexModel, CodexModelList, ResponsesFormat, ResponsesOutputItem,
     ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesStreamEvent, ResponsesText,
@@ -208,7 +206,7 @@ impl CodexResponsesClient {
         if reply.status == 400
             && request.response_format.kind() != LlmResponseFormatKind::Text
             && Self::complains_about_text_format(&reply.body_text())
-            && self.mode.step_down(mode, self.observer.as_ref())
+            && self.mode.step_down_from(mode, self.observer.as_ref())
         {
             return Ok(Attempt::Resend);
         }

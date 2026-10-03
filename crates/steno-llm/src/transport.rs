@@ -1,11 +1,13 @@
-//! What both clients share below the wire format: one attempt raced against
-//! the clock, the `Retry-After` header, the backoff between attempts and
-//! the redaction of secrets from every error.
+//! What both clients share below their wire formats: the HTTP attempt
+//! raced against the [`Clock`], the attempt loop with its backoff and
+//! `Retry-After`, the events a client reports to its [`Observer`], the
+//! TLS-ready HTTP client builder, and the redaction of secrets from every
+//! error.
 //! Swift: `Sources/StenoLLM/Transport.swift`.
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use steno_core::{LlmResponse, async_trait};
@@ -72,27 +74,29 @@ impl Clock for SystemClock {
 }
 
 /// What the client did, for logs, the CLI and tests on a manual clock.
+/// Swift: `LLMClientEvent` in `Sources/StenoLLM/OpenAICompatibleClient.swift`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LlmClientEvent {
+    /// An attempt is about to go out under `mode`; a resend after a
+    /// downgrade or a parameter adjustment keeps its attempt number.
     Request {
         attempt: u32,
         purpose: String,
         mode: StructuredOutputMode,
     },
-    Response {
-        attempt: u32,
-        status: u16,
-    },
-    TimedOut {
-        attempt: u32,
-    },
+    /// The server answered the attempt with `status`, success or not.
+    Response { attempt: u32, status: u16 },
+    /// The attempt's timeout on the clock elapsed before an answer.
+    TimedOut { attempt: u32 },
     /// Fired right before the backoff sleep begins.
     Retrying {
         after: Duration,
         attempt: u32,
         reason: LlmError,
     },
-    ModeDowngraded(StructuredOutputMode),
+    /// A 400 named the structured output request, and the client now
+    /// remembers the weaker mode `to` for every later request.
+    ModeDowngraded { to: StructuredOutputMode },
     /// A 400 named this request parameter (`error.param`); the request is
     /// resent without it (`temperature`) or with its successor
     /// (`max_tokens` as `max_completion_tokens`) and the client keeps
@@ -106,51 +110,6 @@ pub type Observer = Arc<dyn Fn(LlmClientEvent) + Send + Sync>;
 pub(crate) fn notify(observer: Option<&Observer>, event: LlmClientEvent) {
     if let Some(observer) = observer {
         observer(event);
-    }
-}
-
-/// The structured output mode a client remembers across requests: it
-/// starts at the endpoint's and only ever steps down.
-#[derive(Debug)]
-pub(crate) struct RememberedMode(Mutex<StructuredOutputMode>);
-
-impl RememberedMode {
-    pub(crate) fn new(mode: StructuredOutputMode) -> Self {
-        RememberedMode(Mutex::new(mode))
-    }
-
-    pub(crate) fn get(&self) -> StructuredOutputMode {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// One step down from `from`, the mode the rejected request went out
-    /// under; `false` when there is no weaker mode and the 400 stands. The
-    /// step is taken, and announced to `observer`, only while the
-    /// remembered mode still is `from`: a late 400 from a concurrent
-    /// request that started under an older mode must neither bounce the
-    /// mode back up nor announce the same downgrade twice. Either way the
-    /// request is worth resending.
-    pub(crate) fn step_down(
-        &self,
-        from: StructuredOutputMode,
-        observer: Option<&Observer>,
-    ) -> bool {
-        let Some(next) = from.downgraded() else {
-            return false;
-        };
-        let moved = {
-            let mut mode = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            if *mode == from {
-                *mode = next;
-                true
-            } else {
-                false
-            }
-        };
-        if moved {
-            notify(observer, LlmClientEvent::ModeDowngraded(next));
-        }
-        true
     }
 }
 

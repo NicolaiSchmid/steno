@@ -1,6 +1,7 @@
 //! Where the model lives and how much it can hold.
 //! Swift: `Sources/StenoLLM/LLMEndpoint.swift`.
 
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use steno_core::{
@@ -8,6 +9,8 @@ use steno_core::{
     string_enum,
 };
 use url::Url;
+
+use crate::transport::{LlmClientEvent, Observer, notify};
 
 string_enum! {
     /// How the client asks for JSON. It starts at the endpoint's mode and
@@ -57,6 +60,52 @@ impl StructuredOutputMode {
                 strict: *strict,
             }),
         }
+    }
+}
+
+/// The structured output mode a client remembers across requests: it
+/// starts at the endpoint's and only ever steps down. Swift keeps the same
+/// state as `private var mode` on each client.
+#[derive(Debug)]
+pub(crate) struct RememberedMode(Mutex<StructuredOutputMode>);
+
+impl RememberedMode {
+    pub(crate) fn new(mode: StructuredOutputMode) -> Self {
+        RememberedMode(Mutex::new(mode))
+    }
+
+    pub(crate) fn get(&self) -> StructuredOutputMode {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether a weaker mode than `sent` exists; steps to it only while the
+    /// remembered mode is still `sent`. `sent` is the mode the rejected
+    /// request went out under; without a weaker one the 400 stands. The
+    /// step is announced to `observer` only when it is taken: a late 400
+    /// from a concurrent request that started under an older mode must
+    /// neither bounce the mode back up nor announce the same downgrade
+    /// twice. Either way the request is worth resending.
+    pub(crate) fn step_down_from(
+        &self,
+        sent: StructuredOutputMode,
+        observer: Option<&Observer>,
+    ) -> bool {
+        let Some(next) = sent.downgraded() else {
+            return false;
+        };
+        let moved = {
+            let mut mode = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if *mode == sent {
+                *mode = next;
+                true
+            } else {
+                false
+            }
+        };
+        if moved {
+            notify(observer, LlmClientEvent::ModeDowngraded { to: next });
+        }
+        true
     }
 }
 
