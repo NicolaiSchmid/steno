@@ -11,7 +11,8 @@ use chrono::{FixedOffset, Utc};
 use steno_audio::{CaptureConfiguration, CaptureSession, LaneLevels as AudioLevels};
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
-use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus};
+use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
+use steno_host::speech::ModelAsset;
 use steno_pipeline::{LocalRecordingIntake, RecordingResult};
 use uuid::Uuid;
 
@@ -54,6 +55,8 @@ pub struct CaptureRecorder {
     pipeline: Arc<CurrentPipeline>,
     make_session: MakeCaptureSession,
     permissions: Arc<dyn Permissions>,
+    /// Whether the models are on disk, so a warm-up never downloads.
+    speech_models: Arc<dyn SpeechModels>,
     zone: FixedOffset,
     runtime: tokio::runtime::Handle,
     inner: Mutex<Inner>,
@@ -68,6 +71,7 @@ impl CaptureRecorder {
         pipeline: Arc<CurrentPipeline>,
         make_session: MakeCaptureSession,
         permissions: Arc<dyn Permissions>,
+        speech_models: Arc<dyn SpeechModels>,
         zone: FixedOffset,
         runtime: tokio::runtime::Handle,
     ) -> Self {
@@ -76,6 +80,7 @@ impl CaptureRecorder {
             pipeline,
             make_session,
             permissions,
+            speech_models,
             zone,
             runtime,
             inner: Mutex::new(Inner {
@@ -115,6 +120,25 @@ impl CaptureRecorder {
 
     fn intake(&self) -> LocalRecordingIntake {
         LocalRecordingIntake::over(self.store.clone(), self.pipeline.current(), self.zone)
+    }
+
+    /// Loads the speech engine and the diarizer in the background while
+    /// the recording runs, so processing does not wait for the cold load;
+    /// only when both models are installed, so it never starts a
+    /// download. Swift: `AppEnvironment.warmUpPipelineIfModelsInstalled`,
+    /// called when a recording starts.
+    fn warm_up_if_installed(&self) {
+        if !(self.speech_models.is_installed(ModelAsset::ParakeetV3)
+            && self.speech_models.is_installed(ModelAsset::OfflineDiarizer))
+        {
+            return;
+        }
+        let pipeline = self.pipeline.current();
+        self.runtime.spawn(async move {
+            if let Err(failure) = pipeline.warm_up().await {
+                tracing::debug!(%failure, "warm-up failed; processing loads the models");
+            }
+        });
     }
 
     fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<(), String> {
@@ -285,10 +309,13 @@ impl Recorder for CaptureRecorder {
             inner.status.warning = None;
         }
         self.notify();
-        if let Err(error) = self.start_inner(mode, call_app) {
-            let mut inner = self.inner();
-            inner.status.state = RecordingState::Idle;
-            inner.status.error = Some(format!("Recording could not start: {error}"));
+        match self.start_inner(mode, call_app) {
+            Ok(()) => self.warm_up_if_installed(),
+            Err(error) => {
+                let mut inner = self.inner();
+                inner.status.state = RecordingState::Idle;
+                inner.status.error = Some(format!("Recording could not start: {error}"));
+            }
         }
         self.notify();
     }
@@ -331,5 +358,124 @@ impl Recorder for CaptureRecorder {
             .collect();
         self.inner().status.denied_permissions = denied;
         self.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use steno_audio::testing::SyntheticCaptureBackend;
+    use steno_audio::testing::synthetic::SyntheticOptions;
+    use steno_core::paths::file_url;
+    use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
+    use steno_host::fakes::{FakePermissions, FakeSpeechModels};
+    use steno_pipeline::ProcessingPipeline;
+
+    use super::*;
+    use crate::pipeline::MakeDependencies;
+    use crate::testing::{fake_dependencies, temp_store};
+
+    struct Harness {
+        _dir: tempfile::TempDir,
+        recorder: Arc<CaptureRecorder>,
+        engine: Arc<FakeSpeechEngine>,
+        diarizer: Arc<FakeDiarizer>,
+    }
+
+    fn harness(installed: &[ModelAsset]) -> Harness {
+        let (dir, store) = temp_store();
+        let mut settings = store.settings().unwrap();
+        settings.audio_folder = file_url(&dir.path().join("audio"), true);
+        store.save_settings(&settings).unwrap();
+        let engine = Arc::new(FakeSpeechEngine::default());
+        let diarizer = Arc::new(FakeDiarizer::default());
+        let mut dependencies = fake_dependencies(&store, "fake-engine");
+        dependencies.speech_engine = engine.clone();
+        dependencies.diarizer = diarizer.clone();
+        let make: MakeDependencies = {
+            let dependencies = dependencies.clone();
+            Arc::new(move || Ok(dependencies.clone()))
+        };
+        let pipeline = Arc::new(CurrentPipeline::new(
+            ProcessingPipeline::new(dependencies),
+            make,
+            tokio::runtime::Handle::current(),
+        ));
+        let models = Arc::new(FakeSpeechModels::default());
+        for asset in installed {
+            models.install(*asset, None);
+        }
+        let make_session: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
+            let lanes = configuration.lanes();
+            let mut options =
+                SyntheticOptions::tones(&lanes, &[(steno_core::AudioLane::Mic, 440.0)], 600.0);
+            options.real_time = true;
+            CaptureSession::with_backend(
+                configuration,
+                Arc::new(SyntheticCaptureBackend::new(options)),
+                None,
+                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                Arc::new(steno_audio::SystemClock::new()),
+            )
+            .map_err(|error| error.to_string())
+        });
+        let recorder = Arc::new(CaptureRecorder::new(
+            store,
+            pipeline,
+            make_session,
+            Arc::new(FakePermissions::all_granted()),
+            models,
+            chrono::FixedOffset::east_opt(0).unwrap(),
+            tokio::runtime::Handle::current(),
+        ));
+        Harness {
+            _dir: dir,
+            recorder,
+            engine,
+            diarizer,
+        }
+    }
+
+    async fn start(recorder: &Arc<CaptureRecorder>) {
+        let starting = recorder.clone();
+        tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
+            .await
+            .unwrap();
+        assert_eq!(recorder.status().state, RecordingState::Recording);
+    }
+
+    async fn stop(recorder: &Arc<CaptureRecorder>) {
+        let stopping = recorder.clone();
+        tokio::task::spawn_blocking(move || stopping.stop())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
+        let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
+        start(&harness.recorder).await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while harness.engine.preparations.count() == 0
+                || harness.diarizer.preparations.count() == 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("both models were loaded while recording");
+        stop(&harness.recorder).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_start_never_warms_up_models_that_would_download() {
+        let harness = harness(&[ModelAsset::OfflineDiarizer]);
+        start(&harness.recorder).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(harness.engine.preparations.count(), 0);
+        assert_eq!(harness.diarizer.preparations.count(), 0);
+        // Processing the recording loads them, as it always did.
+        stop(&harness.recorder).await;
     }
 }

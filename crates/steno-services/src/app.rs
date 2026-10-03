@@ -261,11 +261,13 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let models_directory = crate::speech::models_directory(&settings, &paths);
 
     let permissions = Arc::new(FakePermissions::all_granted());
+    let speech_models = Arc::new(ModelStoreSpeechModels::new(&models_directory));
     let recorder = Arc::new(CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
         options.make_capture_session,
         permissions.clone(),
+        speech_models.clone(),
         zone,
         runtime.clone(),
     ));
@@ -288,7 +290,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
             pipeline: pipeline.clone(),
             sweep: sweep.clone(),
         }),
-        speech_models: Arc::new(ModelStoreSpeechModels::new(&models_directory)),
+        speech_models,
         llm: Arc::new(ClientLlmService { codex }),
         export_validator: Arc::new(crate::export::ObsidianExportValidator),
         handover: handover.as_ref().map(|(service, mac_id)| {
