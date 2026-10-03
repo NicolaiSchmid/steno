@@ -256,13 +256,12 @@ async fn accept_loop(
 ) {
     let mut connections = JoinSet::new();
     loop {
-        // Stop first, so nothing is accepted once it is asked for; reaping
-        // before accepting keeps a connection flood from growing the set.
+        // Stop first, so nothing is accepted once it is asked for; then reap
+        // finished connections before the next accept, so the set does not
+        // grow for the life of the listener, nor under a connection flood.
         let accepted = tokio::select! {
             biased;
             () = stopped(&mut stopping) => break,
-            // Reap finished connections so the set does not grow for the
-            // life of the listener.
             Some(_) = connections.join_next(), if !connections.is_empty() => continue,
             accepted = listener.accept() => accepted,
         };
@@ -350,9 +349,8 @@ pub enum ServerError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use chrono::Utc;
     use rustls_pki_types::ServerName;
