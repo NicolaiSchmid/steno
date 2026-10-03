@@ -1204,14 +1204,28 @@ async fn a_failed_refresh_after_a_401_does_not_use_up_the_refresh() {
     );
 }
 
-/// Sixty-four completions on a sign-in inside its expiry window: one token
-/// POST between them, and every request goes out with the new token.
-#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn sixty_four_completions_on_an_expiring_sign_in_share_one_refresh() {
+/// A harness without retries whose sign-in is inside its expiry window.
+async fn expiring_sign_in_without_retries() -> CodexHarness {
     let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
     harness
         .home
         .write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    harness
+}
+
+/// Sixty-four text completions started at once.
+async fn sixty_four_completions(
+    harness: &CodexHarness,
+) -> Vec<Result<steno_core::LlmResponse, CodexError>> {
+    let request = text_request();
+    futures_util::future::join_all((0..64).map(|_| harness.client.complete_llm(&request))).await
+}
+
+/// Sixty-four completions on a sign-in inside its expiry window: one token
+/// POST between them, and every request goes out with the new token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn sixty_four_completions_on_an_expiring_sign_in_share_one_refresh() {
+    let harness = expiring_sign_in_without_retries().await;
     let fresh = CodexHome::access_token(3_600, "plus");
     let fresh_for_server = fresh.clone();
     harness.home.server.respond(Arc::new(move |request| {
@@ -1224,10 +1238,7 @@ async fn sixty_four_completions_on_an_expiring_sign_in_share_one_refresh() {
     harness
         .backend
         .respond(Arc::new(|_| Some(scripts.stream("ok"))));
-    let request = text_request();
-    let results =
-        futures_util::future::join_all((0..64).map(|_| harness.client.complete_llm(&request)))
-            .await;
+    let results = sixty_four_completions(&harness).await;
     for result in results {
         assert_eq!(result.unwrap().text, "ok");
     }
@@ -1247,17 +1258,11 @@ async fn sixty_four_completions_on_an_expiring_sign_in_share_one_refresh() {
 /// `SignInExpired`, and nothing reaches the backend.
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn sixty_four_completions_on_a_refused_sign_in_post_the_dead_token_once() {
-    let harness = CodexHarness::build(RetryPolicy::NONE, "gpt-stub", |_| {}).await;
-    harness
-        .home
-        .write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let harness = expiring_sign_in_without_retries().await;
     harness.home.server.respond(Arc::new(|_| {
         Some(scripts.token_refresh_rejected("refresh_token_expired", 400))
     }));
-    let request = text_request();
-    let results =
-        futures_util::future::join_all((0..64).map(|_| harness.client.complete_llm(&request)))
-            .await;
+    let results = sixty_four_completions(&harness).await;
     for result in results {
         let error = credential(result.unwrap_err());
         assert!(
