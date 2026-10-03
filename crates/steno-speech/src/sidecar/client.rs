@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use steno_core::protocols::{BoundaryResult, async_trait};
@@ -230,15 +230,19 @@ impl SidecarProcess {
         }
     }
 
-    /// Sends `request` with `payload` and waits for its reply. The write
-    /// runs on a thread of its own, so a child that stops reading cannot
-    /// block past the deadline.
-    fn request(
+    /// Sends `request` with `payload` and waits for its reply, which
+    /// `pick` turns into the answer; a reply it hands back is a protocol
+    /// violation, `expected` naming what it wanted. The write runs on a
+    /// thread of its own, so a child that stops reading cannot block past
+    /// the deadline.
+    fn request<T>(
         &mut self,
         make: impl FnOnce(u64) -> Request,
         payload: Vec<u8>,
         timeout: Duration,
-    ) -> Result<Reply, SidecarError> {
+        expected: &str,
+        pick: impl FnOnce(Reply) -> Result<T, Reply>,
+    ) -> Result<T, SidecarError> {
         let id = self.next_id;
         self.next_id += 1;
         let request = make(id);
@@ -255,7 +259,9 @@ impl SidecarProcess {
             .map_err(SidecarError::Pipe)?;
         match self.wait_for(Some(id), timeout)? {
             Reply::Failed { error, .. } => Err(SidecarError::Remote(error)),
-            reply => Ok(reply),
+            reply => pick(reply).map_err(|other| {
+                SidecarError::Protocol(format!("expected {expected}, got {other:?}"))
+            }),
         }
     }
 
@@ -292,26 +298,27 @@ impl SidecarProcess {
     }
 
     /// The error for a child whose pipes closed or refused a write: its
-    /// exit status once it has one, else the pipe error.
+    /// exit status and last stderr lines once it has one, else the pipe
+    /// error.
     fn crashed(&mut self, write: Option<std::io::Error>) -> SidecarError {
-        match self.exit_status(Duration::from_secs(2)) {
-            Some(status) => self.crash_report(status),
-            None => SidecarError::Pipe(write.unwrap_or_else(|| {
+        let Some(status) = self.exit_status(Duration::from_secs(2)) else {
+            return SidecarError::Pipe(write.unwrap_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
                     "the sidecar closed its stdout but kept running",
                 )
-            })),
-        }
-    }
-
-    fn crash_report(&self, status: ExitStatus) -> SidecarError {
+            }));
+        };
         // The stderr reader may still be draining the last lines.
         std::thread::sleep(Duration::from_millis(50));
         let tail = self.stderr.lock().unwrap_or_else(PoisonError::into_inner);
         SidecarError::Crashed {
             status: status.to_string(),
-            stderr: tail.iter().cloned().collect::<Vec<_>>().join("\n"),
+            stderr: tail
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n"),
         }
     }
 
@@ -332,8 +339,9 @@ impl SidecarProcess {
     /// Asks the child to exit, then kills it if it has not within the
     /// grace period. Returns its exit status.
     fn shutdown(mut self, grace: Duration) -> Option<ExitStatus> {
+        // Any answer but a failure will do.
         let polite = self
-            .request(|id| Request::Shutdown { id }, Vec::new(), grace)
+            .request(|id| Request::Shutdown { id }, Vec::new(), grace, "bye", Ok)
             .is_ok();
         if polite && let Some(status) = self.exit_status(grace) {
             return Some(status);
@@ -357,10 +365,83 @@ impl Drop for SidecarProcess {
     }
 }
 
-/// The client's state behind its lock.
-#[derive(Default)]
-struct State {
-    process: Option<SidecarProcess>,
+/// What the engine shares with the blocking threads its calls run on.
+struct Shared {
+    store: ModelStore,
+    assets: Vec<ModelAsset>,
+    config: SidecarConfig,
+    /// The running child; a call holds the lock for its whole request.
+    process: Mutex<Option<SidecarProcess>>,
+    /// The running child's pid, 0 for none; readable while a request runs.
+    pid: AtomicU32,
+    spawns: AtomicU64,
+}
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Option<SidecarProcess>> {
+        self.process.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Installs the assets, then makes sure a child runs with its models
+    /// loaded. Blocking; the caller holds the lock.
+    fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
+        if slot.as_ref().is_some_and(|p| p.loaded) {
+            return Ok(());
+        }
+        let mut report = |progress: DownloadProgress<'_>| {
+            tracing::debug!(
+                file = progress.file,
+                received = progress.received,
+                total = progress.total,
+                "model download"
+            );
+        };
+        for asset in &self.assets {
+            self.store.ensure(asset, &mut report)?;
+        }
+        if slot.is_none() {
+            let process = SidecarProcess::spawn(&self.config)?;
+            self.spawns.fetch_add(1, Ordering::SeqCst);
+            self.pid.store(process.pid, Ordering::SeqCst);
+            *slot = Some(process);
+        }
+        let process = slot.as_mut().ok_or(SpeechError::NotPrepared)?;
+        let reply = process.request(
+            |id| Request::Load {
+                id,
+                models_root: self.store.root().to_path_buf(),
+                intra_threads: self.config.options.intra_threads,
+                inter_threads: self.config.options.inter_threads,
+            },
+            Vec::new(),
+            self.config.load_timeout,
+            "loaded",
+            |reply| match reply {
+                Reply::Loaded { .. } => Ok(()),
+                other => Err(other),
+            },
+        );
+        match reply {
+            Ok(()) => {
+                process.loaded = true;
+                Ok(())
+            }
+            Err(error) => Err(self.stop(slot, error).into()),
+        }
+    }
+
+    /// Drops the child unless `error` came from the child itself, which
+    /// then still runs and answers; returns the error.
+    fn stop(&self, slot: &mut Option<SidecarProcess>, error: SidecarError) -> SidecarError {
+        if !matches!(error, SidecarError::Remote(_)) {
+            if let Some(mut process) = slot.take() {
+                let status = process.kill();
+                tracing::warn!(pid = process.pid, ?status, %error, "speech sidecar stopped");
+            }
+            self.pid.store(0, Ordering::SeqCst);
+        }
+        error
+    }
 }
 
 /// Parakeet v3 on ONNX Runtime in `steno-speech-sidecar`, the default
@@ -373,13 +454,8 @@ struct State {
 /// replaced on the next call. [`SidecarSpeechEngine::release`] stops the
 /// child and frees its working set; the pipeline calls it after each job.
 pub struct SidecarSpeechEngine {
-    store: ModelStore,
-    assets: Vec<ModelAsset>,
-    config: SidecarConfig,
+    shared: Arc<Shared>,
     languages: BTreeSet<LanguageTag>,
-    state: Arc<Mutex<State>>,
-    pid: Arc<AtomicU32>,
-    spawns: Arc<AtomicU64>,
 }
 
 impl SidecarSpeechEngine {
@@ -398,74 +474,71 @@ impl SidecarSpeechEngine {
     #[must_use]
     pub fn with_assets(store: ModelStore, config: SidecarConfig, assets: Vec<ModelAsset>) -> Self {
         SidecarSpeechEngine {
-            store,
-            assets,
-            config,
+            shared: Arc::new(Shared {
+                store,
+                assets,
+                config,
+                process: Mutex::new(None),
+                pid: AtomicU32::new(0),
+                spawns: AtomicU64::new(0),
+            }),
             languages: OnnxSpeechEngine::LANGUAGES
                 .into_iter()
                 .map(LanguageTag::from)
                 .collect(),
-            state: Arc::new(Mutex::new(State::default())),
-            pid: Arc::new(AtomicU32::new(0)),
-            spawns: Arc::new(AtomicU64::new(0)),
         }
     }
 
     #[must_use]
     pub fn config(&self) -> &SidecarConfig {
-        &self.config
+        &self.shared.config
     }
 
     /// The running child's pid; `None` when there is none. Readable while
     /// a request runs.
     #[must_use]
     pub fn pid(&self) -> Option<u32> {
-        Some(self.pid.load(Ordering::SeqCst)).filter(|&pid| pid != 0)
+        Some(self.shared.pid.load(Ordering::SeqCst)).filter(|&pid| pid != 0)
     }
 
     /// How many children this engine has started.
     #[must_use]
     pub fn spawns(&self) -> u64 {
-        self.spawns.load(Ordering::SeqCst)
+        self.shared.spawns.load(Ordering::SeqCst)
     }
 
     /// Asks the running child for its pid, resident set and whether its
     /// models are loaded; `None` when no child runs. A child that does not
     /// answer is stopped.
     pub async fn health(&self) -> BoundaryResult<Option<SidecarHealth>> {
-        let (state, config, pid) = (
-            Arc::clone(&self.state),
-            self.config.clone(),
-            Arc::clone(&self.pid),
-        );
+        let shared = Arc::clone(&self.shared);
         Ok(blocking(move || {
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            let Some(process) = state.process.as_mut() else {
+            let mut slot = shared.lock();
+            let Some(process) = slot.as_mut() else {
                 return Ok(None);
             };
-            let reply = process.request(
-                |id| Request::Health { id },
-                Vec::new(),
-                config.control_timeout,
-            );
-            match reply {
-                Ok(Reply::Health {
-                    pid,
-                    rss_bytes,
-                    loaded,
-                    ..
-                }) => Ok(Some(SidecarHealth {
-                    pid,
-                    rss_bytes,
-                    loaded,
-                })),
-                Ok(other) => Err(stop(
-                    &mut state,
-                    &pid,
-                    SidecarError::Protocol(format!("expected health, got {other:?}")),
-                )),
-                Err(error) => Err(stop(&mut state, &pid, error)),
-            }
+            process
+                .request(
+                    |id| Request::Health { id },
+                    Vec::new(),
+                    shared.config.control_timeout,
+                    "health",
+                    |reply| match reply {
+                        Reply::Health {
+                            pid,
+                            rss_bytes,
+                            loaded,
+                            ..
+                        } => Ok(SidecarHealth {
+                            pid,
+                            rss_bytes,
+                            loaded,
+                        }),
+                        other => Err(other),
+                    },
+                )
+                .map(Some)
+                .map_err(|error| shared.stop(&mut slot, error))
         })
         .await??)
     }
@@ -473,106 +546,29 @@ impl SidecarSpeechEngine {
     /// Stops the child, politely first; returns its exit status, `None`
     /// when no child ran. The next call starts a new one.
     pub async fn release(&self) -> BoundaryResult<Option<ExitStatus>> {
-        let (state, config, pid) = (
-            Arc::clone(&self.state),
-            self.config.clone(),
-            Arc::clone(&self.pid),
-        );
+        let shared = Arc::clone(&self.shared);
         Ok(blocking(move || {
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            pid.store(0, Ordering::SeqCst);
-            state
-                .process
-                .take()
-                .and_then(|process| process.shutdown(config.control_timeout))
+            let mut slot = shared.lock();
+            shared.pid.store(0, Ordering::SeqCst);
+            slot.take()
+                .and_then(|process| process.shutdown(shared.config.control_timeout))
         })
         .await?)
     }
-
-    /// Installs the assets, then makes sure a child runs with its models
-    /// loaded. Blocking; runs under the state lock.
-    fn ensure_loaded(
-        state: &mut State,
-        store: &ModelStore,
-        assets: &[ModelAsset],
-        config: &SidecarConfig,
-        pid: &AtomicU32,
-        spawns: &AtomicU64,
-    ) -> Result<(), SpeechError> {
-        if state.process.as_ref().is_some_and(|p| p.loaded) {
-            return Ok(());
-        }
-        let mut report = |progress: DownloadProgress<'_>| {
-            tracing::debug!(
-                file = progress.file,
-                received = progress.received,
-                total = progress.total,
-                "model download"
-            );
-        };
-        for asset in assets {
-            store.ensure(asset, &mut report)?;
-        }
-        if state.process.is_none() {
-            let process = SidecarProcess::spawn(config)?;
-            spawns.fetch_add(1, Ordering::SeqCst);
-            pid.store(process.pid, Ordering::SeqCst);
-            state.process = Some(process);
-        }
-        let process = state.process.as_mut().ok_or(SpeechError::NotPrepared)?;
-        let models_root = store.root().to_path_buf();
-        let options = config.options.clone();
-        let reply = process.request(
-            |id| Request::Load {
-                id,
-                models_root,
-                intra_threads: options.intra_threads,
-                inter_threads: options.inter_threads,
-            },
-            Vec::new(),
-            config.load_timeout,
-        );
-        match reply {
-            Ok(Reply::Loaded { .. }) => {
-                process.loaded = true;
-                Ok(())
-            }
-            Ok(other) => Err(stop(
-                state,
-                pid,
-                SidecarError::Protocol(format!("expected loaded, got {other:?}")),
-            )
-            .into()),
-            Err(error) => Err(stop(state, pid, error).into()),
-        }
-    }
-}
-
-/// Drops the child unless `error` came from the child itself, which then
-/// still runs and answers; returns the error.
-fn stop(state: &mut State, pid: &AtomicU32, error: SidecarError) -> SidecarError {
-    if !matches!(error, SidecarError::Remote(_)) {
-        if let Some(mut process) = state.process.take() {
-            let status = process.kill();
-            tracing::warn!(pid = process.pid, ?status, %error, "speech sidecar stopped");
-        }
-        pid.store(0, Ordering::SeqCst);
-    }
-    error
 }
 
 impl Drop for SidecarSpeechEngine {
     /// Stops the child politely when nothing else holds the state; the
     /// process's own drop kills it otherwise.
     fn drop(&mut self) {
-        if let Some(state) = Arc::get_mut(&mut self.state)
-            && let Some(process) = state
+        if let Some(shared) = Arc::get_mut(&mut self.shared)
+            && let Some(process) = shared
+                .process
                 .get_mut()
                 .unwrap_or_else(PoisonError::into_inner)
-                .process
                 .take()
         {
-            process.shutdown(self.config.control_timeout);
+            process.shutdown(shared.config.control_timeout);
         }
     }
 }
@@ -588,19 +584,8 @@ impl SpeechEngine for SidecarSpeechEngine {
     }
 
     async fn prepare(&self) -> BoundaryResult<()> {
-        let (state, store, assets, config, pid, spawns) = (
-            Arc::clone(&self.state),
-            self.store.clone(),
-            self.assets.clone(),
-            self.config.clone(),
-            Arc::clone(&self.pid),
-            Arc::clone(&self.spawns),
-        );
-        blocking(move || {
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            Self::ensure_loaded(&mut state, &store, &assets, &config, &pid, &spawns)
-        })
-        .await??;
+        let shared = Arc::clone(&self.shared);
+        blocking(move || shared.ensure_loaded(&mut shared.lock())).await??;
         Ok(())
     }
 
@@ -612,40 +597,31 @@ impl SpeechEngine for SidecarSpeechEngine {
         if audio.is_empty() {
             return Ok(Vec::new());
         }
-        let (state, store, assets, config, pid, spawns) = (
-            Arc::clone(&self.state),
-            self.store.clone(),
-            self.assets.clone(),
-            self.config.clone(),
-            Arc::clone(&self.pid),
-            Arc::clone(&self.spawns),
-        );
+        let shared = Arc::clone(&self.shared);
         let sample_count = audio.samples.len() as u64;
-        let timeout = config.transcribe_timeout(audio.duration());
+        let timeout = shared.config.transcribe_timeout(audio.duration());
         let payload = protocol::encode_samples(&audio.samples);
         let hint = hint.cloned();
         let segments = blocking(move || {
-            let mut state = state.lock().unwrap_or_else(PoisonError::into_inner);
-            Self::ensure_loaded(&mut state, &store, &assets, &config, &pid, &spawns)?;
-            let process = state.process.as_mut().ok_or(SpeechError::NotPrepared)?;
-            let reply = process.request(
-                |id| Request::Transcribe {
-                    id,
-                    sample_count,
-                    hint,
-                },
-                payload,
-                timeout,
-            );
-            match reply {
-                Ok(Reply::Transcript { segments, .. }) => Ok(segments),
-                Ok(other) => Err(SpeechError::from(stop(
-                    &mut state,
-                    &pid,
-                    SidecarError::Protocol(format!("expected a transcript, got {other:?}")),
-                ))),
-                Err(error) => Err(stop(&mut state, &pid, error).into()),
-            }
+            let mut slot = shared.lock();
+            shared.ensure_loaded(&mut slot)?;
+            let process = slot.as_mut().ok_or(SpeechError::NotPrepared)?;
+            process
+                .request(
+                    |id| Request::Transcribe {
+                        id,
+                        sample_count,
+                        hint,
+                    },
+                    payload,
+                    timeout,
+                    "a transcript",
+                    |reply| match reply {
+                        Reply::Transcript { segments, .. } => Ok(segments),
+                        other => Err(other),
+                    },
+                )
+                .map_err(|error| SpeechError::from(shared.stop(&mut slot, error)))
         })
         .await??;
         Ok(segments)
