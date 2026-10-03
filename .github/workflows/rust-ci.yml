@@ -47,7 +47,8 @@ name: Rust CI
 # The `tsan` job runs the audio ring tests under ThreadSanitizer: the
 # two-thread accounting test in `crates/steno-audio/tests/ring.rs` is what
 # catches a weakened memory ordering on the ring indices, and only a
-# sanitizer sees that on x86. It needs nightly and `-Zbuild-std`, so it is
+# sanitizer sees that on x86. `tests/split_streams.rs` runs there too: its
+# two-thread test drives the WASAPI backend's follower staging ring. It needs nightly and `-Zbuild-std`, so it is
 # its own job and is not a required check: a nightly breakage must not block
 # the workspace jobs.
 
@@ -204,6 +205,13 @@ jobs:
         if: matrix.name == 'linux'
         run: apps/desktop/scripts/release-matrix.test.sh
 
+      # The WASAPI smoke tests again with their output, so the log shows what
+      # COM answered on the runner (endpoints, sessions, why a capture
+      # failed).
+      - name: WASAPI smoke tests, with output
+        if: matrix.name == 'windows'
+        run: cargo test -p steno-audio --test live_windows --locked -- --nocapture
+
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. The run
       # ends itself after 15 s; the step limit catches a hang before that.
@@ -276,4 +284,4 @@ jobs:
       - name: Ring tests under ThreadSanitizer
         env:
           RUSTFLAGS: -Zsanitizer=thread
-        run: cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --locked -p steno-audio --test ring
+        run: cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu --locked -p steno-audio --test ring --test split_streams

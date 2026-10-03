@@ -242,6 +242,13 @@ fn a_full_staging_ring_refuses_whole_packets_and_the_master_counts_them() {
     let dropped = sink.dropped_samples();
     assert_eq!(dropped.get(&AudioLane::System), Some(&100));
     assert_eq!(dropped.get(&AudioLane::Mic), None);
+
+    router.route(packet(&ramp(480, 480), 1), &sink);
+    assert_eq!(
+        sink.dropped_samples().get(&AudioLane::System),
+        Some(&100),
+        "an overflow is reported once"
+    );
 }
 
 #[test]
@@ -355,4 +362,91 @@ fn a_slice_shorter_than_it_claims_is_delivered_as_silence_of_its_claimed_length(
     deliver_slices(&[slice(&short), slice(&full)], &plan.layout.sources, &sink);
     assert_eq!(drain(&sink, 0), vec![0.0; 480]);
     assert_eq!(drain(&sink, 1), full);
+}
+
+/// The follower pushing and the master pulling on two threads at once, as
+/// the capture threads do: whatever the interleaving, the mic lane arrives
+/// whole, both lanes stay the same length, the system lane keeps its order
+/// with no torn sample, and every pushed follower frame is delivered,
+/// counted as lost or still queued. Small enough for every CI job; the
+/// `tsan` job runs it under ThreadSanitizer.
+#[test]
+fn a_follower_and_a_master_on_two_threads_account_for_every_frame() {
+    const PERIOD: usize = 480;
+    const PACKETS: usize = 150;
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let plan = SplitStreamPlan::new(&lanes).unwrap();
+    // Two seconds per lane hold all 150 periods, so nothing drains early.
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let follower = Arc::new(FollowerLane::for_period(PERIOD));
+    let mut master = StreamBody::Master {
+        router: PacketRouter::new(
+            plan.layout.sources.clone(),
+            Some(Arc::clone(&follower)),
+            PERIOD,
+        ),
+        sink: Arc::clone(&sink),
+    };
+    let mut staging = StreamBody::follower(Arc::clone(&follower), PERIOD);
+
+    let follower_thread = std::thread::spawn(move || {
+        let mut packet = vec![0.0f32; 2 * PERIOD];
+        for index in 0..PACKETS {
+            // Left and right equal, so the fold is the frame's number.
+            for (frame, pair) in packet.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+                let value = (index * PERIOD + frame + 1) as f32;
+                pair.fill(value);
+            }
+            staging.handle(SliceView {
+                frames: PERIOD,
+                channels: 2,
+                samples: Some(&packet),
+            });
+            if index % 3 == 0 {
+                std::thread::yield_now();
+            }
+        }
+        PACKETS * PERIOD
+    });
+    let mic = ramp(1, PACKETS * PERIOD);
+    for (index, period) in mic.as_chunks::<PERIOD>().0.iter().enumerate() {
+        master.handle(packet(period, 1));
+        if index % 2 == 0 {
+            std::thread::yield_now();
+        }
+    }
+    let pushed = follower_thread.join().unwrap();
+    // A last empty pull hands over any staging overflow not yet reported.
+    let late_lost = follower.pull(&mut []);
+
+    let mic_lane = drain(&sink, 0);
+    let system_lane = drain(&sink, 1);
+    assert_eq!(mic_lane, mic, "the mic lane arrives whole");
+    assert_eq!(system_lane.len(), mic_lane.len(), "the lanes stay aligned");
+    let mut previous = 0.0f32;
+    let mut delivered = 0;
+    for (index, sample) in system_lane.iter().copied().enumerate() {
+        if sample == 0.0 {
+            continue;
+        }
+        assert!(
+            sample > previous,
+            "order broken at {index}: {sample} after {previous}"
+        );
+        assert_eq!(sample.fract(), 0.0, "torn sample at {index}: {sample}");
+        previous = sample;
+        delivered += 1;
+    }
+    let system_lost = sink
+        .dropped_samples()
+        .get(&AudioLane::System)
+        .copied()
+        .unwrap_or(0)
+        + late_lost;
+    assert_eq!(
+        pushed,
+        delivered + system_lost + follower.queued(),
+        "pushed = delivered + lost + queued"
+    );
+    assert_eq!(sink.dropped_samples().get(&AudioLane::Mic), None);
 }
