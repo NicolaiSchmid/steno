@@ -129,15 +129,6 @@ pub fn merge_windows(
     out
 }
 
-/// `tokens` from its first splice point (a word start or a punctuation
-/// piece) on, or all of it when it has none.
-fn from_splice_point<'a>(tokens: &'a [Token], vocab: &Vocab) -> &'a [Token] {
-    match tokens.iter().position(|t| vocab.is_splice_safe(t.id)) {
-        Some(p) => &tokens[p..],
-        None => tokens,
-    }
-}
-
 fn merge_by_midpoint(
     left: &[Token],
     right: &[Token],
@@ -155,7 +146,7 @@ fn merge_by_midpoint(
         .iter()
         .position(|t| seconds(t) >= cutoff)
         .unwrap_or(left.len());
-    let right_start_index = right
+    let mut right_start_index = right
         .iter()
         .position(|t| seconds(t) >= cutoff)
         .unwrap_or(right.len());
@@ -165,11 +156,13 @@ fn merge_by_midpoint(
             .take_while(|t| !vocab.is_splice_safe(t.id))
             .count();
     }
-    [
-        &left[..left_end_index],
-        from_splice_point(&right[right_start_index..], vocab),
-    ]
-    .concat()
+    // The right resumes at its first splice point (a word start or a
+    // punctuation piece), or keeps everything when it has none.
+    right_start_index += right[right_start_index..]
+        .iter()
+        .position(|t| vocab.is_splice_safe(t.id))
+        .unwrap_or(0);
+    [&left[..left_end_index], &right[right_start_index..]].concat()
 }
 
 #[cfg(test)]
