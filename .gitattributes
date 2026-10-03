@@ -15,3 +15,7 @@ apps/macos/web/fixtures/bridge/*.json text eol=lf
 # Goldens and fixtures compared byte for byte by the Swift and Rust tests:
 # never converted, so a Windows checkout keeps their LF line endings.
 Tests/Fixtures/** -text
+
+# The Swift and Rust LLM prompt goldens are compared byte for byte; keep
+# them LF on every platform.
+Tests/Fixtures/llm/** text eol=lf
