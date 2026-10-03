@@ -39,10 +39,20 @@ It is hosted at `steno.nicolaischmid.com`.
    meeting, never a real recording.
 5. **CI and hosting.** `.github/workflows/site-ci.yml` installs from the root
    lockfile with `--filter @steno/site...` and runs Biome, `tsc` and
-   `next build`. `apps/site/vercel.json` carries the same install and build
-   commands (upstream keeps them in `vercel.ts`), so on Vercel the project is
-   the repository with Root Directory `apps/site`, and the CNAME
-   `steno.nicolaischmid.com` points at it. Elsewhere: upload `out/`.
+   `next build`. The Vercel project (team wasc, `steno`, CNAME
+   `steno.nicolaischmid.com`) has the repository root as its Root Directory
+   and a root `vercel.json` with the same install command, `pnpm build:site`,
+   output `apps/site/out`, framework "Other" (static files) and an ignore
+   command. Tried first and rejected: Root Directory `apps/site` with
+   `apps/site/vercel.json`. Vercel fails a commit whose root directory does
+   not exist before any ignore step runs, so every push to the Rust branches
+   (no `apps/site`) produced a failed deployment. With the root at the
+   repository root the ignore command sees every branch and skips those
+   without the site or without changes to it. The Next.js preset is not used
+   because at the repository root Vercel finds no `next` dependency; the
+   export is plain static output anyway. Fonts are self-hosted woff2 files in
+   `apps/site/public/fonts` (as upstream) because `next/font/google` failed to
+   resolve under Turbopack on Vercel's builder.
 
 ## Fit with the Rust core and Tauri shell
 
