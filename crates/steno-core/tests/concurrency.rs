@@ -117,7 +117,8 @@ fn two_stores_open_a_fresh_file_at_once() {
 /// `Store::export` reads under a deferred transaction, which in WAL mode
 /// is a snapshot that neither waits for nor blocks a writer: it returns
 /// while the other store holds the write lock. An immediate transaction
-/// would queue on the busy timeout instead and fail after it.
+/// would queue on the busy timeout instead and fail with `database is
+/// locked` once it ran out.
 #[test]
 fn an_export_reads_while_the_other_store_holds_the_write_lock() {
     let directory = tempfile::tempdir().unwrap();
@@ -126,7 +127,6 @@ fn an_export_reads_while_the_other_store_holds_the_write_lock() {
     let meeting = populate(&writer);
     let reader = Store::open(&path).unwrap();
 
-    let started = Instant::now();
     writer
         .write(|_| {
             let export = reader.export(meeting.id).unwrap();
@@ -135,8 +135,4 @@ fn an_export_reads_while_the_other_store_holds_the_write_lock() {
             Ok(())
         })
         .unwrap();
-    assert!(
-        started.elapsed() < Duration::from_secs(4),
-        "the export waited on the writer's lock"
-    );
 }
