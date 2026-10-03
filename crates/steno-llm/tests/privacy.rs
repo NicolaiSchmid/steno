@@ -404,7 +404,7 @@ async fn the_endpoint_client_redacts_every_copy_of_the_api_key() {
     harness.server.enqueue([
         StubResponse::json(&echoing_envelope(&secrets), 400)
             .with_header("X-Echo", &format!("Bearer {API_KEY}")),
-        StubResponse::new(400, echoing_plain_body(&secrets, API_KEY, 500)),
+        StubResponse::new(400, echoing_plain_body(&secrets, API_KEY, ERROR_CUT)),
         scripts.refusal(&format!("I saw {twice}")),
         StubResponse::new(200, format!("not a completion: {twice}").into_bytes()),
     ]);
@@ -431,7 +431,7 @@ async fn the_codex_client_redacts_every_copy_of_the_tokens_and_the_account_id() 
     let all = secrets.join(" and ");
     harness.backend.enqueue([
         StubResponse::json(&echoing_envelope(&secrets), 400),
-        StubResponse::new(400, echoing_plain_body(&secrets[1..], &access, 500)),
+        StubResponse::new(400, echoing_plain_body(&secrets[1..], &access, ERROR_CUT)),
         scripts.responses_error_event(&format!("{all}; again {all}"), "server_error"),
         scripts.responses_refusal(&format!("I saw {all}; again {all}")),
         StubResponse::new(200, format!("<html>{all}; again {all}</html>").into_bytes()),
@@ -470,7 +470,7 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
     // A code is lowercased for the decisions; a token in it is redacted
     // before that, or a case-folded copy would survive.
     let cased = StubResponse::json(&serde_json::json!({"error": {"code": access}}), 400);
-    let plain = StubResponse::new(503, echoing_plain_body(&secrets[1..], &access, 300));
+    let plain = StubResponse::new(503, echoing_plain_body(&secrets[1..], &access, REFRESH_CUT));
     for reply in [nested, flat, cased, plain] {
         let home = CodexHome::new().await;
         home.write(AuthFile::default().access(&access));
@@ -483,13 +483,8 @@ async fn the_token_refresh_redacts_every_copy_of_the_tokens_and_the_account_id()
     }
 }
 
-// Every cut a client takes: 4 096 characters of a body that is not the
-// answer, 500 of an error body that is not an envelope, 300 of a refusal
-// from the token endpoint. Each body is redacted whole before it is cut.
-
-const BODY_CUT: usize = 4_096;
-const ERROR_CUT: usize = 500;
-const REFRESH_CUT: usize = 300;
+// Each body is redacted whole before it is cut at `BODY_CUT`, `ERROR_CUT`
+// or `REFRESH_CUT`.
 
 /// A project key (`sk-proj-` and 160 more characters), long enough that a
 /// body of its copies redacts to fewer than 500 characters before byte

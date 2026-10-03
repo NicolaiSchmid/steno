@@ -101,10 +101,10 @@ fn body_with(rng: &mut Rng, secrets: &[String], max: usize) -> String {
             let secret = &secrets[rng.below(secrets.len())];
             let inside = rng.range(1, secret.chars().count());
             let offset = match rng.below(5) {
-                0 => 300usize.saturating_sub(inside),
-                1 => 500usize.saturating_sub(inside),
+                0 => REFRESH_CUT.saturating_sub(inside),
+                1 => ERROR_CUT.saturating_sub(inside),
                 // After "HTTP 4xx: " in the refresh's detail.
-                2 => 290usize.saturating_sub(inside),
+                2 => (REFRESH_CUT - "HTTP 4xx: ".len()).saturating_sub(inside),
                 _ => rng.below(chars.len() + 1),
             };
             (offset, secret)
@@ -120,7 +120,7 @@ fn body_with(rng: &mut Rng, secrets: &[String], max: usize) -> String {
     let mut text: String = chars.into_iter().collect();
     if rng.below(6) == 0 {
         let secret = &secrets[rng.below(secrets.len())];
-        let target = 4_096usize.saturating_sub(rng.range(1, secret.len()));
+        let target = BODY_CUT.saturating_sub(rng.range(1, secret.len()));
         while text.len() < target {
             text.push('z');
         }

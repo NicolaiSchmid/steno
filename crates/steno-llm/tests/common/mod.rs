@@ -401,6 +401,13 @@ impl CodexHome {
     }
 }
 
+/// The cuts a client takes of a body for an error: 4 096 characters of a
+/// body that is not the answer, 500 of an error body that is not an
+/// envelope, 300 of a refusal from the token endpoint.
+pub const BODY_CUT: usize = 4_096;
+pub const ERROR_CUT: usize = 500;
+pub const REFRESH_CUT: usize = 300;
+
 /// The names in `directory`, sorted.
 pub fn file_names(directory: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(directory)
