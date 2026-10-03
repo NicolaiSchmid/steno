@@ -581,6 +581,33 @@ another release, otherwise the cutover closes them:
   rebuild's successful restart and `resume` clears the new backend's
   audio and reports nothing.
 
+What the Linux backend (WP5b) does differently from the Mac's, each an
+item to settle before the Linux release:
+
+- **The system lane is the whole default sink.** The Mac's tap leaves out
+  Steno's own process; the PipeWire backend records the default sink's
+  monitor, Steno's output included (Steno plays nothing while recording),
+  and only that sink: an app routed to another output is not in the lane.
+- **Latencies are the ports' `SPA_PARAM_Latency` lower bounds**: the
+  microphone port's capture side plus the sink's first playback port's
+  playback side, in frames of the first cycle. Null devices report zero, so
+  CI checks the parsing and the arithmetic, not real numbers. Measure the
+  far-end delay on a laptop with ALSA and with a Bluetooth headset.
+- **`start` waits for the first cycle** and fails after 3 s without one;
+  the Mac's returns before any callback. Linking the sink's monitor keeps
+  the sink running, so cycles arrive with nothing playing (the Mac's call
+  mode waits for an output client).
+- **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
+  names no Linux node, so a synced or copied settings file shows the input
+  device as unavailable and the user picks again. A virtual source (a null
+  sink with `media.class = Audio/Source/Virtual`) records from its monitor
+  output, the only output it has.
+- **No input device list and no meeting detection on Linux yet.**
+  `AudioDevices` (the picker) and the live `ProcessAudioActivitySource`
+  (the detector) are macOS-only. The PipeWire registry holds both: the
+  `Audio/Source` nodes, and the `Stream/Input/Audio` nodes with their
+  `application.process.id`. A follow-up package adds them.
+
 ### Handover
 
 Rust fixes the Swift behaviours below except the network and service name lines; each
@@ -747,6 +774,7 @@ PR off `main`.
 | WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | merged |
 | WP7c handover | `feat/rust-handover` | #169 | merged |
 | WP8 shell completion: tray, floating panels, autostart, updater, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | open |
+| WP5b PipeWire capture | `feat/rust-pipewire` | | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -780,3 +808,19 @@ port must have the master and its commits on disk by then (the `RecordingIntake.
 line under Store). Pairing and revoke commits stay `NORMAL`, as in Swift: a power loss
 right after one can forget a pairing (the phone gets 401 and unpairs, and the user
 pairs it again) or bring a revoked device back.
+
+WP5b is the Linux `LiveCaptureBackend`, `crates/steno-audio/src/capture/live/pipewire/`:
+one PipeWire capture stream (48 kHz `f32`, one `AUXn` channel per linked
+port) that Steno links itself, through the server's `link-factory`, to the
+microphone's first output port and the default sink's front monitor ports.
+Every graph cycle brings all lanes in one interleaved buffer, which goes
+through the same `deliver` the Mac's IOProc calls; the stream's `process`
+runs on PipeWire's data-loop thread. Default device moves, a linked node
+going away and a lost connection are coalesced for 500 ms and judged with
+`DeviceSnapshot::difference`, as on the Mac. The proof: `tests/realtime.rs`
+counts the process body on every OS, and `tests/pipewire.rs` runs against a
+private headless daemon with WirePlumber and null devices
+(`scripts/pipewire-headless.sh`, a step of the Linux CI job): each lane
+carries its own tone, PipeWire's data-loop thread makes zero allocations
+over a second of cycles, and the device changes are reported. Linux items:
+the list after the Swift defects above.
