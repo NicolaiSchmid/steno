@@ -282,12 +282,14 @@ impl LiveCaptureBackend {
     }
 }
 
-/// Opens the stream `source` needs on this thread.
+/// Joins COM and opens the stream `source` needs on this thread. The
+/// apartment comes first so it is dropped last.
 fn open(
     source: StreamSource,
     input_device_uid: Option<&str>,
-    enumerator: &Enumerator,
-) -> Result<(CaptureClient, StreamInfo), CaptureError> {
+) -> Result<(Apartment, Enumerator, CaptureClient, StreamInfo), CaptureError> {
+    let apartment = Apartment::enter()?;
+    let enumerator = Enumerator::new()?;
     let channels = source.channels();
     let (client, endpoint_id, loopback) = match source {
         StreamSource::Microphone => {
@@ -327,7 +329,7 @@ fn open(
         endpoint_id,
         loopback,
     };
-    Ok((client, info))
+    Ok((apartment, enumerator, client, info))
 }
 
 /// A stream thread: opens its stream, reports, waits for its body, starts,
@@ -341,21 +343,7 @@ fn run_stream(
     stop: &AtomicBool,
     watcher: &Watcher,
 ) {
-    let apartment = match Apartment::enter() {
-        Ok(apartment) => apartment,
-        Err(error) => {
-            let _ = events.send(StreamEvent::Opened(Err(error.into())));
-            return;
-        }
-    };
-    let enumerator = match Enumerator::new() {
-        Ok(enumerator) => enumerator,
-        Err(error) => {
-            let _ = events.send(StreamEvent::Opened(Err(error.into())));
-            return;
-        }
-    };
-    let (mut client, info) = match open(source, input_device_uid, &enumerator) {
+    let (apartment, enumerator, mut client, info) = match open(source, input_device_uid) {
         Ok(opened) => opened,
         Err(error) => {
             let _ = events.send(StreamEvent::Opened(Err(error)));
@@ -759,6 +747,8 @@ impl AudioDevices {
                 };
                 let (channels, rate) = endpoint.mix_format().unwrap_or((0, 0));
                 let is_input = flow == SessionFlow::Capture;
+                let is_default = |default: Option<&str>| default == Some(uid.as_str());
+                let is_default_output = !is_input && is_default(default_output.as_deref());
                 devices.push(AudioDeviceInfo {
                     id: u32::try_from(devices.len()).unwrap_or(u32::MAX),
                     name: endpoint.friendly_name().unwrap_or_else(|| uid.clone()),
@@ -767,10 +757,9 @@ impl AudioDevices {
                     nominal_sample_rate: f64::from(rate),
                     transport_type: "WASAPI endpoint".into(),
                     is_running_somewhere: false,
-                    is_default_input: is_input && default_input.as_deref() == Some(uid.as_str()),
-                    is_default_output: !is_input && default_output.as_deref() == Some(uid.as_str()),
-                    is_default_system_output: !is_input
-                        && default_output.as_deref() == Some(uid.as_str()),
+                    is_default_input: is_input && is_default(default_input.as_deref()),
+                    is_default_output,
+                    is_default_system_output: is_default_output,
                     uid,
                 });
             }
