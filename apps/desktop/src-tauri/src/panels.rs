@@ -157,11 +157,12 @@ impl RaisedPrompt {
     }
 }
 
-/// The prompt slot: the one pending, and how many have been raised.
+/// The prompt slot: the one pending, and the number of the latest one
+/// raised (how many have been).
 #[derive(Debug, Default)]
-struct Prompts {
+struct PromptSlot {
     pending: Option<RaisedPrompt>,
-    raised: u64,
+    last_raised: u64,
 }
 
 /// What the one floating surface shows.
@@ -258,7 +259,7 @@ pub struct Panels {
     /// The size each panel's page last reported.
     sizes: Mutex<HashMap<Panel, (f64, f64)>>,
     placed: Mutex<HashMap<Panel, Placement>>,
-    prompt: Mutex<Prompts>,
+    prompt: Mutex<PromptSlot>,
     recording: Mutex<RecordingState>,
     /// What `apply` last showed, so a snapshot that changes nothing does
     /// not re-navigate the prompt.
@@ -335,10 +336,10 @@ impl Panels {
     fn set_prompt(&self, request: Option<PromptRequest>) {
         if let Ok(mut prompt) = self.prompt.lock() {
             prompt.pending = request.map(|request| {
-                prompt.raised += 1;
+                prompt.last_raised += 1;
                 RaisedPrompt {
                     request,
-                    raised: prompt.raised,
+                    raised: prompt.last_raised,
                 }
             });
         }
@@ -353,7 +354,7 @@ impl Panels {
     /// closes only itself (`onClose`).
     fn dismiss_prompt(&self, raised: Option<u64>) -> bool {
         self.prompt.lock().is_ok_and(|mut prompt| {
-            let dismisses = raised.is_none_or(|raised| raised == prompt.raised);
+            let dismisses = raised.is_none_or(|raised| raised == prompt.last_raised);
             if dismisses {
                 prompt.pending = None;
             }

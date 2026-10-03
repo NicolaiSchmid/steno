@@ -37,15 +37,6 @@ use crate::{
     recording::{RecorderState, RecordingState},
 };
 
-/// The name a status notifier host's watcher owns on the session bus:
-/// KDE's, the GNOME `AppIndicator` extension's and most desktop panels'.
-#[cfg(target_os = "linux")]
-const WATCHER: &str = "org.kde.StatusNotifierWatcher";
-
-/// Whether `WATCHER` has been seen on the bus in this run (`has_host`).
-#[cfg(target_os = "linux")]
-static WATCHER_SEEN: AtomicBool = AtomicBool::new(false);
-
 /// The tray's id, for `AppHandle::tray_by_id`.
 pub const TRAY_ID: &str = "steno";
 
@@ -89,6 +80,93 @@ pub struct Tray {
     in_person: MenuItem<Wry>,
     launch_at_login: CheckMenuItem<Wry>,
 }
+
+/// Builds the menu and the icon and manages `Tray`.
+pub fn build(app: &AppHandle) -> tauri::Result<()> {
+    let record = MenuAction::Record.item(app, Some("CmdOrCtrl+Shift+R"))?;
+    let in_person = MenuAction::RecordInPerson.item(app, None)?;
+    let launch_at_login = CheckMenuItem::with_id(
+        app,
+        MenuAction::LaunchAtLogin.as_str(),
+        MenuAction::LaunchAtLogin.label(),
+        true,
+        autostart::status(app).is_on(),
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &record,
+            &in_person,
+            &PredefinedMenuItem::separator(app)?,
+            &MenuAction::OpenMain.item(app, None)?,
+            &MenuAction::OpenSettings.item(app, Some("CmdOrCtrl+,"))?,
+            &PredefinedMenuItem::separator(app)?,
+            &launch_at_login,
+            &MenuAction::CheckForUpdates.item(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            // Not muda's predefined Quit: that one ends the process without
+            // `ExitRequested`, so the shell could not shut down cleanly.
+            &MenuAction::Quit.item(app, Some("CmdOrCtrl+Q"))?,
+        ],
+    )?;
+    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .tooltip(tooltip(RecordingState::Idle));
+    builder = if cfg!(target_os = "macos") {
+        // The four-bar mark as a template image: the menu bar draws it in
+        // its own colour, as it drew the SF Symbol.
+        builder
+            .icon(Image::from_bytes(include_bytes!(
+                "../icons/tray/mark@2x.png"
+            ))?)
+            .icon_as_template(true)
+    } else if let Some(icon) = app.default_window_icon() {
+        builder.icon(icon.clone())
+    } else {
+        builder
+    };
+    builder.build(app)?;
+    app.manage(Tray {
+        record,
+        in_person,
+        launch_at_login,
+    });
+    Ok(())
+}
+
+/// A `recording` snapshot reached the main window: retitle the items.
+pub fn note_recording(app: &AppHandle, state: RecordingState) {
+    let Some(tray) = app.try_state::<Tray>() else {
+        return;
+    };
+    let _ = tray.record.set_text(record_label(state));
+    let _ = tray.record.set_enabled(record_enabled(state));
+    let _ = tray.in_person.set_enabled(in_person_enabled(state));
+    if let Some(icon) = app.tray_by_id(TRAY_ID) {
+        let _ = icon.set_tooltip(Some(tooltip(state)));
+    }
+}
+
+/// The login item changed (from the menu or from Settings): the check mark
+/// follows what the system says, not what was asked.
+pub fn note_login_item(app: &AppHandle) {
+    if let Some(tray) = app.try_state::<Tray>() {
+        let _ = tray
+            .launch_at_login
+            .set_checked(autostart::status(app).is_on());
+    }
+}
+
+/// The name a status notifier host's watcher owns on the session bus:
+/// KDE's, the GNOME `AppIndicator` extension's and most desktop panels'.
+#[cfg(target_os = "linux")]
+const WATCHER: &str = "org.kde.StatusNotifierWatcher";
+
+/// Whether `WATCHER` has been seen on the bus in this run (`has_host`).
+#[cfg(target_os = "linux")]
+static WATCHER_SEEN: AtomicBool = AtomicBool::new(false);
 
 /// Whether something on the desktop shows the tray's icon. macOS and
 /// Windows always do. On Linux a status notifier host does, found through
@@ -172,84 +250,6 @@ fn watcher_owned() -> bool {
 #[cfg(target_os = "linux")]
 fn owner_in(reply: &gio::glib::Variant) -> bool {
     reply.get::<(bool,)>().is_some_and(|(owned,)| owned)
-}
-
-/// Builds the menu and the icon and manages `Tray`.
-pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let record = MenuAction::Record.item(app, Some("CmdOrCtrl+Shift+R"))?;
-    let in_person = MenuAction::RecordInPerson.item(app, None)?;
-    let launch_at_login = CheckMenuItem::with_id(
-        app,
-        MenuAction::LaunchAtLogin.as_str(),
-        MenuAction::LaunchAtLogin.label(),
-        true,
-        autostart::status(app).is_on(),
-        None::<&str>,
-    )?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &record,
-            &in_person,
-            &PredefinedMenuItem::separator(app)?,
-            &MenuAction::OpenMain.item(app, None)?,
-            &MenuAction::OpenSettings.item(app, Some("CmdOrCtrl+,"))?,
-            &PredefinedMenuItem::separator(app)?,
-            &launch_at_login,
-            &MenuAction::CheckForUpdates.item(app, None)?,
-            &PredefinedMenuItem::separator(app)?,
-            // Not muda's predefined Quit: that one ends the process without
-            // `ExitRequested`, so the shell could not shut down cleanly.
-            &MenuAction::Quit.item(app, Some("CmdOrCtrl+Q"))?,
-        ],
-    )?;
-    let mut builder = TrayIconBuilder::with_id(TRAY_ID)
-        .menu(&menu)
-        .show_menu_on_left_click(true)
-        .tooltip(tooltip(RecordingState::Idle));
-    builder = if cfg!(target_os = "macos") {
-        // The four-bar mark as a template image: the menu bar draws it in
-        // its own colour, as it drew the SF Symbol.
-        builder
-            .icon(Image::from_bytes(include_bytes!(
-                "../icons/tray/mark@2x.png"
-            ))?)
-            .icon_as_template(true)
-    } else if let Some(icon) = app.default_window_icon() {
-        builder.icon(icon.clone())
-    } else {
-        builder
-    };
-    builder.build(app)?;
-    app.manage(Tray {
-        record,
-        in_person,
-        launch_at_login,
-    });
-    Ok(())
-}
-
-/// A `recording` snapshot reached the main window: retitle the items.
-pub fn note_recording(app: &AppHandle, state: RecordingState) {
-    let Some(tray) = app.try_state::<Tray>() else {
-        return;
-    };
-    let _ = tray.record.set_text(record_label(state));
-    let _ = tray.record.set_enabled(record_enabled(state));
-    let _ = tray.in_person.set_enabled(in_person_enabled(state));
-    if let Some(icon) = app.tray_by_id(TRAY_ID) {
-        let _ = icon.set_tooltip(Some(tooltip(state)));
-    }
-}
-
-/// The login item changed (from the menu or from Settings): the check mark
-/// follows what the system says, not what was asked.
-pub fn note_login_item(app: &AppHandle) {
-    if let Some(tray) = app.try_state::<Tray>() {
-        let _ = tray
-            .launch_at_login
-            .set_checked(autostart::status(app).is_on());
-    }
 }
 
 #[cfg(test)]
