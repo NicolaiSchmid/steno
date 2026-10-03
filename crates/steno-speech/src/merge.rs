@@ -106,10 +106,12 @@ pub fn merge_windows(
         }
     }
     let tail = &right[last_right + 1..];
-    if let Some(first) = tail.first() {
-        if vocab.is_splice_safe(first.id) {
-            out.extend_from_slice(tail);
-        } else {
+    match tail.first() {
+        // Nothing follows the last match on the right: its window ended
+        // inside the left one's span, so the left keeps the rest.
+        None => out.extend_from_slice(&left[last_left + 1..]),
+        Some(first) if vocab.is_splice_safe(first.id) => out.extend_from_slice(tail),
+        Some(_) => {
             // The left window owns the seam word; the right resumes at its
             // next word start.
             let mut cursor = last_left + 1;
@@ -235,6 +237,23 @@ mod tests {
             ids(&merged),
             vec![(1, 20), (5, 21), (2, 24), (7, 25), (3, 30)]
         );
+    }
+
+    #[test]
+    fn a_right_window_that_ends_inside_the_left_leaves_the_left_intact() {
+        // Right matches b y c and has nothing after; left goes on with z and d.
+        let left = vec![
+            token(0, 0),
+            token(4, 1),
+            token(1, 20),
+            token(5, 21),
+            token(2, 24),
+            token(6, 25),
+            token(3, 28),
+        ];
+        let right = vec![token(1, 20), token(5, 21), token(2, 24)];
+        let merged = merge_all(&[left.clone(), right], 1.5, &vocab());
+        assert_eq!(ids(&merged), ids(&left));
     }
 
     #[test]
