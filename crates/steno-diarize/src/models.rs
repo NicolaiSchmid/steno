@@ -217,7 +217,7 @@ pub fn sha256_of(path: &Path) -> Result<String, ModelError> {
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
 
     use super::*;
 
@@ -268,13 +268,20 @@ mod tests {
     }
 
     /// A loopback HTTP server that answers `connections` requests with
-    /// `body`, declaring `declared_length` bytes; the URL it serves.
+    /// `body`, declaring `declared_length` bytes; the URL it serves. It
+    /// accepts every connection before it answers any, so concurrent
+    /// fetches are all under way, each with its partial file, before the
+    /// first one can finish.
     fn serve(body: &'static [u8], declared_length: usize, connections: usize) -> &'static str {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
-            for stream in listener.incoming().take(connections) {
-                let mut stream = stream.unwrap();
+            let streams: Vec<TcpStream> = listener
+                .incoming()
+                .take(connections)
+                .map(Result::unwrap)
+                .collect();
+            for mut stream in streams {
                 let mut request = Vec::new();
                 let mut byte = [0u8; 1];
                 while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
@@ -295,9 +302,10 @@ mod tests {
     const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
     /// Two fetches of one model into a cold store at once, as the app and
-    /// the `steno` command on first use: each downloads into its own
-    /// temporary file, both end with the verified file in place, and
-    /// nothing else is left in the directory.
+    /// the `steno` command on first use: the server holds both responses
+    /// until both requests are in, so each fetch has its own temporary
+    /// file open while the other downloads; both end with the verified
+    /// file in place, and nothing else is left in the directory.
     #[test]
     fn concurrent_fetches_of_one_model_both_succeed() {
         let dir = tempfile::tempdir().unwrap();
