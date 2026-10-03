@@ -289,8 +289,10 @@ pub const PANEL_PROMPT_Y: f64 = 700.0;
 pub const PANEL_BUBBLE_Y: f64 = 800.0;
 
 /// Both panels exist, are visible and have taken the size their page
-/// reported, then hide on request and report hidden: the same `show`,
-/// `resize` and `hide` the one rule drives, checked from outside.
+/// reported, keep it when asked for another (`keeps_its_size`), the
+/// prompt's window takes a second prompt (`takes_a_second_prompt`), and
+/// both hide on request and report hidden: the same `show`, `resize` and
+/// `hide` the one rule drives, checked from outside.
 fn check_panels(app: &AppHandle) -> Result<(), String> {
     let smoke = app.state::<Smoke>();
     for panel in Panel::ALL {
@@ -315,7 +317,7 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
             "[steno-desktop] smoke: the {label} window is {} by {}",
             window_size.0, window_size.1
         );
-        stays_put(&window, label, window_size)?;
+        keeps_its_size(&window, label, window_size)?;
         if panel == Panel::Prompt {
             takes_a_second_prompt(app, &window)?;
         }
@@ -372,7 +374,7 @@ fn check_main_hides(app: &AppHandle) -> Result<(), String> {
 /// A panel's size is the page's alone: a request for another size, as a
 /// drag on the Linux resize border makes, leaves the window as it is
 /// (`panels::pin_size`).
-fn stays_put(window: &WebviewWindow, label: &str, size: (f64, f64)) -> Result<(), String> {
+fn keeps_its_size(window: &WebviewWindow, label: &str, size: (f64, f64)) -> Result<(), String> {
     window
         .set_size(LogicalSize::new(size.0 + 40.0, size.1 + 40.0))
         .map_err(|error| error.to_string())?;
