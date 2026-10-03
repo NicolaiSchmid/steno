@@ -6,8 +6,15 @@
 //! the main window shows: Record (or Stop), Record in person, Open Steno,
 //! Settings, Launch at login, Check for Updates, Quit.
 //!
-//! The tray also keeps the process alive: with it, closing the last window
-//! ends nothing on any platform (`main.rs`).
+//! The tray also keeps the process alive: with it, closing the main window
+//! hides it and the process stays, as the Swift menu bar app stays; without
+//! a tray (a Linux desktop with no indicator host) the window closes and
+//! the process ends with it (`main.rs`).
+//!
+//! The menu's handler is `on_menu_event`, registered once by `main.rs`:
+//! Tauri hands every menu event to the same listeners, whether from the
+//! tray's menu or, on macOS, the menu bar's (`menu.rs`), whose items carry
+//! the same ids.
 //!
 //! Swift: `MenuBarView.swift`, `MenuBarLabel` and `MenuBarLabelPresentation`
 //! in `StenoApp.swift` and `FloatingContent.swift`.
@@ -168,8 +175,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .tooltip(tooltip(RecordingState::Idle))
-        .on_menu_event(|app, event| on_menu_event(app, &event));
+        .tooltip(tooltip(RecordingState::Idle));
     builder = if cfg!(target_os = "macos") {
         // The four-bar mark as a template image: the menu bar draws it in
         // its own colour, as it drew the SF Symbol.
@@ -215,7 +221,8 @@ pub fn note_login_item(app: &AppHandle) {
     }
 }
 
-fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
+/// A menu item was chosen, in the tray's menu or the menu bar's.
+pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
     let MenuId(id) = event.id();
     let Some(action) = MenuAction::from_id(id) else {
         return;

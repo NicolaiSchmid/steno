@@ -29,6 +29,8 @@ mod dialogs;
 #[cfg(feature = "fixture-host")]
 mod fixtures;
 mod host;
+#[cfg(target_os = "macos")]
+mod menu;
 mod navigation;
 mod panel_geometry;
 mod panels;
@@ -41,6 +43,8 @@ mod updater;
 mod windows;
 
 use tauri::Manager;
+
+use crate::windows::BridgeWindow;
 
 fn main() {
     let mut builder = tauri::Builder::default();
@@ -60,12 +64,21 @@ fn main() {
         .plugin(updater::plugin());
     #[cfg(target_os = "macos")]
     {
-        builder = builder.plugin(tauri_nspanel::init());
+        // The menu bar's menu is the shell's own: Tauri's default one ends
+        // in a Quit that terminates without `ExitRequested`.
+        builder = builder
+            .plugin(tauri_nspanel::init())
+            .enable_macos_default_menu(false)
+            .menu(menu::build);
     }
     let app = builder
+        // One handler for every menu: the tray's on every platform and
+        // the menu bar's on macOS reach the same listeners.
+        .on_menu_event(|app, event| tray::on_menu_event(app, &event))
         .manage(host::Host)
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())
+        .manage(windows::Pages::default())
         .manage(updater::Updates::default())
         .invoke_handler(tauri::generate_handler![
             bridge::bridge_call,
@@ -98,10 +111,34 @@ fn main() {
         .expect("steno-desktop failed to build");
     app.run(|app, event| match event {
         tauri::RunEvent::ExitRequested { code, api, .. } => {
-            if !exits_on(code) {
+            if !exits_on(code, has_tray(app)) {
                 api.prevent_exit();
             }
         }
+        // The main window closes: hidden and kept while a tray can bring
+        // it back, as the Swift main window closes behind the menu bar
+        // item (and the tray's recorder commands keep a window to go
+        // through); destroyed otherwise, which ends the process below.
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::CloseRequested { api, .. },
+            ..
+        } => {
+            if label == BridgeWindow::Main.as_str() && hides_main_on_close(has_tray(app)) {
+                api.prevent_close();
+                if let Some(main) = app.get_webview_window(&label)
+                    && let Err(error) = main.hide()
+                {
+                    eprintln!("[steno-desktop] hiding the main window failed: {error}");
+                }
+            }
+        }
+        // A window is gone: its page no longer listens.
+        tauri::RunEvent::WindowEvent {
+            label,
+            event: tauri::WindowEvent::Destroyed,
+            ..
+        } => app.state::<windows::Pages>().gone(&label),
         // A panel the user dragged: its anchor follows (`panels::moved`
         // tells a drag from the window taking its size).
         tauri::RunEvent::WindowEvent {
@@ -124,14 +161,28 @@ fn main() {
     });
 }
 
+/// Whether the tray was built (`tray::build` manages `Tray` on success).
+fn has_tray(app: &tauri::AppHandle) -> bool {
+    app.try_state::<tray::Tray>().is_some()
+}
+
+/// Whether closing the main window hides it rather than destroying it:
+/// yes while a tray can bring it back, as the Swift main window closes
+/// behind the menu bar item; without a tray the window is the only way to
+/// the app, so it closes for real and the process ends with it rather than
+/// linger invisibly.
+fn hides_main_on_close(has_tray: bool) -> bool {
+    has_tray
+}
+
 /// Whether an exit request ends the process. One with a code is the shell's
-/// own (`AppHandle::exit` from the tray's Quit, the smoke's) and always
-/// does. One without comes from the last window closing: the tray keeps
-/// the process alive on every platform, as the Swift menu bar app stays
-/// when its window closes (`applicationShouldTerminateAfterLastWindowClosed`
-/// in `StenoApp.swift`).
-fn exits_on(code: Option<i32>) -> bool {
-    code.is_some()
+/// own (`AppHandle::exit` from Quit, the smoke's) and always does. One
+/// without comes from the last window closing: with a tray the process
+/// stays, as the Swift menu bar app stays when its window closes
+/// (`applicationShouldTerminateAfterLastWindowClosed` in `StenoApp.swift`);
+/// without one it ends.
+fn exits_on(code: Option<i32>, has_tray: bool) -> bool {
+    code.is_some() || !has_tray
 }
 
 /// Whether the single-instance plugin can run: on Linux it holds a name on
@@ -147,10 +198,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_shells_own_exit_ends_the_process() {
-        assert!(exits_on(Some(0)));
-        assert!(exits_on(Some(1)));
-        assert!(!exits_on(None));
+    fn only_the_shells_own_exit_ends_the_process_while_a_tray_stands() {
+        assert!(exits_on(Some(0), true));
+        assert!(exits_on(Some(1), true));
+        assert!(!exits_on(None, true));
+        // No tray: the last window closing ends the process.
+        assert!(exits_on(None, false));
+        assert!(exits_on(Some(0), false));
+    }
+
+    #[test]
+    fn the_main_window_hides_on_close_only_behind_a_tray() {
+        assert!(hides_main_on_close(true));
+        assert!(!hides_main_on_close(false));
     }
 
     #[test]

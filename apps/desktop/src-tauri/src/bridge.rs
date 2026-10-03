@@ -161,6 +161,11 @@ pub async fn bridge_call(
         "page.ready" => {
             smoke.note_ready(window.label());
             host.page_ready(&window)?;
+            // What was asked of the window before its page could hear it
+            // (a deep link at launch) goes out after the first snapshots.
+            if let Some(owed) = app.state::<windows::Pages>().ready(window.label()) {
+                host.publish_request(&window, owed.field, &owed.value)?;
+            }
             Ok(Value::Null)
         }
         "window.open" => {
