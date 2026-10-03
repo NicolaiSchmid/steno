@@ -21,7 +21,7 @@
 use steno_core::{AudioBuffer16k, BoxError, Embedding, SpeakerCluster, TimeRange};
 
 use crate::first_max_by;
-use crate::mapping::{merged, speaker_label, speech_seconds};
+use crate::mapping::{display_label, merged, speech_seconds};
 
 /// Embeds one stretch of speech as a single speaker. The pipeline fulfils
 /// it with its own models; pure, so the refinement is tested without them.
@@ -121,7 +121,7 @@ pub fn refine(
         .into_iter()
         .enumerate()
         .map(|(index, mut cluster)| {
-            cluster.label = speaker_label(index);
+            cluster.label = display_label(index);
             cluster
         })
         .collect())

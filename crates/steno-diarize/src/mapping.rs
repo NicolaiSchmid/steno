@@ -22,7 +22,7 @@ use crate::first_max_by;
 /// speech: `Speaker 1`, `Speaker 2`, ... Spelled here and nowhere else,
 /// as [`crate::timeline::cluster_label`] spells the turn labels.
 #[must_use]
-pub fn speaker_label(index: usize) -> String {
+pub fn display_label(index: usize) -> String {
     format!("Speaker {}", index + 1)
 }
 
@@ -78,7 +78,7 @@ pub fn result(turns: &[SpeakerTurn], raw: &[ClusterChunk]) -> DiarizationResult 
             };
             let choice = pick_clip(&ranges, &scored);
             SpeakerCluster {
-                label: speaker_label(index),
+                label: display_label(index),
                 ranges,
                 embedding: cluster_embedding(&own_chunks),
                 cluster_confidence: choice.cluster_confidence,
