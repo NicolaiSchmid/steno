@@ -525,6 +525,116 @@ fn snapshots_are_emitted_outside_the_hosts_lock() {
     );
 }
 
+/// A sink as slow as a window channel can be: it sleeps 0 to 7 ms per emit,
+/// spread by a hash of the emit count, and keeps the payloads per topic in
+/// arrival order.
+#[derive(Default)]
+struct SlowSink {
+    emits: std::sync::atomic::AtomicU64,
+    payloads: Mutex<std::collections::BTreeMap<BridgeTopic, Vec<Value>>>,
+}
+
+impl EventSink for SlowSink {
+    fn emit(&self, event: BridgeEvent) {
+        let n = self
+            .emits
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let spread = n.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 61;
+        std::thread::sleep(std::time::Duration::from_millis(spread));
+        self.payloads
+            .lock()
+            .unwrap()
+            .entry(event.topic)
+            .or_default()
+            .push(event.payload);
+    }
+}
+
+/// Snapshots are built under the lock and emitted after it; only the
+/// publishing mutex keeps two publishers from emitting in the opposite
+/// order to the one they built in, which would leave the page on an older
+/// state. Two threads raise a counter (the meeting count, the recorder's
+/// warning) and notify; three more publish the same topics as fast as they
+/// can; per topic, what reaches the sink never goes backwards.
+#[test]
+fn concurrent_publishes_reach_the_sink_in_build_order() {
+    const WRITES: u32 = 40;
+    let harness = sample();
+    let sink = Arc::new(SlowSink::default());
+    harness.host.attach(sink.clone());
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for n in 1..=WRITES {
+                harness
+                    .store
+                    .save_meeting(&meeting(
+                        0x1000 + n,
+                        &format!("Write {n}"),
+                        TitleOrigin::User,
+                        "2026-09-28T10:00:00.000Z",
+                        60.0,
+                        MeetingSource::MacCall,
+                        &[],
+                        MeetingState::Ready,
+                        None,
+                    ))
+                    .unwrap();
+                harness.host.store_changed();
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        scope.spawn(|| {
+            let mut n = 0;
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                n += 1;
+                harness
+                    .fakes
+                    .recorder
+                    .set_messages(Some(&format!("w{n:06}")), None);
+                harness.host.recorder_changed();
+                std::thread::sleep(std::time::Duration::from_micros(300));
+            }
+        });
+        for _ in 0..3 {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    harness
+                        .host
+                        .meetings_set_filter(SetFilterParams {
+                            filter: ListFilter::All,
+                        })
+                        .unwrap();
+                    harness.host.recorder_changed();
+                }
+            });
+        }
+    });
+    harness.wait_for("the throttled recording to flush", |harness| {
+        harness.host.next_flush_due().is_none()
+    });
+
+    let payloads = sink.payloads.lock().unwrap();
+    let counts: Vec<i64> = payloads[&BridgeTopic::MeetingsList]
+        .iter()
+        .map(|list| list["counts"]["all"].as_i64().unwrap())
+        .collect();
+    assert!(
+        counts.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the meeting count went backwards: {counts:?}"
+    );
+    assert_eq!(counts.last(), Some(&(3 + i64::from(WRITES))));
+    let warnings: Vec<&str> = payloads[&BridgeTopic::Recording]
+        .iter()
+        .filter_map(|recording| recording["warning"].as_str())
+        .collect();
+    assert!(
+        warnings.windows(2).all(|pair| pair[0] <= pair[1]),
+        "the recorder's warning went backwards: {warnings:?}"
+    );
+}
+
 /// `meeting.revealRecording`, `meeting.revealExport`, `page.layout`,
 /// `recording.keepGoing` and `recording.clearMessages` through the host.
 #[test]
