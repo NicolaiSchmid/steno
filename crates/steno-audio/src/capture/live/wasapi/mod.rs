@@ -53,7 +53,12 @@
 //! [`StreamBody::handle`]: no allocation, no lock. Between packets the
 //! thread waits on the stream's event with a timeout (and drains on the
 //! timeout too, so a polled loopback stream works), checking an atomic
-//! stop flag.
+//! stop flag. `start` starts the follower before the master, the sink's
+//! only producer, so a start that fails has written nothing. Data the
+//! engine itself lost (a packet flagged as a discontinuity, the first one
+//! aside) is counted and logged at stop, not added to the sink's drop
+//! count: WASAPI does not say how much was lost. The follower's underrun
+//! and slip counts are logged at stop too.
 
 pub(crate) mod com;
 
@@ -243,6 +248,8 @@ impl DeviceProbe {
 struct Active {
     stop: Arc<AtomicBool>,
     streams: Vec<Launched>,
+    /// The system stream's staging, for its counts at `stop()`.
+    follower: Option<Arc<FollowerLane>>,
     watcher: Arc<Watcher>,
     watcher_thread: Option<JoinHandle<()>>,
 }
@@ -699,6 +706,7 @@ impl CaptureBackend for LiveCaptureBackend {
         *active = Some(Active {
             stop,
             streams,
+            follower,
             watcher,
             watcher_thread: Some(watcher_thread),
         });
@@ -717,6 +725,14 @@ impl CaptureBackend for LiveCaptureBackend {
             return;
         };
         tear_down(&active.stop, std::mem::take(&mut active.streams));
+        if let Some(lane) = &active.follower {
+            tracing::info!(
+                "system stream staging: {} frames padded with zeros (underrun), {} skipped \
+                 (slipped)",
+                lane.underrun_frames(),
+                lane.slipped_frames()
+            );
+        }
         active.watcher.stop();
         if let Some(thread) = active.watcher_thread.take() {
             let _ = thread.join();
