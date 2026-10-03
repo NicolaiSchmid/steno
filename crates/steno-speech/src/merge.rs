@@ -109,27 +109,29 @@ pub fn merge_windows(
         }
     }
     let tail = &right[last_right + 1..];
-    match tail.first() {
-        // Nothing follows the last match on the right: its window ended
-        // inside the left one's span, so the left keeps the rest.
-        None => out.extend_from_slice(&left[last_left + 1..]),
-        Some(first) if vocab.is_splice_safe(first.id) => out.extend_from_slice(tail),
-        Some(_) => {
+    match tail.iter().position(|t| vocab.is_splice_safe(t.id)) {
+        Some(0) => out.extend_from_slice(tail),
+        Some(next) => {
             // The left window owns the seam word; the right resumes at its
-            // next word start.
+            // next splice point.
             out.extend(
                 left[last_left + 1..]
                     .iter()
                     .take_while(|t| !vocab.is_splice_safe(t.id)),
             );
-            out.extend_from_slice(from_word_start(tail, vocab));
+            out.extend_from_slice(&tail[next..]);
         }
+        // Nothing past the seam word on the right, or only the rest of that
+        // word: its window ended inside the left one's span, so the left
+        // keeps the rest.
+        None => out.extend_from_slice(&left[last_left + 1..]),
     }
     out
 }
 
-/// `tokens` from its first splice-safe token on, or all of it when none is.
-fn from_word_start<'a>(tokens: &'a [Token], vocab: &Vocab) -> &'a [Token] {
+/// `tokens` from its first splice point (a word start or a punctuation
+/// piece) on, or all of it when it has none.
+fn from_splice_point<'a>(tokens: &'a [Token], vocab: &Vocab) -> &'a [Token] {
     match tokens.iter().position(|t| vocab.is_splice_safe(t.id)) {
         Some(p) => &tokens[p..],
         None => tokens,
@@ -165,7 +167,7 @@ fn merge_by_midpoint(
     }
     [
         &left[..left_end_index],
-        from_word_start(&right[right_start_index..], vocab),
+        from_splice_point(&right[right_start_index..], vocab),
     ]
     .concat()
 }
@@ -313,6 +315,31 @@ mod tests {
         assert_eq!(
             ids(&merge_windows(&left, &right, 0.4, &vocab())),
             vec![(1, 20), (2, 24), (3, 40)]
+        );
+    }
+
+    #[test]
+    fn a_right_tail_without_a_word_start_leaves_the_left_its_words() {
+        // Pairs end at c; right only adds a continuation (x), left goes on
+        // with w, d and z.
+        let left = vec![token(2, 24), token(7, 25), token(3, 28), token(6, 29)];
+        let right = vec![token(2, 24), token(4, 25)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            ids(&left)
+        );
+    }
+
+    #[test]
+    fn the_midpoint_cut_keeps_word_rests_on_both_sides() {
+        // Cutoff at frame 25. Left's first token (x, frame 26) already lies
+        // past it, so left contributes nothing; right after the cutoff has
+        // no word start, so all of it is kept.
+        let left = vec![token(4, 26), token(5, 27), token(0, 29)];
+        let right = vec![token(1, 21), token(6, 26), token(7, 27)];
+        assert_eq!(
+            ids(&merge_windows(&left, &right, 1.5, &vocab())),
+            vec![(6, 26), (7, 27)]
         );
     }
 
