@@ -5,7 +5,10 @@
 //! body is collected and the complete request handed to the engine.
 //! Rejections are answered at once with `Connection: close`; what the
 //! client still sends is discarded up to a limit, then the connection
-//! closes. A connection that stays silent for the read timeout while the
+//! closes. A body that ends early (a parse error, a client gone
+//! mid-body, the read timeout) is not answered: the connection closes, as
+//! the Swift handler's `errorCaught` does. A connection that stays silent
+//! for the read timeout while the
 //! computer waits on the client is closed; the silence is not counted while
 //! the engine is handling a request. When the server stops, an idle
 //! connection closes at once and one mid-request closes after its
@@ -73,7 +76,7 @@ pub async fn serve(
         let shared = shared.clone();
         move |request| {
             let shared = shared.clone();
-            async move { Ok::<_, std::convert::Infallible>(handle(shared, request).await) }
+            async move { handle(shared, request).await }
         }
     });
     let mut connection = std::pin::pin!(
@@ -103,7 +106,23 @@ pub async fn serve(
     }
 }
 
-async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Full<Bytes>> {
+/// The body ended before its declared end. Returned to hyper as the
+/// service's error, which ends the connection without a response.
+#[derive(Debug)]
+struct TornBody;
+
+impl std::fmt::Display for TornBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the request body ended early")
+    }
+}
+
+impl std::error::Error for TornBody {}
+
+async fn handle(
+    shared: Arc<Shared>,
+    request: Request<Incoming>,
+) -> Result<Response<Full<Bytes>>, TornBody> {
     shared.metrics.update(|metrics| metrics.request_heads += 1);
     let (parts, mut body) = request.into_parts();
     let uri = parts
@@ -111,11 +130,11 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Ful
         .path_and_query()
         .map_or_else(|| parts.uri.path().to_owned(), ToString::to_string);
     let Some(route) = Route::matches(&parts.method, &uri) else {
-        return reject(
+        return Ok(reject(
             &shared,
             HandoverResponse::problem(StatusCode::NOT_FOUND, "no such route"),
             body,
-        );
+        ));
     };
     let limit = usize::try_from(route.body_limit(&shared.configuration)).unwrap_or(usize::MAX);
     let declared = parts
@@ -124,7 +143,7 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Ful
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<usize>().ok());
     if declared.is_some_and(|declared| declared > limit) {
-        return respond_and_close(&shared, too_large(limit));
+        return Ok(respond_and_close(&shared, too_large(limit)));
     }
     let authorization = parts
         .headers
@@ -132,7 +151,7 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Ful
         .and_then(|value| value.to_str().ok());
     let principal = match shared.engine.authenticate(route, authorization).await {
         AuthOutcome::Allowed(principal) => principal,
-        AuthOutcome::Rejected(response) => return reject(&shared, response, body),
+        AuthOutcome::Rejected(response) => return Ok(reject(&shared, response, body)),
     };
 
     let mut collected = BytesMut::new();
@@ -140,16 +159,12 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Ful
         let Ok(frame) = frame else {
             // The body ended early: nothing to answer, drop the connection.
             shared.closing.store(true, Ordering::SeqCst);
-            return respond(
-                &shared,
-                HandoverResponse::empty(StatusCode::BAD_REQUEST),
-                true,
-            );
+            return Err(TornBody);
         };
         if let Ok(data) = frame.into_data() {
             collected.extend_from_slice(&data);
             if collected.len() > limit {
-                return respond_and_close(&shared, too_large(limit));
+                return Ok(respond_and_close(&shared, too_large(limit)));
             }
         }
     }
@@ -174,7 +189,7 @@ async fn handle(shared: Arc<Shared>, request: Request<Incoming>) -> Response<Ful
     if !keep_alive {
         shared.closing.store(true, Ordering::SeqCst);
     }
-    respond(&shared, response, !keep_alive)
+    Ok(respond(&shared, response, !keep_alive))
 }
 
 fn too_large(limit: usize) -> HandoverResponse {

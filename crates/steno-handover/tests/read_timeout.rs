@@ -65,29 +65,44 @@ async fn a_torn_body_is_closed_on_the_read_timeout() {
     assert_eq!(phone.announce(&metadata).await.status, 201);
 
     // The head and 16 KiB of a 256 KiB chunk, then silence.
-    let head = format!(
-        "PUT /v1/recordings/{}/chunks/0 HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\n\
-         Content-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n",
-        metadata.recording_id,
-        phone.bearer(),
-        bytes.len()
-    );
-    let mut sent = head.into_bytes();
-    sent.extend_from_slice(&bytes[..16 * 1024]);
     // The phone's pooled connections from pairing and announcing idle out
     // meanwhile; the assertions are about the torn connection.
     let handled_before = test.metrics().handled_requests;
-    let closed = test
+    let statuses_before = test.metrics().statuses.len();
+    let exchange = test
         .raw_client()
-        .hold_open(&sent, Duration::from_secs(10))
+        .exchange(
+            "PUT",
+            &format!("/v1/recordings/{}/chunks/0", metadata.recording_id),
+            &[
+                ("Authorization", phone.bearer()),
+                ("Content-Type", "application/octet-stream".to_owned()),
+                ("Content-Length", bytes.len().to_string()),
+            ],
+            &bytes[..16 * 1024],
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+        )
         .await
         .unwrap();
-    assert!(closed, "the server closes the torn upload");
+    assert!(
+        exchange.closed_by_server,
+        "the server closes the torn upload"
+    );
+    assert_eq!(
+        exchange.status, None,
+        "a torn body is closed, not answered (Swift's `errorCaught`)"
+    );
     let metrics = test.metrics();
     assert!(metrics.timed_out >= 1);
     assert_eq!(
         metrics.handled_requests, handled_before,
         "the torn chunk never reached the engine"
+    );
+    assert_eq!(
+        metrics.statuses.len(),
+        statuses_before,
+        "no status was written for it"
     );
     let status: wire::RecordingStatus = phone.status(metadata.recording_id).await.json();
     assert!(status.received_chunks.is_empty());
