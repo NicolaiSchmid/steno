@@ -104,17 +104,15 @@ impl Inbox {
 
     /// Removes every file of the recording.
     pub fn discard(&self, recording_id: Uuid) {
-        let mut files = vec![
+        let verified = AudioFormat::ALL
+            .iter()
+            .map(|format| self.verified(recording_id, *format));
+        let files = [
             self.partial(recording_id),
             self.metadata(recording_id),
             self.metadata_temporary(recording_id),
         ];
-        files.extend(
-            AudioFormat::ALL
-                .iter()
-                .map(|format| self.verified(recording_id, *format)),
-        );
-        for file in files {
+        for file in files.into_iter().chain(verified) {
             let _ = std::fs::remove_file(file);
         }
     }

@@ -16,7 +16,9 @@ use bytes::Bytes;
 use chrono::Duration;
 use http::{HeaderMap, StatusCode};
 use serde::Serialize;
-use steno_core::{HandoverIntake, HandoverReceipt, HandoverState, PairedDevice, Store, store};
+use steno_core::{
+    HandoverIntake, HandoverReceipt, HandoverState, HandoverStateKind, PairedDevice, Store, store,
+};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -280,7 +282,7 @@ impl Engine {
             match receipt {
                 None => self.inbox.discard(recording_id),
                 Some(receipt)
-                    if receipt.state.kind() == steno_core::HandoverStateKind::Complete
+                    if receipt.state.kind() == HandoverStateKind::Complete
                         || receipt.updated_at < cutoff =>
                 {
                     self.inbox.discard(recording_id);
@@ -324,7 +326,7 @@ impl Engine {
         let mut unfinished = Vec::new();
         self.state().active_receipts.retain(|_, receipt| {
             let owned = receipt.device_id == device_id;
-            if owned && receipt.state.kind() != steno_core::HandoverStateKind::Complete {
+            if owned && receipt.state.kind() != HandoverStateKind::Complete {
                 unfinished.push(receipt.recording_id);
             }
             !owned
