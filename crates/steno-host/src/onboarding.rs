@@ -18,7 +18,7 @@ use steno_core::paths::path_from_file_url;
 use steno_core::{AudioRetention, Settings, Store};
 
 use crate::labels::retention_footnote;
-use crate::services::{Permissions, Services, permission_is_required};
+use crate::services::{Services, permission_is_required};
 use crate::settings::llm::{CodexStatus, LlmPreset, LlmSettingsViewModel, url_host};
 use crate::settings::obsidian::ObsidianSettingsViewModel;
 use crate::settings::snapshots as settings_snapshots;
@@ -259,13 +259,6 @@ impl OnboardingViewModel {
             step.state = state;
         }
         self.requesting = None;
-    }
-
-    /// `begin_request`, the prompt and `finish_request` in one call.
-    pub fn request(&mut self, kind: PermissionKind, permissions: &dyn Permissions) {
-        self.begin_request(kind);
-        let state = permissions.request(kind);
-        self.finish_request(kind, state);
     }
 
     /// Optional steps can be skipped; required ones cannot.

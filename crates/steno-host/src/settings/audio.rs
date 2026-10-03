@@ -186,13 +186,6 @@ impl AudioSettingsViewModel {
             .unwrap_or(PermissionState::Unknown)
     }
 
-    /// The three halves in one call, for a caller that may block.
-    pub fn request_permission(&mut self, kind: PermissionKind, services: &Services) {
-        if self.begin_request(kind) {
-            self.finish_request(kind, services.permissions.request(kind));
-        }
-    }
-
     /// Marks the step as requesting; false while another request is up.
     /// The host runs the prompt outside its lock and calls
     /// [`Self::finish_request`].

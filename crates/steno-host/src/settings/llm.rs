@@ -589,20 +589,6 @@ impl LlmSettingsViewModel {
         Ok(settings)
     }
 
-    /// Reachability, model listing and structured output mode, through the
-    /// module's probe: the three halves in one call, for a caller that may
-    /// block.
-    pub fn test(&mut self, services: &Services, now: DateTime<Utc>) {
-        self.request_probe();
-        if let Some(probe) = self.begin_pending_probe(now) {
-            self.finish_probe(
-                services
-                    .llm
-                    .probe(&probe.settings, probe.api_key.as_deref()),
-            );
-        }
-    }
-
     /// Asks for a probe; the host begins it once the command's lock is
     /// released.
     pub fn request_probe(&mut self) {

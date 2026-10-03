@@ -82,12 +82,6 @@ impl GeneralSettingsViewModel {
         self.save(store, move |settings| settings.default_template_id = id);
     }
 
-    /// The three halves in one call, for a caller that may block.
-    pub fn request_calendar(&mut self, services: &Services) {
-        self.begin_calendar_request();
-        self.finish_calendar_request(services.permissions.request(PermissionKind::Calendar));
-    }
-
     /// Marks the request as up; the host runs the prompt outside its lock
     /// and calls [`Self::finish_calendar_request`].
     pub fn begin_calendar_request(&mut self) {
