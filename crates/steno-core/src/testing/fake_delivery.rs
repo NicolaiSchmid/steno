@@ -22,9 +22,10 @@ pub struct Transient {
 }
 
 /// A `Destination` that writes `meeting.json` under `<root>/<meeting id>/`
-/// and records every export it received. The file holds the compact
-/// `StenoJSON` form, not the pretty [`crate::json::to_canonical_string`]
-/// form the adapters' `meeting.json` holds.
+/// and records every export it received. The file holds the column form
+/// ([`crate::json::to_column_string`]), not the pretty
+/// [`crate::json::to_canonical_string`] form the adapters' `meeting.json`
+/// holds.
 #[derive(Debug)]
 pub struct FakeDestination {
     pub id: String,

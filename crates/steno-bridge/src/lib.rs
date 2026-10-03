@@ -10,8 +10,7 @@
 //! `UUID` is `uuid::Uuid` written upper case, a nil optional is an omitted
 //! key, `String` enums are `steno_core::string_enum!` enums with the same
 //! raw values. The date and UUID codecs and the printer are
-//! `steno_core::json`'s; [`json`] re-exports the printer's two styles, the
-//! fixtures' pretty one and the dispatcher's compact one.
+//! `steno_core::json`'s ([`json`] re-exports the printer).
 //!
 //! Naming: a top-level Swift type keeps its name without the `Bridge` prefix
 //! (`BridgeMeetingSource` is [`MeetingSource`]). A type nested in a snapshot,
@@ -58,7 +57,7 @@ pub use envelope::*;
 pub use settings::*;
 pub use snapshots::*;
 
-/// The printer, `steno_core::json`'s:
+/// Re-exports [`steno_core::json::printer`]:
 /// [`to_canonical_string`](steno_core::json::to_canonical_string) is the
 /// fixtures' pretty style (`BridgeJSON.encode`),
 /// [`to_compact_string`](steno_core::json::to_compact_string) the

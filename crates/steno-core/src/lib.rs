@@ -14,8 +14,9 @@
 //!   holds the column codecs a query outside the crate uses.
 //! - `testing` (feature `testing`): deterministic fakes for every
 //!   boundary, so the pipeline, the CLI and the shell test without models.
-//! - [`json`]: the `StenoJSON` convention, the date and UUID codecs, and
-//!   the Foundation-style printer `meeting.json` and the bridge use.
+//! - [`json`]: the `StenoJSON` convention and the date and UUID codecs;
+//!   [`json::printer`] holds the Foundation-style printer `meeting.json` and
+//!   the bridge use.
 //! - [`summary`]: the summary document as Markdown, names substituted.
 //! - [`string_enum`](mod@string_enum): the macro every Swift `String` enum is spelled with.
 //! - [`paths`]: where the database lives on each platform, and the file URL

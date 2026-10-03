@@ -1,9 +1,10 @@
 //! The `StenoJSON` convention (`Sources/StenoCore/Model/StenoJSON.swift`):
 //! sorted keys, ISO 8601 dates with three fraction digits, `Data` as base64,
-//! slashes unescaped. JSON columns use [`to_column_string`], the compact
-//! one-line form; the bridge fixtures and `meeting.json` use the Foundation
-//! printer in [`printer`] ([`to_canonical_string`] pretty,
-//! [`to_compact_string`] one-line), which `steno-bridge` re-exports.
+//! slashes unescaped. JSON columns use [`to_column_string`] (`serde_json`'s
+//! number spelling, whole doubles as integers). Bytes that must match
+//! Foundation's (the bridge fixtures and replies, `meeting.json`) go through
+//! [`printer`]: [`to_canonical_string`] pretty, [`to_compact_string`]
+//! one-line. `steno-bridge` re-exports both.
 //!
 //! The date and UUID text codecs ([`format_date`], [`parse_date`],
 //! [`uuid_string`], [`parse_uuid`] and the `with` modules [`iso_time`],

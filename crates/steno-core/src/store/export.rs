@@ -57,11 +57,10 @@ pub(super) fn export_rows(
 }
 
 impl Store {
-    /// Everything an adapter receives, read in one deferred transaction:
-    /// one snapshot across every query while the Swift app may be
-    /// writing the same file (GRDB's `writer.read` on the Swift side),
-    /// released when the rows are in hand. The `StenoJSON` pretty form of
-    /// the result is `meeting.json`.
+    /// Everything an adapter receives, read in one deferred transaction as
+    /// Swift's `writer.read` does, so every query sees one snapshot while
+    /// the Swift app may be writing the same file. The `StenoJSON` pretty
+    /// form of the result is `meeting.json`.
     ///
     /// ```no_run
     /// use steno_core::{StenoPaths, Store};

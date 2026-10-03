@@ -19,8 +19,8 @@ publish = false
 
 # Shared dependency versions live here and nowhere else; crates inherit them
 # with `workspace = true`. No `serde_json/preserve_order`: every writer sorts
-# keys itself (`steno-bridge` and `steno-core` `json.rs`), so the default map
-# is the right one.
+# keys itself (`steno-core`'s `json.rs` and `json/printer.rs`), so the default
+# map is the right one.
 [workspace.dependencies]
 anyhow = "1"
 base64 = "0.22"
