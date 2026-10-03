@@ -249,10 +249,10 @@ impl Array {
                 ));
             }
         };
-        array.require(array.data_type)?;
-        // SAFETY: the buffer is `product(shape) * size_of::<T>()` bytes
-        // owned by the retained array; `write_bytes` initialises every
-        // byte before a slice is formed.
+        array.require_contiguous()?;
+        // SAFETY: contiguous (per `require_contiguous`), so the buffer is
+        // `len() * size_of::<T>()` bytes owned by the retained array, and
+        // `write_bytes` initialises every byte before a slice is formed.
         unsafe { std::ptr::write_bytes(array.base(), 0, array.len() * element_size) };
         Ok(array)
     }
@@ -335,9 +335,7 @@ impl Array {
         Ok(())
     }
 
-    /// `require_type` plus contiguity, the precondition of the typed slices.
-    fn require(&self, data_type: DataType) -> Result<(), SpeechError> {
-        self.require_type(data_type)?;
+    fn require_contiguous(&self) -> Result<(), SpeechError> {
         if !self.is_contiguous() {
             return Err(SpeechError::CoreMl(format!(
                 "array {:?} with strides {:?} is not contiguous",
@@ -345,6 +343,12 @@ impl Array {
             )));
         }
         Ok(())
+    }
+
+    /// `require_type` plus contiguity, the precondition of the typed slices.
+    fn require(&self, data_type: DataType) -> Result<(), SpeechError> {
+        self.require_type(data_type)?;
+        self.require_contiguous()
     }
 
     /// The base pointer. `dataPointer` is deprecated in favour of
