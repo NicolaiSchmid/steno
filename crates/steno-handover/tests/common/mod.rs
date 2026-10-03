@@ -888,6 +888,17 @@ pub async fn engine_pair(
     device_name: &str,
 ) -> HandoverResponse {
     let principal = pairing_principal(test, payload).await;
+    engine_pair_as(test, principal, device_id, device_name).await
+}
+
+/// The body of `POST /v1/pair` straight into the engine, as `principal`,
+/// the gate's answer at the head.
+pub async fn engine_pair_as(
+    test: &TestService,
+    principal: Principal,
+    device_id: Uuid,
+    device_name: &str,
+) -> HandoverResponse {
     test.service
         .engine
         .handle(

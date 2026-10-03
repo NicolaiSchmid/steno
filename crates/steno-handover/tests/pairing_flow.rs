@@ -19,8 +19,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use common::{Phone, TestService, bearer};
-use steno_handover::engine::{Engine, HandoverRequest, RequestHandling as _};
-use steno_handover::route::Route;
+use steno_handover::engine::Engine;
 use steno_handover::{base64url, wire};
 use uuid::Uuid;
 
@@ -311,19 +310,7 @@ async fn a_head_authorised_against_a_closed_window_does_not_pair_against_the_nex
     test.service.cancel_pairing();
     let _second = test.service.begin_pairing();
 
-    let late = test
-        .service
-        .engine
-        .handle(
-            HandoverRequest::new(Route::Pair, principal).with_body(
-                serde_json::to_vec(&wire::PairRequest {
-                    device_id: Uuid::new_v4(),
-                    device_name: "iPhone".to_owned(),
-                })
-                .unwrap(),
-            ),
-        )
-        .await;
+    let late = common::engine_pair_as(&test, principal, Uuid::new_v4(), "iPhone").await;
     assert_eq!(late.status.as_u16(), 403);
     assert!(
         test.service.engine.pairing_is_open(),
