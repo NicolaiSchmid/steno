@@ -140,7 +140,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
-      - name: Test the core's fakes behind their feature
+      - name: Test the core fakes
         run: cargo test -p steno-core --features testing --locked
 
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
