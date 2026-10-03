@@ -118,13 +118,15 @@ fn main() {
         // The main window closes: hidden and kept while a tray can bring
         // it back, as the Swift main window closes behind the menu bar
         // item (and the tray's recorder commands keep a window to go
-        // through); destroyed otherwise, which ends the process below.
+        // through); destroyed otherwise, as the window is then the only
+        // way to the app, which ends the process rather than linger
+        // invisibly.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },
             ..
         } => {
-            if label == BridgeWindow::Main.as_str() && hides_main_on_close(has_tray(app)) {
+            if label == BridgeWindow::Main.as_str() && has_tray(app) {
                 api.prevent_close();
                 if let Some(main) = app.get_webview_window(&label)
                     && let Err(error) = main.hide()
@@ -166,15 +168,6 @@ fn has_tray(app: &tauri::AppHandle) -> bool {
     app.try_state::<tray::Tray>().is_some()
 }
 
-/// Whether closing the main window hides it rather than destroying it:
-/// yes while a tray can bring it back, as the Swift main window closes
-/// behind the menu bar item; without a tray the window is the only way to
-/// the app, so it closes for real and the process ends with it rather than
-/// linger invisibly.
-fn hides_main_on_close(has_tray: bool) -> bool {
-    has_tray
-}
-
 /// Whether an exit request ends the process. One with a code is the shell's
 /// own (`AppHandle::exit` from Quit, the smoke's) and always does. One
 /// without comes from the last window closing: with a tray the process
@@ -205,12 +198,6 @@ mod tests {
         // No tray: the last window closing ends the process.
         assert!(exits_on(None, false));
         assert!(exits_on(Some(0), false));
-    }
-
-    #[test]
-    fn the_main_window_hides_on_close_only_behind_a_tray() {
-        assert!(hides_main_on_close(true));
-        assert!(!hides_main_on_close(false));
     }
 
     #[test]

@@ -26,10 +26,10 @@ use crate::{
     navigation,
 };
 
-/// One window as the Swift app sizes it, in logical points.
+/// One window as the Swift app sizes it, in logical points. Its label is
+/// the contract's `BridgeWindow::as_str`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Spec {
-    pub label: &'static str,
     pub title: &'static str,
     pub route: &'static str,
     pub size: (f64, f64),
@@ -43,21 +43,18 @@ impl Spec {
     pub const fn of(window: BridgeWindow) -> Spec {
         match window {
             BridgeWindow::Main => Spec {
-                label: "main",
                 title: "Steno",
                 route: "#/main",
                 size: (1120.0, 720.0),
                 min_size: Some((960.0, 600.0)),
             },
             BridgeWindow::Settings => Spec {
-                label: "settings",
                 title: "Settings",
                 route: "#/settings",
                 size: (960.0, 640.0),
                 min_size: Some((760.0, 520.0)),
             },
             BridgeWindow::Onboarding => Spec {
-                label: "onboarding",
                 title: "Welcome to Steno",
                 route: "#/onboarding",
                 size: (560.0, 620.0),
@@ -70,10 +67,14 @@ impl Spec {
 /// The document a window loads: `index.html` plus the hash route and its
 /// query, resolved against the app origin by Tauri.
 pub fn start_path(window: BridgeWindow, query: Option<&str>) -> String {
-    let route = Spec::of(window).route;
+    format!("index.html{}", with_query(Spec::of(window).route, query))
+}
+
+/// `route?query`, or the route alone for no query or an empty one.
+pub fn with_query(route: &str, query: Option<&str>) -> String {
     match query {
-        Some(query) if !query.is_empty() => format!("index.html{route}?{query}"),
-        _ => format!("index.html{route}"),
+        Some(query) if !query.is_empty() => format!("{route}?{query}"),
+        _ => route.to_owned(),
     }
 }
 
@@ -87,7 +88,7 @@ pub fn open(
     position: Option<(f64, f64)>,
 ) -> tauri::Result<WebviewWindow> {
     let spec = Spec::of(window);
-    if let Some(existing) = app.get_webview_window(spec.label) {
+    if let Some(existing) = app.get_webview_window(window.as_str()) {
         existing.show()?;
         existing.set_focus()?;
         return Ok(existing);
@@ -96,7 +97,7 @@ pub fn open(
     let dev_server = navigation::dev_server(app);
     let mut builder = WebviewWindowBuilder::new(
         app,
-        spec.label,
+        window.as_str(),
         WebviewUrl::App(start_path(window, query).into()),
     )
     .title(spec.title)
@@ -330,17 +331,5 @@ mod tests {
                 value: "00000000-0000-0000-0000-00000000000C".into(),
             }
         );
-    }
-
-    #[test]
-    fn the_label_is_the_wire_value() {
-        for window in [
-            BridgeWindow::Main,
-            BridgeWindow::Settings,
-            BridgeWindow::Onboarding,
-        ] {
-            assert_eq!(Spec::of(window).label, window.as_str());
-            assert_eq!(window.to_string(), window.as_str());
-        }
     }
 }

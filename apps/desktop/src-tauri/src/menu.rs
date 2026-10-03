@@ -14,16 +14,13 @@
 
 use tauri::{
     AppHandle, Wry,
-    menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu},
 };
 
 use crate::tray::MenuAction;
 
 /// The whole menu bar; `Builder::menu` installs it.
 pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
-    let item = |action: MenuAction, accelerator: Option<&str>| {
-        MenuItem::with_id(app, action.id(), action.label(), true, accelerator)
-    };
     let info = app.package_info();
     let about = AboutMetadata {
         name: Some(info.name.clone()),
@@ -37,8 +34,8 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         &[
             &PredefinedMenuItem::about(app, None, Some(about))?,
             &PredefinedMenuItem::separator(app)?,
-            &item(MenuAction::OpenSettings, Some("Cmd+,"))?,
-            &item(MenuAction::CheckForUpdates, None)?,
+            &MenuAction::OpenSettings.item(app, Some("Cmd+,"))?,
+            &MenuAction::CheckForUpdates.item(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             &PredefinedMenuItem::services(app, None)?,
             &PredefinedMenuItem::separator(app)?,
@@ -46,7 +43,7 @@ pub fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             &PredefinedMenuItem::hide_others(app, None)?,
             &PredefinedMenuItem::show_all(app, None)?,
             &PredefinedMenuItem::separator(app)?,
-            &item(MenuAction::Quit, Some("Cmd+Q"))?,
+            &MenuAction::Quit.item(app, Some("Cmd+Q"))?,
         ],
     )?;
     let edit = Submenu::with_items(

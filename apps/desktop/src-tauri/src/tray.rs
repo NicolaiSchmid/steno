@@ -91,6 +91,12 @@ impl MenuAction {
             Self::Quit => "Quit Steno",
         }
     }
+
+    /// The plain menu item for the action, in the tray's menu or the menu
+    /// bar's.
+    pub fn item(self, app: &AppHandle, accelerator: Option<&str>) -> tauri::Result<MenuItem<Wry>> {
+        MenuItem::with_id(app, self.id(), self.label(), true, accelerator)
+    }
 }
 
 impl fmt::Display for MenuAction {
@@ -142,11 +148,8 @@ pub struct Tray {
 
 /// Builds the menu and the icon and manages `Tray`.
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let plain = |action: MenuAction, accelerator: Option<&str>| {
-        MenuItem::with_id(app, action.id(), action.label(), true, accelerator)
-    };
-    let record = plain(MenuAction::Record, Some("CmdOrCtrl+Shift+R"))?;
-    let in_person = plain(MenuAction::RecordInPerson, None)?;
+    let record = MenuAction::Record.item(app, Some("CmdOrCtrl+Shift+R"))?;
+    let in_person = MenuAction::RecordInPerson.item(app, None)?;
     let launch_at_login = CheckMenuItem::with_id(
         app,
         MenuAction::LaunchAtLogin.id(),
@@ -161,15 +164,15 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             &record,
             &in_person,
             &PredefinedMenuItem::separator(app)?,
-            &plain(MenuAction::OpenMain, None)?,
-            &plain(MenuAction::OpenSettings, Some("CmdOrCtrl+,"))?,
+            &MenuAction::OpenMain.item(app, None)?,
+            &MenuAction::OpenSettings.item(app, Some("CmdOrCtrl+,"))?,
             &PredefinedMenuItem::separator(app)?,
             &launch_at_login,
-            &plain(MenuAction::CheckForUpdates, None)?,
+            &MenuAction::CheckForUpdates.item(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             // Not muda's predefined Quit: that one ends the process without
             // `ExitRequested`, so the shell could not shut down cleanly.
-            &plain(MenuAction::Quit, Some("CmdOrCtrl+Q"))?,
+            &MenuAction::Quit.item(app, Some("CmdOrCtrl+Q"))?,
         ],
     )?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)

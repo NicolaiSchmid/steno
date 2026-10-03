@@ -48,6 +48,7 @@ use crate::{
     navigation,
     panel_geometry::{PROBE_SIZE, PanelAnchor, Rect, accepted_size, frame_hanging_from, same_size},
     recording::{RecorderState, RecordingState},
+    windows,
 };
 
 /// The two panels; the raw value is the window label and the route's
@@ -100,10 +101,7 @@ impl Panel {
 
     /// The document fragment: `/panel/<label>[?<query>]`.
     pub fn fragment(self, query: Option<&str>) -> String {
-        match query {
-            Some(query) if !query.is_empty() => format!("{}?{query}", self.route()),
-            _ => self.route().to_owned(),
-        }
+        windows::with_query(self.route(), query)
     }
 
     /// `index.html#/panel/<label>?<query>`, for a new window.
