@@ -162,7 +162,7 @@ impl TranscriptSegmenter {
 mod tests {
     use super::*;
 
-    fn token(text: &str, start: f64, end: f64, confidence: f32) -> TimedWord {
+    fn piece(text: &str, start: f64, end: f64, confidence: f32) -> TimedWord {
         TimedWord {
             text: text.to_owned(),
             start,
@@ -176,11 +176,11 @@ mod tests {
     }
 
     #[test]
-    fn a_word_over_three_tokens() {
+    fn three_pieces_join_into_one_word_with_the_mean_confidence() {
         let words = TokenAggregator.words(&[
-            token("▁Produkt", 0.0, 0.1, 0.9),
-            token("strat", 0.1, 0.25, 0.7),
-            token("egie", 0.25, 0.4, 0.8),
+            piece("▁Produkt", 0.0, 0.1, 0.9),
+            piece("strat", 0.1, 0.25, 0.7),
+            piece("egie", 0.25, 0.4, 0.8),
         ]);
         assert_eq!(words.len(), 1);
         assert_eq!(
@@ -191,14 +191,14 @@ mod tests {
     }
 
     #[test]
-    fn space_prefixed_tokens_as_fluid_audio_delivers_them() {
+    fn space_prefixed_pieces_start_words() {
         let words = TokenAggregator.words(&[
-            token(" Wir", 0.0, 0.1, 1.0),
-            token(" müssen", 0.3, 0.5, 1.0),
-            token(" das", 0.6, 0.7, 1.0),
-            token(" Onboarding", 0.8, 1.0, 1.0),
-            token(".", 1.1, 1.15, 1.0),
-            token(" Dann", 1.3, 1.5, 1.0),
+            piece(" Wir", 0.0, 0.1, 1.0),
+            piece(" müssen", 0.3, 0.5, 1.0),
+            piece(" das", 0.6, 0.7, 1.0),
+            piece(" Onboarding", 0.8, 1.0, 1.0),
+            piece(".", 1.1, 1.15, 1.0),
+            piece(" Dann", 1.3, 1.5, 1.0),
         ]);
         assert_eq!(
             texts(&words),
@@ -214,47 +214,51 @@ mod tests {
     #[test]
     fn the_sentencepiece_marker_is_a_boundary_and_punctuation_glues() {
         let words = TokenAggregator.words(&[
-            token("▁Wir", 0.0, 0.1, 1.0),
-            token("▁müssen", 0.2, 0.4, 1.0),
-            token(".", 0.4, 0.45, 1.0),
+            piece("▁Wir", 0.0, 0.1, 1.0),
+            piece("▁müssen", 0.2, 0.4, 1.0),
+            piece(".", 0.4, 0.45, 1.0),
         ]);
         assert_eq!(texts(&words), ["Wir", "müssen."]);
         let words = TokenAggregator.words(&[
-            token("▁Hallo", 0.0, 0.2, 1.0),
-            token(",", 0.2, 0.25, 1.0),
-            token("▁Welt", 0.3, 0.5, 1.0),
-            token("…", 0.5, 0.55, 1.0),
+            piece("▁Hallo", 0.0, 0.2, 1.0),
+            piece(",", 0.2, 0.25, 1.0),
+            piece("▁Welt", 0.3, 0.5, 1.0),
+            piece("…", 0.5, 0.55, 1.0),
         ]);
         assert_eq!(texts(&words), ["Hallo,", "Welt…"]);
         assert_eq!(words.last().unwrap().end, 0.55);
+        // With the marker too: the vocabulary has `▁,`.
+        let words =
+            TokenAggregator.words(&[piece("▁Hallo", 0.0, 0.2, 1.0), piece("▁,", 0.2, 0.25, 1.0)]);
+        assert_eq!(texts(&words), ["Hallo,"]);
     }
 
     #[test]
     fn bare_boundaries_and_empty_tokens_only_steer_the_next_word() {
         let words = TokenAggregator.words(&[
-            token("▁", 0.0, 0.05, 1.0),
-            token("OK", 0.05, 0.2, 1.0),
-            token("▁", 0.2, 0.25, 1.0),
-            token("go", 0.25, 0.4, 1.0),
-            token(" ", 0.4, 0.45, 1.0),
-            token("on", 0.45, 0.6, 1.0),
+            piece("▁", 0.0, 0.05, 1.0),
+            piece("OK", 0.05, 0.2, 1.0),
+            piece("▁", 0.2, 0.25, 1.0),
+            piece("go", 0.25, 0.4, 1.0),
+            piece(" ", 0.4, 0.45, 1.0),
+            piece("on", 0.45, 0.6, 1.0),
         ]);
         assert_eq!(texts(&words), ["OK", "go", "on"]);
         assert_eq!(words[0].start, 0.05);
         let words = TokenAggregator.words(&[
-            token("", 0.0, 0.1, 1.0),
-            token("ab", 0.1, 0.2, 1.0),
-            token(" ", 0.2, 0.3, 1.0),
+            piece("", 0.0, 0.1, 1.0),
+            piece("ab", 0.1, 0.2, 1.0),
+            piece(" ", 0.2, 0.3, 1.0),
         ]);
         assert_eq!(texts(&words), ["ab"]);
         let words =
-            TokenAggregator.words(&[token("hi", 0.0, 0.1, 1.0), token("▁there", 0.1, 0.2, 1.0)]);
+            TokenAggregator.words(&[piece("hi", 0.0, 0.1, 1.0), piece("▁there", 0.1, 0.2, 1.0)]);
         assert_eq!(texts(&words), ["hi", "there"]);
         assert!(TokenAggregator.words(&[]).is_empty());
     }
 
     fn words(specs: &[(&str, f64, f64)]) -> Vec<TimedWord> {
-        specs.iter().map(|&(t, s, e)| token(t, s, e, 1.0)).collect()
+        specs.iter().map(|&(t, s, e)| piece(t, s, e, 1.0)).collect()
     }
 
     #[test]
@@ -293,7 +297,7 @@ mod tests {
         let long: Vec<(String, f64, f64)> = (0..40)
             .map(|i| (format!("w{i}"), f64::from(i), f64::from(i) + 0.5))
             .collect();
-        let long: Vec<TimedWord> = long.iter().map(|(t, s, e)| token(t, *s, *e, 1.0)).collect();
+        let long: Vec<TimedWord> = long.iter().map(|(t, s, e)| piece(t, *s, *e, 1.0)).collect();
         let segments = TranscriptSegmenter::default().segments(&long);
         assert_eq!(segments.len(), 2);
         assert!(segments[0].end - segments[0].start <= 30.0);
