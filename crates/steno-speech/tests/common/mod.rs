@@ -3,6 +3,10 @@
 //! (`spikes/onnx-speech/fleurs/score_fleurs.py`), ported so the gate is
 //! measured the way the spike table was.
 
+// `dead_code`: the `transcribe` example includes this module for `read_wav`
+// alone. The cast allows repeat the crate's because a test target does not
+// inherit `lib.rs` attributes and `[lints] workspace = true` leaves no room
+// for a per-package table.
 #![allow(
     dead_code,
     clippy::cast_precision_loss,
@@ -36,10 +40,9 @@ pub fn fleurs_dir() -> Option<PathBuf> {
     root.join("cat").is_dir().then_some(root)
 }
 
-pub fn skip(reason: &str) {
-    eprintln!(
-        "skipped: {reason} (set STENO_MODELS_DIR and STENO_FLEURS_DIR to run the model-gated tests)"
-    );
+/// Says which variable would have let the model-gated test run.
+pub fn skip(variable: &str) {
+    eprintln!("skipped: {variable} is unset or does not point at the data");
 }
 
 /// Reads a 16 kHz mono PCM-16 WAV into `f32` samples.

@@ -39,7 +39,7 @@ fn transcriber(models: &std::path::Path) -> Transcriber<OnnxBackend> {
 #[test]
 fn the_export_splits_into_8193_pieces_and_five_duration_bins() {
     let Some(models) = common::models_dir() else {
-        return common::skip("no models");
+        return common::skip("STENO_MODELS_DIR");
     };
     let (backend, vocab) = OnnxBackend::load(
         &models.join("parakeet-tdt-0.6b-v3-fp32"),
@@ -64,8 +64,11 @@ fn the_export_splits_into_8193_pieces_and_five_duration_bins() {
 
 #[test]
 fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
-    let (Some(models), Some(fleurs)) = (common::models_dir(), common::fleurs_dir()) else {
-        return common::skip("no models or no FLEURS data");
+    let Some(models) = common::models_dir() else {
+        return common::skip("STENO_MODELS_DIR");
+    };
+    let Some(fleurs) = common::fleurs_dir() else {
+        return common::skip("STENO_FLEURS_DIR");
     };
     let mut transcriber = transcriber(&models);
     let mut files: Vec<_> = std::fs::read_dir(fleurs.join("cat"))
@@ -117,6 +120,7 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
         mean * 100.0,
         pooled * 100.0
     );
+    // One-sided on purpose: a better mean than spike F's is not a failure.
     assert!(
         mean <= SPIKE_F_MEAN_WER + TOLERANCE,
         "mean WER {:.2}% is more than {:.1} points over spike F's {:.1}%",
