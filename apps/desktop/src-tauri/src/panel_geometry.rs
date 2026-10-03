@@ -35,6 +35,11 @@ impl Rect {
         self.x + self.width / 2.0
     }
 
+    /// The point a panel at this frame hangs from.
+    pub fn top_center(&self) -> (f64, f64) {
+        (self.mid_x(), self.y)
+    }
+
     pub fn max_x(&self) -> f64 {
         self.x + self.width
     }
@@ -91,7 +96,7 @@ impl PanelAnchor {
     /// The anchor that describes a panel at `frame`, on the screen among
     /// `screens` that holds its top-centre point (else `fallback`).
     pub fn from_frame(frame: Rect, screens: &[Rect], fallback: Rect) -> Self {
-        let point = (frame.mid_x(), frame.y);
+        let point = frame.top_center();
         Self {
             top_center: point,
             screen: Rect::holding(screens, point, fallback),
@@ -184,6 +189,8 @@ mod tests {
 
     const SCREEN: Rect = Rect::new(0.0, 25.0, 1440.0, 875.0);
     const SECOND: Rect = Rect::new(1440.0, 0.0, 1920.0, 1080.0);
+    /// `SCREEN`'s size, the work area a report is clamped to.
+    const AREA: (f64, f64) = (1440.0, 875.0);
 
     #[test]
     fn the_default_anchor_is_top_centre_under_the_top_edge() {
@@ -201,10 +208,10 @@ mod tests {
     #[test]
     fn a_resize_keeps_the_top_centre() {
         let before = Rect::new(1160.0, 700.0, 480.0, 56.0);
-        let after = frame_hanging_from((before.mid_x(), before.y), (384.0, 56.0));
+        let after = frame_hanging_from(before.top_center(), (384.0, 56.0));
         assert_eq!(after, Rect::new(1208.0, 700.0, 384.0, 56.0));
         assert_eq!(after.mid_x(), before.mid_x());
-        let taller = frame_hanging_from((after.mid_x(), after.y), (384.0, 68.0));
+        let taller = frame_hanging_from(after.top_center(), (384.0, 68.0));
         assert_eq!((taller.x, taller.y), (after.x, after.y));
     }
 
@@ -326,7 +333,6 @@ mod tests {
 
     #[test]
     fn a_report_is_a_size_only_when_finite_and_at_least_a_point() {
-        const AREA: (f64, f64) = (1440.0, 875.0);
         assert_eq!(accepted_size((244.0, 40.0), AREA), Some((244.0, 40.0)));
         assert_eq!(accepted_size((1.0, 1.0), AREA), Some((1.0, 1.0)));
         for bad in [
@@ -349,7 +355,6 @@ mod tests {
     /// than the pill it holds.
     #[test]
     fn a_report_rounds_up_to_whole_points() {
-        const AREA: (f64, f64) = (1440.0, 875.0);
         assert_eq!(accepted_size((78.465, 41.91), AREA), Some((79.0, 42.0)));
         assert_eq!(accepted_size((244.5, 40.0), AREA), Some((245.0, 40.0)));
         assert_eq!(accepted_size((1.2, 1.0), AREA), Some((2.0, 1.0)));
@@ -384,7 +389,6 @@ mod tests {
 
     #[test]
     fn a_report_is_clamped_to_the_work_area() {
-        const AREA: (f64, f64) = (1440.0, 875.0);
         assert_eq!(accepted_size((1e9, 40.0), AREA), Some((1440.0, 40.0)));
         assert_eq!(accepted_size((240.0, 1e9), AREA), Some((240.0, 875.0)));
         assert_eq!(accepted_size((1440.0, 875.0), AREA), Some((1440.0, 875.0)));

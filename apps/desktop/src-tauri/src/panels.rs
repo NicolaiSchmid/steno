@@ -180,6 +180,16 @@ struct Placement {
     origin: (f64, f64),
 }
 
+impl Placement {
+    /// `frame` hanging from `top_center`.
+    const fn new(top_center: (f64, f64), frame: Rect) -> Self {
+        Self {
+            top_center,
+            origin: (frame.x, frame.y),
+        }
+    }
+}
+
 /// The saved anchor, read from disk on first use.
 #[derive(Debug, Default)]
 struct AnchorState {
@@ -314,13 +324,7 @@ impl Panels {
         let screen = Rect::holding(screens, top_center, fallback_screen(screens));
         let frame = fitted(frame_hanging_from(top_center, size), screen);
         if let Ok(mut placed) = self.placed.lock() {
-            placed.insert(
-                panel,
-                Placement {
-                    top_center,
-                    origin: (frame.x, frame.y),
-                },
-            );
+            placed.insert(panel, Placement::new(top_center, frame));
         }
         frame
     }
@@ -353,13 +357,7 @@ impl Panels {
             {
                 return None;
             }
-            placed.insert(
-                panel,
-                Placement {
-                    top_center: anchor.top_center,
-                    origin: (frame.x, frame.y),
-                },
-            );
+            placed.insert(panel, Placement::new(anchor.top_center, frame));
         }
         let mut state = self.anchor.lock().ok()?;
         (state.anchor != Some(anchor)).then(|| {
@@ -435,15 +433,23 @@ pub fn logical_size(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
     ))
 }
 
+/// The window's frame in logical points with its top-left corner at
+/// `position`, in pixels: where the window is (`outer_position`) or where
+/// a `Moved` event says it went.
+fn logical_frame(window: &WebviewWindow, position: PhysicalPosition<i32>) -> tauri::Result<Rect> {
+    let scale = window.scale_factor()?;
+    let (width, height) = logical_size(window)?;
+    Ok(Rect::new(
+        f64::from(position.x) / scale,
+        f64::from(position.y) / scale,
+        width,
+        height,
+    ))
+}
+
 /// The window's top-centre point in logical points.
 fn top_center_of(window: &WebviewWindow) -> tauri::Result<(f64, f64)> {
-    let scale = window.scale_factor()?;
-    let position = window.outer_position()?;
-    let (width, _) = logical_size(window)?;
-    Ok((
-        f64::from(position.x) / scale + width / 2.0,
-        f64::from(position.y) / scale,
-    ))
+    Ok(logical_frame(window, window.outer_position()?)?.top_center())
 }
 
 /// Shows `panel` at the anchor, creating its window when needed. The
@@ -689,15 +695,9 @@ pub fn moved(app: &AppHandle, panel: Panel, position: PhysicalPosition<i32>) {
     let Some(window) = app.get_webview_window(panel.label()) else {
         return;
     };
-    let (Ok(scale), Ok(size)) = (window.scale_factor(), logical_size(&window)) else {
+    let Ok(frame) = logical_frame(&window, position) else {
         return;
     };
-    let frame = Rect::new(
-        f64::from(position.x) / scale,
-        f64::from(position.y) / scale,
-        size.0,
-        size.1,
-    );
     let screens = screens(app);
     if let Some(anchor) = app.state::<Panels>().dragged(panel, frame, &screens) {
         save_anchor(app, anchor);
