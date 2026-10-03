@@ -62,8 +62,6 @@ uuid = { version = "1", features = ["serde", "v4"] }
 zmij = "1"
 # The audio crate: decoding of recordings and phone files in pure Rust.
 symphonia = { version = "0.5", default-features = false, features = ["aac", "caf", "isomp4", "mp3", "pcm", "wav"] }
-# Build only
-cc = "1"
 # The secret store behind `SecretStore` in the services assembly: the
 # Keychain and the Windows credential store. On Linux the services use
 # the 0600 secrets file instead (`linux-native` is the kernel keyring,
@@ -72,6 +70,8 @@ cc = "1"
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 # The `steno` CLI's argument parser.
 clap = { version = "4", features = ["derive"] }
+# Build only
+cc = "1"
 # Test only
 similar = "2"
 # Temporary directories in tests; `steno-diarize` also downloads each model

@@ -19,6 +19,7 @@ steno-adapters = { path = "../steno-adapters" }
 steno-audio = { path = "../steno-audio" }
 steno-bridge = { path = "../steno-bridge" }
 steno-core = { path = "../steno-core" }
+# The ONNX diarizer only; the CoreML diarizer is not wired.
 steno-diarize = { path = "../steno-diarize", default-features = false, features = ["onnx"] }
 steno-handover = { path = "../steno-handover" }
 steno-host = { path = "../steno-host" }

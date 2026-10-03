@@ -51,6 +51,7 @@
 //!
 //! let runtime = tokio::runtime::Runtime::new()?;
 //! let options = AppOptions::product(runtime.handle().clone(), Arc::new(NoOpener), "0.1.0")?;
+//! // `build` blocks on the runtime for the secret store, so it runs inside it.
 //! let app = runtime.block_on(async { build(options) })?;
 //! let host = Arc::new(app.host()?);
 //! let _guard = runtime.enter();
