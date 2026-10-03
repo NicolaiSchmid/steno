@@ -142,8 +142,9 @@ fn overlap(turn: &SpeakerTurn, chunk: &ClusterChunk) -> f64 {
 /// unit length, summed with its duration as weight, then L2-normalised.
 /// Normalising first means a few high-norm windows (crosstalk, music,
 /// clipping) cannot steer the mean. `None` without a usable chunk; chunks
-/// of another dimension, of zero duration or with a non-finite value
-/// (the backends reject those, so a defence) are skipped.
+/// of another dimension, of zero duration or with a non-finite value are
+/// skipped, a defence only: extraction rejects the wrong dimension and the
+/// backends drop a non-finite vector.
 #[must_use]
 pub fn cluster_embedding(chunks: &[ClusterChunk]) -> Option<Embedding> {
     let mut sum = vec![0.0f32; Embedding::DIMENSION];

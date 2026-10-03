@@ -144,17 +144,8 @@ impl TensorBackend for CoreMlBackend {
         let output = self
             .embedding
             .predict(&[("fbank_features", &fbank), ("weights", &mask)])?;
-        let array = output.array("embedding")?;
-        let embedding = array.to_f32()?;
-        let expected = steno_core::Embedding::DIMENSION;
-        if embedding.len() != expected {
-            return Err(format!(
-                "Embedding.mlmodelc returned {} values (shape {:?}), expected {expected}",
-                embedding.len(),
-                array.shape()
-            )
-            .into());
-        }
+        // The length is checked once for both backends, in extraction.
+        let embedding = output.array("embedding")?.to_f32()?;
         if embedding.iter().any(|value| !value.is_finite()) {
             return Ok(None);
         }

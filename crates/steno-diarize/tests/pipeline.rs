@@ -10,7 +10,7 @@ mod common;
 use common::{audio, range};
 use steno_core::{AudioBuffer16k, Embedding, TimeRange};
 use steno_diarize::backend::{BackendError, SegmentationGeometry, TensorBackend};
-use steno_diarize::{DiarizerConfig, ModelDiarizer, Pipeline};
+use steno_diarize::{DiarizeError, DiarizerConfig, ModelDiarizer, Pipeline};
 
 struct FakeBackend {
     geometry: SegmentationGeometry,
@@ -206,6 +206,52 @@ fn silence_and_short_audio_yield_no_speakers() {
         pipeline.backend().segment_calls,
         11,
         "thirty seconds: eleven windows; the half second none"
+    );
+}
+
+/// The fake with an embedding model of another size: 128 values where
+/// the store and the speaker matching hold 256.
+struct ShortEmbeddings(FakeBackend);
+
+impl TensorBackend for ShortEmbeddings {
+    fn geometry(&self) -> &SegmentationGeometry {
+        self.0.geometry()
+    }
+
+    fn segment(&mut self, window: &[f32]) -> Result<Vec<f32>, BackendError> {
+        self.0.segment(window)
+    }
+
+    fn embed(&mut self, window: &[f32], weights: &[f32]) -> Result<Option<Vec<f32>>, BackendError> {
+        let embedding = self.0.embed(window, weights)?;
+        Ok(embedding.map(|mut values| {
+            values.truncate(128);
+            values
+        }))
+    }
+}
+
+/// An embedding of the wrong length fails the analysis with the shape,
+/// whichever backend produced it, rather than clustering vectors the
+/// mapping would then drop.
+#[test]
+fn an_embedding_of_the_wrong_length_is_an_error() {
+    let buffer = audio(&[(1.0, range(0.0, 20.0))], 20.0);
+    let mut pipeline = Pipeline::new(
+        ShortEmbeddings(FakeBackend::new()),
+        DiarizerConfig::default(),
+    );
+    let error = pipeline.diarize(&buffer).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            DiarizeError::Shape {
+                what: "embedding output",
+                expected: 256,
+                got: 128
+            }
+        ),
+        "{error}"
     );
 }
 

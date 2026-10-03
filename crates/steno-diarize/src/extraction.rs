@@ -2,6 +2,8 @@
 //! `Analysis` every later stage works from, so a threshold sweep re-runs
 //! only the clustering.
 
+use steno_core::Embedding;
+
 use crate::backend::{BackendError, SegmentationGeometry, TensorBackend};
 use crate::error::DiarizeError;
 use crate::segmentation::{self, Window, WindowActivity};
@@ -77,7 +79,8 @@ impl Analysis {
 }
 
 /// Runs segmentation over every window and embeds every local speaker with
-/// enough clean speech. `step` is in samples.
+/// enough clean speech. `step` is in samples. A segmentation or embedding
+/// output of the wrong length is [`DiarizeError::Shape`].
 pub fn analyze(
     backend: &mut dyn TensorBackend,
     audio: &[f32],
@@ -117,6 +120,16 @@ pub fn analyze(
             if let Some(embedding) = embed_speaker(backend, &context, &window, &activity, speaker)
                 .map_err(DiarizeError::backend)?
             {
+                // Checked here, once for every backend: a vector of another
+                // length would cluster, then be dropped by the mapping,
+                // leaving every speaker without an embedding.
+                if embedding.embedding.len() != Embedding::DIMENSION {
+                    return Err(DiarizeError::Shape {
+                        what: "embedding output",
+                        expected: Embedding::DIMENSION,
+                        got: embedding.embedding.len(),
+                    });
+                }
                 embeddings.push(embedding);
             }
         }
