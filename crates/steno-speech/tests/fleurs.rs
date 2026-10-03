@@ -20,7 +20,7 @@ mod common;
 use std::time::Instant;
 
 use steno_speech::{
-    ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, SAMPLE_RATE, VadConfig,
+    ModelAsset, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, SAMPLE_RATE, VadConfig,
 };
 
 const SPIKE_F_MEAN_WER: f64 = 0.053;
@@ -28,11 +28,11 @@ const TOLERANCE: f64 = 0.005;
 
 #[test]
 fn the_export_splits_into_8193_pieces_and_five_duration_bins() {
-    let Some(models) = common::models_dir() else {
+    let Some(store) = common::models_dir() else {
         return common::skip("STENO_MODELS_DIR");
     };
     let (backend, vocab) = OnnxBackend::load(
-        &models.join("parakeet-tdt-0.6b-v3-fp32"),
+        &store.directory(&ModelAsset::parakeet_v3_fp32()),
         &OnnxOptions::default(),
     )
     .unwrap();
@@ -61,7 +61,7 @@ fn fleurs_cat_mean_wer_is_within_half_a_point_of_spike_f() {
         return common::skip("STENO_FLEURS_DIR");
     };
     let mut transcriber = OnnxSpeechEngine::open_transcriber(
-        &ModelStore::new(models),
+        &models,
         &OnnxOptions::default(),
         PipelineConfig::default(),
         VadConfig::default(),

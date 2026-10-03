@@ -33,7 +33,12 @@ fn main() {
     let mut range: Option<(f32, f32)> = None;
     let mut files: Vec<PathBuf> = Vec::new();
     let mut args = std::env::args().skip(1);
+    let usage = "usage: transcribe [--range START-END] <wav>...";
     while let Some(arg) = args.next() {
+        if arg == "--help" || arg == "-h" {
+            println!("{usage}");
+            return;
+        }
         if arg == "--range" {
             let value = args.next().expect("--range START-END");
             let (start, end) = value.split_once('-').expect("--range START-END");
@@ -42,10 +47,7 @@ fn main() {
             files.push(PathBuf::from(arg));
         }
     }
-    assert!(
-        !files.is_empty(),
-        "usage: transcribe [--range START-END] <wav>..."
-    );
+    assert!(!files.is_empty(), "{usage}");
 
     let started = Instant::now();
     let mut transcriber = OnnxSpeechEngine::open_transcriber(

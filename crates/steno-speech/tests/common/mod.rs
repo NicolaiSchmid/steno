@@ -18,20 +18,16 @@
 
 use std::path::{Path, PathBuf};
 
-/// The models root, when the test data is present; read the way the
-/// engine reads it.
-pub fn models_dir() -> Option<PathBuf> {
-    let root = steno_speech::ModelStore::environment_root()?;
-    if root
-        .join("parakeet-tdt-0.6b-v3-fp32")
-        .join("encoder.onnx")
-        .is_file()
-        && root.join("silero-vad").join("silero_vad.onnx").is_file()
-    {
-        Some(root)
-    } else {
-        None
-    }
+use steno_speech::{ModelAsset, ModelStore};
+
+/// The model store, when both assets are installed under the root
+/// `STENO_MODELS_DIR` names; read the way the engine reads it.
+pub fn models_dir() -> Option<ModelStore> {
+    let store = ModelStore::new(ModelStore::environment_root()?);
+    [ModelAsset::parakeet_v3_fp32(), ModelAsset::silero_vad()]
+        .iter()
+        .all(|asset| store.is_installed(asset))
+        .then_some(store)
 }
 
 /// The FLEURS directory (`cat/`, `utt/`), when present.
