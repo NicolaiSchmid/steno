@@ -9,6 +9,15 @@
 //! the real-time path that is not a plain atomic; it takes no lock in the
 //! std implementation on macOS and Linux (a futex or `ulock` wake syscall),
 //! and the IOProc in Swift pays the same `DispatchSemaphore.signal` cost.
+//!
+//! The hand-off is the store/load pattern (producer: bump `pending`, then
+//! read `parked`; consumer: set `parked`, then read `pending`), which
+//! needs `SeqCst` on those four accesses so at least one side sees the
+//! other; `Release`/`Acquire` alone would let both miss. What remains is
+//! a `notify_one` that lands after the consumer's re-check and before its
+//! `wait_timeout`, since the producer takes no lock: that wake waits out
+//! the timeout (20 ms on the processing thread, 50 ms on the writer), and
+//! the rings hold the frames meanwhile.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -42,8 +51,8 @@ impl Wake {
     /// Producer side: one more pending wake; wakes a parked consumer.
     #[inline(always)]
     pub fn signal(&self) {
-        self.pending.fetch_add(1, Ordering::Release);
-        if self.parked.load(Ordering::Acquire) {
+        self.pending.fetch_add(1, Ordering::SeqCst);
+        if self.parked.load(Ordering::SeqCst) {
             self.condvar.notify_one();
         }
     }
@@ -58,25 +67,25 @@ impl Wake {
             .lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.parked.store(true, Ordering::Release);
+        self.parked.store(true, Ordering::SeqCst);
         // Re-check after announcing the park so a signal between the first
         // check and the store is not missed.
         if self.try_take() {
-            self.parked.store(false, Ordering::Release);
+            self.parked.store(false, Ordering::SeqCst);
             return true;
         }
         let (guard, _) = self
             .condvar
             .wait_timeout(guard, timeout)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.parked.store(false, Ordering::Release);
+        self.parked.store(false, Ordering::SeqCst);
         drop(guard);
         self.try_take()
     }
 
     /// Consumer side: a pending wake without waiting.
     pub fn try_take(&self) -> bool {
-        let mut current = self.pending.load(Ordering::Acquire);
+        let mut current = self.pending.load(Ordering::SeqCst);
         while current > 0 {
             match self.pending.compare_exchange_weak(
                 current,

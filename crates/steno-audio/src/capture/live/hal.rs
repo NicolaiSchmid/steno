@@ -1,11 +1,10 @@
-//! The CoreAudio HAL calls behind the capture, and the one place in the
-//! crate besides the ring where `unsafe` lives: property reads and writes,
+//! The CoreAudio HAL calls behind the capture: property reads and writes,
 //! default devices, process objects, the process tap
 //! (`AudioHardwareCreateProcessTap` with a `CATapDescription`), the private
 //! aggregate device, one IOProc and property listeners.
 //! Swift: `Sources/StenoAudio/Capture/AudioObjectProperties.swift`,
 //! `ProcessTap.swift`, `AggregateDevice.swift`, the create/start/stop of
-//! `RealTime/IOProcRunner.swift`. Built on `spikes/capture-rs/src/hal.rs`.
+//! `RealTime/IOProcRunner.swift`.
 //!
 //! Everything here runs off the audio thread except the IOProc callback
 //! the caller supplies to [`IoProc::start`]. The invariants each `unsafe`
@@ -16,6 +15,7 @@
 //! its removal returns.
 
 use std::ffi::{CStr, c_void};
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 
 use objc2::AnyThread;
@@ -696,21 +696,28 @@ impl std::fmt::Debug for PropertyListener {
     }
 }
 
+/// The C listener: runs the boxed handler once per address. A panic in a
+/// handler must not unwind into the HAL, so it aborts the process instead.
 unsafe extern "C-unwind" fn listener_proc(
     _object: Id,
     count: u32,
     addresses: NonNull<AudioObjectPropertyAddress>,
     client: *mut c_void,
 ) -> OSStatus {
-    // SAFETY: `client` is the `*mut ListenerHandler` registered in `add`,
-    // alive until `remove` has returned (the HAL calls no listener after
-    // its removal); `addresses` has `count` entries.
-    unsafe {
-        let handler = &*client.cast::<ListenerHandler>();
-        for index in 0..count as usize {
-            let address = *addresses.as_ptr().add(index);
-            handler(address.mSelector);
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: `client` is the `*mut ListenerHandler` registered in
+        // `add`, alive until `remove` has returned (the HAL calls no
+        // listener after its removal); `addresses` has `count` entries.
+        unsafe {
+            let handler = &*client.cast::<ListenerHandler>();
+            for index in 0..count as usize {
+                let address = *addresses.as_ptr().add(index);
+                handler(address.mSelector);
+            }
         }
+    }));
+    if outcome.is_err() {
+        std::process::abort();
     }
     0
 }

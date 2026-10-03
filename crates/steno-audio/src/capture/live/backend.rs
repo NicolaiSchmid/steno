@@ -22,8 +22,8 @@
 //! `AudioHardwareDestroyProcessTap`.
 
 use std::ffi::c_void;
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -54,8 +54,6 @@ use crate::realtime::{BufferView, LaneFrameSink, deliver};
 struct CallbackContext {
     sink: Arc<LaneFrameSink>,
     sources: Vec<LaneSource>,
-    callbacks: AtomicU64,
-    frames: AtomicU64,
 }
 
 /// The most input buffers an aggregate of ours produces: the output device's
@@ -65,7 +63,9 @@ const MAX_BUFFERS: usize = 16;
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
 /// buffer list and hands it to [`deliver`]: no allocation, no lock, no
-/// syscall.
+/// syscall. A panic inside must not unwind into the HAL, so the body runs
+/// under `catch_unwind` and a panic aborts the process; the barrier costs
+/// nothing on the path that does not panic.
 unsafe extern "C-unwind" fn io_proc(
     _device: Id,
     _now: NonNull<AudioTimeStamp>,
@@ -75,38 +75,34 @@ unsafe extern "C-unwind" fn io_proc(
     _output_time: NonNull<AudioTimeStamp>,
     client: *mut c_void,
 ) -> OSStatus {
-    // SAFETY: `client` is the boxed `CallbackContext` registered in
-    // `start`, alive until the IOProc is destroyed (which happens before
-    // the box is dropped); `input` is the HAL's list, valid for the call.
-    unsafe {
-        let ctx = &*client.cast::<CallbackContext>();
-        let list = input.as_ref();
-        let count = (list.mNumberBuffers as usize).min(MAX_BUFFERS);
-        let mut views = [BufferView {
-            channels: 0,
-            data: None,
-            byte_size: 0,
-        }; MAX_BUFFERS];
-        let buffers = list.mBuffers.as_ptr();
-        for (index, view) in views.iter_mut().enumerate().take(count) {
-            let buffer = &*buffers.add(index);
-            *view = BufferView {
-                channels: buffer.mNumberChannels as usize,
-                data: (!buffer.mData.is_null() && buffer.mDataByteSize > 0)
-                    .then_some(buffer.mData.cast_const().cast::<f32>()),
-                byte_size: buffer.mDataByteSize as usize,
-            };
+    let outcome = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: `client` is the boxed `CallbackContext` registered in
+        // `start`, alive until the IOProc is destroyed (which happens before
+        // the box is dropped); `input` is the HAL's list, valid for the call.
+        unsafe {
+            let ctx = &*client.cast::<CallbackContext>();
+            let list = input.as_ref();
+            let count = (list.mNumberBuffers as usize).min(MAX_BUFFERS);
+            let mut views = [BufferView {
+                channels: 0,
+                data: None,
+                byte_size: 0,
+            }; MAX_BUFFERS];
+            let buffers = list.mBuffers.as_ptr();
+            for (index, view) in views.iter_mut().enumerate().take(count) {
+                let buffer = &*buffers.add(index);
+                *view = BufferView {
+                    channels: buffer.mNumberChannels as usize,
+                    data: (!buffer.mData.is_null() && buffer.mDataByteSize > 0)
+                        .then_some(buffer.mData.cast_const().cast::<f32>()),
+                    byte_size: buffer.mDataByteSize as usize,
+                };
+            }
+            deliver(&views[..count], &ctx.sources, &ctx.sink);
         }
-        deliver(&views[..count], &ctx.sources, &ctx.sink);
-        ctx.callbacks.fetch_add(1, Ordering::Relaxed);
-        if let Some(first) = views.first()
-            && first.channels > 0
-        {
-            ctx.frames.fetch_add(
-                (first.byte_size / (first.channels * 4)) as u64,
-                Ordering::Relaxed,
-            );
-        }
+    }));
+    if outcome.is_err() {
+        std::process::abort();
     }
     0
 }
@@ -179,10 +175,9 @@ struct Active {
     watcher_thread: Option<JoinHandle<()>>,
 }
 
+/// The macOS capture backend; see the module doc.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
-    /// `start` calls so far; the generation the watcher reports under.
-    start_generation: AtomicU64,
 }
 
 impl Default for LiveCaptureBackend {
@@ -206,7 +201,6 @@ impl LiveCaptureBackend {
     pub fn new() -> Self {
         Self {
             active: Mutex::new(None),
-            start_generation: AtomicU64::new(0),
         }
     }
 
@@ -218,14 +212,16 @@ impl LiveCaptureBackend {
 
     /// The watcher thread: waits for a notification, lets the burst settle
     /// for `COALESCE_DELAY` after the last one, then resolves the devices
-    /// and reports the first difference, if the same `start` still runs.
+    /// and reports the first difference. It belongs to one `start`:
+    /// `stop()` raises `WatchState::stop` and joins it before the backend
+    /// can start again, so a report never reaches a later capture (Swift
+    /// compared a generation counter instead; the join makes that
+    /// unnecessary here).
     fn watch(
         watcher: &Watcher,
         probe: &DeviceProbe,
         baseline: &DeviceSnapshot,
         sink: &LaneFrameSink,
-        generation: u64,
-        current_generation: &AtomicU64,
     ) {
         let mut state = watcher.lock();
         loop {
@@ -257,10 +253,8 @@ impl LiveCaptureBackend {
             match snapshot.difference(baseline) {
                 None => tracing::info!("ignored device notification {name}"),
                 Some(reason) => {
-                    if current_generation.load(Ordering::Acquire) == generation {
-                        tracing::info!("device notification {name} reported {reason:?}");
-                        sink.report_device_change(reason);
-                    }
+                    tracing::info!("device notification {name} reported {reason:?}");
+                    sink.report_device_change(reason);
                 }
             }
             state = watcher.lock();
@@ -284,7 +278,6 @@ impl CaptureBackend for LiveCaptureBackend {
         if active.is_some() {
             return Err(CaptureError::InvalidState("backend already started".into()));
         }
-        let generation = self.start_generation.fetch_add(1, Ordering::AcqRel) + 1;
 
         let needs_mic = lanes.contains(&AudioLane::Mic) || lanes.contains(&AudioLane::Mixed);
         let needs_tap = lanes.contains(&AudioLane::System);
@@ -364,8 +357,6 @@ impl CaptureBackend for LiveCaptureBackend {
         let context = Box::new(CallbackContext {
             sink: Arc::clone(&sink),
             sources: layout.sources.clone(),
-            callbacks: AtomicU64::new(0),
-            frames: AtomicU64::new(0),
         });
         let context_ptr: *const CallbackContext = &raw const *context;
         // SAFETY: `context` is boxed and stored in `Active` beside the
@@ -444,14 +435,10 @@ impl CaptureBackend for LiveCaptureBackend {
         let watcher_thread = {
             let watcher = Arc::clone(&watcher);
             let sink = Arc::clone(&sink);
-            let generation_counter = Arc::new(AtomicU64::new(generation));
-            let counter = Arc::clone(&generation_counter);
             std::thread::Builder::new()
                 .name("steno-devices".into())
                 .spawn(move || {
-                    LiveCaptureBackend::watch(
-                        &watcher, &probe, &baseline, &sink, generation, &counter,
-                    );
+                    LiveCaptureBackend::watch(&watcher, &probe, &baseline, &sink);
                 })
                 .map_err(|e| CaptureError::BackendFailed(format!("device watcher: {e}")))?
         };

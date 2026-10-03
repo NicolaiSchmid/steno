@@ -5,19 +5,29 @@
 //! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`.
 //!
 //! A write error is kept, reported once and stops further writes; the loop
-//! keeps draining so the relay never fills.
+//! keeps draining so the relay never fills. The lane slices handed to the
+//! writer sit in a stack array sized by [`AudioLane::ALL`], so a drained
+//! frame allocates nothing (not a real-time requirement here, the thread
+//! does file I/O, but one less allocation per 10 ms).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use steno_core::AudioLane;
+
 use super::recording_writer::{LaneFrames, RecordingWriting};
 use crate::capture::{CaptureError, LaneLevels};
 use crate::realtime::{FrameRelay, LevelSlot};
 
+/// Runs on the writer thread with the levels it republishes.
 pub type LevelsHandler = Box<dyn Fn(LaneLevels) + Send>;
+/// Runs on the writer thread once, with the first write error.
 pub type ErrorHandler = Box<dyn Fn(CaptureError) + Send>;
+
+/// A recording has at most one channel per [`AudioLane`].
+const MAX_LANES: usize = AudioLane::ALL.len();
 
 struct Worker {
     relay: Arc<FrameRelay>,
@@ -41,13 +51,13 @@ impl Worker {
             if self.failed.load(Ordering::Acquire) {
                 continue;
             }
-            let lanes: Vec<&[f32]> = self.buffers[..self.lane_count]
-                .iter()
-                .map(Vec::as_slice)
-                .collect();
+            let mut lanes: [&[f32]; MAX_LANES] = [&[]; MAX_LANES];
+            for (slot, buffer) in lanes.iter_mut().zip(&self.buffers[..self.lane_count]) {
+                *slot = buffer.as_slice();
+            }
             let frames = LaneFrames {
                 frame_count: self.relay.frame_size(),
-                lanes: &lanes,
+                lanes: &lanes[..self.lane_count],
                 raw_mic: self
                     .has_raw_mic
                     .then(|| self.buffers[self.lane_count].as_slice()),
@@ -88,6 +98,10 @@ impl WriterThread {
         on_levels: LevelsHandler,
         on_error: ErrorHandler,
     ) -> Self {
+        assert!(
+            lane_count <= MAX_LANES,
+            "{lane_count} lanes, at most {MAX_LANES} exist"
+        );
         let failed = Arc::new(AtomicBool::new(false));
         let worker = Worker {
             relay: Arc::clone(&relay),

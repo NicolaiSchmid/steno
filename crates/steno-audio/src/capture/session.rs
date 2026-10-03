@@ -37,6 +37,14 @@
 //! The rebuild runs on its own thread, takes the mutex for each step that
 //! touches the state and sleeps outside it on the injected [`Clock`], with
 //! a [`Cancel`] token `stop()` raises.
+//!
+//! The one long hold is deliberate: `start` and the rebuild's
+//! `restart_backend` keep the mutex across `backend.start()`, up to 200 ms
+//! while [`NominalSampleRate::settle`](super::NominalSampleRate::settle)
+//! waits for the aggregate. A `stop()` arriving meanwhile queues behind it
+//! and then finds a started backend to tear down, instead of racing a
+//! half-built one; a backend never calls back into the session from
+//! `start`, so the hold cannot deadlock.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};
