@@ -64,7 +64,9 @@ impl SpeakerMemory for InMemorySpeakerMemory {
             })
             .collect();
         // Best first; ties broken by id, which orders like Swift's
-        // uppercase id text.
+        // uppercase id text. `total_cmp` puts +0.0 before -0.0 whatever
+        // the ids, where Swift breaks that tie by id too; a zero similarity
+        // never passes a positive threshold, so no match differs.
         ranked.sort_by(|left, right| {
             right
                 .similarity

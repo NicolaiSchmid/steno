@@ -12,7 +12,10 @@
 /// Everything it needs (filter state, far-end history, scratch
 /// buffers) is allocated by the constructor, which is the backend's own
 /// `new(sample_rate, frame_size)` rather than a trait method so the trait
-/// stays dyn-compatible. The three slices have the same length, one frame.
+/// stays dyn-compatible. The three slices have the same length, one frame:
+/// the capture session guarantees it, the signature cannot. An
+/// implementation may `debug_assert_eq!` the lengths and must process the
+/// shortest common length rather than panic on the audio thread.
 ///
 /// `Send` without `Sync`: the capture session owns one canceller and calls
 /// it from one thread; the methods take `&mut self` because the filter

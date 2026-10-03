@@ -54,8 +54,8 @@ impl Default for FakeSpeechEngine {
 impl FakeSpeechEngine {
     /// The segments for `duration` seconds: one per `segment_seconds`, each
     /// starting exactly where the previous one ended, the last one clipped
-    /// to the end; three evenly spaced word timings each when asked, the
-    /// last word ending exactly at the segment's `end`.
+    /// to the end; when asked, one word timing per word of the text, evenly
+    /// spaced, the last word ending exactly at the segment's `end`.
     #[must_use]
     pub fn segments(
         duration: f64,

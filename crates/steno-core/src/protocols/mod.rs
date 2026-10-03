@@ -23,7 +23,10 @@
 //! `#[async_trait]` on their `impl` block and write `async fn` as usual.
 //! The cost is one allocation per call on boundaries that take seconds to
 //! minutes, which is nothing; the audio thread never crosses one of these
-//! (see [`EchoCanceller`]).
+//! (see [`EchoCanceller`]). Because the traits are `Send + Sync` with
+//! `Send` futures, an implementor holding a handle that is not `Sync` (a
+//! Core ML model object, for example) wraps it in a `Mutex` or owns a worker
+//! thread and talks to it over a channel.
 //!
 //! # Implementing a boundary
 //!

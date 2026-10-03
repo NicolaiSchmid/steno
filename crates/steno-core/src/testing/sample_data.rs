@@ -1,5 +1,6 @@
-//! Fixed values the fakes and their tests share.
-//! Swift: `Sources/StenoCore/Testing/SampleData.swift`.
+//! Fixed values the fakes and their tests share. After
+//! `Sources/StenoCore/Testing/SampleData.swift`, with its own title, ids
+//! and dates.
 
 use chrono::{DateTime, TimeZone, Utc};
 use uuid::Uuid;
