@@ -107,6 +107,15 @@ impl ComError {
         }
     }
 
+    /// A failure with no `HRESULT` behind it (code 0).
+    fn other(operation: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            operation,
+            code: 0,
+            message: message.into(),
+        }
+    }
+
     /// The stream's device went away or was reconfigured
     /// (`AUDCLNT_E_DEVICE_INVALIDATED`): rebuild, do not retry.
     #[must_use]
@@ -144,15 +153,12 @@ impl Apartment {
         // balanced by `CoUninitialize` in `Drop` on this same thread
         // (the guard is `!Send`).
         let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        if result == RPC_E_CHANGED_MODE {
-            return Ok(Self {
-                uninitialize: false,
-                _thread: PhantomData,
-            });
+        let uninitialize = result != RPC_E_CHANGED_MODE;
+        if uninitialize {
+            check(result.ok(), "CoInitializeEx")?;
         }
-        check(result.ok(), "CoInitializeEx")?;
         Ok(Self {
-            uninitialize: true,
+            uninitialize,
             _thread: PhantomData,
         })
     }
@@ -368,11 +374,8 @@ impl Endpoint {
         // `take_co_string` does after copying it.
         let id = check(unsafe { self.0.GetId() }, "IMMDevice::GetId")?;
         // SAFETY: as above.
-        unsafe { take_co_string(id) }.ok_or(ComError {
-            operation: "IMMDevice::GetId",
-            code: 0,
-            message: "empty endpoint id".into(),
-        })
+        unsafe { take_co_string(id) }
+            .ok_or_else(|| ComError::other("IMMDevice::GetId", "empty endpoint id"))
     }
 
     /// `DEVICE_STATE_ACTIVE`: present, enabled, not unplugged.
@@ -810,11 +813,10 @@ fn activate_process_loopback(
         "ActivateAudioInterfaceAsync",
     )?;
     if receiver.recv_timeout(timeout).is_err() {
-        return Err(ComError {
-            operation: "ActivateAudioInterfaceAsync",
-            code: 0,
-            message: format!("no completion within {timeout:?}"),
-        });
+        return Err(ComError::other(
+            "ActivateAudioInterfaceAsync",
+            format!("no completion within {timeout:?}"),
+        ));
     }
     let mut result = HRESULT(0);
     let mut interface: Option<IUnknown> = None;
@@ -825,11 +827,8 @@ fn activate_process_loopback(
         "IActivateAudioInterfaceAsyncOperation::GetActivateResult",
     )?;
     check(result.ok(), "process loopback activation")?;
-    let interface = interface.ok_or(ComError {
-        operation: "process loopback activation",
-        code: 0,
-        message: "no interface returned".into(),
-    })?;
+    let interface = interface
+        .ok_or_else(|| ComError::other("process loopback activation", "no interface returned"))?;
     check(
         interface.cast::<IAudioClient>(),
         "IUnknown::QueryInterface(IAudioClient)",
