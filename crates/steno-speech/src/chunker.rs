@@ -133,6 +133,9 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
     let speech_end = last_speech.end.min(total);
 
     let mut start = speech[0].start.saturating_sub(pad);
+    // Where the last chunk ended; no cut falls before it, so every chunk
+    // adds audio even when the search window reaches back into the overlap.
+    let mut previous_end = 0;
     loop {
         // A start inside a pause snaps forward to just before the next speech.
         if let Some(pause) = pauses.iter().find(|p| p.start <= start && start < p.end) {
@@ -156,10 +159,13 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
                 break;
             }
             start = next_start(start, end, overlap, min_chunk);
+            previous_end = end;
             continue;
         }
         // A long pause before the search window closes ends the chunk early;
-        // no overlap is needed across silence.
+        // no overlap is needed across silence. When the clamp cuts the chunk
+        // before the pause, the speech up to the pause is still ahead and
+        // the next chunk overlaps as usual.
         if let Some(pause) = pauses.iter().find(|p| {
             p.start >= start + min_chunk && p.start < want + search && p.len() >= long_pause
         }) {
@@ -168,11 +174,19 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
                 range: start..end,
                 cut: Cut::LongPause,
             });
-            start = pause.end.saturating_sub(pad).max(start + 1);
+            start = if end < pause.start + pad {
+                next_start(start, end, overlap, min_chunk)
+            } else {
+                pause.end.saturating_sub(pad).max(start + 1)
+            };
+            previous_end = end;
             continue;
         }
-        let lo = want.saturating_sub(search).max(start + min_chunk);
-        let hi = (want + search).min(start + max);
+        let lo = want
+            .saturating_sub(search)
+            .max(start + min_chunk)
+            .max(previous_end);
+        let hi = (want + search).min(start + max).max(lo + 1);
         // The longest pause, clipped to the window, wins; the first on ties.
         let mut best: Option<Range<usize>> = None;
         for pause in &pauses {
@@ -192,6 +206,7 @@ pub fn layout(audio: &[f32], speech: &[Range<usize>], config: &ChunkerConfig) ->
             cut,
         });
         start = next_start(start, end, overlap, min_chunk);
+        previous_end = end;
     }
     chunks
 }
@@ -220,6 +235,13 @@ mod tests {
             }
         }
         out
+    }
+
+    /// Every chunk starts and ends after the one before it.
+    fn ends_advance(chunks: &[Chunk]) -> bool {
+        chunks
+            .windows(2)
+            .all(|w| w[1].range.start > w[0].range.start && w[1].range.end > w[0].range.end)
     }
 
     fn covers(chunks: &[Chunk], speech: &[Range<usize>]) -> bool {
@@ -296,6 +318,50 @@ mod tests {
     }
 
     #[test]
+    fn a_long_pause_beyond_the_clamp_does_not_skip_the_speech_before_it() {
+        // target + search reaches past max: the chunk is clamped at 16 s,
+        // and the speech between the clamp and the 40 s pause must still be
+        // laid out instead of the next chunk jumping to 45 s.
+        let speech = [s(6.8)..s(40.0), s(45.0)..s(60.0)];
+        let config = ChunkerConfig {
+            target_seconds: 30.2,
+            search_seconds: 7.5,
+            max_seconds: 16.0,
+            ..ChunkerConfig::default()
+        };
+        let chunks = layout(&audio(62.0, &speech), &speech, &config);
+        assert_eq!(chunks[0].cut, Cut::LongPause);
+        assert_eq!(chunks[0].range, s(6.55)..s(22.55));
+        assert_eq!(chunks[1].range.start, s(22.55) - s(1.5));
+        assert!(chunks.iter().all(|c| c.seconds() <= 16.0));
+        assert!(covers(&chunks, &speech), "{chunks:?}");
+    }
+
+    #[test]
+    fn the_search_window_never_reaches_behind_the_previous_chunk() {
+        // target - search (4 s) is under the overlap (4.5 s), so the second
+        // chunk's window opens inside the first; the quiet frame at 5.6 s
+        // would otherwise end the second chunk before the first did.
+        let speech = [0..s(30.0)];
+        let mut samples = audio(30.0, &speech);
+        for x in &mut samples[s(5.6)..s(5.7)] {
+            *x = 0.001;
+        }
+        let config = ChunkerConfig {
+            target_seconds: 6.0,
+            search_seconds: 2.0,
+            overlap_seconds: 4.5,
+            min_chunk_seconds: 1.0,
+            ..ChunkerConfig::default()
+        };
+        let chunks = layout(&samples, &speech, &config);
+        assert_eq!(chunks[0].range.end, s(5.6) + SAMPLE_RATE / 20);
+        assert_eq!(chunks[1].range.start, s(5.65) - s(4.5));
+        assert!(ends_advance(&chunks), "{chunks:?}");
+        assert!(covers(&chunks, &speech));
+    }
+
+    #[test]
     fn a_degenerate_configuration_still_terminates() {
         let speech = [0..s(50.0)];
         let config = ChunkerConfig {
@@ -307,11 +373,7 @@ mod tests {
         };
         let chunks = layout(&audio(50.0, &speech), &speech, &config);
         assert!(!chunks.is_empty());
-        assert!(
-            chunks
-                .windows(2)
-                .all(|w| w[1].range.start > w[0].range.start)
-        );
+        assert!(ends_advance(&chunks), "{chunks:?}");
         assert_eq!(quietest_point(&[0.0; 10], 0, 10), 5);
     }
 }
