@@ -7,9 +7,10 @@ import { cn } from "@/lib/cn";
 import { site } from "@/lib/site";
 
 const nav = [
-	{ href: "#how", label: "How it works" },
-	{ href: "#privacy", label: "Privacy" },
-	{ href: "#open", label: "Source" },
+	{ href: "/#how", label: "How it works" },
+	{ href: "/#privacy", label: "Privacy" },
+	{ href: "/recording-law", label: "Recording law" },
+	{ href: "/#open", label: "Source" },
 ];
 
 /** The sticky nav: wordmark, links from 640 px, Download, the GitHub pill. */
@@ -34,7 +35,7 @@ export function Header() {
 				<a
 					aria-label="Steno home"
 					className="inline-flex items-center gap-2.5 font-[650] text-[16px] text-fg leading-none tracking-[-0.025em] transition-colors duration-200 hover:text-white"
-					href="#top"
+					href="/#top"
 				>
 					<RecordMark />
 					Steno
@@ -53,7 +54,7 @@ export function Header() {
 				<div className="inline-flex items-center gap-2">
 					<a
 						className="px-2.5 text-[13px] text-fg-muted tracking-[-0.01em] transition-colors duration-[180ms] hover:text-fg"
-						href="#download"
+						href="/#download"
 					>
 						Download
 					</a>

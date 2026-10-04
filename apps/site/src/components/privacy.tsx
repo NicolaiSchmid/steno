@@ -1,3 +1,4 @@
+import { ArrowRight } from "lucide-react";
 import { Checklist } from "@/components/checklist";
 import { SectionHead } from "@/components/section-head";
 
@@ -46,6 +47,13 @@ export function Privacy() {
 							"Plain files you can grep, sync and back up yourself",
 						]}
 					/>
+					<a
+						className="mt-7 inline-flex items-center gap-1.5 font-medium text-[14px] text-fg-muted transition-colors duration-[180ms] hover:text-fg"
+						href="/recording-law"
+					>
+						Whether you may record a call is a separate question
+						<ArrowRight className="size-3.5" strokeWidth={1.5} />
+					</a>
 				</div>
 				<div className="tile p-0">
 					<div className="flex items-center justify-between border-border border-b px-4 py-2.5 font-mono text-[11px] text-fg-dim">

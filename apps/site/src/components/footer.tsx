@@ -1,11 +1,12 @@
 import { RecordMark } from "@/components/record-mark";
 import { site } from "@/lib/site";
 
-const links = [
+const links: Array<{ href: string; label: string; internal?: boolean }> = [
 	{ href: site.repo, label: "GitHub" },
 	{ href: site.releases, label: "Download" },
 	{ href: site.issues, label: "Issues" },
 	{ href: site.scope, label: "Scope" },
+	{ href: "/recording-law", label: "Recording law", internal: true },
 	{ href: site.tap, label: "Homebrew tap" },
 	{ href: site.author.url, label: site.author.name },
 ];
