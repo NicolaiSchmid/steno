@@ -1,26 +1,57 @@
-name: Desktop bundles
+name: Desktop release
 
-# Builds the Tauri shell's installer bundles on the three platforms and
-# uploads them as workflow artifacts, on a manual trigger: `.app` and `.dmg`
-# on macOS, `.deb` and `.AppImage` on Linux, `.msi` and NSIS `.exe` on
-# Windows. WP8 of .plans/2026-10-02-rust-core-and-tauri-shell.md. Nothing is
-# signed or notarised and no GitHub release is published; that is WP9, which
-# also gives this job the `TAURI_SIGNING_PRIVATE_KEY` secret (the private
-# half of `plugins.updater.pubkey` in tauri.conf.json, generated with
-# `cargo tauri signer generate`; see apps/desktop/README.md). Until the
-# secret exists the updater artifacts (`.sig` files and the macOS
-# `.app.tar.gz`) are switched off through Tauri's configuration merge,
-# because a public key in the config without a private key in the
-# environment fails the build. The CLI writes no `latest.json`; the
-# manifests are WP9's.
+# Builds the Tauri shell's installer bundles on the three platforms, signs
+# what can be signed, and on a `desktop-v*` tag publishes them with the
+# updater manifests. WP9 of .plans/2026-10-02-rust-core-and-tauri-shell.md.
+#
+#   macOS    `.app` and `.dmg`, Apple silicon. Signed with the Developer ID
+#            certificate under the hardened runtime by the Tauri bundler,
+#            from a throwaway keychain (apps/desktop/scripts/
+#            signing-keychain.sh, the approach of the Swift release.yml);
+#            the bundler notarises and staples the `.app` through the App
+#            Store Connect API key before it builds the image and the
+#            updater archive, then notarize-dmg.sh notarises and staples
+#            the image.
+#   Linux    `.deb` and `.AppImage`, x86_64.
+#   Windows  `.msi` and NSIS `.exe`, x86_64. Not code-signed: there is no
+#            Windows certificate, so SmartScreen warns on first install.
+#
+# Every bundle carries `steno-speech-sidecar` beside the app's binary, as a
+# Tauri `externalBin` (tauri.release.conf.json, staged by
+# stage-sidecar.sh); check-bundle.sh unpacks each bundle as its installer
+# would, finds the two side by side and starts the sidecar from there.
+# Every updater artifact (`.app.tar.gz`, `.AppImage`, `.deb`, `.msi`,
+# `-setup.exe`) gets a `.sig` from TAURI_SIGNING_PRIVATE_KEY (the private
+# half of `plugins.updater.pubkey` in tauri.conf.json; no password).
+#
+# Triggers. A pushed `desktop-v<version>` tag builds all three platforms
+# and publishes; the version must be the workspace's (`[workspace.package]`
+# in Cargo.toml), which Tauri stamps into the bundles. The Swift app's
+# release.yml owns `v*` and mobile-cd.yml `ios-fp-*`; GitHub matches tag
+# filters from the start of the name, so `desktop-v*` meets neither. A
+# manual run builds, signs and notarises the platforms it is given and
+# uploads them as workflow artifacts; it publishes nothing.
+#
+# Publishing (tags only): one GitHub release per tag with every bundle,
+# its `.sig` and `latest.json`; then the manifest is copied to the rolling
+# `desktop-beta` release, and for a release without a hyphen to
+# `desktop-stable` too, which are the two lanes `updater.rs` reads. Every
+# release this workflow writes is a GitHub pre-release and never "latest":
+# until the Mac cutover (.plans/2026-10-04-mac-cutover.md) the README's and
+# the site's "latest release" links and the Homebrew cask belong to the
+# Swift app.
+#
+# `cargo deny check` (deny.toml) gates the bundles: no build starts while a
+# licence, an advisory, a ban or a source fails.
 #
 # The bundles carry the real host (`steno_host::Host` over the services
 # graph, WP6b); this job builds the crate's default features, so the
-# opt-in `fixture-host` stays out of them.
-#
-# The macOS job follows `MACOS_RUNS_ON` like the other workflows.
+# opt-in `fixture-host` stays out of them. The macOS job follows
+# `MACOS_RUNS_ON` like the other workflows.
 
 on:
+  push:
+    tags: ['desktop-v*']
   workflow_dispatch:
     inputs:
       platforms:
@@ -30,28 +61,45 @@ on:
 
 concurrency:
   group: desktop-release-${{ github.ref }}
-  cancel-in-progress: true
+  # A tag run is never cut off halfway through publishing.
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
 
 permissions:
   contents: read
 
 jobs:
-  # Which platforms the run builds, from the input: a job-level `if` cannot
-  # read the matrix, so a first job turns the input into the include list
+  # The version and the platforms. A job-level `if` cannot read the matrix,
+  # so this job turns the input into the include list
   # (apps/desktop/scripts/release-matrix.sh: any case, an unknown name
-  # fails the run) and the bundle job takes its matrix from it. The macOS
-  # runner label comes from `MACOS_RUNS_ON` as everywhere else.
+  # fails the run) and the bundle job takes its matrix from it. A tag
+  # builds all three.
   plan:
     name: plan
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
+      - id: version
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)"
+          test -n "$version" || { echo "::error::no version under [workspace.package] in Cargo.toml"; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "desktop-v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not name the workspace version $version; tag desktop-v$version or bump [workspace.package] first"
+            exit 1
+          fi
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "version=$version prerelease=$prerelease"
       - id: plan
         env:
-          PLATFORMS: ${{ inputs.platforms }}
+          PLATFORMS: ${{ inputs.platforms || 'linux,windows,macos' }}
           MACOS_RUNS_ON: ${{ vars.MACOS_RUNS_ON || '"macos-15"' }}
         run: |
           set -euo pipefail
@@ -59,16 +107,53 @@ jobs:
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "$matrix"
 
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
   bundle:
     name: ${{ matrix.name }}
-    needs: plan
+    needs: [plan, deny]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
+    env:
+      # Release panics would otherwise carry the runner's source paths. Set
+      # for the job so the sidecar and the app share one dependency build.
+      RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=steno
+      # macOS only: the throwaway keychain and the search list saved before
+      # it went in front (signing-keychain.sh). Outside the workspace and
+      # named apart from the Swift release's, which may share the runner.
+      KEYCHAIN_PATH: ${{ github.workspace }}/../steno-desktop-release.keychain-db
+      KEYCHAINS_BEFORE: ${{ github.workspace }}/../steno-desktop-release.keychains-before
     steps:
       - uses: actions/checkout@v4
+
+      # Before any tool is installed or built: name every missing secret.
+      - name: Check secrets
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          MACOS_CERTIFICATE_P12_BASE64: ${{ matrix.name == 'macos' && secrets.MACOS_CERTIFICATE_P12_BASE64 || '' }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ matrix.name == 'macos' && secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          ASC_KEY_ID: ${{ matrix.name == 'macos' && secrets.ASC_KEY_ID || '' }}
+          ASC_ISSUER_ID: ${{ matrix.name == 'macos' && secrets.ASC_ISSUER_ID || '' }}
+          ASC_PRIVATE_KEY: ${{ matrix.name == 'macos' && secrets.ASC_PRIVATE_KEY || '' }}
+        run: |
+          set -euo pipefail
+          names=(TAURI_SIGNING_PRIVATE_KEY)
+          if [ "${{ matrix.name }}" = macos ]; then
+            names+=(MACOS_CERTIFICATE_P12_BASE64 MACOS_CERTIFICATE_PASSWORD ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY)
+          fi
+          apps/desktop/scripts/require-secrets.sh "${names[@]}"
 
       - name: Linux prerequisites
         if: matrix.name == 'linux'
@@ -110,29 +195,76 @@ jobs:
         run: pnpm install --frozen-lockfile && pnpm build
         working-directory: apps/macos/web
 
+      - name: Speech sidecar
+        shell: bash
+        run: apps/desktop/scripts/stage-sidecar.sh
+
+      # The bundler signs with the identity this prints; the App Store
+      # Connect key is written for the bundler's notarytool call and for
+      # notarize-dmg.sh, and removed in the last step.
+      - name: Signing keychain and notarisation key
+        if: matrix.name == 'macos'
+        env:
+          P12: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          identity="$(apps/desktop/scripts/signing-keychain.sh import "$KEYCHAIN_PATH" "$KEYCHAINS_BEFORE")"
+          key_path="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          (umask 077 && printf '%s\n' "$ASC_PRIVATE_KEY" > "$key_path")
+          {
+            echo "APPLE_SIGNING_IDENTITY=$identity"
+            echo "ASC_KEY_PATH=$key_path"
+          } >> "$GITHUB_ENV"
+
       # The Tauri CLI as the npm package: a prebuilt binary in seconds,
       # where `cargo install tauri-cli` compiles for minutes. Pinned to the
       # exact version of the `tauri` crate in Cargo.lock and of
-      # `@tauri-apps/api`, because it runs with the signing key in its
-      # environment.
+      # `@tauri-apps/api`, because it runs with the signing keys in its
+      # environment. tauri.release.conf.json adds the sidecar, and on
+      # Windows tauri.release.windows.conf.json the DirectML.dll it loads.
       - name: Bundle
         shell: bash
         working-directory: apps/desktop/src-tauri
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Release panics would otherwise carry the runner's source paths.
-          RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=steno
+          # macOS: the bundler notarises when all three are set (and
+          # warns and skips when one is missing, which check-bundle.sh
+          # then fails on); elsewhere they are empty and unread.
+          APPLE_API_KEY: ${{ matrix.name == 'macos' && secrets.ASC_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ matrix.name == 'macos' && secrets.ASC_ISSUER_ID || '' }}
+          APPLE_API_KEY_PATH: ${{ env.ASC_KEY_PATH }}
         run: |
           set -euo pipefail
-          updater=true
-          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
-            echo "::notice::TAURI_SIGNING_PRIVATE_KEY is not set; building without updater artifacts (WP9)"
-            updater=false
+          configs=(--config tauri.release.conf.json)
+          if [ "${{ matrix.name }}" = windows ]; then
+            configs+=(--config tauri.release.windows.conf.json)
           fi
-          config="{\"build\":{\"beforeBuildCommand\":null},\"bundle\":{\"createUpdaterArtifacts\":$updater}}"
           pnpm dlx @tauri-apps/cli@2.12.1 build --ci \
-            --bundles "${{ matrix.bundles }}" --config "$config"
+            --bundles "${{ matrix.bundles }}" "${configs[@]}" \
+            --config '{"build":{"beforeBuildCommand":null}}'
+
+      - name: Notarise the disk image
+        if: matrix.name == 'macos'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          dmgs=("${STENO_TARGET_DIR:-target}"/release/bundle/dmg/*.dmg)
+          [[ ${#dmgs[@]} -eq 1 && -f "${dmgs[0]}" ]] || { echo "::error::expected one .dmg, found ${dmgs[*]}"; exit 1; }
+          apps/desktop/scripts/notarize-dmg.sh "${dmgs[0]}"
+
+      - name: Check the bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          signed=()
+          if [ "${{ matrix.name }}" = macos ]; then signed=(--signed); fi
+          apps/desktop/scripts/check-bundle.sh "${signed[@]}" \
+            "${STENO_TARGET_DIR:-target}/release/bundle" "${{ matrix.bundles }}"
 
       # A self-hosted runner keeps its target directory outside the
       # workspace; the upload step reads from the workspace.
@@ -156,3 +288,119 @@ jobs:
             ${{ matrix.artifacts }}
             target/release/bundle/**/*.sig
           if-no-files-found: error
+
+      - name: Remove keychain and keys
+        if: always() && matrix.name == 'macos'
+        run: |
+          apps/desktop/scripts/signing-keychain.sh remove "$KEYCHAIN_PATH" "$KEYCHAINS_BEFORE"
+          rm -f "$RUNNER_TEMP"/AuthKey_*.p8
+
+  publish:
+    name: publish
+    if: github.ref_type == 'tag'
+    needs: [plan, bundle]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+      VERSION: ${{ needs.plan.outputs.version }}
+      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: steno-desktop-*
+          path: dist
+          merge-multiple: true
+
+      # One flat directory of release assets. The macOS updater archive is
+      # `Steno.app.tar.gz` on every version; it gets the version and the
+      # architecture the other assets carry (its signature covers the
+      # bytes, not the name).
+      - name: Assets
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          find dist -type f -exec mv -t assets {} +
+          if [ -f assets/Steno.app.tar.gz ]; then
+            mv assets/Steno.app.tar.gz "assets/Steno_${VERSION}_aarch64.app.tar.gz"
+            mv assets/Steno.app.tar.gz.sig "assets/Steno_${VERSION}_aarch64.app.tar.gz.sig"
+          fi
+          ls -l assets
+
+      # Every signature against the public key the installed apps verify
+      # with, so a secret that is not the config key's other half fails
+      # here and not on every user's next update.
+      - name: Verify the updater signatures
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends minisign >/dev/null
+          pubkey="$(jq -r '.plugins.updater.pubkey' apps/desktop/src-tauri/tauri.conf.json | base64 --decode)"
+          printf '%s\n' "$pubkey" > "$RUNNER_TEMP/updater.pub"
+          count=0
+          for sig in assets/*.sig; do
+            base64 --decode "$sig" > "$RUNNER_TEMP/signature.minisig"
+            minisign -V -q -p "$RUNNER_TEMP/updater.pub" -x "$RUNNER_TEMP/signature.minisig" -m "${sig%.sig}"
+            count=$((count + 1))
+          done
+          test "$count" -eq 5 || { echo "::error::expected five updater signatures, found $count"; exit 1; }
+          echo "verified $count updater signatures"
+
+      - name: Updater manifest
+        run: |
+          set -euo pipefail
+          apps/desktop/scripts/updater-manifest.sh "$VERSION" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" assets > latest.json
+          mv latest.json assets/latest.json
+          cat assets/latest.json
+
+      - name: Publish the release
+        run: |
+          set -euo pipefail
+          notes="Steno desktop $VERSION: macOS (Apple silicon, signed and notarised), Linux (.deb, AppImage) and Windows (.msi, setup .exe; not code-signed, so SmartScreen asks before the first install). The Mac app on the Swift releases stays the one to install on macOS until the cutover."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists; replacing assets"
+          else
+            gh release create "$TAG" --draft --prerelease --latest=false \
+              --verify-tag --title "Steno desktop $VERSION" --notes "$notes"
+          fi
+          gh release upload "$TAG" assets/* --clobber
+          gh release edit "$TAG" --draft=false --prerelease --latest=false
+          gh release view "$TAG" --json url --jq .url
+
+      # After the release is public, so the manifest's URLs resolve. Each
+      # lane is a release holding only latest.json; its tag moves to this
+      # commit so the lane's page says what it serves. A release moves the
+      # beta lane too, unless that lane already serves a pre-release of a
+      # later version (0.3.0-rc.1 stays when 0.2.1 ships).
+      - name: Update lanes
+        run: |
+          set -euo pipefail
+          lanes=(desktop-beta)
+          if [ "$PRERELEASE" != true ]; then
+            lanes=(desktop-stable)
+            beta="$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/desktop-beta/latest.json" | jq -r .version || true)"
+            newest="$(printf '%s\n%s\n' "${beta%%-*}" "$VERSION" | sort -V | tail -n 1)"
+            if [ -z "$beta" ] || [ "$newest" = "$VERSION" ]; then
+              lanes+=(desktop-beta)
+            else
+              echo "the beta lane keeps $beta, a later version than $VERSION"
+            fi
+          fi
+          for lane in "${lanes[@]}"; do
+            notes="The update manifest of the ${lane#desktop-} lane: Steno desktop $VERSION ($TAG). Installed desktop apps read latest.json from here; the installers are on $TAG."
+            if gh release view "$lane" >/dev/null 2>&1; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$lane" -f sha="$GITHUB_SHA" -F force=true >/dev/null
+              gh release edit "$lane" --notes "$notes" --prerelease --latest=false
+            else
+              gh release create "$lane" --target "$GITHUB_SHA" --prerelease --latest=false \
+                --title "Steno desktop updates (${lane#desktop-})" --notes "$notes"
+            fi
+            gh release upload "$lane" assets/latest.json --clobber
+            echo "$lane serves $VERSION"
+          done
