@@ -177,6 +177,9 @@ struct SidecarProcess {
     /// crash counts as the probe's.
     load_asked_directml: bool,
     ceiling: u64,
+    /// Set by the stdout reader once it has queued
+    /// [`Event::OverCeiling`].
+    over_ceiling: Arc<AtomicBool>,
 }
 
 /// The lines of the child's stderr kept for a crash report.
@@ -320,19 +323,25 @@ impl SidecarProcess {
         let (sender, events) = mpsc::channel();
         let replies = sender.clone();
         let ceiling = config.memory_ceiling_bytes;
+        let over_ceiling = Arc::new(AtomicBool::new(false));
+        let over = Arc::clone(&over_ceiling);
         std::thread::Builder::new()
             .name(format!("sidecar-{pid}-stdout"))
             .spawn(move || {
                 let mut stdout = BufReader::new(stdout);
-                let mut over = false;
                 loop {
                     let event = match protocol::read_header::<_, Reply>(&mut stdout) {
                         Ok(Some(Reply::Memory { rss_bytes })) => {
-                            if over || rss_bytes <= ceiling {
+                            if over.load(Ordering::SeqCst) || rss_bytes <= ceiling {
                                 continue;
                             }
-                            over = true;
-                            Event::OverCeiling(rss_bytes)
+                            if replies.send(Event::OverCeiling(rss_bytes)).is_err() {
+                                return;
+                            }
+                            // After the send: whoever reads it finds the
+                            // event queued.
+                            over.store(true, Ordering::SeqCst);
+                            continue;
                         }
                         Ok(Some(reply)) => Event::Reply(reply),
                         Ok(None) | Err(FrameError::Truncated | FrameError::Io(_)) => Event::Closed,
@@ -357,6 +366,7 @@ impl SidecarProcess {
             provider: None,
             load_asked_directml: false,
             ceiling,
+            over_ceiling,
         };
         match process.wait_for(None, config.startup_timeout)? {
             Reply::Ready { protocol, .. } if protocol == PROTOCOL_VERSION => Ok(process),
@@ -813,6 +823,18 @@ impl SidecarSpeechEngine {
     #[must_use]
     pub fn spawns(&self) -> u64 {
         self.shared.spawns.load(Ordering::SeqCst)
+    }
+
+    /// For tests: whether the running child's report of a resident set
+    /// over the ceiling is queued, for the next call to find. Blocking,
+    /// and it waits for a request that runs.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn over_ceiling_queued(&self) -> bool {
+        self.shared
+            .lock()
+            .as_ref()
+            .is_some_and(|p| p.over_ceiling.load(Ordering::SeqCst))
     }
 
     /// Asks the running child for its pid, resident set, whether its

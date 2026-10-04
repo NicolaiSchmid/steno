@@ -695,21 +695,13 @@ async fn a_child_over_the_ceiling_while_idle_is_replaced_without_an_error() {
     engine.prepare().await.unwrap();
     let pid = engine.pid().unwrap();
     assert_works(&engine, &tone(0.5)).await;
-    // Heartbeats for the reader to queue the report. Should it arrive
-    // only during the next request, that request fails on it instead;
-    // either way the child is replaced, but only the first way tests the
-    // idle check.
-    std::thread::sleep(Duration::from_millis(200));
-    if let Err(error) = engine.transcribe(&tone(0.5), None).await {
-        assert!(
-            matches!(
-                sidecar_error(error.as_ref()),
-                SidecarError::MemoryCeiling { .. }
-            ),
-            "{error}"
-        );
-        assert_works(&engine, &tone(0.5)).await;
-    }
+    // The report is queued while no request runs, so the next call finds
+    // it before it sends one.
+    assert!(
+        within_ten_seconds(|| engine.over_ceiling_queued().then_some(())).is_some(),
+        "the reader never queued the report over the ceiling"
+    );
+    assert_works(&engine, &tone(0.5)).await;
     assert_ne!(engine.pid(), Some(pid));
     assert_eq!(engine.spawns(), 2);
 }
