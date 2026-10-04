@@ -129,7 +129,7 @@ impl MonotonicClock for SystemClock {
     }
 }
 
-/// The app's exit as the pipelines see it, set by [`ProcessingPipeline::quit`].
+/// The app's exit as the pipelines see it ([`ProcessingPipeline::quit`]).
 /// Clones share it, so one latch stops every pipeline built over
 /// dependencies that carry it ([`PipelineDependencies::with_quit_latch`]).
 /// Once it is set, no job starts, and a job that fails leaves its meeting
@@ -494,11 +494,9 @@ impl ProcessingPipeline {
         self.state().in_flight.iter().copied().collect()
     }
 
-    /// Sets the pipeline's [`QuitLatch`] for the app's exit: from now on
-    /// no job starts (`enqueue` still saves the meeting `queued` with its
-    /// asset), and a job already running that fails leaves its meeting
-    /// for the next launch. The services call it first thing in
-    /// `App::shutdown`.
+    /// Sets the pipeline's [`QuitLatch`] for the app's exit, which quits
+    /// every pipeline sharing it; `enqueue` still saves the meeting
+    /// `queued` with its asset.
     pub fn quit(&self) {
         self.inner.dependencies.quit_latch.set();
     }
