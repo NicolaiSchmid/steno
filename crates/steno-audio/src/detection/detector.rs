@@ -51,12 +51,12 @@ struct Core {
     ignoring_pids: BTreeSet<i32>,
     debounce: Duration,
     poll_interval: Duration,
-    /// Held across a whole `evaluate`, snapshot included, so the listener
+    /// Held across a whole evaluation, snapshot included, so the listener
     /// and the poller apply their snapshots in the order they read them:
     /// a poll snapshot read before a change and applied after it would
     /// otherwise cancel the debounce the change armed. The Swift detector
-    /// is an actor, which serialises the same way. `stop` holds it too, so
-    /// no evaluation runs across it. Taken before `inner`.
+    /// is an actor, which serialises the same way. `start` and `stop` hold
+    /// it too, so no evaluation runs across either. Taken before `inner`.
     evaluating: Mutex<()>,
     inner: Mutex<Inner>,
 }
@@ -140,12 +140,17 @@ impl MeetingDetector {
     }
 
     /// Reads a first snapshot (an already-open microphone is reported after
-    /// the debounce like any other), then listens and polls.
+    /// the debounce like any other), then listens and polls. A `stop()` or
+    /// a second `start()` meanwhile waits for it to finish.
     pub fn start(&self) -> Result<(), ActivityError> {
+        // Held to the end, so a `stop()` cannot run between the first
+        // snapshot and `running` being set and leave the threads running;
+        // they wait for it before their first evaluation.
+        let _evaluating = self.core.evaluating();
         if self.is_running() {
             return Ok(());
         }
-        self.core.evaluate(None)?;
+        self.core.apply_snapshot()?;
         let running = Cancel::new();
         let changes = self.core.source.changes();
         let listener = {
@@ -195,11 +200,7 @@ impl MeetingDetector {
     pub fn stop(&self) {
         // An evaluation in flight finishes first; one that waits for the
         // lock finds `running` cancelled and applies nothing.
-        let evaluating = self
-            .core
-            .evaluating
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let evaluating = self.core.evaluating();
         let (running, pending, threads) = {
             let mut inner = self.core.lock();
             inner.pending_generation += 1;
@@ -239,21 +240,24 @@ impl Core {
     }
 
     fn evaluate_ignoring_errors(self: &Arc<Self>, running: &Cancel) {
-        let _ = self.evaluate(Some(running));
+    fn evaluating(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.evaluating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The listener's and the poller's evaluation; `running` is their flag:
+    /// once `stop` raised it, nothing is applied.
+        let _evaluating = self.evaluating();
+        if running.is_cancelled() {
+            return;
+        }
+        let _ = self.apply_snapshot();
     }
 
     /// Compares the snapshot with what was reported and arms or disarms
-    /// the debounce timer. `running` is the listener's or the poller's
-    /// flag (`None` for `start`'s first read): once `stop` raised it,
-    /// nothing is applied.
-    fn evaluate(self: &Arc<Self>, running: Option<&Cancel>) -> Result<(), ActivityError> {
-        let _evaluating = self
-            .evaluating
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if running.is_some_and(Cancel::is_cancelled) {
-            return Ok(());
-        }
+    /// the debounce timer. The caller holds `evaluating`.
+    fn apply_snapshot(self: &Arc<Self>) -> Result<(), ActivityError> {
         let mut active: Vec<ProcessAudioActivity> = self
             .source
             .snapshot()?

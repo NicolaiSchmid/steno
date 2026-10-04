@@ -341,3 +341,70 @@ fn a_poll_in_flight_during_stop_leaves_no_holder() {
         "a stopped detector has no timer and no holder"
     );
 }
+
+/// A source whose `changes()`, which `start()` calls after its first
+/// snapshot, waits to be let go.
+struct HeldStart {
+    inner: FakeProcessAudioActivity,
+    entered: Sender<()>,
+    release: Mutex<Receiver<()>>,
+}
+
+impl ProcessAudioActivitySource for HeldStart {
+    fn snapshot(&self) -> Result<Vec<ProcessAudioActivity>, ActivityError> {
+        self.inner.snapshot()
+    }
+
+    fn changes(&self) -> Receiver<()> {
+        let _ = self.entered.send(());
+        let _ = self
+            .release
+            .lock()
+            .unwrap()
+            .recv_timeout(Duration::from_secs(5));
+        self.inner.changes()
+    }
+}
+
+/// A `stop()` while `start()` is between its first snapshot and its
+/// threads waits for the start, then stops what it started: the detector
+/// is not left running with no `stop()` to come.
+#[test]
+fn a_stop_during_start_waits_for_it_and_stops_it() {
+    let clock = Arc::new(ManualClock::new());
+    let (entered, entered_receiver) = channel();
+    let (release, release_receiver) = channel();
+    let source = Arc::new(HeldStart {
+        inner: FakeProcessAudioActivity::new(vec![]),
+        entered,
+        release: Mutex::new(release_receiver),
+    });
+    let detector = Arc::new(MeetingDetector::new(
+        source as Arc<dyn ProcessAudioActivitySource>,
+        Arc::clone(&clock) as Arc<dyn steno_audio::Clock>,
+        Some(BTreeSet::from([1])),
+        MeetingDetector::DEFAULT_DEBOUNCE,
+        MeetingDetector::DEFAULT_POLL_INTERVAL,
+    ));
+    let starter = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || detector.start())
+    };
+    entered_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("start read its first snapshot");
+    let stopper = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || detector.stop())
+    };
+    // Time for the stop to reach the lock the start holds.
+    std::thread::sleep(Duration::from_millis(200));
+    release.send(()).unwrap();
+    starter.join().unwrap().unwrap();
+    stopper.join().unwrap();
+    assert!(!detector.is_running());
+    assert!(
+        clock.wait_for_sleepers(0),
+        "no poll timer outlives the stop"
+    );
+}
