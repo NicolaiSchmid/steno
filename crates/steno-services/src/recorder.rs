@@ -30,7 +30,8 @@ struct Active {
     mode: CaptureMode,
     /// The latest lane levels, written by the forwarding thread.
     levels: Arc<Mutex<Option<LaneLevels>>>,
-    level_thread: Option<JoinHandle<()>>,
+    /// The forwarding thread, joined once the session is dropped.
+    level_thread: JoinHandle<()>,
 }
 
 struct Inner {
@@ -201,6 +202,24 @@ impl CaptureRecorder {
         }
         let meeting_id = meeting.id;
         let shared = Arc::new(Mutex::new(None::<LaneLevels>));
+        // Levels arrive on a std channel at 10 Hz; a thread forwards them
+        // into `Active::levels` and the host republishes `recording`. It
+        // is spawned before `Recording` is visible, so the stop that takes
+        // the session always takes the thread with it.
+        let hook = self.hook();
+        let level_thread = {
+            let shared = shared.clone();
+            std::thread::spawn(move || {
+                while let Ok(update) = levels_receiver.recv() {
+                    *shared
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(levels(&update));
+                    if let Some(hook) = &hook {
+                        hook();
+                    }
+                }
+            })
+        };
         {
             let mut inner = self.inner();
             inner.status.state = RecordingState::Recording;
@@ -215,25 +234,9 @@ impl CaptureRecorder {
                 session,
                 meeting_id,
                 mode,
-                levels: shared.clone(),
-                level_thread: None,
+                levels: shared,
+                level_thread,
             });
-        }
-        // Levels arrive on a std channel at 10 Hz; a thread forwards them
-        // into `Active::levels` and the host republishes `recording`.
-        let hook = self.hook();
-        let thread = std::thread::spawn(move || {
-            while let Ok(update) = levels_receiver.recv() {
-                *shared
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(levels(&update));
-                if let Some(hook) = &hook {
-                    hook();
-                }
-            }
-        });
-        if let Some(active) = self.inner().active.as_mut() {
-            active.level_thread = Some(thread);
         }
         Ok(settings)
     }
@@ -311,10 +314,8 @@ impl CaptureRecorder {
                 Err(message)
             }
         };
-        if let Some(thread) = active.level_thread {
-            drop(active.session);
-            let _ = thread.join();
-        }
+        drop(active.session);
+        let _ = active.level_thread.join();
         let mut inner = self.inner();
         inner.status.state = RecordingState::Idle;
         inner.status.started_at = None;
