@@ -1,26 +1,31 @@
 //! The Windows live backend against the real WASAPI (WP10a).
 //!
-//! **Nobody has run the ignored tests yet.** No Windows machine has run
-//! them; the backend is compile-tested on the `windows-latest` CI runner,
-//! which has no audio device. The `#[ignore]`d tests here are
-//! the live check a Windows machine with a microphone and speakers must
-//! run before the backend ships (the plan's parity list):
+//! **Nobody has run the ignored tests on hardware yet.** The
+//! `windows-latest` CI runner has no audio endpoint, so it records no
+//! microphone; process loopback runs there all the same and delivers
+//! silence. The `#[ignore]`d tests here are the live check a Windows
+//! machine with a microphone and speakers must run before the backend
+//! ships (the plan's parity list):
 //!
 //! ```text
 //! cargo test -p steno-audio --test live_windows -- --ignored --nocapture
 //! ```
 //!
-//! Without `--nocapture` the record they print is swallowed. Play audio
-//! during `call_capture_records_both_lanes` (any media player) so the
-//! loopback has something to deliver.
+//! Without `--nocapture` the record they print is swallowed, and so are
+//! the backend's `info` logs (which loopback runs, the follower's underrun
+//! and slip counts at stop), which these tests print to the test output;
+//! `RUST_LOG` overrides their `steno_audio=info` filter. Play audio during
+//! `call_capture_records_both_lanes` (any media player) so the loopback has
+//! something to deliver.
 //!
 //! The tests that are not ignored run on every Windows host, the CI runner
-//! included: they need no device and check only that the COM paths return
-//! within a bound with an answer (a capture that fails with "no input
-//! device" is a pass) instead of hanging or crashing. Each run happens on
-//! its own thread joined with a deadline, so a hang fails instead of
-//! stalling the suite. CI runs them with `--nocapture`, so its log shows
-//! what COM answered.
+//! included: they check that the COM paths return within a bound with an
+//! answer (a capture that fails with "no input device" is a pass) instead
+//! of hanging or crashing. Each run happens on its own thread joined with
+//! a deadline, so a hang fails instead of stalling the suite. On the CI
+//! runner (`GITHUB_ACTIONS` set) the system-lane capture must also start,
+//! deliver whole periods, stop dead and restart. CI runs them with
+//! `--nocapture`, so its log shows what COM answered.
 // Plan package names (WP10a) are not code.
 #![allow(clippy::doc_markdown)]
 #![cfg(windows)]
@@ -35,6 +40,19 @@ use steno_audio::{
     CaptureBackend, CaptureMode, LaneFrameSink, LiveCaptureBackend, ProcessAudioActivitySource,
 };
 use steno_core::AudioLane;
+
+/// The backend's logs into the test output, at `info` unless a non-empty
+/// `RUST_LOG` says otherwise.
+fn show_logs() {
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|filter| !filter.is_empty())
+        .unwrap_or_else(|| "steno_audio=info".into());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_test_writer()
+        .try_init();
+}
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
 fn within<T: Send + 'static>(
@@ -58,17 +76,41 @@ fn peak(samples: &[f32]) -> f32 {
 /// What one start, capture, stop run saw.
 struct Run {
     callbacks: usize,
+    /// Frames per lane delivered before `stop()` returned.
+    available: usize,
+    /// Frames per lane that arrived in the 300 ms after `stop()`.
+    after_stop: usize,
     peaks: Vec<f32>,
 }
 
 /// Starts the backend for `lanes`, captures `duration`, stops, and returns
 /// the callbacks counted in between (each completed callback signals the
-/// sink's wake once) and each lane's peak, or `None` when the start
-/// failed, which is printed.
-fn start_capture_stop(lanes: Vec<AudioLane>, duration: Duration) -> Option<Run> {
+/// sink's wake once), what arrived after the stop and each lane's peak, or
+/// `None` when the start failed, which is printed. With `restart`, the
+/// same backend starts and stops a second time, as the session's rebuild
+/// does, and the run is the second one's.
+fn start_capture_stop(lanes: Vec<AudioLane>, duration: Duration, restart: bool) -> Option<Run> {
+    show_logs();
     within(Duration::from_secs(60), "start, capture, stop", move || {
         let backend = LiveCaptureBackend::new();
-        let sink = Arc::new(LaneFrameSink::new(&lanes));
+        // Room for the whole capture: nothing overflows undrained.
+        let seconds = duration.as_secs_f64() + 1.0;
+        let sink = Arc::new(LaneFrameSink::with_handler(
+            &lanes,
+            steno_audio::SAMPLE_RATE,
+            seconds,
+            Box::new(|_| {}),
+        ));
+        if restart {
+            backend
+                .start(&lanes, None, Arc::clone(&sink))
+                .inspect_err(|error| println!("first start for {lanes:?} failed: {error}"))
+                .ok()?;
+            std::thread::sleep(duration);
+            backend.stop();
+            while sink.wake().try_take() {}
+            sink.clear();
+        }
         let started = Instant::now();
         let stream = match backend.start(&lanes, None, Arc::clone(&sink)) {
             Ok(stream) => stream,
@@ -90,14 +132,22 @@ fn start_capture_stop(lanes: Vec<AudioLane>, duration: Duration) -> Option<Run> 
             callbacks += 1;
         }
         let available = sink.available_to_read();
+        std::thread::sleep(Duration::from_millis(300));
+        let after_stop = sink.available_to_read() - available;
         let peaks: Vec<f32> = (0..lanes.len())
             .map(|index| peak(&sink.ring(index).drain_all()))
             .collect();
         println!(
-            "{callbacks} callbacks, {available} samples per lane, dropped {:?}, peaks {peaks:?}",
+            "{callbacks} callbacks, {available} samples per lane, {after_stop} after stop, \
+             dropped {:?}, peaks {peaks:?}",
             sink.dropped_samples()
         );
-        Some(Run { callbacks, peaks })
+        Some(Run {
+            callbacks,
+            available,
+            after_stop,
+            peaks,
+        })
     })
 }
 
@@ -134,7 +184,7 @@ fn a_capture_without_a_device_answers_and_stops() {
         CaptureMode::Call.lanes(),
         vec![AudioLane::System],
     ] {
-        if start_capture_stop(lanes.clone(), Duration::from_millis(200)).is_none() {
+        if start_capture_stop(lanes.clone(), Duration::from_millis(200), false).is_none() {
             println!(
                 "SKIPPED live capture for {lanes:?}: no usable audio device here, which is \
                  expected on the CI runner; run the --ignored tests on a Windows machine"
@@ -145,6 +195,29 @@ fn a_capture_without_a_device_answers_and_stops() {
     let backend = LiveCaptureBackend::new();
     backend.stop();
     backend.stop();
+}
+
+/// The CI runner has no endpoint, but process loopback runs there and
+/// delivers a silent 10 ms period per callback, so the system-lane path is
+/// checked for real: it starts, delivers whole periods, delivers nothing
+/// once `stop()` has returned, and the same backend starts again. Only
+/// where `GITHUB_ACTIONS` is set: elsewhere a machine may have no audio
+/// service at all.
+#[test]
+fn on_the_ci_runner_a_system_capture_delivers_stops_and_restarts() {
+    if std::env::var_os("GITHUB_ACTIONS").is_none() {
+        println!("SKIPPED: the system-lane contract is checked on the CI runner only");
+        return;
+    }
+    let run = start_capture_stop(vec![AudioLane::System], Duration::from_millis(300), true)
+        .expect("the system capture starts and restarts on the CI runner");
+    assert!(run.callbacks > 0, "the system stream never delivered");
+    assert_eq!(
+        run.available,
+        run.callbacks * 480,
+        "every callback carries one 10 ms period"
+    );
+    assert_eq!(run.after_stop, 0, "nothing arrives after stop()");
 }
 
 #[test]
@@ -173,17 +246,19 @@ fn session_notifications_start_and_stop() {
 #[test]
 #[ignore = "needs a Windows machine with a microphone; run with -- --ignored --nocapture"]
 fn in_person_capture_records_the_microphone() {
-    let run = start_capture_stop(CaptureMode::InPerson.lanes(), Duration::from_secs(1))
-        .expect("the in-person capture starts");
+    let run = start_capture_stop(CaptureMode::InPerson.lanes(), Duration::from_secs(1), true)
+        .expect("the in-person capture starts and restarts");
     assert!(run.callbacks > 0, "the microphone stream never delivered");
+    assert_eq!(run.after_stop, 0, "nothing arrives after stop()");
 }
 
 #[test]
 #[ignore = "needs a Windows machine with a microphone and speakers, audio playing; run with -- --ignored --nocapture"]
 fn call_capture_records_both_lanes() {
-    let run = start_capture_stop(CaptureMode::Call.lanes(), Duration::from_secs(3))
+    let run = start_capture_stop(CaptureMode::Call.lanes(), Duration::from_secs(3), false)
         .expect("the call capture starts");
     assert!(run.callbacks > 0, "the microphone stream never delivered");
+    assert_eq!(run.after_stop, 0, "nothing arrives after stop()");
     println!(
         "system lane peak {:.4}: above zero means process loopback delivered what was playing",
         run.peaks[1]
