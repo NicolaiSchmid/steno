@@ -30,13 +30,12 @@
 //! `steno_speech::onnx` passes, and answers with the provider it chose.
 //! It reads framed requests from stdin with the audio as a binary
 //! payload, answers on stdout, and reports its resident set from a
-//! heartbeat thread so the parent can kill it at the memory ceiling.
-//! It exits on a shutdown
-//! request and as soon as stdin ends or stdout breaks, so a dead parent
-//! leaves no child behind. Its log goes to stderr, which the parent keeps
-//! the tail of for crash reports. Its sessions open through
-//! `steno_speech::onnx`, which switches ONNX Runtime's telemetry off first,
-//! so the child sends nothing anywhere.
+//! heartbeat thread so the parent can kill it at the memory ceiling. It
+//! exits on a shutdown request and as soon as stdin ends or stdout breaks,
+//! so a dead parent leaves no child behind. Its log goes to stderr, which
+//! the parent keeps the tail of for crash reports. Its sessions open
+//! through `steno_speech::onnx`, which switches ONNX Runtime's telemetry
+//! off first, so the child sends nothing anywhere.
 //!
 //! # Test faults
 //!
