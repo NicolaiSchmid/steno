@@ -67,11 +67,14 @@ steno_core::string_enum! {
         /// A line of stderr that is not UTF-8, then a Rust panic, which
         /// ends the process with status 101.
         Panic = "panic",
+        /// 1 MiB of stderr without a newline, then a Rust panic: the
+        /// parent's crash report must stay small.
+        Flood = "flood",
         /// Exits with status 3.
         Exit = "exit",
         /// Never answers.
         Hang = "hang",
-        /// Allocates and touches memory without bound, then hangs.
+        /// Allocates and touches 4 GiB in 16 MiB steps, then hangs.
         Allocate = "allocate",
         /// Writes bytes that are not a frame (a length prefix of 16 MiB,
         /// then text), then hangs.
@@ -247,6 +250,10 @@ impl Engine for FakeEngine {
                 // write: the parent must still keep the panic message.
                 let _ = io::stderr().write_all(b"native noise \xff\xfe\n");
                 panic!("simulated panic in the speech engine")
+            }
+            Some(Fault::Flood) => {
+                let _ = io::stderr().write_all(&vec![b'x'; 1 << 20]);
+                panic!("simulated panic after a flood of stderr")
             }
             Some(Fault::Exit) => std::process::exit(3),
             Some(Fault::Hang) => hang(),

@@ -1,13 +1,15 @@
 //! `SidecarSpeechEngine` against the real `steno-speech-sidecar` binary:
 //! the protocol round trip, health and graceful shutdown, and every way
 //! the child can fail (killed mid-request, aborting the way an uncaught
-//! C++ exception does, panicking, exiting, hanging past the deadline,
+//! C++ exception does, panicking, panicking after a flood of stderr,
+//! exiting, hanging past the deadline,
 //! allocating past the memory ceiling, writing garbage, reporting an
 //! error, staying silent at start, speaking another protocol version).
 //! Each failure must come back as an error from the engine, never take the
 //! test process down, and leave an engine that works on the next call.
-//! Driven by hand, without the client, a child must exit when its parent's
-//! pipes close, idle or busy.
+//! Dropping the engine stops its child, inside a runtime or not. Driven by
+//! hand, without the client, a child must exit when its parent's pipes
+//! close, idle or busy.
 //!
 //! The fake engine needs no models; the last test, ignored by default,
 //! runs the real one when `STENO_MODELS_DIR` holds them
@@ -299,14 +301,31 @@ async fn a_panic_or_an_exit_is_a_crash_with_the_child_s_last_words() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_flood_of_stderr_leaves_a_crash_report_of_bounded_size() {
+    // 1 MiB without a newline, then the panic: the report keeps the panic
+    // and at most 20 pieces of 4 KiB.
+    let (engine, _dir) = engine_with_fault("flood", |_| {});
+    assert_recovers(&engine, |error| {
+        let SidecarError::Crashed { stderr, .. } = error else {
+            panic!("{error}");
+        };
+        assert!(stderr.contains("after a flood of stderr"), "{stderr}");
+        assert!(stderr.len() <= 20 * 4097, "{} bytes", stderr.len());
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_hangs_is_killed_at_the_deadline() {
+    // The floor also bounds the recovery call, a fresh child's first
+    // transcription, so it leaves a busy runner room.
     let (engine, _dir) = engine_with_fault("hang", |c| {
-        c.transcribe_timeout_floor = Duration::from_millis(800);
+        c.transcribe_timeout_floor = Duration::from_secs(2);
     });
     let started = Instant::now();
     assert_recovers(&engine, |error| {
         assert!(
-            matches!(error, SidecarError::Timeout { after } if *after == Duration::from_millis(800)),
+            matches!(error, SidecarError::Timeout { after } if *after == Duration::from_secs(2)),
             "{error}"
         );
     })

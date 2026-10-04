@@ -1367,7 +1367,7 @@ mod tests {
     fn a_download_that_finds_its_file_installed_leaves_no_partial() {
         // Installed by another download between the check and the lock:
         // this one returns at once (the URL is never fetched) and must not
-        // leave the partial it opened.
+        // leave the partial it opened, whatever it held.
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         let body = b"not really a model".to_vec();
@@ -1376,6 +1376,8 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let destination = directory.join("model.onnx");
         fs::write(&destination, &body).unwrap();
+        // Bytes a killed run left, which only this call would delete.
+        fs::write(directory.join("model.onnx.partial"), &body[..4]).unwrap();
         store
             .download_with_retries(
                 "http://127.0.0.1:9/never",
