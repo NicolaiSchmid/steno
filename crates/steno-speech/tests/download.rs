@@ -178,6 +178,7 @@ fn body(len: usize) -> Vec<u8> {
 const ID: &str = "test-asset";
 const NAME: &str = "model.onnx";
 const PARTIAL: &str = "model.onnx.partial";
+const LOCK: &str = "model.onnx.lock";
 
 /// A server over a directory holding a file at `<ID>/<NAME>`, an empty
 /// store and the asset of that one file.
@@ -279,7 +280,7 @@ fn a_cut_connection_resumes_with_a_range_request() {
         .expect("a Range request");
     assert!(resumed_at > 0 && resumed_at <= 100_000, "{resumed_at}");
     assert_eq!(starts, [0, resumed_at]);
-    assert_eq!(names(&f.directory()), [NAME]);
+    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
@@ -302,7 +303,7 @@ fn a_partial_a_killed_run_left_is_resumed_not_fetched_again() {
             range: Some("bytes=123456-".to_owned()),
         }]
     );
-    assert_eq!(names(&f.directory()), [NAME]);
+    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
@@ -313,7 +314,7 @@ fn a_corrupt_prefix_fails_its_checksum_and_is_fetched_again_from_zero() {
     f.install();
     let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
     assert_eq!(ranges, [Some("bytes=20000-".to_owned()), None]);
-    assert_eq!(names(&f.directory()), [NAME]);
+    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
@@ -363,7 +364,7 @@ fn a_wrong_checksum_is_rejected_and_nothing_is_kept() {
     f.asset.files[0].sha256 = digest(b"something else");
     let error = f.store.ensure(&f.asset, &mut |_| {}).unwrap_err();
     assert!(matches!(error, SpeechError::Checksum { .. }), "{error}");
-    assert_eq!(names(&f.directory()), Vec::<String>::new());
+    assert_eq!(names(&f.directory()), [LOCK]);
     assert!(!f.store.is_installed(&f.asset));
 }
 
@@ -389,13 +390,13 @@ fn a_mirror_serves_every_file_from_asset_id_and_file_name() {
 
 #[test]
 fn a_download_waits_for_the_one_holding_its_partial_and_resumes_it() {
-    // Another download holds the partial and stops; this one waits for
-    // the lock instead of fetching a copy of its own, then continues the
-    // bytes the other left.
+    // Another download holds the lock and stops; this one waits for the
+    // lock instead of fetching a copy of its own, then continues the bytes
+    // the other left.
     let contents = body(20_000);
     let f = fixture(&contents, Behaviour::default());
-    let partial = f.leave_partial(&contents[..7_000]);
-    let held = File::options().write(true).open(&partial).unwrap();
+    f.leave_partial(&contents[..7_000]);
+    let held = File::create(f.directory().join(LOCK)).unwrap();
     held.lock().unwrap();
     let holder = std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -405,7 +406,7 @@ fn a_download_waits_for_the_one_holding_its_partial_and_resumes_it() {
     holder.join().unwrap();
     let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
     assert_eq!(ranges, [Some("bytes=7000-".to_owned())]);
-    assert_eq!(names(&f.directory()), [NAME]);
+    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
@@ -429,6 +430,6 @@ fn a_206_from_the_wrong_offset_or_without_a_range_is_not_appended() {
             [Some("bytes=12000-".to_owned()), None],
             "labelled {labelled}"
         );
-        assert_eq!(names(&f.directory()), [NAME]);
+        assert_eq!(names(&f.directory()), [NAME, LOCK]);
     }
 }
