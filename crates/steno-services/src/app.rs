@@ -1032,7 +1032,7 @@ mod tests {
         app.pipeline.reload().unwrap();
         assert_eq!(
             app.pipeline.current().resume_unfinished().unwrap(),
-            [],
+            Vec::<uuid::Uuid>::new(),
             "a reload's pipeline has quit too"
         );
     }

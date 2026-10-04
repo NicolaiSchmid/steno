@@ -71,7 +71,7 @@ fn speech_settings_with(file: &Path, mirror: Option<String>) -> SpeechSettings {
 
 /// The speech sidecar binary beside the running executable
 /// ([`SidecarConfig::beside_current_exe`]), its sessions on
-/// [`ONNX_THREADS`]. The release bundles carry it there (WP9a of
+/// [`ONNX_THREADS`]. The release bundles carry it there (`WP9a` of
 /// `.plans/2026-10-02-rust-core-and-tauri-shell.md`); a bundle built
 /// without the release configuration does not, and its `prepare` fails
 /// with "could not start". In a
