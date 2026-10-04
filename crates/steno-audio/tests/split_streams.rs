@@ -236,30 +236,28 @@ fn a_period_policy_keeps_two_periods_and_slips_one_period_above() {
     let mut scratch = vec![0.0f32; 4_096];
     let mut out = vec![0.0f32; 480];
     let pulls_per_window = FollowerLane::SLIP_WINDOW / 480;
-    // Primed at the target; then one period too many, sustained: 1 440
-    // left after every pull is the high-water mark, which a whole window
-    // at it does not pass.
     follower.push(packet(&ramp(0, 1_440), 1), &mut scratch);
-    assert_eq!(follower.pull(&mut out), 0);
-    follower.push(packet(&ramp(1_440, 480), 1), &mut scratch);
-    let mut pushed = 1_920;
-    let mut lost = 0;
-    for _ in 0..2 * pulls_per_window {
-        follower.push(packet(&ramp(pushed, 480), 1), &mut scratch);
-        pushed += 480;
-        lost += follower.pull(&mut out);
-    }
-    assert_eq!(lost, 0, "at the high-water mark: no slip");
-    // Two periods too many, sustained: one window later the lowest queue,
-    // 1 920, slips to 960.
-    follower.push(packet(&ramp(pushed, 480), 1), &mut scratch);
-    pushed += 480;
-    for _ in 0..2 * pulls_per_window {
-        follower.push(packet(&ramp(pushed, 480), 1), &mut scratch);
-        pushed += 480;
-        lost += follower.pull(&mut out);
-    }
-    assert_eq!(lost, 960);
+    assert_eq!(follower.pull(&mut out), 0, "primed at the target");
+    // `extra` frames at once, then a period pushed per period pulled for
+    // two windows: the frames lost.
+    let mut pushed = 1_440;
+    let mut sustain = |extra: usize| {
+        follower.push(packet(&ramp(pushed, extra), 1), &mut scratch);
+        pushed += extra;
+        let mut lost = 0;
+        for _ in 0..2 * pulls_per_window {
+            follower.push(packet(&ramp(pushed, 480), 1), &mut scratch);
+            pushed += 480;
+            lost += follower.pull(&mut out);
+        }
+        lost
+    };
+    // One period too many: 1 440 left after every pull is the high-water
+    // mark, which a whole window at it does not pass.
+    assert_eq!(sustain(480), 0, "at the high-water mark: no slip");
+    // Two periods too many: one window later the lowest queue, 1 920,
+    // slips to 960.
+    assert_eq!(sustain(480), 960);
     assert_eq!(follower.slipped_frames(), 960);
     assert_eq!(follower.underrun_frames(), 0);
     assert_eq!(follower.queued(), 960, "back at the target");
