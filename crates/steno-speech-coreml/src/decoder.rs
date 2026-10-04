@@ -171,9 +171,7 @@ mod tests {
     use steno_speech::JointDecision;
 
     use super::*;
-    use crate::vocab::BLANK_ID;
-
-    const BLANK: u32 = 8192;
+    use crate::vocab::BLANK_TOKEN;
 
     /// A model driven by a script of joint decisions in call order; it
     /// records every call, so two loops over the same script can be
@@ -202,7 +200,7 @@ mod tests {
     impl TdtModel for Scripted {
         type Error = SpeechError;
         fn blank_id(&self) -> u32 {
-            BLANK
+            BLANK_TOKEN
         }
         fn duration(&self, bin: usize) -> Result<usize, SpeechError> {
             duration_of(bin)
@@ -218,7 +216,7 @@ mod tests {
         fn joint(&mut self, t: usize) -> Result<JointDecision, SpeechError> {
             self.calls.push(('j', t));
             Ok(self.script.pop_front().unwrap_or(JointDecision {
-                token: BLANK,
+                token: BLANK_TOKEN,
                 probability: 1.0,
                 duration_bin: 1,
             }))
@@ -246,7 +244,8 @@ mod tests {
     fn a_second_zero_duration_emission_advances_and_records_one_frame() {
         // Frame 0: token 1 dur 0, token 2 dur 0 (forced to 1). Frame 1:
         // token 3 dur 0, blank. Frame 2: blank dur 2 past the end.
-        let mut model = Scripted::new(&[(1, 0), (2, 0), (3, 0), (BLANK, 1), (BLANK, 2)]);
+        let mut model =
+            Scripted::new(&[(1, 0), (2, 0), (3, 0), (BLANK_TOKEN, 1), (BLANK_TOKEN, 2)]);
         let mut stats = DecodeStats::default();
         let hypothesis = decode_window(&mut model, 4, spec(3, false), &mut stats).unwrap();
         assert_eq!(
@@ -292,7 +291,7 @@ mod tests {
     fn the_last_window_flushes_until_five_blanks() {
         // The loop: blank past the end of two frames. The flush: a token at
         // the clamped stop frame, then five blanks.
-        let mut model = Scripted::new(&[(BLANK, 2), (7, 0)]);
+        let mut model = Scripted::new(&[(BLANK_TOKEN, 2), (7, 0)]);
         let hypothesis =
             decode_window(&mut model, 2, spec(2, true), &mut DecodeStats::default()).unwrap();
         assert_eq!(id_frame_duration(&hypothesis), vec![(7, 101, 0)]);
@@ -315,7 +314,7 @@ mod tests {
         assert!(model.calls.contains(&('f', 1)));
     }
 
-    /// FluidAudio's loop as #163 ported it, before the shared loop: the
+    /// FluidAudio's `decodeWithTimings` as Steno PR #163 ported it: the
     /// oracle for [`the_shared_loop_decodes_as_fluid_audio_does`].
     #[allow(clippy::too_many_lines)]
     fn fluid_audio_reference(
@@ -365,7 +364,7 @@ mod tests {
             let mut label = decision.token;
             let mut score = confidence(decision.probability);
             let mut duration = duration_of(decision.duration_bin)?;
-            let mut blank = label == BLANK;
+            let mut blank = label == BLANK_TOKEN;
             if !blank && duration == 0 && last_emission_frame == Some(t) && emissions_at_frame >= 1
             {
                 duration = 1;
@@ -385,7 +384,7 @@ mod tests {
                 label = inner.token;
                 score = confidence(inner.probability);
                 duration = duration_of(inner.duration_bin)?;
-                blank = label == BLANK;
+                blank = label == BLANK_TOKEN;
                 if blank && duration == 0 {
                     duration = 1;
                 }
@@ -394,7 +393,7 @@ mod tests {
                 active = t < effective_len;
                 advance = active && blank;
             }
-            if active && label != BLANK {
+            if active && label != BLANK_TOKEN {
                 processed += 1;
                 if processed > MAX_TOKENS_PER_CHUNK {
                     break;
@@ -408,8 +407,9 @@ mod tests {
                     last_emission_frame = Some(label_frame);
                     emissions_at_frame = 1;
                 }
-                // The forced advance moves a frame's second emission on, so
-                // FLUID_AUDIO's two symbols a frame hold and the branch below never runs.
+                // The forced advance moves a frame's second emission on, so no
+                // frame emits a third time (`FLUID_AUDIO`'s two symbols a frame)
+                // and the `MAX_SYMBOLS_PER_STEP` branch below never runs.
                 assert!(emissions_at_frame <= 2);
                 if emissions_at_frame >= MAX_SYMBOLS_PER_STEP {
                     t = (t + 1).min(last_timestep);
@@ -437,7 +437,7 @@ mod tests {
                 counts.1 += 1;
                 let score = confidence(decision.probability);
                 let duration = duration_of(decision.duration_bin)?;
-                if decision.token == BLANK {
+                if decision.token == BLANK_TOKEN {
                     consecutive_blanks += 1;
                 } else {
                     consecutive_blanks = 0;
@@ -487,7 +487,7 @@ mod tests {
             let script: Vec<JointDecision> = (0..rng.below(if long { 1200 } else { 80 }))
                 .map(|_| JointDecision {
                     token: if rng.below(10) < blank_share {
-                        BLANK
+                        BLANK_TOKEN
                     } else {
                         u32::try_from(rng.below(6)).unwrap()
                     },
@@ -527,6 +527,5 @@ mod tests {
             runaways += stats.runaways;
         }
         assert!(runaways > 0, "no window reached the token budget");
-        assert_eq!(usize::try_from(BLANK).unwrap(), BLANK_ID);
     }
 }

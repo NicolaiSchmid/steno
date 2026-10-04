@@ -25,7 +25,7 @@ use crate::SpeechError;
 use crate::chunking::MAX_MODEL_SAMPLES;
 use crate::coreml::{Array, ComputeUnits, EncoderView, Model, inputs};
 use crate::decoder::duration_of;
-use crate::vocab::{BLANK_ID, Vocab};
+use crate::vocab::{BLANK_TOKEN, Vocab};
 
 /// Encoder hidden size (`ASRConstants.encoderHiddenSize`).
 pub const ENCODER_HIDDEN: usize = 1024;
@@ -324,8 +324,8 @@ impl Backend {
     }
 }
 
-/// One window's encoder frames, the models and a worker's scratch: the
-/// prediction network and the joint the shared TDT loop calls.
+/// The shared TDT loop's `TdtModel` over one window: the models, a
+/// worker's scratch and the window's encoder frames.
 pub struct WindowModel<'a> {
     backend: &'a Backend,
     scratch: &'a mut Scratch,
@@ -336,10 +336,7 @@ impl TdtModel for WindowModel<'_> {
     type Error = SpeechError;
 
     fn blank_id(&self) -> u32 {
-        // 8192 fits.
-        #[allow(clippy::cast_possible_truncation)]
-        let blank = BLANK_ID as u32;
-        blank
+        BLANK_TOKEN
     }
 
     fn duration(&self, bin: usize) -> Result<usize, SpeechError> {

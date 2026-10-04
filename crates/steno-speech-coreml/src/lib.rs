@@ -10,8 +10,7 @@
 //!   CI platforms: [`chunking`] (window layout, silence-aligned starts,
 //!   the end-aligned final window, the adaptive speech gate), [`decoder`]
 //!   (FluidAudio's TDT loop: `steno_speech`'s shared loop under
-//!   FluidAudio's guards, the last window's flush and the warm-up
-//!   window's emission cutoff), [`merge`] (the overlap merge, seam-word
+//!   FluidAudio's guards, with steps of its own), [`merge`] (the overlap merge, seam-word
 //!   collapse, seam-gap splice rules),
 //!   [`vocab`] (the SentencePiece vocabulary and its derived id sets),
 //!   [`segments`] (tokens to timed words to `RawSegment`s, as
@@ -84,8 +83,8 @@ pub struct Token {
     pub duration: usize,
 }
 
-/// The shared decoder's token with the id as this crate's vocabulary
-/// indexes it.
+/// The shared loop's token, its `u32` id widened to the `usize` this
+/// crate's vocabulary indexes by.
 impl From<steno_speech::Token> for Token {
     fn from(token: steno_speech::Token) -> Self {
         Token {

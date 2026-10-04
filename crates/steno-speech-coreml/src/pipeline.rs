@@ -426,7 +426,7 @@ impl Transcriber {
         let encoder = self.backend.encode(&mel)?;
         let after_encoder = Instant::now();
         let actual_frames = encoder_frames(effective_len);
-        let mut counts = DecodeStats::default();
+        let mut window_stats = DecodeStats::default();
         let hypothesis = decode_window(
             &mut self.backend.window_model(scratch, &encoder),
             encoder.valid,
@@ -436,13 +436,13 @@ impl Transcriber {
                 emit_after_frame: placement.emit_after_frame,
                 is_last: placement.is_last,
             },
-            &mut counts,
+            &mut window_stats,
         )?;
         stats.preprocessor_seconds += (after_preprocessor - started).as_secs_f64();
         stats.encoder_seconds += (after_encoder - after_preprocessor).as_secs_f64();
         stats.decoder_seconds += after_encoder.elapsed().as_secs_f64();
-        stats.decoder_calls += counts.decoder_calls;
-        stats.joint_calls += counts.joint_calls;
+        stats.decoder_calls += window_stats.decoder_calls;
+        stats.joint_calls += window_stats.joint_calls;
         Ok(hypothesis)
     }
 
