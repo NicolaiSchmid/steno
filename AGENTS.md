@@ -76,9 +76,14 @@ missing local setup, run it. Do not ask first.
   `Diarizer`, `EchoCanceller`, `LanguageModel`, `Destination`. Two
   implementations before generalising further.
 - Persistence through GRDB. Migrations are append-only and live in one file.
-- Audio never leaves the device. Any code path that sends bytes over the
-  network must be a `Destination` or the LLM client, and the LLM client sends
-  text only.
+- Audio never leaves the device. Only these code paths open network
+  connections, and a new one needs a plan first:
+  - a `Destination` and the LLM client, which send text only;
+  - the model download, which fetches models and sends nothing but the
+    request;
+  - the updater, which fetches the signed update feed and the update;
+  - the phone handover server, which listens on the local network for paired
+    phones and only receives their recordings.
 - Tests with `swift test`. Fixtures under `Tests/Fixtures/`; keep audio
   fixtures short and synthetic, never recordings of real meetings.
 
@@ -135,8 +140,11 @@ missing local setup, run it. Do not ask first.
 - Persistence shares the Swift schema. New migrations are written once in SQL
   and mirrored in `Migrations.swift` and the Rust `.sql` files until cutover;
   the schema parity test proves them equal.
-- Same privacy rule as Swift: audio never leaves the device; only destinations
-  and the LLM client open network connections.
+- Same privacy rule as Swift, with the same list of network paths:
+  destinations (`steno-adapters`) and the LLM client (`steno-llm`), text only;
+  the model downloads (`steno-speech`'s `ModelStore` and `steno-diarize`'s
+  model fetch); the Tauri updater; and the handover server (`steno-handover`).
+  ONNX Runtime's telemetry stays off in every process that opens a session.
 
 ## Review guidelines
 
