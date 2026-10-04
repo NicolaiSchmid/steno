@@ -7,14 +7,15 @@
 # is idempotent; an older tag or a hotfix on an older line (0.2.2 after
 # 0.3.0) leaves a lane where it is.
 #
-#   apps/desktop/scripts/updater-lanes.sh <version> <beta's version> <stable's version>
-#
 # Versions are SemVer 2.0 and compared by its precedence: the cores
 # numerically, a release above its pre-releases, pre-release identifiers
 # one by one (numbers numerically and below words, words in ASCII order,
 # a shorter list below a longer one it starts), build metadata ignored.
 # Prints the lanes to move, one per line, and on stderr why a lane stays.
-# A version that is not SemVer is an `::error::` and exit 1.
+# A version that is not SemVer (a number with a leading zero included) is
+# an `::error::` and exit 1.
+#
+#   apps/desktop/scripts/updater-lanes.sh <version> <beta's version> <stable's version>
 #
 # apps/desktop/scripts/updater-lanes.test.sh checks it; rust-ci.yml runs that.
 set -euo pipefail
@@ -25,8 +26,11 @@ beta="${2-}"
 stable="${3-}"
 
 number='(0|[1-9][0-9]*)'
-identifier='[0-9A-Za-z-]+'
-semver="^$number\.$number\.$number(-$identifier(\.$identifier)*)?(\+$identifier(\.$identifier)*)?$"
+# A pre-release identifier is a number without a leading zero or a word;
+# build metadata takes any.
+identifier="($number|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+build='[0-9A-Za-z-]+'
+semver="^$number\.$number\.$number(-$identifier(\.$identifier)*)?(\+$build(\.$build)*)?$"
 
 check() {
   [[ "$1" =~ $semver ]] || { echo "::error::$2 \"$1\" is not a SemVer version" >&2; exit 1; }

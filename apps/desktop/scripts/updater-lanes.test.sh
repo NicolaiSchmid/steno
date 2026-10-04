@@ -57,14 +57,22 @@ expect 1.0.0 1.0.0-rc.1 '' desktop-stable,desktop-beta
 expect 1.0.0-rc.10 1.0.0-rc.9 '' desktop-beta
 expect 1.0.0-rc.99999999999999999999 1.0.0-rc.99999999999999999998 '' desktop-beta
 expect 1.0.0-RC.1 1.0.0-rc.1 '' ''
+# The pre-release starts at the first hyphen; later hyphens are its own.
+expect 1.0.0-a-z 1.0.0-b '' ''
+# A leading zero makes a word, which ranks above a number.
+expect 1.0.0-0a 1.0.0-1 '' desktop-beta
 # Build metadata does not count.
 expect 0.2.0+2 0.2.0+5 0.2.0+5 desktop-stable,desktop-beta
+expect 0.2.0+01 0.2.0 0.2.0 desktop-stable,desktop-beta
 
 refuse x '' ''
 refuse 0.2 '' ''
 refuse 0.2.0 null ''
 refuse 0.2.0 '' 'v0.1.0'
 refuse 0.2.0-rc..1 '' ''
+refuse 01.2.0 '' ''
+refuse 0.2.0-rc.01 '' ''
+refuse 0.2.0 0.2.0-01 ''
 
 if ((failures > 0)); then
   echo "updater-lanes: $failures failed"
