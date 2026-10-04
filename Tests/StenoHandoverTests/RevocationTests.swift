@@ -118,6 +118,7 @@ import Testing
   /// The Mac comes back over the store and inbox of a phone that uploaded
   /// every chunk: after a restart its receipt is only in the store.
   private struct Restarted {
+    let gate: StoreGate
     let test: TestService
     /// The phone's view before the restart.
     let phone: EngineDevice
@@ -128,8 +129,9 @@ import Testing
     /// The same phone's view of the restarted engine.
     let device: EngineDevice
 
-    init(_ gate: StoreGate) async throws {
+    init() async throws {
       let chunkSize = 64 * 1024
+      gate = try StoreGate()
       test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
       phone = try await EngineClient.paired(test)
       bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 99)
@@ -144,6 +146,11 @@ import Testing
     }
 
     var id: UUID { metadata.recordingID }
+
+    func remove() {
+      gate.remove()
+      try? FileManager.default.removeItem(at: test.directory)
+    }
 
     /// Nothing reached the intake and nothing of the upload is left.
     func expectNothingAdmitted() async throws {
@@ -163,14 +170,12 @@ import Testing
   /// With `pairsAgain`, the phone pairs again under the same device id
   /// before the read returns.
   private func completeAfterARevokeDuringItsReceiptRead(pairsAgain: Bool) async throws {
-    let gate = try StoreGate()
-    defer { gate.remove() }
-    let restarted = try await Restarted(gate)
-    defer { try? FileManager.default.removeItem(at: restarted.test.directory) }
+    let restarted = try await Restarted()
+    defer { restarted.remove() }
+    let gate = restarted.gate
     let phone = restarted.phone.device
 
     gate.receiptRead.arm()
-    defer { gate.receiptRead.release() }
     let completing = Task { await restarted.device.complete(restarted.id) }
     await gate.receiptRead.held()
     try await restarted.service.revoke(phone.id)
@@ -213,17 +218,14 @@ import Testing
   /// delete.
   @Test(.timeLimit(.minutes(1)))
   func aCompleteDuringARevokesStoreDeleteAdmitsNothing() async throws {
-    let gate = try StoreGate()
-    defer { gate.remove() }
-    let restarted = try await Restarted(gate)
-    defer { try? FileManager.default.removeItem(at: restarted.test.directory) }
+    let restarted = try await Restarted()
+    defer { restarted.remove() }
+    let gate = restarted.gate
 
     gate.receiptRead.arm()
-    defer { gate.receiptRead.release() }
     let readBefore = Task { await restarted.device.complete(restarted.id) }
     await gate.receiptRead.held()
     gate.deviceDelete.arm()
-    defer { gate.deviceDelete.release() }
     let revoking = Task { try await restarted.service.revoke(restarted.phone.device.id) }
     await gate.deviceDelete.held()
 

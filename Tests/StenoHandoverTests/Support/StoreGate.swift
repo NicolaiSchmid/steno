@@ -40,8 +40,10 @@ final class StoreGate: Sendable {
   /// something the held statement blocked.
   var timedOut: Bool { receiptRead.timedOut || deviceDelete.timedOut }
 
-  /// Deletes the database directory.
+  /// Lets any held statement go on and deletes the database directory.
   func remove() {
+    receiptRead.release()
+    deviceDelete.release()
     try? FileManager.default.removeItem(at: directory)
   }
 
@@ -62,12 +64,10 @@ final class StoreGate: Sendable {
     private let phase = Mutex(Phase.idle)
     private let expired = Mutex(false)
     private let released = DispatchSemaphore(value: 0)
-    private let heldSignal: AsyncStream<Void>
-    private let heldContinuation: AsyncStream<Void>.Continuation
+    private let (heldSignal, heldContinuation) = AsyncStream<Void>.makeStream()
 
     init(matching sql: String) {
       self.sql = sql
-      (heldSignal, heldContinuation) = AsyncStream.makeStream()
     }
 
     /// Holds the next matching statement.
