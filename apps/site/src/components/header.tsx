@@ -9,10 +9,11 @@ import { site } from "@/lib/site";
 const nav = [
 	{ href: "#how", label: "How it works" },
 	{ href: "#privacy", label: "Privacy" },
+	{ href: "#built", label: "Platforms" },
 	{ href: "#open", label: "Source" },
 ];
 
-/** The sticky nav: wordmark, links from 640 px, Download, the GitHub pill. */
+/** The sticky nav: wordmark, links from 768 px, Download, the GitHub pill. */
 export function Header() {
 	const [scrolled, setScrolled] = useState(false);
 
@@ -39,10 +40,10 @@ export function Header() {
 					<RecordMark />
 					Steno
 				</a>
-				<nav aria-label="Primary" className="hidden items-center sm:flex">
+				<nav aria-label="Primary" className="hidden items-center md:flex">
 					{nav.map((item) => (
 						<a
-							className="px-2.5 text-[13px] text-fg-muted tracking-[-0.01em] transition-colors duration-[180ms] hover:text-fg"
+							className="whitespace-nowrap px-2.5 text-[13px] text-fg-muted tracking-[-0.01em] transition-colors duration-[180ms] hover:text-fg"
 							href={item.href}
 							key={item.href}
 						>

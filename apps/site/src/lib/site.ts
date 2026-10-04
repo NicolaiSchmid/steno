@@ -18,8 +18,20 @@ export const site = {
 
 export type Platform = "mac" | "win" | "linux";
 
-export const platformLabel: Record<Platform, string> = {
-	mac: "Download for macOS",
-	win: "Download for Windows",
-	linux: "Download for Linux",
+/**
+ * One entry per desktop. `released` is true only where a build is on the
+ * releases page today; the download button and the closing CTA read it, so
+ * flipping Windows or Linux here is the whole change once they ship.
+ */
+export const platforms: Record<
+	Platform,
+	{ name: string; released: boolean; note: string }
+> = {
+	mac: {
+		name: "macOS",
+		released: true,
+		note: "Apple Silicon · signed and notarised",
+	},
+	win: { name: "Windows", released: false, note: "Preview · not released yet" },
+	linux: { name: "Linux", released: false, note: "Preview · not released yet" },
 };

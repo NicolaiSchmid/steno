@@ -1,15 +1,11 @@
 import { DownloadButton } from "@/components/download-button";
 import { AppleIcon, LinuxIcon, WindowsIcon } from "@/components/platform-icons";
-import { site } from "@/lib/site";
+import { platforms, site } from "@/lib/site";
 
-const platforms = [
-	{
-		Icon: AppleIcon,
-		label: "macOS",
-		note: "Apple Silicon · signed and notarized",
-	},
-	{ Icon: WindowsIcon, label: "Windows", note: "x64 · arm64" },
-	{ Icon: LinuxIcon, label: "Linux", note: "AppImage · x64" },
+const rows = [
+	{ Icon: AppleIcon, ...platforms.mac },
+	{ Icon: WindowsIcon, ...platforms.win },
+	{ Icon: LinuxIcon, ...platforms.linux },
 ];
 
 export function ClosingCta() {
@@ -42,15 +38,15 @@ export function ClosingCta() {
 					</a>
 				</div>
 				<ul className="mx-auto mt-10 grid max-w-[720px] gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-3">
-					{platforms.map(({ Icon, label, note }) => (
+					{rows.map(({ Icon, name, note }) => (
 						<li
 							className="flex items-center gap-3 bg-bg px-5 py-4 text-left"
-							key={label}
+							key={name}
 						>
 							<Icon className="size-4 shrink-0 text-fg-muted" />
 							<span className="min-w-0">
 								<span className="block font-medium text-[14px] tracking-[-0.01em]">
-									{label}
+									{name}
 								</span>
 								<span className="block truncate font-mono text-[11px] text-fg-dim">
 									{note}
