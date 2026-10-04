@@ -21,10 +21,8 @@ use crate::block_on;
 
 /// The speech engine a pipeline was built with: the engine id the
 /// settings named at the build and where [`SpeechSetup::runtime`] runs it.
-/// The recorder's warm-up reads it from [`CurrentPipeline`], not from the
-/// store, so a failed reload or an engine id the Swift app saved meanwhile
-/// cannot make it load an engine the pipeline does not hold the way it
-/// thinks.
+/// The recorder's warm-up reads it from [`CurrentPipeline`], not the id
+/// stored now.
 ///
 /// [`SpeechSetup::runtime`]: crate::speech::SpeechSetup::runtime
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +49,15 @@ struct Current {
     engine: BuiltEngine,
 }
 
+impl From<BuiltPipeline> for Current {
+    fn from(built: BuiltPipeline) -> Self {
+        Current {
+            pipeline: ProcessingPipeline::new(built.dependencies),
+            engine: built.engine,
+        }
+    }
+}
+
 /// The current pipeline behind a swap: a reload replaces it first, so a
 /// Save never waits for a run in progress; the retired pipeline is kept
 /// until it is idle, so meetings in flight finish on the dependencies they
@@ -72,10 +79,7 @@ impl CurrentPipeline {
         runtime: tokio::runtime::Handle,
     ) -> Self {
         CurrentPipeline {
-            current: Mutex::new(Current {
-                pipeline: ProcessingPipeline::new(built.dependencies),
-                engine: built.engine,
-            }),
+            current: Mutex::new(built.into()),
             make,
             runtime,
         }
@@ -105,11 +109,7 @@ impl CurrentPipeline {
     /// the secret store's API key. A failed build keeps the current
     /// pipeline and its engine.
     pub fn reload(&self) -> Result<(), BuildError> {
-        let built = (self.make)()?;
-        let replacement = Current {
-            pipeline: ProcessingPipeline::new(built.dependencies),
-            engine: built.engine,
-        };
+        let replacement = Current::from((self.make)()?);
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });
