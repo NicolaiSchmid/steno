@@ -220,7 +220,7 @@ impl SidecarProcess {
                 program: config.program.clone(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "not an absolute path, and the sidecar is never looked up on PATH",
+                    "not an absolute path; the sidecar is never looked up on PATH or in the working directory",
                 ),
             });
         }
@@ -796,22 +796,29 @@ mod tests {
         engine.release().await.unwrap();
     }
 
-    /// A bare name is refused, never looked up: `sh` (`cmd` on Windows)
-    /// is on every `PATH`, and still nothing starts.
+    /// A bare or relative name is refused, never looked up: `sh` (`cmd`
+    /// on Windows) is on every `PATH`, and still nothing starts; nor does
+    /// `./sh` (`.\cmd`) from the working directory.
     #[tokio::test]
     async fn a_program_that_is_not_an_absolute_path_never_starts() {
         let dir = tempfile::tempdir().unwrap();
-        let on_path = if cfg!(windows) { "cmd" } else { "sh" };
-        let engine = SidecarSpeechEngine::with_assets(
-            ModelStore::new(dir.path()),
-            SidecarConfig::new(on_path),
-            Vec::new(),
-        );
-        let error = engine.prepare().await.unwrap_err().to_string();
-        assert!(error.contains("could not start"), "{error}");
-        assert!(error.contains("not an absolute path"), "{error}");
-        assert_eq!(engine.spawns(), 0);
-        assert_eq!(engine.pid(), None);
+        let names = if cfg!(windows) {
+            ["cmd", ".\\cmd"]
+        } else {
+            ["sh", "./sh"]
+        };
+        for program in names {
+            let engine = SidecarSpeechEngine::with_assets(
+                ModelStore::new(dir.path()),
+                SidecarConfig::new(program),
+                Vec::new(),
+            );
+            let error = engine.prepare().await.unwrap_err().to_string();
+            assert!(error.contains("could not start"), "{program}: {error}");
+            assert!(error.contains("not an absolute path"), "{program}: {error}");
+            assert_eq!(engine.spawns(), 0, "{program}");
+            assert_eq!(engine.pid(), None, "{program}");
+        }
     }
 
     #[cfg(unix)]

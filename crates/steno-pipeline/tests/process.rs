@@ -731,6 +731,67 @@ async fn a_job_whose_transcription_fails_releases_the_engine_too() {
     assert_eq!(failing.releases.count(), 1);
 }
 
+/// A lane that cannot be decoded fails the job in `decode`, after the
+/// engine was loaded; the engine is released all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_lane_cannot_be_decoded_releases_the_engine_too() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(FakeSpeechEngine::default());
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    let layout = RecordingLayout::from_asset(&asset).unwrap();
+    std::fs::remove_file(layout.sidecar(AudioLane::System)).unwrap();
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    let MeetingState::Failed { reason } = meeting_state(&world, meeting.id) else {
+        panic!("the job failed");
+    };
+    assert!(reason.starts_with("decode: "), "{reason}");
+    assert_eq!(engine.preparations.count(), 1);
+    assert_eq!(engine.releases.count(), 1);
+}
+
+/// A diarizer whose models cannot load.
+struct UnloadableDiarizer;
+
+#[async_trait]
+impl steno_core::Diarizer for UnloadableDiarizer {
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        Err("no diarizer model".into())
+    }
+
+    async fn diarize(
+        &self,
+        _audio: &steno_core::AudioBuffer16k,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::DiarizationResult> {
+        Err("never loaded".into())
+    }
+}
+
+/// A warm-up that loads the speech engine and then fails on the diarizer
+/// fails the job in `diarize` and still releases the engine it loaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_warm_up_fails_releases_the_engine_too() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(FakeSpeechEngine::default());
+    let mut dependencies = with_engine(&world, engine.clone());
+    dependencies.diarizer = Arc::new(UnloadableDiarizer);
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        meeting_state(&world, meeting),
+        MeetingState::Failed {
+            reason: "diarize: no diarizer model".to_owned()
+        }
+    );
+    assert_eq!(engine.preparations.count(), 1);
+    assert_eq!(engine.transcriptions.count(), 0);
+    assert_eq!(engine.releases.count(), 1);
+}
+
 /// Which call of a [`GatedEngine`] is gated.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Gate {

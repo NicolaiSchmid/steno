@@ -230,29 +230,22 @@ mod tests {
         assert_eq!(standardized(&root.join("..")), root);
     }
 
-    /// The flag, not the stored id, picks the engine. Every engine reports
-    /// `parakeet-v3`, and off the Mac every id runs in the speech sidecar,
-    /// so only the Mac can tell: there the flag's `parakeet-v3` is the
-    /// `CoreML` engine, the stored Whisper id the sidecar's. `prepare` over
-    /// a models directory whose name is not UTF-8 tells them apart without
-    /// the network: `CoreML` misses its bundles under
-    /// `fluidaudio/parakeet-tdt-0.6b-v3`, the sidecar refuses the root
-    /// before any download.
-    #[cfg(target_os = "macos")]
-    #[tokio::test(flavor = "multi_thread")]
-    async fn the_engine_flag_wins_over_the_stored_engine() {
+    /// `--engine` over `--models-dir <dir>/models-\xff`, a name that is
+    /// not UTF-8, with `stored` as the settings' engine: the error of the
+    /// engine's `prepare`, which fails without the network.
+    #[cfg(unix)]
+    async fn prepare_error(dir: &Path, flag: &str, stored: &str) -> (PathBuf, String) {
         use std::os::unix::ffi::OsStrExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        let models = dir.path().join(std::ffi::OsStr::from_bytes(b"models-\xff"));
-        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let models = dir.join(std::ffi::OsStr::from_bytes(b"models-\xff"));
+        let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
         let settings = Settings {
-            speech_engine_id: "whisperkit-large-v3-turbo".to_owned(),
+            speech_engine_id: stored.to_owned(),
             ..Settings::default()
         };
         let dependencies = dependencies(
             store,
             &settings,
-            Some("parakeet-v3"),
+            Some(flag),
             Some(&models),
             None,
             None,
@@ -260,11 +253,41 @@ mod tests {
         )
         .unwrap();
         let error = dependencies.speech_engine.prepare().await.unwrap_err();
+        (models, error.to_string())
+    }
+
+    /// The flag, not the stored id, picks the engine, over the directory
+    /// `--models-dir` names. Every engine reports `parakeet-v3`, and off
+    /// the Mac every id runs in the speech sidecar, so only the Mac can
+    /// tell the engines apart: there the flag's `parakeet-v3` is the
+    /// `CoreML` engine, the stored Whisper id the sidecar's. `CoreML`
+    /// misses its bundles under the given directory's
+    /// `fluidaudio/parakeet-tdt-0.6b-v3`; the sidecar would refuse the
+    /// root before any download.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_engine_flag_wins_over_the_stored_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let (models, error) =
+            prepare_error(dir.path(), "parakeet-v3", "whisperkit-large-v3-turbo").await;
+        let coreml = steno_services::speech::coreml_model_directory(&models);
         assert!(
-            error
-                .to_string()
-                .contains("fluidaudio/parakeet-tdt-0.6b-v3"),
-            "the CoreML engine: {error}"
+            error.contains(&coreml.display().to_string()),
+            "the CoreML engine over --models-dir: {error}"
+        );
+    }
+
+    /// Off the Mac the sidecar runs every id; its refusal of the root that
+    /// is not UTF-8 names the `onnx/` folder of the given directory, not
+    /// the default one.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_engine_runs_over_the_models_dir_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let (models, error) = prepare_error(dir.path(), "parakeet-v3", "parakeet-v3").await;
+        assert!(
+            error.contains(&models.join("onnx").display().to_string()),
+            "the sidecar over --models-dir: {error}"
         );
     }
 }

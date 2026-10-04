@@ -657,6 +657,59 @@ mod tests {
         );
     }
 
+    /// The models directory is decided once, when the app is built: a
+    /// reload after the settings name another directory keeps the first, so
+    /// the pipeline and the model service agree. Both
+    /// directories are plain files, so the engine's `prepare` fails naming
+    /// the one it uses without touching the network (`CoreML` misses its
+    /// bundles under it on the Mac; elsewhere the sidecar's store cannot
+    /// create its folder in it).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_keeps_the_models_directory_the_app_was_built_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StenoPaths::new(dir.path().join("support"));
+        let (first, reloaded) = (
+            dir.path().join("built-models"),
+            dir.path().join("reloaded-models"),
+        );
+        for file in [&first, &reloaded] {
+            std::fs::write(file, b"not a directory").unwrap();
+        }
+        let store = open_store(&paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.models_directory = Some(file_url(&first, true));
+        store.save_settings(&settings).unwrap();
+        drop(store);
+
+        let app = build(AppOptions {
+            paths,
+            database_path: None,
+            keyring: false,
+            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
+            login_item: None,
+            runtime: tokio::runtime::Handle::current(),
+            version: "0.0.0".to_owned(),
+            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+        })
+        .unwrap();
+        let prepare = async || {
+            let engine = app.pipeline.current().dependencies().speech_engine.clone();
+            engine.prepare().await.unwrap_err().to_string()
+        };
+        let named = first.display().to_string();
+        let error = prepare().await;
+        assert!(error.contains(&named), "{named} in {error}");
+
+        settings.models_directory = Some(file_url(&reloaded, true));
+        app.store.save_settings(&settings).unwrap();
+        app.pipeline.reload().unwrap();
+        let error = prepare().await;
+        assert!(
+            error.contains(&named) && !error.contains("reloaded-models"),
+            "{named} in {error}"
+        );
+    }
+
     /// The shell's login item is the one the host reads and switches; the
     /// CLI and the tests, which pass none, get a fake that registers
     /// nothing.
