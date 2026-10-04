@@ -486,12 +486,12 @@ impl SidecarProcess {
 
 /// Whether a child's end counts against `DirectML`: it crashed, hung or
 /// overran the memory ceiling with its encoder on `DirectML`, or inside a
-/// load that asked for it, where the probe runs; a crash inside that load
-/// counts whatever its cause (the decoder, the joiner or Silero opening, a
-/// cold disk past the load timeout). The memory ceiling
-/// counts because a child that passes it on `DirectML` would pass it on
-/// every job; on the CPU the fp32 export stays well under it. A child on
-/// the CPU, an error it reported or a protocol violation does not count.
+/// load that asked for it, where the probe runs: a crash inside that load,
+/// whatever its cause (the decoder, the joiner or Silero opening, a cold
+/// disk past the load timeout). The memory ceiling counts because a child
+/// that passes it on `DirectML` would pass it on every job; on the CPU the
+/// fp32 export stays well under it. A child on the CPU, an error it
+/// reported or a protocol violation does not count.
 fn ended_on_directml(
     error: &SidecarError,
     provider: Option<EncoderProvider>,
