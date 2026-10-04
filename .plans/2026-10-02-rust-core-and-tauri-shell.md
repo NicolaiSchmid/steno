@@ -542,8 +542,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   `nicolaischmid/steno-models` (`STENO_MODELS_REPO`), uploaded by
   `scripts/upload-models.sh` and pinned at commit
   `4a133253481bfd2cb38dc3e77c3f748199562488` (`PARAKEET_V3_FP32_REVISION`); `prepare`
-  downloads it like Silero, and off the Mac the Settings download of Parakeet v3
-  installs Silero VAD with it (the row counts as installed only with both; removing it
+  downloads it like Silero, and where the speech sidecar runs Parakeet v3, the Settings
+  download installs Silero VAD with it (the row counts as installed only with both; removing it
   keeps the VAD). A personal account, not an organisation: moving it later means a new
   upload and a new pin.
 - [ ] `SpeechSettings` (`onnxSidecarOnMac`, `modelsMirror`) are Rust-only: Swift has
@@ -554,10 +554,14 @@ still has to draw the window side. `[ ]` is not ported yet.
   Nothing writes the file and the bridge contract has no field for either, so the
   Settings window shows neither: the macOS fallback waits for a plan that words it for
   users, and the mirror stays configuration only.
-- [ ] Off the Mac, processing a meeting before Parakeet v3 is downloaded starts a
-  silent 2.6 GB download inside the pipeline, which the Settings row does not show.
-  Either show pipeline-side downloads in the Transcription row, or fail processing with
-  "Download the speech model in Settings" until the engine's models are installed.
+- [ ] Where the speech sidecar runs Parakeet v3, processing a meeting before its models
+  are downloaded starts a silent 2.6 GB download inside the pipeline, which the Settings
+  row does not show. The same holds for a stored engine other than Parakeet v3:
+  Whisper, Ultra and DE run Parakeet v3 in the sidecar, but their Settings row is their
+  own and never installs, so only processing downloads the export. Either show
+  pipeline-side downloads in the row of the engine that runs (and map those engines'
+  rows to Parakeet v3's models), or fail processing with "Download the speech model in
+  Settings" until the engine's models are installed.
 
 ### Beyond the bridge
 
@@ -1178,8 +1182,8 @@ PR off `main`.
 | Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
 | WP9a signed and notarised release bundles with the speech sidecar, `cargo deny`, the `desktop-v*` release and the updater lanes | `feat/rust-release-signing` | #184 | merged |
 | WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`) | | | planned |
-| Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | in review |
-| fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | open |
+| Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
+| fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -485,8 +485,8 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// Off the Mac, Parakeet v3's size counts the export only, not the
-    /// 640 KB of Silero VAD its row also needs.
+    /// Where the speech sidecar runs Parakeet v3, its size counts the
+    /// export only, not the 640 KB of Silero VAD its row also needs.
     fn installed_size(&self, asset: ModelAsset) -> Option<i64> {
         if !self.is_installed(asset) {
             return None;
@@ -555,8 +555,9 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// Off the Mac, removing Parakeet v3 removes the export and keeps
-    /// Silero VAD, which is small; the row reads Not downloaded either way.
+    /// Where the speech sidecar runs Parakeet v3, removing it removes the
+    /// export and keeps Silero VAD, which is small; the row reads Not
+    /// downloaded either way.
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         match asset {
             ModelAsset::OfflineDiarizer => {
