@@ -122,9 +122,21 @@ pub enum Reply {
         pid: u32,
         rss_bytes: u64,
         loaded: bool,
+        /// Where the encoder runs now, which a failed run on `DirectML`
+        /// moves to the CPU after [`Reply::Loaded`]; absent before a load
+        /// and from a child that does not say, which leaves the parent
+        /// with the provider it last heard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<EncoderProvider>,
     },
-    /// The answer to [`Request::Transcribe`].
-    Transcript { id: u64, segments: Vec<RawSegment> },
+    /// The answer to [`Request::Transcribe`], with `provider` as in
+    /// [`Reply::Health`], after the run.
+    Transcript {
+        id: u64,
+        segments: Vec<RawSegment>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<EncoderProvider>,
+    },
     /// The request failed inside the child; the child keeps running.
     Failed { id: u64, error: String },
     /// The answer to [`Request::Shutdown`], the child's last message.
@@ -329,9 +341,11 @@ mod tests {
                 pid: 42,
                 rss_bytes: 7,
                 loaded: true,
+                provider: Some(EncoderProvider::DirectMl),
             },
             Reply::Transcript {
                 id: 3,
+                provider: Some(EncoderProvider::Cpu),
                 segments: vec![RawSegment {
                     start: 0.08,
                     end: 1.5,
@@ -411,8 +425,15 @@ mod tests {
         );
     }
 
+    /// [`Reply::Transcript`] as a parent from before its `provider` reads it.
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "camelCase")]
+    enum OldReply {
+        Transcript { id: u64, segments: Vec<RawSegment> },
+    }
+
     #[test]
-    fn the_provider_fields_are_camel_case_and_default_to_the_cpu_when_absent() {
+    fn the_provider_fields_are_camel_case_and_default_when_absent() {
         fn header(message: &impl Serialize) -> String {
             let mut wire = Vec::new();
             write_frame(&mut wire, message, &[]).unwrap();
@@ -454,6 +475,44 @@ mod tests {
                 provider: EncoderProvider::Cpu,
             }
         );
+
+        // The live provider: by name when known, absent (not null) when
+        // not, and absent reads as unknown.
+        assert_eq!(
+            header(&Reply::Health {
+                id: 2,
+                pid: 42,
+                rss_bytes: 7,
+                loaded: true,
+                provider: Some(EncoderProvider::Cpu),
+            }),
+            r#"{"id":2,"loaded":true,"pid":42,"provider":"cpu","rssBytes":7,"type":"health"}"#
+        );
+        assert_eq!(
+            header(&Reply::Transcript {
+                id: 3,
+                segments: Vec::new(),
+                provider: None,
+            }),
+            r#"{"id":3,"segments":[],"type":"transcript"}"#
+        );
+        let old_health: Reply = serde_json::from_str(
+            r#"{"id":2,"loaded":false,"pid":42,"rssBytes":7,"type":"health"}"#,
+        )
+        .unwrap();
+        assert!(matches!(old_health, Reply::Health { provider: None, .. }));
+        let old_transcript: Reply =
+            serde_json::from_str(r#"{"id":3,"segments":[],"type":"transcript"}"#).unwrap();
+        assert!(matches!(
+            old_transcript,
+            Reply::Transcript { provider: None, .. }
+        ));
+        // A parent from before the field reads a reply that has it.
+        let OldReply::Transcript { id, segments } = serde_json::from_str(
+            r#"{"id":3,"provider":"directml","segments":[],"type":"transcript"}"#,
+        )
+        .unwrap();
+        assert_eq!((id, segments.len()), (3, 0));
     }
 
     #[test]

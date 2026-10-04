@@ -6,7 +6,9 @@
 //! allocating past the memory ceiling, writing garbage, reporting an
 //! error, staying silent at start, speaking another protocol version).
 //! Each failure must come back as an error from the engine, never take the
-//! test process down, and leave an engine that works on the next call.
+//! test process down, and leave an engine that works on the next call; a
+//! child that dies with `DirectML` in use leaves the rest of the run on the
+//! CPU.
 //! Dropping the engine stops its child, inside a runtime or not. Driven by
 //! hand, without the client, a child must exit when its parent's pipes
 //! close, idle or busy.
@@ -253,6 +255,63 @@ async fn the_directml_request_reaches_the_child_and_its_provider_comes_back() {
         assert_eq!(health.provider, Some(expected));
         engine.shut_down().await.unwrap();
     }
+}
+
+/// A child whose encoder leaves `DirectML` after it loaded says so in its
+/// next answers, and the health report follows.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_provider_follows_a_fallback_after_the_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(&["--fault", "fallback"]);
+    config.options.directml = true;
+    let engine = engine_in(&dir, config);
+    engine.prepare().await.unwrap();
+    let provider = async || engine.health().await.unwrap().unwrap().provider;
+    assert_eq!(provider().await, Some(EncoderProvider::DirectMl));
+    assert_works(&engine, &tone(0.5)).await;
+    assert_eq!(provider().await, Some(EncoderProvider::Cpu));
+    assert_eq!(engine.spawns(), 1);
+}
+
+/// A child that aborts with its encoder on `DirectML` turns `DirectML` off
+/// for the engine's life: the next child is asked for the CPU.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_that_dies_on_directml_leaves_the_rest_of_the_run_on_the_cpu() {
+    let (engine, _dir) = engine_with_fault("abort", |c| c.options.directml = true);
+    engine.prepare().await.unwrap();
+    let provider = async || engine.health().await.unwrap().unwrap().provider;
+    assert_eq!(provider().await, Some(EncoderProvider::DirectMl));
+    let error = engine.transcribe(&tone(0.5), None).await.unwrap_err();
+    assert!(
+        matches!(sidecar_error(error.as_ref()), SidecarError::Crashed { .. }),
+        "{error}"
+    );
+    assert_works(&engine, &tone(0.5)).await;
+    assert_eq!(engine.spawns(), 2);
+    assert_eq!(provider().await, Some(EncoderProvider::Cpu));
+    assert!(engine.config().options.directml, "the setting is untouched");
+}
+
+/// An error the child reports and a release are no reason to give up on
+/// `DirectML`: the next child is asked for it again. (A child on the CPU
+/// that crashes does not count either; the client's unit tests show it.)
+#[tokio::test(flavor = "multi_thread")]
+async fn an_error_or_a_release_leaves_directml_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(&["--fault", "error"]);
+    config.options.directml = true;
+    let engine = engine_in(&dir, config);
+    engine.prepare().await.unwrap();
+    let error = engine.transcribe(&tone(0.1), None).await.unwrap_err();
+    assert!(
+        matches!(sidecar_error(error.as_ref()), SidecarError::Remote(_)),
+        "{error}"
+    );
+    engine.release().await.unwrap();
+    engine.prepare().await.unwrap();
+    assert_eq!(engine.spawns(), 2);
+    let health = engine.health().await.unwrap().unwrap();
+    assert_eq!(health.provider, Some(EncoderProvider::DirectMl));
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -25,28 +25,34 @@
 //! # What the child does
 //!
 //! It loads the models once from the store root the parent names and
-//! installed (it never downloads and opens no connection), the encoder on
-//! `DirectML` when the parent asks for it on Windows and the probe in
-//! `steno_speech::onnx` passes, and answers with the provider it chose.
-//! It reads framed requests from stdin with the audio as a binary
+//! installed; it never downloads and opens no connection. When the parent
+//! asks for `DirectML` on Windows, the encoder runs there if the probe in
+//! `steno_speech::onnx` passes, and the child answers the load with the
+//! provider it chose. Its health reports and transcripts carry the
+//! provider in force, and when the encoder falls back to the CPU it writes
+//! one line saying why, in fixed words. It reads framed requests from stdin with the audio as a binary
 //! payload, answers on stdout, and reports its resident set from a
 //! heartbeat thread so the parent can kill it at the memory ceiling. It
 //! exits on a shutdown request and as soon as stdin ends or stdout breaks,
 //! so a dead parent leaves no child behind. Its log goes to stderr, which
 //! the parent keeps the tail of for crash reports. Its sessions open
 //! through `steno_speech::onnx`, which switches ONNX Runtime's telemetry
-//! off first, so the child sends nothing anywhere.
+//! off first, so ONNX Runtime sends nothing. With `DirectML` on,
+//! `DirectML.dll` and Direct3D 12 may still log to Windows' own diagnostic
+//! data, as for any program that uses them; the child opens nothing for
+//! it, and no audio or text is involved.
 //!
 //! # Test faults
 //!
 //! `--fake-engine` replaces Parakeet with an engine that needs no models
 //! and answers with the sample count and peak of the audio it received;
-//! it reports `DirectML` whenever the load asks for it.
-//! Only with it, `--fault <kind>` ([`Fault`]) makes the next transcription
-//! abort, panic, flood stderr and panic, exit, hang, allocate 4 GiB,
-//! write garbage or fail, or the child stay silent or announce another
-//! protocol version from the start; `--fault-once <path>` limits that to the first child that creates
-//! `<path>`, which holds that child's pid. The isolation tests drive the
+//! it answers a load that asks for `DirectML` with `DirectML`, and reports
+//! no live provider. Only with it, `--fault <kind>` ([`Fault`]) makes the
+//! next transcription abort, panic, flood stderr and panic, exit, hang,
+//! allocate 4 GiB, write garbage, fail or report a fallback to the CPU, or
+//! the child stay silent or announce another protocol version from the
+//! start; `--fault-once <path>` limits that to the first child that
+//! creates `<path>`, which holds that child's pid. The isolation tests drive the
 //! real client against these.
 
 use std::fs::File;
@@ -86,6 +92,9 @@ steno_core::string_enum! {
         Garbage = "garbage",
         /// Answers with an error and keeps running.
         Error = "error",
+        /// Answers, and from then on reports the CPU as the encoder's
+        /// provider, as a child does after a run that failed on `DirectML`.
+        Fallback = "fallback",
         /// At start: sends nothing, reads nothing, hangs.
         Silent = "silent",
         /// At start: announces protocol version 0 in its ready message.
@@ -163,6 +172,14 @@ trait Engine {
         options: &OnnxOptions,
     ) -> Result<EncoderProvider, String>;
     fn loaded(&self) -> bool;
+    /// Where the encoder runs now; `None` before a load, or when the
+    /// engine cannot tell.
+    fn provider(&self) -> Option<EncoderProvider>;
+    /// Why the encoder is on the CPU though the load asked for `DirectML`,
+    /// in fixed words ([`OnnxBackend::fallback`]).
+    fn fallback(&self) -> Option<&'static str> {
+        None
+    }
     fn transcribe(
         &mut self,
         samples: &[f32],
@@ -201,6 +218,14 @@ impl Engine for OnnxEngine {
         self.transcriber.is_some()
     }
 
+    fn provider(&self) -> Option<EncoderProvider> {
+        Some(self.transcriber.as_ref()?.backend().provider())
+    }
+
+    fn fallback(&self) -> Option<&'static str> {
+        self.transcriber.as_ref()?.backend().fallback()
+    }
+
     fn transcribe(
         &mut self,
         samples: &[f32],
@@ -222,6 +247,8 @@ struct FakeEngine {
     loaded: bool,
     fault: Option<Fault>,
     fault_once: Option<PathBuf>,
+    /// Set by [`Fault::Fallback`].
+    fell_back: bool,
 }
 
 impl FakeEngine {
@@ -258,6 +285,12 @@ impl Engine for FakeEngine {
 
     fn loaded(&self) -> bool {
         self.loaded
+    }
+
+    /// `None`, as from a child that does not say, until
+    /// [`Fault::Fallback`].
+    fn provider(&self) -> Option<EncoderProvider> {
+        self.fell_back.then_some(EncoderProvider::Cpu)
     }
 
     fn transcribe(
@@ -299,22 +332,29 @@ impl Engine for FakeEngine {
                 hang()
             }
             Some(Fault::Error) => Err("simulated failure in the speech engine".to_owned()),
-            // The start faults were committed, if at all, at start.
-            Some(Fault::Silent | Fault::WrongProtocol) | None => {
-                let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-                // Exact up to 2^53 samples, as in `AudioBuffer16k::duration`.
-                #[allow(clippy::cast_precision_loss)]
-                let seconds = samples.len() as f64 / AudioBuffer16k::SAMPLE_RATE;
-                Ok(vec![RawSegment {
-                    start: 0.0,
-                    end: seconds,
-                    text: format!("{} samples, peak {peak}", samples.len()),
-                    language: hint.cloned(),
-                    word_timings: None,
-                }])
+            Some(Fault::Fallback) => {
+                self.fell_back = true;
+                Ok(describe(samples, hint))
             }
+            // The start faults were committed, if at all, at start.
+            Some(Fault::Silent | Fault::WrongProtocol) | None => Ok(describe(samples, hint)),
         }
     }
+}
+
+/// The fake engine's answer: one segment naming what arrived.
+fn describe(samples: &[f32], hint: Option<&LanguageTag>) -> Vec<RawSegment> {
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    // Exact up to 2^53 samples, as in `AudioBuffer16k::duration`.
+    #[allow(clippy::cast_precision_loss)]
+    let seconds = samples.len() as f64 / AudioBuffer16k::SAMPLE_RATE;
+    vec![RawSegment {
+        start: 0.0,
+        end: seconds,
+        text: format!("{} samples, peak {peak}", samples.len()),
+        language: hint.cloned(),
+        word_timings: None,
+    }]
 }
 
 fn hang() -> ! {
@@ -359,6 +399,19 @@ fn start_heartbeat(interval: Duration) -> io::Result<()> {
         .map(drop)
 }
 
+/// Writes why the encoder left `DirectML` to stderr, once per reason: the
+/// child has no log subscriber, and the parent logs its stderr.
+fn tell_fallback(engine: &dyn Engine, told: &mut Option<&'static str>) {
+    if let Some(reason) = engine.fallback()
+        && *told != Some(reason)
+    {
+        eprintln!(
+            "steno-speech-sidecar: DirectML is not usable ({reason}); the speech encoder runs on the CPU"
+        );
+        *told = Some(reason);
+    }
+}
+
 /// Runs the child until a shutdown request, the end of stdin, a broken
 /// stdout or an unreadable request.
 pub fn serve(options: &Options) -> ExitCode {
@@ -366,6 +419,7 @@ pub fn serve(options: &Options) -> ExitCode {
         loaded: false,
         fault: options.fault,
         fault_once: options.fault_once.clone(),
+        fell_back: false,
     });
     let start_fault = fake
         .as_ref()
@@ -391,6 +445,7 @@ pub fn serve(options: &Options) -> ExitCode {
         pid: std::process::id(),
     });
     let mut input = BufReader::new(io::stdin().lock());
+    let mut fallback_told = None;
     loop {
         let request = match protocol::read_header::<_, Request>(&mut input) {
             Ok(Some(request)) => request,
@@ -423,6 +478,7 @@ pub fn serve(options: &Options) -> ExitCode {
                 pid: std::process::id(),
                 rss_bytes: rss_bytes(),
                 loaded: engine.loaded(),
+                provider: engine.provider(),
             },
             Request::Transcribe {
                 id,
@@ -437,7 +493,11 @@ pub fn serve(options: &Options) -> ExitCode {
                     }
                 };
                 match engine.transcribe(&samples, hint.as_ref()) {
-                    Ok(segments) => Reply::Transcript { id, segments },
+                    Ok(segments) => Reply::Transcript {
+                        id,
+                        segments,
+                        provider: engine.provider(),
+                    },
                     Err(error) => Reply::Failed { id, error },
                 }
             }
@@ -446,6 +506,7 @@ pub fn serve(options: &Options) -> ExitCode {
                 return ExitCode::SUCCESS;
             }
         };
+        tell_fallback(&*engine, &mut fallback_told);
         send(&reply);
     }
 }
@@ -481,6 +542,7 @@ mod tests {
             loaded: false,
             fault: Some(Fault::Error),
             fault_once: Some(dir.path().join("marker")),
+            fell_back: false,
         };
         assert_eq!(engine.fault_now(), Some(Fault::Error));
         assert_eq!(engine.fault_now(), None);
