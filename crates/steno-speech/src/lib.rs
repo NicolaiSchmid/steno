@@ -12,8 +12,8 @@
 //!   logits split.
 //! - [`features`]: the `NeMo` mel preprocessor in Rust.
 //! - [`vocab`]: `tokens.txt`, word boundaries, the splice-safe set.
-//! - [`decoder`]: the greedy TDT loop over one encoder window, shared with
-//!   the `CoreML` backend through [`TdtModel`].
+//! - [`decoder`]: the greedy TDT loop over one encoder window, over
+//!   [`TdtModel`].
 //! - [`vad`]: [`VoiceActivityDetector`], Silero through ONNX Runtime and an
 //!   energy detector for tests.
 //! - [`chunker`]: the longest-pause layout with the 60 s memory clamp.
