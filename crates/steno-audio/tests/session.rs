@@ -1702,11 +1702,11 @@ fn stop_at_the_gate(
             let result = session.stop();
             (result, backend.alive.load(Ordering::SeqCst))
         });
-        let window = Instant::now() + Duration::from_millis(200);
-        let deadline = Instant::now() + RECV;
+        let started = Instant::now();
         while !stopper.is_finished()
-            && Instant::now() < deadline
-            && (Instant::now() < window || session.state() != CaptureState::Stopping)
+            && started.elapsed() < RECV
+            && (started.elapsed() < Duration::from_millis(200)
+                || session.state() != CaptureState::Stopping)
         {
             std::thread::sleep(Duration::from_millis(5));
         }
