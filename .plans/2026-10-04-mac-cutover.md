@@ -54,35 +54,35 @@ Each row is something the cutover has to carry over, retire or decide.
    Installs of the `uno.schmid.steno.desktop` build read the same
    `desktop-*` lanes, so the cutover build reaches them as an ordinary
    Tauri update and converts them in place to `uno.schmid.steno.mac`,
-   wherever they sit. This step decides between two outcomes. Either the
-   conversion happens, and a Mac with both apps then has two copies of
-   the same app on the same database, one of which the release notes
-   (step 3) tell the user to delete. Or the cutover build reads new lane
-   names, the old lanes stay at the last desktop-id build, and those
-   installs stay a second app that the notes tell users to delete.
+   wherever they sit. This step decides which of two outcomes ships:
+   either the conversion happens, and a Mac that had both apps ends with
+   two copies of the cutover app on one database; or the cutover build
+   reads new lane names, and the old lanes leave those installs at the
+   last desktop-id build, a second app on the same database. Either way
+   the release notes (step 3) tell users to delete the extra copy.
 2. **Sparkle handoff.** The last Swift release ships unchanged. The cutover
    release adds one item to the rolling appcast on the `appcast` branch: the
-   Tauri `.dmg`, signed with `SPARKLE_PRIVATE_KEY` (Sparkle's `sign_update`
-   from a pinned Sparkle release, since the Xcode build that provided
-   `generate_appcast` goes away), `sparkle:version` the build number from
-   step 1. `desktop-release.yml` gains `SPARKLE_PRIVATE_KEY` in Check
-   secrets, and the desktop README's secrets table lists it. The item
-   first carries `<sparkle:channel>beta</sparkle:channel>` and a
-   pre-release version; after test 4, a release item without the channel
-   follows. The macOS Bundle job runs `sign_update` on the `.dmg` and
-   uploads the signature with the bundles; publish writes the item to the
-   `appcast` branch after the release is public, since the item's URL
-   resolves only then. The cutover build's `Info.plist` (`apps/desktop/src-tauri/`)
-   carries the Swift app's `SUPublicEDKey` from `apps/macos/project.yml`:
-   Sparkle 2 refuses an update whose new bundle drops the key the running
-   app has (it supports rotation, not removal). The key is inert in the
-   Tauri app. Sparkle installs the item over `Steno.app` because the
-   bundle id matches and the EdDSA signature verifies against that key
-   (the Developer ID team matching the running app's designated
-   requirement is the other check that would pass). After the release item
-   `release.yml`, the Sparkle scripts and the `appcast` branch stop
-   moving; the branch stays published so a Swift build that was offline
-   for months still finds the handoff item.
+   Tauri `.dmg`, signed with `SPARKLE_PRIVATE_KEY`, `sparkle:version` the
+   build number from step 1. The macOS Bundle job signs the `.dmg` with
+   Sparkle's `sign_update` from a pinned Sparkle release (the Xcode build
+   that provided `generate_appcast` goes away) and uploads the signature
+   with the bundles; publish writes the item to the `appcast` branch after
+   the release is public, since the item's URL resolves only then.
+   `desktop-release.yml` gains `SPARKLE_PRIVATE_KEY` in Check secrets, and
+   the desktop README's secrets table lists it. The item first carries
+   `<sparkle:channel>beta</sparkle:channel>` and a pre-release version;
+   after test 4, a release item without the channel follows. The cutover
+   build's `Info.plist` (`apps/desktop/src-tauri/`) carries the Swift
+   app's `SUPublicEDKey` from `apps/macos/project.yml`: Sparkle 2 refuses
+   an update whose new bundle drops the key the running app has (it
+   supports rotation, not removal). The key is inert in the Tauri app.
+   Sparkle installs the item over `Steno.app` because the bundle id
+   matches and the EdDSA signature verifies against that key (the
+   Developer ID team matching the running app's designated requirement is
+   the other check that would pass). After the release item, `release.yml`,
+   the Sparkle scripts and the `appcast` branch stop moving; the branch
+   stays published so a Swift build that was offline for months still
+   finds the handoff item.
 3. **Distribution.** The desktop workflow takes over what `release.yml`
    did: the Mac release becomes GitHub's "latest" (drop `--prerelease` and
    `--latest=false` for releases without a hyphen), the Homebrew cask bump
@@ -118,9 +118,9 @@ Each row is something the cutover has to carry over, retire or decide.
    Export that identity with `SecItemExport` as PKCS#12, convert it to the
    PEM bundle `steno-handover` reads, store it under `handover-identity` and
    leave the Swift item in place. If the export fails (a key marked
-   non-extractable, a denied prompt), the app mints a new identity and the
-   release notes say that phones pair again. The paired devices are rows
-   in the shared database, so nothing else changes.
+   non-extractable, a denied prompt), the app mints a new identity and
+   phones pair again. The paired devices are rows in the shared database,
+   so nothing else changes.
 7. **Remove the Swift app.** `apps/macos/` except `web/`, the Swift package
    targets the Rust crates replace, `swift-ci.yml`, `release.yml`, the
    Swift rows in `AGENTS.md`. The web app moves from `apps/macos/web` to
@@ -162,12 +162,10 @@ Each row is something the cutover has to carry over, retire or decide.
   which happens.
 - **Data directory.** Both apps use the same database. A user who runs the
   `uno.schmid.steno.desktop` build beside the Swift app before the cutover
-  already shares it. That build follows the `desktop-*` lanes, so the
-  cutover build converts it in place to `uno.schmid.steno.mac`, a second
-  copy of the cutover app on the same database, unless step 1 gives the
-  cutover build new lanes; step 1 decides it and step 3's notes cover it.
-  Tauri's own directories (WebKit data, caches, the panel
-  anchor) are named after the bundle id and start empty under the new one.
+  already shares it, and after the cutover it leaves a second Steno on the
+  same database either way (step 1). Tauri's own directories (WebKit data,
+  caches, the panel anchor) are named after the bundle id and start empty
+  under the new one.
 - **Rollback.** Once Sparkle has replaced the app there is no way back
   through Sparkle; a broken cutover build is fixed forward through the
   Tauri updater, which only works if the cutover build's updater works.
@@ -188,11 +186,12 @@ second user account), never on CI alone.
    (`defaults write uno.schmid.steno.mac SUFeedURL <url>` on a test
    account), after checking that a release build still honours it; if it
    does not, use a Developer ID test build of the last Swift release whose
-   `Info.plist` names the local appcast. Check for updates, install. Then: the app launches as the
-   Tauri app, `codesign -dr -` on it shows the same designated requirement
-   as the Swift build's, its `Info.plist` has the Swift `SUPublicEDKey`,
-   the meeting is listed, the API key works without a prompt, onboarding
-   does not open, Login Items shows one Steno entry.
+   `Info.plist` names the local appcast. Check for updates, install. Then:
+   the app launches as the Tauri app, `codesign -dr -` on it shows the
+   same designated requirement as the Swift build's, its `Info.plist` has
+   the Swift `SUPublicEDKey`, the meeting is listed, the API key works
+   without a prompt, onboarding does not open, Login Items shows one Steno
+   entry.
 2. **Permissions.** After test 1, record a call: both lanes carry audio, no
    TCC prompt appeared, and `tccutil` was not needed.
 3. **Phone.** After test 1, the paired phone uploads a recording without
