@@ -98,7 +98,7 @@ impl Identity {
     }
 
     /// The identity of the open `file`: the 128-bit file id where the
-    /// file system has one (NTFS, ReFS), else the 64-bit file index. std's
+    /// file system keeps one, else the 64-bit file index. std's
     /// `MetadataExt::file_index` is not stable yet.
     #[cfg(windows)]
     #[allow(unsafe_code)]
