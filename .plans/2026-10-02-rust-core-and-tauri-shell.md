@@ -1169,6 +1169,13 @@ fix is ported to Swift before cutover.
   whenever no window is open, also after a cancel. Rust numbers the windows and pairs
   only against the one the gate matched (`Principal::Pairing`); a failed save does not
   reopen a window cancelled or replaced meanwhile.
+- Revoke during a `complete`: Swift's `HandoverEngine.revoke` discards the files of the
+  receipts in `activeReceipts` only. After a restart a receipt may be only in the store:
+  a revoke that lands while `RecordingHandler.complete` reads it finds nothing to
+  discard, and the verified file of the revoked phone goes to the intake. Rust's
+  `complete` checks the revoked set after the verify and discards the files instead
+  (401). Both leave the files of a revoked device's receipt that is only in the store,
+  and not being completed, to the next start's sweep.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
@@ -1311,6 +1318,7 @@ PR off `main`.
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | merged |
 | WASAPI follow-ups: slip window and immediate slip, trusted stream sizes, start deadline, detector start and stop serialised (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
 | Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | in review |
+| Revoke during a `complete`, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
