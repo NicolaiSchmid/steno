@@ -3,7 +3,7 @@
 # the updater artifacts in a directory and the `.sig` beside each: one entry
 # per `{os}-{arch}-{installer}` key the updater plugin looks up first, and
 # the `{os}-{arch}` key it falls back to when a binary does not know its
-# bundle type (the AppImage on Linux, the NSIS installer on Windows).
+# bundle type (the AppImage on Linux, the NSIS `-setup.exe` on Windows).
 #
 #   apps/desktop/scripts/updater-manifest.sh <version> <base-url> <dir> [platform...]
 #
@@ -43,8 +43,8 @@ artifact() {
   printf '%s\t%s\n' "${matches[0]##*/}" "$(tr -d '\r\n' < "${matches[0]}.sig")"
 }
 
-# entry <key> <pattern>: one "<key>\t<file name>\t<signature>" line.
 entries=""
+# entry <key> <pattern>: one "<key>\t<file name>\t<signature>" line.
 entry() {
   entries+="$1"$'\t'"$(artifact "$2")"$'\n'
 }
