@@ -542,20 +542,24 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     // `complete` waits on its `verifying` write and holds the turn of the
     // receipt saves meanwhile.
     let hold = StoreHold::new(&test.store);
-    let woken = Woken::new();
+    let saved = Woken::new();
     let mut completing = std::pin::pin!(phone.complete(id));
     assert!(
-        woken.poll(completing.as_mut()).is_pending(),
+        saved.poll(completing.as_mut()).is_pending(),
         "complete waits on its verifying write"
     );
     let mut revoking = std::pin::pin!(test.service.revoke(phone.device.id));
     assert!(
-        woken.poll(revoking.as_mut()).is_pending(),
+        Woken::new().poll(revoking.as_mut()).is_pending(),
         "the revoke waits on its store delete"
     );
     assert!(!inbox.has_partial(id), "the revoke discarded the partial");
     hold.release();
     revoking.await.unwrap();
+    // Whichever of the `verifying` write and the delete ran first, no row is
+    // left once both returned; a write after the pairing's save would put
+    // the row back for the new pairing.
+    saved.wait("the verifying write returns").await;
     let again = phone.pair_again().await;
 
     // The new announce creates the partial, then waits for the turn the old
