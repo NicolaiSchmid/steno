@@ -234,6 +234,31 @@ fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
     None
 }
 
+/// One arrival of `signal`: the code to end the process with at once
+/// (`forced_exit`), or none once it has quit the pipeline and then asked
+/// for Quit, in that order, so the pipeline is quit before the request
+/// waits for the main thread. The guard on `seen` is released before
+/// either step.
+#[cfg(unix)]
+fn on_exit_signal(
+    signal: ExitSignal,
+    seen: &std::sync::Mutex<Vec<ExitSignal>>,
+    quit_pipeline: impl FnOnce(),
+    ask_for_quit: impl FnOnce(),
+) -> Option<i32> {
+    let forced = forced_exit(
+        signal,
+        &mut seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if forced.is_none() {
+        quit_pipeline();
+        ask_for_quit();
+    }
+    forced
+}
+
 /// SIGTERM, SIGINT and SIGHUP ask for the exit Quit asks for, so the
 /// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
 /// terminal, systemd at a shutdown. A logout on Linux saves when logind
@@ -275,17 +300,15 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
                 }
             };
             while arrivals.recv().await.is_some() {
-                let forced = forced_exit(
+                let forced = on_exit_signal(
                     signal,
-                    &mut seen
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    &seen,
+                    || host::host(&app).quit_pipeline(),
+                    || actions::quit(&app),
                 );
                 if let Some(code) = forced {
                     std::process::exit(code);
                 }
-                host::host(&app).quit_pipeline();
-                actions::quit(&app);
             }
         });
     }
@@ -711,6 +734,36 @@ mod tests {
         assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), Some(143));
     }
 
+    /// A signal quits the pipeline, then asks for Quit, with `seen`
+    /// unlocked for both; a second SIGTERM does neither and forces the exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_quits_the_pipeline_before_it_asks_for_quit() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let steps = std::cell::RefCell::new(Vec::new());
+        let step = |name: &'static str| {
+            assert!(seen.try_lock().is_ok(), "{name} ran under the guard");
+            steps.borrow_mut().push(name);
+        };
+        let first = on_exit_signal(
+            ExitSignal::TERMINATE,
+            &seen,
+            || step("quit the pipeline"),
+            || step("ask for Quit"),
+        );
+        assert_eq!(first, None);
+        assert_eq!(*steps.borrow(), ["quit the pipeline", "ask for Quit"]);
+
+        let second = on_exit_signal(
+            ExitSignal::TERMINATE,
+            &seen,
+            || step("quit the pipeline"),
+            || step("ask for Quit"),
+        );
+        assert_eq!(second, Some(143));
+        assert_eq!(steps.borrow().len(), 2);
+    }
+
     /// The exit signals are SIGTERM, SIGINT and SIGHUP, and only the first
     /// two force a second time, with 128 plus their number.
     #[cfg(unix)]
@@ -747,6 +800,38 @@ mod tests {
         unsafe { libc::signal(libc::SIGUSR2, before) };
         assert!(when_ignored);
         assert!(!when_default);
+    }
+
+    /// Set in the copy of this test binary the stderr test runs.
+    #[cfg(unix)]
+    const STDERR_CHILD: &str = "STENO_TEST_STDERR_CHILD";
+
+    /// The child writes a line to a stderr nobody reads (a pipe with no
+    /// reader fails each write, as a closed terminal does), so the line is
+    /// lost; the child must still pass, not panic. `--nocapture`, or the
+    /// test harness would catch the line. Unix only, as the services' test
+    /// of their log lines.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_to_a_closed_stderr_is_dropped_without_a_panic() {
+        if std::env::var_os(STDERR_CHILD).is_some() {
+            stderr_line!("[steno-desktop] a line nobody reads");
+            return;
+        }
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_line_to_a_closed_stderr_is_dropped_without_a_panic",
+                "--nocapture",
+            ])
+            .env(STDERR_CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(writer)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
     }
 
     #[test]
