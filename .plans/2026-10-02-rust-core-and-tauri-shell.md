@@ -327,7 +327,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     with the app (Ctrl-C, a closed terminal, systemd), and a child that died of them
     would end its job before the app's shutdown quit the pipeline
     (`the_signals_that_end_the_app_leave_a_request_in_the_child_answered`). The client
-    ends a child only by a shutdown request, its closed stdin or SIGKILL.
+    ends a child only with a shutdown request or SIGKILL (the memory ceiling, a
+    deadline, a broken protocol); the child also ends when its stdin closes or its
+    stdout breaks, as at the app's exit.
     `SpeechEngine::release()` stops it and frees the 2.2 GB working set
     (`requests_round_trip_the_audio_bit_for_bit_in_one_child`); the pipeline calls it
     once a job's lanes are transcribed and no other job needs the engine (see
@@ -458,7 +460,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   hardware, and Windows ends a process that has not answered within about five
   seconds, less than `SHUTDOWN_PATIENCE`, so a long save can be cut off ("Pipeline and
   services (WP6b)"); the follow-up is `ShutdownBlockReasonCreate` while a recording
-  runs, so the logoff screen waits and says why.
+  runs, so the logoff screen waits and says why. A logoff may also end the speech
+  sidecar, a console process, before `RunEvent::Exit` sets the quit latch, so its job
+  could be persisted as `failed`; unverified.
 
 ## Risks
 
@@ -766,7 +770,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   `AppController.shutdown()`, which awaited `awaitSettled()` first. Swift waited without
   a bound.
   - The exit requests go through `exit_request` in the shell and are held until the
-    shutdown ended, a second Quit included: Quit in the tray's menu and in the macOS
+    shutdown has ended, a second Quit included: Quit in the tray's menu and in the macOS
     menu bar (#172's own item, not muda's `terminate:`), a destroyed main window with no
     tray, the last window closing with no tray, and SIGTERM, SIGINT and SIGHUP on Linux
     and macOS (a plain `kill`, Ctrl-C, a closed terminal, systemd at a shutdown). A
@@ -784,9 +788,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     exit ends leaves its meeting `processing` for the next launch, as it did when the
     Swift app died with its job, and the recording the shutdown saves stays `queued`
     until then. The speech sidecar ignores SIGINT, SIGTERM and SIGHUP on Linux and
-    macOS, so the signals that reach it with the app (Ctrl-C reaches the terminal's
-    whole foreground group, systemd every process in a scope) do not end its job first;
-    it exits within a heartbeat once the app is gone (see WP4c).
+    macOS, so the signals that reach it with the app (Ctrl-C and a closed terminal
+    reach the terminal's whole foreground group, systemd every process in a scope) do
+    not end its job first; it exits within a heartbeat once the app is gone (see WP4c).
   - The Dock's Quit, a logout and a system shutdown on macOS send `terminate:` directly;
     tao answers with `applicationWillTerminate` only, which reaches the shell as
     `RunEvent::Exit` and which AppKit waits for, so the shutdown runs there

@@ -31,26 +31,24 @@ Secrets are not the shell's: the `SecretStore` lives in `steno-services`
 (the login Keychain on macOS, the Credential Manager on Windows, the 0600
 `secrets.json` on Linux), which the host reads the API key through.
 
-Every exit saves first: `App::shutdown` runs once, at most ten seconds,
-and stops and saves a recording in progress (a start or a stop under way
-settles first) and stops the handover listener, as the Swift
-`applicationShouldTerminate` awaited `AppController.shutdown`. It first
-quits the pipeline: no new job starts, so the saved recording stays queued
-until the next launch processes it, and a job the exit ends leaves its
-meeting processing for the next launch, not failed. The speech sidecar
-ignores SIGINT, SIGTERM and SIGHUP on Linux and macOS, so Ctrl-C and
-systemd, which signal it with the app, do not end its job first; it exits
-within a heartbeat once the app is gone. The exits reach it these ways:
+Every exit saves first: `App::shutdown` runs once, at most ten seconds.
+It quits the pipeline (no new job starts), lets a start or a stop under
+way settle, stops and saves a recording in progress and stops the
+handover listener, as the Swift `applicationShouldTerminate` awaited
+`AppController.shutdown`. The saved recording stays queued, and a job
+the exit ends stays processing, not failed, until the next launch. The
+exits reach the shutdown these ways:
 
 - Quit in the tray's menu or the macOS menu bar, the close that ends the
-  process because no tray stands, and SIGTERM, SIGINT and SIGHUP (a plain
-  `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are exit
-  requests, held until the shutdown ended (`exit_request` in `main.rs`
-  over `steno_services::app::ExitGate`); a second Quit meanwhile is
-  held too. A signal quits the pipeline at once, before its request
-  reaches the main thread. A second SIGTERM or a second SIGINT ends the
-  process at once, unsaved; a SIGHUP never does. A signal the app
-  inherited ignored (`nohup`, a background job's SIGINT) stays ignored.
+  process because no tray stands, and SIGTERM, SIGINT and SIGHUP (a
+  plain `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are
+  exit requests, held until the shutdown has ended (`exit_request` in
+  `main.rs` over `steno_services::app::ExitGate`); a second Quit
+  meanwhile is held too. A signal quits the pipeline at once, before its
+  request reaches the main thread. A second SIGTERM or a second SIGINT
+  ends the process at once, unsaved; a SIGHUP never does. A signal the
+  app inherited ignored (`nohup`, a background job's SIGINT) stays
+  ignored.
 - A logout on Linux saves when logind ends the session's processes (with
   `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
   SIGHUP). Otherwise nothing signals the app, and when the display
@@ -62,10 +60,18 @@ within a heartbeat once the app is gone. The exits reach it these ways:
 - An update's relaunch bypasses the request, so it waits for the shutdown
   first too; on Windows the installer's own exit runs it, and an install
   that fails after that ends the app once its message is closed.
-- A logoff or a shutdown on Windows also arrives as `RunEvent::Exit` (tao
-  answers `WM_ENDSESSION` with it), and the shutdown runs until Windows'
-  end-session timeout ends the process: about five seconds, less than the
-  ten above. Untested on hardware (WP10).
+- A logoff or a shutdown on Windows also arrives as `RunEvent::Exit`
+  (tao answers `WM_ENDSESSION` with it), and the shutdown runs until
+  Windows' end-session timeout ends the process: about five seconds,
+  less than the ten above. Untested on hardware, and the logoff may end
+  the speech sidecar, a console process, before `RunEvent::Exit` quits
+  the pipeline, so its job could leave the meeting failed; unverified
+  (WP10).
+
+The speech sidecar ignores SIGINT, SIGTERM and SIGHUP on Linux and
+macOS: Ctrl-C, a closed terminal and systemd signal it with the app, and
+it would otherwise end its job first. It exits within a heartbeat once
+the app is gone.
 
 Snapshots reach the windows, the tray and the panels from the main thread
 (`WindowSink` in `host.rs`): the host emits under its `publishing` lock,
@@ -613,8 +619,8 @@ removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it
 lands the desktop app installs beside the Swift app on the Mac. WP6b
 filled the host's half of the WP8 seams except four (the plan's
 "Pipeline and services (WP6b)" list gives each one's reason and what
-closes it): the detection controller (WP5) is not ported,
-so nothing raises the prompt (`panels::set_prompt`) and its X
+closes it): the detection controller (WP5) is not ported, so nothing
+raises the prompt (`panels::set_prompt`) and its X
 (`panels::dismiss_prompt`) tells no one; the host's `Permissions` stay
 the services' fake (all granted), because `permissions` answers
 `unknown` off the Mac and for the Mac's system audio, which the host's
@@ -638,11 +644,11 @@ and no Find Meetings (`⌘F`). Updates are checked only when asked (the
 tray's item, Settings), where Sparkle checks daily on its own (an update
 schedule, due before the cutover). On macOS the system audio permission
 has no status API; the audio crate's probe (WP5) records it and until
-then it reads `unknown`. The panels are re-tuned on the Mac once they run there beside
-the Swift ones (the plan's risk list). Linux and Windows keep their
-native title bar; macOS gets the overlay title bar the Swift windows
-have. The page's traffic light inset is a design question for the other
-two platforms. On Linux, WebKitGTK leaks one shared-memory file
+then it reads `unknown`. The panels are re-tuned on the Mac once they run
+there beside the Swift ones (the plan's risk list). Linux and Windows
+keep their native title bar; macOS gets the overlay title bar the Swift
+windows have. The page's traffic light inset is a design question for the
+other two platforms. On Linux, WebKitGTK leaks one shared-memory file
 descriptor per destroyed webview that lived longer than about 250 ms (29
 to 107 fds over 70 Settings open/close cycles; wry/WebKitGTK level, not
 the shell), so long sessions with many Settings opens should be watched

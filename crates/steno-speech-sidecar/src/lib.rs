@@ -37,15 +37,16 @@
 //! stdout breaks, so a dead parent leaves no child behind. Its log goes to
 //! stderr, which the parent logs and keeps the tail of for crash reports.
 //!
-//! On unix it ignores SIGINT, SIGTERM and SIGHUP once its heartbeat runs.
-//! Those are the signals that end the app, and they reach the child too:
-//! Ctrl-C and a closed terminal reach the terminal's whole foreground
-//! group, and systemd signals every process in a scope. A child that died
-//! of them would end its job before the app's shutdown began. Ignoring them,
-//! the child finishes its request or exits within a heartbeat of its
-//! parent's exit, when stdout breaks. The client never ends a child by
-//! those signals: it asks for a shutdown, closes stdin or kills it with
-//! SIGKILL (the memory ceiling, a deadline, a broken protocol).
+//! On Linux and macOS it ignores SIGINT, SIGTERM and SIGHUP once its
+//! heartbeat runs. Those are the signals that end the app, and they reach
+//! the child too: Ctrl-C and a closed terminal reach the terminal's whole
+//! foreground group, and systemd signals every process in a scope. A child
+//! that died of them would end its job before the app quit its pipeline.
+//! So the child finishes its request or exits within a heartbeat of its
+//! parent's exit, when stdout breaks. The client ends a child only with a
+//! shutdown request or SIGKILL (the memory ceiling, a deadline, a broken
+//! protocol); the child also ends when its stdin closes or its stdout
+//! breaks, as at the app's exit.
 //!
 //! # Privacy
 //!
