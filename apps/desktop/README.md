@@ -225,9 +225,8 @@ platforms. A pushed `desktop-v<version>` tag builds all of them and
 publishes; the version must be the one under `[workspace.package]` in
 `Cargo.toml`, which Tauri stamps into the bundles, or the run fails before
 it builds. So does a version the MSI cannot carry: WiX takes numbers only,
-so `scripts/wix-version.sh` turns a release `X.Y.Z` into `X.Y.Z.65535` and
-a pre-release `X.Y.Z-<label>.<N>` into `X.Y.Z.N`, and refuses any other
-form. A manual run builds, signs and notarises the platforms it is given
+so `scripts/wix-version.sh` accepts `X.Y.Z` and `X.Y.Z-<label>.<N>` alone.
+A manual run builds, signs and notarises the platforms it is given
 and keeps the bundles as workflow artifacts; it publishes nothing. The
 `desktop-v` prefix keeps these tags apart from the Swift app's `v*`
 (`release.yml`) and the mobile build tags `ios-fp-*` (`mobile-cd.yml`).
@@ -275,12 +274,10 @@ replaces the release's assets while the lanes still serve the old
 - **A job that timed out or lost its runner**: `notarize-dmg.sh` gives up
   after 45 minutes, but the bundler's own notarisation of the `.app` waits
   until the job's 90-minute timeout. Check `xcrun notarytool history` with
-  the App Store Connect key, then re-run the failed jobs; `publish` follows
-  once every platform bundled.
-- **publish**: re-run the failed jobs. An existing release is reused and
-  its assets replaced; the lanes move as on the first run, never
-  backwards. A publish cancelled while it waited (a third tag, see
-  Cutting a release) is re-run the same way.
+  the App Store Connect key, then re-run the failed jobs.
+- **publish**, also one cancelled while it waited (a third tag): re-run it.
+  An existing release is reused and its assets replaced; the lanes move as
+  on the first run.
 
 ### A bad release
 
@@ -389,11 +386,11 @@ the release commit. Each lane only moves forward: the stable lane takes a
 release (no hyphen), the beta lane every version, each only when the
 version is at or above the one the lane serves (`scripts/updater-lanes.sh`,
 SemVer precedence). A rerun of a tag moves the same lanes again; an older
-tag or a hotfix on an older line leaves a lane where it is. One publish
-runs at a time, and one more waits (see Cutting a release). Every desktop release is a GitHub pre-release and never
-"latest": until the Mac cutover (`.plans/2026-10-04-mac-cutover.md`) the
-"latest release" that the repository README, the site and the Homebrew
-cask point at is the Swift app's.
+tag or a hotfix on an older line leaves a lane where it is. Every desktop
+release is a GitHub pre-release and never "latest": until the Mac cutover
+(`.plans/2026-10-04-mac-cutover.md`) the "latest release" that the
+repository README, the site and the Homebrew cask point at is the Swift
+app's.
 
 ## Test
 
