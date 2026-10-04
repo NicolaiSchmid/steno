@@ -423,14 +423,10 @@ impl SidecarProcess {
         };
         // The stderr reader may still be draining the last lines.
         std::thread::sleep(Duration::from_millis(50));
-        let tail = self.stderr.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut tail = self.stderr.lock().unwrap_or_else(PoisonError::into_inner);
         SidecarError::Crashed {
             status: status.to_string(),
-            stderr: tail
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join("\n"),
+            stderr: tail.make_contiguous().join("\n"),
         }
     }
 
