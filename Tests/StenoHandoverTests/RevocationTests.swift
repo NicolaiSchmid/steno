@@ -115,60 +115,126 @@ import Testing
     }
   }
 
-  /// After a restart a receipt is only in the store. A revoke that lands
-  /// while `complete` reads it finds nothing in memory to discard, so the
-  /// files are still there for the verify; the engine itself must keep a
-  /// revoked device's recording from the intake. With `repair`, the phone
-  /// pairs again under the same device id before the read returns.
-  private func completeAfterARevokeDuringItsReceiptRead(repair: Bool) async throws {
-    let gate = try ReceiptReadGate()
-    defer { gate.remove() }
-    let chunkSize = 64 * 1024
-    let test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
-    defer { try? FileManager.default.removeItem(at: test.directory) }
-    let phone = try await EngineClient.paired(test)
-    let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 99)
-    let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
-    try await phone.uploadAll(metadata, bytes)
-    let id = metadata.recordingID
+  /// The Mac comes back over the store and inbox of a phone that uploaded
+  /// every chunk: after a restart its receipt is only in the store.
+  private struct Restarted {
+    let test: TestService
+    /// The phone's view before the restart.
+    let phone: EngineDevice
+    let bytes: Data
+    let metadata: RecordingMetadata
+    let service: HandoverService
+    let intake: FakeHandoverIntake
+    /// The same phone's view of the restarted engine.
+    let device: EngineDevice
 
-    // The Mac comes back over the same store and inbox.
-    let intake = FakeHandoverIntake()
-    let now = test.now
-    let restarted = HandoverService(
-      configuration: test.service.configuration, store: test.store, intake: intake,
-      identity: test.service.identity, now: { now })
-    let device = EngineDevice(engine: restarted.engine, device: phone.device)
-
-    gate.arm()
-    let completing = Task { await device.complete(id) }
-    await gate.reading()
-    try await restarted.revoke(phone.device.id)
-    if repair {
-      _ = await restarted.engine.beginPairing()
-      let paired = try await EngineClient(engine: restarted.engine).pair(
-        deviceID: phone.device.id, deviceName: phone.device.name)
-      #expect(paired.code == 200)
+    init(_ gate: StoreGate) async throws {
+      let chunkSize = 64 * 1024
+      test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
+      phone = try await EngineClient.paired(test)
+      bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 99)
+      metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      try await phone.uploadAll(metadata, bytes)
+      intake = FakeHandoverIntake()
+      let now = test.now
+      service = HandoverService(
+        configuration: test.service.configuration, store: test.store, intake: intake,
+        identity: test.service.identity, now: { now })
+      device = EngineDevice(engine: service.engine, device: phone.device)
     }
-    gate.release()
-    let response = await completing.value
 
-    #expect(response.code == 401, "the phone learns it was unpaired")
-    #expect(await intake.admissions.count == 0, "the intake never sees the file")
-    let inbox = restarted.engine.inbox
-    #expect(!inbox.hasPartial(id) && !inbox.hasVerified(id, format: metadata.format))
-    #expect(inbox.loadMetadata(id) == nil, "its files are gone")
-    #expect(await restarted.engine.receiptsSnapshot.isEmpty)
-    if !repair {
+    var id: UUID { metadata.recordingID }
+
+    /// Nothing reached the intake and nothing of the upload is left.
+    func expectNothingAdmitted() async throws {
+      #expect(await intake.admissions.count == 0, "the intake never sees the file")
+      let inbox = service.engine.inbox
+      #expect(
+        !inbox.hasPartial(id) && !inbox.hasVerified(id, format: metadata.format)
+          && inbox.loadMetadata(id) == nil, "its files are gone")
+      #expect(await service.engine.receiptsSnapshot.isEmpty)
       #expect(try await test.store.handoverReceipt(recordingID: id) == nil)
     }
   }
 
-  @Test func aCompleteThatReadItsReceiptBeforeARevokeAdmitsNothing() async throws {
-    try await completeAfterARevokeDuringItsReceiptRead(repair: false)
+  /// A revoke that lands while `complete` reads the store finds nothing in
+  /// memory to discard, so the files are still there for the verify; the
+  /// engine itself must keep a revoked device's recording from the intake.
+  /// With `pairsAgain`, the phone pairs again under the same device id
+  /// before the read returns.
+  private func completeAfterARevokeDuringItsReceiptRead(pairsAgain: Bool) async throws {
+    let gate = try StoreGate()
+    defer { gate.remove() }
+    let restarted = try await Restarted(gate)
+    defer { try? FileManager.default.removeItem(at: restarted.test.directory) }
+    let phone = restarted.phone.device
+
+    gate.receiptRead.arm()
+    defer { gate.receiptRead.release() }
+    let completing = Task { await restarted.device.complete(restarted.id) }
+    await gate.receiptRead.held()
+    try await restarted.service.revoke(phone.id)
+    if pairsAgain {
+      _ = await restarted.service.engine.beginPairing()
+      let pairing = try await EngineClient(engine: restarted.service.engine).pair(
+        deviceID: phone.id, deviceName: phone.name)
+      #expect(pairing.code == 200)
+    }
+    gate.receiptRead.release()
+    let response = await completing.value
+
+    #expect(response.code == 401, "the phone learns it was unpaired")
+    try await restarted.expectNothingAdmitted()
+    let paired = try await restarted.test.store.pairedDevice(id: phone.id)
+    #expect((paired != nil) == pairsAgain, "only pairing again brings the device back")
+    if let paired {
+      // The new pairing uploads the recording again, and it goes through.
+      let again = EngineDevice(engine: restarted.service.engine, device: paired)
+      try await again.uploadAll(restarted.metadata, restarted.bytes)
+      #expect(await again.complete(restarted.id).code == 200)
+    }
+    #expect(!gate.timedOut, "nothing waited on the held read")
   }
 
-  @Test func aPhoneThatPairedAgainDoesNotLetTheOldCompleteThrough() async throws {
-    try await completeAfterARevokeDuringItsReceiptRead(repair: true)
+  @Test(.timeLimit(.minutes(1)))
+  func aCompleteThatReadItsReceiptBeforeARevokeAdmitsNothing() async throws {
+    try await completeAfterARevokeDuringItsReceiptRead(pairsAgain: false)
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aPhoneThatPairedAgainDoesNotLetTheOldCompleteThrough() async throws {
+    try await completeAfterARevokeDuringItsReceiptRead(pairsAgain: true)
+  }
+
+  /// Until a revoke's store delete commits, a store read still returns the
+  /// device's receipt. A `complete` that starts meanwhile is refused before
+  /// it reads, and one that read before the revoke is refused when its read
+  /// returns, before it writes: either would otherwise wait on the held
+  /// delete.
+  @Test(.timeLimit(.minutes(1)))
+  func aCompleteDuringARevokesStoreDeleteAdmitsNothing() async throws {
+    let gate = try StoreGate()
+    defer { gate.remove() }
+    let restarted = try await Restarted(gate)
+    defer { try? FileManager.default.removeItem(at: restarted.test.directory) }
+
+    gate.receiptRead.arm()
+    defer { gate.receiptRead.release() }
+    let readBefore = Task { await restarted.device.complete(restarted.id) }
+    await gate.receiptRead.held()
+    gate.deviceDelete.arm()
+    defer { gate.deviceDelete.release() }
+    let revoking = Task { try await restarted.service.revoke(restarted.phone.device.id) }
+    await gate.deviceDelete.held()
+
+    let startedDuring = await restarted.device.complete(restarted.id)
+    #expect(startedDuring.code == 401, "a complete during the delete is refused")
+    gate.receiptRead.release()
+    #expect(await readBefore.value.code == 401, "a complete that read before it is refused")
+    gate.deviceDelete.release()
+    try await revoking.value
+
+    try await restarted.expectNothingAdmitted()
+    #expect(!gate.timedOut, "nothing waited on the held delete")
   }
 }
