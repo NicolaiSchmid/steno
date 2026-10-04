@@ -29,11 +29,13 @@ struct Behaviour {
     whole_file_as_206: Option<bool>,
 }
 
-/// One request the server saw: the path and the `Range` header.
+/// One request the server saw: the path and the `Range` and
+/// `Accept-Encoding` headers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Seen {
     path: String,
     range: Option<String>,
+    accept_encoding: Option<String>,
 }
 
 /// Serves the files under `root` at `http://127.0.0.1:<port>/<path>` until
@@ -84,21 +86,24 @@ fn answer(
         .unwrap_or("/")
         .trim_start_matches('/')
         .to_owned();
-    let mut range = None;
+    let (mut range, mut accept_encoding) = (None, None);
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 || header == "\r\n" {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("range")
-        {
-            range = Some(value.trim().to_owned());
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("range") {
+                range = Some(value.trim().to_owned());
+            } else if name.eq_ignore_ascii_case("accept-encoding") {
+                accept_encoding = Some(value.trim().to_owned());
+            }
         }
     }
     log.lock().unwrap().push(Seen {
         path: path.clone(),
         range: range.clone(),
+        accept_encoding,
     });
     let mut out = stream;
     let Ok(body) = fs::read(root.join(&path)) else {
@@ -281,6 +286,12 @@ fn a_cut_connection_resumes_with_a_range_request() {
         .expect("a Range request");
     assert!(resumed_at > 0 && resumed_at <= 100_000, "{resumed_at}");
     assert_eq!(starts, [0, resumed_at]);
+    // Uncompressed, so a byte range is a range of the file itself.
+    assert!(
+        seen.iter()
+            .all(|s| s.accept_encoding.as_deref() == Some("identity")),
+        "{seen:?}"
+    );
     assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
@@ -302,6 +313,7 @@ fn a_partial_a_killed_run_left_is_resumed_not_fetched_again() {
         [Seen {
             path: format!("{ID}/{NAME}"),
             range: Some("bytes=123456-".to_owned()),
+            accept_encoding: Some("identity".to_owned()),
         }]
     );
     assert_eq!(names(&f.directory()), [NAME, LOCK]);

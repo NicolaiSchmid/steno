@@ -658,14 +658,16 @@ impl ModelStore {
     }
 
     /// One `GET` of `url`, with a `Range` header when `range` is set and
-    /// `body` as its body timeout.
+    /// `body` as its body timeout. It asks for the bytes uncompressed: the
+    /// client would otherwise offer gzip, and a range of a compressed body
+    /// is no range of the file.
     fn get(
         &self,
         url: &str,
         range: Option<String>,
         body: Duration,
     ) -> Result<ureq::http::Response<ureq::Body>, SpeechError> {
-        let request = self.agent.get(url);
+        let request = self.agent.get(url).header("Accept-Encoding", "identity");
         let request = match range {
             Some(range) => request.header("Range", range),
             None => request,
