@@ -368,15 +368,18 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     (`a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2`). The tests
     find the binary through `CARGO_BIN_EXE_steno-speech-sidecar`, which cargo builds
     for them, run it once by hand before any start timeout counts, and give every
-    start 60 s but the silent child's (20 s). On 2026-10-04 a macOS CI run on the
-    shared Forge runner failed nine of them: the binary was there (six tests spawned
-    it, and the cached build did not relink it), but every child of that run took
-    about 11 s to greet, longer than the 5 s and 10 s start timeouts the tests then
-    had; the same binary on the same runner had greeted within 2 s ten minutes earlier.
-    On Forge the first start of a freshly copied binary takes 1.2 s for 16 at once and
-    the next 0.04 s (macOS checks a new executable on its first start); with three
-    other CI jobs on the machine that minute, that or the load alone explains it.
-    A loaded runner, then, not a missing build. On a Ryzen
+    start 60 s but the silent child's (20 s). They wait for what they test (a fault
+    marker, a dead or zombie pid, a queued report, a held download) rather than for
+    a fixed time. On 2026-10-04 a macOS CI run on the shared Forge runner failed nine
+    of them. Eight children took longer to greet than the 10 s start timeout the
+    tests then had. The silent child's test, whose start timeout was 5 s, then read
+    the child's fault marker, which a child killed before it started never writes:
+    the `NotFound` in that log was the missing marker, not a missing binary (cargo
+    builds it for the tests). A missing marker now fails with a message that names
+    it. On Forge the first start of a freshly copied binary takes 1.2 s for 16 at once
+    and the next 0.04 s (macOS checks a new executable on its first start); with
+    three other CI jobs on the machine that minute, that and the load explain the
+    slow starts. On a Ryzen
     7 7700 desktop, in a release build, the child loads at 2.2 GB resident and
     transcribes 471 s of FLEURS German in 16.9 s, segment for segment equal to the
     in-process engine (`the_real_models_load_and_transcribe_in_the_sidecar_when_installed`,
@@ -401,8 +404,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     each request costs a round trip through the redirect. A mirror
     (`SpeechSettings::models_mirror`, `<mirror>/<asset id>/<file>`, the speech models
     only) should answer `Range`: a host that ignores it gets the whole file under one
-    timeout for its size. An odd answer to a range keeps the partial; only wrong or
-    surplus bytes throw it away. Tests: `crates/steno-speech/tests/download.rs`
+    timeout for its size. Every request asks for the bytes uncompressed, as a range of
+    a compressed body is no range of the file. An odd answer to a range keeps the
+    partial; only wrong or surplus bytes throw it away. The lock waits run on a clock
+    the tests move, and only the tests of a stalled body shorten the body timeouts,
+    so no download test depends on the machine's speed. Tests:
+    `crates/steno-speech/tests/download.rs`
     (`a_cut_connection_resumes_with_a_range_request`,
     `a_partial_a_killed_run_left_is_resumed_not_fetched_again`,
     `a_partial_longer_than_the_file_or_already_complete_is_handled`,
@@ -413,12 +420,16 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     `a_download_that_waited_installs_the_file_after_the_first_threw_its_partial_away`,
     `a_download_waits_while_the_holder_writes_and_gives_up_once_it_stops`,
     `a_lock_this_process_holds_is_neither_locked_again_nor_opened`,
-    `a_large_file_comes_in_chunks_and_a_stalled_chunk_is_given_up_alone`,
-    `a_chunk_slower_than_the_longest_timeout_is_cut_and_the_rest_asked_for`,
+    `a_large_file_comes_in_chunks_and_a_chunk_cut_short_is_resumed_alone`,
+    `a_range_s_body_timeout_follows_its_length_up_to_the_longest`,
+    `a_silent_chunk_is_given_up_at_the_longest_timeout_not_at_its_length_s`,
+    `a_range_follows_a_redirect_to_another_host`,
     `a_host_that_sends_less_than_a_range_asks_for_is_asked_for_the_rest`,
     `an_odd_answer_to_a_range_keeps_the_partial`,
     `a_partial_is_deleted_once_its_file_is_installed_another_way`,
-    `a_download_that_finds_its_file_installed_leaves_no_partial`). The engine
+    `a_download_that_finds_its_file_installed_leaves_no_partial`; ignored, as it
+    fetches from Hugging Face:
+    `a_partial_of_the_hosted_export_resumes_through_its_redirect_in_chunks`). The engine
     installs the models on first use and outside its lock
     (`the_engine_installs_its_models_on_first_use_and_outside_its_lock`).
   - Shipped beside the app by WP9's first half: every bundle carries the binary as a
