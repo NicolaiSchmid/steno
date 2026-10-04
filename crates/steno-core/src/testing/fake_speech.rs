@@ -31,6 +31,10 @@ pub struct FakeSpeechEngine {
     pub text_prefix: String,
     pub word_timings: bool,
     pub failure: Option<String>,
+    /// A buffer whose peak stays below this is silence and yields no
+    /// segment, the way a real engine hears a tap that recorded nothing.
+    /// `None` (the default) transcribes every buffer.
+    pub silent_below_peak: Option<f32>,
     pub transcriptions: CallLog<TranscribeCall>,
     pub preparations: CallLog<()>,
 }
@@ -45,6 +49,7 @@ impl Default for FakeSpeechEngine {
             text_prefix: "fake".to_owned(),
             word_timings: false,
             failure: None,
+            silent_below_peak: None,
             transcriptions: CallLog::new(),
             preparations: CallLog::new(),
         }
@@ -143,6 +148,11 @@ impl SpeechEngine for FakeSpeechEngine {
             hint: hint.cloned(),
         });
         FakeFailure::check(self.failure.as_ref())?;
+        if let Some(peak) = self.silent_below_peak
+            && audio.samples.iter().all(|sample| sample.abs() < peak)
+        {
+            return Ok(Vec::new());
+        }
         Ok(Self::segments(
             audio.duration(),
             self.segment_seconds,

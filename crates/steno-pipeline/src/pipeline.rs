@@ -251,6 +251,16 @@ struct DecodedLane {
 struct Diarization {
     speakers: Vec<Speaker>,
     cluster_speakers: Vec<ClusterSpeaker>,
+    /// The lane the clusters cover; `None` when nothing was diarized.
+    lane: Option<AudioLane>,
+}
+
+impl Diarization {
+    const NONE: Diarization = Diarization {
+        speakers: Vec::new(),
+        cluster_speakers: Vec::new(),
+        lane: None,
+    };
 }
 
 struct Merged {
@@ -312,6 +322,57 @@ pub fn diarized_lane(source: MeetingSource, lanes: &[AudioLane]) -> Option<Audio
         return Some(preferred);
     }
     ordered_lanes(lanes).last().copied()
+}
+
+/// [`diarized_lane`], except for a call whose tap carried no conversation:
+/// then the microphone heard everyone (a phone on speaker next to the Mac,
+/// a call app the tap missed) and the mic lane is the room lane to
+/// diarize, instead of being "me" wholesale. Swift:
+/// `diarizedLane(source:lanes:transcription:)`.
+#[must_use]
+pub fn diarized_lane_after_transcription(
+    source: MeetingSource,
+    lanes: &[AudioLane],
+    transcription: &BTreeMap<AudioLane, Vec<RawSegment>>,
+) -> Option<AudioLane> {
+    if source == MeetingSource::MacCall
+        && lanes.contains(&AudioLane::Mic)
+        && tap_carried_no_conversation(transcription)
+    {
+        return Some(AudioLane::Mic);
+    }
+    diarized_lane(source, lanes)
+}
+
+/// The tap carried no conversation when its speech stays under both
+/// bounds: this share of the mic's speech, and
+/// [`TAP_CONVERSATION_MAXIMUM_SECONDS`] outright. A notification chime or a
+/// hallucinated word on a silent tap stays under both; a partner who
+/// mostly listens still clears the seconds. Swift:
+/// `tapConversationMinimumShare`.
+pub const TAP_CONVERSATION_MINIMUM_SHARE: f64 = 0.05;
+/// Swift: `tapConversationMaximumSeconds`.
+pub const TAP_CONVERSATION_MAXIMUM_SECONDS: f64 = 10.0;
+
+/// True when the mic lane holds speech and the system lane holds less than
+/// [`TAP_CONVERSATION_MINIMUM_SHARE`] of it and less than
+/// [`TAP_CONVERSATION_MAXIMUM_SECONDS`]. Swift: `tapCarriedNoConversation`.
+#[must_use]
+pub fn tap_carried_no_conversation(lanes: &BTreeMap<AudioLane, Vec<RawSegment>>) -> bool {
+    let (Some(mic), Some(system)) = (lanes.get(&AudioLane::Mic), lanes.get(&AudioLane::System))
+    else {
+        return false;
+    };
+    let speech = |segments: &[RawSegment]| {
+        segments
+            .iter()
+            .fold(0.0, |total, segment| total + segment.duration())
+    };
+    let mic_speech = speech(mic);
+    let tap_speech = speech(system);
+    mic_speech > 0.0
+        && tap_speech < mic_speech * TAP_CONVERSATION_MINIMUM_SHARE
+        && tap_speech < TAP_CONVERSATION_MAXIMUM_SECONDS
 }
 
 fn attributing<T, E: fmt::Display + 'static>(
@@ -579,9 +640,16 @@ impl ProcessingPipeline {
         let mut current = meeting;
         current.state = MeetingState::Processing;
         // The last decoded lane is handed to `diarize` and dropped there, so
-        // no buffer is alive from `match_speakers` on.
+        // no buffer is alive from `match_speakers` on. The lane to diarize
+        // is decided from the transcription (a call whose tap carried
+        // nothing falls back to its mic lane); a handed buffer of another
+        // lane is dropped before `diarize` decodes the right one, so one
+        // buffer is alive at a time.
         let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
-        let mut diarized = self.diarize(asset, &current, last).await?;
+        let lane =
+            diarized_lane_after_transcription(current.source, &asset.lanes, &transcription.lanes);
+        let handed = last.filter(|decoded| Some(decoded.lane) == lane);
+        let mut diarized = self.diarize(asset, &current, lane, handed).await?;
         current.language = transcription.language;
         diarized.speakers = self
             .match_speakers(diarized.speakers, current.id, &settings)
@@ -942,30 +1010,35 @@ impl ProcessingPipeline {
         Ok((Transcription { lanes, language }, last))
     }
 
-    /// Runs the diarizer over the diarized lane and turns every cluster
-    /// into a `Speaker` with a deterministic id. Each cluster's clip is
-    /// written as 16 kHz WAV beside the master.
+    /// Runs the diarizer over `lane` and turns every cluster into a
+    /// `Speaker` with a deterministic id. Each cluster's clip is written as
+    /// 16 kHz WAV beside the master. A mic lane in which the diarizer hears
+    /// fewer than two voices is the user alone (headphones, the tap
+    /// permission missing): the stage returns no clusters and no lane,
+    /// writes no clip, and the merge keeps the mic as "me". `handed` is
+    /// reused when it carries `lane`, else the lane is decoded here.
     async fn diarize(
         &self,
         asset: &AudioAsset,
         meeting: &Meeting,
+        lane: Option<AudioLane>,
         handed: Option<DecodedLane>,
     ) -> Result<Diarization> {
         let decoder = &self.inner.dependencies.decoder;
         let diarizer = &self.inner.dependencies.diarizer;
         let meeting_id = meeting.id;
         self.run(PipelineStage::Diarize, 0, meeting_id, async {
-            let Some(lane) = diarized_lane(meeting.source, &asset.lanes) else {
-                return Ok::<_, PipelineFailure>(Diarization {
-                    speakers: Vec::new(),
-                    cluster_speakers: Vec::new(),
-                });
+            let Some(lane) = lane else {
+                return Ok::<_, PipelineFailure>(Diarization::NONE);
             };
             let buffer = match handed {
                 Some(handed_lane) if handed_lane.lane == lane => handed_lane.buffer,
                 _ => attributing(PipelineStage::Diarize, decoder.decode(asset, lane).await)?,
             };
             let result = attributing(PipelineStage::Diarize, diarizer.diarize(&buffer).await)?;
+            if lane == AudioLane::Mic && result.clusters.len() < 2 {
+                return Ok(Diarization::NONE);
+            }
             let mut labels = BTreeSet::new();
             for cluster in &result.clusters {
                 if !labels.insert(cluster.label.clone()) {
@@ -1012,6 +1085,7 @@ impl ProcessingPipeline {
             Ok(Diarization {
                 speakers,
                 cluster_speakers,
+                lane: Some(lane),
             })
         })
         .await
@@ -1051,8 +1125,11 @@ impl ProcessingPipeline {
 
     /// Merges the lanes into one ordered transcript and persists it with
     /// the speakers and the meeting's elected language in one transaction.
-    /// When the asset has a `mic` lane, the "me" participant and speaker
-    /// exist before any segment points at them.
+    /// When the asset has a `mic` lane that is "me" (not the lane diarized
+    /// as the room), the "me" participant and speaker exist before any
+    /// segment points at them. When the mic lane is the room, a "me"
+    /// participant an earlier run of this pipeline created is removed
+    /// again; one the app wrote stays.
     async fn merge(
         &self,
         meeting: &Meeting,
@@ -1064,7 +1141,10 @@ impl ProcessingPipeline {
         self.run(PipelineStage::Merge, 0, meeting.id, async {
             let mut all_speakers = diarization.speakers.clone();
             let mut me_speaker_id = None;
-            if lanes.contains_key(&AudioLane::Mic) {
+            let mic_is_room = diarization.lane == Some(AudioLane::Mic);
+            if mic_is_room {
+                store.delete_participant(LaneMerger::me_participant_id(meeting.id))?;
+            } else if lanes.contains_key(&AudioLane::Mic) {
                 let me = ensure_me_participant(store, meeting.id)?;
                 let me_speaker = LaneMerger::me_speaker(meeting.id, me.person_id);
                 me_speaker_id = Some(me_speaker.id);
@@ -1075,6 +1155,7 @@ impl ProcessingPipeline {
                 lanes,
                 &diarization.cluster_speakers,
                 me_speaker_id,
+                diarization.lane,
             );
             let mut updated = meeting.clone();
             updated.updated_at = now;

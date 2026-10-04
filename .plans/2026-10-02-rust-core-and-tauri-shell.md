@@ -659,6 +659,14 @@ still has to draw the window side. `[ ]` is not ported yet.
   default input until the PipeWire (WP5b) and WASAPI (WP10) backends enumerate.
 - The pipeline's `decode` reads a whole lane through symphonia (see Audio); the one
   buffer alive at a time rule holds, the buffer is the full lane.
+- Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
+  under 5 % of the mic lane's speech and under ten seconds is diarized on the mic lane
+  (`pipeline::diarized_lane_after_transcription`, `tap_carried_no_conversation`); the
+  mic segments get clusters, no "me" speaker is made, the tap's stray segments are kept
+  without a speaker (`LaneMerger::merge`'s `diarized_lane`), and fewer than two voices
+  on the mic keeps it "me". A re-run that falls back removes the pipeline's "me"
+  participant (`Store::delete_participant`). The handed buffer of another lane is
+  dropped before the mic is decoded again, as in Swift.
 
 ### Store
 

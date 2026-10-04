@@ -16,7 +16,10 @@ string_enum! {
     /// Where a recording came from. Decides which lanes exist and which lane
     /// is diarized.
     pub enum MeetingSource {
-        /// Two lanes on the Mac: `mic` is "me", `system` is "them".
+        /// Two lanes on the Mac: `mic` is "me", `system` is "them", unless
+        /// the tap carried no conversation (a phone on speaker next to the
+        /// Mac); then the mic lane is diarized like a room
+        /// (`steno_pipeline::pipeline::diarized_lane_after_transcription`).
         MacCall = "macCall",
         /// One `mixed` room lane from the Mac microphone, fully diarized.
         MacInPerson = "macInPerson",
