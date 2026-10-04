@@ -261,10 +261,7 @@ async fn the_directml_request_reaches_the_child_and_its_provider_comes_back() {
 /// next answers, and the health report follows.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_provider_follows_a_fallback_after_the_load() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = config(&["--fault", "fallback"]);
-    config.options.directml = true;
-    let engine = engine_in(&dir, config);
+    let (engine, _dir) = engine_with_fault("fallback", |c| c.options.directml = true);
     engine.prepare().await.unwrap();
     let provider = async || engine.health().await.unwrap().unwrap().provider;
     assert_eq!(provider().await, Some(EncoderProvider::DirectMl));
@@ -297,10 +294,7 @@ async fn a_child_that_dies_on_directml_leaves_the_rest_of_the_run_on_the_cpu() {
 /// that crashes does not count either; the client's unit tests show it.)
 #[tokio::test(flavor = "multi_thread")]
 async fn an_error_or_a_release_leaves_directml_on() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut config = config(&["--fault", "error"]);
-    config.options.directml = true;
-    let engine = engine_in(&dir, config);
+    let (engine, _dir) = engine_with_fault("error", |c| c.options.directml = true);
     engine.prepare().await.unwrap();
     let error = engine.transcribe(&tone(0.1), None).await.unwrap_err();
     assert!(
