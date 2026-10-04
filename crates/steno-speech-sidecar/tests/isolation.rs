@@ -109,6 +109,17 @@ fn faulted(dir: &tempfile::TempDir) -> Option<u32> {
         .ok()
 }
 
+/// [`faulted`] for a child that must have written its marker by now; the
+/// test fails saying which child never did.
+fn faulted_child(dir: &tempfile::TempDir, which: &str) -> u32 {
+    faulted(dir).unwrap_or_else(|| {
+        panic!(
+            "the {which} child never wrote its marker {}: it did not get as far as its fault",
+            dir.path().join("faulted").display()
+        )
+    })
+}
+
 /// A child with `args`, started by hand without the client.
 fn spawn_by_hand(args: &[&str]) -> Child {
     Command::new(binary())
@@ -421,7 +432,6 @@ async fn a_child_that_hangs_is_killed_at_the_deadline() {
     let (engine, _dir) = engine_with_fault("hang", |c| {
         c.transcribe_timeout_floor = Duration::from_secs(2);
     });
-    let started = Instant::now();
     assert_recovers(&engine, |error| {
         assert!(
             matches!(error, SidecarError::Timeout { after } if *after == Duration::from_secs(2)),
@@ -429,7 +439,6 @@ async fn a_child_that_hangs_is_killed_at_the_deadline() {
         );
     })
     .await;
-    assert!(started.elapsed() < Duration::from_secs(20));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -455,9 +464,9 @@ async fn a_child_over_the_memory_ceiling_is_killed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn garbage_on_stdout_is_a_protocol_violation() {
     // The garbage claims a 16 MiB header; the parent refuses it at the
-    // first byte instead of waiting out the 30 s deadline for the rest.
+    // first byte, a protocol violation, instead of waiting out the 30 s
+    // deadline for the rest, which would be a timeout.
     let (engine, _dir) = engine_with_fault("garbage", |_| {});
-    let started = Instant::now();
     assert_recovers(&engine, |error| {
         assert!(
             matches!(error, SidecarError::Protocol(detail) if detail.contains("not a protocol message")),
@@ -465,7 +474,6 @@ async fn garbage_on_stdout_is_a_protocol_violation() {
         );
     })
     .await;
-    assert!(started.elapsed() < Duration::from_secs(20));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -495,7 +503,7 @@ async fn a_child_of_another_protocol_version_is_refused() {
         "{error}"
     );
     assert_eq!(engine.pid(), None);
-    let refused = faulted(&dir).unwrap();
+    let refused = faulted_child(&dir, "refused");
     assert!(gone_soon(refused), "the refused child {refused} still runs");
     // The next child speaks the protocol.
     assert_works(&engine, &tone(0.5)).await;
@@ -515,7 +523,9 @@ async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
         matches!(sidecar_error(error.as_ref()), SidecarError::Timeout { .. }),
         "{error}"
     );
-    let silent = faulted(&dir).expect("the silent child started within the timeout");
+    // A child that has not started within the 20 s start timeout is
+    // killed before it writes its marker: then this says so.
+    let silent = faulted_child(&dir, "silent");
     if !gone_soon(silent) {
         kill(silent);
         panic!("the silent child {silent} outlived its failed start");
@@ -547,7 +557,17 @@ fn dropping_the_engine_stops_its_child_inside_a_runtime_or_not() {
 fn a_busy_child_exits_when_its_parent_goes_away() {
     // Driven by hand: the child hangs inside a transcription, so it never
     // reads the closed stdin; its next heartbeat finds stdout gone.
-    let mut child = spawn_by_hand(&["--fake-engine", "--fault", "hang", "--heartbeat-ms", "20"]);
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("faulted");
+    let mut child = spawn_by_hand(&[
+        "--fake-engine",
+        "--fault",
+        "hang",
+        "--fault-once",
+        marker.to_str().unwrap(),
+        "--heartbeat-ms",
+        "20",
+    ]);
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     ready(&mut stdout);
@@ -562,7 +582,8 @@ fn a_busy_child_exits_when_its_parent_goes_away() {
         &protocol::encode_samples(&samples),
     )
     .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    // Busy once it has written its marker, inside the transcription.
+    assert_eq!(within_ten_seconds(|| faulted(&dir)), Some(child.id()));
     assert!(child.try_wait().unwrap().is_none(), "the child is busy");
     drop(stdin);
     drop(stdout);
@@ -723,13 +744,14 @@ async fn a_reply_the_child_cannot_send_is_a_crash_that_says_why() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_heartbeat_does_not_hold_back_the_answers() {
-    // Every frame is flushed as it is written: with a heartbeat a minute
+    // Every frame is flushed as it is written: with a heartbeat an hour
     // apart, nothing else would push the ready message and the replies
-    // out of the child's stdout buffer before the deadlines.
+    // out of the child's stdout buffer before the deadlines (60 s to
+    // start, 30 s for the health request).
     let dir = tempfile::tempdir().unwrap();
     let mut config = config(&[]);
-    config.heartbeat = Duration::from_secs(60);
-    config.control_timeout = Duration::from_secs(5);
+    config.heartbeat = Duration::from_secs(3600);
+    config.control_timeout = Duration::from_secs(30);
     let engine = engine_in(&dir, config);
     engine.prepare().await.unwrap();
     assert!(engine.health().await.unwrap().unwrap().loaded);

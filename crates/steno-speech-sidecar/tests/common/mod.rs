@@ -6,7 +6,7 @@
 use std::ffi::OsString;
 use std::process::{Command, Stdio};
 use std::sync::Once;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use steno_core::{AudioBuffer16k, LanguageTag, SpeechEngine as _};
 use steno_speech::{
@@ -18,16 +18,31 @@ pub const BINARY: &str = env!("CARGO_BIN_EXE_steno-speech-sidecar");
 
 /// [`BINARY`], after it has once been run to the end by hand, so the start
 /// timeouts measure the child rather than a first start, which a loaded
-/// runner can take seconds over.
+/// runner can take seconds over (macOS checks a new executable then). A
+/// first start that has not ended after two minutes fails the test rather
+/// than hang it.
 pub fn binary() -> &'static str {
     static WARM: Once = Once::new();
     WARM.call_once(|| {
-        let warm = Command::new(BINARY)
+        let mut warm = Command::new(BINARY)
             .arg("--fake-engine")
             .stdin(Stdio::null())
-            .output()
+            .stdout(Stdio::null())
+            .spawn()
             .unwrap();
-        assert!(warm.status.success(), "{warm:?}");
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let status = loop {
+            if let Some(status) = warm.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = warm.kill();
+                let _ = warm.wait();
+                panic!("the sidecar's first start had not ended after two minutes");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "{status}");
     });
     BINARY
 }
