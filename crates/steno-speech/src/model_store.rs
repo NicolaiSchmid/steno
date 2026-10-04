@@ -1345,18 +1345,16 @@ mod tests {
     /// those bytes (none: the connection is closed unanswered), and returns
     /// the URL.
     fn serve(responses: Vec<Vec<u8>>) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            for bytes in responses {
-                let (stream, _) = listener.accept().unwrap();
-                read_request_head(&stream);
-                let mut stream = &stream;
-                stream.write_all(&bytes).unwrap();
-                stream.flush().unwrap();
-            }
-        });
-        format!("http://{address}/model.onnx")
+        let handlers = responses
+            .into_iter()
+            .map(|bytes| Box::new(move |stream: &TcpStream, _| send(stream, &bytes)) as Handler)
+            .collect();
+        serve_each(handlers).0
+    }
+
+    /// Writes `bytes` to `stream`, whether or not the client still reads.
+    fn send(mut stream: &TcpStream, bytes: &[u8]) {
+        let _ = stream.write_all(bytes);
     }
 
     /// Serves `body` once and returns the URL.
@@ -1413,16 +1411,9 @@ mod tests {
     /// for under `206`, or `body` under `200` without one. Returns the
     /// reply's bytes and the length of its body.
     fn reply(body: &[u8], range: Option<&str>) -> (Vec<u8>, usize) {
-        let bounds = range.and_then(|r| {
-            let (first, last) = r.strip_prefix("bytes=")?.split_once('-')?;
-            let first: usize = first.parse().ok()?;
-            let last = last
-                .parse::<usize>()
-                .map_or(body.len() - 1, |l| l.min(body.len() - 1));
-            Some((first, last))
-        });
-        match bounds {
+        match range.and_then(bounds) {
             Some((first, last)) => {
+                let last = last.map_or(body.len() - 1, |l| l.min(body.len() - 1));
                 let part = &body[first..=last];
                 let head = format!(
                     "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{last}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1433,6 +1424,13 @@ mod tests {
             }
             None => (response("200 OK", body), body.len()),
         }
+    }
+
+    /// The first byte of `range` (`bytes=<first>-[<last>]`) and its last,
+    /// when it names one.
+    fn bounds(range: &str) -> Option<(usize, Option<usize>)> {
+        let (first, last) = range.strip_prefix("bytes=")?.split_once('-')?;
+        Some((first.parse().ok()?, last.parse().ok()))
     }
 
     /// [`reply`] to `range`, all of it if `stall` is `None`, else that
@@ -1450,13 +1448,11 @@ mod tests {
             None => (length, None),
         };
         let (now, later) = bytes.split_at(bytes.len() - length + sent);
-        let mut stream = stream;
-        let _ = stream.write_all(now);
+        send(stream, now);
         if let Some(release) = release {
-            let _ = stream.flush();
             let _ = release.recv();
         }
-        let _ = stream.write_all(later);
+        send(stream, later);
     }
 
     /// Reads a request up to the blank line that ends its head and
@@ -1508,24 +1504,23 @@ mod tests {
     /// until the test says how far the clock moves on.
     #[derive(Debug)]
     pub(super) struct ManualClock {
-        start: Instant,
-        elapsed: Mutex<Duration>,
-        steps: Mutex<mpsc::Sender<Step>>,
+        now: Mutex<Instant>,
+        steps: mpsc::Sender<Step>,
         moves: Mutex<mpsc::Receiver<Duration>>,
     }
 
     impl ManualClock {
         pub(super) fn now(&self) -> Instant {
-            self.start + *self.elapsed.lock().unwrap()
+            *self.now.lock().unwrap()
         }
 
         /// Panics once the test has gone, which ends the download's thread
         /// rather than leave it polling.
         pub(super) fn sleep(&self) {
             let gone = "the test stopped driving the clock";
-            self.steps.lock().unwrap().send(Step::Asleep).expect(gone);
+            self.steps.send(Step::Asleep).expect(gone);
             let by = self.moves.lock().unwrap().recv().expect(gone);
-            *self.elapsed.lock().unwrap() += by;
+            *self.now.lock().unwrap() += by;
         }
     }
 
@@ -1544,9 +1539,8 @@ mod tests {
         let (report, progress) = mpsc::channel();
         let mut store = store.clone();
         store.clock = Clock::Manual(Arc::new(ManualClock {
-            start: Instant::now(),
-            elapsed: Mutex::new(Duration::ZERO),
-            steps: Mutex::new(step.clone()),
+            now: Mutex::new(Instant::now()),
+            steps: step.clone(),
             moves: Mutex::new(moves),
         }));
         let asset = asset.clone();
@@ -1620,11 +1614,7 @@ mod tests {
         let directory = store
             .ensure(&asset, &mut |p| {
                 reports.push((p.received, p.total));
-                partials.extend(
-                    fs::read_dir(dir.path().join("test-asset"))
-                        .unwrap()
-                        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned()),
-                );
+                partials.extend(names(&store, &asset));
             })
             .unwrap();
         // The download writes the resumable partial, not the target.
@@ -1784,14 +1774,10 @@ mod tests {
         let (cut, b) = (body.clone(), body.clone());
         let (url, ranges) = serve_each(vec![
             Box::new(move |stream, _| {
-                let mut stream = stream;
                 let bytes = response("200 OK", &cut);
-                let _ = stream.write_all(&bytes[..bytes.len() - half]);
+                send(stream, &bytes[..bytes.len() - half]);
             }),
-            Box::new(|stream, _| {
-                let mut stream = stream;
-                let _ = stream.write_all(&response("404 Not Found", b""));
-            }),
+            Box::new(|stream, _| send(stream, &response("404 Not Found", b""))),
             Box::new(move |stream, range| answer(stream, &b, range.as_deref(), None)),
         ]);
         let dir = tempfile::tempdir().unwrap();
@@ -1855,18 +1841,31 @@ mod tests {
             (body.clone(), body.len()),
         ]);
         let asset = asset(Some(url), &body, &digest(&body));
-        let (done, finished) = mpsc::channel();
-        let installer = store.clone();
-        let wanted = asset.clone();
-        std::thread::spawn(move || {
-            let _ = done.send(installer.ensure(&wanted, &mut |_| {}));
-        });
-        let result = finished
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the stalled body was never given up");
+        let result = ensure_within(
+            &store,
+            &asset,
+            Duration::from_secs(10),
+            "the stalled body was never given up",
+        );
         drop(release);
         result.unwrap();
         store.verify(&asset).unwrap();
+    }
+
+    /// `ensure` of `asset` on a thread of its own; fails the test with
+    /// `hung` when it has not returned after `limit`.
+    fn ensure_within(
+        store: &ModelStore,
+        asset: &ModelAsset,
+        limit: Duration,
+        hung: &str,
+    ) -> Result<PathBuf, SpeechError> {
+        let (done, finished) = mpsc::channel();
+        let (store, asset) = (store.clone(), asset.clone());
+        std::thread::spawn(move || {
+            let _ = done.send(store.ensure(&asset, &mut |_| {}));
+        });
+        finished.recv_timeout(limit).expect(hung)
     }
 
     #[test]
@@ -1888,8 +1887,7 @@ mod tests {
                 Box::new(move |stream: &TcpStream, range: Option<String>| {
                     if cut {
                         let (bytes, length) = reply(&body, range.as_deref());
-                        let mut stream = stream;
-                        let _ = stream.write_all(&bytes[..bytes.len() - length / 2]);
+                        send(stream, &bytes[..bytes.len() - length / 2]);
                     } else {
                         answer(stream, &body, range.as_deref(), None);
                     }
@@ -1897,10 +1895,7 @@ mod tests {
             })
             .collect();
         let (url, ranges) = serve_each(handlers);
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ModelStore::new(dir.path());
-        store.chunk = CHUNK.into();
-        let asset = asset(Some(url), &body, &digest(&body));
+        let (store, asset, _dir) = chunked(url, &body);
         store.ensure(&asset, &mut |_| {}).unwrap();
         store.verify(&asset).unwrap();
         let ranges = ranges.lock().unwrap();
@@ -1914,12 +1909,8 @@ mod tests {
 
     /// `range` (`bytes=<first>-[<last>]`) cut to at most `cap` bytes.
     fn capped(range: &str, cap: usize) -> String {
-        let (first, last) = range
-            .strip_prefix("bytes=")
-            .and_then(|r| r.split_once('-'))
-            .unwrap();
-        let first: usize = first.parse().unwrap();
-        let last = last.parse::<usize>().unwrap_or(usize::MAX);
+        let (first, last) = bounds(range).unwrap();
+        let last = last.unwrap_or(usize::MAX);
         format!("bytes={first}-{}", last.min(first.saturating_add(cap - 1)))
     }
 
@@ -1965,22 +1956,14 @@ mod tests {
         // and are tried again; neither throws the first chunk away.
         let body: Vec<u8> = (0..3 * 65_536u32).map(|i| (i % 233) as u8).collect();
         let shared = Arc::new(body.clone());
-        let page: Handler = Box::new(|stream, _| {
-            let mut stream = stream;
-            let _ = stream.write_all(&response("200 OK", b"<html>sign in</html>"));
-        });
+        let page: Handler =
+            Box::new(|stream, _| send(stream, &response("200 OK", b"<html>sign in</html>")));
         // A `206` that starts where it was asked to and brings nothing.
         let empty = || -> Handler {
             Box::new(|stream, range| {
-                let first = range
-                    .as_deref()
-                    .and_then(|r| r.strip_prefix("bytes="))
-                    .and_then(|r| r.split_once('-'))
-                    .unwrap()
-                    .0
-                    .to_owned();
-                let mut stream = stream;
-                let _ = stream.write_all(
+                let (first, _) = bounds(&range.unwrap()).unwrap();
+                send(
+                    stream,
                     format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{first}/196608\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
                 );
             })
@@ -2073,17 +2056,14 @@ mod tests {
         store.min_body_timeout = Duration::from_secs(3600);
         store.max_chunk_timeout = Duration::from_millis(50);
         let asset = asset(Some(url), &body, &digest(&body));
-        let (done, finished) = mpsc::channel();
-        let installer = store.clone();
-        let wanted = asset.clone();
-        std::thread::spawn(move || {
-            let _ = done.send(installer.ensure(&wanted, &mut |_| {}));
-        });
         // Only a hang guard: the hour would hold the test, 50 ms does not.
-        let error = finished
-            .recv_timeout(Duration::from_secs(60))
-            .expect("a silent chunk waited for its length's timeout")
-            .unwrap_err();
+        let error = ensure_within(
+            &store,
+            &asset,
+            Duration::from_secs(60),
+            "a silent chunk waited for its length's timeout",
+        )
+        .unwrap_err();
         drop(holds);
         assert!(is_transient(&error), "{error}");
         assert_eq!(
@@ -2110,6 +2090,13 @@ mod tests {
         drop(again);
     }
 
+    /// The lock file at `path`, locked the way another download holds it.
+    fn locked(path: &Path) -> File {
+        let file = open_or_create(path).unwrap();
+        file.lock().unwrap();
+        file
+    }
+
     #[test]
     fn a_download_waits_while_the_holder_writes_and_gives_up_once_it_stops() {
         // A holder that keeps writing is waited for however long it takes,
@@ -2127,8 +2114,7 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let lock = directory.join("model.onnx.lock");
         let partial = directory.join("model.onnx.partial");
-        let held = open_or_create(&lock).unwrap();
-        held.lock().unwrap();
+        let held = locked(&lock);
         let mut holder = File::create(&partial).unwrap();
         holder.write_all(&body[..1000]).unwrap();
         let waiter = drive(&store, &asset);
@@ -2152,8 +2138,7 @@ mod tests {
         // Stopped: 1000 bytes and then nothing.
         fs::remove_file(directory.join("model.onnx")).unwrap();
         fs::write(&partial, &body[..1000]).unwrap();
-        let held = open_or_create(&lock).unwrap();
-        held.lock().unwrap();
+        let held = locked(&lock);
         let waiter = drive(&store, &asset);
         waiter.asleep();
         waiter.move_on(STALE_PARTIAL.checked_sub(Duration::from_secs(1)).unwrap());
@@ -2183,10 +2168,7 @@ mod tests {
             Box::new(move |stream, _| answer(stream, &first, None, None)),
             Box::new(move |stream, _| answer(stream, &second, None, None)),
         ]);
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = ModelStore::new(dir.path());
-        store.chunk = 65_536;
-        let asset = asset(Some(url), &body, &digest(&body));
+        let (store, asset, _dir) = chunked(url, &body);
         store.ensure(&asset, &mut |_| {}).unwrap();
         store.verify(&asset).unwrap();
         assert_eq!(
@@ -2205,8 +2187,8 @@ mod tests {
         let (target, served) = serve_each(vec![capping(&shared, usize::MAX)]);
         let target = target.replace("127.0.0.1", "localhost");
         let redirect: Handler = Box::new(move |stream, _| {
-            let mut stream = stream;
-            let _ = stream.write_all(
+            send(
+                stream,
                 format!("HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
             );
         });
@@ -2388,8 +2370,7 @@ mod tests {
         fs::write(&partial, &body[..4]).unwrap();
         fs::write(directory.join("model.onnx"), &body).unwrap();
         // While another download holds the lock, it stays.
-        let held = open_or_create(&directory.join("model.onnx.lock")).unwrap();
-        held.lock().unwrap();
+        let held = locked(&directory.join("model.onnx.lock"));
         store.ensure(&asset, &mut |_| {}).unwrap();
         assert!(partial.exists());
         drop(held);
@@ -2485,11 +2466,7 @@ mod tests {
                 .unwrap();
         }
         store.ensure(&asset, &mut |_| {}).unwrap();
-        let mut left: Vec<_> = fs::read_dir(&directory)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        left.sort();
+        let left = names(&store, &asset);
         let mut expected: Vec<_> = files[..]
             .iter()
             .map(|(name, _, _)| (*name).to_owned())
