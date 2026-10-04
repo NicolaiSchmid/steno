@@ -195,10 +195,15 @@ struct State {
     /// `complete` must not start a second verify or admission.
     completing: BTreeSet<Uuid>,
     /// Devices revoked since start and not paired again. Their receipts
-    /// stay out of `active_receipts` (and the stream), also when a request
-    /// that read one before the revoke writes it back after, and a
-    /// `complete` that read one before the revoke admits nothing.
+    /// stay out of `active_receipts` and the stream. A request that read one
+    /// before the revoke does not write it back. A `complete` of one of
+    /// these devices is refused before it reads.
     revoked: BTreeSet<Uuid>,
+    /// Revokes per device since start. A `complete` that sees the count
+    /// change across its receipt read or its verify admits nothing. Pairing
+    /// again does not reset it: the phone pairs again under the same device
+    /// id.
+    revocations: BTreeMap<Uuid, u64>,
 }
 
 impl State {
@@ -357,15 +362,20 @@ impl Engine {
             .is_some_and(PairingSession::is_open)
     }
 
-    /// Forgets the device and drops whatever it was uploading: the files of
-    /// its receipts in memory here, and whatever a `complete` in flight
-    /// verifies, before the intake sees it. Files of a receipt only in the
-    /// store (not read since start) wait for the next start's sweep.
+    /// Forgets the device and drops what it was uploading: the files of its
+    /// receipts in memory. A `complete` in flight that has not reached the
+    /// intake discards its own files when it sees the revoke. An admission
+    /// already under way finishes, and its receipt then stays out of memory
+    /// and out of the store. Files of a receipt only in the store (not read
+    /// since start) wait for the next start's sweep.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
         {
+            // Before the first yield: a `complete` that starts or checks
+            // while the store delete runs must already see this revoke.
             let mut state = self.state();
             state.revoked.insert(device_id);
+            *state.revocations.entry(device_id).or_default() += 1;
             state.active_receipts.retain(|_, receipt| {
                 let owned = receipt.device_id == device_id;
                 if owned && receipt.state.kind() != HandoverStateKind::Complete {
@@ -504,6 +514,13 @@ impl Engine {
 
     fn publish_receipts(&self) {
         self.receipts.send_replace(self.receipts_snapshot());
+    }
+
+    /// Drops the receipt from memory and tells the observers; the store
+    /// row, if any, stays. Swift: `HandoverEngine.forget`.
+    pub(crate) fn forget(&self, recording_id: Uuid) {
+        self.state().active_receipts.remove(&recording_id);
+        self.publish_receipts();
     }
 
     /// One state change: the state, the chunk set when given, `updated_at`,

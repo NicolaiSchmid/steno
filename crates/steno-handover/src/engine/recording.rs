@@ -247,16 +247,39 @@ impl Engine {
     /// chunk is present and the whole file hashes to the announced value;
     /// 409 with the status while chunks are missing or while an earlier
     /// `complete` is still verifying or admitting; 422 on a hash mismatch,
-    /// after which the partial is gone and the phone starts over.
+    /// after which the partial is gone and the phone starts over; 401 from
+    /// the revoke of the device until it pairs again, or when a revoke landed
+    /// during the receipt read or the verify, after which the files are gone.
     pub(super) async fn complete(
         &self,
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
+        // Until a revoke's store delete commits, a store read still returns
+        // the device's receipts, and a `complete` that starts meanwhile
+        // takes the count the revoke already bumped, so the checks below
+        // would miss it: refuse before reading. `revoked` holds the device
+        // from the revoke until it pairs again. The receipt's owner is not
+        // known yet, so nothing is discarded.
+        let revocation = {
+            let state = self.state();
+            if state.revoked.contains(&device.id) {
+                return Self::unauthorized();
+            }
+            state.revocations.get(&device.id).copied().unwrap_or(0)
+        };
         let mut receipt = match self.owned_receipt(recording_id, device).await {
             Ok(receipt) => receipt,
             Err(response) => return response,
         };
+        // The receipt read and the verify yield. A revoke meanwhile discards
+        // files only for receipts it finds in memory, and after a restart
+        // this one may be only in the store: the file of a revoked device
+        // must not reach the intake. Checked here, before anything is
+        // written for the receipt, and again after the verify.
+        if let Some(refused) = self.refusal(recording_id, device, revocation) {
+            return refused;
+        }
         if let Some(meeting_id) = receipt.state.meeting_id() {
             return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });
         }
@@ -272,16 +295,31 @@ impl Engine {
         };
         match self.verified_file(&mut receipt, &metadata).await {
             Verification::Answered(response) => response,
-            // The receipt read and the verify yielded. A revoke that landed
-            // meanwhile discarded the files only if it found the receipt in
-            // memory, which after a restart it may not have: the file of a
-            // revoked device never reaches the intake.
-            Verification::File(_) if self.state().revoked.contains(&device.id) => {
-                self.inbox.discard(recording_id);
-                Self::unauthorized()
-            }
-            Verification::File(file) => self.admit(&file, &metadata, device, &mut receipt).await,
+            // Nothing yields between this check and the intake call.
+            Verification::File(file) => match self.refusal(recording_id, device, revocation) {
+                Some(refused) => refused,
+                None => self.admit(&file, &metadata, device, &mut receipt).await,
+            },
         }
+    }
+
+    /// 401 when the device was revoked since `complete` took `revocation`.
+    /// The count sees every such revoke, also one followed by a pairing,
+    /// which takes the device out of `revoked`. The revoke may have missed
+    /// the receipt, so its files are discarded and it leaves memory here.
+    fn refusal(
+        &self,
+        recording_id: Uuid,
+        device: &PairedDevice,
+        revocation: u64,
+    ) -> Option<HandoverResponse> {
+        let revocations = self.state().revocations.get(&device.id).copied();
+        if revocations.unwrap_or(0) == revocation {
+            return None;
+        }
+        self.inbox.discard(recording_id);
+        self.forget(recording_id);
+        Some(Self::unauthorized())
     }
 
     /// The verified file: the one already waiting after an earlier intake
