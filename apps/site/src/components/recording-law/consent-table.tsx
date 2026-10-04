@@ -2,6 +2,9 @@ import { SectionHead } from "@/components/section-head";
 import { cn } from "@/lib/cn";
 import { type Consent, consentLabel, jurisdictions } from "@/lib/recording-law";
 
+// Header and rows share one template so the columns line up.
+const columns = "md:grid-cols-[minmax(0,1.1fr)_170px_minmax(0,2fr)] md:gap-6";
+
 const dot: Record<Consent, string> = {
 	one: "bg-ok",
 	mixed: "bg-warn",
@@ -19,7 +22,12 @@ export function ConsentTable() {
 					follow the strictest rule among them.
 				</SectionHead>
 				<div className="tile p-0">
-					<div className="hidden grid-cols-[minmax(0,1.1fr)_170px_minmax(0,2fr)] gap-6 border-border border-b px-5 py-2.5 font-mono text-[11px] text-fg-dim md:grid">
+					<div
+						className={cn(
+							"hidden border-border border-b px-5 py-2.5 font-mono text-[11px] text-fg-dim md:grid",
+							columns,
+						)}
+					>
 						<span>Where</span>
 						<span>A participant…</span>
 						<span>What to know</span>
@@ -27,7 +35,10 @@ export function ConsentTable() {
 					<dl>
 						{jurisdictions.map((j) => (
 							<div
-								className="grid gap-2 border-border border-t px-5 py-4 first:border-t-0 md:grid-cols-[minmax(0,1.1fr)_170px_minmax(0,2fr)] md:gap-6"
+								className={cn(
+									"grid gap-2 border-border border-t px-5 py-4 first:border-t-0",
+									columns,
+								)}
 								key={j.place}
 							>
 								<dt className="font-medium text-[14px] text-fg leading-[1.45] tracking-[-0.01em]">
@@ -49,15 +60,18 @@ export function ConsentTable() {
 						))}
 					</dl>
 					<div className="flex flex-wrap gap-5 border-border border-t px-5 py-3 font-mono text-[11px] text-fg-dim">
-						{(["one", "mixed", "all"] as const).map((kind) => (
-							<span className="inline-flex items-center gap-2" key={kind}>
+						{(Object.keys(dot) as Consent[]).map((kind) => (
+							<span
+								className="inline-flex items-center gap-2 lowercase"
+								key={kind}
+							>
 								<span className={cn("size-1.5 rounded-full", dot[kind])} />
-								{consentLabel[kind].toLowerCase()}
+								{consentLabel[kind]}
 							</span>
 						))}
 					</div>
 				</div>
-				<p className="mt-5 max-w-[720px] text-[14px] text-fg-dim leading-[1.6]">
+				<p className="mt-5 max-w-[720px] text-[14px] text-fg-muted leading-[1.6]">
 					&ldquo;You may record&rdquo; covers capturing a call you take part in.
 					Publishing or sharing the recording is a separate question almost
 					everywhere, and work use brings in data protection law on top.

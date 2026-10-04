@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { GitHubMark } from "@/components/github-mark";
 import { RecordMark } from "@/components/record-mark";
@@ -16,6 +17,7 @@ const nav = [
 /** The sticky nav: wordmark, links from 640 px, Download, the GitHub pill. */
 export function Header() {
 	const [scrolled, setScrolled] = useState(false);
+	const pathname = usePathname();
 
 	useEffect(() => {
 		const onScroll = () => setScrolled(window.scrollY > 12);
@@ -43,7 +45,8 @@ export function Header() {
 				<nav aria-label="Primary" className="hidden items-center sm:flex">
 					{nav.map((item) => (
 						<a
-							className="px-2.5 text-[13px] text-fg-muted tracking-[-0.01em] transition-colors duration-[180ms] hover:text-fg"
+							aria-current={item.href === pathname ? "page" : undefined}
+							className="px-2.5 text-[13px] text-fg-muted tracking-[-0.01em] transition-colors duration-[180ms] hover:text-fg aria-[current=page]:text-fg"
 							href={item.href}
 							key={item.href}
 						>

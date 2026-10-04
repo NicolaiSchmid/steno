@@ -23,7 +23,7 @@ export const summary: Point[] = [
 	},
 	{
 		title: "Voices are the sensitive part.",
-		body: "Remembering who spoke is biometric data. For work, get explicit consent before Steno learns someone's voice.",
+		body: "Remembering who spoke is biometric data. For work, get explicit consent before you name someone's voice in Steno.",
 	},
 ];
 
@@ -43,7 +43,7 @@ export const steps: Point[] = [
 	},
 	{
 		title: "If someone says no, stop.",
-		body: "Stop the recording and delete the meeting. Take notes by hand for that call.",
+		body: "Stop the recording. Once Steno has finished processing, delete the meeting and any note it exported, and take notes by hand for the rest of the call.",
 	},
 	{
 		title: "Keep less.",
@@ -51,14 +51,22 @@ export const steps: Point[] = [
 	},
 ];
 
+interface Disclosure {
+	label: string;
+	text: string;
+	/** Set when the text is not English, for screen readers. */
+	lang?: string;
+}
+
 /** Notices to copy, beside the steps. */
-export const disclosures = [
+export const disclosures: Disclosure[] = [
 	{
 		label: "On the call",
 		text: "Quick note before we start: I record this call on my computer to take notes. The recording stays on my machine. Tell me now if you'd rather I didn't.",
 	},
 	{
 		label: "Auf Deutsch",
+		lang: "de",
 		text: "Kurz vorab: Ich zeichne das Gespräch auf meinem Rechner auf, um Notizen zu machen. Die Aufnahme bleibt auf meinem Gerät. Sag gern jetzt, wenn du das nicht möchtest.",
 	},
 	{
@@ -67,12 +75,12 @@ export const disclosures = [
 	},
 ];
 
-export type Consent = "one" | "all" | "mixed";
+export type Consent = "one" | "mixed" | "all";
 
 export const consentLabel: Record<Consent, string> = {
 	one: "You may record",
-	all: "Everyone must agree",
 	mixed: "Depends",
+	all: "Everyone must agree",
 };
 
 interface Jurisdiction {
@@ -81,6 +89,7 @@ interface Jurisdiction {
 	note: string;
 }
 
+/** Who must agree, one row per place or group of places. */
 export const jurisdictions: Jurisdiction[] = [
 	{
 		place: "Germany",
@@ -131,7 +140,7 @@ export const jurisdictions: Jurisdiction[] = [
 	{
 		place: "Australia",
 		consent: "mixed",
-		note: "By state. Victoria and Queensland let a participant record; New South Wales, Western Australia, South Australia, Tasmania and the ACT need consent, with narrow exceptions.",
+		note: "By state. Victoria, Queensland and the Northern Territory let a participant record; New South Wales, Western Australia, South Australia, Tasmania and the ACT need consent, with narrow exceptions.",
 	},
 	{
 		place: "Japan, Brazil, India",
@@ -141,39 +150,36 @@ export const jurisdictions: Jurisdiction[] = [
 ];
 
 interface RuleSet {
-	what: string;
+	kept: string;
 	law: string;
-	detail: string;
+	body: string;
 }
 
 /** What Steno keeps, and which body of law cares about it. */
 export const ruleSets: RuleSet[] = [
 	{
-		what: "The audio file",
+		kept: "The audio file",
 		law: "Recording law",
-		detail:
-			"A stored file is what most statutes call a recording. Steno writes audio to disk before it transcribes, so this applies every time you press Record.",
+		body: "A stored file is what most statutes call a recording. Steno writes audio to disk before it transcribes, so this applies every time you press Record.",
 	},
 	{
-		what: "Transcript, summary, tasks",
+		kept: "Transcript, summary, tasks",
 		law: "Data protection",
-		detail:
-			"For work, you are the controller under the GDPR and similar laws: you need a reason, people have to be told, and they can ask for a copy or for deletion. Purely private use is exempt in the EU.",
+		body: "For work, you are the controller under the GDPR and similar laws: you need a reason, people have to be told, and they can ask for a copy or for deletion. Purely private use is exempt in the EU.",
 	},
 	{
-		what: "Voice profiles",
+		kept: "Voice profiles",
 		law: "Biometric law",
-		detail:
-			"Steno remembers voices so it can name speakers in the next meeting. A voice profile that identifies a person is biometric data under GDPR Art. 9 and Illinois' BIPA, the strictest category: explicit, often written, consent.",
+		body: "Steno remembers voices so it can name speakers in the next meeting. A voice profile that identifies a person is biometric data under GDPR Art. 9 and Illinois' BIPA, the strictest category: explicit, often written, consent.",
 	},
 	{
-		what: "Text sent to your summary model",
-		law: "Data protection and confidentiality",
-		detail:
-			"A cloud model is a third party. That matters for client confidentiality and legal privilege. A local model keeps the text on your machine.",
+		kept: "Text sent to your summary model",
+		law: "Data protection",
+		body: "A cloud model is a third party, which matters under data protection law and again for client confidentiality and legal privilege. A local model keeps the text on your machine.",
 	},
 ];
 
+/** The four ways people use Steno. */
 export const situations: Point[] = [
 	{
 		title: "Calls with friends and family",
@@ -181,15 +187,15 @@ export const situations: Point[] = [
 	},
 	{
 		title: "Your own work calls",
-		body: "Freelancers, founders and team leads are the controller for their notes. Tell people what you record and why, delete when someone asks, and get explicit consent before Steno learns a person's voice.",
+		body: "Freelancers, founders and team leads are the controller for their notes. Tell people what you record and why, delete when someone asks, and get explicit consent before you name a person's voice in Steno.",
 	},
 	{
 		title: "A company rolling Steno out",
-		body: "Write a policy before the first install. In Germany a works council has a say in tools that can monitor staff (BetrVG § 87). In Illinois, companies that enable voice recognition have been named in BIPA suits next to the vendor.",
+		body: "Write a policy before the first install. In Germany a works council has a say in tools that can monitor staff (BetrVG § 87). In Illinois, plaintiffs argue that a company enabling voice recognition can be liable under BIPA alongside the vendor.",
 	},
 	{
 		title: "Lawyers, doctors, therapists",
-		body: "Professional secrecy rules restrict sending client material to an outside provider, and a US court has held that material run through a consumer AI service is not privileged. Use a local summary model, or none.",
+		body: "Professional secrecy rules restrict sending client material to an outside provider, and a US court has held that documents a client made on their own with a consumer AI service were not privileged. Use a local summary model, or none.",
 	},
 ];
 
@@ -207,13 +213,14 @@ interface Case {
 	sources: [Source, ...Source[]];
 }
 
+/** Cases against AI notetakers; their sources lead the Sources list. */
 export const cases: Case[] = [
 	{
 		name: "In re Otter.AI Privacy Litigation",
 		when: "N.D. Cal., ruling of 13 Aug 2026",
 		held: "Wiretap, California privacy and BIPA claims go ahead. Otter can be a third-party eavesdropper because it keeps and uses recordings for its own purposes.",
 		forSteno:
-			"There is no Steno server, so no vendor can be the eavesdropper. Your own duty to the people on the call is unchanged.",
+			"There is no Steno server, so no vendor receives the call. A cloud summary model you pick does receive the transcript text. Your own duty to the people on the call is unchanged.",
 		sources: [
 			{
 				label:
@@ -229,7 +236,7 @@ export const cases: Case[] = [
 	{
 		name: "Chamberlain v. Granola",
 		when: "N.D. Cal., filed 30 Jul 2026",
-		held: "The first suit against a notetaker without a bot. It argues that recording from the user's computer, invisible to everyone else, was a design choice to avoid disclosure. No ruling yet.",
+		held: "The first major suit against a bot-free notetaker. It argues that recording from the user's computer, invisible to everyone else, was a design choice to avoid disclosure. No ruling yet.",
 		forSteno:
 			"Steno captures audio the same way. Telling people yourself is what closes that gap.",
 		sources: [
@@ -299,12 +306,20 @@ export const gaps: Point[] = [
 		body: "Deleting a meeting removes its recording, transcript, summary and tasks. The people Steno knows, their voice profiles and any files you already exported stay. There is no button yet to forget one person's voice.",
 	},
 	{
+		title: "It compares every voice.",
+		body: "Each meeting's speakers are matched against the people Steno knows, and there is no switch to turn that off. A voice profile only grows when you confirm a name.",
+	},
+	{
+		title: "It can't discard a recording on Stop.",
+		body: "Stopping always runs processing, including the summary and the export. Delete the meeting afterwards if someone asked you not to record.",
+	},
+	{
 		title: "It doesn't record consent.",
 		body: "Steno has no field for who agreed. Keep that in your notes or your calendar.",
 	},
 ];
 
-/** Every case's sources, then the ones behind the country and German rows. */
+/** Every case's sources, then the ones behind voice profiles, the German row and the US states. */
 export const sources: Source[] = [
 	...cases.flatMap((c) => c.sources),
 	{

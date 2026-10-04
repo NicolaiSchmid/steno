@@ -15,17 +15,17 @@ export function RuleSets() {
 				</SectionHead>
 				<div className="grid gap-5 md:grid-cols-2">
 					{ruleSets.map((rule) => (
-						<div className="tile p-6" key={rule.what}>
+						<div className="tile p-6" key={rule.kept}>
 							<div className="mb-4 flex flex-wrap items-center justify-between gap-3">
 								<span className="font-medium text-[16px] tracking-[-0.01em]">
-									{rule.what}
+									{rule.kept}
 								</span>
 								<span className="rounded-full border border-border px-2.5 py-0.5 font-mono text-[10px] text-fg-dim uppercase tracking-[0.08em]">
 									{rule.law}
 								</span>
 							</div>
 							<p className="text-[14px] text-fg-muted leading-[1.6]">
-								{rule.detail}
+								{rule.body}
 							</p>
 						</div>
 					))}

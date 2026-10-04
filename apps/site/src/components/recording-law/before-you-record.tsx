@@ -35,19 +35,24 @@ export function BeforeYouRecord() {
 					</ol>
 				</div>
 				<div className="tile p-0">
-					<div className="border-border border-b px-4 py-2.5 font-mono text-[11px] text-fg-dim">
+					<div className="px-5 py-2.5 font-mono text-[11px] text-fg-dim">
 						Copy and adapt
 					</div>
 					{disclosures.map((line) => (
 						<div
-							className="flex items-start gap-3 border-border border-t px-4 py-4"
+							className="flex items-start gap-3 border-border border-t px-5 py-4"
 							key={line.label}
 						>
 							<div className="min-w-0 flex-1">
-								<div className="mb-1.5 font-mono text-[11px] text-fg-dim uppercase tracking-[0.08em]">
+								<div className="mb-1.5 font-mono text-[10px] text-fg-dim uppercase tracking-[0.08em]">
 									{line.label}
 								</div>
-								<p className="text-[14px] text-fg leading-[1.6]">{line.text}</p>
+								<p
+									className="text-[14px] text-fg leading-[1.6]"
+									lang={line.lang}
+								>
+									{line.text}
+								</p>
 							</div>
 							<CopyButton label={`Copy "${line.label}"`} text={line.text} />
 						</div>

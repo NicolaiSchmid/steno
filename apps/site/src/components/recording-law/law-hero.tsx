@@ -33,14 +33,14 @@ export function LawHero() {
 				>
 					{summary.map(({ title, body }) => (
 						<div className="bg-bg p-6" key={title}>
-							<div className="mb-2 font-medium text-[15px] tracking-[-0.01em]">
+							<div className="mb-2.5 font-medium text-[15px] tracking-[-0.01em]">
 								{title}
 							</div>
-							<p className="text-[14px] text-fg-muted leading-[1.55]">{body}</p>
+							<p className="text-[14px] text-fg-muted leading-[1.6]">{body}</p>
 						</div>
 					))}
 				</div>
-				<p className="mt-6 max-w-[680px] font-mono text-[11px] text-fg-dim leading-[1.7]">
+				<p className="mt-6 max-w-[680px] font-mono text-[11px] text-fg-muted leading-[1.7]">
 					Not legal advice. Laws change and courts read them differently; check
 					with a lawyer before you rely on a row here for work. Last reviewed{" "}
 					{reviewed}.

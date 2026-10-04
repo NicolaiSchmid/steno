@@ -15,7 +15,7 @@ export function Cases() {
 				<div className="tile p-0">
 					{cases.map((c) => (
 						<div
-							className="grid gap-4 border-border border-t px-5 py-5 first:border-t-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1.2fr)] lg:gap-8"
+							className="grid gap-4 border-border border-t p-5 first:border-t-0 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)_minmax(0,1.2fr)] lg:gap-8"
 							key={c.name}
 						>
 							<div>

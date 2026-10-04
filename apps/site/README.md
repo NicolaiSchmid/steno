@@ -1,7 +1,7 @@
 # Steno landing page
 
 The marketing site for [steno.nicolaischmid.com](https://steno.nicolaischmid.com):
-one page built with Next.js 16 (App Router, static export), React 19,
+the home page and `/recording-law`, built with Next.js 16 (App Router, static export), React 19,
 Tailwind CSS 4 and Biome. It is the first member of the root pnpm workspace,
 laid out like pingdotgg/t3code's `apps/marketing`.
 
@@ -38,6 +38,11 @@ Cloudflare Pages or a plain web server, upload `out/`.
 
 URLs, install commands and the platform labels live in `src/lib/site.ts`.
 Change them there, nowhere else.
+
+The facts on `/recording-law` (the country rows, cases, sources and the
+`reviewed` date) live in `src/lib/recording-law.ts`. Change them there, and
+update `reviewed` whenever you re-check a row. When the app closes one of the
+gaps that page lists, delete its row.
 
 ## Design
 
