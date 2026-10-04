@@ -412,6 +412,26 @@ async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
 }
 
 #[test]
+fn dropping_the_engine_stops_its_child_inside_a_runtime_or_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let started = |engine: &SidecarSpeechEngine| {
+        runtime.block_on(engine.prepare()).unwrap();
+        engine.pid().unwrap()
+    };
+    // Inside a runtime the stop runs on a blocking thread, after the drop.
+    let engine = engine_in(&dir, config(&[]));
+    let pid = started(&engine);
+    runtime.block_on(async move { drop(engine) });
+    assert!(gone_soon(pid), "the child {pid} outlived its engine");
+    // Outside one the drop stops and reaps the child before it returns.
+    let engine = engine_in(&dir, config(&[]));
+    let pid = started(&engine);
+    drop(engine);
+    assert!(!alive(pid), "the child {pid} outlived its engine");
+}
+
+#[test]
 fn a_busy_child_exits_when_its_parent_goes_away() {
     // Driven by hand: the child hangs inside a transcription, so it never
     // reads the closed stdin; its next heartbeat finds stdout gone.

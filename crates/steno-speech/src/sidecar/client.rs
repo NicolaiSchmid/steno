@@ -388,7 +388,7 @@ impl SidecarProcess {
 
     /// Asks the child to exit, then kills it if it has not within the
     /// grace period. Returns its exit status.
-    fn shutdown(mut self, grace: Duration) -> Option<ExitStatus> {
+    fn shut_down(mut self, grace: Duration) -> Option<ExitStatus> {
         // Any answer but a failure will do.
         let polite = self
             .request(|id| Request::Shutdown { id }, Vec::new(), grace, "bye", Ok)
@@ -635,7 +635,7 @@ impl SidecarSpeechEngine {
             let mut slot = shared.lock();
             shared.pid.store(0, Ordering::SeqCst);
             slot.take()
-                .and_then(|process| process.shutdown(shared.config.control_timeout))
+                .and_then(|process| process.shut_down(shared.config.control_timeout))
         })
         .await?)
     }
@@ -643,7 +643,9 @@ impl SidecarSpeechEngine {
 
 impl Drop for SidecarSpeechEngine {
     /// Stops the child politely when nothing else holds the state; the
-    /// process's own drop kills it otherwise.
+    /// process's own drop kills it otherwise. The polite stop waits up to
+    /// twice the control timeout, so inside a tokio runtime it runs on a
+    /// blocking thread instead of the worker that dropped the engine.
     fn drop(&mut self) {
         if let Some(shared) = Arc::get_mut(&mut self.shared)
             && let Some(process) = shared
@@ -652,7 +654,17 @@ impl Drop for SidecarSpeechEngine {
                 .unwrap_or_else(PoisonError::into_inner)
                 .take()
         {
-            process.shutdown(shared.config.control_timeout);
+            shared.pid.store(0, Ordering::SeqCst);
+            let grace = shared.config.control_timeout;
+            let stop = move || {
+                let _ = process.shut_down(grace);
+            };
+            match tokio::runtime::Handle::try_current() {
+                // A runtime shutting down drops the task unrun, and with it
+                // the process, whose drop kills the child.
+                Ok(runtime) => drop(runtime.spawn_blocking(stop)),
+                Err(_) => stop(),
+            }
         }
     }
 }
