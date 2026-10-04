@@ -18,10 +18,9 @@
 #   --private  create the repository private if it does not exist yet
 #   --dry-run  verify and stage, print the upload commands, upload nothing
 #
-# Needs huggingface-cli (pip install -U "huggingface_hub[cli]") signed in
-# with a write token (huggingface-cli login, or HF_TOKEN in the
-# environment), curl and sha256sum or shasum. The repository is created on
-# the first upload.
+# Needs the Hugging Face CLI, hf (pip install -U huggingface_hub), signed in
+# with a write token (hf auth login, or HF_TOKEN in the environment), curl
+# and sha256sum or shasum. The repository is created on the first upload.
 #
 # What lands in the repository, and nothing else from the models directory
 # (no partial downloads, no Finder files):
@@ -30,7 +29,8 @@
 #   ATTRIBUTION.md  the CC-BY-4.0 credit: creator, source, licence link and
 #                   the changes made (ONNX conversion, longer position table)
 # The layout is <asset id>/<file name>, the same as a Steno models root, so
-# `huggingface-cli download` output can be served as a mirror unchanged.
+# the output of `hf download <repo> --revision <commit> --local-dir <dir>`
+# can be served as a mirror unchanged.
 #
 # Afterwards set PARAKEET_V3_FP32_REVISION in
 # crates/steno-speech/src/model_store.rs to the printed commit; the manifest
@@ -71,7 +71,7 @@ while (($# > 0)); do
 		shift
 		;;
 	-h | --help)
-		sed -n '3,37p' "$0" | sed 's/^# \{0,1\}//'
+		awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
 		exit 0
 		;;
 	*) fail 2 "unknown argument: $1" ;;
@@ -172,19 +172,19 @@ run() {
 if ((dry_run)); then
 	printf '\ndry run, would run:\n'
 else
-	command -v huggingface-cli >/dev/null || fail 1 "huggingface-cli not found: pip install -U 'huggingface_hub[cli]'"
+	command -v hf >/dev/null || fail 1 "hf not found: pip install -U huggingface_hub"
 fi
 # File by file: only the verified files go up, never a partial download
 # or anything else in the directory. The first upload creates the
 # repository.
 for name in "${files[@]}"; do
-	run huggingface-cli upload "$repo" "$directory/$name" "$asset/$name" --repo-type model \
+	run hf upload "$repo" "$directory/$name" "$asset/$name" --repo-type model \
 		${private[@]+"${private[@]}"} --commit-message "Parakeet TDT 0.6B v3 fp32 ONNX export: $name"
 	private=()
 done
-run huggingface-cli upload "$repo" "$staging/ATTRIBUTION.md" ATTRIBUTION.md --repo-type model \
+run hf upload "$repo" "$staging/ATTRIBUTION.md" ATTRIBUTION.md --repo-type model \
 	--commit-message "CC-BY-4.0 attribution"
-run huggingface-cli upload "$repo" "$staging/README.md" README.md --repo-type model \
+run hf upload "$repo" "$staging/README.md" README.md --repo-type model \
 	--commit-message "Model card"
 
 if ((dry_run)); then
