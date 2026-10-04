@@ -34,11 +34,10 @@ pub enum SpeechError {
         directory: PathBuf,
         missing: Vec<String>,
     },
-    /// The manifest has no source for a missing file and no mirror is set
-    /// (the fp32 export until it is hosted); the files have to be put in
-    /// place by hand.
+    /// A missing file has no source in the manifest and no mirror is set
+    /// (no asset Steno ships); it has to be put in place by hand.
     #[error(
-        "model {asset} has no download location yet; put its files in {}",
+        "model {asset} has no download location; put its files in {}",
         directory.display()
     )]
     NotHosted {

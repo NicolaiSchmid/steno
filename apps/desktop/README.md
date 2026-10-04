@@ -151,14 +151,13 @@ directory is `~/Library/Application Support/Steno` on the Mac,
 binaries. Without the sidecar the windows still work, but processing a
 meeting fails with "could not start" and the path it looked for.
 
-The sidecar also needs the fp32 Parakeet export, which no host serves yet.
-Put its five files (`encoder.onnx`, `encoder.weights`, `decoder.onnx`,
-`joiner.onnx`, `tokens.txt`) in `onnx/parakeet-tdt-0.6b-v3-fp32/` under the
-models directory (`Models` in the support directory, unless `STENO_MODELS_DIR`
-or the settings name another), or set `STENO_MODELS_MIRROR` to a copy.
-"Models" in the `steno-speech` crate doc says how to produce the export.
-Silero VAD, the other model, downloads on first use. The bundles carry the
-sidecar beside the shell (see Release).
+The sidecar also needs the fp32 Parakeet export (2.6 GB, from Hugging Face)
+and Silero VAD. With Parakeet v3 as the engine, Settings > Transcription
+downloads both, and so does the first meeting processed without them, into
+`onnx/` under the models directory (`Models` in the support directory, unless
+`STENO_MODELS_DIR` or the settings name another). `STENO_MODELS_MIRROR` serves
+them from a copy instead. The bundles carry the sidecar beside the shell (see
+Release).
 
 Every build without the `custom-protocol` feature loads `devUrl` (the Vite
 dev server on 5173), whatever the profile; that is Tauri's dev build. Set

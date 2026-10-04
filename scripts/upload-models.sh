@@ -11,8 +11,8 @@
 # Usage: scripts/upload-models.sh [--repo <owner/name>] [--models <store root>]
 #        [--private] [--dry-run]
 #
-#   --repo     the target repository; default NicolaiSchmid/steno-models,
-#              a placeholder until the plan's parity list settles the account
+#   --repo     the target repository; default nicolaischmid/steno-models,
+#              the one STENO_MODELS_REPO names
 #   --models   a store root holding parakeet-tdt-0.6b-v3-fp32/ (the files
 #              spikes/onnx-speech/export/ writes); default $STENO_MODELS_DIR
 #   --private  create the repository private if it does not exist yet
@@ -33,14 +33,15 @@
 # can be served as a mirror unchanged.
 #
 # Afterwards set PARAKEET_V3_FP32_REVISION in
-# crates/steno-speech/src/model_store.rs to the printed commit; the manifest
-# then points at https://huggingface.co/<repo>/resolve/<commit>/<path>.
+# crates/steno-speech/src/model_store.rs to the printed commit (and
+# STENO_MODELS_REPO to the repository, if it changed); the manifest points
+# at https://huggingface.co/<repo>/resolve/<commit>/<path>.
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/crates/steno-speech/src/model_store.rs"
-repo="NicolaiSchmid/steno-models"
+repo="nicolaischmid/steno-models"
 models="${STENO_MODELS_DIR:-}"
 private=()
 dry_run=0

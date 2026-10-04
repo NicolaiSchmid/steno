@@ -399,7 +399,7 @@ pub fn diarizer(models_directory: &Path) -> Arc<dyn Diarizer> {
 /// The host's model service over the models under one directory.
 /// Parakeet v3 is the model the engine runs: on the Mac by default the
 /// `CoreML` model (installed by the Swift app); elsewhere, and on the Mac
-/// with the sidecar chosen, the ONNX export.
+/// with the sidecar chosen, the ONNX export with Silero VAD in front.
 pub struct ModelStoreSpeechModels {
     /// The ONNX store, with the speech settings' mirror.
     pub speech: ModelStore,
@@ -480,12 +480,18 @@ impl SpeechModels for ModelStoreSpeechModels {
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
                 coreml_parakeet_installed(&self.coreml)
             }
+            // Every model the ONNX engine loads.
+            ModelAsset::ParakeetV3 => steno_speech::ModelAsset::all()
+                .iter()
+                .all(|asset| self.speech.is_installed(asset)),
             other => {
                 Self::speech_asset(other).is_some_and(|asset| self.speech.is_installed(&asset))
             }
         }
     }
 
+    /// Off the Mac, Parakeet v3's size counts the export only, not the
+    /// 640 KB of Silero VAD its row also needs.
     fn installed_size(&self, asset: ModelAsset) -> Option<i64> {
         if !self.is_installed(asset) {
             return None;
@@ -518,34 +524,44 @@ impl SpeechModels for ModelStoreSpeechModels {
                 "This build cannot download the CoreML Parakeet v3 model; install it from the Steno Mac app."
                     .into(),
             ),
-            other => {
-                let asset = Self::speech_asset(other)
-                    .ok_or_else(|| format!("{} has no Rust engine yet", other.as_str()))?;
-                let total = asset.total_size().max(1);
+            ModelAsset::ParakeetV3 => {
+                // Silero VAD (640 KB) too, so the ONNX engine is ready
+                // offline once the row says Installed.
+                let assets = steno_speech::ModelAsset::all();
+                let total = assets
+                    .iter()
+                    .map(steno_speech::ModelAsset::total_size)
+                    .sum::<u64>()
+                    .max(1);
+                let mut throttle = ProgressThrottle::default();
                 let mut received_before: u64 = 0;
-                let mut current_file = String::new();
-                self.speech
-                    .ensure(&asset, &mut |report| {
-                        if report.file != current_file {
-                            if !current_file.is_empty() {
-                                received_before += asset
-                                    .files
-                                    .iter()
-                                    .find(|f| f.name == current_file)
-                                    .map_or(0, |f| f.size);
-                            }
-                            report.file.clone_into(&mut current_file);
-                        }
+                for asset in &assets {
+                    self.speech.ensure(asset, &mut |report| {
+                        let earlier_files: u64 = asset
+                            .files
+                            .iter()
+                            .take_while(|f| f.name != report.file)
+                            .map(|f| f.size)
+                            .sum();
                         #[allow(clippy::cast_precision_loss)]
-                        let fraction = (received_before + report.received) as f64 / total as f64;
-                        progress(fraction.min(1.0), report.file);
+                        let fraction = ((received_before + earlier_files + report.received) as f64
+                            / total as f64)
+                            .min(1.0);
+                        if throttle.forwards(fraction, report.file) {
+                            progress(fraction, report.file);
+                        }
                     })?;
+                    received_before += asset.total_size();
+                }
                 progress(1.0, "Installed");
                 Ok(())
             }
+            other => Err(format!("{} has no Rust engine yet", other.as_str()).into()),
         }
     }
 
+    /// Off the Mac, removing Parakeet v3 removes the export and keeps
+    /// Silero VAD, which is small; the row reads Not downloaded either way.
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         match asset {
             ModelAsset::OfflineDiarizer => {
@@ -603,6 +619,30 @@ impl SpeechModels for ModelStoreSpeechModels {
     }
 }
 
+/// Lets a download report through only when its whole percent or its file
+/// changes: the store reports every 64 KB read, and the host publishes a
+/// Settings snapshot for each report it gets.
+#[derive(Default)]
+struct ProgressThrottle {
+    last: Option<(i64, String)>,
+}
+
+impl ProgressThrottle {
+    fn forwards(&mut self, fraction: f64, file: &str) -> bool {
+        #[allow(clippy::cast_possible_truncation)]
+        let percent = (fraction * 100.0) as i64;
+        if self
+            .last
+            .as_ref()
+            .is_some_and(|(last, last_file)| *last == percent && last_file == file)
+        {
+            return false;
+        }
+        self.last = Some((percent, file.to_owned()));
+        true
+    }
+}
+
 /// Model files on disk for the tests, so no test downloads one.
 #[cfg(test)]
 pub(crate) mod testing {
@@ -657,6 +697,19 @@ pub(crate) mod testing {
         for path in models.diarizer_paths() {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"onnx").unwrap();
+        }
+    }
+
+    /// `asset`'s files in the speech store, each a sparse file of its
+    /// manifest size.
+    pub fn install_speech_asset(models: &ModelStoreSpeechModels, asset: &steno_speech::ModelAsset) {
+        let directory = models.speech.directory(asset);
+        std::fs::create_dir_all(&directory).unwrap();
+        for file in &asset.files {
+            std::fs::File::create(directory.join(&file.name))
+                .unwrap()
+                .set_len(file.size)
+                .unwrap();
         }
     }
 
@@ -768,6 +821,140 @@ mod tests {
             assert!(!models.coreml.exists());
             assert!(!models.is_installed(ModelAsset::ParakeetV3));
         }
+    }
+
+    /// On the ONNX export (off the Mac, or the sidecar chosen on it), the
+    /// Parakeet v3 row counts as installed only with Silero VAD next to the
+    /// export, as the engine needs both; removing the row removes the
+    /// export and keeps the VAD.
+    #[test]
+    fn on_the_onnx_export_parakeet_v3_needs_the_export_and_the_vad() {
+        let dir = tempfile::tempdir().unwrap();
+        let models =
+            ModelStoreSpeechModels::new(&testing::setup(dir.path(), testing::sidecar_chosen()));
+        testing::install_speech_asset(&models, &steno_speech::ModelAsset::parakeet_v3_fp32());
+        assert!(!models.is_installed(ModelAsset::ParakeetV3), "no VAD yet");
+        assert!(!models.engine_installed("parakeet-v3"));
+        testing::install_speech_asset(&models, &steno_speech::ModelAsset::silero_vad());
+        assert!(models.is_installed(ModelAsset::ParakeetV3));
+        assert!(models.engine_installed("parakeet-v3"));
+        models.remove(ModelAsset::ParakeetV3).unwrap();
+        assert!(!models.is_installed(ModelAsset::ParakeetV3));
+        assert!(
+            models
+                .speech
+                .is_installed(&steno_speech::ModelAsset::silero_vad())
+        );
+    }
+
+    /// A mirror on 127.0.0.1 that answers every request with `len` bytes
+    /// of junk, which fail any checksum.
+    fn junk_mirror(len: usize) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                // Read the request head, so closing does not reset it.
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(&[head.as_bytes(), &vec![b'x'; len]].concat());
+            }
+        });
+        format!("http://{address}")
+    }
+
+    /// On the ONNX export, the Parakeet v3 download fetches Silero VAD too,
+    /// ends with Installed and counts every byte of both models in its
+    /// fraction.
+    #[test]
+    fn on_the_onnx_export_the_parakeet_v3_download_installs_the_vad_and_counts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = |models_mirror| SpeechSettings {
+            models_mirror,
+            ..testing::sidecar_chosen()
+        };
+        let local = ModelStoreSpeechModels::new(&testing::setup(dir.path(), settings(None)));
+        let with_mirror = |len| {
+            ModelStoreSpeechModels::new(&testing::setup(
+                dir.path(),
+                settings(Some(junk_mirror(len))),
+            ))
+        };
+        let download = |models: &ModelStoreSpeechModels| {
+            let mut reports = Vec::new();
+            let result = models.download(ModelAsset::ParakeetV3, &mut |fraction, file| {
+                reports.push((fraction, file.to_owned()));
+            });
+            (result, reports)
+        };
+        let vad = steno_speech::ModelAsset::silero_vad();
+        let export = steno_speech::ModelAsset::parakeet_v3_fp32();
+        testing::install_speech_asset(&local, &export);
+
+        let vad_size = usize::try_from(vad.total_size()).unwrap();
+        let (result, _) = download(&with_mirror(vad_size));
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("silero_vad.onnx"), "{error}");
+
+        testing::install_speech_asset(&local, &vad);
+        let (result, reports) = download(&with_mirror(0));
+        result.unwrap();
+        assert_eq!(reports, [(1.0, "Installed".to_owned())]);
+
+        let tokens = export
+            .files
+            .iter()
+            .find(|f| f.name == "tokens.txt")
+            .unwrap();
+        std::fs::remove_file(local.speech.directory(&export).join("tokens.txt")).unwrap();
+        let (result, reports) = download(&with_mirror(usize::try_from(tokens.size).unwrap()));
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("sha256"), "{error}");
+        #[allow(clippy::cast_precision_loss)]
+        let (total, rest) = (
+            (vad.total_size() + export.total_size()) as f64,
+            tokens.size as f64,
+        );
+        // Every other byte of both models counts as received: the reports
+        // start at (total - tokens.txt) / total, below 1.0.
+        assert!(
+            reports.first().is_some_and(|(fraction, _)| *fraction < 1.0),
+            "{reports:?}"
+        );
+        assert!(
+            reports
+                .iter()
+                .all(|(fraction, file)| file == "tokens.txt" && *fraction >= (total - rest) / total),
+            "{reports:?}"
+        );
+    }
+
+    #[test]
+    fn download_progress_goes_through_once_per_percent_or_file() {
+        let mut throttle = ProgressThrottle::default();
+        let forwarded: Vec<_> = [
+            (0.0, "a"),
+            (0.004, "a"),
+            (0.009, "a"),
+            (0.01, "a"),
+            (0.011, "b"),
+            (0.015, "b"),
+            (0.5, "b"),
+        ]
+        .into_iter()
+        .filter(|(fraction, file)| throttle.forwards(*fraction, file))
+        .collect();
+        assert_eq!(
+            forwarded,
+            [(0.0, "a"), (0.01, "a"), (0.011, "b"), (0.5, "b")]
+        );
     }
 
     /// The warm-up's question: with the `CoreML` Parakeet on disk, only
