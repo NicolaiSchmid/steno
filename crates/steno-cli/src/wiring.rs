@@ -62,13 +62,13 @@ pub const ENGINE_IDS: [&str; 4] = [
     "whisperkit-large-v3-turbo",
 ];
 
-/// `--engine <id>`: without it the pipeline runs the fakes; with it the
-/// named engine, the ONNX diarizer and cosine speaker memory over the
-/// store, models downloading on first use.
+/// `--engine <id>`: without it the pipeline runs the fakes; with it
+/// Parakeet v3 where the flag's help says, the ONNX diarizer and cosine
+/// speaker memory over the store. The diarizer's models download on first
+/// use; Parakeet's must be installed or, in the speech sidecar, come from
+/// the mirror.
 #[derive(Debug, Clone, Args)]
 pub struct SpeechOptions {
-    // A `help` string, not a doc comment: clap prints it as written, and
-    // the doc lint would ask for backticks around CoreML.
     #[arg(
         long,
         value_name = "engine",
@@ -235,9 +235,10 @@ mod tests {
         assert_eq!(standardized(&root.join("..")), root);
     }
 
-    /// `--engine` over `--models-dir <dir>/models-\xff`, a name that is
-    /// not UTF-8, with `stored` as the settings' engine: the error of the
-    /// engine's `prepare`, which fails without the network.
+    /// `--engine` over the models directory `<dir>/models-\xff` (a name
+    /// that is not UTF-8) passed to `dependencies`, as `steno process`
+    /// passes the settings', with `stored` as the settings' engine: the
+    /// error of the engine's `prepare`, which fails without the network.
     #[cfg(unix)]
     async fn prepare_error(dir: &Path, flag: &str, stored: &str) -> (PathBuf, String) {
         use std::os::unix::ffi::OsStrExt as _;
@@ -261,8 +262,8 @@ mod tests {
         (models, error.to_string())
     }
 
-    /// The flag, not the stored id, picks the engine, over the directory
-    /// `--models-dir` names. Every engine reports `parakeet-v3`, and off
+    /// The flag, not the stored id, picks the engine, over the models
+    /// directory the caller passes. Every engine reports `parakeet-v3`, and off
     /// the Mac every id runs in the speech sidecar, so only the Mac can
     /// tell the engines apart: there the flag's `parakeet-v3` is the
     /// `CoreML` engine, the stored Whisper id the sidecar's. `CoreML`
@@ -278,7 +279,7 @@ mod tests {
         let coreml = steno_services::speech::coreml_model_directory(&models);
         assert!(
             error.contains(&coreml.display().to_string()),
-            "the CoreML engine over --models-dir: {error}"
+            "the CoreML engine over the given models directory: {error}"
         );
     }
 
@@ -292,7 +293,7 @@ mod tests {
         let (models, error) = prepare_error(dir.path(), "parakeet-v3", "parakeet-v3").await;
         assert!(
             error.contains(&models.join("onnx").display().to_string()),
-            "the sidecar over --models-dir: {error}"
+            "the sidecar over the given models directory: {error}"
         );
     }
 }

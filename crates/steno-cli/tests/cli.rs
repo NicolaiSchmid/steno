@@ -503,6 +503,7 @@ fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
         diarizer_files.iter().all(|file| !file.exists()),
         "removed from --models-dir"
     );
+    // Removing an asset that is not installed succeeds.
     dev_models(home, &["remove", "parakeetV3"]);
 }
 
