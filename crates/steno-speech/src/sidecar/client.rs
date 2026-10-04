@@ -596,10 +596,13 @@ impl Shared {
                 process.provider = Some(provider);
                 Ok(())
             }
+            // The child answered and still runs, so the probe did not end it.
+            Err(error @ SidecarError::Remote(_)) => {
+                process.load_asked_directml = false;
+                Err(error)
+            }
             Err(error) => {
-                // The child answered, so the probe did not end it.
-                process.load_asked_directml &= !matches!(error, SidecarError::Remote(_));
-                let probe_ended = ended_on_directml(&error, None, process.load_asked_directml);
+                let probe_ended = ended_on_directml(&error, None, directml);
                 let error = self.kill_unless_remote(slot, error);
                 if probe_ended {
                     // `DirectML` is off now, so this load asks for the CPU
