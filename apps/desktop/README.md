@@ -246,18 +246,15 @@ finding.
    secrets in the table below are set, and a manual run on the branch
    passes:
    `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
-   It builds, signs and notarises, and publishes nothing.
 1. On `main`, set `[workspace.package] version` in `Cargo.toml`, run
    `cargo check` so `Cargo.lock` follows (CI builds with `--locked`), and
-   merge both. A hyphen (`0.2.0-rc.1`) means the beta lane only; a
-   pre-release ends in a number.
+   merge both. A hyphen (`0.2.0-rc.1`) means the beta lane only.
 2. Tag the merge commit:
    `git tag desktop-v<version> <merge commit> && git push origin desktop-v<version>`.
    Push one tag at a time and wait for its publish: GitHub keeps one
    waiting job per concurrency group, so a third tag cancels the second's
    waiting publish. Until the macOS job is done, start no Swift release
-   and no other desktop run with macOS: one job signs on the self-hosted
-   Mac at a time (see Signing).
+   and no other desktop run with macOS (see Signing).
 3. Watch the Desktop release run. `publish` runs only when all three
    platforms bundled.
 4. Check what the lanes serve:
@@ -312,8 +309,7 @@ previous *release*'s manifest, never an rc's, which would offer the rc to
 every stable user: the same two commands with `desktop-v<previous
 release>` and `desktop-stable`. Never re-run the bad tag's publish: its
 **Update lanes** moves the lanes back to it. Then fix forward with a higher
-version. Its tag moves the lanes as usual, because they now serve older
-versions.
+version, whose tag moves the lanes as usual.
 
 ### Secrets
 
@@ -331,15 +327,14 @@ built.
 
 Installed apps verify updates only with the `pubkey` they were built with.
 To rotate the updater key, publish one release whose `tauri.conf.json`
-carries the new public key, signed with the old private key. Publish's
-signature check reads the config's key, so on that release's commit the
-`pubkey=` line of **Verify the updater signatures** (`desktop-release.yml`)
-reads the old one,
+carries the new public key, signed with the old private key. Publish
+checks the signatures against the config's key, so on that release's
+commit the `pubkey=` line of **Verify the updater signatures**
+(`desktop-release.yml`) is set to the old key,
 `pubkey="$(base64 --decode <<< '<the old plugins.updater.pubkey value>')"`,
-and the next commit reverts the line. After that release, replace
-`TAURI_SIGNING_PRIVATE_KEY`.
-An app that never installed that release needs a manual install, and so
-does every app if the key is lost.
+and the next commit reverts it. After that release, replace
+`TAURI_SIGNING_PRIVATE_KEY`. An app that never installed that release
+needs a manual install, and so does every app if the key is lost.
 
 ### The speech sidecar
 
@@ -385,12 +380,10 @@ The release binary is built first with no secret in the environment
 imports the Developer ID certificate into a throwaway keychain
 (`scripts/signing-keychain.sh`, the Swift release's approach) and hands
 its identity to the bundler; at the end it takes only that keychain off
-the search list and leaves every other one there. One macOS signing job
-runs at a time on the self-hosted Mac: no Swift release and no other
-desktop run signs while a desktop run signs. Two throwaway keychains
-would hold the same Developer ID identity, and a `codesign` by name (the
-Swift app's `make-dmg.sh` and Xcode export) then fails as ambiguous. The
-bundler signs the sidecar, the app binary and the bundle under the
+the search list. Only one job signs on the self-hosted Mac at a time: two
+throwaway keychains would hold the same Developer ID identity, and a
+`codesign` by name (the Swift app's `make-dmg.sh` and Xcode export) then
+fails as ambiguous. The bundler signs the sidecar, the app binary and the bundle under the
 hardened runtime with `Entitlements.plist` (one file for every item, so
 the sidecar carries the two entitlements without using them), then
 notarises and staples the `.app` with the App Store Connect key before it
