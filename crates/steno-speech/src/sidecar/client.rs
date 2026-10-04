@@ -697,19 +697,20 @@ impl SidecarSpeechEngine {
                         loaded,
                         provider,
                         ..
-                    } => Ok((pid, rss_bytes, loaded, provider)),
+                    } => Ok(SidecarHealth {
+                        pid,
+                        rss_bytes,
+                        loaded,
+                        provider,
+                    }),
                     other => Err(other),
                 },
             );
             match reply {
-                Ok((pid, rss_bytes, loaded, provider)) => {
-                    process.observe_provider(provider);
-                    Ok(Some(SidecarHealth {
-                        pid,
-                        rss_bytes,
-                        loaded,
-                        provider: process.provider,
-                    }))
+                Ok(mut health) => {
+                    process.observe_provider(health.provider);
+                    health.provider = process.provider;
+                    Ok(Some(health))
                 }
                 Err(error) => Err(shared.kill_unless_remote(&mut slot, error)),
             }
