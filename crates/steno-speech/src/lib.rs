@@ -22,13 +22,17 @@
 //! - [`language`]: the per-segment language tagger.
 //! - [`pipeline`]: [`Transcriber`], which runs the above in order and
 //!   retries empty chunks with a wider window.
-//! - [`onnx`]: the ONNX Runtime backend over our fp32 export.
+//! - [`onnx`]: the ONNX Runtime backend over our fp32 export, with the
+//!   encoder on `DirectML` on Windows when the settings ask and the probe
+//!   passes ([`EncoderProvider`]).
 //! - [`model_store`]: the manifest, its two hosts and the checksummed,
 //!   resumable download.
 //! - [`engine`]: [`OnnxSpeechEngine`], the in-process `SpeechEngine` the
 //!   sidecar hosts.
 //! - [`sidecar`]: [`SidecarSpeechEngine`], the `SpeechEngine` over the
-//!   `steno-speech-sidecar` child process, and its wire protocol.
+//!   `steno-speech-sidecar` child process, and its wire protocol, and the
+//!   process-wide switch-off of `DirectML` after a child crashed on it
+//!   ([`sidecar::directml_switched_off`]).
 //! - [`runtime`]: [`SpeechSettings`] and [`SpeechRuntime`], which engine
 //!   runs on which platform.
 //! - [`wav`]: the 16 kHz PCM-16 reader of the example and the tests.
@@ -135,7 +139,7 @@ pub use model_store::{
     DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore, PARAKEET_V3_FP32_REVISION,
     STENO_MODELS_REPO,
 };
-pub use onnx::{OnnxBackend, OnnxOptions};
+pub use onnx::{EncoderProvider, OnnxBackend, OnnxOptions};
 pub use pipeline::{PipelineConfig, RecoveryConfig, Transcriber, Transcript};
 pub use runtime::{SpeechRuntime, SpeechSettings};
 pub use segmentation::{TokenAggregator, TranscriptSegmenter};

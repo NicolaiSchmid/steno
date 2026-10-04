@@ -250,6 +250,26 @@ jobs:
         if: matrix.name == 'windows'
         run: cargo test -p steno-audio --test live_windows --locked -- --nocapture
 
+      # The DirectML probe test again, with its output, so the log shows
+      # what the runner (no GPU) makes of it. `--workspace` keeps the Test
+      # step's feature set, so nothing rebuilds. A renamed test would match
+      # the filter to nothing and pass, so the step checks for the test's
+      # `provider chosen:` line. Without a GPU that line must say `cpu`
+      # after a `NoDevice` refusal: a session labelled DirectML here would
+      # mean the provider was dropped without an error (`error_on_failure`
+      # gone) and the session ran on the CPU under the wrong name.
+      - name: DirectML probe, with output
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/directml-probe.log"
+          cargo test --workspace --lib --locked -- --exact --nocapture \
+            onnx::tests::directml_probe_opens_a_working_session_on_whatever_this_machine_has \
+            | tee "$log"
+          grep -qF "provider chosen:" "$log" || { echo "::error::the DirectML probe did not run"; exit 1; }
+          grep -qF "provider chosen: cpu" "$log" || { echo "::error::without a GPU the probe must choose the CPU"; exit 1; }
+          grep -qF "(NoDevice)" "$log" || { echo "::error::without a GPU DirectML must refuse to start (NoDevice)"; exit 1; }
+
       # A debug build loads devUrl; the smoke needs the embedded bundle, so
       # the dev URL is dropped through Tauri's configuration merge. The run
       # ends itself after 15 s; the step limit catches a hang before that.

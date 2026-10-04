@@ -1,5 +1,6 @@
-//! Which engine runs Parakeet where, and the speech settings that choose
-//! it. On Linux and Windows the ONNX sidecar
+//! Which engine runs Parakeet where, the speech settings that choose it,
+//! and on Windows whether the encoder may use `DirectML`. On Linux and
+//! Windows the ONNX sidecar
 //! ([`SidecarSpeechEngine`](crate::SidecarSpeechEngine)) is the only
 //! speech engine the app runs: speech inference never shares the app's
 //! process there (the diarizer's ONNX models still run in it).
@@ -36,6 +37,17 @@ pub struct SpeechSettings {
     /// macOS only: run the ONNX sidecar instead of `CoreML`. Ignored
     /// elsewhere, where the sidecar is the only choice.
     pub onnx_sidecar_on_mac: bool,
+    /// Windows only: run the speech encoder on `DirectML` when a DirectX 12
+    /// GPU takes it, on the CPU otherwise
+    /// ([`OnnxOptions::directml`](crate::OnnxOptions::directml), the probe
+    /// in [`crate::onnx#directml`]). Off by default until gate G4 of the
+    /// speech-stack plan is measured: no Windows machine with a GPU has
+    /// run it, so its speed on an integrated GPU, its transcripts against
+    /// the CPU's and how its drivers fail are unknown. A driver that aborts
+    /// mid-run takes the sidecar and that job with it (one that aborts in
+    /// the probe costs no job), and the encoder runs on the CPU for the rest
+    /// of the app's run. Ignored elsewhere.
+    pub directml_on_windows: bool,
     /// A mirror the speech models (Silero VAD and the Parakeet export) are
     /// fetched from instead of their hosts ([`ModelStore::with_mirror`]);
     /// the diarizer's models keep their hosts. `None` uses the hosts.
@@ -77,6 +89,7 @@ mod tests {
     #[test]
     fn the_sidecar_is_the_default_off_the_mac_and_the_fallback_on_it() {
         let default = SpeechSettings::default();
+        assert!(!default.directml_on_windows, "DirectML is opt-in");
         assert_eq!(default.runtime_on(true), SpeechRuntime::CoreMlInProcess);
         assert_eq!(default.runtime_on(false), SpeechRuntime::OnnxSidecar);
         let fallback = SpeechSettings {
@@ -97,12 +110,13 @@ mod tests {
     fn settings_round_trip_in_camel_case_and_default_when_absent() {
         let settings = SpeechSettings {
             onnx_sidecar_on_mac: true,
+            directml_on_windows: true,
             models_mirror: Some("http://mirror.example:8000/models".to_owned()),
         };
         let json = steno_core::json::to_column_string(&settings).unwrap();
         assert_eq!(
             json,
-            r#"{"modelsMirror":"http://mirror.example:8000/models","onnxSidecarOnMac":true}"#
+            r#"{"directmlOnWindows":true,"modelsMirror":"http://mirror.example:8000/models","onnxSidecarOnMac":true}"#
         );
         assert_eq!(
             serde_json::from_str::<SpeechSettings>(&json).unwrap(),
