@@ -97,9 +97,8 @@ Each row is something the cutover has to carry over, retire or decide.
    (`Sources/StenoHandover/Identity/IdentityKeychain.swift`; an identity
    query ignores the label and returns every identity in the keychain).
    Export that identity with `SecItemExport` as PKCS#12, convert it to the
-   PEM bundle
-   `steno-handover` reads, store it under `handover-identity` and leave the
-   Swift item in place. If the export fails (a key marked non-extractable,
+   PEM bundle `steno-handover` reads, store it under `handover-identity` and
+   leave the Swift item in place. If the export fails (a key marked non-extractable,
    a denied prompt), the app mints a new identity and the release notes
    say that phones pair again. The paired devices are rows in the shared
    database, so nothing else changes.
@@ -115,12 +114,10 @@ Each row is something the cutover has to carry over, retire or decide.
 
 ## Risks
 
-- **Sparkle refuses the update.** Sparkle refuses a new bundle without the
-  installed app's `SUPublicEDKey`, with another bundle id, or that passes
-  neither the EdDSA check against the installed key nor the installed
-  app's designated requirement (the bundle id and the team; an ad hoc
-  signed sidecar fails that one). The Swift app then retries daily without
-  telling the user why. Step 2 carries the key; covered by test 1.
+- **Sparkle refuses the update** when the new bundle lacks the key or the
+  bundle id of step 2, or passes neither the EdDSA check nor the designated
+  requirement (an ad hoc signed sidecar fails the latter). The Swift app
+  then retries daily without telling the user why. Covered by test 1.
 - **Version ordering.** A `CFBundleVersion` lower than the last Swift
   build's means the item is never offered; a marketing version lower than
   the last Swift tag confuses the Tauri updater after the handoff. Step 1
@@ -170,8 +167,8 @@ second user account), never on CI alone.
    account), check for updates, install. Then: the app launches as the
    Tauri app, `codesign -dr -` on it shows the same designated requirement
    as the Swift build's, its `Info.plist` has the Swift `SUPublicEDKey`,
-   the meeting is listed, the API key works without a
-   prompt, onboarding does not open, Login Items shows one Steno entry.
+   the meeting is listed, the API key works without a prompt, onboarding
+   does not open, Login Items shows one Steno entry.
 2. **Permissions.** After test 1, record a call: both lanes carry audio, no
    TCC prompt appeared, and `tccutil` was not needed.
 3. **Phone.** After test 1, the paired phone uploads a recording without
