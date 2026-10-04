@@ -13,13 +13,43 @@ use steno_pipeline::{
     Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline, RetentionSweep,
     SweepIncomplete,
 };
+use steno_speech::SpeechRuntime;
 use uuid::Uuid;
 
 use crate::app::BuildError;
 use crate::block_on;
 
+/// The speech engine a pipeline was built with: the engine id the
+/// settings named at the build and where [`SpeechSetup::runtime`] runs it.
+/// The recorder's warm-up reads it from [`CurrentPipeline`], not from the
+/// store, so a failed reload or an engine id the Swift app saved meanwhile
+/// cannot make it load an engine the pipeline does not hold the way it
+/// thinks.
+///
+/// [`SpeechSetup::runtime`]: crate::speech::SpeechSetup::runtime
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltEngine {
+    /// The stored engine id the build read.
+    pub engine_id: String,
+    /// Where the pipeline's speech engine runs.
+    pub runtime: SpeechRuntime,
+}
+
+/// One pipeline's dependencies and the speech engine they hold.
+pub struct BuiltPipeline {
+    pub dependencies: PipelineDependencies,
+    pub engine: BuiltEngine,
+}
+
 /// Rebuilds the dependencies from the stored settings and the API key.
-pub type MakeDependencies = Arc<dyn Fn() -> Result<PipelineDependencies, BuildError> + Send + Sync>;
+pub type MakeDependencies = Arc<dyn Fn() -> Result<BuiltPipeline, BuildError> + Send + Sync>;
+
+/// The pipeline [`CurrentPipeline`] holds, with the engine it was built
+/// with, swapped together.
+struct Current {
+    pipeline: ProcessingPipeline,
+    engine: BuiltEngine,
+}
 
 /// The current pipeline behind a swap: a reload replaces it first, so a
 /// Save never waits for a run in progress; the retired pipeline is kept
@@ -28,44 +58,59 @@ pub type MakeDependencies = Arc<dyn Fn() -> Result<PipelineDependencies, BuildEr
 /// so a recording that ends after a reload goes through the new one.
 /// Held by `App`, the recorder, the phone intake and [`HostPipeline`].
 pub struct CurrentPipeline {
-    current: Mutex<ProcessingPipeline>,
+    current: Mutex<Current>,
     make: MakeDependencies,
     runtime: tokio::runtime::Handle,
 }
 
 impl CurrentPipeline {
+    /// The pipeline over `built`, reloading through `make`.
     #[must_use]
     pub fn new(
-        pipeline: ProcessingPipeline,
+        built: BuiltPipeline,
         make: MakeDependencies,
         runtime: tokio::runtime::Handle,
     ) -> Self {
         CurrentPipeline {
-            current: Mutex::new(pipeline),
+            current: Mutex::new(Current {
+                pipeline: ProcessingPipeline::new(built.dependencies),
+                engine: built.engine,
+            }),
             make,
             runtime,
         }
     }
 
-    #[must_use]
-    pub fn current(&self) -> ProcessingPipeline {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Current> {
         self.current
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+    }
+
+    #[must_use]
+    pub fn current(&self) -> ProcessingPipeline {
+        self.lock().pipeline.clone()
+    }
+
+    /// The current pipeline and the speech engine it was built with, read
+    /// together, so a reload in between cannot pair one pipeline with
+    /// another's engine.
+    #[must_use]
+    pub fn current_with_engine(&self) -> (ProcessingPipeline, BuiltEngine) {
+        let current = self.lock();
+        (current.pipeline.clone(), current.engine.clone())
     }
 
     /// Replaces the pipeline with one built from the stored settings and
-    /// the secret store's API key.
+    /// the secret store's API key. A failed build keeps the current
+    /// pipeline and its engine.
     pub fn reload(&self) -> Result<(), BuildError> {
-        let replacement = ProcessingPipeline::new((self.make)()?);
-        let retired = std::mem::replace(
-            &mut *self
-                .current
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            replacement,
-        );
+        let built = (self.make)()?;
+        let replacement = Current {
+            pipeline: ProcessingPipeline::new(built.dependencies),
+            engine: built.engine,
+        };
+        let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });
         Ok(())

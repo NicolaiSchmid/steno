@@ -15,14 +15,14 @@ use steno_host::fakes::{
 use steno_host::services::{LoginItem, LoginItemStatus, Opener, Services};
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
-use steno_pipeline::{
-    MeetingEventBus, PipelineDependencies, ProcessingPipeline, RecordingIntake, RetentionSweep,
-};
+use steno_pipeline::{MeetingEventBus, PipelineDependencies, RecordingIntake, RetentionSweep};
 
 use crate::block_on;
 use crate::handover::ListenerHandover;
 use crate::llm::{ClientLlmService, codex_store};
-use crate::pipeline::{CurrentPipeline, HostPipeline, MakeDependencies, run_sweep};
+use crate::pipeline::{
+    BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
+};
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, MakeCaptureSession};
 use crate::secrets::secret_store;
@@ -134,11 +134,11 @@ fn api_key(
 }
 
 /// The dependencies of one pipeline from the stored settings, the API key
-/// and `speech`, shared by the first build and every reload. `speech` is
-/// read once by [`build`] and also backs the model service and the
-/// recorder's warm-up, so the three agree on where each engine runs. A
-/// secret store that cannot be read is logged and the passes are built
-/// without a key.
+/// and `speech`, shared by the first build and every reload, with the
+/// speech engine they hold. `speech` is read once by [`build`] and also
+/// backs the model service, so the two agree on where each engine runs; the
+/// recorder's warm-up reads the engine from the pipeline. A secret store
+/// that cannot be read is logged and the passes are built without a key.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     speech: &SpeechSetup,
@@ -146,7 +146,7 @@ pub fn pipeline_dependencies(
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
-) -> Result<PipelineDependencies, BuildError> {
+) -> Result<BuiltPipeline, BuildError> {
     let settings = store.settings()?;
     let api_key = api_key(secrets, runtime).unwrap_or_else(|warning| {
         tracing::warn!("{warning}");
@@ -163,9 +163,16 @@ pub fn pipeline_dependencies(
         store.clone(),
         events.clone(),
     );
-    Ok(match passes {
+    let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
+    };
+    Ok(BuiltPipeline {
+        dependencies,
+        engine: BuiltEngine {
+            runtime: speech.runtime(&settings.speech_engine_id),
+            engine_id: settings.speech_engine_id,
+        },
     })
 }
 
@@ -262,16 +269,12 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let zone = local_zone();
 
     // The speech settings are read once, here: the pipeline (and every
-    // reload), the model service and the recorder share them.
+    // reload) and the model service share them.
     let speech = SpeechSetup::new(&store.settings()?, &paths);
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
     let make = make_dependencies(&store, &speech, &secrets, &codex, &events, &runtime);
-    let pipeline = Arc::new(CurrentPipeline::new(
-        ProcessingPipeline::new(make()?),
-        make,
-        runtime.clone(),
-    ));
+    let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
     let sweep = RetentionSweep::new(store.clone());
 
     let permissions = Arc::new(FakePermissions::all_granted());
@@ -282,7 +285,6 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         options.make_capture_session,
         permissions.clone(),
         speech_models.clone(),
-        speech.speech_settings.clone(),
         zone,
         runtime.clone(),
     ));
@@ -553,10 +555,10 @@ mod tests {
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
         async_trait, paths::file_url, protocols::BoundaryResult,
     };
-    use steno_pipeline::{MeetingEventBus, ProcessingPipeline};
+    use steno_pipeline::MeetingEventBus;
 
     use super::*;
-    use crate::testing::{fake_dependencies, temp_store};
+    use crate::testing::{built, fake_dependencies, temp_store};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_phone_intake_enqueues_through_the_pipeline_current_at_admission() {
@@ -569,11 +571,11 @@ mod tests {
             let (store, reloads) = (store.clone(), reloads.clone());
             Arc::new(move || {
                 let n = reloads.fetch_add(1, Ordering::SeqCst) + 1;
-                Ok(fake_dependencies(&store, &format!("engine-{n}")))
+                Ok(built(fake_dependencies(&store, &format!("engine-{n}"))))
             })
         };
         let current = Arc::new(CurrentPipeline::new(
-            ProcessingPipeline::new(fake_dependencies(&store, "engine-0")),
+            built(fake_dependencies(&store, "engine-0")),
             make,
             tokio::runtime::Handle::current(),
         ));
@@ -817,7 +819,7 @@ mod tests {
         let (dir, store) = temp_store();
         let secrets: Arc<dyn SecretStore> = Arc::new(BrokenSecrets);
         let paths = StenoPaths::new(dir.path().join("support"));
-        let dependencies = pipeline_dependencies(
+        let built = pipeline_dependencies(
             &store,
             &SpeechSetup::new(&store.settings().unwrap(), &paths),
             &secrets,
@@ -826,7 +828,7 @@ mod tests {
             &tokio::runtime::Handle::current(),
         )
         .expect("the graph builds without the key");
-        assert!(dependencies.cleaner.is_none());
+        assert!(built.dependencies.cleaner.is_none());
         assert_eq!(
             api_key(&secrets, &tokio::runtime::Handle::current()).unwrap_err(),
             "Could not read the LLM API key from the secret store: no default keychain"
