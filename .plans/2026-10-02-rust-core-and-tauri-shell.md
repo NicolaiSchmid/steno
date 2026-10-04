@@ -1172,10 +1172,17 @@ fix is ported to Swift before cutover.
 - Revoke during a `complete`: Swift's `HandoverEngine.revoke` discards the files of the
   receipts in `activeReceipts` only. After a restart a receipt may be only in the store:
   a revoke that lands while `RecordingHandler.complete` reads it finds nothing to
-  discard, and the verified file of the revoked phone goes to the intake. Rust's
-  `complete` checks the revoked set after the verify and discards the files instead
-  (401). Both leave the files of a revoked device's receipt that is only in the store,
-  and not being completed, to the next start's sweep.
+  discard, and the verified file of the revoked phone goes to the intake, also when the
+  phone paired again meanwhile. Rust counts the revokes per device since start
+  (`State::revocations`, never reset by a pairing); `complete` takes the count before
+  its receipt read and compares it after the read and after the verify, and on a change
+  discards the files, drops the receipt from memory and answers 401. Swift PR #191 ports
+  the same fix (`HandoverEngine.revocations`). One difference at entry: Swift refuses a
+  `complete` while a revoke of the device is in flight (`revoking`), Rust from the
+  revoke until the device pairs again (`State::revoked`), so a `revoke` future dropped
+  mid-delete leaves no counter behind; after a finished revoke Swift answers 404 (the
+  receipt is gone), Rust 401. Both leave the files of a revoked device's receipt that
+  is only in the store, and not being completed, to the next start's sweep.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
