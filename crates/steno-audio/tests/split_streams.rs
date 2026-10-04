@@ -365,8 +365,61 @@ fn a_queue_beyond_the_masters_buffer_slips_at_once() {
     assert_eq!(out, ramp(3_360, 480), "the newest frames survive the slip");
 }
 
+/// A slip at once starts a fresh window, so the excess queued before it
+/// does not count toward the next window's end.
 #[test]
-fn a_period_policy_keeps_two_periods_and_slips_one_period_above() {
+fn a_slip_at_once_starts_a_fresh_window() {
+    // Ten pulls a window; ceiling: high water 960 plus a 960-frame buffer.
+    let follower = FollowerLane::new(480, 960, 4_800, 48_000).with_max_lateness(960);
+    let mut scratch = vec![0.0f32; 4_096];
+    let mut out = vec![0.0f32; 480];
+    let mut pushed = 0;
+    let mut feed = |frames: usize| {
+        follower.push(packet(&ramp(pushed, frames), 1), &mut scratch);
+        pushed += frames;
+        follower.pull(&mut out)
+    };
+    // A first window at the target.
+    assert_eq!(feed(960), 0);
+    for _ in 0..9 {
+        assert_eq!(feed(480), 0);
+    }
+    // Three pulls above the high-water mark, then a burst above the
+    // ceiling.
+    assert_eq!(feed(1_200), 0);
+    assert_eq!(feed(480), 0);
+    assert_eq!(feed(480), 0);
+    assert_eq!(feed(1_440), 1_680, "2 160 left is above 1 920: at once");
+    // Above the high-water mark again for nine pulls, one short of a
+    // fresh window.
+    assert_eq!(feed(1_200), 0);
+    for pull in 0..8 {
+        assert_eq!(feed(480), 0, "pull {pull} after the slip");
+    }
+    assert_eq!(follower.slipped_frames(), 1_680);
+}
+
+/// [`FollowerLane::for_streams`] sets the ceiling a master buffer above
+/// the high-water mark: 1 440 + 960 for 10 ms periods behind 20 ms.
+#[test]
+fn the_stream_policy_slips_at_once_a_master_buffer_above_high_water() {
+    let follower = FollowerLane::for_streams(480, 960);
+    let mut scratch = vec![0.0f32; 4_096];
+    let mut out = vec![0.0f32; 480];
+    follower.push(packet(&ramp(0, 1_440), 1), &mut scratch);
+    assert_eq!(follower.pull(&mut out), 0);
+    assert_eq!(follower.queued(), 960);
+    follower.push(packet(&ramp(1_440, 1_980), 1), &mut scratch);
+    assert_eq!(
+        follower.pull(&mut out),
+        1_500,
+        "2 460 left is above 2 400: at once"
+    );
+    assert_eq!(follower.queued(), 960);
+}
+
+#[test]
+fn the_stream_policy_keeps_two_periods_and_slips_one_period_above() {
     let follower = FollowerLane::for_streams(480, 4_800);
     assert_eq!(follower.target(), 960, "two periods");
     let mut scratch = vec![0.0f32; 4_096];
@@ -505,6 +558,21 @@ fn audio_queued_before_the_first_pull_is_trimmed_uncounted() {
     assert_eq!(follower.trimmed_frames(), 3_840);
 }
 
+/// A pre-roll above the ceiling is trimmed at the first pull, not
+/// slipped: nothing lost, nothing below the target skipped.
+#[test]
+fn a_pre_roll_above_the_ceiling_is_trimmed_not_slipped() {
+    let follower = FollowerLane::for_streams(480, 960);
+    let mut scratch = vec![0.0f32; 4_096];
+    let mut out = vec![0.0f32; 480];
+    follower.push(packet(&ramp(0, 8_000), 1), &mut scratch);
+    assert_eq!(follower.pull(&mut out), 0, "a trim is not a loss");
+    assert_eq!(out, ramp(6_560, 480));
+    assert_eq!(follower.trimmed_frames(), 6_560);
+    assert_eq!(follower.slipped_frames(), 0);
+    assert_eq!(follower.queued(), 960);
+}
+
 /// The trim is decided at the master's first pull: a follower that starts
 /// after the master delivers recorded audio, which is never trimmed.
 #[test]
@@ -551,7 +619,14 @@ fn a_full_staging_ring_refuses_whole_packets_and_the_master_counts_them() {
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = LaneFrameSink::new(&lanes);
     let mut router = PacketRouter::new(plan.layout.sources, Some(Arc::clone(&follower)), 480);
+    // The master's first pull, before the follower delivers.
     router.route(packet(&ramp(0, 480), 1), &sink);
+
+    let mut scratch = vec![0.0f32; 512];
+    follower.push(packet(&ramp(0, 1_000), 1), &mut scratch);
+    follower.push(packet(&ramp(1_000, 100), 1), &mut scratch);
+    assert_eq!(follower.queued(), 1_000, "the second packet did not fit");
+    router.route(packet(&ramp(480, 480), 1), &sink);
     let dropped = sink.dropped_samples();
     assert_eq!(dropped.get(&AudioLane::System), Some(&100));
     assert_eq!(dropped.get(&AudioLane::Mic), None);
@@ -562,6 +637,27 @@ fn a_full_staging_ring_refuses_whole_packets_and_the_master_counts_them() {
         Some(&100),
         "an overflow is reported once"
     );
+}
+
+/// A follower that fills its staging before the master's first pull (a
+/// slow start of the master's stream) loses only audio from before the
+/// recording: uncounted, as the trim is. An overflow after the first pull
+/// is counted.
+#[test]
+fn an_overflow_before_the_first_pull_is_not_counted_as_lost() {
+    let follower = FollowerLane::new(0, 1_024, 4_800, 1_024);
+    let mut scratch = vec![0.0f32; 512];
+    let mut out = vec![0.0f32; 480];
+    follower.push(packet(&ramp(0, 1_000), 1), &mut scratch);
+    follower.push(packet(&ramp(1_000, 100), 1), &mut scratch);
+    assert_eq!(follower.queued(), 1_000, "the second packet did not fit");
+    assert_eq!(follower.pull(&mut out), 0, "nothing recorded was lost");
+    assert_eq!(out, ramp(520, 480), "trimmed to the newest queued frames");
+
+    follower.push(packet(&ramp(1_100, 1_000), 1), &mut scratch);
+    follower.push(packet(&ramp(2_100, 100), 1), &mut scratch);
+    assert_eq!(follower.pull(&mut out), 100, "refused after the first pull");
+    assert_eq!(follower.pull(&mut out), 0, "an overflow is reported once");
 }
 
 #[test]
@@ -619,14 +715,7 @@ fn a_full_sink_drops_the_callback_on_every_lane() {
     let sink = LaneFrameSink::with_handler(&lanes, 1_000.0, 1.0, Box::new(|_| {}));
     let follower = Arc::new(FollowerLane::new(0, 4_800, 4_800, 48_000));
     let mut scratch = vec![0.0f32; 2_048];
-    // The master's first pull, before the follower delivers.
     follower.push(packet(&ramp(0, 2_048), 1), &mut scratch);
-
-    let mut scratch = vec![0.0f32; 512];
-    follower.push(packet(&ramp(0, 1_000), 1), &mut scratch);
-    follower.push(packet(&ramp(1_000, 100), 1), &mut scratch);
-    assert_eq!(follower.queued(), 1_000, "the second packet did not fit");
-    router.route(packet(&ramp(480, 480), 1), &sink);
     let mut router = PacketRouter::new(plan.layout.sources, Some(follower), 2_048);
     // The rings hold 1 024 samples; 2 048 frames do not fit.
     router.route(packet(&ramp(0, 2_048), 1), &sink);
@@ -639,27 +728,6 @@ fn a_full_sink_drops_the_callback_on_every_lane() {
 #[test]
 fn a_system_only_master_folds_its_stereo_packet() {
     let lanes = [AudioLane::System];
-/// A follower that fills its staging before the master's first pull (a
-/// slow start of the master's stream) loses only audio from before the
-/// recording: uncounted, as the trim is. An overflow after the first pull
-/// is counted.
-#[test]
-fn an_overflow_before_the_first_pull_is_not_counted_as_lost() {
-    let follower = FollowerLane::new(0, 1_024, 4_800, 1_024);
-    let mut scratch = vec![0.0f32; 512];
-    let mut out = vec![0.0f32; 480];
-    follower.push(packet(&ramp(0, 1_000), 1), &mut scratch);
-    follower.push(packet(&ramp(1_000, 100), 1), &mut scratch);
-    assert_eq!(follower.queued(), 1_000, "the second packet did not fit");
-    assert_eq!(follower.pull(&mut out), 0, "nothing recorded was lost");
-    assert_eq!(out, ramp(520, 480), "trimmed to the newest queued frames");
-
-    follower.push(packet(&ramp(1_100, 1_000), 1), &mut scratch);
-    follower.push(packet(&ramp(2_100, 100), 1), &mut scratch);
-    assert_eq!(follower.pull(&mut out), 100, "refused after the first pull");
-    assert_eq!(follower.pull(&mut out), 0, "an overflow is reported once");
-}
-
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = LaneFrameSink::new(&lanes);
     let mut router = PacketRouter::new(plan.layout.sources, None, 480);
