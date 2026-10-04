@@ -1281,6 +1281,8 @@ DirectML in the ONNX Runtime build, a hardware DirectX 12 adapter (the device
 filter leaves out WARP), the session created, one encoder run on a second of
 silence. Any failure opens the encoder on the CPU, and a later run that fails on
 DirectML reopens it on the CPU for good and runs again, so the job does not fail.
+A child whose CPU reopen fails too exits without answering, which counts as a
+crash on DirectML.
 
 An abort inside the driver still ends the sidecar. A child that crashes, hangs or
 overruns the memory ceiling with DirectML in use switches DirectML off for the rest
@@ -1293,7 +1295,9 @@ child's answers, which carry the provider in force, so a fallback after the load
 shows in the parent's log and in `SidecarHealth`. The child has no log
 subscriber; its stderr reaches the parent's log (at debug level, the fallback line
 at info) and the crash tail, so the child writes the reason for a fallback there
-in fixed words. What is and is not proven:
+in fixed words. A killed child is logged at warn level with its exit status and
+the kind of failure only; the error with the crash tail goes to debug. What is and
+is not proven:
 
 - **Off by default.** Gate G4 (at least three times the CPU's speed on an
   integrated GPU) is open with no machine, and so is whether DirectML's
@@ -1301,7 +1305,10 @@ in fixed words. What is and is not proven:
   default flips when a Windows machine with a GPU has measured both. The
   `DirectMl` label means the provider is registered for the encoder's session;
   ONNX Runtime may still place nodes DirectML does not support on the CPU, which
-  the measurement checks in ONNX Runtime's verbose session log.
+  the measurement checks in ONNX Runtime's verbose session log. A child that
+  hangs is killed at its deadline, but the kill waits for the child's exit
+  without bound, so a child stuck in a driver call could hold the engine's lock;
+  the measurement checks whether a hung DirectML child exits when killed.
 - **The CPU path is unchanged.** With the setting off, and on Linux and macOS
   where it is ignored, the ten FLEURS German `cat/` files give segments and tokens
   byte-identical to `main`'s on atlas (`STENO_MODELS_DIR` with the fp32 export).
@@ -1314,8 +1321,10 @@ in fixed words. What is and is not proven:
   ONNX model with a CPU session labelled `DirectML`. The switch-off is tested with
   the fake engine on Windows: an abort on DirectML leaves the next child and every
   later engine on the CPU, an abort inside the probe loads again on the CPU within
-  the same call, and an error, a release or a crash after a fallback to the CPU
-  leaves DirectML on. No real GPU fault has run.
+  the same call, a child that lost its encoder on DirectML exits unanswered and
+  switches DirectML off, and an error, a release or a crash after a fallback to
+  the CPU leaves DirectML on. On every platform, a crash inside a load on the CPU
+  is not retried within the call. No real GPU fault has run.
 - **`DirectML.dll` is a load-time import** of every Windows binary that links
   ONNX Runtime, with or without this package: pyke publishes only DirectML builds
   of ONNX Runtime for Windows, and `ort-sys` links `DirectML.lib` for them. ONNX
