@@ -11,8 +11,7 @@
 //! of [`TokenBudget`], [`WindowEnd`] and [`TokenDuration`] are `FluidAudio`'s
 //! guards, which `steno-speech-coreml` sets (`FLUID_AUDIO`) for parity with
 //! the Swift app; the steps it keeps around the loop are listed in its
-//! decoder module. The WP4 notes in the plan list where the two
-//! configurations differ.
+//! decoder module.
 //!
 //! The model side is [`TdtModel`]: the prediction network and the joint
 //! over one window's encoder frames, which [`decode_window`] builds over a
@@ -277,7 +276,9 @@ impl<B: SpeechBackend + ?Sized> TdtModel for BackendWindow<'_, B> {
 
 /// Decodes `encoder` with a fresh prediction-network state; token frames
 /// are offset by `frame_offset`, the window's first frame in the recording.
-/// A window abandoned at the token budget is logged as a warning.
+/// A window abandoned at the token budget is logged as a warning; it
+/// reports the tokens kept, which under [`TokenBudget::PerWindow`] is the
+/// budget itself.
 pub fn decode_window<B: SpeechBackend + ?Sized>(
     backend: &mut B,
     encoder: &EncoderOutput,
@@ -487,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn the_default_limits_are_nemos() {
+    fn the_default_limits_are_nemos_with_a_per_second_budget() {
         assert_eq!(
             DecoderConfig::default(),
             DecoderConfig {
@@ -517,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_window_decodes_nothing_and_a_bad_duration_bin_is_a_shape_error() {
+    fn an_empty_window_decodes_nothing() {
         let mut backend = ScriptedBackend::new(&[(1, 7)]);
         let (tokens, stats) = decode(&mut backend, &encoder(0)).unwrap();
         assert!(tokens.is_empty());
@@ -527,10 +528,25 @@ mod tests {
             (1, 0, 0)
         );
         assert!(backend.fed.is_empty());
+    }
+
+    #[test]
+    fn a_duration_bin_outside_the_table_is_a_shape_error() {
+        let mut backend = ScriptedBackend::new(&[(1, 7)]);
         assert!(matches!(
             decode(&mut backend, &encoder(1)),
             Err(SpeechError::Shape(_))
         ));
+    }
+
+    #[test]
+    fn a_probability_is_clamped_to_a_confidence_and_a_non_finite_one_is_zero() {
+        assert_eq!(confidence(1.5), 1.0);
+        assert_eq!(confidence(-0.5), 0.0);
+        assert_eq!(confidence(f32::INFINITY), 0.0);
+        assert_eq!(confidence(f32::NEG_INFINITY), 0.0);
+        assert_eq!(confidence(f32::NAN), 0.0);
+        assert_eq!(confidence(0.3), 0.3);
     }
 
     #[test]
