@@ -163,9 +163,10 @@ pub const QUIT_CODE: i32 = 0;
 
 /// Ends the process through the run loop, so `ExitRequested` carries a code
 /// and `main` lets it through (a code-less request is the last window
-/// closing, which the tray keeps alive) once a recording in progress is
-/// saved (`main::exit_request`). Quit in the tray's menu and in the macOS
-/// menu bar, and a destroyed main window with no tray, all end here.
+/// closing, which the tray keeps alive) once the shutdown ran: a recording
+/// in progress is saved first (`main::exit_request`). Quit in the tray's
+/// menu and in the macOS menu bar, a destroyed main window with no tray,
+/// and SIGTERM all end here.
 pub fn quit(app: &AppHandle) {
     app.exit(QUIT_CODE);
 }

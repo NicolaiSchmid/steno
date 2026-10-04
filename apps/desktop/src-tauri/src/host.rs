@@ -5,7 +5,10 @@
 //! Snapshots leave through [`crate::bridge::emit`] on every open window,
 //! which also ends onboarding on a finished `onboarding` snapshot and moves
 //! the tray and the panels on a `recording` one, so a host never closes a
-//! window itself. With the opt-in `fixture-host` feature every window gets
+//! window itself. They go out from the main thread (`WindowSink`): the
+//! tray's and the windows' setters wait for it when called from anywhere
+//! else, and the host publishes under its own lock, which the main thread
+//! takes too. With the opt-in `fixture-host` feature every window gets
 //! the recorded snapshots on `page.ready` and commands are answered as
 //! `apps/macos/web/src/bridge/mock-transport.ts` answers them, so the UI
 //! runs without a database.
@@ -29,6 +32,7 @@ use crate::bridge::BridgeError;
 
 #[cfg(not(feature = "fixture-host"))]
 mod real {
+    use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex, PoisonError};
 
@@ -40,15 +44,24 @@ mod real {
     use crate::bridge::BridgeError;
     use crate::windows::RequestField;
 
-    /// Snapshots go to every open window; each page keeps the topics it
-    /// shows, and the panels read the `recording` one.
-    pub struct WindowSink {
-        pub app: AppHandle,
+    /// What [`WindowSink`] needs of the main thread: a task posted to it
+    /// runs there, at once when posted from it and in posting order
+    /// otherwise; `deliver` hands a snapshot to every open window, and
+    /// runs only there.
+    pub trait MainThread: Clone + Send + Sync + 'static {
+        fn post(&self, task: Box<dyn FnOnce() + Send>);
+        fn deliver(&self, event: BridgeEvent);
     }
 
-    impl EventSink for WindowSink {
-        fn emit(&self, event: BridgeEvent) {
-            for window in self.app.webview_windows().values() {
+    impl MainThread for AppHandle {
+        fn post(&self, task: Box<dyn FnOnce() + Send>) {
+            if let Err(error) = self.run_on_main_thread(task) {
+                tracing::debug!(%error, "snapshot not delivered: the run loop has ended");
+            }
+        }
+
+        fn deliver(&self, event: BridgeEvent) {
+            for window in self.webview_windows().values() {
                 if let Err(error) =
                     crate::bridge::emit(window, event.topic.as_str(), event.payload.clone())
                 {
@@ -58,12 +71,63 @@ mod real {
         }
     }
 
+    /// Snapshots go to every open window, from the main thread; each page
+    /// keeps the topics it shows, and the tray and the panels follow the
+    /// `recording` one (`bridge::emit`). `emit` queues the snapshot and
+    /// returns without waiting: the host emits under its `publishing`
+    /// lock, from a command, its flush thread or the recorder's level
+    /// thread, while the main thread may be waiting for that lock (a Stop
+    /// from the tray joins the level thread on it), and the tray's setters
+    /// wait for the main thread when called from another. One queue keeps
+    /// the snapshots in emit order whichever thread delivers them, also
+    /// when an emit on the main thread runs before a task posted earlier.
+    pub struct WindowSink<M = AppHandle> {
+        main: M,
+        queue: Arc<Mutex<VecDeque<BridgeEvent>>>,
+    }
+
+    impl<M: MainThread> WindowSink<M> {
+        pub fn new(main: M) -> Self {
+            WindowSink {
+                main,
+                queue: Arc::default(),
+            }
+        }
+    }
+
+    impl<M: MainThread> EventSink for WindowSink<M> {
+        fn emit(&self, event: BridgeEvent) {
+            queue(&self.queue).push_back(event);
+            let (main, pending) = (self.main.clone(), self.queue.clone());
+            self.main.post(Box::new(move || {
+                // The lock is released before each delivery: one may emit
+                // again on this thread.
+                loop {
+                    let next = queue(&pending).pop_front();
+                    let Some(event) = next else { break };
+                    main.deliver(event);
+                }
+            }));
+        }
+    }
+
+    fn queue(
+        queue: &Mutex<VecDeque<BridgeEvent>>,
+    ) -> std::sync::MutexGuard<'_, VecDeque<BridgeEvent>> {
+        queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// The Finder, the browser and the shell's windows for the host:
     /// `dialogs::reveal`, `dialogs::open_url`, `windows::open` and
     /// `windows::close`. The page's own `system.openURL` and `window.*`
     /// calls are the shell's (`bridge.rs`) and never reach the host, so in
     /// practice the host reveals files (`meeting.revealRecording`,
-    /// `meeting.revealExport`, `settings.recording.revealFolder`).
+    /// `meeting.revealExport`, `settings.recording.revealFolder`). A
+    /// failure warns without its text, which can name the path or the URL
+    /// (a folder named after a meeting); the text goes to debug.
+    ///
+    /// Swift: `NSWorkspace.activateFileViewerSelecting` and
+    /// `NSWorkspace.open`.
     pub struct ShellOpener {
         pub app: AppHandle,
     }
@@ -71,13 +135,15 @@ mod real {
     impl steno_host::services::Opener for ShellOpener {
         fn reveal(&self, path: &Path) {
             if let Err(error) = crate::dialogs::reveal(&self.app, path) {
-                tracing::warn!(%error, "revealing a file failed");
+                tracing::warn!("revealing a file failed");
+                tracing::debug!(%error, "revealing a file failed");
             }
         }
 
         fn open_url(&self, url: &str) {
             if let Err(error) = crate::dialogs::open_url(&self.app, url) {
-                tracing::warn!(%error, "opening a link failed");
+                tracing::warn!("opening a link failed");
+                tracing::debug!(%error, "opening a link failed");
             }
         }
 
@@ -87,7 +153,8 @@ mod real {
 
         fn close_window(&self, window: BridgeWindow) {
             if let Err(error) = crate::windows::close(&self.app, window) {
-                tracing::warn!(%error, %window, "closing a window failed");
+                tracing::warn!(%window, "closing a window failed");
+                tracing::debug!(%error, %window, "closing a window failed");
             }
         }
     }
@@ -97,6 +164,8 @@ mod real {
     /// the host's `choose_folder` callback takes it from here. One chooser
     /// call at a time holds `calls`, so two windows choosing at once cannot
     /// swap their folders.
+    ///
+    /// Swift: the `NSOpenPanel` inside `chooseFolder` (`SettingsBridge.swift`).
     #[derive(Default)]
     pub struct ChosenFolder {
         calls: Mutex<()>,
@@ -125,11 +194,14 @@ mod real {
     }
 
     /// The window a command came from, for `Host::for_window`: the
-    /// Summaries form answers on the calling window's view model.
+    /// Summaries form answers on the calling window's view model. A
+    /// panel's label, or any other, answers on main.
     fn bridge_window(label: &str) -> BridgeWindow {
         label.parse().unwrap_or(BridgeWindow::Main)
     }
 
+    /// The services graph and the host over it, with the chosen folder the
+    /// folder commands answer through.
     pub struct RealHost {
         pub host: Arc<Host>,
         pub app: Arc<steno_services::App>,
@@ -207,8 +279,121 @@ mod real {
             assert_eq!(choose(None), None, "nothing left after the call");
         }
 
+        type Task = Box<dyn FnOnce() + Send>;
+
+        /// A main thread the test drives: a task posted from it runs at
+        /// once, one posted from elsewhere waits its turn; `deliver` notes
+        /// each topic and whether it ran on that thread.
+        #[derive(Clone)]
+        struct TestMain {
+            id: std::thread::ThreadId,
+            tasks: std::sync::mpsc::Sender<Task>,
+            delivered: Arc<Mutex<Vec<(steno_bridge::BridgeTopic, bool)>>>,
+        }
+
+        impl MainThread for TestMain {
+            fn post(&self, task: Task) {
+                if std::thread::current().id() == self.id {
+                    task();
+                } else {
+                    self.tasks.send(task).unwrap();
+                }
+            }
+
+            fn deliver(&self, event: BridgeEvent) {
+                let on_main = std::thread::current().id() == self.id;
+                self.delivered.lock().unwrap().push((event.topic, on_main));
+            }
+        }
+
+        /// The main thread, running what is posted to it until every
+        /// handle is gone.
+        fn test_main() -> (TestMain, std::thread::JoinHandle<()>) {
+            let (tasks, posted) = std::sync::mpsc::channel::<Task>();
+            let thread = std::thread::spawn(move || {
+                while let Ok(task) = posted.recv() {
+                    task();
+                }
+            });
+            let main = TestMain {
+                id: thread.thread().id(),
+                tasks,
+                delivered: Arc::default(),
+            };
+            (main, thread)
+        }
+
+        fn event(topic: steno_bridge::BridgeTopic) -> BridgeEvent {
+            BridgeEvent::new(topic, Value::Null)
+        }
+
+        /// The tray's Stop: the main thread waits for the host's
+        /// `publishing` lock (joining the level thread) while the flush
+        /// thread emits under it. The emit returns without the main thread,
+        /// and the snapshot is delivered there once the lock is free; an
+        /// emit that delivered on its own thread would have waited for the
+        /// main thread inside the tray's setters, under the lock.
         #[test]
-        fn a_command_answers_for_the_window_that_sent_it() {
+        fn a_snapshot_is_delivered_on_the_main_thread_and_the_emit_never_waits_for_it() {
+            let (main, thread) = test_main();
+            let sink = WindowSink::new(main.clone());
+            let publishing = Arc::new(Mutex::new(()));
+            let held = publishing.lock().unwrap();
+            let (blocked, main_blocked) = std::sync::mpsc::channel();
+            let waiting = publishing.clone();
+            main.tasks
+                .send(Box::new(move || {
+                    blocked.send(()).unwrap();
+                    drop(waiting.lock().unwrap());
+                }))
+                .unwrap();
+            main_blocked
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            sink.emit(event(steno_bridge::BridgeTopic::Recording));
+            assert!(
+                main.delivered.lock().unwrap().is_empty(),
+                "delivered while the main thread was busy"
+            );
+            drop(held);
+            let delivered = main.delivered.clone();
+            drop((sink, main));
+            thread.join().unwrap();
+            assert_eq!(
+                *delivered.lock().unwrap(),
+                [(steno_bridge::BridgeTopic::Recording, true)]
+            );
+        }
+
+        /// A snapshot emitted on the main thread is delivered at once, but
+        /// never ahead of one emitted earlier from another thread whose
+        /// task has not run yet.
+        #[test]
+        fn snapshots_are_delivered_in_emit_order_from_any_thread() {
+            use steno_bridge::BridgeTopic;
+            let (main, thread) = test_main();
+            let sink = Arc::new(WindowSink::new(main.clone()));
+            let (go, released) = std::sync::mpsc::channel::<()>();
+            let on_main = sink.clone();
+            main.tasks
+                .send(Box::new(move || {
+                    released.recv().unwrap();
+                    on_main.emit(event(BridgeTopic::App));
+                }))
+                .unwrap();
+            sink.emit(event(BridgeTopic::Recording));
+            go.send(()).unwrap();
+            let delivered = main.delivered.clone();
+            drop((sink, main));
+            thread.join().unwrap();
+            assert_eq!(
+                *delivered.lock().unwrap(),
+                [(BridgeTopic::Recording, true), (BridgeTopic::App, true)]
+            );
+        }
+
+        #[test]
+        fn a_command_answers_for_its_window_and_a_panels_for_main() {
             for window in BridgeWindow::ALL {
                 assert_eq!(bridge_window(window.as_str()), *window);
             }
@@ -219,6 +404,19 @@ mod real {
 
 #[cfg(not(feature = "fixture-host"))]
 pub use real::{RealHost, ShellOpener, WindowSink};
+
+/// Why the real host could not be built.
+#[cfg(not(feature = "fixture-host"))]
+#[derive(Debug, thiserror::Error)]
+pub enum ShellHostError {
+    /// The support directory could not be created.
+    #[error(transparent)]
+    Options(#[from] std::io::Error),
+    #[error(transparent)]
+    Build(#[from] steno_services::BuildError),
+    #[error(transparent)]
+    Host(#[from] steno_host::host::HostError),
+}
 
 /// What the shell manages: the real host, or the fixture answerer.
 pub struct Host {
@@ -232,35 +430,32 @@ impl Host {
     /// sink. The launch sequence (recovery, sweep, handover) runs once the
     /// main window exists, see [`Host::launch`].
     #[cfg(not(feature = "fixture-host"))]
-    pub fn real(app: &AppHandle, runtime: &tokio::runtime::Runtime) -> Result<Self, String> {
+    pub fn real(
+        app: &AppHandle,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Result<Self, ShellHostError> {
         use std::sync::Arc;
 
         let mut options = steno_services::AppOptions::product(
             runtime.handle().clone(),
             Arc::new(ShellOpener { app: app.clone() }),
             app.package_info().version.to_string().as_str(),
-        )
-        .map_err(|error| error.to_string())?;
+        )?;
         options.login_item = Some(Arc::new(crate::autostart::ShellLoginItem {
             app: app.clone(),
         }));
-        let graph = runtime
-            .block_on(async { steno_services::build(options) })
-            .map_err(|error| error.to_string())?;
+        let graph = runtime.block_on(async { steno_services::build(options) })?;
         for warning in &graph.startup_warnings {
             tracing::warn!("{warning}");
         }
         let chosen = real::ChosenFolder::default();
         let confirm_app = app.clone();
-        let host = graph
-            .host()
-            .map_err(|error| error.to_string())?
-            .with_dialogs(
-                Box::new(move |prompt| crate::dialogs::confirm_destructive(&confirm_app, prompt)),
-                chosen.callback(),
-            );
+        let host = graph.host()?.with_dialogs(
+            Box::new(move |prompt| crate::dialogs::confirm_destructive(&confirm_app, prompt)),
+            chosen.callback(),
+        );
         let host = Arc::new(host);
-        host.attach(Arc::new(WindowSink { app: app.clone() }));
+        host.attach(Arc::new(WindowSink::new(app.clone())));
         Ok(Host {
             inner: RealHost {
                 host,
@@ -270,6 +465,7 @@ impl Host {
         })
     }
 
+    /// The fixture answerer (`fixture-host`).
     #[cfg(feature = "fixture-host")]
     pub fn fixtures() -> Self {
         Host {}
@@ -295,21 +491,9 @@ impl Host {
         self.inner.host.onboarding_window_closed();
     }
 
-    /// The meeting being recorded, which an exit has to save first; never
-    /// one for the fixtures.
-    pub fn recording(&self) -> Option<uuid::Uuid> {
-        #[cfg(not(feature = "fixture-host"))]
-        {
-            self.inner.app.recording()
-        }
-        #[cfg(feature = "fixture-host")]
-        {
-            None
-        }
-    }
-
-    /// Stops and saves a recording in progress before the process exits
-    /// (`steno_services::App::shutdown`); a no-op for the fixtures.
+    /// What every exit runs first (`steno_services::App::shutdown`): a
+    /// recording in progress is stopped and saved, the phone listener
+    /// stops; a no-op for the fixtures.
     pub fn shutdown_action(&self) -> impl FnOnce() + Send + 'static {
         #[cfg(not(feature = "fixture-host"))]
         {

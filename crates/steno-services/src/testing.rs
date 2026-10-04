@@ -12,6 +12,7 @@ use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory}
 use steno_pipeline::{MeetingEventBus, PipelineDependencies, ProcessingPipeline};
 
 use crate::pipeline::{CurrentPipeline, MakeDependencies};
+use crate::recorder::MakeCaptureSession;
 
 /// How long a test waits for background work before it fails.
 pub const PATIENCE: Duration = Duration::from_secs(5);
@@ -52,6 +53,28 @@ pub fn current_pipeline(dependencies: PipelineDependencies) -> Arc<CurrentPipeli
         make,
         tokio::runtime::Handle::current(),
     ))
+}
+
+/// Capture sessions over a synthetic backend that plays a tone on the
+/// microphone lane in real time, for up to ten minutes.
+pub fn synthetic_capture() -> MakeCaptureSession {
+    Arc::new(|configuration: steno_audio::CaptureConfiguration| {
+        let lanes = configuration.lanes();
+        let mut options = steno_audio::testing::synthetic::SyntheticOptions::tones(
+            &lanes,
+            &[(steno_core::AudioLane::Mic, 440.0)],
+            600.0,
+        );
+        options.real_time = true;
+        steno_audio::CaptureSession::with_backend(
+            configuration,
+            Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+            None,
+            steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+            Arc::new(steno_audio::SystemClock::new()),
+        )
+        .map_err(|error| error.to_string())
+    })
 }
 
 /// Waits until `done` holds, failing the test with `what` after

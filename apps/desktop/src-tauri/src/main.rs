@@ -15,10 +15,15 @@
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
 //! instance, and on a Wayland session the `XWayland` backend the panels
-//! need (`display`). Every exit goes through `App::shutdown` first
-//! (`exit_request`): Quit from either menu, and the close that ends the
-//! process when no tray stands, stop and save a recording in progress
-//! before the process ends. Secrets are not the shell's:
+//! need (`display`). Every exit runs `App::shutdown` first, at most
+//! `SHUTDOWN_PATIENCE` (ten seconds), over one `ExitGate`: it stops and
+//! saves a recording in progress and stops the phone listener. Quit from
+//! either menu, the close that ends the process when no tray stands, and
+//! SIGTERM (`kill`, a logout on Linux) are exit requests the gate holds
+//! (`exit_request`); the Dock's Quit, a logout and a shutdown on macOS
+//! reach the run loop only as its last event, and an update's relaunch
+//! bypasses the request, so both run the same shutdown first
+//! (`shut_down_before_exit`). Secrets are not the shell's:
 //! the keyring `SecretStore` lives in `steno-services` (#173, `WP6b`).
 //! Every one is a thin module over a Tauri plugin or an OS API with its
 //! rules in plain functions the tests cover. Everything that is on the
@@ -62,7 +67,9 @@ fn main() {
     #[cfg(target_os = "linux")]
     display::choose();
     // The runtime the services graph runs on, beside Tauri's own: the
-    // pipeline, the recorder's saves and the handover listener.
+    // pipeline, the recorder's saves, the handover listener and the SIGTERM
+    // listener. The run loop's handler owns it, so it lives as long as the
+    // app: Tauri drops the setup closure once it ran.
     let runtime = std::sync::Arc::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -102,15 +109,21 @@ fn main() {
         .manage(windows::Pages::default())
         .manage(updater::Updates::default())
         .manage(TrayAtClose::default())
+        .manage(steno_services::app::ExitGate::default())
         .invoke_handler(tauri::generate_handler![
             bridge::bridge_call,
             bridge::panel_call
         ])
-        .setup(move |app| setup(app.handle(), &runtime))
+        .setup({
+            let runtime = runtime.clone();
+            move |app| setup(app.handle(), &runtime)
+        })
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
-    let exits = steno_services::app::ExitGate::default();
-    app.run(move |app, event| on_event(app, event, &exits));
+    app.run(move |app, event| {
+        let _services = &runtime;
+        on_event(app, event);
+    });
 }
 
 /// Builds the host, the tray and the main window, opens onboarding when
@@ -136,29 +149,66 @@ fn setup(
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);
+    #[cfg(unix)]
+    exit_on_terminate(handle, runtime);
     Ok(())
 }
 
+/// SIGTERM asks for the exit Quit asks for, so the shutdown runs first: a
+/// logout or a shutdown on Linux sends it, as `kill` does everywhere. On
+/// macOS a logout goes through `RunEvent::Exit` instead.
+#[cfg(unix)]
+fn exit_on_terminate(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
+    let app = app.clone();
+    runtime.spawn(async move {
+        let mut terminate =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(terminate) => terminate,
+                Err(error) => {
+                    tracing::warn!(%error, "SIGTERM ends the app without saving a recording");
+                    return;
+                }
+            };
+        while terminate.recv().await.is_some() {
+            actions::quit(&app);
+        }
+    });
+}
+
+/// Runs the shutdown for an exit no request held, on this thread's behalf,
+/// and returns once it ran (at most `SHUTDOWN_PATIENCE`), at once when an
+/// exit request already ran it: `RunEvent::Exit` and the updater's
+/// relaunch call it.
+fn shut_down_before_exit(app: &tauri::AppHandle) {
+    app.state::<steno_services::app::ExitGate>().exiting(
+        steno_services::app::SHUTDOWN_PATIENCE,
+        host::host(app).shutdown_action(),
+    );
+}
+
 /// One turn of the run loop.
-fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent, exits: &steno_services::app::ExitGate) {
+fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
-        // Quit from either menu, the smoke's exit, the last window closing
-        // with no tray: a recording in progress is stopped and saved first
+        // Quit from either menu, SIGTERM, the smoke's exit, the last
+        // window closing with no tray: the shutdown runs first
         // (`exit_request`).
         tauri::RunEvent::ExitRequested { code, api, .. } => {
-            let host = host::host(app);
             let handle = app.clone();
             if !exit_request(
                 code,
                 || tray_at_close(app),
-                exits,
-                host.recording(),
-                host.shutdown_action(),
+                &app.state::<steno_services::app::ExitGate>(),
+                host::host(app).shutdown_action(),
                 move |code| handle.exit(code),
             ) {
                 api.prevent_exit();
             }
         }
+        // The run loop's last event. After a request the gate held the
+        // shutdown has run; the Dock's Quit, a logout and a shutdown on
+        // macOS raise no request (tao answers `applicationWillTerminate`,
+        // which AppKit waits for), so the shutdown runs here.
+        tauri::RunEvent::Exit => shut_down_before_exit(app),
         // The main window closes: hidden and kept while a tray can bring
         // it back (`hides_on_close`); destroyed otherwise. `has_tray` is
         // asked here, once per close, and the events that follow reuse it.
@@ -301,13 +351,12 @@ fn exits_when_destroyed(label: &str, has_tray: impl FnOnce() -> bool) -> bool {
 }
 
 /// What an exit request does; true lets it through now. `exits_on`
-/// decides whether the process ends at all. One that ends it while
-/// `recording` names a meeting is held: `shutdown` stops and saves the
-/// recording on a thread of its own (`App::shutdown`), at most
+/// decides whether the process ends at all. The first one that ends it is
+/// held: `shutdown` runs on a thread of its own (`App::shutdown`), at most
 /// `SHUTDOWN_PATIENCE`, and then `exit` raises the request again with its
-/// code (zero for one without), which goes through. Re-entry is the gate's:
-/// every request after the first that held goes ahead, the one `exit`
-/// raises included, and the shutdown runs once.
+/// code (zero for one without), which goes through. A request while the
+/// shutdown runs is held too (the exit is coming), and the shutdown runs
+/// once (`ExitGate`).
 ///
 /// Swift: `applicationShouldTerminate` answered `.terminateLater`, awaited
 /// `AppController.shutdown()` and replied.
@@ -315,7 +364,6 @@ fn exit_request(
     code: Option<i32>,
     has_tray: impl FnOnce() -> bool,
     gate: &steno_services::app::ExitGate,
-    recording: Option<uuid::Uuid>,
     shutdown: impl FnOnce() + Send + 'static,
     exit: impl FnOnce(i32) + Send + 'static,
 ) -> bool {
@@ -324,7 +372,6 @@ fn exit_request(
     }
     let code = code.unwrap_or(0);
     gate.exit_requested(
-        recording,
         steno_services::app::SHUTDOWN_PATIENCE,
         shutdown,
         move || exit(code),
@@ -367,8 +414,7 @@ mod tests {
     /// `AppHandle::exit` raises `ExitRequested`, and reports whether that
     /// one went through.
     fn requested_again(
-        gate: std::sync::Arc<steno_services::app::ExitGate>,
-        recording: Option<uuid::Uuid>,
+        gate: steno_services::app::ExitGate,
         steps: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         went_through: std::sync::mpsc::Sender<bool>,
     ) -> impl FnOnce(i32) + Send + 'static {
@@ -378,27 +424,25 @@ mod tests {
                 Some(code),
                 || panic!("the tray asked for an exit with a code"),
                 &gate,
-                recording,
                 || panic!("a second shutdown"),
                 |_| panic!("a second exit"),
             ));
         }
     }
 
-    /// Quit (the tray's item, the menu bar's, `actions::quit`) while
-    /// recording: the request is held, the recording is stopped and saved
-    /// once, then the process exits with Quit's code; nothing exits before
-    /// the save, and a second Quit meanwhile neither saves nor waits again.
+    /// Quit (the tray's item, the menu bar's, `actions::quit`, SIGTERM):
+    /// the request is held, the shutdown runs once, then the process exits
+    /// with Quit's code; nothing exits before the shutdown ended, and a
+    /// second Quit meanwhile is held too, without a second shutdown.
     #[test]
-    fn a_quit_while_recording_stops_once_and_exits_after_the_save() {
+    fn a_quit_runs_the_shutdown_once_and_holds_a_second_quit_until_it_ends() {
         use std::sync::{Arc, Mutex, atomic::AtomicUsize, atomic::Ordering};
         use std::time::Duration;
 
-        let gate = Arc::new(steno_services::app::ExitGate::default());
+        let gate = steno_services::app::ExitGate::default();
         let steps = Arc::new(Mutex::new(Vec::<String>::new()));
         let shutdowns = Arc::new(AtomicUsize::new(0));
         let (went_through, exit_seen) = std::sync::mpsc::channel();
-        let meeting = Some(uuid::Uuid::new_v4());
         let shutdown = {
             let (steps, shutdowns) = (steps.clone(), shutdowns.clone());
             move || {
@@ -411,87 +455,73 @@ mod tests {
             Some(actions::QUIT_CODE),
             || panic!("the tray asked for an exit with a code"),
             &gate,
-            meeting,
             shutdown,
-            requested_again(gate.clone(), meeting, steps.clone(), went_through),
+            requested_again(gate.clone(), steps.clone(), went_through),
         );
-        assert!(held, "Quit waits for the save");
+        assert!(held, "Quit waits for the shutdown");
         assert!(
-            exit_request(
+            !exit_request(
                 Some(actions::QUIT_CODE),
                 || true,
                 &gate,
-                meeting,
                 || panic!("a second shutdown"),
                 |_| panic!("a second exit"),
             ),
-            "a second Quit while saving goes ahead"
+            "a second Quit while saving is held"
         );
         assert!(
             exit_seen.recv_timeout(Duration::from_secs(5)).unwrap(),
-            "the exit after the save goes through"
+            "the exit after the shutdown goes through"
         );
         assert_eq!(*steps.lock().unwrap(), ["saved", "exit 0"]);
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
     }
 
-    /// Closing main with no tray while recording: the code-less request
-    /// that ends the process is held the same way and exits with zero
-    /// after the save.
+    /// Closing main with no tray: the code-less request that ends the
+    /// process is held the same way and exits with zero after the
+    /// shutdown.
     #[test]
-    fn a_close_without_a_tray_saves_the_recording_before_the_process_ends() {
+    fn a_close_without_a_tray_runs_the_shutdown_before_the_process_ends() {
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
-        let gate = Arc::new(steno_services::app::ExitGate::default());
+        let gate = steno_services::app::ExitGate::default();
         let steps = Arc::new(Mutex::new(Vec::<String>::new()));
         let (went_through, exit_seen) = std::sync::mpsc::channel();
-        let meeting = Some(uuid::Uuid::new_v4());
         let saved = steps.clone();
         assert!(!exit_request(
             None,
             || false,
             &gate,
-            meeting,
             move || saved.lock().unwrap().push("saved".to_owned()),
-            requested_again(gate.clone(), meeting, steps.clone(), went_through),
+            requested_again(gate.clone(), steps.clone(), went_through),
         ));
         assert!(exit_seen.recv_timeout(Duration::from_secs(5)).unwrap());
         assert_eq!(*steps.lock().unwrap(), ["saved", "exit 0"]);
     }
 
-    /// A close behind a tray ends nothing, so it stops nothing; with no
-    /// recording, an exit goes through at once without a shutdown.
+    /// A close behind a tray ends nothing, so it runs nothing.
     #[test]
-    fn only_an_exit_that_ends_the_process_during_a_recording_waits() {
+    fn a_close_behind_a_tray_runs_no_shutdown() {
         let gate = steno_services::app::ExitGate::default();
-        let meeting = Some(uuid::Uuid::new_v4());
-        let untouched = || panic!("a shutdown");
-        let no_exit = |_| panic!("an exit");
         assert!(!exit_request(
             None,
             || true,
             &gate,
-            meeting,
-            untouched,
-            no_exit
+            || panic!("a shutdown"),
+            |_| panic!("an exit"),
         ));
-        assert!(exit_request(
+        // The gate is still open: the next exit runs the shutdown.
+        let (shut_down, seen) = std::sync::mpsc::channel();
+        assert!(!exit_request(
             Some(actions::QUIT_CODE),
             || true,
             &gate,
-            None,
-            untouched,
-            no_exit
+            move || shut_down.send(()).unwrap(),
+            |_| {},
         ));
-        assert!(exit_request(
-            None,
-            || false,
-            &gate,
-            None,
-            untouched,
-            no_exit
-        ));
+        seen.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the shutdown ran");
     }
 
     /// A tray stands when it was built and a host or a smoke run shows it;

@@ -107,11 +107,14 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::
 /// is `failed` with the updater's words.
 pub async fn check(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, BridgeError> {
     let version = app.package_info().version.to_string();
+    let handle = app.clone();
     let outcome = async {
         let updater = app
             .updater_builder()
             .endpoints(endpoints(&version))
             .map_err(failed)?
+            // Windows: the installer ends the process itself.
+            .on_before_exit(move || crate::shut_down_before_exit(&handle))
             .build()
             .map_err(failed)?;
         updater.check().await.map_err(failed)
@@ -137,6 +140,10 @@ fn notify(app: &AppHandle, kind: MessageDialogKind, message: impl Into<String>) 
 
 /// The tray's "Check for Updates…": checks, then asks before installing,
 /// as Sparkle's standard driver does, and relaunches when the user agrees.
+/// The relaunch bypasses the exit request, so the shutdown runs first
+/// (`shut_down_before_exit`), as Sparkle's relaunch went through
+/// `applicationShouldTerminate`; on Windows the installer's own exit runs
+/// it (`check`).
 pub async fn check_and_offer(app: &AppHandle) {
     let update = match check(app).await {
         Ok(Some(update)) => update,
@@ -172,7 +179,14 @@ pub async fn check_and_offer(app: &AppHandle) {
         return;
     }
     match update.download_and_install(|_, _| {}, || {}).await {
-        Ok(()) => app.restart(),
+        Ok(()) => {
+            let handle = app.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                crate::shut_down_before_exit(&handle);
+            })
+            .await;
+            app.restart()
+        }
         Err(error) => {
             app.state::<Updates>()
                 .record(UpdateOutcome::Failed(error.to_string()));

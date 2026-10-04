@@ -1,8 +1,8 @@
 //! The native dialogs the pages cannot draw: the folder panels for the
 //! recordings folder and the Obsidian vault, the destructive alert,
-//! revealing a file, opening a folder. The Swift hosts open `NSOpenPanel` themselves inside the view
-//! model call; the Rust host is headless, so the shell shows the panel and
-//! hands the host the choice.
+//! revealing a file, opening a folder. The Swift hosts open `NSOpenPanel`
+//! themselves inside the view model call; the Rust host is headless, so
+//! the shell shows the panel and hands the host the choice.
 //!
 //! The three chooser methods keep their contract (no params in, a
 //! `chosenPath` reply out) towards the page. Towards the host the shell

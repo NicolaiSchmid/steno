@@ -240,10 +240,10 @@ fn handover_listener(
 /// LLM passes, delivery coordinator, handover listener, capture session,
 /// recorder, the speech models, folder usage, preferences, and the login item
 /// when the shell passes its own ([`AppOptions::login_item`]). Fakes where no
-/// platform side exists yet (the plan's `WP6b` row says why for each):
-/// permissions (all granted), updater, clip player, QR encoder; the audio
-/// device list is empty off the Mac until the `PipeWire` and WASAPI backends
-/// enumerate devices.
+/// platform side exists yet (the plan's "Pipeline and services (WP6b)" list
+/// says why for each): permissions (all granted), updater, clip player, QR
+/// encoder; the audio device list is empty off the Mac until the `PipeWire`
+/// and WASAPI backends enumerate devices.
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
@@ -342,57 +342,136 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     })
 }
 
-/// How long quitting waits for a recording to be saved before it exits
+/// How long an exit waits for [`App::shutdown`] before the process ends
 /// anyway.
 pub const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// The shell's exit requests around [`App::shutdown`]. The first request
-/// that finds a recording in progress is held while the shutdown runs on
-/// a thread of its own, for at most a patience; then `exit` is called.
-/// Every later request, the exit that `exit` itself causes included, goes
-/// ahead. Swift: `applicationShouldTerminate` answered `.terminateLater`,
-/// awaited `AppController.shutdown()` and then replied.
-#[derive(Debug, Default)]
+/// The shell's exits around [`App::shutdown`], which runs once, for at
+/// most `patience` (the shell passes [`SHUTDOWN_PATIENCE`]), before the
+/// process ends. The first exit request is held while the shutdown runs
+/// on a thread of its own and then raises the exit itself; a request
+/// meanwhile is held too, and every request after that goes ahead, the
+/// one the gate raises included. An exit the gate cannot hold (the run
+/// loop's last event after the Dock's Quit or a logout on macOS, an
+/// update's relaunch) calls [`ExitGate::exiting`], which runs or waits for
+/// the same shutdown on the caller's thread. Swift:
+/// `applicationShouldTerminate` answered `.terminateLater`, awaited
+/// `AppController.shutdown()` and then replied; Swift waited for it
+/// without a bound.
+#[derive(Debug, Clone, Default)]
 pub struct ExitGate {
-    shutting_down: std::sync::atomic::AtomicBool,
+    shared: Arc<(std::sync::Mutex<ExitStage>, std::sync::Condvar)>,
+}
+
+/// Where the gate stands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum ExitStage {
+    /// No exit yet.
+    #[default]
+    Open,
+    /// The shutdown runs for a held request, whose exit the gate raises
+    /// once it ends.
+    ShuttingDown,
+    /// The shutdown runs, and the process ends without the gate's exit
+    /// ([`ExitGate::exiting`]).
+    Ending,
+    /// The shutdown ended or ran out of patience: exits go ahead.
+    Released,
 }
 
 impl ExitGate {
-    /// Whether this exit request may go ahead now. `recording` is the
-    /// meeting being recorded, if any; with one, the first request returns
-    /// false and runs `shutdown`, then `exit`, as described on the type.
+    /// Whether this exit request may go ahead now. The first one returns
+    /// false, runs `shutdown` for at most `patience` and then calls `exit`,
+    /// which is expected to raise the request again; that one, and every
+    /// one after it, returns true. A request while the shutdown runs
+    /// returns false and is dropped: the exit is coming.
     pub fn exit_requested(
         &self,
-        recording: Option<uuid::Uuid>,
         patience: std::time::Duration,
         shutdown: impl FnOnce() + Send + 'static,
         exit: impl FnOnce() + Send + 'static,
     ) -> bool {
-        let Some(meeting_id) = recording else {
-            return true;
-        };
-        if self
-            .shutting_down
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            return true;
+        match self.advance(ExitStage::ShuttingDown) {
+            ExitStage::Released => return true,
+            ExitStage::ShuttingDown | ExitStage::Ending => return false,
+            ExitStage::Open => {}
         }
+        let gate = self.clone();
         std::thread::spawn(move || {
-            let (done, finished) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                shutdown();
-                let _ = done.send(());
-            });
-            if finished.recv_timeout(patience).is_err() {
-                tracing::warn!(
-                    %meeting_id,
-                    seconds = patience.as_secs(),
-                    "quitting before the recording was saved"
-                );
+            run_for_at_most(patience, shutdown);
+            // `exiting` took over while the shutdown ran: the process is
+            // ending without the gate's exit.
+            if gate.release() == ExitStage::ShuttingDown {
+                exit();
             }
-            exit();
         });
         false
+    }
+
+    /// The process is about to end without an exit request the gate
+    /// holds: runs `shutdown` on this thread's behalf, or waits for the
+    /// one a held request started, and returns once it ended, at most
+    /// `patience` later; at once when it already ran. Every exit request
+    /// goes ahead afterwards.
+    pub fn exiting(&self, patience: std::time::Duration, shutdown: impl FnOnce() + Send + 'static) {
+        match self.advance(ExitStage::Ending) {
+            ExitStage::Open => {
+                run_for_at_most(patience, shutdown);
+                self.release();
+            }
+            ExitStage::ShuttingDown => {
+                let (stage, released) = &*self.shared;
+                let _ = released
+                    .wait_timeout_while(lock_stage(stage), patience, |stage| {
+                        *stage != ExitStage::Released
+                    })
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            ExitStage::Ending | ExitStage::Released => {}
+        }
+    }
+
+    /// Moves an open gate to `running`, and one whose held request is
+    /// shutting down to `Ending` when `running` is; the stage it found.
+    fn advance(&self, running: ExitStage) -> ExitStage {
+        let mut stage = lock_stage(&self.shared.0);
+        let found = *stage;
+        if found == ExitStage::Open
+            || (found == ExitStage::ShuttingDown && running == ExitStage::Ending)
+        {
+            *stage = running;
+        }
+        found
+    }
+
+    /// Releases the gate; the stage it left.
+    fn release(&self) -> ExitStage {
+        let (stage, released) = &*self.shared;
+        let left = std::mem::replace(&mut *lock_stage(stage), ExitStage::Released);
+        released.notify_all();
+        left
+    }
+}
+
+fn lock_stage(stage: &std::sync::Mutex<ExitStage>) -> std::sync::MutexGuard<'_, ExitStage> {
+    stage
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Runs `shutdown` on a thread of its own and waits for it, at most
+/// `patience`.
+fn run_for_at_most(patience: std::time::Duration, shutdown: impl FnOnce() + Send + 'static) {
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        shutdown();
+        let _ = done.send(());
+    });
+    if finished.recv_timeout(patience).is_err() {
+        tracing::warn!(
+            seconds = patience.as_secs(),
+            "exiting before the shutdown finished; a recording in progress may not be saved"
+        );
     }
 }
 
@@ -430,21 +509,12 @@ impl App {
         )
     }
 
-    /// The meeting being recorded, if any: what quitting has to save first.
-    #[must_use]
-    pub fn recording(&self) -> Option<uuid::Uuid> {
-        use steno_host::services::Recorder as _;
-        let status = self.recorder.status();
-        (status.state != steno_bridge::RecordingState::Idle)
-            .then_some(status.meeting_id)
-            .flatten()
-    }
-
-    /// What quitting does first, in order: a recording in progress is
-    /// stopped with the `quit` end reason and saved (its asset written,
-    /// the meeting queued, so the next launch processes it), and the phone
-    /// listener stops. Every write is a committed transaction by then, so
-    /// the store has nothing left to flush. Swift: `AppController.shutdown`.
+    /// What every exit does first ([`ExitGate`]), in order: a start or a
+    /// stop in progress settles, a recording in progress is stopped with
+    /// the `quit` end reason and saved (its asset written, the meeting
+    /// queued, so the next launch processes it), and the phone listener
+    /// stops. Every write is a committed transaction by then, so the store
+    /// has nothing left to flush. Swift: `AppController.shutdown`.
     pub fn shutdown(&self) {
         self.recorder.stop_for_quit();
         if let Some(handover) = &self.handover {
@@ -684,23 +754,102 @@ mod tests {
         );
     }
 
-    /// An exit request during a recording is held: the shutdown runs once,
-    /// to the end, and only then the exit; the exit that causes, and any
-    /// other request meanwhile, goes ahead. With nothing recording every
-    /// request goes ahead.
+    /// The graph `build` assembles, over fakes, with a recorder that
+    /// records a synthetic tone into `dir`: what `App::shutdown` drives.
+    fn recording_app(dir: &tempfile::TempDir, store: &Arc<Store>) -> App {
+        let mut settings = store.settings().unwrap();
+        settings.audio_folder = file_url(&dir.path().join("audio"), true);
+        store.save_settings(&settings).unwrap();
+        let pipeline = crate::testing::current_pipeline(fake_dependencies(store, "fake-engine"));
+        let zone = FixedOffset::east_opt(0).unwrap();
+        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
+        let recorder = Arc::new(CaptureRecorder::new(
+            store.clone(),
+            pipeline.clone(),
+            crate::testing::synthetic_capture(),
+            fakes.permissions.clone(),
+            fakes.speech_models.clone(),
+            zone,
+            tokio::runtime::Handle::current(),
+        ));
+        App {
+            paths: StenoPaths::new(dir.path().join("support")),
+            store: store.clone(),
+            secrets: Arc::new(steno_core::testing::InMemorySecretStore::new()),
+            events: MeetingEventBus::new(),
+            pipeline,
+            sweep: RetentionSweep::new(store.clone()),
+            services: fakes.services(),
+            handover: None,
+            recorder,
+            models_directory: dir.path().join("models"),
+            zone,
+            runtime: tokio::runtime::Handle::current(),
+            version: "0.0.0".to_owned(),
+            startup_warnings: Vec::new(),
+        }
+    }
+
+    /// What every exit runs first: a recording in progress is stopped with
+    /// `quit` and saved by the time the shutdown returns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutting_down_stops_and_saves_a_recording_in_progress() {
+        use steno_host::services::Recorder as _;
+        let (dir, store) = temp_store();
+        let app = Arc::new(recording_app(&dir, &store));
+        let starting = app.clone();
+        tokio::task::spawn_blocking(move || {
+            starting
+                .recorder
+                .start(steno_bridge::CaptureMode::InPerson, None);
+        })
+        .await
+        .unwrap();
+        let meeting_id = app.recorder.status().meeting_id.expect("recording");
+        let quitting = app.clone();
+        tokio::task::spawn_blocking(move || quitting.shutdown())
+            .await
+            .unwrap();
+        assert_eq!(
+            app.recorder.status().state,
+            steno_bridge::RecordingState::Idle
+        );
+        let meeting = store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(
+            meeting.end_reason,
+            Some(steno_core::RecordingEndReason::Quit)
+        );
+        assert!(store.asset(meeting_id).unwrap().is_some(), "the asset");
+    }
+
+    /// An idle exit runs the same shutdown, which saves nothing and
+    /// returns at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shutting_down_with_nothing_recorded_saves_nothing() {
+        let (dir, store) = temp_store();
+        let app = recording_app(&dir, &store);
+        crate::testing::on_own_thread(
+            std::time::Duration::from_secs(5),
+            "an idle shutdown returned",
+            move || app.shutdown(),
+        );
+        assert_eq!(store.all_meetings().unwrap(), []);
+    }
+
+    /// The first exit request is held and runs the shutdown once, to the
+    /// end, recording or not; a request meanwhile is held too; then the
+    /// gate's exit runs, and the request it raises goes ahead, as does
+    /// every one after it.
     #[test]
-    fn an_exit_while_recording_waits_for_the_save_then_exits_once() {
+    fn the_first_exit_runs_the_shutdown_once_and_holds_the_others_until_it_ends() {
         use std::sync::Mutex;
         use std::time::Duration;
-        let gate = Arc::new(ExitGate::default());
+        let gate = ExitGate::default();
         let steps = Arc::new(Mutex::new(Vec::<&str>::new()));
         let (exited, exit_seen) = std::sync::mpsc::channel();
         let shutdowns = Arc::new(AtomicUsize::new(0));
-        let meeting = uuid::Uuid::new_v4();
-        assert!(gate.exit_requested(None, Duration::from_secs(1), || {}, || {}));
 
         let held = gate.exit_requested(
-            Some(meeting),
             Duration::from_secs(5),
             {
                 let (steps, shutdowns) = (steps.clone(), shutdowns.clone());
@@ -716,18 +865,21 @@ mod tests {
                     steps.lock().unwrap().push("exit");
                     // The shell's own exit raises a second request.
                     let _ = exited.send(gate.exit_requested(
-                        Some(meeting),
                         Duration::from_secs(5),
                         || panic!("no second shutdown"),
-                        || {},
+                        || panic!("no second exit"),
                     ));
                 }
             },
         );
         assert!(!held, "the first request waits");
         assert!(
-            gate.exit_requested(Some(meeting), Duration::from_secs(5), || {}, || {}),
-            "a request while the shutdown runs goes ahead"
+            !gate.exit_requested(
+                Duration::from_secs(5),
+                || panic!("no second shutdown"),
+                || panic!("no second exit"),
+            ),
+            "a request while the shutdown runs waits too"
         );
         assert!(
             exit_seen.recv_timeout(Duration::from_secs(5)).unwrap(),
@@ -735,17 +887,21 @@ mod tests {
         );
         assert_eq!(*steps.lock().unwrap(), ["saved", "exit"]);
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
+        assert!(gate.exit_requested(
+            Duration::from_secs(5),
+            || panic!("no second shutdown"),
+            || panic!("no second exit"),
+        ));
     }
 
-    /// A save that does not finish within the patience does not keep the
-    /// app from quitting.
+    /// A shutdown that does not finish within the patience does not keep
+    /// the app from quitting.
     #[test]
     fn an_exit_waits_at_most_the_patience() {
         let gate = ExitGate::default();
         let (exited, exit_seen) = std::sync::mpsc::channel();
         let (_never, stuck) = std::sync::mpsc::channel::<()>();
         assert!(!gate.exit_requested(
-            Some(uuid::Uuid::new_v4()),
             std::time::Duration::from_millis(100),
             move || {
                 let _ = stuck.recv();
@@ -755,6 +911,74 @@ mod tests {
         exit_seen
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("exited after the patience");
+    }
+
+    /// An exit no request held (the Dock's Quit, a relaunch) runs the
+    /// shutdown on the caller's behalf and returns once it ended, or once
+    /// the patience ran out; exits go ahead afterwards, and a second one
+    /// runs nothing.
+    #[test]
+    fn an_exit_without_a_request_runs_the_shutdown_before_it_returns() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+        let gate = ExitGate::default();
+        let saved = Arc::new(AtomicBool::new(false));
+        let saving = saved.clone();
+        gate.exiting(Duration::from_secs(5), move || {
+            std::thread::sleep(Duration::from_millis(100));
+            saving.store(true, Ordering::SeqCst);
+        });
+        assert!(saved.load(Ordering::SeqCst), "saved before it returned");
+        gate.exiting(Duration::from_secs(5), || panic!("no second shutdown"));
+        assert!(gate.exit_requested(
+            Duration::from_secs(5),
+            || panic!("no second shutdown"),
+            || panic!("no exit of the gate's"),
+        ));
+
+        let stuck_gate = ExitGate::default();
+        let (_never, stuck) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        stuck_gate.exiting(Duration::from_millis(100), move || {
+            let _ = stuck.recv();
+        });
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    /// The process ends while a held request's shutdown runs (a Quit, then
+    /// the Dock's Quit): `exiting` waits for that shutdown instead of
+    /// running another, and the gate's exit is not raised on top.
+    #[test]
+    fn an_exit_during_a_held_shutdown_waits_for_it_and_takes_its_exit_over() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+        let gate = ExitGate::default();
+        let saved = Arc::new(AtomicBool::new(false));
+        let (begun, shutdown_begun) = std::sync::mpsc::channel();
+        let saving = saved.clone();
+        let (raised, exit_raised) = std::sync::mpsc::channel();
+        assert!(!gate.exit_requested(
+            Duration::from_secs(5),
+            move || {
+                begun.send(()).unwrap();
+                std::thread::sleep(Duration::from_millis(200));
+                saving.store(true, Ordering::SeqCst);
+            },
+            move || {
+                let _ = raised.send(());
+            },
+        ));
+        shutdown_begun
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the shutdown began");
+        gate.exiting(Duration::from_secs(5), || panic!("a second shutdown"));
+        assert!(saved.load(Ordering::SeqCst), "waited for the shutdown");
+        assert!(
+            exit_raised
+                .recv_timeout(Duration::from_millis(300))
+                .is_err(),
+            "the gate raised an exit the process no longer needs"
+        );
     }
 
     #[test]

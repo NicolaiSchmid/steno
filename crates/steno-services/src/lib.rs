@@ -8,7 +8,7 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()` and `launch()`, [`BuildError`] |
+//! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()`, `launch()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`] |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline), and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`speech`] | The models directory, the speech engine per platform, the ONNX diarizer, the host's `SpeechModels` |
@@ -19,10 +19,12 @@
 //! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, the CLI's `meeting.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |
 //!
-//! What stays a fake here is named in [`build`]'s doc: the shell's
-//! platform services (permissions, login item, updater, clip player, QR
-//! encoder) wait for the plan's `WP8`; the speech sidecar process is `WP4c`'s,
-//! so ONNX inference runs in this process until it lands.
+//! What stays a fake here is named in [`build`]'s doc: the platform
+//! services the shell does not supply yet (permissions, updater, clip
+//! player, QR encoder; the login item when the shell passes none), each
+//! with its reason and owner in the plan's "Pipeline and services (WP6b)"
+//! list; the speech sidecar process is `WP4c`'s, so ONNX inference runs in
+//! this process until it lands.
 //!
 //! Secrets live in the platform keyring on macOS (the Keychain) and on
 //! Windows (the credential store). On Linux they live in the 0600
