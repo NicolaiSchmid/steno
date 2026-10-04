@@ -132,14 +132,19 @@ pnpm --dir apps/macos/web dev &
 cargo build -p steno-desktop -p steno-speech-sidecar && target/debug/steno-desktop
 ```
 
-Off the Mac, and on the Mac when the speech settings choose it, Parakeet
-runs in the speech sidecar, `steno-speech-sidecar`, which the services
-start from beside the shell's binary (`steno_services::speech::sidecar_config`).
-`cargo build -p steno-desktop` and `cargo tauri dev` do not build it; add
+Off the Mac, Parakeet runs in the speech sidecar, `steno-speech-sidecar`. It
+also runs there on the Mac when `speech.json` in the support directory holds
+`{"onnxSidecarOnMac": true}`. `steno-services` starts the sidecar from beside
+the shell's binary (`steno_services::speech::sidecar_config`).
+`cargo build -p steno-desktop` and `cargo tauri dev` do not build it. Add
 `-p steno-speech-sidecar` as above, or run `cargo build` at the workspace
-root, so `target/debug/` holds both. Without it the windows work, and
-processing a meeting fails with "could not start" and the path it looked
-for. Bundles carry the binary from WP9 on.
+root, so that `target/debug/` holds both binaries. Without the sidecar the
+windows still work, but processing a meeting fails with "could not start"
+and the path it looked for. The sidecar also needs the fp32 Parakeet export,
+which no host serves yet: place the files in the models directory's `onnx/`
+folder, or set `STENO_MODELS_MIRROR` to a copy (see "Models" in the
+`steno-speech` crate doc). The bundles do not carry the binary until WP9, so a
+bundle built today cannot process off the Mac either.
 
 Every build without the `custom-protocol` feature loads `devUrl` (the Vite
 dev server on 5173), whatever the profile; that is Tauri's dev build. Set
@@ -184,6 +189,11 @@ icon` over the Swift app icon
 the tray's template mark in `icons/tray/` is drawn by hand. The identifier
 stays `uno.schmid.steno.desktop` so the shell installs beside the Swift
 app; WP9 changes it to `uno.schmid.steno.mac` for the cutover.
+
+No bundle carries `steno-speech-sidecar` yet (WP9 adds it), so a `.deb`,
+AppImage, `.msi` or NSIS install opens its windows but fails to process a
+meeting with "could not start"; on the Mac, the default `CoreML` engine
+needs no sidecar.
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the

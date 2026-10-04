@@ -1,7 +1,8 @@
 //! Which engine runs Parakeet where, and the speech settings that choose
 //! it. On Linux and Windows the ONNX sidecar
 //! ([`SidecarSpeechEngine`](crate::SidecarSpeechEngine)) is the only
-//! engine the app runs: inference never shares the app's process there.
+//! speech engine the app runs: speech inference never shares the app's
+//! process there (the diarizer's ONNX models still run in it).
 //! On macOS the in-process `CoreML` engine (`steno-speech-coreml`) is the
 //! default, so the Mac stays one process; the ONNX sidecar is a fallback
 //! behind [`SpeechSettings::onnx_sidecar_on_mac`], for a Mac where the
@@ -35,8 +36,9 @@ pub struct SpeechSettings {
     /// macOS only: run the ONNX sidecar instead of `CoreML`. Ignored
     /// elsewhere, where the sidecar is the only choice.
     pub onnx_sidecar_on_mac: bool,
-    /// A mirror every model is fetched from instead of its host
-    /// ([`ModelStore::with_mirror`]); `None` uses the hosts.
+    /// A mirror the speech models (Silero VAD and the Parakeet export) are
+    /// fetched from instead of their hosts ([`ModelStore::with_mirror`]);
+    /// the diarizer's models keep their hosts. `None` uses the hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_mirror: Option<String>,
 }
@@ -110,6 +112,14 @@ mod tests {
             serde_json::from_str::<SpeechSettings>("{}").unwrap(),
             SpeechSettings::default()
         );
+    }
+
+    #[test]
+    fn the_model_store_is_the_models_directory_s_onnx_folder_with_the_mirror() {
+        let settings = SpeechSettings {
+            models_mirror: Some("http://mirror.example:8000/models".to_owned()),
+            ..SpeechSettings::default()
+        };
         let store = settings.model_store(Path::new("/models"));
         assert_eq!(store.root(), Path::new("/models").join("onnx"));
         assert_eq!(store.mirror(), Some("http://mirror.example:8000/models"));

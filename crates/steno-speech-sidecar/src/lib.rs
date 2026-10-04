@@ -14,7 +14,8 @@
 //! # Platform policy
 //!
 //! On Linux and Windows this process is where speech runs, always: the app
-//! never loads ONNX Runtime itself. On macOS the in-process `CoreML` engine
+//! never runs Parakeet on ONNX Runtime itself (the diarizer's ONNX models
+//! still run in the app's process). On macOS the in-process `CoreML` engine
 //! is the default and this sidecar is a fallback behind the speech setting
 //! `onnxSidecarOnMac` (`steno_speech::SpeechSettings`). The reason is the
 //! same everywhere: an uncaught C++ exception in ONNX Runtime ends the

@@ -261,8 +261,9 @@ pub trait SpeechModels: Send + Sync {
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()>;
 
     /// The name the acknowledgements give `asset`. The model behind an
-    /// asset is the services' choice per platform (the Mac's `CoreML` int8
-    /// Parakeet, an fp32 ONNX export elsewhere), so they may name it; the
+    /// asset is the services' choice per platform (the `CoreML` int8
+    /// Parakeet where the Mac runs it, the fp32 ONNX export in the speech
+    /// sidecar), so they may name it; the
     /// default is the Swift app's name, [`ModelAsset::display_name`].
     fn display_name(&self, asset: ModelAsset) -> &'static str {
         asset.display_name()
