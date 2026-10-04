@@ -1103,6 +1103,7 @@ PR off `main`.
 | WP8 shell completion: tray, floating panels, autostart, updater, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | merged |
 | Store opens with `synchronous = NORMAL` | `fix/rust-core-concurrency-flake` | #174 | merged |
 | WP6b pipeline, CLI, services, the shell on the real host, quitting saves first | `feat/rust-pipeline` | #173 | merged |
+| Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | open |
 | WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | merged |
 | Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
 
