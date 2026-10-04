@@ -406,7 +406,8 @@ impl Recorder for CaptureRecorder {
 mod tests {
     use super::*;
     use crate::testing::{
-        PATIENCE, current_pipeline, eventually, fake_dependencies, synthetic_capture, temp_store,
+        PATIENCE, current_pipeline, eventually, fake_dependencies, on_own_thread,
+        synthetic_capture, temp_store,
     };
     use steno_core::paths::file_url;
     use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
@@ -475,6 +476,33 @@ mod tests {
             .unwrap();
     }
 
+    async fn quit(recorder: &Arc<CaptureRecorder>) {
+        let quitting = recorder.clone();
+        tokio::task::spawn_blocking(move || quitting.stop_for_quit())
+            .await
+            .unwrap();
+    }
+
+    /// Every change that finds the recorder in `state` holds it there for
+    /// a while; the receiver hears of each one as it begins.
+    fn held_in(
+        recorder: &Arc<CaptureRecorder>,
+        state: RecordingState,
+    ) -> std::sync::mpsc::Receiver<()> {
+        let (reached, seen) = std::sync::mpsc::channel();
+        let watched = Arc::downgrade(recorder);
+        recorder.on_change(Arc::new(move || {
+            if watched
+                .upgrade()
+                .is_some_and(|recorder| recorder.status().state == state)
+            {
+                let _ = reached.send(());
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+        }));
+        seen
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
         let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
@@ -504,10 +532,7 @@ mod tests {
         let harness = harness(&[]);
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let quitting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || quitting.stop_for_quit())
-            .await
-            .unwrap();
+        quit(&harness.recorder).await;
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
         assert_eq!(meeting.end_reason, Some(RecordingEndReason::Quit));
@@ -526,27 +551,11 @@ mod tests {
         let harness = harness(&[]);
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        // The stop's first change holds it in `Stopping` for a while.
-        let (stopping, stop_seen) = std::sync::mpsc::channel();
-        let watched = Arc::downgrade(&harness.recorder);
-        harness.recorder.on_change(Arc::new(move || {
-            if watched
-                .upgrade()
-                .is_some_and(|recorder| recorder.status().state == RecordingState::Stopping)
-            {
-                let _ = stopping.send(());
-                std::thread::sleep(std::time::Duration::from_millis(300));
-            }
-        }));
+        let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
         let stopper = harness.recorder.clone();
         let manual = std::thread::spawn(move || stopper.stop());
-        stop_seen
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("the stop began");
-        let quitting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || quitting.stop_for_quit())
-            .await
-            .unwrap();
+        stop_seen.recv_timeout(PATIENCE).expect("the stop began");
+        quit(&harness.recorder).await;
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
         let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
@@ -559,27 +568,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn quitting_during_a_start_stops_the_recording_it_starts() {
         let harness = harness(&[]);
-        // The start's first change holds it in `Starting` for a while.
-        let (starting, start_seen) = std::sync::mpsc::channel();
-        let watched = Arc::downgrade(&harness.recorder);
-        harness.recorder.on_change(Arc::new(move || {
-            if watched
-                .upgrade()
-                .is_some_and(|recorder| recorder.status().state == RecordingState::Starting)
-            {
-                let _ = starting.send(());
-                std::thread::sleep(std::time::Duration::from_millis(300));
-            }
-        }));
+        let start_seen = held_in(&harness.recorder, RecordingState::Starting);
         let starter = harness.recorder.clone();
         let start = std::thread::spawn(move || starter.start(CaptureMode::InPerson, None));
-        start_seen
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("the start began");
-        let quitting = harness.recorder.clone();
-        tokio::task::spawn_blocking(move || quitting.stop_for_quit())
-            .await
-            .unwrap();
+        start_seen.recv_timeout(PATIENCE).expect("the start began");
+        quit(&harness.recorder).await;
         start.join().unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         let meetings = harness.store.all_meetings().unwrap();
@@ -594,7 +587,7 @@ mod tests {
     async fn a_toggle_starts_a_call_and_the_next_one_stops_it() {
         let harness = harness(&[]);
         let toggling = harness.recorder.clone();
-        crate::testing::on_own_thread(PATIENCE, "the first toggle returned", move || {
+        on_own_thread(PATIENCE, "the first toggle returned", move || {
             toggling.toggle();
         });
         let status = harness.recorder.status();
@@ -602,7 +595,7 @@ mod tests {
         assert_eq!(status.mode, Some(CaptureMode::Call));
         let meeting_id = status.meeting_id.unwrap();
         let toggling = harness.recorder.clone();
-        crate::testing::on_own_thread(PATIENCE, "the second toggle returned", move || {
+        on_own_thread(PATIENCE, "the second toggle returned", move || {
             toggling.toggle();
         });
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
