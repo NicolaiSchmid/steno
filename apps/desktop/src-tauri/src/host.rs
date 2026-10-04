@@ -10,10 +10,9 @@
 //! for a thread that holds it (a Stop from the tray joins the recorder's
 //! level thread, which publishes), and the tray's setters wait for the
 //! main thread when called from another. With the opt-in `fixture-host`
-//! feature every window gets
-//! the recorded snapshots on `page.ready` and commands are answered as
-//! `apps/macos/web/src/bridge/mock-transport.ts` answers them, so the UI
-//! runs without a database.
+//! feature every window gets the recorded snapshots on `page.ready` and
+//! commands are answered as `apps/macos/web/src/bridge/mock-transport.ts`
+//! answers them, so the UI runs without a database.
 //!
 //! The host reaches back into the shell through four seams, all wired here:
 //! the `Opener` (`ShellOpener`, over `dialogs` and `windows`), the login

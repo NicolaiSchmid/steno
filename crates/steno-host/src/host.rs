@@ -60,15 +60,15 @@
 //! it released: the recorder's commands, whose changes re-enter the host
 //! (`Host::recorder_changed`), the permission prompts, the LLM probe, the
 //! Codex calls and the model download, the prompts and the probe with
-//! their busy flag published first. `settings.transcription.download` replies after its
-//! first publish and keeps publishing from its own thread until the
-//! download ends; a second download of the asset reattaches to that thread
-//! instead of starting one. The flush thread starts in [`Host::new`] and
-//! ends with the last clone. The core's async boundaries (the secret store)
-//! are awaited on the host's own runtime. A call that arrives inside a
-//! tokio runtime anyway (a `#[tokio::test]`, a command that skipped
-//! `spawn_blocking`) awaits the secret store on a helper thread instead of
-//! panicking, and still blocks that worker.
+//! their busy flag published first. `settings.transcription.download`
+//! replies after its first publish and keeps publishing from its own
+//! thread until the download ends; a second download of the asset
+//! reattaches to that thread instead of starting one. The flush thread
+//! starts in [`Host::new`] and ends with the last clone. The core's async
+//! boundaries (the secret store) are awaited on the host's own runtime. A
+//! call that arrives inside a tokio runtime anyway (a `#[tokio::test]`, a
+//! command that skipped `spawn_blocking`) awaits the secret store on a
+//! helper thread instead of panicking, and still blocks that worker.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
