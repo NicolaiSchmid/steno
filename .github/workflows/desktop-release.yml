@@ -163,6 +163,7 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then cargo_home="$(cygpath -aw "$cargo_home")"; fi
           sep=$'\x1f'
           echo "CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=steno$sep--remap-path-prefix=$cargo_home=cargo" >> "$GITHUB_ENV"
+          echo "STENO_CARGO_HOME=$cargo_home" >> "$GITHUB_ENV"
 
       - name: Target directory outside the workspace (self-hosted runners only)
         if: runner.environment == 'self-hosted'
@@ -268,8 +269,13 @@ jobs:
           [[ ${#dmgs[@]} -eq 1 && -f "${dmgs[0]}" ]] || { echo "::error::expected one .dmg, found ${dmgs[*]}"; exit 1; }
           apps/desktop/scripts/notarize-dmg.sh "${dmgs[0]}"
 
+      # Also fails when either binary still holds a remapped prefix.
       - name: Check the bundles
         shell: bash
+        env:
+          STENO_HOST_PATHS: |
+            ${{ github.workspace }}
+            ${{ env.STENO_CARGO_HOME }}
         run: |
           set -euo pipefail
           signed=()

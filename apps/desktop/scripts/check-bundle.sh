@@ -23,6 +23,10 @@
 #   nsis      nsis/*-setup.exe, installed silently into a scratch directory;
 #             the same as msi
 #
+# With STENO_HOST_PATHS set (one absolute path per line, e.g. the build
+# host's workspace and cargo home), every type also checks that neither
+# binary contains any of them, i.e. that the path remapping took effect.
+#
 # Exits non-zero at the first failed check (with an `::error::` for the
 # script's own checks).
 set -euo pipefail
@@ -54,8 +58,23 @@ one() {
   echo "${matches[0]}"
 }
 
-# side_by_side <dir> <app binary> <sidecar>: both are files in <dir>, and
-# the sidecar greets and exits on an empty stdin.
+# no_host_paths <file...>: none of the files contains a line of
+# STENO_HOST_PATHS. Nothing to check when it is unset.
+no_host_paths() {
+  local file path
+  for file in "$@"; do
+    while IFS= read -r path; do
+      [[ -n "$path" ]] || continue
+      if grep -qaF -- "$path" "$file"; then
+        die "$file contains the build host's path $path"
+      fi
+    done <<< "${STENO_HOST_PATHS:-}"
+  done
+  [[ -z "${STENO_HOST_PATHS:-}" ]] || echo "ok: no build host path in $*"
+}
+
+# side_by_side <dir> <app binary> <sidecar>: both are files in <dir>, the
+# sidecar greets and exits on an empty stdin, and neither holds a host path.
 side_by_side() {
   local dir="$1" app="$2" sidecar="$3" greeting
   [[ -f "$dir/$app" ]] || die "$app is not in $dir"
@@ -63,6 +82,7 @@ side_by_side() {
   greeting="$("$dir/$sidecar" < /dev/null | tr -d '\0' || true)"
   [[ "$greeting" == *'"type":"ready"'* ]] || die "$dir/$sidecar did not greet: $greeting"
   echo "ok: $dir holds $app and $sidecar, which runs"
+  no_host_paths "$dir/$app" "$dir/$sidecar"
 }
 
 check_deb() {
