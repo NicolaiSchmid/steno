@@ -2,13 +2,13 @@
 
 The Tauri 2 shell for macOS, Linux and Windows: three windows and two
 floating panels around the web UI in `apps/macos/web`, a tray icon, and the
-`bridge_call` command the web app's Tauri transport talks to. WP3 and WP8 of
-`.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP6b puts it on the real host.
-The shell holds no logic: `steno_host::Host` over the services graph
-(`steno-services`: the store, the pipeline, the recorder, the handover
-listener) answers the bridge. The opt-in `fixture-host` cargo feature
-answers it from the recorded fixtures in `apps/macos/web/fixtures/bridge/`
-instead, for UI work without a database
+`bridge_call` command the web app's Tauri transport talks to. WP3 and WP8
+of `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP6b puts it on the
+real host. The shell holds no logic: `steno_host::Host` over the services
+graph (`steno-services`: the store, the pipeline, the recorder, the
+handover listener) answers the bridge. The opt-in `fixture-host` cargo
+feature answers it from the recorded fixtures in
+`apps/macos/web/fixtures/bridge/` instead, for UI work without a database
 (`cargo run -p steno-desktop --features fixture-host`). Paths below are
 from the repository root.
 
@@ -35,14 +35,19 @@ Every exit saves first: `App::shutdown` runs once, at most ten seconds,
 and stops and saves a recording in progress (a start or a stop under way
 settles first) and stops the handover listener, as the Swift
 `applicationShouldTerminate` awaited `AppController.shutdown`. The exits
-reach it four ways:
+reach it these ways:
 
 - Quit in the tray's menu or the macOS menu bar, the close that ends the
-  process because no tray stands, and SIGTERM (a logout on Linux, a plain
-  `kill`) are exit requests, held until the shutdown ended (`exit_request`
-  in `main.rs` over `steno_services::app::ExitGate`); a second Quit
-  meanwhile waits too, and a second SIGTERM ends the process at once,
-  unsaved. SIGINT and SIGHUP are not caught.
+  process because no tray stands, and SIGTERM, SIGINT and SIGHUP (a plain
+  `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are exit
+  requests, held until the shutdown ended (`exit_request` in `main.rs`
+  over `steno_services::app::ExitGate`); a second Quit meanwhile waits
+  too. A second SIGTERM or a second SIGINT ends the process at once,
+  unsaved; a SIGHUP never does.
+- A logout on Linux saves when the session manager signals the app
+  (systemd stops the session's scope with SIGTERM, then SIGHUP). When the
+  display connection closes first, as GNOME and KDE often do, GDK ends the
+  process unsaved; untested (WP9, before the first Linux release).
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
@@ -50,8 +55,10 @@ reach it four ways:
   first too; on Windows the installer's own exit runs it, and an install
   that fails after that ends the app once its message is closed.
 - A logoff or a shutdown on Windows also arrives as `RunEvent::Exit` (tao
-  answers `WM_ENDSESSION` with it), within Windows' own end-session
-  timeout; untested on hardware (WP10).
+  answers `WM_ENDSESSION` with it), and the shutdown runs until Windows'
+  end-session timeout, which can be shorter, ends the process: Windows
+  allows about five seconds, less than the ten above. Untested on hardware
+  (WP10).
 
 Snapshots reach the windows, the tray and the panels from the main thread
 (`WindowSink` in `host.rs`): the host emits under its `publishing` lock,
@@ -330,7 +337,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session) |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session) |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
@@ -373,10 +380,10 @@ asked (the tray's item, Settings), where Sparkle checks daily on its
 own (WP9's update schedule). On macOS the system audio permission has
 no status API; the audio crate's probe (WP5) records it and until then it
 reads `unknown`. The panels are re-tuned on the Mac once they run there
-beside the Swift ones (the plan's risk list). Linux and Windows keep their native title bar;
-macOS gets the overlay title bar the Swift windows have. The page's
-traffic light inset is a design question for the other two platforms. On
-Linux, WebKitGTK leaks one shared-memory file descriptor per destroyed
+beside the Swift ones (the plan's risk list). Linux and Windows keep
+their native title bar; macOS gets the overlay title bar the Swift
+windows have. The page's traffic light inset is a design question for
+the other two platforms. On Linux, WebKitGTK leaks one shared-memory file descriptor per destroyed
 webview that lived longer than about 250 ms (29 to 107 fds over 70
 Settings open/close cycles; wry/WebKitGTK level, not the shell), so long
 sessions with many Settings opens should be watched until

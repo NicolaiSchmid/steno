@@ -420,10 +420,18 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
   entry `handover-identity`, or accepts that phones re-pair and says so in the release
   notes; the cutover plan decides which.
+  Before the first Linux release (no package of its own yet, so WP9's): a logout on
+  GNOME and on KDE while recording is tested. The shell saves when the session manager
+  signals it, but when the display connection closes first, GDK ends the process
+  unsaved ("Pipeline and services (WP6b)").
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
   WP10a: WASAPI capture (#175); DirectML and the installer follow. The shell's exit on
   a Windows logoff or shutdown (`WM_ENDSESSION`, which reaches the shell as
-  `RunEvent::Exit`) is untested on hardware ("Pipeline and services (WP6b)").
+  `RunEvent::Exit`) is untested on hardware, and Windows ends a process that has not
+  answered within about five seconds, less than `SHUTDOWN_PATIENCE`, so a long save
+  can be cut off ("Pipeline and services (WP6b)"); the follow-up is
+  `ShutdownBlockReasonCreate` while a recording runs, so the logoff screen waits and
+  says why.
 
 ## Risks
 
@@ -654,19 +662,26 @@ still has to draw the window side. `[ ]` is not ported yet.
   `exit_request` in the shell and are held until the shutdown ended, a second Quit
   included: Quit in the tray's menu and in the macOS menu bar (#172's own item, not
   muda's `terminate:`), a destroyed main window with no tray, the last window closing
-  with no tray, and SIGTERM on Linux and macOS (a logout or a shutdown on Linux, a
-  plain `kill`); a second SIGTERM ends the process at once, unsaved. The Dock's Quit,
-  a logout and a system shutdown on macOS send `terminate:` directly; tao answers with
-  `applicationWillTerminate` only, which reaches the shell as `RunEvent::Exit` and
-  which AppKit waits for, so the shutdown runs there (`shut_down_before_exit`). A
-  logoff or a shutdown on Windows arrives the same way: tao answers `WM_ENDSESSION`
-  with the run loop's end, `RunEvent::Exit`, and the shutdown runs within Windows' own
-  end-session timeout. The updater's relaunch bypasses the exit request and runs the
-  shutdown before it relaunches; on Windows the installer's own exit runs it
-  (`on_before_exit`), and an install that fails after it ends the app once its
-  message is closed. The services' runtime is never dropped: dropping it waits, without
-  a bound, for a transcription or a model load in progress. Open: the Windows logoff
-  is untested on hardware (WP10), and SIGINT and SIGHUP end the app unsaved.
+  with no tray, and SIGTERM, SIGINT and SIGHUP on Linux and macOS (a plain `kill`,
+  Ctrl-C, a closed terminal, systemd at a shutdown); a second SIGTERM or a second
+  SIGINT ends the process at once, unsaved, and a SIGHUP never does. A Linux logout
+  saves when the session manager signals the app: systemd stops a session's scope with
+  SIGTERM, then SIGHUP at once. When the display connection closes first (GNOME and
+  KDE often close it), GDK ends the process unsaved; that is untested (WP9). The
+  Dock's Quit, a logout and a system shutdown on macOS send `terminate:` directly; tao
+  answers with `applicationWillTerminate` only, which reaches the shell as
+  `RunEvent::Exit` and which AppKit waits for, so the shutdown runs there
+  (`shut_down_before_exit`). A logoff or a shutdown on Windows arrives the same way:
+  tao answers `WM_ENDSESSION` with the run loop's end, `RunEvent::Exit`, and the
+  shutdown runs there until Windows' end-session timeout, which can be shorter, ends
+  the process: Windows allows about five seconds, less than `SHUTDOWN_PATIENCE`
+  (WP10). The updater's relaunch bypasses the exit request and runs the shutdown
+  before it relaunches; on Windows the installer's own exit runs it (`on_before_exit`),
+  and an install that fails after it ends the app once its message is closed. The
+  services runtime is never dropped: dropping it waits, without a bound, for a
+  transcription or a model load in progress. Open: the Windows logoff is untested on
+  hardware and can outlast the end-session timeout (WP10), and a Linux logout that
+  closes the display first ends the app unsaved (WP9).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes), and the tray's setters wait for the main thread when called from
@@ -688,10 +703,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   automatic-check or automatic-download flag and no last check time, so the General
   section's Updates row has nothing real to show, and `updates.check` stays the
   shell's; filling it is the update schedule WP9 decides, and the shell's
-  `UpdateOutcome` stays beside the host's until then; (4) the
-  QR encoder and the clip player are fakes, so the pairing code shows no QR image and a
-  speaker's sample clip does not play: each needs new code (a QR crate, an audio
-  output), not wiring; the audio output is WP5's, and WP9's cutover list names both.
+  `UpdateOutcome` stays beside the host's until then; (4) the QR encoder and the clip
+  player are fakes, so the pairing code shows no QR image and a speaker's sample clip
+  does not play: each needs new code (a QR crate, an audio output), not wiring; the
+  audio output is WP5's, and WP9's cutover list names both.
 - The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
   `App::launch` and runs whether or not a code is shown, where Swift ran it only while
   the Phones pane showed one.
@@ -1114,9 +1129,9 @@ PR off `main`.
 | WP8 shell completion: tray, floating panels, autostart, updater, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | merged |
 | Store opens with `synchronous = NORMAL` | `fix/rust-core-concurrency-flake` | #174 | merged |
 | WP6b pipeline, CLI, services, the shell on the real host, quitting saves first | `feat/rust-pipeline` | #173 | merged |
-| Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | open |
 | WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | merged |
 | Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
+| Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
