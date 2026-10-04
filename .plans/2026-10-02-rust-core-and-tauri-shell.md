@@ -422,8 +422,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   certificate), and publishing on `desktop-v*` tags (the Swift workflow owns `v*`):
   one GitHub pre-release per tag with the bundles, the `.sig` files and
   `latest.json`, copied to the rolling `desktop-beta` and `desktop-stable` releases
-  that `updater.rs` reads, each only moving forward (`apps/desktop/scripts/updater-lanes.sh`).
-  No desktop release is GitHub's "latest" before the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
+  that `updater.rs` reads, each only moving forward
+  (`apps/desktop/scripts/updater-lanes.sh`). No desktop release is GitHub's "latest"
+  before the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM

@@ -3,9 +3,10 @@
 Status: planned 2026-10-04, not started. WP9b, the second half of WP9 in
 `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP9a (signed, notarised
 bundles that carry the speech sidecar, `cargo deny`, the `desktop-v*`
-release workflow and the updater lanes) landed with
-`feat/rust-release-signing`. It supersedes nothing; it expands the cutover
-paragraph of WP9 in the Rust plan, whose progress table tracks it as WP9b.
+release workflow and the updater lanes) is #184
+(`feat/rust-release-signing`). It supersedes nothing; it expands the
+cutover paragraph of WP9 in the Rust plan, whose progress table tracks it
+as WP9b.
 This plan is one pull request, opened only once the parity list in the
 Rust plan is empty.
 
@@ -55,14 +56,18 @@ Each row is something the cutover has to carry over, retire or decide.
    Tauri `.dmg`, signed with `SPARKLE_PRIVATE_KEY` (Sparkle's `sign_update`
    from a pinned Sparkle release, since the Xcode build that provided
    `generate_appcast` goes away), `sparkle:version` the build number from
-   step 1. The cutover build's `Info.plist` (`apps/desktop/src-tauri/`)
+   step 1. `desktop-release.yml` gains `SPARKLE_PRIVATE_KEY` in Check
+   secrets, and the desktop README's secrets table lists it. The item
+   first carries `<sparkle:channel>beta</sparkle:channel>` and a
+   pre-release version; after test 4, a release item without the channel
+   follows. The cutover build's `Info.plist` (`apps/desktop/src-tauri/`)
    carries the Swift app's `SUPublicEDKey` from `apps/macos/project.yml`:
    Sparkle 2 refuses an update whose new bundle drops the key the running
    app has (it supports rotation, not removal). The key is inert in the
    Tauri app. Sparkle installs the item over `Steno.app` because the
    bundle id matches and the EdDSA signature verifies against that key
    (the Developer ID team matching the running app's designated
-   requirement is the other check that would pass). After that release
+   requirement is the other check that would pass). After the release item
    `release.yml`, the Sparkle scripts and the `appcast` branch stop
    moving; the branch stays published so a Swift build that was offline
    for months still finds the handoff item.
@@ -98,10 +103,10 @@ Each row is something the cutover has to carry over, retire or decide.
    query ignores the label and returns every identity in the keychain).
    Export that identity with `SecItemExport` as PKCS#12, convert it to the
    PEM bundle `steno-handover` reads, store it under `handover-identity` and
-   leave the Swift item in place. If the export fails (a key marked non-extractable,
-   a denied prompt), the app mints a new identity and the release notes
-   say that phones pair again. The paired devices are rows in the shared
-   database, so nothing else changes.
+   leave the Swift item in place. If the export fails (a key marked
+   non-extractable, a denied prompt), the app mints a new identity and the
+   release notes say that phones pair again. The paired devices are rows
+   in the shared database, so nothing else changes.
 7. **Remove the Swift app.** `apps/macos/` except `web/`, the Swift package
    targets the Rust crates replace, `swift-ci.yml`, `release.yml`, the
    Swift rows in `AGENTS.md`. The web app moves from `apps/macos/web` to
@@ -151,9 +156,7 @@ Each row is something the cutover has to carry over, retire or decide.
 - **Rollback.** Once Sparkle has replaced the app there is no way back
   through Sparkle; a broken cutover build is fixed forward through the
   Tauri updater, which only works if the cutover build's updater works.
-  The cutover release is therefore a pre-release first, delivered to the
-  beta lane of the appcast only, and promoted after it has updated itself
-  once through the Tauri updater.
+  Step 2 publishes to the beta channel first.
 
 ## Tests
 
