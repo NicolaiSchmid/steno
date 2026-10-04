@@ -14,7 +14,9 @@
 #   --repo     the target repository; default nicolaischmid/steno-models,
 #              the one STENO_MODELS_REPO names
 #   --models   a store root holding parakeet-tdt-0.6b-v3-fp32/ (the files
-#              spikes/onnx-speech/export/ writes); default $STENO_MODELS_DIR
+#              spikes/onnx-speech/export/ writes); default the store root
+#              of the models directory $STENO_MODELS_DIR names,
+#              $STENO_MODELS_DIR/onnx
 #   --private  create the repository private if it does not exist yet
 #   --dry-run  verify and stage, print the upload commands, upload nothing
 #
@@ -42,7 +44,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/crates/steno-speech/src/model_store.rs"
 repo="nicolaischmid/steno-models"
-models="${STENO_MODELS_DIR:-}"
+models="${STENO_MODELS_DIR:+$STENO_MODELS_DIR/onnx}"
 private=()
 dry_run=0
 asset="parakeet-tdt-0.6b-v3-fp32"
@@ -194,9 +196,11 @@ if ((dry_run)); then
 	exit 0
 fi
 
+# The token goes to curl on stdin, not its command line, where ps shows it.
 auth=()
-[[ -n "${HF_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $HF_TOKEN")
-revision="$(curl -fsS ${auth[@]+"${auth[@]}"} "https://huggingface.co/api/models/$repo/revision/main" |
+[[ -n "${HF_TOKEN:-}" ]] && auth=(-H @-)
+revision="$(printf 'Authorization: Bearer %s\n' "${HF_TOKEN:-}" |
+	curl -fsS ${auth[@]+"${auth[@]}"} "https://huggingface.co/api/models/$repo/revision/main" |
 	sed -n 's/.*"sha":"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
 [[ -n "$revision" ]] || fail 1 "uploaded, but could not read the commit of $repo; look it up on the repository page"
 
