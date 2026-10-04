@@ -589,6 +589,57 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     assert_eq!(intake.count(), 1);
 }
 
+#[tokio::test]
+async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
+    // The phone pairs again while the computer revokes it. The revoke
+    // started after the pairing read the count, so whichever of the save
+    // and the delete commits first, the device stays revoked until the
+    // next pairing.
+    let test = TestService::with(common::Options {
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = common::EngineDevice::paired(&test, "Direct iPhone").await;
+    let payload = test.service.begin_pairing();
+    let principal = common::pairing_principal(&test.service, &payload).await;
+
+    let hold = StoreHold::new(&test.store);
+    let woken = Woken::new();
+    let mut pairing = std::pin::pin!(common::engine_pair_as(
+        &test.service,
+        principal,
+        phone.device.id,
+        &phone.device.name,
+    ));
+    assert!(
+        woken.poll(pairing.as_mut()).is_pending(),
+        "the pairing waits on its save"
+    );
+    let mut revoking = std::pin::pin!(test.service.revoke(phone.device.id));
+    assert!(
+        woken.poll(revoking.as_mut()).is_pending(),
+        "the revoke waits on its store delete"
+    );
+    hold.release();
+    let (paired, revoked) = tokio::join!(pairing, revoking);
+    assert_eq!(paired.status.as_u16(), 200);
+    revoked.unwrap();
+
+    let unknown = Uuid::new_v4();
+    assert_eq!(
+        phone.complete(unknown).await.status.as_u16(),
+        401,
+        "the device is still revoked"
+    );
+    let again = phone.pair_again().await;
+    assert_eq!(
+        again.complete(unknown).await.status.as_u16(),
+        404,
+        "the next pairing clears it"
+    );
+}
+
 /// Holds the store's one connection from another thread until
 /// [`StoreHold::release`], so a store call of the engine waits on it.
 struct StoreHold {

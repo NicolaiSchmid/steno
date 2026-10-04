@@ -481,6 +481,7 @@ impl Engine {
             last_seen_at: Some(timestamp),
         };
         let hash = DeviceTokens::hash(&token);
+        let revocation = self.state().revocations.get(&device_id).copied();
         if let Err(error) = self
             .with_store(move |store| store.save_paired_device(&device, &hash))
             .await
@@ -491,7 +492,15 @@ impl Engine {
             }
             return HandoverResponse::internal_error("saving the device", &error);
         }
-        self.state().revoked.remove(&device_id);
+        // A revoke that started during the save keeps the device revoked,
+        // whichever of the save and its delete commits first; the next
+        // pairing clears it.
+        {
+            let mut state = self.state();
+            if state.revocations.get(&device_id).copied() == revocation {
+                state.revoked.remove(&device_id);
+            }
+        }
         HandoverResponse::json(
             StatusCode::OK,
             &wire::PairResponse {
