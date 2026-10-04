@@ -4,8 +4,9 @@ Status: direction agreed 2026-10-01; spikes D, E and F done the same day. Gates 
 (transcript quality) and G3 (diarization, WP4d of the Rust port plan) passed; G2 (idle
 laptop speed) and G4 (GPU) are open. Follows `.plans/2026-10-01-cross-platform-spikes.md`,
 which owns the question, the method, the baseline and spikes A to C. This plan does not
-widen the scope plan's "Windows, Linux" non-goal; a later platform plan does if G2 and G3
-pass. Until then it is spike work under `spikes/` and no product target depends on it.
+widen the scope plan's "Windows, Linux" non-goal. The Rust port plan
+(`.plans/2026-10-02-rust-core-and-tauri-shell.md`) widens it and builds this stack as WP4a
+to WP4d; this plan keeps the decisions and the gates.
 Next: the G2 measurement (WP1c).
 
 ## Problem

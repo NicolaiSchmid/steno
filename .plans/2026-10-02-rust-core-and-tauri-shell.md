@@ -315,8 +315,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     starts only an absolute program path, never one looked up on `PATH` or in the
     working directory (`a_program_that_is_not_an_absolute_path_never_starts`): the
     child is handed the meeting's audio. A child that dies, hangs, overruns or breaks
-    the protocol is killed and reaped, the call fails with `SpeechError::Sidecar`, and
-    the next call spawns and loads again; an error the child reports keeps it
+    the protocol during a request is killed and reaped, the call fails with
+    `SpeechError::Sidecar`, and the next call spawns and loads again; one that dies or
+    overruns between requests is replaced by the next call without an error. An error
+    the child reports keeps it
     (`an_error_the_child_reports_keeps_the_child`). The child
     exits when stdin ends or stdout breaks, so a dead app leaves no child, idle or busy
     (`the_child_greets_and_exits_when_its_parent_goes_away`,
@@ -353,15 +355,25 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   - Crash isolation (`crates/steno-speech-sidecar/tests/isolation.rs`, the real client
     against the real binary with `--fake-engine --fault`): killed mid-request, abort
     (the way an uncaught C++ exception in ONNX Runtime ends the process), panic, a
-    panic after 1 MiB of stderr (the crash report stays bounded), exit, hang past the
-    deadline, allocation past the ceiling, garbage on stdout, silence at start and
-    another protocol version each end in an error and a working next call in a new
-    child. A crash report waits up to 1 s for the end of the child's stderr, so it
-    keeps the child's last words on a loaded machine. A child that died between
-    requests is replaced by the next call without an error
-    (`a_child_that_died_while_idle_is_replaced_without_an_error`), and a request the
-    child cannot read ends it with status 2 and a line on stderr
-    (`a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2`). On a Ryzen
+    panic after 1 MiB of stderr (the crash report stays bounded), exit, a reply over
+    the frame limit (status 2 and a line on stderr), hang past the deadline,
+    allocation past the ceiling, garbage on stdout, silence at start and another
+    protocol version each end in an error and a working next call in a new child. A
+    crash report waits up to 5 s for the end of the child's stderr (the wait ends when
+    stderr closes), so it keeps the child's last words on a loaded machine. A child
+    that died or went over the ceiling between requests is replaced by the next call
+    without an error (`a_child_that_died_while_idle_is_replaced_without_an_error`,
+    `a_child_over_the_ceiling_while_idle_is_replaced_without_an_error`), and a request
+    the child cannot read ends it with status 2 and a line on stderr
+    (`a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2`). The tests
+    find the binary through `CARGO_BIN_EXE_steno-speech-sidecar`, which cargo builds
+    for them, run it once by hand before any start timeout counts, and give every
+    start 60 s but the silent child's (20 s). On 2026-10-04 a macOS CI run on the
+    shared Forge runner failed nine of them: the binary was there (six tests spawned
+    it, and the cached build did not relink it), but every child of that run took
+    about 11 s to greet, longer than the 5 s and 10 s start timeouts the tests then
+    had; the same binary on the same runner had greeted within 2 s ten minutes earlier.
+    A loaded runner, then, not a missing build. On a Ryzen
     7 7700 desktop, in a release build, the child loads at 2.2 GB resident and
     transcribes 471 s of FLEURS German in 16.9 s, segment for segment equal to the
     in-process engine (`the_real_models_load_and_transcribe_in_the_sidecar_when_installed`,
@@ -374,26 +386,34 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     export (`encoder.weights` alone is 2.4 GB). `scripts/upload-models.sh` verifies
     the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and uploads
     it to `nicolaischmid/steno-models`, pinned at commit `4a133253`
-    (`STENO_MODELS_REPO`, `PARAKEET_V3_FP32_REVISION`). A download holds a lock on
-    `<name>.lock`, which no download deletes, and opens, resumes and renames
-    `<name>.partial` only while it holds it. A file over 8 MiB comes in `Range`
-    requests of 8 MiB, each with a body timeout for its own size (128 s), so a silent
-    connection costs minutes, not hours; an attempt that moved the file on resets
-    the count of failures. Downloads resume across retries and runs; a second
-    download of the same file, in this process or another, waits for the lock while
-    reporting the first one's progress, then finds the file installed or resumes
-    it, so the bytes cross the wire once, also when the first one failed and threw
-    its partial away. The partial goes once its file is installed; a mirror
-    (`SpeechSettings::models_mirror`) serves `<mirror>/<asset id>/<file>` for the
-    speech models. Tests: `crates/steno-speech/tests/download.rs`
+    (`STENO_MODELS_REPO`, `PARAKEET_V3_FP32_REVISION`). The files on disk and what may
+    be deleted: `model_store`'s "On disk" section; how a download runs: its
+    "Downloads" section. Decided: a download holds `<name>.lock`, which no download
+    deletes, while it writes `<name>.partial`, so two downloads of a file, in one
+    process or two, never write the same partial; the one that waits then finds the
+    file installed or resumes it, and gives up once the holder has written nothing for
+    10 minutes. A file over 64 MiB comes in `Range` requests of 64 MiB, each with a body
+    timeout of at most 128 s, so a silent connection costs minutes; from the export's
+    repository 128 MiB took 13 to 15 s in 8 MiB chunks and 6 to 8 s in 64 MiB ones, as
+    each request costs a round trip through the redirect. A mirror
+    (`SpeechSettings::models_mirror`, `<mirror>/<asset id>/<file>`, the speech models
+    only) should answer `Range`: a host that ignores it gets the whole file under one
+    timeout for its size. An odd answer to a range keeps the partial; only wrong or
+    surplus bytes throw it away. Tests: `crates/steno-speech/tests/download.rs`
     (`a_cut_connection_resumes_with_a_range_request`,
     `a_partial_a_killed_run_left_is_resumed_not_fetched_again`,
+    `a_partial_longer_than_the_file_or_already_complete_is_handled`,
     `a_206_from_the_wrong_offset_or_without_a_range_is_not_appended`,
     `a_mirror_serves_every_file_from_asset_id_and_file_name`) and the unit tests in
     `crates/steno-speech/src/model_store.rs`
     (`a_second_download_of_one_file_waits_for_the_first_and_fetches_nothing`,
     `a_download_that_waited_installs_the_file_after_the_first_threw_its_partial_away`,
+    `a_download_waits_while_the_holder_writes_and_gives_up_once_it_stops`,
+    `a_lock_this_process_holds_is_neither_locked_again_nor_opened`,
     `a_large_file_comes_in_chunks_and_a_stalled_chunk_is_given_up_alone`,
+    `a_chunk_slower_than_the_longest_timeout_is_cut_and_the_rest_asked_for`,
+    `a_host_that_sends_less_than_a_range_asks_for_is_asked_for_the_rest`,
+    `an_odd_answer_to_a_range_keeps_the_partial`,
     `a_partial_is_deleted_once_its_file_is_installed_another_way`,
     `a_download_that_finds_its_file_installed_leaves_no_partial`). The engine
     installs the models on first use and outside its lock
@@ -1369,7 +1389,7 @@ PR off `main`.
 | WASAPI follow-ups: slip window and immediate slip, trusted stream sizes, start deadline, detector start and stop serialised (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
 | Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | merged |
 | Revoke during a `complete`, a verify bound to the file it hashed, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | in review |
-| Speech sidecar follow-ups: download lock file and chunks, crash-report stderr, idle child replaced | `fix/rust-sidecar-followups` | #187 | open |
+| Speech sidecar follow-ups: download lock file, 64 MiB chunks, odd range answers, crash-report stderr, idle child replaced | `fix/rust-sidecar-followups` | #187 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
