@@ -369,9 +369,8 @@ impl Engine {
             ));
         }
         // Opened before the `verifying` write, the first yield. A partial
-        // discarded meanwhile and created again (a stale `complete`'s
-        // refusal, then the phone's announce) is another file, and the open
-        // handle keeps the old file's number from going to the new one.
+        // discarded and created again meanwhile (a stale `complete`'s
+        // refusal, then the phone's announce) is another file: `Identity`.
         let partial = self.inbox.partial(recording_id);
         let opened = std::fs::File::open(&partial)
             .and_then(|file| Ok((Identity::of(&file)?, Arc::new(file))));

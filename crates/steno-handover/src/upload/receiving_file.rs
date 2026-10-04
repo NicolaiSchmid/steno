@@ -42,9 +42,8 @@ pub async fn write(
     .await
 }
 
-/// Whether the whole of `file`, streamed through SHA-256 from its start,
-/// hashes to `expected`. `file` is freshly opened: the hash reads from the
-/// current position.
+/// Whether `file`, streamed through SHA-256 from its current position (the
+/// start of a freshly opened file), hashes to `expected`.
 pub async fn hash_matches(file: Arc<File>, expected: Vec<u8>) -> std::io::Result<bool> {
     off_task(move || {
         let mut file = &*file;
@@ -75,20 +74,18 @@ pub struct Identity {
     file: u128,
 }
 
+#[cfg(unix)]
 impl Identity {
     /// The identity of the open `file`.
-    #[cfg(unix)]
     pub fn of(file: &File) -> std::io::Result<Identity> {
         Ok(Self::from_metadata(&file.metadata()?))
     }
 
     /// The identity of the file at `path` now.
-    #[cfg(unix)]
     pub fn at(path: &Path) -> std::io::Result<Identity> {
         Ok(Self::from_metadata(&std::fs::metadata(path)?))
     }
 
-    #[cfg(unix)]
     fn from_metadata(metadata: &std::fs::Metadata) -> Identity {
         use std::os::unix::fs::MetadataExt as _;
         Identity {
@@ -96,11 +93,13 @@ impl Identity {
             file: u128::from(metadata.ino()),
         }
     }
+}
 
+#[cfg(windows)]
+impl Identity {
     /// The identity of the open `file`: the 128-bit file id where the
     /// file system keeps one, else the 64-bit file index. std's
     /// `MetadataExt::file_index` is not stable yet.
-    #[cfg(windows)]
     #[allow(unsafe_code)]
     pub fn of(file: &File) -> std::io::Result<Identity> {
         use std::os::windows::io::AsRawHandle as _;
@@ -143,7 +142,6 @@ impl Identity {
     /// The identity of the file at `path` now, through a handle open for
     /// the call. std opens with delete sharing, so the handle keeps no
     /// rename or delete of the file from going through.
-    #[cfg(windows)]
     pub fn at(path: &Path) -> std::io::Result<Identity> {
         Self::of(&File::open(path)?)
     }
