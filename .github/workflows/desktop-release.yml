@@ -149,12 +149,12 @@ jobs:
         with:
           toolchain: stable
 
-      # Keeps the build host's paths out of release panics. The cargo home
-      # (the dependency sources) is the prefix that matters and reads
-      # `cargo/…`; Cargo already passes the workspace's own paths relative,
-      # and any absolute one left reads `steno/…`. Set for the job so the
-      # sidecar and the app both get it. The encoded form separates flags
-      # with 0x1f, so a path with a space stays one flag.
+      # Keeps the build host's paths out of release panics: the cargo home
+      # (the dependency sources) reads `cargo/…`; Cargo already passes the
+      # workspace's paths relative, and any absolute one left reads
+      # `steno/…`. Set for the job so the sidecar and the app both get it;
+      # the encoded form separates flags with 0x1f, so a path with a space
+      # stays one flag.
       - name: Remap source paths
         shell: bash
         run: |
