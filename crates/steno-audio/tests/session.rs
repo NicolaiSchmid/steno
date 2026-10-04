@@ -1769,7 +1769,10 @@ fn stop_during_a_rebuilds_teardown_waits_for_it() {
 /// The disk fills while recording and a user's `stop()` arrives while that
 /// failure is still finalising. It waits for the finalise, as Swift's actor
 /// ordered the two, and returns the recording the failure carries: no
-/// error, and no producer running when it returns.
+/// error, and no producer running when it returns. Whether this `stop()`
+/// waited or arrived after the finalise is not observable here; the unit
+/// tests in `src/capture/session.rs` force the wait's window, and a
+/// `start()` that overtakes it, deterministically.
 #[test]
 fn stop_during_a_writer_failures_finalise_returns_its_recording() {
     let directory = tempfile::tempdir().unwrap();
