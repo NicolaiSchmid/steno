@@ -162,6 +162,11 @@ extension HandoverEngine {
     guard var receipt = await ownedReceipt(recordingID, device: device) else {
       return .problem(.notFound, "no such recording")
     }
+    // A revoke during the store read missed the receipt; refuse before
+    // anything is written for it.
+    if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
+      return refused
+    }
     if let meetingID = receipt.state.meetingID {
       return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
     }
@@ -181,15 +186,25 @@ extension HandoverEngine {
     case .answered(let response):
       return response
     case .file(let file):
-      // A revoke during the receipt read or the verify may have missed the
-      // receipt (after a restart it was only in the store).
-      guard revocations[device.id, default: 0] == revocation else {
-        inbox.discard(recordingID)
-        forget(recordingID)
-        return Self.unauthorized
+      // Again after the verify, which suspends. Nothing suspends between
+      // this check and the intake call.
+      if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
+        return refused
       }
       return await admit(file, metadata: metadata, device: device, receipt: &receipt)
     }
+  }
+
+  /// 401 when the device was revoked since `complete` took `revocation`.
+  /// The revoke may have missed the receipt, so its files are discarded and
+  /// it leaves memory here.
+  private func refusal(_ recordingID: UUID, device: PairedDevice, revokedSince revocation: Int)
+    -> HandoverResponse?
+  {
+    guard revocations[device.id, default: 0] != revocation else { return nil }
+    inbox.discard(recordingID)
+    forget(recordingID)
+    return Self.unauthorized
   }
 
   private enum Verification {
