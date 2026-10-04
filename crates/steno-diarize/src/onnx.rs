@@ -1,10 +1,12 @@
 //! The ONNX Runtime backend: pyannote segmentation 3.0 and `WeSpeaker`
 //! ResNet34-LM from the sherpa-onnx exports, with the fbank front end of
 //! [`crate::fbank`] in front of the embedding model. Runs on every
-//! platform.
+//! platform, in the caller's process: unlike speech it has no sidecar, an
+//! exception to invariant 4 that the Speech section of the parity list in
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md` keeps open.
 //!
 //! Privacy invariant: ONNX Runtime's telemetry is off. `session`, the one
-//! place a session opens, calls `steno_speech::onnx::init_environment`
+//! place a session opens, calls [`steno_speech::onnx::init_environment`]
 //! first, which configures the process-wide environment with telemetry
 //! disabled; `steno-speech` opens its sessions after the same call.
 

@@ -50,24 +50,17 @@
 //! [`ModelStore::from_environment`], for the `transcribe` example and the
 //! FLEURS test, takes it from the same variable and default.
 //!
-//! Both assets download with their checksums verified: Silero VAD from
-//! the sherpa-onnx GitHub release, the fp32 Parakeet export (2.6 GB, over
-//! GitHub's 2 GB asset limit) from the Hugging Face repository
-//! [`STENO_MODELS_REPO`] at the commit [`PARAKEET_V3_FP32_REVISION`]
-//! ([`ModelSource::HuggingFace`], uploaded by `scripts/upload-models.sh`).
-//! A mirror ([`ModelStore::with_mirror`]) serves both instead.
+//! Where each model is hosted: [`model_store`].
 //!
 //! # Threads and process boundaries
 //!
 //! Inference is synchronous and CPU-bound. [`OnnxSpeechEngine`] runs it on
 //! a blocking thread when a tokio runtime is present. The app does not run
-//! it in its own process (invariant 4, speech-stack decision 5): on Linux
-//! and Windows it runs [`SidecarSpeechEngine`], which hosts the same
-//! [`Transcriber`] in `steno-speech-sidecar` and sends it the audio over a
-//! pipe, so an abort out of ONNX Runtime ends the child and not the app;
-//! on macOS the in-process `CoreML` engine is the default and the sidecar
-//! a fallback behind [`SpeechSettings::onnx_sidecar_on_mac`]
-//! ([`runtime`]).
+//! it in its own process (invariant 4, speech-stack decision 5): it runs
+//! [`SidecarSpeechEngine`], which hosts the same [`Transcriber`] in
+//! `steno-speech-sidecar` and sends it the audio over a pipe, so an abort
+//! out of ONNX Runtime ends the child and not the app. Which platform runs
+//! which engine: [`runtime`].
 //!
 //! ```no_run
 //! use steno_core::{AudioBuffer16k, SpeechEngine};

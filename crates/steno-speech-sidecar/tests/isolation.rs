@@ -1,16 +1,17 @@
 //! `SidecarSpeechEngine` against the real `steno-speech-sidecar` binary:
-//! the protocol round trip, health and graceful shutdown, and every way
-//! the child can fail (killed mid-request, aborting the way an uncaught
-//! C++ exception does, panicking, panicking after a flood of stderr,
-//! exiting, hanging past the deadline,
+//! the protocol round trip, health and graceful shutdown, installing the
+//! models, and every way the child can fail (killed mid-request or while
+//! idle, aborting the way an uncaught C++ exception does, panicking,
+//! panicking after a flood of stderr, exiting, hanging past the deadline,
 //! allocating past the memory ceiling, writing garbage, reporting an
 //! error, staying silent at start, speaking another protocol version).
 //! Each failure must come back as an error from the engine, never take the
 //! test process down, and leave an engine that works on the next call.
 //! Dropping the engine stops its child, inside a runtime or not. Driven by
 //! hand, without the client, a child must exit when its parent's pipes
-//! close, idle or busy, and on unix answer a request that SIGINT, SIGTERM
-//! and SIGHUP reach mid-request.
+//! close, idle or busy, with status 2 on a request it cannot read, and on
+//! unix answer a request that SIGINT, SIGTERM and SIGHUP reach
+//! mid-request.
 //!
 //! Nothing here ends a child with `DirectML` in use: that switches
 //! `DirectML` off for the rest of the process's run, so those tests run
@@ -18,7 +19,7 @@
 //! `directml_probe_crash.rs`, `directml_lost_encoder.rs`).
 //!
 //! The fake engine needs no models; the last test, ignored by default,
-//! runs the real one when `STENO_MODELS_DIR` holds them
+//! runs the real one and fails unless `STENO_MODELS_DIR` holds them
 //! (`cargo test -p steno-speech-sidecar --release -- --ignored`).
 
 #![allow(

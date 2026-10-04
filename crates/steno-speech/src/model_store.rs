@@ -1,8 +1,8 @@
 //! Where the models live and how they get there. The manifest names every
 //! file of an asset with its size and SHA-256; the store checks a directory
 //! against it, downloads what is missing into a partial file of its own
-//! while hashing, and renames only a verified, synced file into place. Models are
-//! never committed (`.gitignore` covers `*.onnx`).
+//! while hashing, and renames only a verified, synced file into place.
+//! Models are never committed (`.gitignore` covers `*.onnx`).
 //! Swift: `Sources/StenoSpeech/Models/ModelAsset.swift`,
 //! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
 //! through `FluidAudio` and `WhisperKit` instead.
@@ -34,7 +34,8 @@
 //! reports [`SpeechError::NotHosted`] when it is missing.
 //!
 //! A mirror ([`ModelStore::with_mirror`], the speech setting
-//! `modelsMirror`) replaces every host: the file is fetched from
+//! `modelsMirror`) replaces every host of this store, so the speech models
+//! (Parakeet, Silero VAD) but not `steno-diarize`'s: the file is fetched from
 //! `<mirror>/<asset id>/<file name>`, the layout of a store root and of the
 //! Hugging Face repository, so a copy of either served over HTTP is a
 //! mirror.
