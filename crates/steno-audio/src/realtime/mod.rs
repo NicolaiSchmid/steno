@@ -13,7 +13,9 @@ pub mod sink;
 pub mod streams;
 pub mod wake;
 
-pub use io_proc::{BufferView, MAX_SLICE_BUFFERS, SliceView, deliver, deliver_slices};
+pub use io_proc::{
+    BufferView, MAX_SLICE_BUFFERS, SliceView, deliver, deliver_slices, interleaved_view,
+};
 pub use level_meter::{LevelMeter, LevelSlot};
 pub use processing::{ProcessingConfiguration, ProcessingThread};
 pub use relay::FrameRelay;

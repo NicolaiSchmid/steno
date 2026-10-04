@@ -159,6 +159,91 @@ import Testing
     #expect(Set(export.segments.compactMap(\.speakerID)) == Set(export.speakers.map(\.id)))
   }
 
+  /// A phone call on speaker next to the Mac: the tap records silence and
+  /// the microphone hears both people. The mic lane is diarized like a
+  /// room, nobody is "me", the mic is decoded a second time for the
+  /// diarizer, and the kept recording and lanes are untouched.
+  @Test func aCallWithASilentTapDiarizesTheMicLaneAndHasNoMe() async throws {
+    var engine = FakeSpeechEngine()
+    engine.silentBelowPeak = 1e-4
+    let decoder = RecordingAudioDecoder()
+    let harness = try await PipelineHarness(decoder: decoder, engine: engine)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    let layout = RecordingLayout(asset: asset)
+    try WAVWriter.write(
+      AudioBuffer16k(samples: [Float](repeating: 0, count: 6 * 16_000)),
+      to: layout.sidecar(.system))
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.meeting.source == .macCall, "it was a call, just not through the Mac")
+    #expect(export.speakers.map(\.clusterLabel) == ["Speaker 1", "Speaker 2"])
+    #expect(export.participants.isEmpty, "no \"me\" participant is invented")
+    #expect(export.segments.count == 6)
+    #expect(export.segments.allSatisfy { $0.lane == .mic && $0.speakerID != nil })
+    #expect(Set(export.segments.compactMap(\.speakerID)) == Set(export.speakers.map(\.id)))
+    #expect(await decoder.decodes.entries == [.mic, .system, .mic])
+    #expect(await harness.diarizer.diarizations.entries == [6])
+    #expect(export.audio?.lanes == [.mic, .system])
+  }
+
+  /// A silent tap with one voice on the mic is the user alone (headphones,
+  /// the tap permission missing): the standard rules stand, the mic is
+  /// "me", and no clip is written for a cluster that was never made a
+  /// speaker.
+  @Test func aSilentTapWithOneVoiceOnTheMicKeepsTheMicAsMe() async throws {
+    var engine = FakeSpeechEngine()
+    engine.silentBelowPeak = 1e-4
+    let harness = try await PipelineHarness(engine: engine, diarizer: FakeDiarizer(clusterCount: 1))
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    let layout = RecordingLayout(asset: asset)
+    try WAVWriter.write(
+      AudioBuffer16k(samples: [Float](repeating: 0, count: 6 * 16_000)),
+      to: layout.sidecar(.system))
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+
+    let export = try await harness.store.export(meetingID: meeting.id)
+    #expect(export.meeting.state == .ready)
+    #expect(export.speakers.map(\.clusterLabel) == ["Me"])
+    #expect(export.participants.map(\.role) == [.me])
+    let me = LaneMerger.meSpeakerID(meetingID: meeting.id)
+    #expect(export.segments.count == 6)
+    #expect(export.segments.allSatisfy { $0.lane == .mic && $0.speakerID == me })
+    #expect(!FileManager.default.fileExists(atPath: layout.speakersDirectory.path))
+  }
+
+  /// Processing again after the tap went quiet: the "me" participant the
+  /// first run created goes with the "me" speaker, so the export does not
+  /// advertise a participant nobody speaks as.
+  @Test func aRerunThatFallsBackToTheMicLaneRemovesThePipelinesMeParticipant() async throws {
+    var engine = FakeSpeechEngine()
+    engine.silentBelowPeak = 1e-4
+    let harness = try await PipelineHarness(engine: engine)
+    defer { harness.cleanUp() }
+    let (meeting, asset) = try harness.meeting(source: .macCall)
+    try await harness.pipeline.enqueue(meeting, asset: asset)
+    await harness.pipeline.waitUntilIdle()
+    let first = try await harness.store.export(meetingID: meeting.id)
+    #expect(first.participants.map(\.role) == [.me])
+    #expect(first.speakers.map(\.clusterLabel) == ["Me", "Speaker 1", "Speaker 2"])
+
+    let layout = RecordingLayout(asset: asset)
+    try WAVWriter.write(
+      AudioBuffer16k(samples: [Float](repeating: 0, count: 6 * 16_000)),
+      to: layout.sidecar(.system))
+    try await harness.pipeline.process(assetID: asset.id)
+    let second = try await harness.store.export(meetingID: meeting.id)
+    #expect(second.meeting.state == .ready)
+    #expect(second.participants.isEmpty)
+    #expect(second.speakers.map(\.clusterLabel) == ["Speaker 1", "Speaker 2"])
+    #expect(second.segments.allSatisfy { $0.speakerID != nil })
+  }
+
   @Test func summarizeFailureMarksFailedAndKeepsTheTranscript() async throws {
     struct Boom: Error {}
     let harness = try await PipelineHarness(summarizer: FakeSummarizer(failure: Boom()))

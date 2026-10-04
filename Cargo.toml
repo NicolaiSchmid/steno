@@ -52,6 +52,10 @@ gdk = "0.18"
 gio = "0.18"
 thiserror = "2"
 tracing = "0.1"
+# The `steno` CLI's and the desktop shell's log output
+# (`steno_services::log_to_stderr`): plain lines on stderr, filtered by
+# `RUST_LOG` (default `warn`).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "fmt", "std"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 # The digit source of `steno-bridge`'s `json::write_number`: shortest
 # round-trip digits with ties to even, as Foundation breaks them and Rust's
@@ -75,6 +79,20 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell_PropertiesSystem",
 ] }
 windows-core = "0.62"
+# The audio crate's Linux capture backend (WP5b): libpipewire through the
+# pipewire-rs bindings. No version feature: the calls it makes exist since
+# PipeWire 0.3, so Ubuntu 24.04's 1.0 and Debian 12's 0.3.65 both build it.
+# Pulled in only by `cfg(target_os = "linux")` dependency tables; building
+# it needs the libpipewire-0.3 headers and libclang (scripts/setup-linux.sh).
+pipewire = "0.10"
+# The secret store behind `SecretStore` in the services assembly: the
+# Keychain and the Windows credential store. On Linux the services use
+# the 0600 secrets file instead (`linux-native` is the kernel keyring,
+# which does not survive a reboot, and the Secret Service store needs
+# D-Bus); the feature stays so the crate builds there without a mock.
+keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
+# The `steno` CLI's argument parser.
+clap = { version = "4", features = ["derive"] }
 # Build only
 cc = "1"
 # Test only
@@ -128,6 +146,11 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "
 realfft = "3"
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
 whatlang = "0.18"
+# Speech sidecar (WP4c): the child's own resident set, which its heartbeat
+# reports so the parent can enforce the memory ceiling (`/proc/self/statm`,
+# mach and psapi underneath; no unsafe of ours). `always_use_statm`: one
+# short read per heartbeat instead of parsing `/proc/self/smaps`.
+memory-stats = { version = "1", features = ["always_use_statm"] }
 # The handover listener: TLS (rustls, the LLM line above, on ring; TLS 1.3
 # only is set in code; aws-lc-rs needs cmake and NASM on Windows), the
 # minted identity (rcgen, time), HTTP/1.1, Bonjour, the pairing secrets

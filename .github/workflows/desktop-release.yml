@@ -14,10 +14,9 @@ name: Desktop bundles
 # environment fails the build. The CLI writes no `latest.json`; the
 # manifests are WP9's.
 #
-# The bundles answer the bridge from the recorded fixtures (the shell's
-# default `fixture-host` feature): they show the whole UI with synthetic
-# data on every platform. WP6b flips the default feature off once the real
-# host is wired; this job builds whatever the crate's default is.
+# The bundles carry the real host (`steno_host::Host` over the services
+# graph, WP6b); this job builds the crate's default features, so the
+# opt-in `fixture-host` stays out of them.
 #
 # The macOS job follows `MACOS_RUNS_ON` like the other workflows.
 

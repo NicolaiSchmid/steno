@@ -5,9 +5,10 @@
 //! The macOS backend (`capture::live`) turns the HAL's `AudioBufferList`
 //! into a slice of [`BufferView`]s on the stack and calls [`deliver`]. No
 //! arrays are created, no closures called, nothing logged inside the
-//! callback. The WASAPI capture threads hold their packets as slices and
-//! go through [`deliver_slices`], the safe form, via
-//! [`PacketRouter`](super::PacketRouter).
+//! callback. Safe code holds its buffers as [`SliceView`]s and goes
+//! through [`deliver_slices`], the safe form: the WASAPI capture threads
+//! via [`PacketRouter`](super::PacketRouter), and the PipeWire backend
+//! after [`interleaved_view`] has turned its one mapped buffer into a view.
 
 use super::sink::LaneFrameSink;
 use crate::capture::layout::{ChannelRef, LaneSource};
@@ -107,9 +108,11 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
 }
 
 /// One input buffer as safe code holds it: a WASAPI capture packet (valid
-/// from `GetBuffer` to `ReleaseBuffer`) or the follower's staging copy, its
-/// interleaved samples borrowed for the call, `None` for a buffer flagged
-/// silent (`AUDCLNT_BUFFERFLAGS_SILENT`), which becomes zeros.
+/// from `GetBuffer` to `ReleaseBuffer`), the follower's staging copy, or a
+/// dequeued PipeWire buffer ([`interleaved_view`]), its interleaved samples
+/// borrowed for the call. `None` for a buffer flagged silent
+/// (`AUDCLNT_BUFFERFLAGS_SILENT`) or memory that cannot be read as
+/// interleaved `f32`, which becomes zeros.
 #[derive(Debug, Clone, Copy)]
 pub struct SliceView<'a> {
     /// Interleaved channels in the buffer.
@@ -155,4 +158,159 @@ pub fn deliver_slices(buffers: &[SliceView<'_>], sources: &[LaneSource], sink: &
     // callback's frames at the buffer's channel count, which its shape
     // check keeps inside `byte_size`.
     unsafe { deliver(&views[..count], sources, sink) }
+}
+
+/// One PipeWire buffer of interleaved `f32` as a [`SliceView`]: `memory`
+/// is the mapped `spa_data` (`maxsize` bytes), `offset`, `size` and
+/// `stride` its `spa_chunk`, `channels` the format's channel count. The
+/// chunk's offset is taken modulo the memory size as SPA defines it, a
+/// chunk running past the end is cut to what the memory holds (audio chunks
+/// do not wrap), and a partial last frame is dropped. Memory that is
+/// missing, misaligned for `f32`, or strided unlike `channels` interleaved
+/// samples becomes a view without samples, so [`deliver_slices`] writes
+/// silence of the chunk's length instead of reading past the buffer. A
+/// stride of 0 (a producer that leaves it unset) is read as `channels`
+/// samples. A handful of integer operations, no allocation; the view
+/// borrows `memory`, valid as long as the buffer stays dequeued.
+#[inline(always)]
+#[must_use]
+pub fn interleaved_view(
+    memory: Option<&[u8]>,
+    offset: u32,
+    size: u32,
+    stride: i32,
+    channels: usize,
+) -> SliceView<'_> {
+    let frame_bytes = channels * size_of::<f32>();
+    if frame_bytes == 0 {
+        return SliceView {
+            channels,
+            frames: 0,
+            samples: None,
+        };
+    }
+    let size = size as usize;
+    let without_samples = |frames| SliceView {
+        channels,
+        frames,
+        samples: None,
+    };
+    let Some(memory) = memory.filter(|m| !m.is_empty()) else {
+        return without_samples(size / frame_bytes);
+    };
+    let start = offset as usize % memory.len();
+    let frames = size.min(memory.len() - start) / frame_bytes;
+    let bytes = &memory[start..start + frames * frame_bytes];
+    let stride = usize::try_from(stride).unwrap_or(usize::MAX);
+    if (stride != 0 && stride != frame_bytes) || bytes.as_ptr().addr() % align_of::<f32>() != 0 {
+        return without_samples(frames);
+    }
+    // The alignment is checked just above.
+    #[allow(clippy::cast_ptr_alignment)]
+    let first = bytes.as_ptr().cast::<f32>();
+    // SAFETY: `bytes` is aligned for `f32` (checked above) and holds
+    // exactly `frames * channels` of them (`frames * frame_bytes` bytes);
+    // every bit pattern is a valid `f32`, and the slice borrows `memory`
+    // for the lifetime it returns with.
+    let samples = unsafe { std::slice::from_raw_parts(first, frames * channels) };
+    SliceView {
+        channels,
+        frames,
+        samples: Some(samples),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `samples` as the bytes PipeWire maps, 4-byte aligned.
+    fn bytes(samples: &[f32]) -> &[u8] {
+        // SAFETY: any initialised `f32` slice is valid as bytes; the length
+        // is the slice's in bytes.
+        unsafe { std::slice::from_raw_parts(samples.as_ptr().cast::<u8>(), size_of_val(samples)) }
+    }
+
+    #[test]
+    fn a_view_delivers_whole_frames_in_channel_order_within_the_memory() {
+        use steno_core::AudioLane;
+
+        // Four frames of three channels, sample `10 * frame + channel`.
+        let samples: Vec<f32> = (0..12u8).map(|i| f32::from(i / 3 * 10 + i % 3)).collect();
+        let memory = bytes(&samples);
+        // From the second frame, a chunk far longer than the memory.
+        let view = interleaved_view(Some(memory), 12, 4_096, 12, 3);
+        assert_eq!(view.frames, 3, "three whole frames are left");
+        let lanes = [AudioLane::Mic, AudioLane::System];
+        let sources = [
+            LaneSource {
+                lane: AudioLane::Mic,
+                left: ChannelRef::new(0, 0, 3),
+                right: None,
+            },
+            LaneSource {
+                lane: AudioLane::System,
+                left: ChannelRef::new(0, 2, 3),
+                right: None,
+            },
+        ];
+        let sink = LaneFrameSink::new(&lanes);
+        deliver_slices(&[view], &sources, &sink);
+        assert_eq!(sink.available_to_read(), 3);
+        let (mut mic, mut system) = ([0.0f32; 3], [0.0f32; 3]);
+        assert!(sink.ring(0).read(&mut mic) && sink.ring(1).read(&mut system));
+        assert_eq!(mic, [10.0, 20.0, 30.0], "channel 0 of frames 1 to 3");
+        assert_eq!(system, [12.0, 22.0, 32.0], "channel 2 of frames 1 to 3");
+    }
+
+    #[test]
+    fn a_whole_chunk_views_from_its_offset() {
+        let samples = [0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        let view = interleaved_view(Some(bytes(&samples)), 12, 24, 12, 3);
+        assert_eq!(view.channels, 3);
+        assert_eq!(view.frames, 2);
+        assert_eq!(view.samples, Some(&samples[3..]));
+    }
+
+    #[test]
+    fn the_offset_wraps_and_an_overlong_chunk_is_cut() {
+        let samples = [0.0f32; 6];
+        let memory = bytes(&samples);
+        // 36 wraps to 12 in 24 bytes of memory; the 12 bytes left there
+        // hold one whole stereo frame of 8.
+        let view = interleaved_view(Some(memory), 36, 400, 8, 2);
+        assert_eq!(view.frames, 1);
+        assert_eq!(
+            view.samples.map(|samples| samples.as_ptr().cast::<u8>()),
+            Some(memory[12..].as_ptr())
+        );
+    }
+
+    #[test]
+    fn a_partial_frame_is_dropped_and_a_zero_stride_is_accepted() {
+        let samples = [0.0f32; 8];
+        let view = interleaved_view(Some(bytes(&samples)), 0, 30, 0, 2);
+        assert_eq!(view.frames, 3);
+        assert_eq!(view.samples.map(<[f32]>::len), Some(6));
+    }
+
+    #[test]
+    fn a_foreign_stride_or_misalignment_becomes_silence_of_the_same_length() {
+        let samples = [0.0f32; 8];
+        let memory = bytes(&samples);
+        let strided = interleaved_view(Some(memory), 0, 32, 16, 2);
+        assert_eq!((strided.samples, strided.frames), (None, 4));
+        let misaligned = interleaved_view(Some(memory), 2, 16, 8, 2);
+        assert_eq!((misaligned.samples, misaligned.frames), (None, 2));
+    }
+
+    #[test]
+    fn missing_memory_or_channels_carry_no_data() {
+        let none = interleaved_view(None, 0, 48, 12, 3);
+        assert_eq!((none.samples, none.frames), (None, 4));
+        let empty = interleaved_view(Some(&[]), 0, 48, 12, 3);
+        assert_eq!((empty.samples, empty.frames), (None, 4));
+        let no_channels = interleaved_view(Some(bytes(&[0.0; 4])), 0, 16, 0, 0);
+        assert_eq!((no_channels.samples, no_channels.frames), (None, 0));
+    }
 }

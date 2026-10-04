@@ -20,6 +20,10 @@ serde_json.workspace = true
 # contract's ids use.
 steno-bridge = { path = "../../../crates/steno-bridge" }
 steno-core = { path = "../../../crates/steno-core" }
+# The real host over the services graph (WP6b): the view models, and the
+# store, pipeline, recorder and handover listener behind them.
+steno-host = { path = "../../../crates/steno-host" }
+steno-services = { path = "../../../crates/steno-services" }
 tauri.workspace = true
 tauri-plugin-autostart.workspace = true
 tauri-plugin-deep-link.workspace = true
@@ -28,7 +32,8 @@ tauri-plugin-opener.workspace = true
 tauri-plugin-single-instance.workspace = true
 tauri-plugin-updater.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync"] }
+tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
 
@@ -44,9 +49,10 @@ block2.workspace = true
 
 # The work packages named here are in .plans/2026-10-02-rust-core-and-tauri-shell.md.
 [features]
-default = ["fixture-host"]
+default = []
 # Answers the bridge from the recorded fixtures in apps/macos/web/fixtures/bridge/
-# (WP3 of the plan); WP6 turns it off and wires the real host.
+# instead of the real host (WP3 of the plan): opt in for UI work without a
+# database, `cargo run -p steno-desktop --features fixture-host`.
 fixture-host = []
 # Embeds the web `dist/` instead of loading `devUrl`; `cargo tauri build`
 # turns it on. A release build without it still loads the Vite dev server.

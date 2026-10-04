@@ -6,8 +6,8 @@
 //!   SpeexDSP and a passthrough, with the ERLE metrics.
 //! - [`capture`]: the [`CaptureSession`] state machine over a
 //!   [`CaptureBackend`], the configuration and results, the stream layout,
-//!   and the live backend (Core Audio on macOS, WASAPI on Windows; stubs
-//!   elsewhere).
+//!   and the live backend (Core Audio on macOS, PipeWire on Linux, WASAPI
+//!   on Windows).
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
 //!   files to 16 kHz mono, and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
@@ -50,6 +50,12 @@
 //!                              `notices` channels, the asset on `stop()`
 //! ```
 //!
+//! On Linux the top of the diagram is PipeWire's data-loop thread running
+//! the capture stream's `process` callback (`capture::live::pipewire`),
+//! which turns its one interleaved buffer into a view
+//! ([`realtime::interleaved_view`]) and calls `deliver_slices`, the safe
+//! form of the same `deliver`.
+//!
 //! On Windows the top of the diagram is two WASAPI capture threads
 //! (`capture::live::wasapi`): the microphone thread is the first arrow,
 //! routing each packet through `realtime::PacketRouter`, and the system
@@ -64,21 +70,23 @@
 //! (`capture::live::hal`, `capture::live::backend`), the WASAPI binding
 //! (`capture::live::wasapi::com`), the Speex FFI (`aec::speex`), the ring
 //! and its raw-pointer callers (`realtime::ring`, `realtime::sink`,
-//! `realtime::io_proc`), and the counting allocator (`testing::rt`).
+//! `realtime::io_proc`, which also reads a mapped PipeWire buffer as
+//! samples; the rest of libpipewire is reached through the safe `pipewire`
+//! crate), and the counting allocator (`testing::rt`).
 //!
 //! # Platforms
 //!
 //! The live backend and the process-activity source are Core Audio on
-//! macOS and WASAPI on Windows; on Linux they are stubs until PipeWire
-//! (WP5b). **The Windows backend is compile-tested only:** no Windows
-//! machine has run it. It is written against Microsoft's documentation,
-//! built, linted and unit-tested on the `windows-latest` CI runner, which
-//! has no audio device; its per-packet bodies (`realtime::streams`), the
-//! stream plan (`capture::split_streams`) and the session mapping
-//! (`detection::sessions`) are platform-independent and tested on every
-//! OS, the zero-allocation proof included. The live checks in
-//! `tests/live_windows.rs` are `--ignored` until a Windows machine runs
-//! them.
+//! macOS and WASAPI on Windows; on Linux the live backend is PipeWire
+//! (WP5b) and the process-activity source a stub. **The Windows backend is
+//! compile-tested only:** no Windows machine has run it. It is written
+//! against Microsoft's documentation, built, linted and unit-tested on the
+//! `windows-latest` CI runner, which has no audio device; its per-packet
+//! bodies (`realtime::streams`), the stream plan (`capture::split_streams`)
+//! and the session mapping (`detection::sessions`) are
+//! platform-independent and tested on every OS, the zero-allocation proof
+//! included. The live checks in `tests/live_windows.rs` are `--ignored`
+//! until a Windows machine runs them.
 //!
 //! Swift: `Sources/StenoAudio/StenoAudio.swift`.
 

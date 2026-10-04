@@ -18,7 +18,7 @@ use super::llm::{CodexStatus, LlmPreset, LlmSettingsViewModel, TestResult};
 use super::obsidian::ObsidianSettingsViewModel;
 use super::phones::PhonesSettingsViewModel;
 use super::transcription::{AssetState, SpeechSettingsViewModel};
-use crate::services::{ListenerState, LoginItemStatus, Services, UpdateOutcome};
+use crate::services::{ListenerState, LoginItemStatus, Services, SpeechModels, UpdateOutcome};
 use crate::speech::ModelAsset;
 
 fn login_item(status: LoginItemStatus) -> GeneralLoginItem {
@@ -72,15 +72,16 @@ pub fn libraries() -> Vec<GeneralAcknowledgement> {
     .collect()
 }
 
-/// Every speech model, then the libraries.
-pub fn acknowledgements() -> Vec<GeneralAcknowledgement> {
+/// Every speech model, named by the model store that holds it, then the
+/// libraries.
+pub fn acknowledgements(models: &dyn SpeechModels) -> Vec<GeneralAcknowledgement> {
     ModelAsset::ALL
         .iter()
         .map(|asset| GeneralAcknowledgement {
             group: GeneralAcknowledgementGroup::SpeechModels,
-            name: asset.display_name().to_owned(),
+            name: models.display_name(*asset).to_owned(),
             licence: asset.licence().to_owned(),
-            source: asset.source_repo().to_owned(),
+            source: models.source_repo(*asset).to_owned(),
         })
         .chain(libraries())
         .collect()
@@ -132,7 +133,7 @@ pub fn general(
             outcome,
             detail,
         },
-        acknowledgements: acknowledgements(),
+        acknowledgements: acknowledgements(services.speech_models.as_ref()),
         error: general.errors.error.clone(),
         error_details: general.errors.details.clone(),
     }

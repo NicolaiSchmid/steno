@@ -30,6 +30,10 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
   public var textPrefix: String
   public var wordTimings: Bool
   public var failure: (any Error & Sendable)?
+  /// A buffer whose peak stays below this is silence and yields no segment,
+  /// the way a real engine hears a tap that recorded nothing. nil (the
+  /// default) transcribes every buffer.
+  public var silentBelowPeak: Float?
   /// Runs before every `transcribe`, after it is recorded; tests advance a
   /// `ManualClock` here so a lane takes a known time, or sleep so a run
   /// stays inside the stage. An error thrown here fails the call.
@@ -69,6 +73,9 @@ public struct FakeSpeechEngine: SpeechEngine, Sendable {
     await transcriptions.record(TranscribeCall(duration: audio.duration, hint: hint))
     try await onTranscribe?()
     if let failure { throw failure }
+    if let silentBelowPeak, audio.samples.allSatisfy({ abs($0) < silentBelowPeak }) {
+      return []
+    }
     return Self.segments(
       duration: audio.duration, segmentSeconds: segmentSeconds, language: language,
       textPrefix: textPrefix, wordTimings: wordTimings)

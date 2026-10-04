@@ -2,11 +2,11 @@
 //! prints the text, the segments and the decode statistics; with
 //! `--range START-END` (seconds) it decodes that one window without the
 //! chunker, which is how the zero-token window of spike D is probed.
-//! `STENO_MODELS_DIR` names the store root, the directory with
-//! `parakeet-tdt-0.6b-v3-fp32/` and `silero-vad/` in it.
+//! `STENO_MODELS_DIR` names Steno's models directory, as for the app and
+//! the CLI: its `onnx/` holds `parakeet-tdt-0.6b-v3-fp32/` and `silero-vad/`.
 //!
 //! ```sh
-//! STENO_MODELS_DIR=/path/to/models/onnx cargo run --release -p steno-speech --example transcribe -- file.wav
+//! STENO_MODELS_DIR=/path/to/models cargo run --release -p steno-speech --example transcribe -- file.wav
 //! cargo run --release -p steno-speech --example transcribe -- --range 25-48 file.wav
 //! ```
 

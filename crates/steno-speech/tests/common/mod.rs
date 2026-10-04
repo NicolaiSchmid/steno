@@ -20,10 +20,11 @@ use std::path::{Path, PathBuf};
 
 use steno_speech::{ModelAsset, ModelStore};
 
-/// The model store, when both assets are installed under the root
+/// The model store, when both assets are installed in the models directory
 /// `STENO_MODELS_DIR` names; read the way [`ModelStore::from_environment`] reads it.
 pub fn installed_store() -> Option<ModelStore> {
-    let store = ModelStore::new(ModelStore::environment_root()?);
+    let directory = ModelStore::environment_models_directory()?;
+    let store = ModelStore::in_models_directory(&directory);
     [ModelAsset::parakeet_v3_fp32(), ModelAsset::silero_vad()]
         .iter()
         .all(|asset| store.is_installed(asset))
@@ -44,33 +45,7 @@ pub fn skip(variable: &str, needs: &str) {
 
 /// Reads a 16 kHz mono PCM-16 WAV into `f32` samples.
 pub fn read_wav(path: &Path) -> Vec<f32> {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert_eq!(&bytes[0..4], b"RIFF", "{}: not a WAV", path.display());
-    assert_eq!(&bytes[8..12], b"WAVE");
-    let mut offset = 12;
-    let mut channels = 1u16;
-    let mut sample_rate = 0u32;
-    let mut bits = 16u16;
-    while offset + 8 <= bytes.len() {
-        let id = &bytes[offset..offset + 4];
-        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let body = &bytes[offset + 8..(offset + 8 + size).min(bytes.len())];
-        if id == b"fmt " {
-            channels = u16::from_le_bytes(body[2..4].try_into().unwrap());
-            sample_rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
-            bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
-        } else if id == b"data" {
-            assert_eq!(sample_rate, 16_000, "{}: {sample_rate} Hz", path.display());
-            assert_eq!(bits, 16, "{}: {bits} bits", path.display());
-            let step = 2 * channels as usize;
-            return body
-                .chunks_exact(step)
-                .map(|frame| f32::from(i16::from_le_bytes([frame[0], frame[1]])) / 32_768.0)
-                .collect();
-        }
-        offset += 8 + size + (size & 1);
-    }
-    panic!("{}: no data chunk", path.display());
+    steno_speech::wav::read_pcm16(path).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Spike F's normaliser: lower case, `%` to `prozent`, `€` to `euro`, `$` to

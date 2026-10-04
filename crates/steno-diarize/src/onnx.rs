@@ -2,6 +2,11 @@
 //! ResNet34-LM from the sherpa-onnx exports, with the fbank front end of
 //! [`crate::fbank`] in front of the embedding model. Runs on every
 //! platform.
+//!
+//! Privacy invariant: ONNX Runtime's telemetry is off. `session`, the one
+//! place a session opens, calls `steno_speech::onnx::init_environment`
+//! first, which configures the process-wide environment with telemetry
+//! disabled; `steno-speech` opens its sessions after the same call.
 
 use std::path::Path;
 
@@ -150,6 +155,7 @@ fn speaker_features(
 }
 
 fn session(path: &Path, threads: usize) -> Result<Session, DiarizeError> {
+    steno_speech::onnx::init_environment();
     let mut builder = Session::builder().map_err(DiarizeError::backend)?;
     if threads > 0 {
         // The builder error carries the builder back and is not `Send`;
@@ -262,6 +268,18 @@ impl DiarizationBackend for OnnxBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_session_opens_only_once_telemetry_is_off() {
+        // A missing model still reaches ONNX Runtime, which would set up
+        // its default environment (telemetry on) had nothing come first.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(session(&dir.path().join("missing.onnx"), 1).is_err());
+        assert!(
+            steno_speech::onnx::init_environment(),
+            "a session opened before telemetry was switched off"
+        );
+    }
 
     /// Features whose first five seconds sit at one and whose second five
     /// sit at minus one, the speaker marked over the first five: the

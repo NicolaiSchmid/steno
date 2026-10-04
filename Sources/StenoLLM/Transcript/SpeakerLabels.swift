@@ -29,6 +29,14 @@ public struct SpeakerLabels: Sendable, Equatable {
   public func speakerID(forLabel label: String) -> UUID? {
     idsByLabel[label.trimmingCharacters(in: .whitespaces).lowercased()]
   }
+
+  /// True for a speaker's label or `Unknown speaker`, the labels a prompt
+  /// line can start with, case-insensitively and ignoring surrounding
+  /// whitespace.
+  public func isLabel(_ candidate: String) -> Bool {
+    let normalized = candidate.trimmingCharacters(in: .whitespaces).lowercased()
+    return idsByLabel[normalized] != nil || normalized == Self.unknown.lowercased()
+  }
 }
 
 /// The transcript as the model reads it: `[n] Speaker 1: text`, one line

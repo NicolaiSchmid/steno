@@ -10,11 +10,14 @@
 //! the count is zero. The report prints the count; anything above zero
 //! means the callback path allocated.
 //!
-//! The current thread is identified by the OS (`pthread_self` on Unix,
-//! `GetCurrentThreadId` on Windows), the two calls that neither allocate
-//! nor touch Rust's thread-local machinery, so the allocator may make them
-//! re-entrantly. (A `thread_local!` address worked on Linux and macOS but
-//! counted nothing on the Windows runner.)
+//! The current thread is identified by the OS (`gettid` on Linux,
+//! `pthread_self` on other Unixes, `GetCurrentThreadId` on Windows), calls
+//! that neither allocate nor touch Rust's thread-local machinery, so the
+//! allocator may make them re-entrantly. (A `thread_local!` address worked
+//! on Linux and macOS but counted nothing on the Windows runner.) On Linux
+//! the id is the kernel's thread id, the one `/proc/self/task` lists, so a
+//! test can count a thread it did not start, PipeWire's data loop
+//! ([`CountingAllocator::allocations_on`]).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::Mutex;
@@ -34,7 +37,12 @@ static COUNTED_THREAD: AtomicUsize = AtomicUsize::new(0);
 static COUNTED: AtomicU64 = AtomicU64::new(0);
 static TOTAL: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn gettid() -> i32;
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 unsafe extern "C" {
     fn pthread_self() -> usize;
 }
@@ -47,8 +55,14 @@ unsafe extern "system" {
 
 #[inline(always)]
 fn thread_id() -> usize {
-    // SAFETY: a plain, always-available OS call without preconditions.
-    #[cfg(unix)]
+    // SAFETY: a plain, always-available OS call without preconditions
+    // (`gettid` since glibc 2.30 and musl 1.2.2).
+    #[cfg(target_os = "linux")]
+    unsafe {
+        gettid() as usize
+    }
+    // SAFETY: as above.
+    #[cfg(all(unix, not(target_os = "linux")))]
     unsafe {
         pthread_self()
     }
@@ -91,8 +105,12 @@ unsafe impl GlobalAlloc for CountingAllocator {
 impl CountingAllocator {
     /// Starts counting the calling thread's allocations; resets the count.
     pub fn start_counting() {
+        Self::start_counting_on(thread_id());
+    }
+
+    fn start_counting_on(thread: usize) {
         COUNTED.store(0, Ordering::Relaxed);
-        COUNTED_THREAD.store(thread_id(), Ordering::Relaxed);
+        COUNTED_THREAD.store(thread, Ordering::Relaxed);
         COUNTING.store(true, Ordering::Release);
     }
 
@@ -109,12 +127,26 @@ impl CountingAllocator {
     /// callers' "the hook sees a deliberate allocation" test guards.
     /// Measurements are serialised process-wide (see `MEASURING`).
     pub fn allocations_during(body: impl FnOnce()) -> u64 {
+        Self::allocations_on(thread_id(), body)
+    }
+
+    /// Allocations thread `thread` (an id as [`Self::current_thread`]
+    /// gives it, on Linux the kernel's thread id) made while the calling
+    /// thread ran `body`: how a test counts a thread it cannot run code on.
+    /// Serialised with [`Self::allocations_during`].
+    pub fn allocations_on(thread: usize, body: impl FnOnce()) -> u64 {
         let _guard = MEASURING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::start_counting();
+        Self::start_counting_on(thread);
         body();
         Self::stop_counting()
+    }
+
+    /// The calling thread's id as the counter compares it.
+    #[must_use]
+    pub fn current_thread() -> usize {
+        thread_id()
     }
 
     /// Every allocator call in the process so far.

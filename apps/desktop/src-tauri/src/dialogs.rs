@@ -1,6 +1,6 @@
 //! The native dialogs the pages cannot draw: the folder panels for the
-//! recordings folder and the Obsidian vault, revealing a file, opening a
-//! folder. The Swift hosts open `NSOpenPanel` themselves inside the view
+//! recordings folder and the Obsidian vault, the destructive alert,
+//! revealing a file, opening a folder. The Swift hosts open `NSOpenPanel` themselves inside the view
 //! model call; the Rust host is headless, so the shell shows the panel and
 //! hands the host the choice.
 //!
@@ -14,13 +14,14 @@
 //! host's.
 //!
 //! Swift: `chooseFolder` in `SettingsBridge.swift` and
-//! `OnboardingBridge.swift`.
+//! `OnboardingBridge.swift`; `presentAlert` in `MainWindowBridge.swift`.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
+use steno_bridge::ConfirmDestructiveParams;
 use tauri::{AppHandle, WebviewWindow};
-use tauri_plugin_dialog::DialogExt;
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 
 use crate::bridge::{BridgeError, failed};
@@ -91,11 +92,29 @@ pub async fn choose_folder(
     }
 }
 
+/// The host's destructive confirmation (`ui.confirmDestructive`, and the
+/// prompts the host raises itself before a delete): a warning alert with
+/// the prompt's title and message, its confirm button and Cancel; true
+/// when the user confirmed. Blocks until answered, so it runs on the
+/// command's thread, never the main one (`bridge_call` is async).
+pub fn confirm_destructive(app: &AppHandle, prompt: &ConfirmDestructiveParams) -> bool {
+    app.dialog()
+        .message(&prompt.message)
+        .title(&prompt.title)
+        .kind(MessageDialogKind::Warning)
+        .buttons(confirm_buttons(prompt))
+        .blocking_show()
+}
+
+/// The alert's buttons: the prompt's confirm title, then Cancel.
+fn confirm_buttons(prompt: &ConfirmDestructiveParams) -> MessageDialogButtons {
+    MessageDialogButtons::OkCancelCustom(prompt.confirm_title.clone(), "Cancel".to_owned())
+}
+
 /// Shows a file or folder in the file manager, selected where the
 /// platform can. The reveal methods (`settings.recording.revealFolder`,
 /// `meeting.reveal*`) need a path only the host knows, so the host calls
-/// this (`WP6b`).
-#[allow(dead_code)]
+/// this through its `Opener` (`host::ShellOpener`).
 pub fn reveal(app: &AppHandle, path: &Path) -> Result<(), BridgeError> {
     app.opener().reveal_item_in_dir(path).map_err(failed)
 }
@@ -138,6 +157,21 @@ mod tests {
         ] {
             assert_ne!(chooser.title(), "");
         }
+    }
+
+    #[test]
+    fn the_alert_confirms_with_the_prompts_button() {
+        let prompt: ConfirmDestructiveParams = serde_json::from_str(include_str!(
+            "../../../macos/web/fixtures/bridge/params.ui.confirmDestructive.json"
+        ))
+        .unwrap();
+        let MessageDialogButtons::OkCancelCustom(confirm, cancel) = confirm_buttons(&prompt) else {
+            panic!("not a confirm and a cancel button");
+        };
+        assert_eq!(
+            (confirm.as_str(), cancel.as_str()),
+            (prompt.confirm_title.as_str(), "Cancel")
+        );
     }
 
     #[test]

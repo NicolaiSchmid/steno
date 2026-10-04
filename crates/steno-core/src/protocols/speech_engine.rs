@@ -29,4 +29,16 @@ pub trait SpeechEngine: Send + Sync {
         audio: &AudioBuffer16k,
         hint: Option<&LanguageTag>,
     ) -> BoundaryResult<Vec<RawSegment>>;
+
+    /// Frees what `prepare` loaded; the next `prepare` or `transcribe` loads
+    /// again. The pipeline is to call it once a job's lanes are transcribed
+    /// (WP6b; nothing calls it yet). Only `SidecarSpeechEngine` overrides it,
+    /// by stopping its child, and a call there waits for a running request
+    /// (not for a model download).
+    /// The in-process engines (`OnnxSpeechEngine`, `CoreMlParakeetEngine`)
+    /// keep this default and their models stay loaded, so the Mac's next job
+    /// starts warm. Rust only: Swift's protocol has no counterpart.
+    async fn release(&self) -> BoundaryResult<()> {
+        Ok(())
+    }
 }

@@ -11,6 +11,7 @@ use common::*;
 use steno_core::{AudioLane, LlmUsage, TranscriptCleaner, TranscriptSegment};
 use steno_llm::cleanup::{CleanupDraft, CleanupDraftSegment, glossary};
 use steno_llm::inputs::cleanup_input;
+use steno_llm::labels::SpeakerLabels;
 use steno_llm::testing::{StubChatServer, default_usage, parse_segments, scripts};
 use steno_llm::{
     CleanupPromptBuilder, LlmEndpoint, LlmError, LlmTranscriptCleaner, OpenAiCompatibleClient,
@@ -123,6 +124,55 @@ async fn preserves_count_order_ids_and_raw_text_and_rewrites_text() {
             .map(|s| s.name.as_str()),
         Some("transcript_cleanup")
     );
+}
+
+/// A model that answers `Me: text` for every segment of a call: the
+/// transcript comes back without the labels and without a retry.
+#[tokio::test]
+async fn a_model_echoing_the_speaker_label_is_cleaned_without_a_retry() {
+    let server = StubChatServer::start().await.unwrap();
+    server.respond(scripts.cleanup_echo(
+        LlmUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            requests: 1,
+        },
+        |index, text| {
+            Some(if index % 2 == 0 {
+                format!("Me: {}", fixing(text))
+            } else {
+                format!("[{index}] Speaker 1: {text}")
+            })
+        },
+    ));
+    let input = cleanup_input(&customer_call());
+    let chunker = TranscriptChunker::new(800, 1_200, 3);
+    let chunks = chunker.chunk(&input.segments, input.language.as_ref());
+    let output = cleaner(&server, Some(chunker), |_| {})
+        .clean(&input)
+        .await
+        .unwrap();
+
+    assert_eq!(output.failed_chunks.len(), 0);
+    assert_eq!(output.segments.len(), input.segments.len());
+    assert!(
+        !output
+            .segments
+            .iter()
+            .any(|s| s.text.starts_with("Me:") || s.text.starts_with('['))
+    );
+    for (out, inp) in output.segments.iter().zip(&input.segments) {
+        assert_eq!(out.raw_text, inp.raw_text);
+    }
+    let requests = server.requests();
+    assert_eq!(requests.len(), chunks.len(), "no chunk was retried");
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.purpose.as_deref() == Some("cleanup"))
+    );
+    let system = &requests[0].chat.as_ref().unwrap().messages[0].content;
+    assert!(system.contains("return only the text after the colon, never the label"));
 }
 
 #[tokio::test]
@@ -384,6 +434,108 @@ fn output_tokens_scale_with_the_chunk_and_stay_under_the_ceiling() {
 
 fn first_chunk() -> TranscriptChunk {
     TranscriptChunker::default().chunk(&standup().segments, Some(&de()))[0].clone()
+}
+
+/// The model reads `[3] Me: words` and some answer `Me: words`. The label
+/// is one word, so the word-count check alone would pass it; the draft
+/// strips a leading index and any known label first, and nothing else: a
+/// colon-bearing first word that is no label stays.
+#[test]
+fn an_echoed_speaker_label_is_stripped_before_validation() {
+    let standup = standup();
+    let mut speakers = standup.speakers.clone();
+    let mut me = speakers[0].clone();
+    me.id = sample_uuid(300);
+    me.cluster_label = "Me".to_owned();
+    me.cluster_confidence = 1.0;
+    speakers.push(me);
+    let labels = SpeakerLabels::new(&speakers);
+    let strip = |text: &str| CleanupDraft::stripping_label(text, &labels).to_owned();
+
+    assert_eq!(strip("Me: Danke dir."), "Danke dir.");
+    assert_eq!(strip("me:Danke dir."), "Danke dir.");
+    assert_eq!(strip("[3] Speaker 1: Hallo."), "Hallo.");
+    assert_eq!(strip("[3] Hallo."), "Hallo.");
+    assert_eq!(strip("Unknown speaker: Hallo."), "Hallo.");
+    assert_eq!(strip("  Speaker 2 : Hallo."), "Hallo.");
+    assert_eq!(strip("**Me:** Danke dir."), "Danke dir.");
+    assert_eq!(strip("_Speaker 1_: Danke dir."), "Danke dir.");
+    assert_eq!(strip("(Me) Danke dir."), "Danke dir.");
+    assert_eq!(strip("Me - Danke dir."), "Danke dir.");
+    assert_eq!(
+        strip("Speaker 10: Hallo."),
+        "Speaker 10: Hallo.",
+        "not a label of this meeting"
+    );
+    assert_eq!(strip("Meeting: agenda"), "Meeting: agenda");
+    assert_eq!(
+        strip("Me-too products are everywhere."),
+        "Me-too products are everywhere."
+    );
+    assert_eq!(strip("Me, I think so: yes"), "Me, I think so: yes");
+    assert_eq!(
+        strip("Das ist, was ich meine, und zwar wirklich so: alles."),
+        "Das ist, was ich meine, und zwar wirklich so: alles."
+    );
+    assert_eq!(
+        strip(" Hallo."),
+        " Hallo.",
+        "untouched when nothing is stripped"
+    );
+    assert_eq!(
+        strip("Me:"),
+        "",
+        "an emptied text is then a validation problem"
+    );
+
+    let chunk = first_chunk();
+    let mut echoed = echo(&chunk);
+    for segment in &mut echoed.segments {
+        segment.text.insert_str(0, "Me: ");
+    }
+    assert_eq!(
+        echoed.problems(&chunk),
+        Vec::<String>::new(),
+        "one extra word slips past the word count"
+    );
+    let stripped = echoed.stripping_speaker_labels(&labels);
+    let texts: Vec<String> = chunk.segments.iter().map(|s| s.text.clone()).collect();
+    assert_eq!(stripped.ordered_texts(), texts);
+}
+
+/// Swift walks `Character`s, grapheme clusters: a colon carrying a
+/// combining mark is no separator, a space carrying one is whitespace
+/// before the index but no decoration after the label, and the opening
+/// stretch ends after 32 clusters.
+#[test]
+fn echoed_labels_are_found_by_grapheme_cluster() {
+    let labels = SpeakerLabels::new(&standup().speakers);
+    let strip = |text: &str| CleanupDraft::stripping_label(text, &labels).to_owned();
+
+    assert_eq!(
+        strip("Speaker 1:\u{301} Hallo."),
+        "Speaker 1:\u{301} Hallo."
+    );
+    assert_eq!(strip(" \u{301}[2] Hallo."), "Hallo.");
+    assert_eq!(strip("Speaker 1:  \u{301}Hallo."), " \u{301}Hallo.");
+    assert_eq!(strip("\u{A0}Speaker 1\u{3000}: Hallo."), "Hallo.");
+    assert_eq!(
+        strip("Speaker 1\n: Hallo."),
+        "Speaker 1\n: Hallo.",
+        "a line break is no decoration"
+    );
+    let last_in_stretch = format!("{}Speaker 1: Hallo.", "* ".repeat(11));
+    assert_eq!(
+        strip(&last_in_stretch),
+        "Hallo.",
+        "the colon is the 32nd cluster"
+    );
+    let past_stretch = format!("{}Speaker 1: Hallo.", "*".repeat(23));
+    assert_eq!(
+        strip(&past_stretch),
+        past_stretch,
+        "the colon is the 33rd cluster"
+    );
 }
 
 #[test]

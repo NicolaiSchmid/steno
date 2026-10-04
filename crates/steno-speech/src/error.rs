@@ -1,8 +1,11 @@
-//! The crate's one error type. Every boundary method of the engine returns
-//! it through `?` as a `BoxError`, so the pipeline prints it as text.
+//! [`SpeechError`], the crate's one error type, and [`SidecarError`], its
+//! cause when the speech sidecar fails. Every boundary method of the
+//! engines returns it through `?` as a `BoxError`, so the pipeline prints
+//! it as text.
 //! Swift: `StenoSpeechError` in `Sources/StenoSpeech/StenoSpeech.swift`.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use thiserror::Error;
 
@@ -31,8 +34,9 @@ pub enum SpeechError {
         directory: PathBuf,
         missing: Vec<String>,
     },
-    /// The manifest has no URL for a missing file (the fp32 export until it
-    /// is hosted); the files have to be put in place by hand.
+    /// The manifest has no source for a missing file and no mirror is set
+    /// (the fp32 export until it is hosted); the files have to be put in
+    /// place by hand.
     #[error(
         "model {asset} has no download location yet; put its files in {}",
         directory.display()
@@ -80,6 +84,56 @@ pub enum SpeechError {
     /// `transcribe` before `prepare` succeeded.
     #[error("the speech engine is not prepared; call prepare() first")]
     NotPrepared,
+    /// A WAV file is not 16 kHz PCM-16.
+    #[error("{}: {detail}", path.display())]
+    Wav { path: PathBuf, detail: String },
+    /// The speech sidecar failed: unless the child reported the error
+    /// itself ([`SidecarError::Remote`]), no child is left running, and the
+    /// next call starts a fresh one.
+    #[error("speech sidecar: {0}")]
+    Sidecar(#[from] SidecarError),
+}
+
+/// How the speech sidecar failed. Every variant but
+/// [`SidecarError::Remote`] leaves the parent without a child: the next
+/// `prepare` or `transcribe` spawns and loads again.
+#[derive(Debug, Error)]
+pub enum SidecarError {
+    /// The binary could not be started.
+    #[error("could not start {}: {source}", program.display())]
+    Spawn {
+        program: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    /// A pipe to or from the child failed, or a thread that supervises it
+    /// could not start.
+    #[error("pipe to the sidecar: {0}")]
+    Pipe(#[source] std::io::Error),
+    /// The child sent bytes the protocol does not define, answered with
+    /// the wrong message or spoke another protocol version; it was killed.
+    #[error("protocol violation, the sidecar was killed: {0}")]
+    Protocol(String),
+    /// The child died before answering: an abort out of ONNX Runtime, a
+    /// panic, a signal, an exit. `stderr` is the last lines it wrote.
+    #[error("the sidecar died mid-request ({status}){}", if stderr.is_empty() { String::new() } else { format!(": {stderr}") })]
+    Crashed { status: String, stderr: String },
+    /// The child did not answer within the request's limit and was killed.
+    #[error("the sidecar did not answer within {:.1} s and was killed", after.as_secs_f64())]
+    Timeout { after: Duration },
+    /// The child's resident set passed the ceiling and it was killed.
+    #[error(
+        "the sidecar used {rss_bytes} bytes, over the {ceiling_bytes} byte ceiling, and was killed"
+    )]
+    MemoryCeiling { rss_bytes: u64, ceiling_bytes: u64 },
+    /// The child reported an error of its own (models that failed to load,
+    /// a run ONNX Runtime refused) and keeps running.
+    #[error("{0}")]
+    Remote(String),
+    /// The models root is not valid UTF-8, which the protocol's JSON cannot
+    /// carry; no child was started.
+    #[error("the models root {} is not valid UTF-8, which the sidecar protocol cannot carry", path.display())]
+    NotUtf8 { path: PathBuf },
 }
 
 impl SpeechError {

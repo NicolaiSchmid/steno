@@ -47,6 +47,64 @@ public struct CleanupDraft: Codable, Sendable, Equatable {
     return problems
   }
 
+  /// The draft with the framing of a prompt line stripped from the front
+  /// of every text: an optional `[n]` index, then a speaker label from
+  /// `labels` and its colon. The model reads `[3] Me: words` and some
+  /// models answer `Me: words`; the label is one word, so the word-count
+  /// check alone lets it through into the transcript.
+  public func strippingSpeakerLabels(_ labels: SpeakerLabels) -> CleanupDraft {
+    var stripped = self
+    for index in stripped.segments.indices {
+      stripped.segments[index].text = Self.strippingLabel(
+        from: stripped.segments[index].text, labels: labels)
+    }
+    return stripped
+  }
+
+  /// `text` without a leading `[n]` index and a speaker label; `text`
+  /// itself when neither is there. The label may be wrapped in markdown or
+  /// brackets (`**Me:**`, `(Me)`) and end in a colon, a closing bracket or
+  /// a spaced dash (`Me - `); a first word that is no label ("Meeting:
+  /// agenda", "Me-too products") is left alone.
+  static func strippingLabel(from text: String, labels: SpeakerLabels) -> String {
+    var rest = text[...].drop(while: \.isWhitespace)
+    var stripped = false
+    if rest.first == "[", let close = rest.firstIndex(of: "]"),
+      Int(rest[rest.index(after: rest.startIndex)..<close]) != nil
+    {
+      rest = rest[rest.index(after: close)...].drop(while: \.isWhitespace)
+      stripped = true
+    }
+    if let separator = Self.labelSeparator(in: rest),
+      labels.isLabel(String(rest[..<separator]).trimmingCharacters(in: Self.labelDecoration))
+    {
+      rest = rest[rest.index(after: separator)...].drop { character in
+        character.unicodeScalars.allSatisfy(Self.labelDecoration.contains)
+      }
+      stripped = true
+    }
+    return stripped ? String(rest) : text
+  }
+
+  /// Markdown emphasis and brackets a model may wrap a label in.
+  static let labelDecoration = CharacterSet(charactersIn: "*_~`()[]").union(.whitespaces)
+
+  /// The first `:` or `)` in the opening stretch of `text`, or a `-` that
+  /// follows whitespace; nil when the opening stretch has none. The
+  /// stretch is long enough for `**Unknown speaker:**` and short enough
+  /// that a colon deep in a sentence is never taken for a label's.
+  static func labelSeparator(in text: Substring) -> Substring.Index? {
+    let window = text.prefix(32)
+    var previous: Character?
+    for index in window.indices {
+      let character = window[index]
+      if character == ":" || character == ")" { return index }
+      if character == "-", previous?.isWhitespace == true { return index }
+      previous = character
+    }
+    return nil
+  }
+
   /// The cleaned texts in segment order, trimmed; meaningful once
   /// `problems(against:)` is empty.
   public var orderedTexts: [String] {

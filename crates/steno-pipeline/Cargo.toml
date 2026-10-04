@@ -1,0 +1,37 @@
+[package]
+name = "steno-pipeline"
+description = "The post-meeting pipeline: orchestration, intakes and the retention sweep over steno-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# `fixtures::two_lane_call`, the recorded call the integration tests here
+# and in the services crate process, and `fixtures::CapturedLog`, what
+# their privacy tests read of the log.
+testing = ["dep:tracing-subscriber"]
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+# `catch_unwind` on a claimed operation, so a panic is reported.
+futures-util.workspace = true
+steno-core = { path = "../steno-core" }
+# A temporary file of each writer's own for the durable writes in `files`.
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt", "macros"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+uuid.workspace = true
+
+[dev-dependencies]
+steno-core = { path = "../steno-core", features = ["testing"] }
+steno-pipeline = { path = ".", features = ["testing"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+
+[lints]
+workspace = true

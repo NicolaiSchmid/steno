@@ -70,9 +70,12 @@
 //! thread ran) as dropped on every lane.
 //!
 //! The one long hold is deliberate: `start` and the rebuild's
-//! `restart_backend` keep the mutex across `backend.start()`, up to 200 ms
-//! while [`NominalSampleRate::settle`](super::NominalSampleRate::settle)
-//! waits for the aggregate. A `stop()` arriving meanwhile queues behind it
+//! `restart_backend` keep the mutex across `backend.start()`: on macOS up
+//! to 200 ms while
+//! [`NominalSampleRate::settle`](super::NominalSampleRate::settle) waits
+//! for the aggregate, on Linux until PipeWire runs the first cycle (1 to
+//! 2 s for a Bluetooth sink; none within 3 s fails the start). A
+//! `stop()` arriving meanwhile queues behind it
 //! and then finds a started backend to tear down, instead of racing a
 //! half-built one; a backend never calls back into the session from
 //! `start`, so the hold cannot deadlock. It can stall, though: every

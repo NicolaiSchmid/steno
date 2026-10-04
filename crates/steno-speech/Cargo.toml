@@ -1,6 +1,6 @@
 [package]
 name = "steno-speech"
-description = "Steno's speech pipeline: VAD, pause-aligned chunker, TDT greedy decoder, overlap merge, the ONNX Runtime backend and the model store"
+description = "Steno's speech pipeline: VAD, pause-aligned chunker, TDT greedy decoder, overlap merge, the ONNX Runtime backend, the sidecar client and the model store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,8 @@ publish.workspace = true
 steno-core = { path = "../steno-core" }
 ort.workspace = true
 realfft.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

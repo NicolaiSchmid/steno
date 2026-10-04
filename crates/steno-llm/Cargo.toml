@@ -28,6 +28,9 @@ thiserror.workspace = true
 # sockets come with the `testing` feature. Additive on top of the workspace
 # line.
 tokio = { workspace = true, features = ["sync", "time"] }
+# Echoed speaker labels are found by grapheme cluster, as Swift's
+# `Character` walks them.
+unicode-segmentation.workspace = true
 url.workspace = true
 uuid.workspace = true
 
