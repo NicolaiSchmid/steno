@@ -115,20 +115,13 @@ pub fn paths() -> Result<StenoPaths, Failure> {
     StenoPaths::create_default().map_err(Failure::runtime)
 }
 
-/// The speech setup over `models_directory` when given (`--models-dir`),
-/// else over the settings' models directory. The speech settings file is
-/// only read, so a given directory leaves the support directory uncreated.
-pub fn speech_setup(
-    settings: &Settings,
-    models_directory: Option<&std::path::Path>,
-) -> Result<SpeechSetup, Failure> {
-    Ok(match models_directory {
-        Some(directory) => SpeechSetup::in_models_directory(
-            standardized(directory),
-            &StenoPaths::new(StenoPaths::default_support_directory()),
-        ),
-        None => SpeechSetup::new(settings, &paths()?),
-    })
+/// The speech setup over `models_directory`, the speech settings read
+/// from the default support directory without creating it.
+pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
+    SpeechSetup::in_models_directory(
+        models_directory,
+        &StenoPaths::new(StenoPaths::default_support_directory()),
+    )
 }
 
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
@@ -170,7 +163,10 @@ pub fn dependencies(
         Arc<dyn steno_core::SpeakerMemory>,
     ) = match engine {
         Some(engine) => {
-            let speech = speech_setup(settings, models_directory)?;
+            let speech = speech_setup(match models_directory {
+                Some(directory) => standardized(directory),
+                None => steno_services::speech::models_directory(settings, &paths()?),
+            });
             (
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.

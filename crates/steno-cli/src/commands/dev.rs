@@ -400,13 +400,9 @@ impl ModelsOptions {
         Ok(ModelStoreSpeechModels::new(&self.setup()?))
     }
 
-    /// The speech setup over [`Self::directory`], the speech settings
-    /// read from the default support directory without creating it.
+    /// The speech setup over [`Self::directory`].
     fn setup(&self) -> Result<SpeechSetup, Failure> {
-        Ok(SpeechSetup::in_models_directory(
-            self.directory()?,
-            &steno_core::StenoPaths::new(steno_core::StenoPaths::default_support_directory()),
-        ))
+        Ok(crate::wiring::speech_setup(self.directory()?))
     }
 
     /// The models directory; `dev models list` prints it.
