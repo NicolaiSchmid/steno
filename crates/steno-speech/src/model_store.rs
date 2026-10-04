@@ -56,7 +56,7 @@
 //! installed, by whatever path, the next call deletes its `<name>.partial`.
 
 use std::fs::{self, File, TryLockError};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -559,7 +559,11 @@ impl ModelStore {
                 actual: partial.len,
             });
         }
-        check_digest(file, destination, hex(&partial.hasher.clone().finalize()))?;
+        check_digest(
+            file,
+            destination,
+            format!("{:x}", partial.hasher.clone().finalize()),
+        )?;
         fs::rename(&partial.path, destination).map_err(|e| SpeechError::io(destination, e))?;
         partial.done = true;
         sync_parent(destination);
@@ -825,23 +829,8 @@ impl Partial {
         self.file
             .seek(SeekFrom::Start(0))
             .map_err(|e| SpeechError::io(&self.path, e))?;
-        let mut buffer = vec![0u8; 1 << 16];
-        let mut remaining = len;
-        while remaining > 0 {
-            let want = buffer
-                .len()
-                .min(usize::try_from(remaining).unwrap_or(usize::MAX));
-            let n = self
-                .file
-                .read(&mut buffer[..want])
-                .map_err(|e| SpeechError::io(&self.path, e))?;
-            if n == 0 {
-                break;
-            }
-            self.hasher.update(&buffer[..n]);
-            remaining -= n as u64;
-        }
-        self.len = len - remaining;
+        self.len = hash_into(&mut self.hasher, (&self.file).take(len))
+            .map_err(|e| SpeechError::io(&self.path, e))?;
         self.file
             .seek(SeekFrom::Start(self.len))
             .map_err(|e| SpeechError::io(&self.path, e))?;
@@ -994,36 +983,23 @@ fn check_digest(file: &ModelFile, path: &Path, actual: String) -> Result<(), Spe
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
-            let _ = write!(out, "{b:02x}");
-            out
-        })
+/// Streams `input` into `hasher` and returns the bytes read.
+fn hash_into(hasher: &mut Sha256, input: impl Read) -> std::io::Result<u64> {
+    std::io::copy(&mut BufReader::with_capacity(1 << 16, input), hasher)
 }
 
 /// The lower-case hex SHA-256 of a file, streamed.
 pub fn sha256_of(path: &Path) -> Result<String, SpeechError> {
-    let mut file = File::open(path).map_err(|e| SpeechError::io(path, e))?;
     let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 16];
-    loop {
-        let n = file
-            .read(&mut buffer)
-            .map_err(|e| SpeechError::io(path, e))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-    Ok(hex(&hasher.finalize()))
+    File::open(path)
+        .and_then(|file| hash_into(&mut hasher, file))
+        .map_err(|e| SpeechError::io(path, e))?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead, BufReader};
+    use std::io::BufRead;
     use std::net::{TcpListener, TcpStream};
     use std::sync::mpsc;
 
@@ -1113,7 +1089,7 @@ mod tests {
     }
 
     fn digest(body: &[u8]) -> String {
-        hex(&Sha256::digest(body))
+        format!("{:x}", Sha256::digest(body))
     }
 
     #[test]

@@ -166,13 +166,7 @@ fn answer(
 }
 
 fn digest(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    Sha256::digest(bytes)
-        .iter()
-        .fold(String::new(), |mut out, b| {
-            let _ = write!(out, "{b:02x}");
-            out
-        })
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// A body that is not periodic in any short stride, so a misplaced offset
