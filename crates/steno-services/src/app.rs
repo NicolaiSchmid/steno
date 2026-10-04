@@ -412,7 +412,7 @@ impl ExitGate {
     /// false, runs `shutdown` on a thread of its own for at most
     /// `patience` and then calls `exit`, which is expected to raise the
     /// request again; that one, and every one after it, returns true. A
-    /// request while the shutdown runs returns false and is dropped: the
+    /// request while the shutdown runs returns false and is held: the
     /// exit is coming.
     #[must_use]
     pub fn exit_requested(
@@ -1085,14 +1085,14 @@ mod tests {
                 }
             },
         );
-        assert!(!held, "the first request waits");
+        assert!(!held, "the first request is held");
         assert!(
             !gate.exit_requested(
                 PATIENCE,
                 || panic!("no second shutdown"),
                 || panic!("no second exit"),
             ),
-            "a request while the shutdown runs waits too"
+            "a request while the shutdown runs is held too"
         );
         assert!(
             exit_seen.recv_timeout(PATIENCE).unwrap(),
