@@ -446,36 +446,47 @@ fn moving_the_default_output_is_reported_once() {
     start(&backend, &lanes, None, &sink).expect("start");
     let _restore = DefaultSink;
     DefaultSink::set(SECOND_SINK);
-    // WirePlumber moves `default.audio.sink` after the configured one;
-    // give it time, and say what the metadata held if it never did.
+    assert_output_moved_once(&reasons, "");
+    stop(&backend);
+}
+
+/// Expects one `DefaultOutputChanged` report and no second. WirePlumber
+/// moves `default.audio.sink` after the configured one, so the report gets
+/// time, and a missing one says what the metadata held. `context`
+/// prefixes the failure messages.
+fn assert_output_moved_once(reasons: &Receiver<DeviceChangeReason>, context: &str) {
     let reason = reasons
         .recv_timeout(COALESCE_DELAY + Duration::from_secs(8))
-        .unwrap_or_else(|_| panic!("no device-change report; {}", default_metadata()));
+        .unwrap_or_else(|_| panic!("{context}no device-change report; {}", default_metadata()));
     assert_eq!(reason, DeviceChangeReason::DefaultOutputChanged);
     assert!(
         reasons.recv_timeout(QUIET).is_err(),
-        "one report per change"
+        "{context}one report per change"
     );
-    stop(&backend);
+}
+
+/// What `pw-metadata` prints of the `default` metadata on subject 0:
+/// `key`, or every key; nothing when it fails.
+fn read_default_metadata(key: Option<&str>) -> String {
+    Command::new("pw-metadata")
+        .args(["-n", "default", "0"])
+        .args(key)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
 }
 
 /// What the `default` metadata holds, for a failure message.
 fn default_metadata() -> String {
-    let metadata = Command::new("pw-metadata")
-        .args(["-n", "default", "0"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-    format!("the default metadata holds:\n{metadata}")
+    format!(
+        "the default metadata holds:\n{}",
+        read_default_metadata(None)
+    )
 }
 
 /// The default sink as WirePlumber resolved it, from `pw-metadata`.
 fn default_sink() -> Option<String> {
-    let output = Command::new("pw-metadata")
-        .args(["-n", "default", "0", "default.audio.sink"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = read_default_metadata(Some("default.audio.sink"));
     [SECOND_SINK, SINK]
         .into_iter()
         .find(|name| text.contains(&format!("\"{name}\"")))
@@ -504,19 +515,7 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
         DefaultSink::set(to);
         DefaultSink::set(from);
         DefaultSink::set(to);
-        let reason = reasons
-            .recv_timeout(COALESCE_DELAY + Duration::from_secs(8))
-            .unwrap_or_else(|_| {
-                panic!(
-                    "round {round}: no device-change report; {}",
-                    default_metadata()
-                )
-            });
-        assert_eq!(reason, DeviceChangeReason::DefaultOutputChanged);
-        assert!(
-            reasons.recv_timeout(QUIET).is_err(),
-            "round {round}: one report per burst"
-        );
+        assert_output_moved_once(&reasons, &format!("round {round}: "));
         // The session's rebuild: stop, open the latch, start again.
         stop_and_check_teardown(&backend, &sink);
         sink.rearm_device_change();
@@ -587,25 +586,15 @@ impl TemporaryMic {
         ));
         let mic = Self { name };
         let deadline = Instant::now() + Duration::from_secs(5);
-        while mic.id().is_none() {
+        while node_id(name).is_none() {
             assert!(Instant::now() < deadline, "{name} did not appear");
             std::thread::sleep(Duration::from_millis(50));
         }
         mic
     }
 
-    /// Its global id, from `pw-dump`.
-    fn id(&self) -> Option<u64> {
-        let output = Command::new("pw-dump").output().ok()?;
-        let objects: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-        objects.as_array()?.iter().find_map(|object| {
-            let name = object.pointer("/info/props/node.name")?.as_str()?;
-            (name == self.name).then(|| object.get("id")?.as_u64())?
-        })
-    }
-
     fn destroy(&self) {
-        if let Some(id) = self.id() {
+        if let Some(id) = node_id(self.name) {
             assert!(tool("pw-cli", &["destroy", &id.to_string()]));
         }
     }
