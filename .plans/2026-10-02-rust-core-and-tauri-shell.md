@@ -1179,7 +1179,7 @@ PR off `main`.
 | Store opens with `synchronous = NORMAL` | `fix/rust-core-concurrency-flake` | #174 | merged |
 | WP6b pipeline, CLI, services, the shell on the real host, quitting saves first | `feat/rust-pipeline` | #173 | merged |
 | WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | merged |
-| WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | | open |
+| WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | open |
 | Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
 | WP9a signed and notarised release bundles with the speech sidecar, `cargo deny`, the `desktop-v*` release and the updater lanes | `feat/rust-release-signing` | #184 | merged |
 | WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`) | | | planned |
