@@ -1,11 +1,13 @@
 # Mac cutover: the Tauri app replaces the Swift app
 
-Status: planned 2026-10-04, not started. The second half of WP9 in
-`.plans/2026-10-02-rust-core-and-tauri-shell.md`; the first half (signed,
-notarised bundles that carry the speech sidecar, `cargo deny`, the
-`desktop-v*` release workflow and the updater lanes) landed with
-`feat/rust-release-signing`. This plan is one pull request, opened only once
-the parity list in the Rust plan is empty.
+Status: planned 2026-10-04, not started. WP9b, the second half of WP9 in
+`.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP9a (signed, notarised
+bundles that carry the speech sidecar, `cargo deny`, the `desktop-v*`
+release workflow and the updater lanes) landed with
+`feat/rust-release-signing`. It supersedes nothing; it expands the cutover
+paragraph of WP9 in the Rust plan, whose progress table tracks it as WP9b.
+This plan is one pull request, opened only once the parity list in the
+Rust plan is empty.
 
 ## Goal
 
@@ -25,10 +27,10 @@ Each row is something the cutover has to carry over, retire or decide.
 | Bundle id | `uno.schmid.steno.mac` (`apps/macos/project.yml`) | `uno.schmid.steno.desktop` (`tauri.conf.json`), so both install side by side |
 | App | `/Applications/Steno.app`, executable `Steno` | `Steno.app`, executable `steno-desktop`, sidecar beside it |
 | Version | `CFBundleShortVersionString` from the `v*` tag, `CFBundleVersion` the commit count | Both from `[workspace.package]` (0.1.0) |
-| Updates | Sparkle, `SUFeedURL` the rolling `appcast` branch, `SUPublicEDKey`, daily checks | Tauri updater, the `desktop-stable` and `desktop-beta` lanes, on request only |
+| Updates | Sparkle, `SUFeedURL` the rolling `appcast` branch, `SUPublicEDKey` (`apps/macos/project.yml`), daily checks | Tauri updater, the `desktop-stable` and `desktop-beta` lanes, on request only |
 | Login item | `SMAppService.mainApp` (`LoginItemController.swift`) | A Launch Agent from `tauri-plugin-autostart` |
 | Data | `~/Library/Application Support/Steno/` (database, audio, models) | The same directory (`steno_core::paths`) |
-| Preferences | `UserDefaults` of `uno.schmid.steno.mac`: `steno.onboardingCompleted`, `steno.floatingPanel.anchor`, `steno.systemAudioGranted` | `preferences.json` in the support directory; the panel anchor in `panel-anchor.json` in Tauri's app config directory, which is named after the bundle id |
+| Preferences | `UserDefaults` of `uno.schmid.steno.mac`: `steno.onboardingCompleted`, `steno.floatingPanel.anchor`, `steno.systemAudioGranted`, `steno.loginItemRegistered` (`AppController.swift`: the first-launch login-item registration has run) | `preferences.json` in the support directory; the panel anchor in `panel-anchor.json` in Tauri's app config directory, which is named after the bundle id |
 | Secrets | Keychain generic passwords, service `uno.schmid.steno.mac`, account the `SecretKey` | The same service and accounts through `keyring` (`KEYRING_SERVICE`) |
 | Phone handover identity | A `SecIdentity` labelled `Steno handover identity` (`IdentityKeychain.swift`) | A PEM bundle in the keyring entry `handover-identity` |
 | Permissions | TCC grants for `uno.schmid.steno.mac` under team `KQB68F43PW` | Grants for `uno.schmid.steno.desktop` |
@@ -41,7 +43,10 @@ Each row is something the cutover has to carry over, retire or decide.
    sets `bundle.macOS.bundleVersion` to the commit count, the Swift
    scheme, through the configuration merge. Sparkle orders updates by
    `CFBundleVersion` alone, so the cutover build must have a higher one
-   than the last Swift build; the commit count only grows. The marketing
+   than the last Swift build; the commit count only grows.
+   `desktop-release.yml` checks out with `fetch-depth: 0` (the commit
+   count needs the history) and fails when the build number is not above
+   the newest `sparkle:version` on the `appcast` branch. The marketing
    version moves past the last Swift tag (the workspace version becomes
    the next minor after it), so the Tauri updater, which compares
    marketing versions, never offers an older build.
@@ -50,11 +55,17 @@ Each row is something the cutover has to carry over, retire or decide.
    Tauri `.dmg`, signed with `SPARKLE_PRIVATE_KEY` (Sparkle's `sign_update`
    from a pinned Sparkle release, since the Xcode build that provided
    `generate_appcast` goes away), `sparkle:version` the build number from
-   step 1. Sparkle installs it over `Steno.app` because the bundle id and
-   the Developer ID team match the running app's designated requirement.
-   After that release `release.yml`, the Sparkle scripts and the `appcast`
-   branch stop moving; the branch stays published so a Swift build that
-   was offline for months still finds the handoff item.
+   step 1. The cutover build's `Info.plist` (`apps/desktop/src-tauri/`)
+   carries the Swift app's `SUPublicEDKey` from `apps/macos/project.yml`:
+   Sparkle 2 refuses an update whose new bundle drops the key the running
+   app has (it supports rotation, not removal). The key is inert in the
+   Tauri app. Sparkle installs the item over `Steno.app` because the
+   bundle id matches and the EdDSA signature verifies against that key
+   (the Developer ID team matching the running app's designated
+   requirement is the other check that would pass). After that release
+   `release.yml`, the Sparkle scripts and the `appcast` branch stop
+   moving; the branch stays published so a Swift build that was offline
+   for months still finds the handoff item.
 3. **Distribution.** The desktop workflow takes over what `release.yml`
    did: the Mac release becomes GitHub's "latest" (drop `--prerelease` and
    `--latest=false` for releases without a hyphen), the Homebrew cask bump
@@ -64,11 +75,15 @@ Each row is something the cutover has to carry over, retire or decide.
 4. **Login item.** On first launch the Rust app checks
    `SMAppService.mainApp.status`; when it is `enabled` it unregisters it and
    enables its own Launch Agent, so the user keeps exactly one login item.
-   This needs a small `objc2` call in the shell (`autostart.rs`). The
+   When the status is not `enabled` but `steno.loginItemRegistered` (step
+   5) is set, the user turned the item off after the Swift app registered
+   it, so the Rust app registers nothing. This needs a small `objc2` call
+   in the shell (`autostart.rs`). Keeping `SMAppService.mainApp` instead of
+   the Launch Agent on macOS is the alternative, decided by test 1. The
    `requiresApproval` copy in the General section becomes unreachable and
    goes.
 5. **Preferences.** On first launch, with no `preferences.json` yet, the
-   Rust app reads the three `UserDefaults` keys from
+   Rust app reads the four `UserDefaults` keys from
    `~/Library/Preferences/uno.schmid.steno.mac.plist` (through
    `CFPreferences` with the app's own domain, which after step 1 is that
    one) and writes them into `preferences.json`, so onboarding does not
@@ -76,9 +91,13 @@ Each row is something the cutover has to carry over, retire or decide.
    (the panel then opens at its default place).
 6. **Handover identity.** Phones pin the Mac's certificate, so a new
    identity forces every phone to pair again. The cutover imports the Swift
-   identity: on first launch, when `handover-identity` is empty and the
-   keychain holds an identity labelled `Steno handover identity`, export it
-   with `SecItemExport` as PKCS#12, convert it to the PEM bundle
+   identity: on first launch, when `handover-identity` is empty, find the
+   certificate labelled `Steno handover identity` and its identity through
+   `SecIdentityCreateWithCertificate`, as `IdentityKeychain.load` does
+   (`Sources/StenoHandover/Identity/IdentityKeychain.swift`; an identity
+   query ignores the label and returns every identity in the keychain).
+   Export that identity with `SecItemExport` as PKCS#12, convert it to the
+   PEM bundle
    `steno-handover` reads, store it under `handover-identity` and leave the
    Swift item in place. If the export fails (a key marked non-extractable,
    a denied prompt), the app mints a new identity and the release notes
@@ -96,16 +115,16 @@ Each row is something the cutover has to carry over, retire or decide.
 
 ## Risks
 
-- **Sparkle refuses the update.** Sparkle checks the new app's signature
-  against the installed app's designated requirement, which names the
-  bundle id and the team. A different id or an ad hoc signed sidecar makes
-  it refuse, and the Swift app then retries daily without telling the user
-  why. Covered by test 1.
+- **Sparkle refuses the update.** Sparkle refuses a new bundle without the
+  installed app's `SUPublicEDKey`, with another bundle id, or that passes
+  neither the EdDSA check against the installed key nor the installed
+  app's designated requirement (the bundle id and the team; an ad hoc
+  signed sidecar fails that one). The Swift app then retries daily without
+  telling the user why. Step 2 carries the key; covered by test 1.
 - **Version ordering.** A `CFBundleVersion` lower than the last Swift
   build's means the item is never offered; a marketing version lower than
   the last Swift tag confuses the Tauri updater after the handoff. Step 1
-  fixes both; the release job should fail when the build number is not
-  above the newest appcast item's.
+  fixes and checks both.
 - **TCC grants.** Microphone, system audio and calendar grants are stored
   per bundle id and checked against the code requirement recorded at grant
   time. Same id and team should keep them. If the requirement differs,
@@ -119,10 +138,13 @@ Each row is something the cutover has to carry over, retire or decide.
 - **The handover identity export** can raise a keychain prompt or fail;
   then phones pair again (step 6). The release notes must say which
   happened in testing.
-- **Two login items** if step 4 fails: the Swift `SMAppService` entry would
-  point at an app that no longer exists under that executable and macOS
-  shows a broken item in Login Items. The unregister must run before the
-  Launch Agent is written.
+- **Two login items** if step 4 fails. `SMAppService.mainApp` registers
+  the app bundle (its id and path), not the executable, so after the
+  in-place replacement the Swift entry most likely still launches the new
+  app; with the Launch Agent beside it, two items both start Steno at
+  login (the single-instance guard keeps one running). The unregister
+  must run before the Launch Agent is written; test 1 checks which
+  happens.
 - **Data directory.** Both apps use the same database. A user who runs the
   `uno.schmid.steno.desktop` build beside the Swift app before the cutover
   already shares it; after the cutover the desktop-id build would be a
@@ -138,7 +160,8 @@ Each row is something the cutover has to carry over, retire or decide.
 
 ## Tests
 
-All on a real Mac (Forge or a second user account), never on CI alone.
+All on a real Apple-silicon Mac (the self-hosted runner's machine or a
+second user account), never on CI alone.
 
 1. **Handoff.** Install the last Swift release from its DMG, grant every
    permission, set an API key, pair a phone, record a meeting, enable launch
@@ -146,7 +169,8 @@ All on a real Mac (Forge or a second user account), never on CI alone.
    cutover item (Sparkle's `SUFeedURL` through `defaults write` on a test
    account), check for updates, install. Then: the app launches as the
    Tauri app, `codesign -dr -` on it shows the same designated requirement
-   as the Swift build's, the meeting is listed, the API key works without a
+   as the Swift build's, its `Info.plist` has the Swift `SUPublicEDKey`,
+   the meeting is listed, the API key works without a
    prompt, onboarding does not open, Login Items shows one Steno entry.
 2. **Permissions.** After test 1, record a call: both lanes carry audio, no
    TCC prompt appeared, and `tccutil` was not needed.
@@ -161,3 +185,7 @@ All on a real Mac (Forge or a second user account), never on CI alone.
    is stapled), and nothing references the Swift paths.
 6. **Offline Swift build.** A Swift build two releases behind still finds
    the handoff item on the `appcast` branch after `release.yml` is gone.
+7. **Distribution.** After the cutover release, `releases/latest` resolves
+   to it, and the cask and the flake install the desktop `.dmg`.
+8. **Removal.** `swift-ci.yml` and `release.yml` are gone, and
+   `rg apps/macos` matches nothing outside `.plans/` and `docs/`.

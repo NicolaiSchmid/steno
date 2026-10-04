@@ -412,7 +412,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   binary built as `steno-speech-sidecar-<target triple>` (Tauri strips the suffix
   when it bundles); on macOS it is signed with the app, with the hardened runtime,
   and notarised with it.
-  In two PRs. The first (`feat/rust-release-signing`) did the release half: the
+  In two PRs. WP9a (`feat/rust-release-signing`) did the release half: the
   sidecar in every bundle (declared in `tauri.release.conf.json`, not
   `tauri.conf.json`, so a plain `cargo build` does not need it; staged by
   `apps/desktop/scripts/stage-sidecar.sh`; `check-bundle.sh` unpacks each bundle as
@@ -422,8 +422,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   certificate), and publishing on `desktop-v*` tags (the Swift workflow owns `v*`):
   one GitHub pre-release per tag with the bundles, the `.sig` files and
   `latest.json`, copied to the rolling `desktop-beta` and `desktop-stable` releases
-  that `updater.rs` reads. No desktop release is GitHub's "latest" before the
-  cutover. The second is the cutover: `.plans/2026-10-04-mac-cutover.md`.
+  that `updater.rs` reads. Each lane only moves forward: the stable lane takes a
+  release (no hyphen), the beta lane every version, each only when the version is at
+  or above the one the lane serves. No desktop release is GitHub's "latest" before
+  the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
