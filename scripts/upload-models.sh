@@ -14,9 +14,9 @@
 #   --repo     the target repository; default nicolaischmid/steno-models,
 #              the one STENO_MODELS_REPO names
 #   --models   a store root holding parakeet-tdt-0.6b-v3-fp32/ (the files
-#              spikes/onnx-speech/export/ writes); default the store root
-#              of the models directory $STENO_MODELS_DIR names,
-#              $STENO_MODELS_DIR/onnx
+#              spikes/onnx-speech/export/ writes); default
+#              $STENO_MODELS_DIR/onnx, the store root inside the models
+#              directory
 #   --private  create the repository private if it does not exist yet
 #   --dry-run  verify and stage, print the upload commands, upload nothing
 #
@@ -24,13 +24,13 @@
 # with a write token (hf auth login, or HF_TOKEN in the environment), curl
 # and sha256sum or shasum. The repository is created on the first upload.
 #
-# What lands in the repository, and nothing else from the models directory
-# (no partial downloads, no Finder files):
+# What lands in the repository, and nothing else from the store root (no
+# partial downloads, no lock files, no Finder files):
 #   parakeet-tdt-0.6b-v3-fp32/{encoder.onnx,encoder.weights,decoder.onnx,joiner.onnx,tokens.txt}
 #   README.md       the model card, licence cc-by-4.0, base model named
 #   ATTRIBUTION.md  the CC-BY-4.0 credit: creator, source, licence link and
 #                   the changes made (ONNX conversion, longer position table)
-# The layout is <asset id>/<file name>, the same as a Steno models root, so
+# The layout is <asset id>/<file name>, the same as a Steno store root, so
 # the output of `hf download <repo> --revision <commit> --local-dir <dir>`
 # can be served as a mirror unchanged.
 #
@@ -81,7 +81,7 @@ while (($# > 0)); do
 	esac
 done
 
-[[ -n "$models" ]] || fail 2 "no models root: pass --models or set STENO_MODELS_DIR"
+[[ -n "$models" ]] || fail 2 "no store root: pass --models or set STENO_MODELS_DIR"
 directory="$models/$asset"
 [[ -d "$directory" ]] || fail 1 "$directory: not a directory"
 [[ "$repo" == */* ]] || fail 2 "--repo must be <owner>/<name>"

@@ -56,11 +56,11 @@
 //!
 //! Inference is synchronous and CPU-bound. [`OnnxSpeechEngine`] runs it on
 //! a blocking thread when a tokio runtime is present. The app does not run
-//! it in its own process (invariant 4, speech-stack decision 5): it runs
-//! [`SidecarSpeechEngine`], which hosts the same [`Transcriber`] in
-//! `steno-speech-sidecar` and sends it the audio over a pipe, so an abort
-//! out of ONNX Runtime ends the child and not the app. Which platform runs
-//! which engine: [`runtime`].
+//! it in its own process (invariant 4, speech-stack decision 5): when it
+//! runs ONNX speech it runs [`SidecarSpeechEngine`], which hosts the same
+//! [`Transcriber`] in `steno-speech-sidecar` and sends it the audio over a
+//! pipe, so an abort out of ONNX Runtime ends the child and not the app.
+//! Which platform runs which engine: [`runtime`].
 //!
 //! ```no_run
 //! use steno_core::{AudioBuffer16k, SpeechEngine};
