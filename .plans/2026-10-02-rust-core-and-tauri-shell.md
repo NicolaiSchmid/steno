@@ -156,25 +156,35 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   German (closes the open item from the speech-stack plan); sidecar process; model
   manifest and download. Gate: FLEURS numbers within 0.5 points of the spike F table.
   Integration notes (WP4a `crates/steno-speech`, #171, against `crates/steno-speech-coreml`
-  of #163): the checklist for the shared-decoder follow-up. Invariant 4 makes the two
-  pipelines one; each item is a place where they differ today. "Measure" means: run
-  FLEURS German `cat/` with both choices and keep the better mean.
+  of #163): the checklist for moving the CoreML pipeline onto the shared one. Invariant 4
+  makes the two pipelines one; each item is a place where they differ today. "Measure"
+  means: run FLEURS German `cat/` with both choices and keep the better mean.
+  The decode loop is one loop: `decode_frames` in `crates/steno-speech/src/decoder.rs`
+  over the `TdtModel` trait, which `decode_window` in the same file builds over a
+  `SpeechBackend` and `WindowModel` in `crates/steno-speech-coreml/src/backend.rs` over
+  the CoreML models. The ONNX pipeline runs it under `DecoderConfig::default()` (NeMo),
+  the CoreML crate under `FLUID_AUDIO` in `crates/steno-speech-coreml/src/decoder.rs`,
+  whose `decode_window` keeps the short-window exit, the tail flush and the emission
+  cutoff. The first three decode-loop items below are a choice between those two
+  configurations; the last three are the steps the CoreML `decode_window` keeps. All
+  six are settled when the CoreML backend moves onto the shared chunker; until then each
+  backend keeps its own, so FLEURS and the Swift parity both hold.
   - Decode loop:
     - [ ] Repeated zero-duration tokens. Here: `crates/steno-speech/src/decoder.rs`
       (`DecoderConfig::max_symbols_per_frame`, NeMo's `max_symbols` 10). There:
-      `crates/steno-speech-coreml/src/decoder.rs` (`decode_window`, duration forced to 1 on a frame's second
-      emission). Resolve: measure.
-    - [ ] Token budget. Here: `crates/steno-speech/src/decoder.rs` (`DecoderConfig::max_tokens_per_second`,
+      `crates/steno-speech-coreml/src/decoder.rs` (`FLUID_AUDIO`: two symbols a frame,
+      the forced advance recorded as the duration, `TokenDuration::Advanced`). Resolve: measure.
+    - [ ] Token budget. Here: `crates/steno-speech/src/decoder.rs` (`TokenBudget::PerSecond`,
       40 a second of window plus 16). There: `crates/steno-speech-coreml/src/decoder.rs` (`MAX_TOKENS_PER_CHUNK`,
-      150 a window). Resolve: the per-second budget; 150 truncates a 60 s chunk.
-    - [ ] Short window. Here: `crates/steno-speech/src/decoder.rs` (`decode_window`, one frame decodes).
+      150 a window, `TokenBudget::PerWindow`). Resolve: the per-second budget; 150 truncates a 60 s chunk.
+    - [ ] Window end. Here: `crates/steno-speech/src/decoder.rs` (`decode_frames`, `WindowEnd::Emit`: a token
+      whose duration passes the window end is emitted, as NeMo does). There: `crates/steno-speech-coreml/src/decoder.rs`
+      (`FLUID_AUDIO`, `WindowEnd::Drop` drops it; only the last window's flush
+      recovers it). Resolve: emit it; FLEURS passes here without the
+      flush.
+    - [ ] Short window. Here: `crates/steno-speech/src/decoder.rs` (`decode_frames`, one frame decodes).
       There: `crates/steno-speech-coreml/src/decoder.rs` (`decode_window`, empty for `valid <= 1`). Resolve:
       either; FLEURS never makes a one-frame window.
-    - [ ] Window end. Here: `crates/steno-speech/src/decoder.rs` (`decode_window`, a token whose duration
-      passes the window end is emitted, as NeMo does). There: `crates/steno-speech-coreml/src/decoder.rs`
-      (`decode_window`, `if active && label != BLANK_ID` drops it; only the last
-      window's flush recovers it). Resolve: emit it; FLEURS passes here without the
-      flush.
     - [ ] Tail flush. Here: none, the merge owns the overlap. There: `crates/steno-speech-coreml/src/decoder.rs`
       (`decode_window`, up to 10 probes over three boundary frames, stopping at
       `CONSECUTIVE_BLANK_LIMIT`). Resolve: no flush, as the window end.
@@ -253,17 +263,23 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     - [ ] Backend. Here: `crates/steno-speech/src/backend.rs` (`SpeechBackend`, `&mut self`, decoded to
       `Vec<Token>` by `decode_window`). There: `crates/steno-speech-coreml/src/backend.rs` (`Backend` plus
       `Scratch`), `crates/steno-speech-coreml/src/coreml.rs` (`EncoderView`) and `crates/steno-speech-coreml/src/decoder.rs` (`Hypothesis`).
-      Resolve: the trait, with `Backend` and `Scratch` behind it.
+      Resolve: the trait, with `Backend` and `Scratch` behind it. The decode loop's
+      half is done: `TdtModel` (prediction network and joint over one window), which
+      `WindowModel` implements over `Backend`, `Scratch` and `EncoderView`; the
+      preprocessor and encoder calls stay with the pipeline.
     - [ ] Token. Here: `crates/steno-speech/src/decoder.rs` (`Token`: `id` a `u32`, `duration` the model's
       prediction). There: `crates/steno-speech-coreml/src/lib.rs` (`Token`: `id` a `usize`, `duration` the frames
       the loop advanced, 0 when unknown). Resolve: one type; the timings need the
-      predicted duration.
+      predicted duration. The shared loop emits `steno_speech::Token` and records the
+      duration `DecoderConfig::token_duration` names; the CoreML crate converts it to
+      its own `Token` (`From`) until its merge and segmentation take the shared one.
     - [ ] Modules. Here: `crates/steno-speech/src/chunker.rs`, `crates/steno-speech/src/segmentation.rs`. There:
       `crates/steno-speech-coreml/src/chunking.rs`, `crates/steno-speech-coreml/src/segments.rs`. Resolve: one pair of names.
-    - [ ] Decoder limits. Here: `crates/steno-speech/src/decoder.rs` (`DecoderConfig::max_symbols_per_frame`,
-      `max_tokens_per_second`). There: `crates/steno-speech-coreml/src/decoder.rs` (`MAX_SYMBOLS_PER_STEP`,
-      `MAX_TOKENS_PER_CHUNK`). Resolve: the config fields, which tests vary. Settle
-      with the two decode-loop items above.
+    - [ ] Decoder limits. Both: the `DecoderConfig` fields in `crates/steno-speech/src/decoder.rs`
+      (`max_symbols_per_frame`, `token_budget`, `window_end`, `token_duration`), which tests vary;
+      `FLUID_AUDIO` in `crates/steno-speech-coreml/src/decoder.rs` sets them, the budget from
+      `MAX_TOKENS_PER_CHUNK`. The fields are in place; the values follow the decode-loop
+      items above.
     - [ ] Engine id. Here: `crates/steno-speech/src/engine.rs` (`OnnxSpeechEngine::ID`). There:
       `crates/steno-speech-coreml/src/engine.rs` (`ENGINE_ID`). Both are `parakeet-v3`. Resolve: one constant.
     - [ ] Swift pointers. Here: a `Swift:` line in each module doc. There:
@@ -271,7 +287,8 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     - [ ] Test tools. Here: `crates/steno-speech/src/wav.rs` (`read_pcm16`, promoted
       by WP4c) and `crates/steno-speech/tests/common/mod.rs` (`score`). There: `crates/steno-speech-coreml/src/wav.rs`, `crates/steno-speech-coreml/src/wer.rs` (`word_errors`). Resolve: one module.
   - Already the same: confidence clamping (non-finite values are zero, the rest
-    clamped), chunk and window.
+    clamped; one function, `decoder::confidence`, since the loop is shared), chunk and
+    window.
 
   **WP4c sidecar and models.** `crates/steno-speech-sidecar` (binary
   `steno-speech-sidecar`) hosts the ONNX `Transcriber`; `SidecarSpeechEngine` in
@@ -1070,6 +1087,7 @@ PR off `main`.
 | Store opens with `synchronous = NORMAL` | `fix/rust-core-concurrency-flake` | #174 | merged |
 | WP6b pipeline, CLI, services, the shell on the real host, quitting saves first | `feat/rust-pipeline` | #173 | merged |
 | WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | merged |
+| Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

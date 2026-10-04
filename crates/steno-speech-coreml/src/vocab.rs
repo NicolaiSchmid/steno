@@ -20,6 +20,11 @@ pub const WORD_BOUNDARY: char = '\u{2581}';
 /// (`TdtConfig.blankId`).
 pub const BLANK_ID: usize = 8192;
 
+/// [`BLANK_ID`] as the shared TDT loop's `u32` token id.
+pub const BLANK_TOKEN: u32 = 8192;
+
+const _: () = assert!(BLANK_ID == BLANK_TOKEN as usize);
+
 /// A piece begins a word when it carries the marker or a leading space
 /// (FluidAudio `isWordBoundary`).
 #[must_use]

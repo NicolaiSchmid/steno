@@ -1,7 +1,8 @@
 //! The four model calls of Parakeet TDT v3 on CoreML: preprocessor,
 //! encoder, decoder step and joint step, over FluidAudio's `.mlmodelc`
-//! bundles. The shared-decoder follow-up drives these through
-//! `steno_speech::SpeechBackend`; until then [`crate::decoder`] does.
+//! bundles. [`WindowModel`] puts one window's encoder frames and a worker's
+//! scratch behind `steno_speech::TdtModel`, the calls of the shared TDT
+//! loop that [`crate::decoder`] runs.
 //!
 //! Model contract (FluidAudio 0.17.4, `parakeet-tdt-0.6b-v3`):
 //!
@@ -18,10 +19,13 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use steno_speech::{JointDecision, TdtModel};
+
 use crate::SpeechError;
 use crate::chunking::MAX_MODEL_SAMPLES;
 use crate::coreml::{Array, ComputeUnits, EncoderView, Model, inputs};
-use crate::vocab::Vocab;
+use crate::decoder::duration_of;
+use crate::vocab::{BLANK_TOKEN, Vocab};
 
 /// Encoder hidden size (`ASRConstants.encoderHiddenSize`).
 pub const ENCODER_HIDDEN: usize = 1024;
@@ -79,17 +83,6 @@ pub struct Backend {
     vocab: Vocab,
     directory: PathBuf,
     load_seconds: f64,
-}
-
-/// What the joint decided for one frame.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct JointDecision {
-    /// The argmax token id, `BLANK_ID` for blank.
-    pub token: usize,
-    /// The joint's probability for `token`.
-    pub probability: f32,
-    /// Index into the duration bins, not the duration itself.
-    pub duration_bin: usize,
 }
 
 /// `value` as the `Int32` the models take, or [`SpeechError::Range`].
@@ -219,6 +212,19 @@ impl Backend {
         Scratch::new()
     }
 
+    /// `encoder`'s frames with `scratch` as the shared loop's model.
+    pub fn window_model<'a>(
+        &'a self,
+        scratch: &'a mut Scratch,
+        encoder: &'a EncoderView,
+    ) -> WindowModel<'a> {
+        WindowModel {
+            backend: self,
+            scratch,
+            encoder,
+        }
+    }
+
     /// Mel spectrogram of `samples` (at most 15 s, zero padded to the
     /// window) with `declared_length` as `audio_length`; `None` declares
     /// the full padded window (`preprocessorFull`).
@@ -268,8 +274,8 @@ impl Backend {
     /// Feed `token` to the prediction network: updates the LSTM state and
     /// the cached projection in `scratch` (`TdtModelInference.runDecoder`
     /// followed by the `predictorOutput` cache).
-    pub fn decoder_step(&self, scratch: &mut Scratch, token: usize) -> Result<(), SpeechError> {
-        scratch.targets.as_i32_mut()?[0] = int32("token", token)?;
+    pub fn decoder_step(&self, scratch: &mut Scratch, token: u32) -> Result<(), SpeechError> {
+        scratch.targets.as_i32_mut()?[0] = int32("token", token as usize)?;
         let input = inputs(&[
             ("targets", &scratch.targets),
             ("target_length", &scratch.target_length),
@@ -311,9 +317,44 @@ impl Backend {
         let probability = output.array("token_prob")?.f32_scalar()?;
         let duration_bin = output.array("duration")?.i32_scalar()?;
         Ok(JointDecision {
-            token: usize::try_from(token).unwrap_or(0),
+            token: u32::try_from(token).unwrap_or(0),
             probability,
             duration_bin: usize::try_from(duration_bin).unwrap_or(usize::MAX),
         })
+    }
+}
+
+/// The shared TDT loop's `TdtModel` over one window: the models, a
+/// worker's scratch and the window's encoder frames.
+pub struct WindowModel<'a> {
+    backend: &'a Backend,
+    scratch: &'a mut Scratch,
+    encoder: &'a EncoderView,
+}
+
+impl TdtModel for WindowModel<'_> {
+    type Error = SpeechError;
+
+    fn blank_id(&self) -> u32 {
+        BLANK_TOKEN
+    }
+
+    fn duration(&self, bin: usize) -> Result<usize, SpeechError> {
+        duration_of(bin)
+    }
+
+    /// A zero LSTM state primed with blank (`TdtDecoderState.reset`, then
+    /// the start-of-sequence step).
+    fn start(&mut self) -> Result<(), SpeechError> {
+        self.scratch.reset_decoder()?;
+        self.backend.decoder_step(self.scratch, self.blank_id())
+    }
+
+    fn feed(&mut self, token: u32) -> Result<(), SpeechError> {
+        self.backend.decoder_step(self.scratch, token)
+    }
+
+    fn joint(&mut self, t: usize) -> Result<JointDecision, SpeechError> {
+        self.backend.joint_step(self.scratch, self.encoder, t)
     }
 }
