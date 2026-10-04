@@ -621,6 +621,7 @@ impl Host {
     /// ahead of the shutdown, which quits them again: an exit signal calls
     /// it before its request waits for the main thread. A no-op for the
     /// fixtures.
+    #[cfg(unix)]
     pub fn quit_pipeline(&self) {
         #[cfg(not(feature = "fixture-host"))]
         self.inner.app.pipeline.quit();

@@ -30,7 +30,7 @@
 
 mod common;
 
-use std::io::{BufReader, Write as _};
+use std::io::BufReader;
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -521,6 +521,8 @@ fn a_busy_child_exits_when_its_parent_goes_away() {
 #[cfg(unix)]
 #[test]
 fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
+    use std::io::Write as _;
+
     // Driven by hand: the child has half of a request's audio, so it is
     // inside the request when the signals arrive, as Ctrl-C, a closed
     // terminal or systemd deliver them to the app's child too.
