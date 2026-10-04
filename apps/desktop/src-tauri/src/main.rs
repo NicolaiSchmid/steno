@@ -17,13 +17,15 @@
 //! instance, and on a Wayland session the `XWayland` backend the panels
 //! need (`display`). Every exit runs `App::shutdown` first, at most
 //! `SHUTDOWN_PATIENCE` (ten seconds), over one `ExitGate`: it stops and
-//! saves a recording in progress and stops the phone listener. Quit from
-//! either menu, the close that ends the process when no tray stands, and
-//! SIGTERM (`kill`, a logout on Linux) are exit requests the gate holds
-//! (`exit_request`); the Dock's Quit, a logout and a shutdown on macOS
-//! reach the run loop only as its last event, and an update's relaunch
-//! bypasses the request, so both run the same shutdown first
-//! (`shut_down_before_exit`). Secrets are not the shell's:
+//! saves a recording in progress and stops the handover listener. Quit
+//! from either menu, the close that ends the process when no tray stands,
+//! and SIGTERM (a plain `kill`, a logout on Linux) are exit requests the
+//! gate holds (`exit_request`); the Dock's Quit, a logout and a shutdown on
+//! macOS, and a logoff and a shutdown on Windows, reach the run loop only
+//! as its last event, and an update's relaunch bypasses the request, so
+//! both run the same shutdown first (`shut_down_before_exit`). Open: the
+//! Windows logoff is untested on hardware (WP10), and SIGINT and SIGHUP
+//! are not caught, so they end the app unsaved. Secrets are not the shell's:
 //! the keyring `SecretStore` lives in `steno-services` (#173, `WP6b`).
 //! Every one is a thin module over a Tauri plugin or an OS API with its
 //! rules in plain functions the tests cover. Everything that is on the
@@ -68,14 +70,16 @@ fn main() {
     display::choose();
     // The runtime the services graph runs on, beside Tauri's own: the
     // pipeline, the recorder's saves, the handover listener and the SIGTERM
-    // listener. The run loop's handler owns it, so it lives as long as the
-    // app: Tauri drops the setup closure once it ran.
-    let runtime = std::sync::Arc::new(
+    // listener. Leaked, so it is never dropped: dropping a runtime waits,
+    // without a bound, for every blocking task on it (a transcription, a
+    // model load), and on Linux and Windows the run loop drops its handler
+    // before the process exits.
+    let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("a tokio runtime"),
-    );
+    ));
     let mut builder = tauri::Builder::default();
     // First, so a second instance exits before it builds anything; it
     // hands its arguments (a `steno:` link among them) to this one and
@@ -114,23 +118,17 @@ fn main() {
             bridge::bridge_call,
             bridge::panel_call
         ])
-        .setup({
-            let runtime = runtime.clone();
-            move |app| setup(app.handle(), &runtime)
-        })
+        .setup(move |app| setup(app.handle(), runtime))
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
-    app.run(move |app, event| {
-        let _services = &runtime;
-        on_event(app, event);
-    });
+    app.run(on_event);
 }
 
 /// Builds the host, the tray and the main window, opens onboarding when
 /// the host asks for it, and runs the launch sequence.
 fn setup(
     handle: &tauri::AppHandle,
-    runtime: &tokio::runtime::Runtime,
+    runtime: &'static tokio::runtime::Runtime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(feature = "fixture-host"))]
     let host = host::Host::real(handle, runtime)?;
@@ -154,9 +152,17 @@ fn setup(
     Ok(())
 }
 
+/// The exit code of a process a second SIGTERM ended, 128 plus the
+/// signal's number, as the shells report it.
+#[cfg(unix)]
+const TERMINATED_CODE: i32 = 128 + 15;
+
 /// SIGTERM asks for the exit Quit asks for, so the shutdown runs first: a
-/// logout or a shutdown on Linux sends it, as `kill` does everywhere. On
-/// macOS a logout goes through `RunEvent::Exit` instead.
+/// logout or a shutdown on Linux sends it, as a plain `kill` does. On
+/// macOS a logout goes through `RunEvent::Exit` instead. A second SIGTERM
+/// ends the process at once, unsaved, so a run loop that no longer answers
+/// still ends with a plain `kill` twice. Swift had no handler; SIGTERM
+/// ended the app unsaved.
 #[cfg(unix)]
 fn exit_on_terminate(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
     let app = app.clone();
@@ -169,16 +175,21 @@ fn exit_on_terminate(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) 
                     return;
                 }
             };
+        let mut asked = false;
         while terminate.recv().await.is_some() {
+            if asked {
+                std::process::exit(TERMINATED_CODE);
+            }
+            asked = true;
             actions::quit(&app);
         }
     });
 }
 
 /// Runs the shutdown for an exit no request held, on this thread's behalf,
-/// and returns once it ran (at most `SHUTDOWN_PATIENCE`), at once when an
-/// exit request already ran it: `RunEvent::Exit` and the updater's
-/// relaunch call it.
+/// and returns once it ended (at most `SHUTDOWN_PATIENCE`), waiting for a
+/// held request's shutdown instead of starting one; at once when it
+/// already ran. `RunEvent::Exit` and the updater's relaunch call it.
 fn shut_down_before_exit(app: &tauri::AppHandle) {
     app.state::<steno_services::app::ExitGate>().exiting(
         steno_services::app::SHUTDOWN_PATIENCE,
@@ -207,7 +218,9 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         // The run loop's last event. After a request the gate held the
         // shutdown has run; the Dock's Quit, a logout and a shutdown on
         // macOS raise no request (tao answers `applicationWillTerminate`,
-        // which AppKit waits for), so the shutdown runs here.
+        // which AppKit waits for), nor do a logoff and a shutdown on
+        // Windows (tao answers `WM_ENDSESSION`, within Windows' own
+        // end-session timeout), so the shutdown runs here.
         tauri::RunEvent::Exit => shut_down_before_exit(app),
         // The main window closes: hidden and kept while a tray can bring
         // it back (`hides_on_close`); destroyed otherwise. `has_tray` is
