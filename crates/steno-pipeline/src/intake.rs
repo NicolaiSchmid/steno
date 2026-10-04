@@ -433,6 +433,38 @@ mod tests {
         files
     }
 
+    /// A store under `dir` whose audio folder is `dir/audio`.
+    fn store_with_audio_folder(dir: &Path) -> Arc<Store> {
+        let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
+        let mut settings = store.settings().unwrap();
+        settings.audio_folder = file_url(&dir.join("audio"), true);
+        store.save_settings(&settings).unwrap();
+        store
+    }
+
+    /// A phone paired in `store`, and the metadata of a nine-byte upload
+    /// from it that started at `now`.
+    fn paired_phone(store: &Store, now: DateTime<Utc>) -> (PairedDevice, RecordingMetadata) {
+        let device = PairedDevice {
+            id: Uuid::new_v4(),
+            name: "Phone".to_owned(),
+            paired_at: now,
+            last_seen_at: None,
+        };
+        store.save_paired_device(&device, &[1; 32]).unwrap();
+        let metadata = RecordingMetadata {
+            recording_id: Uuid::new_v4(),
+            started_at: now,
+            duration_seconds: 12.0,
+            byte_count: 9,
+            sha256: vec![0; 32],
+            chunk_size: 9,
+            format: AudioFormat::M4aAac,
+            device_name: "Phone".to_owned(),
+        };
+        (device, metadata)
+    }
+
     #[tokio::test]
     async fn completing_a_meeting_that_is_not_recording_writes_and_enqueues_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -498,11 +530,8 @@ mod tests {
     #[tokio::test]
     async fn a_phone_recording_lands_in_the_audio_folder_and_a_refused_one_leaves_no_copy() {
         let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let store = store_with_audio_folder(dir.path());
         let audio = dir.path().join("audio");
-        let mut settings = store.settings().unwrap();
-        settings.audio_folder = file_url(&audio, true);
-        store.save_settings(&settings).unwrap();
         let now = DateTime::parse_from_rfc3339("2026-09-24T09:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -528,23 +557,7 @@ mod tests {
             Arc::new(move || now),
             FixedOffset::east_opt(0).unwrap(),
         );
-        let device = PairedDevice {
-            id: Uuid::new_v4(),
-            name: "Phone".to_owned(),
-            paired_at: now,
-            last_seen_at: None,
-        };
-        store.save_paired_device(&device, &[1; 32]).unwrap();
-        let metadata = RecordingMetadata {
-            recording_id: Uuid::new_v4(),
-            started_at: now,
-            duration_seconds: 12.0,
-            byte_count: 9,
-            sha256: vec![0; 32],
-            chunk_size: 9,
-            format: AudioFormat::M4aAac,
-            device_name: "Phone".to_owned(),
-        };
+        let (device, metadata) = paired_phone(&store, now);
         let upload = dir.path().join("upload.m4a");
         std::fs::write(&upload, b"aac bytes").unwrap();
 
@@ -586,6 +599,42 @@ mod tests {
             HandoverState::Failed(_)
         ));
         assert_eq!(admitted.lock().unwrap().len(), 1);
+    }
+
+    /// A copy that fails leaves the receipt short of complete and admits
+    /// nothing: the phone, told nothing landed, keeps its recording.
+    #[tokio::test]
+    async fn an_upload_that_cannot_be_copied_is_not_marked_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_audio_folder(dir.path());
+        let now = Utc::now();
+        let enqueued = Arc::new(AtomicBool::new(false));
+        let enqueue: Enqueue = {
+            let enqueued = enqueued.clone();
+            Arc::new(move |_, _| {
+                enqueued.store(true, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            })
+        };
+        let intake = RecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(move || now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let (device, metadata) = paired_phone(&store, now);
+        let missing = dir.path().join("gone.m4a");
+        intake
+            .admit(&missing, &metadata, &device)
+            .await
+            .expect_err("nothing to copy");
+        let receipt = store.handover_receipt(metadata.recording_id).unwrap();
+        assert!(
+            !receipt.is_some_and(|receipt| matches!(receipt.state, HandoverState::Complete { .. })),
+            "a receipt whose copy failed is not complete"
+        );
+        assert_eq!(store.all_meetings().unwrap(), []);
+        assert!(!enqueued.load(Ordering::SeqCst));
     }
 
     #[test]

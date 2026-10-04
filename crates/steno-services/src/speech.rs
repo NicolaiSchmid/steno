@@ -73,9 +73,10 @@ fn speech_settings_with(file: &Path, mirror: Option<String>) -> SpeechSettings {
 
 /// The speech sidecar binary beside the running executable
 /// ([`SidecarConfig::beside_current_exe`]), its sessions on
-/// [`ONNX_THREADS`]. The bundles are to carry it there (WP9 of
-/// `.plans/2026-10-02-rust-core-and-tauri-shell.md`); until then a
-/// bundled app's `prepare` fails with "could not start". In a
+/// [`ONNX_THREADS`]. The release bundles carry it there (`WP9a` of
+/// `.plans/2026-10-02-rust-core-and-tauri-shell.md`); a bundle built
+/// without the release configuration does not, and its `prepare` fails
+/// with "could not start". In a
 /// development build, `cargo build` at the workspace root (or
 /// `cargo build -p steno-speech-sidecar`) puts it beside `steno` and
 /// `steno-desktop` in the target directory. If the executable's path

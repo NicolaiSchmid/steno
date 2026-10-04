@@ -22,7 +22,9 @@
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager, Url};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind,
+};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::bridge::{BridgeError, failed};
@@ -114,11 +116,14 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry, tauri_plugin_updater::
 /// is `failed` with the updater's words.
 pub async fn check(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Update>, BridgeError> {
     let version = app.package_info().version.to_string();
+    let handle = app.clone();
     let outcome = async {
         let updater = app
             .updater_builder()
             .endpoints(endpoints(&version))
             .map_err(failed)?
+            // Windows: the installer ends the process itself.
+            .on_before_exit(move || crate::shut_down_before_exit(&handle))
             .build()
             .map_err(failed)?;
         updater.check().await.map_err(failed)
@@ -133,61 +138,84 @@ pub async fn check(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Updat
     outcome
 }
 
-/// A one-button message from the updater.
-fn notify(app: &AppHandle, kind: MessageDialogKind, message: impl Into<String>) {
-    app.dialog()
-        .message(message)
-        .title("Steno")
-        .kind(kind)
-        .show(|_| {});
+/// A message from the updater, one button unless the caller adds more.
+fn dialog(
+    app: &AppHandle,
+    kind: MessageDialogKind,
+    message: impl Into<String>,
+) -> MessageDialogBuilder<tauri::Wry> {
+    app.dialog().message(message).title("Steno").kind(kind)
 }
 
 /// The tray's "Check for Updates…": checks, then asks before installing,
 /// as Sparkle's standard driver does, and relaunches when the user agrees.
+/// The relaunch bypasses the exit request, so the shutdown runs first
+/// (`shut_down_before_exit`), as Sparkle's relaunch went through
+/// `applicationShouldTerminate`; on Windows the installer's own exit runs
+/// it (`check`). An install that fails after that shutdown ran (Windows:
+/// the installer did not launch) ends the app once its message is
+/// closed: the recorder and the pipeline start nothing after a shutdown,
+/// and the next Quit would run none.
 pub async fn check_and_offer(app: &AppHandle) {
     let update = match check(app).await {
         Ok(Some(update)) => update,
         Ok(None) => {
-            notify(app, MessageDialogKind::Info, "Steno is up to date.");
+            dialog(app, MessageDialogKind::Info, "Steno is up to date.").show(|_| {});
             return;
         }
         Err(error) => {
-            notify(
+            dialog(
                 app,
                 MessageDialogKind::Error,
                 format!("The update check failed: {}", error.message),
-            );
+            )
+            .show(|_| {});
             return;
         }
     };
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .message(format!(
+    dialog(
+        app,
+        MessageDialogKind::Info,
+        format!(
             "Steno {} is available. Install it and relaunch?",
             update.version
-        ))
-        .title("Steno")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Install and Relaunch".into(),
-            "Later".into(),
-        ))
-        .show(move |agreed| {
-            let _ = sender.send(agreed);
-        });
+        ),
+    )
+    .buttons(MessageDialogButtons::OkCancelCustom(
+        "Install and Relaunch".into(),
+        "Later".into(),
+    ))
+    .show(move |agreed| {
+        let _ = sender.send(agreed);
+    });
     if receiver.await != Ok(true) {
         return;
     }
     match update.download_and_install(|_, _| {}, || {}).await {
-        Ok(()) => app.restart(),
+        Ok(()) => {
+            let handle = app.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                crate::shut_down_before_exit(&handle);
+            })
+            .await;
+            app.restart()
+        }
         Err(error) => {
             app.state::<Updates>()
                 .record(UpdateOutcome::Failed(error.to_string()));
-            notify(
+            let shut_down = app.state::<steno_services::app::ExitGate>().released();
+            let handle = app.clone();
+            dialog(
                 app,
                 MessageDialogKind::Error,
                 format!("The update could not be installed: {error}"),
-            );
+            )
+            .show(move |_| {
+                if shut_down {
+                    handle.exit(0);
+                }
+            });
         }
     }
 }

@@ -4822,6 +4822,7 @@ dependencies = [
  "block2",
  "gdk",
  "gio",
+ "libc",
  "objc2",
  "objc2-av-foundation",
  "serde",
@@ -5027,6 +5028,7 @@ dependencies = [
 name = "steno-speech-sidecar"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "memory-stats",
  "serde",
  "steno-core",

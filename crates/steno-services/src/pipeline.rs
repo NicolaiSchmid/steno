@@ -10,8 +10,8 @@ use steno_core::AudioRetention;
 use steno_core::protocols::BoundaryResult;
 use steno_host::services::Pipeline;
 use steno_pipeline::{
-    Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline, RetentionSweep,
-    SweepIncomplete,
+    Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline, QuitLatch,
+    RetentionSweep, SweepIncomplete,
 };
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
@@ -52,10 +52,11 @@ struct Current {
     engine: BuiltEngine,
 }
 
-impl From<BuiltPipeline> for Current {
-    fn from(built: BuiltPipeline) -> Self {
+impl Current {
+    /// The pipeline over `built`, sharing `latch`.
+    fn new(built: BuiltPipeline, latch: &QuitLatch) -> Self {
         Current {
-            pipeline: ProcessingPipeline::new(built.dependencies),
+            pipeline: ProcessingPipeline::new(built.dependencies.with_quit_latch(latch.clone())),
             engine: built.engine,
         }
     }
@@ -66,11 +67,14 @@ impl From<BuiltPipeline> for Current {
 /// until it is idle, so meetings in flight finish on the dependencies they
 /// started with. Everything that enqueues resolves `current()` per call,
 /// so a recording that ends after a reload goes through the new one.
-/// Held by `App`, the recorder, the phone intake and [`HostPipeline`].
+/// Every pipeline it builds shares one [`QuitLatch`], so
+/// [`quit`](Self::quit) reaches the retired ones too. Held by `App`, the
+/// recorder, the phone intake and [`HostPipeline`].
 pub struct CurrentPipeline {
     current: Mutex<Current>,
     make: MakeDependencies,
     runtime: tokio::runtime::Handle,
+    quit_latch: QuitLatch,
 }
 
 impl CurrentPipeline {
@@ -81,10 +85,12 @@ impl CurrentPipeline {
         make: MakeDependencies,
         runtime: tokio::runtime::Handle,
     ) -> Self {
+        let quit_latch = QuitLatch::default();
         CurrentPipeline {
-            current: Mutex::new(built.into()),
+            current: Mutex::new(Current::new(built, &quit_latch)),
             make,
             runtime,
+            quit_latch,
         }
     }
 
@@ -109,11 +115,18 @@ impl CurrentPipeline {
         (current.pipeline.clone(), current.engine.clone())
     }
 
+    /// Quits every pipeline this one built or builds from now on, the
+    /// current one, the retired ones still finishing and a reload's
+    /// replacement: see [`ProcessingPipeline::quit`].
+    pub fn quit(&self) {
+        self.quit_latch.set();
+    }
+
     /// Replaces the pipeline with one built from the stored settings and
     /// the secret store's API key. A failed build keeps the current
     /// pipeline and its engine.
     pub fn reload(&self) -> Result<(), BuildError> {
-        let replacement = Current::from((self.make)()?);
+        let replacement = Current::new((self.make)()?, &self.quit_latch);
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });

@@ -94,7 +94,7 @@ pub fn record(app: &AppHandle, mode: Option<CaptureMode>) -> Result<(), BridgeEr
 /// to report them to.
 pub fn open(app: &AppHandle, window: BridgeWindow) {
     if let Err(error) = windows::open(app, window, None, None) {
-        eprintln!("[steno-desktop] opening the {window} window failed: {error}");
+        stderr_line!("[steno-desktop] opening the {window} window failed: {error}");
     }
 }
 
@@ -129,7 +129,7 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
 
 fn report(result: Result<(), BridgeError>) {
     if let Err(error) = result {
-        eprintln!("[steno-desktop] menu: {error}");
+        stderr_line!("[steno-desktop] menu: {error}");
     }
 }
 
@@ -163,9 +163,10 @@ pub const QUIT_CODE: i32 = 0;
 
 /// Ends the process through the run loop, so `ExitRequested` carries a code
 /// and `main` lets it through (a code-less request is the last window
-/// closing, which the tray keeps alive) once a recording in progress is
-/// saved (`main::exit_request`). Quit in the tray's menu and in the macOS
-/// menu bar, and a destroyed main window with no tray, all end here.
+/// closing, which the tray keeps alive) once the shutdown ran: a recording
+/// in progress is saved first (`main::exit_request`). Quit in the tray's
+/// menu and in the macOS menu bar, a destroyed main window with no tray,
+/// and SIGTERM, SIGINT and SIGHUP all end here.
 pub fn quit(app: &AppHandle) {
     app.exit(QUIT_CODE);
 }

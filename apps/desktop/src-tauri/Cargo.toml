@@ -32,10 +32,16 @@ tauri-plugin-opener.workspace = true
 tauri-plugin-single-instance.workspace = true
 tauri-plugin-updater.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "signal"] }
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true
+
+# Unix only: reads the exit signals' inherited dispositions at launch, so a
+# signal `nohup` or a background job ignored stays ignored (`ignored` in
+# `main.rs`). Already in the lock through tokio.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gdk.workspace = true

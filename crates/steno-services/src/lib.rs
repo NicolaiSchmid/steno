@@ -8,7 +8,7 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()` and `launch()`, [`BuildError`] |
+//! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()`, `launch()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`] |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with, and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels` |
@@ -19,9 +19,11 @@
 //! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, the CLI's `meeting.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |
 //!
-//! What stays a fake here is named in [`build`]'s doc: the shell's
-//! platform services (permissions, login item, updater, clip player, QR
-//! encoder) wait for the plan's `WP8`.
+//! What stays a fake here is named in [`build`]'s doc: the platform
+//! services the shell does not supply yet (permissions, updater, clip
+//! player, QR encoder; the login item when the shell passes none), each
+//! with its reason and owner in the plan's "Pipeline and services (WP6b)"
+//! list.
 //!
 //! Off the Mac, and on the Mac when the speech settings choose it or the
 //! stored engine id has no Rust engine, Parakeet runs in the speech
@@ -35,7 +37,7 @@
 //! keyring, which does not survive a reboot (the handover identity and the
 //! LLM API key would vanish), and its Secret Service store needs D-Bus and
 //! a running secret service, which headless machines and the CI runners
-//! do not have. The Secret Service is `WP8`'s Linux release item.
+//! do not have. The Secret Service has no work package yet.
 //!
 //! The shell's launch, in one piece:
 //!
@@ -89,7 +91,9 @@ pub const LOG_FILTER: &str = "warn";
 /// filtered by `RUST_LOG`, else by `default_filter` (the shell passes
 /// [`LOG_FILTER`]), so what the services warn about (no keychain, no
 /// handover identity, a re-run or re-export that failed in the background)
-/// is seen. A second call does nothing.
+/// is seen. A second call does nothing. A line that cannot be written is
+/// dropped: after a closed terminal every write to stderr fails, and
+/// `tracing-subscriber` would report that with `eprintln!`, which panics.
 ///
 /// Privacy rule for every line at `warn` and above: ids, stages, counts and
 /// error kinds only, never transcript or model text, audio, a file path or
@@ -100,6 +104,7 @@ pub fn log_to_stderr(default_filter: &str) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
+        .log_internal_errors(false)
         .try_init();
 }
 
@@ -110,4 +115,43 @@ pub(crate) fn block_on<T>(
     future: impl std::future::Future<Output = T>,
 ) -> T {
     tokio::task::block_in_place(|| runtime.block_on(future))
+}
+
+// Unix only: there a closed terminal no longer ends the app (the shell's
+// SIGHUP asks for Quit), so its writes to stderr fail; on Windows a closed
+// console ends the process, and a release build has no console.
+#[cfg(all(test, unix))]
+mod tests {
+    use std::process::{Command, Stdio};
+
+    /// Set in the copy of this test binary the test runs.
+    const LOGGING_CHILD: &str = "STENO_TEST_LOGGING_CHILD";
+
+    /// The child logs a warning to a stderr nobody reads (a pipe with no
+    /// reader fails each write, as a closed terminal does), so the line
+    /// is lost; the child must still pass, not panic. `--nocapture`, or
+    /// the test harness would catch the `eprintln!` that panics.
+    #[test]
+    fn a_log_line_to_a_closed_stderr_is_dropped_without_a_panic() {
+        if std::env::var_os(LOGGING_CHILD).is_some() {
+            super::log_to_stderr(super::LOG_FILTER);
+            tracing::warn!("a line nobody reads");
+            return;
+        }
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_log_line_to_a_closed_stderr_is_dropped_without_a_panic",
+                "--nocapture",
+            ])
+            .env(LOGGING_CHILD, "1")
+            .env_remove("RUST_LOG")
+            .stdout(Stdio::null())
+            .stderr(writer)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
+    }
 }

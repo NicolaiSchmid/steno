@@ -87,7 +87,7 @@ pub fn choose() {
     if let Some(allowed) = backend.allowed_backends() {
         gdk::set_allowed_backends(allowed);
     }
-    eprintln!("[steno-desktop] {}", backend.describe());
+    stderr_line!("[steno-desktop] {}", backend.describe());
 }
 
 #[cfg(test)]

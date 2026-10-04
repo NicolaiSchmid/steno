@@ -15,21 +15,52 @@
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
 //! instance, and on a Wayland session the `XWayland` backend the panels
-//! need (`display`). Every exit goes through `App::shutdown` first
-//! (`exit_request`): Quit from either menu, and the close that ends the
-//! process when no tray stands, stop and save a recording in progress
-//! before the process ends. Secrets are not the shell's:
-//! the keyring `SecretStore` lives in `steno-services` (#173, `WP6b`).
-//! Every one is a thin module over a Tauri plugin or an OS API with its
-//! rules in plain functions the tests cover. Everything that is on the
-//! wire (errors, topics, windows, sections, params) is the `steno-bridge`
-//! crate's type; the shell adds only what it needs on top
-//! (`recording::RecorderState`, `windows::Spec`).
+//! need (`display`). Every one is a thin module over a Tauri plugin or an
+//! OS API with its rules in plain functions the tests cover. Everything
+//! that is on the wire (errors, topics, windows, sections, params) is the
+//! `steno-bridge` crate's type; the shell adds only what it needs on top
+//! (`recording::RecorderState`, `windows::Spec`). Secrets are not the
+//! shell's: the keyring `SecretStore` lives in `steno-services` (#173,
+//! `WP6b`).
+//!
+//! Every exit runs `App::shutdown` first, at most `SHUTDOWN_PATIENCE` (ten
+//! seconds), over one `ExitGate`: it quits the pipeline (no new job
+//! starts), stops and saves a recording in progress and stops the handover
+//! listener. Quit from either menu, the close that ends the process when no
+//! tray stands, and on Linux and macOS SIGTERM, SIGINT and SIGHUP (a plain
+//! `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are exit
+//! requests the gate holds (`exit_request`, `exit_on_signals`); a signal
+//! quits the pipeline at once, before its request reaches the main thread.
+//! A signal the app inherited ignored stays ignored (`ignored`). The Dock's
+//! Quit, a logout and a shutdown on macOS, and a logoff and a shutdown on
+//! Windows, reach the run loop only as its last event, and an update's
+//! relaunch bypasses the request, so both run the same shutdown first
+//! (`shut_down_before_exit`). The one exception: a second SIGTERM or a
+//! second SIGINT ends the process at once, unsaved (`forced_exit`). Open:
+//! the Windows logoff is untested on hardware, and Windows' end-session
+//! timeout (about five seconds) is shorter than `SHUTDOWN_PATIENCE`
+//! (WP10); a Linux logout saves only when logind signals the app, which is
+//! untested (before the first Linux release; no work package yet).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The fixture host leaves the real host's seams (the login item, the
 // opener, the alert) unused.
 #![cfg_attr(feature = "fixture-host", allow(dead_code))]
+
+/// `eprintln!` for the shell's own lines, minus its panic: once the
+/// terminal the app started from has closed, every write to stderr fails,
+/// and the line is dropped instead.
+macro_rules! stderr_line {
+    ($($line:tt)*) => {
+        $crate::write_stderr_line(format_args!($($line)*))
+    };
+}
+
+/// What `stderr_line!` writes.
+fn write_stderr_line(line: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
 
 mod actions;
 mod autostart;
@@ -62,13 +93,18 @@ fn main() {
     #[cfg(target_os = "linux")]
     display::choose();
     // The runtime the services graph runs on, beside Tauri's own: the
-    // pipeline, the recorder's saves and the handover listener.
-    let runtime = std::sync::Arc::new(
+    // pipeline, the recorder's saves, the handover listener and the signal
+    // listeners. Leaked, so it is never dropped: dropping a runtime waits,
+    // without a bound, for every blocking task on it (a transcription, a
+    // model load), and Tauri drops whatever owns it before the process
+    // exits (the `setup` closure; the run loop's handler on Linux and
+    // Windows).
+    let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .expect("a tokio runtime"),
-    );
+    ));
     let mut builder = tauri::Builder::default();
     // First, so a second instance exits before it builds anything; it
     // hands its arguments (a `steno:` link among them) to this one and
@@ -102,22 +138,22 @@ fn main() {
         .manage(windows::Pages::default())
         .manage(updater::Updates::default())
         .manage(TrayAtClose::default())
+        .manage(steno_services::app::ExitGate::default())
         .invoke_handler(tauri::generate_handler![
             bridge::bridge_call,
             bridge::panel_call
         ])
-        .setup(move |app| setup(app.handle(), &runtime))
+        .setup(move |app| setup(app.handle(), runtime))
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
-    let exits = steno_services::app::ExitGate::default();
-    app.run(move |app, event| on_event(app, event, &exits));
+    app.run(on_event);
 }
 
 /// Builds the host, the tray and the main window, opens onboarding when
 /// the host asks for it, and runs the launch sequence.
 fn setup(
     handle: &tauri::AppHandle,
-    runtime: &tokio::runtime::Runtime,
+    runtime: &'static tokio::runtime::Runtime,
 ) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(feature = "fixture-host"))]
     let host = host::Host::real(handle, runtime)?;
@@ -136,29 +172,189 @@ fn setup(
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);
+    #[cfg(unix)]
+    exit_on_signals(handle, runtime);
     Ok(())
 }
 
+/// A signal that asks for the exit Quit asks for (`exit_on_signals`).
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExitSignal {
+    kind: tokio::signal::unix::SignalKind,
+    name: &'static str,
+    /// The code a second one ends the process with at once, 128 plus the
+    /// signal's number, as the shells report it; none for SIGHUP, which
+    /// never forces the exit.
+    forced_code: Option<i32>,
+}
+
+#[cfg(unix)]
+impl ExitSignal {
+    const TERMINATE: Self = Self {
+        kind: tokio::signal::unix::SignalKind::terminate(),
+        name: "SIGTERM",
+        forced_code: Some(128 + 15),
+    };
+    const INTERRUPT: Self = Self {
+        kind: tokio::signal::unix::SignalKind::interrupt(),
+        name: "SIGINT",
+        forced_code: Some(128 + 2),
+    };
+    const HANGUP: Self = Self {
+        kind: tokio::signal::unix::SignalKind::hangup(),
+        name: "SIGHUP",
+        forced_code: None,
+    };
+    const ALL: [Self; 3] = [Self::TERMINATE, Self::INTERRUPT, Self::HANGUP];
+}
+
+/// Whether the signal `number` is ignored now, as `nohup` and a shell's
+/// background job (SIGINT) leave it at launch; false when its disposition
+/// cannot be read. The app does not listen for such a signal, so it stays
+/// ignored: installing a handler would undo it.
+#[cfg(unix)]
+fn ignored(number: libc::c_int) -> bool {
+    // SAFETY: an all-zero `sigaction` is a valid value, and a null new
+    // action makes the call read the disposition without changing it.
+    let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
+    let read = unsafe { libc::sigaction(number, std::ptr::null(), &raw mut current) };
+    read == 0 && current.sa_sigaction == libc::SIG_IGN
+}
+
+/// What `signal` does after the exit signals already `seen`, which it
+/// joins: the code to end the process with at once (a second SIGTERM, a
+/// second SIGINT), or none to ask for the Quit exit.
+#[cfg(unix)]
+fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
+    if seen.contains(&signal) {
+        return signal.forced_code;
+    }
+    seen.push(signal);
+    None
+}
+
+/// One arrival of `signal`: the code to end the process with at once
+/// (`forced_exit`), or none once it has quit the pipeline and then asked
+/// for Quit, in that order, so the pipeline is quit before the request
+/// waits for the main thread. The guard on `seen` is released before
+/// either step.
+#[cfg(unix)]
+fn on_exit_signal(
+    signal: ExitSignal,
+    seen: &std::sync::Mutex<Vec<ExitSignal>>,
+    quit_pipeline: impl FnOnce(),
+    ask_for_quit: impl FnOnce(),
+) -> Option<i32> {
+    let forced = forced_exit(
+        signal,
+        &mut seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    if forced.is_none() {
+        quit_pipeline();
+        ask_for_quit();
+    }
+    forced
+}
+
+/// SIGTERM, SIGINT and SIGHUP ask for the exit Quit asks for, so the
+/// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
+/// terminal, systemd at a shutdown. A logout on Linux saves when logind
+/// ends the session's processes (with `KillUserProcesses=yes`, systemd
+/// stops the scope with SIGTERM, then SIGHUP). Otherwise nothing signals
+/// the app, and when the display connection closes first, GDK ends the
+/// process unsaved; untested (before the first Linux release; no work
+/// package yet). On macOS a logout goes through `RunEvent::Exit` instead.
+/// Each signal quits the pipeline here, off the main thread, before it asks
+/// for the exit (`Host::quit_pipeline`), so a job a busy main thread would
+/// let fail first stays resumable. A second SIGTERM or a second SIGINT
+/// ends the process at once, unsaved (`forced_exit`), so a run loop that no
+/// longer answers still ends with a plain `kill` or Ctrl-C twice; a SIGHUP
+/// never does, so the one that follows a session scope's SIGTERM still
+/// saves. A signal the app inherited ignored stays ignored (`ignored`).
+/// Swift had no handler; each of them ended the app unsaved.
+#[cfg(unix)]
+fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    for signal in ExitSignal::ALL {
+        if ignored(signal.kind.as_raw_value()) {
+            tracing::debug!(
+                signal = signal.name,
+                "ignored at launch, so it stays ignored"
+            );
+            continue;
+        }
+        let (app, seen) = (app.clone(), seen.clone());
+        runtime.spawn(async move {
+            let mut arrivals = match tokio::signal::unix::signal(signal.kind) {
+                Ok(arrivals) => arrivals,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        signal = signal.name,
+                        "this signal ends the app without saving a recording"
+                    );
+                    return;
+                }
+            };
+            while arrivals.recv().await.is_some() {
+                let forced = on_exit_signal(
+                    signal,
+                    &seen,
+                    || host::host(&app).quit_pipeline(),
+                    || actions::quit(&app),
+                );
+                if let Some(code) = forced {
+                    std::process::exit(code);
+                }
+            }
+        });
+    }
+}
+
+/// Runs the shutdown for an exit no request held, on this thread's behalf,
+/// and returns once it ended (at most `SHUTDOWN_PATIENCE`), waiting for
+/// the one already running (a held request's, an earlier exit's) instead
+/// of starting one; at once when it already ran. `RunEvent::Exit` and the
+/// updater's relaunch call it.
+///
+/// Swift: the Dock's Quit and a logout reached `applicationShouldTerminate`
+/// as Quit did.
+fn shut_down_before_exit(app: &tauri::AppHandle) {
+    app.state::<steno_services::app::ExitGate>().exiting(
+        steno_services::app::SHUTDOWN_PATIENCE,
+        host::host(app).shutdown_action(),
+    );
+}
+
 /// One turn of the run loop.
-fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent, exits: &steno_services::app::ExitGate) {
+fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
-        // Quit from either menu, the smoke's exit, the last window closing
-        // with no tray: a recording in progress is stopped and saved first
+        // Quit from either menu, an exit signal, the smoke's exit, the
+        // last window closing with no tray: the shutdown runs first
         // (`exit_request`).
         tauri::RunEvent::ExitRequested { code, api, .. } => {
-            let host = host::host(app);
             let handle = app.clone();
             if !exit_request(
                 code,
                 || tray_at_close(app),
-                exits,
-                host.recording(),
-                host.shutdown_action(),
+                &app.state::<steno_services::app::ExitGate>(),
+                host::host(app).shutdown_action(),
                 move |code| handle.exit(code),
             ) {
                 api.prevent_exit();
             }
         }
+        // The run loop's last event. After a request the gate held, the
+        // shutdown has run; the Dock's Quit, a logout and a shutdown on
+        // macOS raise no request (tao answers `applicationWillTerminate`,
+        // which AppKit waits for), nor do a logoff and a shutdown on
+        // Windows (tao answers `WM_ENDSESSION`), so the shutdown runs
+        // here, on Windows until the end-session timeout (about five
+        // seconds) ends the process.
+        tauri::RunEvent::Exit => shut_down_before_exit(app),
         // The main window closes: hidden and kept while a tray can bring
         // it back (`hides_on_close`); destroyed otherwise. `has_tray` is
         // asked here, once per close, and the events that follow reuse it.
@@ -174,7 +370,7 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent, exits: &steno_servic
                 if let Some(main) = app.get_webview_window(&label)
                     && let Err(error) = main.hide()
                 {
-                    eprintln!("[steno-desktop] hiding the main window failed: {error}");
+                    stderr_line!("[steno-desktop] hiding the main window failed: {error}");
                 }
             }
         }
@@ -227,15 +423,17 @@ fn build_tray(app: &tauri::AppHandle) {
         Ok(Ok(())) => {
             app.state::<smoke::Smoke>().note_tray();
             if !tray::has_host() {
-                eprintln!(
+                stderr_line!(
                     "[steno-desktop] no tray host shows the tray icon; \
                      closing the main window ends the app"
                 );
             }
         }
-        Ok(Err(error)) => eprintln!("[steno-desktop] the tray could not be built: {error}"),
+        Ok(Err(error)) => stderr_line!("[steno-desktop] the tray could not be built: {error}"),
         Err(_) => {
-            eprintln!("[steno-desktop] the tray could not be built: the tray library is missing");
+            stderr_line!(
+                "[steno-desktop] the tray could not be built: the tray library is missing"
+            );
         }
     }
 }
@@ -301,13 +499,12 @@ fn exits_when_destroyed(label: &str, has_tray: impl FnOnce() -> bool) -> bool {
 }
 
 /// What an exit request does; true lets it through now. `exits_on`
-/// decides whether the process ends at all. One that ends it while
-/// `recording` names a meeting is held: `shutdown` stops and saves the
-/// recording on a thread of its own (`App::shutdown`), at most
+/// decides whether the process ends at all. The first one that ends it is
+/// held: `shutdown` runs on a thread of its own (`App::shutdown`), at most
 /// `SHUTDOWN_PATIENCE`, and then `exit` raises the request again with its
-/// code (zero for one without), which goes through. Re-entry is the gate's:
-/// every request after the first that held goes ahead, the one `exit`
-/// raises included, and the shutdown runs once.
+/// code (zero for one without), which goes through. A request while the
+/// shutdown runs is held too (the exit is coming), and the shutdown runs
+/// once (`ExitGate`).
 ///
 /// Swift: `applicationShouldTerminate` answered `.terminateLater`, awaited
 /// `AppController.shutdown()` and replied.
@@ -315,7 +512,6 @@ fn exit_request(
     code: Option<i32>,
     has_tray: impl FnOnce() -> bool,
     gate: &steno_services::app::ExitGate,
-    recording: Option<uuid::Uuid>,
     shutdown: impl FnOnce() + Send + 'static,
     exit: impl FnOnce(i32) + Send + 'static,
 ) -> bool {
@@ -324,7 +520,6 @@ fn exit_request(
     }
     let code = code.unwrap_or(0);
     gate.exit_requested(
-        recording,
         steno_services::app::SHUTDOWN_PATIENCE,
         shutdown,
         move || exit(code),
@@ -367,8 +562,7 @@ mod tests {
     /// `AppHandle::exit` raises `ExitRequested`, and reports whether that
     /// one went through.
     fn requested_again(
-        gate: std::sync::Arc<steno_services::app::ExitGate>,
-        recording: Option<uuid::Uuid>,
+        gate: steno_services::app::ExitGate,
         steps: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
         went_through: std::sync::mpsc::Sender<bool>,
     ) -> impl FnOnce(i32) + Send + 'static {
@@ -378,27 +572,25 @@ mod tests {
                 Some(code),
                 || panic!("the tray asked for an exit with a code"),
                 &gate,
-                recording,
                 || panic!("a second shutdown"),
                 |_| panic!("a second exit"),
             ));
         }
     }
 
-    /// Quit (the tray's item, the menu bar's, `actions::quit`) while
-    /// recording: the request is held, the recording is stopped and saved
-    /// once, then the process exits with Quit's code; nothing exits before
-    /// the save, and a second Quit meanwhile neither saves nor waits again.
+    /// Quit (the tray's item, the menu bar's, `actions::quit`, a signal):
+    /// the request is held, the shutdown runs once, then the process exits
+    /// with Quit's code; nothing exits before the shutdown ended, and a
+    /// second Quit meanwhile is held too, without a second shutdown.
     #[test]
-    fn a_quit_while_recording_stops_once_and_exits_after_the_save() {
+    fn a_quit_runs_the_shutdown_once_and_holds_a_second_quit_until_it_ends() {
         use std::sync::{Arc, Mutex, atomic::AtomicUsize, atomic::Ordering};
         use std::time::Duration;
 
-        let gate = Arc::new(steno_services::app::ExitGate::default());
+        let gate = steno_services::app::ExitGate::default();
         let steps = Arc::new(Mutex::new(Vec::<String>::new()));
         let shutdowns = Arc::new(AtomicUsize::new(0));
         let (went_through, exit_seen) = std::sync::mpsc::channel();
-        let meeting = Some(uuid::Uuid::new_v4());
         let shutdown = {
             let (steps, shutdowns) = (steps.clone(), shutdowns.clone());
             move || {
@@ -411,87 +603,73 @@ mod tests {
             Some(actions::QUIT_CODE),
             || panic!("the tray asked for an exit with a code"),
             &gate,
-            meeting,
             shutdown,
-            requested_again(gate.clone(), meeting, steps.clone(), went_through),
+            requested_again(gate.clone(), steps.clone(), went_through),
         );
-        assert!(held, "Quit waits for the save");
+        assert!(held, "Quit waits for the shutdown");
         assert!(
-            exit_request(
+            !exit_request(
                 Some(actions::QUIT_CODE),
                 || true,
                 &gate,
-                meeting,
                 || panic!("a second shutdown"),
                 |_| panic!("a second exit"),
             ),
-            "a second Quit while saving goes ahead"
+            "a second Quit while the shutdown runs is held"
         );
         assert!(
             exit_seen.recv_timeout(Duration::from_secs(5)).unwrap(),
-            "the exit after the save goes through"
+            "the exit after the shutdown goes through"
         );
         assert_eq!(*steps.lock().unwrap(), ["saved", "exit 0"]);
         assert_eq!(shutdowns.load(Ordering::SeqCst), 1);
     }
 
-    /// Closing main with no tray while recording: the code-less request
-    /// that ends the process is held the same way and exits with zero
-    /// after the save.
+    /// Closing main with no tray: the code-less request that ends the
+    /// process is held the same way and exits with zero after the
+    /// shutdown.
     #[test]
-    fn a_close_without_a_tray_saves_the_recording_before_the_process_ends() {
+    fn a_close_without_a_tray_runs_the_shutdown_before_the_process_ends() {
         use std::sync::{Arc, Mutex};
         use std::time::Duration;
 
-        let gate = Arc::new(steno_services::app::ExitGate::default());
+        let gate = steno_services::app::ExitGate::default();
         let steps = Arc::new(Mutex::new(Vec::<String>::new()));
         let (went_through, exit_seen) = std::sync::mpsc::channel();
-        let meeting = Some(uuid::Uuid::new_v4());
         let saved = steps.clone();
         assert!(!exit_request(
             None,
             || false,
             &gate,
-            meeting,
             move || saved.lock().unwrap().push("saved".to_owned()),
-            requested_again(gate.clone(), meeting, steps.clone(), went_through),
+            requested_again(gate.clone(), steps.clone(), went_through),
         ));
         assert!(exit_seen.recv_timeout(Duration::from_secs(5)).unwrap());
         assert_eq!(*steps.lock().unwrap(), ["saved", "exit 0"]);
     }
 
-    /// A close behind a tray ends nothing, so it stops nothing; with no
-    /// recording, an exit goes through at once without a shutdown.
+    /// A close behind a tray ends nothing, so it runs nothing.
     #[test]
-    fn only_an_exit_that_ends_the_process_during_a_recording_waits() {
+    fn a_close_behind_a_tray_runs_no_shutdown() {
         let gate = steno_services::app::ExitGate::default();
-        let meeting = Some(uuid::Uuid::new_v4());
-        let untouched = || panic!("a shutdown");
-        let no_exit = |_| panic!("an exit");
         assert!(!exit_request(
             None,
             || true,
             &gate,
-            meeting,
-            untouched,
-            no_exit
+            || panic!("a shutdown"),
+            |_| panic!("an exit"),
         ));
-        assert!(exit_request(
+        // The gate is still open: the next exit runs the shutdown.
+        let (shut_down, seen) = std::sync::mpsc::channel();
+        assert!(!exit_request(
             Some(actions::QUIT_CODE),
             || true,
             &gate,
-            None,
-            untouched,
-            no_exit
+            move || shut_down.send(()).unwrap(),
+            |_| {},
         ));
-        assert!(exit_request(
-            None,
-            || false,
-            &gate,
-            None,
-            untouched,
-            no_exit
-        ));
+        seen.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the shutdown ran");
     }
 
     /// A tray stands when it was built and a host or a smoke run shows it;
@@ -534,6 +712,126 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Only a second SIGTERM or a second SIGINT ends the process at once;
+    /// every other exit signal asks for Quit, and a SIGHUP, the one systemd
+    /// sends right after a session scope's SIGTERM, never forces the exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_sigterm_or_sigint_forces_the_exit_and_a_sighup_never_does() {
+        let mut seen = Vec::new();
+        assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::HANGUP, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::HANGUP, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::INTERRUPT, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::INTERRUPT, &mut seen), Some(130));
+        assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), Some(143));
+
+        let mut seen = Vec::new();
+        assert_eq!(forced_exit(ExitSignal::INTERRUPT, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), Some(143));
+    }
+
+    /// A signal quits the pipeline, then asks for Quit, with `seen`
+    /// unlocked for both; a second SIGTERM does neither and forces the exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_quits_the_pipeline_before_it_asks_for_quit() {
+        let seen = std::sync::Mutex::new(Vec::new());
+        let steps = std::cell::RefCell::new(Vec::new());
+        let step = |name: &'static str| {
+            assert!(seen.try_lock().is_ok(), "{name} ran under the guard");
+            steps.borrow_mut().push(name);
+        };
+        let first = on_exit_signal(
+            ExitSignal::TERMINATE,
+            &seen,
+            || step("quit the pipeline"),
+            || step("ask for Quit"),
+        );
+        assert_eq!(first, None);
+        assert_eq!(*steps.borrow(), ["quit the pipeline", "ask for Quit"]);
+
+        let second = on_exit_signal(
+            ExitSignal::TERMINATE,
+            &seen,
+            || step("quit the pipeline"),
+            || step("ask for Quit"),
+        );
+        assert_eq!(second, Some(143));
+        assert_eq!(steps.borrow().len(), 2);
+    }
+
+    /// The exit signals are SIGTERM, SIGINT and SIGHUP, and only the first
+    /// two force a second time, with 128 plus their number.
+    #[cfg(unix)]
+    #[test]
+    fn the_exit_signals_are_sigterm_sigint_and_sighup() {
+        let listened: Vec<_> = ExitSignal::ALL
+            .iter()
+            .map(|signal| (signal.kind.as_raw_value(), signal.forced_code))
+            .collect();
+        assert_eq!(
+            listened,
+            [
+                (libc::SIGTERM, Some(143)),
+                (libc::SIGINT, Some(130)),
+                (libc::SIGHUP, None)
+            ]
+        );
+    }
+
+    /// A signal ignored at launch (`nohup`, a background job's SIGINT)
+    /// reads as ignored; a default one does not, nor does one whose
+    /// disposition cannot be read (no such signal). The disposition is read
+    /// as it is: SIGUSR2, which nothing here uses, ignored for the test.
+    #[cfg(unix)]
+    #[test]
+    fn a_signal_ignored_at_launch_reads_as_ignored() {
+        assert!(!ignored(-1));
+
+        // SAFETY: SIGUSR2 has no handler in this binary; it is set back.
+        let before = unsafe { libc::signal(libc::SIGUSR2, libc::SIG_IGN) };
+        let when_ignored = ignored(libc::SIGUSR2);
+        unsafe { libc::signal(libc::SIGUSR2, libc::SIG_DFL) };
+        let when_default = ignored(libc::SIGUSR2);
+        unsafe { libc::signal(libc::SIGUSR2, before) };
+        assert!(when_ignored);
+        assert!(!when_default);
+    }
+
+    /// Set in the copy of this test binary the stderr test runs.
+    #[cfg(unix)]
+    const STDERR_CHILD: &str = "STENO_TEST_STDERR_CHILD";
+
+    /// The child writes a line to a stderr nobody reads (a pipe with no
+    /// reader fails each write, as a closed terminal does), so the line is
+    /// lost; the child must still pass, not panic. `--nocapture`, or the
+    /// test harness would catch the line. Unix only, as the services' test
+    /// of their log lines.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_to_a_closed_stderr_is_dropped_without_a_panic() {
+        if std::env::var_os(STDERR_CHILD).is_some() {
+            stderr_line!("[steno-desktop] a line nobody reads");
+            return;
+        }
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::a_line_to_a_closed_stderr_is_dropped_without_a_panic",
+                "--nocapture",
+            ])
+            .env(STDERR_CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(writer)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
     }
 
     #[test]

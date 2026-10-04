@@ -20,6 +20,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -128,6 +129,32 @@ impl MonotonicClock for SystemClock {
     }
 }
 
+/// The app's exit as the pipelines see it ([`ProcessingPipeline::quit`]).
+/// Clones share it, so one latch quits every pipeline built over
+/// dependencies that carry it ([`PipelineDependencies::with_quit_latch`]).
+/// Once it is set, no job starts, and a job that fails leaves its meeting
+/// `queued` or `processing` for the next launch's
+/// [`resume_unfinished`](ProcessingPipeline::resume_unfinished) instead of
+/// marking it `failed`: the exit can end a job (a session's end can kill
+/// the speech sidecar before the app), and that is no failure of the
+/// meeting's. Rust only: the Swift pipeline ran in the app's process and
+/// died with it, and the next launch resumed the job.
+#[derive(Debug, Clone, Default)]
+pub struct QuitLatch(Arc<AtomicBool>);
+
+impl QuitLatch {
+    /// Sets the latch; it is never cleared.
+    pub fn set(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether the latch is set: the app is exiting.
+    #[must_use]
+    pub fn is_set(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// Everything the pipeline needs, and the only injection axis: the app
 /// and the CLI pass real implementations, tests pass the fakes in
 /// `steno_core::testing`. `cleaner` and `summarizer` are `None` when no
@@ -148,6 +175,9 @@ pub struct PipelineDependencies {
     pub events: MeetingEventBus,
     pub now: Now,
     pub clock: Arc<dyn MonotonicClock>,
+    /// A fresh latch from [`new`](Self::new); clones share theirs, and
+    /// [`with_quit_latch`](Self::with_quit_latch) shares the caller's.
+    pub quit_latch: QuitLatch,
 }
 
 impl PipelineDependencies {
@@ -174,6 +204,7 @@ impl PipelineDependencies {
             events,
             now: Arc::new(Utc::now),
             clock: Arc::new(SystemClock::default()),
+            quit_latch: QuitLatch::default(),
         }
     }
 
@@ -197,6 +228,15 @@ impl PipelineDependencies {
     #[must_use]
     pub fn with_clock(mut self, clock: Arc<dyn MonotonicClock>) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Carries `latch` instead of the fresh one from [`new`](Self::new), so
+    /// every pipeline built over dependencies that carry it quits on one
+    /// [`QuitLatch::set`] (the services' reloads share the app's).
+    #[must_use]
+    pub fn with_quit_latch(mut self, latch: QuitLatch) -> Self {
+        self.quit_latch = latch;
         self
     }
 }
@@ -458,10 +498,23 @@ impl ProcessingPipeline {
         self.state().in_flight.iter().copied().collect()
     }
 
+    /// Sets the pipeline's [`QuitLatch`] for the app's exit, which quits
+    /// every pipeline sharing it; `enqueue` still saves the meeting
+    /// `queued` with its asset.
+    pub fn quit(&self) {
+        self.inner.dependencies.quit_latch.set();
+    }
+
+    fn quitting(&self) -> bool {
+        self.inner.dependencies.quit_latch.is_set()
+    }
+
     /// Writes `Meeting(queued)` plus the asset in one transaction and starts
     /// `process` in the background. The app (Mac recordings) and the phone
     /// intake both call this. Fails when the asset or the meeting is
-    /// already in flight. Needs a `tokio` runtime.
+    /// already in flight. Needs a `tokio` runtime. Once the pipeline
+    /// [quits](Self::quit), the meeting is saved and stays `queued` for the
+    /// next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
         {
             let state = self.state();
@@ -489,8 +542,11 @@ impl ProcessingPipeline {
     /// `queued` or `processing` is processed again from `decode`, oldest
     /// first, in the background like `enqueue`. A meeting whose asset row
     /// is missing is marked failed. Returns the meetings whose processing
-    /// was started.
+    /// was started: none once the pipeline [quits](Self::quit).
     pub fn resume_unfinished(&self) -> Result<Vec<Uuid>> {
+        if self.quitting() {
+            return Ok(Vec::new());
+        }
         let meetings = attributing(
             PipelineStage::Decode,
             self.store()
@@ -529,8 +585,16 @@ impl ProcessingPipeline {
     /// The state lock is held from the spawn to the insert, so the task
     /// cannot finish and remove its entry before the entry exists; the
     /// task's [`Running`] mark removes the entry however the task ends, a
-    /// panic included.
+    /// panic included. Once the pipeline quits, nothing starts.
     fn start(&self, asset_id: Uuid) {
+        if self.quitting() {
+            tracing::debug!(
+                target: BACKGROUND_RUN_LOG,
+                %asset_id,
+                "not started: the app is quitting"
+            );
+            return;
+        }
         let pipeline = self.clone();
         let mut state = self.state();
         let handle = tokio::spawn(async move {
@@ -539,6 +603,16 @@ impl ProcessingPipeline {
                 asset_id,
             };
             if let Err(failure) = pipeline.process(asset_id).await {
+                if pipeline.quitting() {
+                    // The exit ended the job, which `process` did not persist.
+                    tracing::debug!(
+                        target: BACKGROUND_RUN_LOG,
+                        %asset_id,
+                        %failure,
+                        "processing stopped by the exit"
+                    );
+                    return;
+                }
                 // The reason can name the audio file (a decode error) or
                 // quote the model, so warn carries the stage only; the
                 // meeting row has the whole reason.
@@ -608,7 +682,17 @@ impl ProcessingPipeline {
     /// with whatever was persisted so far. Once `persist` has marked the
     /// meeting `ready` nothing downgrades it: a `retention` error is
     /// returned to the caller and the meeting stays ready and delivered.
+    /// Once the pipeline [quits](Self::quit), a failure is returned and
+    /// not persisted, and a call made after it fails at once: the meeting
+    /// stays `queued` or `processing`, which the next launch's
+    /// `resume_unfinished` processes again.
     pub async fn process(&self, asset_id: Uuid) -> Result<()> {
+        if self.quitting() {
+            return Err(PipelineFailure::new(
+                PipelineStage::Decode,
+                "the app is quitting",
+            ));
+        }
         let asset = required(
             PipelineStage::Decode,
             self.store().asset_by_id(asset_id),
@@ -623,6 +707,7 @@ impl ProcessingPipeline {
         self.exclusively(meeting_id, PipelineStage::Decode, async {
             let persisted = match self.process_until_persist(&asset, meeting).await {
                 Ok(asset) => asset,
+                Err(failure) if self.quitting() => return Err(failure),
                 Err(failure) => {
                     let _ = self.store().set_state(
                         meeting_id,

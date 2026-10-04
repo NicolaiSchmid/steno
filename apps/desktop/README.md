@@ -2,13 +2,13 @@
 
 The Tauri 2 shell for macOS, Linux and Windows: three windows and two
 floating panels around the web UI in `apps/macos/web`, a tray icon, and the
-`bridge_call` command the web app's Tauri transport talks to. WP3 and WP8 of
-`.plans/2026-10-02-rust-core-and-tauri-shell.md`, on the host WP6b wires.
-The shell holds no logic: `steno_host::Host` over the services graph
-(`steno-services`: the store, the pipeline, the recorder, the handover
-listener) answers the bridge. The opt-in `fixture-host` cargo feature
-answers it from the recorded fixtures in `apps/macos/web/fixtures/bridge/`
-instead, for UI work without a database
+`bridge_call` command the web app's Tauri transport talks to. WP3 and WP8
+of `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP6b puts it on the
+real host. The shell holds no logic: `steno_host::Host` over the services
+graph (`steno-services`: the store, the pipeline, the recorder, the
+handover listener) answers the bridge. The opt-in `fixture-host` cargo
+feature answers it from the recorded fixtures in
+`apps/macos/web/fixtures/bridge/` instead, for UI work without a database
 (`cargo run -p steno-desktop --features fixture-host`). Paths below are
 from the repository root.
 
@@ -31,12 +31,53 @@ Secrets are not the shell's: the `SecretStore` lives in `steno-services`
 (the login Keychain on macOS, the Credential Manager on Windows, the 0600
 `secrets.json` on Linux), which the host reads the API key through.
 
-Quitting saves first: Quit in the tray's menu or the macOS menu bar, and
-the close that ends the process because no tray stands, stop and save a
-recording in progress before the process ends (`exit_request` in
-`main.rs` over `steno_services::app::ExitGate` and `App::shutdown`, at
-most ten seconds), as the Swift `applicationShouldTerminate` awaited
-`AppController.shutdown`.
+Every exit saves first: `App::shutdown` runs once, at most ten seconds.
+It quits the pipeline (no new job starts), lets a start or a stop under
+way settle, stops and saves a recording in progress and stops the
+handover listener, as the Swift `applicationShouldTerminate` awaited
+`AppController.shutdown`. The saved recording stays queued, and a job
+the exit ends stays processing, not failed, until the next launch. The
+exits reach the shutdown these ways:
+
+- Quit in the tray's menu or the macOS menu bar, the close that ends the
+  process because no tray stands, and SIGTERM, SIGINT and SIGHUP (a
+  plain `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are
+  exit requests, held until the shutdown has ended (`exit_request` in
+  `main.rs` over `steno_services::app::ExitGate`); a second Quit
+  meanwhile is held too. A signal quits the pipeline at once, before its
+  request reaches the main thread. A second SIGTERM or a second SIGINT
+  ends the process at once, unsaved; a SIGHUP never does. A signal the
+  app inherited ignored (`nohup`, a background job's SIGINT) stays
+  ignored.
+- A logout on Linux saves when logind ends the session's processes (with
+  `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
+  SIGHUP). Otherwise nothing signals the app, and when the display
+  connection closes first, GDK ends the process unsaved; untested (before
+  the first Linux release; no work package yet).
+- The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
+  the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
+  it waits for the shutdown first (`shut_down_before_exit`).
+- An update's relaunch bypasses the request, so it waits for the shutdown
+  first too; on Windows the installer's own exit runs it, and an install
+  that fails after that ends the app once its message is closed.
+- A logoff or a shutdown on Windows also arrives as `RunEvent::Exit`
+  (tao answers `WM_ENDSESSION` with it), and the shutdown runs until
+  Windows' end-session timeout ends the process: about five seconds,
+  less than the ten above. Untested on hardware, and the logoff may end
+  the speech sidecar, a console process, before `RunEvent::Exit` quits
+  the pipeline, so its job could leave the meeting failed; unverified
+  (WP10).
+
+The speech sidecar ignores SIGINT, SIGTERM and SIGHUP on Linux and
+macOS: Ctrl-C, a closed terminal and systemd signal it with the app, and
+it would otherwise end its job first. It exits within a heartbeat once
+the app is gone.
+
+Snapshots reach the windows, the tray and the panels from the main thread
+(`WindowSink` in `host.rs`): the host emits under its `publishing` lock,
+the main thread can be waiting for a thread that holds it (a Stop from the
+tray joins the recorder's level thread, which publishes), and the tray's
+setters wait for the main thread when called from another.
 
 The tray menu is the Swift menu bar popover's controls: Record (Stop
 recording while recording, with the recorder's words between), Record in
@@ -219,10 +260,11 @@ decides what becomes of these installs). Both apps are `Steno.app`,
 though: dragged into `/Applications`, the desktop `.dmg` replaces the
 Swift app, so install it elsewhere (`~/Applications`) to keep both.
 
-No bundle carries `steno-speech-sidecar` yet (WP9 adds it), so a `.deb`,
-AppImage, `.msi` or NSIS install opens its windows but fails to process a
-meeting with "could not start". A Mac bundle processes on `CoreML`, except in
-the two cases under Run that send Parakeet to the sidecar.
+Every release bundle carries `steno-speech-sidecar` beside the app (see
+"The speech sidecar" under Release), so a `.deb`, AppImage, `.msi` or NSIS
+install processes a meeting once the sidecar's models are downloaded (see
+Run). A Mac bundle processes on `CoreML`, except in the two cases under Run
+that send Parakeet to the sidecar.
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the
@@ -463,8 +505,11 @@ mounts, when the main window hides on close and when the process ends,
 the login item states, the update lanes, the permission panes per OS,
 the `steno:` link grammar and its case rules, the Linux desktop entry,
 the folder choosers' replies and the host's chosen folder, the alert's
-buttons, and the exit rules: a Quit or a no-tray close while recording
-waits for the save and exits once. `cargo test -p steno-desktop
+buttons, and the exit rules: an exit request runs the shutdown once and
+exits after it, a second Quit meanwhile is held, a close behind a tray
+runs nothing, which repeated signal forces the exit, an ignored signal
+reads as ignored; the window sink delivers on the main thread, in emit
+order, without the emit waiting. `cargo test -p steno-desktop
 --features fixture-host` runs the same with the fixture host, plus the
 fixture table against `index.json` and the mock transport; Rust CI runs
 both. In the web
@@ -552,14 +597,14 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session) |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session) |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
 | `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
 | `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the shell's own methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
-| `apps/desktop/src-tauri/src/host.rs` | The real host: `steno_host::Host` over `steno_services::build`, the window sink, the `Opener`, the alert and the chosen folder, the exit's `recording` and `shutdown_action` |
-| `apps/desktop/src-tauri/src/host.rs`, `fixtures.rs` | With `--features fixture-host`, the fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
+| `apps/desktop/src-tauri/src/host.rs` | The real host: `steno_host::Host` over `steno_services::build`, the window sink that delivers on the main thread, the `Opener`, the alert and the chosen folder, the exits' `shutdown_action` |
+| `apps/desktop/src-tauri/src/fixtures.rs` (and `host.rs` under the feature) | With `--features fixture-host`, the fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
@@ -570,47 +615,45 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 ## Not here yet
 
 The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
-removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it lands
-the desktop app installs beside the Swift app on the Mac. WP6b filled the
-host's half of the WP8 seams except four, which wait for work outside the
-shell (the plan's WP6b row): the detection controller (WP5) is not
-ported, so nothing raises the prompt (`panels::set_prompt`) and its X
+removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it
+lands the desktop app installs beside the Swift app on the Mac. WP6b
+filled the host's half of the WP8 seams except four (the plan's
+"Pipeline and services (WP6b)" list gives each one's reason and what
+closes it): the detection controller (WP5) is not ported, so nothing
+raises the prompt (`panels::set_prompt`) and its X
 (`panels::dismiss_prompt`) tells no one; the host's `Permissions` stay
 the services' fake (all granted), because `permissions` answers
 `unknown` off the Mac and for the Mac's system audio, which the host's
-onboarding opener counts as missing, so
-onboarding would open at every launch until the audio probe (WP5) and a
-rule for `unknown` land; the host's `Updater` stays the fake, because
-`updater` has no automatic-check or automatic-download flag and keeps no
-last check time, so the General section's Updates row cannot be filled
-from it (`updates.check` stays the shell's, and its `UpdateOutcome`
-stays beside the host's); and the QR encoder and the clip player are
-fakes, which need a QR crate and an audio output. On macOS the Dock's
-Quit, a logout and a system shutdown send `terminate:` to the
-application directly; tao answers with `applicationWillTerminate` only,
-no `ExitRequested`, so a recording is not saved there and the next
-launch marks it failed (Swift's interrupted reason). The host may
-treat the main window as always present: a close hides it, or ends the
-process when no tray stands, so publishing to it never fails for want of a
-window. Launch at login is a Launch Agent, not `SMAppService`; the cutover
-has to retire the Swift registration so the user does not get two login
-items (the plan's parity list, `.plans/2026-10-04-mac-cutover.md`). The
-macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are the
-tray's and the sidebar's), and no Find Meetings (`⌘F`). Updates are
-checked only when asked (the tray's item, Settings), where Sparkle checks
-daily on its own. On macOS the system audio permission has no status API;
-the audio crate's probe (WP5) records it and until then it reads
-`unknown`. The panels are re-tuned on the Mac once they run there beside
-the Swift ones (the plan's risk list). Linux and Windows keep their
-native title bar; macOS gets the overlay title bar the Swift windows
-have. The page's traffic light inset
-is a design question for the other two platforms. On Linux, WebKitGTK
-leaks one shared-memory file descriptor per destroyed webview that lived
-longer than about 250 ms (29 to 107 fds over 70 Settings open/close
-cycles; wry/WebKitGTK level, not the shell), so long sessions with many
-Settings opens should be watched until
-[#160](https://github.com/NicolaiSchmid/steno/issues/160) is resolved. On
-Linux a panel keeps a 5 px resize border that Tauri gives every
-undecorated resizable window. The pinned size holds, but the border shows
-a resize cursor and swallows a press, so a drag that starts on the outer
-5 px does not move the panel; no control sits there.
+onboarding opener counts as missing, so onboarding would open at every
+launch until the audio probe (WP5) and a rule for `unknown` land; the
+host's `Updater` stays the fake until an update schedule exists (due
+before the cutover), because `updater` has no automatic-check or
+automatic-download flag and keeps no last check time, so the General
+section's Updates row cannot be filled from it (`updates.check` stays the
+shell's, and its `UpdateOutcome` stays beside the host's); and the QR
+encoder and the clip player are fakes, which need a QR crate and an audio
+output (the audio output is WP5's; both are due before the cutover). The
+host may treat the main window as always present: a close hides it, or
+ends the process when no tray stands, so publishing to it never fails for
+want of a window. Launch at login is a Launch Agent, not `SMAppService`;
+the cutover has to retire the Swift registration so the user does not
+get two login items (the plan's parity list,
+`.plans/2026-10-04-mac-cutover.md`). The macOS menu bar has no Record
+menu yet (`⌘⇧R` and Record In Person are the tray's and the sidebar's),
+and no Find Meetings (`⌘F`). Updates are checked only when asked (the
+tray's item, Settings), where Sparkle checks daily on its own (an update
+schedule, due before the cutover). On macOS the system audio permission
+has no status API; the audio crate's probe (WP5) records it and until
+then it reads `unknown`. The panels are re-tuned on the Mac once they run
+there beside the Swift ones (the plan's risk list). Linux and Windows
+keep their native title bar; macOS gets the overlay title bar the Swift
+windows have. The page's traffic light inset is a design question for the
+other two platforms. On Linux, WebKitGTK leaks one shared-memory file
+descriptor per destroyed webview that lived longer than about 250 ms (29
+to 107 fds over 70 Settings open/close cycles; wry/WebKitGTK level, not
+the shell), so long sessions with many Settings opens should be watched
+until [#160](https://github.com/NicolaiSchmid/steno/issues/160) is
+resolved. On Linux a panel keeps a 5 px resize border that Tauri gives
+every undecorated resizable window. The pinned size holds, but the
+border shows a resize cursor and swallows a press, so a drag that starts
+on the outer 5 px does not move the panel; no control sits there.
