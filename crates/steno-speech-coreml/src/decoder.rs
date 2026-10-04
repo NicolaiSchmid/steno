@@ -1,13 +1,13 @@
 //! FluidAudio's `TdtDecoderV3.decodeWithTimings` (0.17.4) for the path
 //! Steno takes (no language filter, since Steno passes `language: nil`; a
 //! fresh decoder state per window; `initialTimeIndex` zero), as
-//! `steno_speech`'s shared greedy loop under [`FLUID_AUDIO`] plus the
-//! three steps around it that serve this crate's chunker: the early exit
-//! for a window under two frames, the end-of-audio flush of the last
-//! window, and the emission cutoff of the warm-up window. The flush keeps
-//! probing three boundary frames until five blanks in a row.
+//! `steno_speech`'s shared greedy loop under [`FLUID_AUDIO`] plus three
+//! steps of its own, kept for parity with Swift: the early exit for a
+//! window under two frames, the tail flush of the last window (three
+//! boundary frames probed until five blanks in a row), and the emission
+//! cutoff of the chunker's warm-up window.
 
-use steno_speech::decoder::{
+use steno_speech::{
     DecodeStats, DecoderConfig, TdtModel, TokenBudget, TokenDuration, WindowEnd, confidence,
     decode_frames,
 };
@@ -36,7 +36,7 @@ pub const CONSECUTIVE_BLANK_LIMIT: usize = 5;
 /// [`MAX_TOKENS_PER_CHUNK`] ends the window unemitted.
 pub const FLUID_AUDIO: DecoderConfig = DecoderConfig {
     max_symbols_per_frame: 2,
-    budget: TokenBudget::PerWindow(MAX_TOKENS_PER_CHUNK),
+    token_budget: TokenBudget::PerWindow(MAX_TOKENS_PER_CHUNK),
     window_end: WindowEnd::Drop,
     token_duration: TokenDuration::Advanced,
 };

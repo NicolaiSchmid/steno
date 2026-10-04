@@ -128,6 +128,7 @@ pub use backend::{
 pub use chunker::{Chunk, ChunkerConfig, Cut};
 pub use decoder::{
     DecodeStats, Decoded, DecoderConfig, TdtModel, Token, TokenBudget, TokenDuration, WindowEnd,
+    confidence, decode_frames,
 };
 pub use engine::OnnxSpeechEngine;
 pub use error::{SidecarError, SpeechError};
