@@ -4,7 +4,9 @@
 //! the computer and `DELETE /v1/pairing` from the phone. A request that
 //! read its device or receipt before the revoke brings neither back, and a
 //! `complete` that had not reached the intake yet admits nothing, also when
-//! the phone paired again meanwhile.
+//! the phone paired again meanwhile. A recording already admitted answers
+//! its meeting, and a pairing that a revoke overtakes leaves the device
+//! revoked.
 
 #![allow(
     clippy::assert_is_empty,
@@ -17,7 +19,7 @@
 
 mod common;
 
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
@@ -27,6 +29,7 @@ use steno_core::{HandoverIntake, RecordingMetadata};
 use steno_handover::engine::HandoverResponse;
 use steno_handover::pairing::DeviceTokens;
 use steno_handover::{HandoverService, wire};
+use tokio::task::unconstrained;
 use uuid::Uuid;
 
 const CHUNK_SIZE: i64 = 256 * 1024;
@@ -403,13 +406,31 @@ impl Restarted {
         &self,
         pairs_again: bool,
     ) -> (HandoverResponse, Option<EngineDevice>) {
-        // `complete` runs to its store read and waits there: the store is
-        // held, so the read cannot finish before the first poll returns.
-        // Once the read has returned the row, the revoke runs to completion;
-        // then `complete` goes on.
+        let (completing, again) = self.revoke_during_the_read(pairs_again).await;
+        (completing.await, again)
+    }
+
+    /// Runs `complete` to just after its store read, then revokes the
+    /// device (and pairs it again with `pairs_again`), and hands back the
+    /// `complete`, not polled since its read returned.
+    ///
+    /// `complete` runs to its store read and waits there: the store is
+    /// held, so the read cannot finish before the first poll returns. This
+    /// takes the store read to be the first point where `complete` waits;
+    /// an await added before it would leave the read for after the revoke,
+    /// and the tests fail with a 404 (the row is gone) instead of a 401.
+    /// The future runs unconstrained, so a wake means the read returned,
+    /// never that tokio's budget ran out.
+    async fn revoke_during_the_read(
+        &self,
+        pairs_again: bool,
+    ) -> (
+        Pin<Box<impl Future<Output = HandoverResponse> + '_>>,
+        Option<EngineDevice>,
+    ) {
         let hold = StoreHold::new(&self.first.store);
         let woken = Woken::new();
-        let mut completing = std::pin::pin!(self.phone.complete(self.id()));
+        let mut completing = Box::pin(unconstrained(self.phone.complete(self.id())));
         assert!(
             woken.poll(completing.as_mut()).is_pending(),
             "complete waits on the store read"
@@ -422,14 +443,14 @@ impl Restarted {
         } else {
             None
         };
-        (completing.await, again)
+        (completing, again)
     }
 }
 
 /// A revoke that lands while `complete` reads the store finds nothing in
 /// memory to discard, so the files are still there for the verify; the
 /// engine itself must keep a revoked device's recording from the intake.
-async fn complete_after_a_revoke_during_its_receipt_read(pairs_again: bool) {
+async fn a_revoke_during_the_read_admits_nothing(pairs_again: bool) {
     let restarted = Restarted::new().await;
     let (response, again) = restarted
         .complete_with_a_revoke_during_the_read(pairs_again)
@@ -438,7 +459,7 @@ async fn complete_after_a_revoke_during_its_receipt_read(pairs_again: bool) {
     assert_eq!(
         response.status.as_u16(),
         401,
-        "the phone learns it is unpaired"
+        "the phone learns it is unpaired (a 404: `complete` did not wait in its receipt read)"
     );
     restarted.assert_nothing_admitted();
     assert!(restarted.files_are_gone(), "its files are gone");
@@ -454,12 +475,12 @@ async fn complete_after_a_revoke_during_its_receipt_read(pairs_again: bool) {
 
 #[tokio::test]
 async fn a_complete_that_read_its_receipt_before_a_revoke_admits_nothing() {
-    complete_after_a_revoke_during_its_receipt_read(false).await;
+    a_revoke_during_the_read_admits_nothing(false).await;
 }
 
 #[tokio::test]
 async fn a_phone_that_paired_again_does_not_let_the_old_complete_through() {
-    complete_after_a_revoke_during_its_receipt_read(true).await;
+    a_revoke_during_the_read_admits_nothing(true).await;
 }
 
 #[tokio::test]
@@ -496,12 +517,12 @@ async fn a_complete_during_a_revokes_store_delete_admits_nothing() {
     let restarted = Restarted::new().await;
     let hold = StoreHold::new(&restarted.first.store);
     let woken = Woken::new();
-    let mut revoking = std::pin::pin!(restarted.service.revoke(restarted.phone.device.id));
+    let mut revoking = pin!(restarted.service.revoke(restarted.phone.device.id));
     assert!(
         woken.poll(revoking.as_mut()).is_pending(),
         "the revoke waits on its store delete"
     );
-    let mut completing = std::pin::pin!(restarted.phone.complete(restarted.id()));
+    let mut completing = pin!(restarted.phone.complete(restarted.id()));
     let Poll::Ready(response) = woken.poll(completing.as_mut()) else {
         panic!("complete is refused before it reads the store");
     };
@@ -532,12 +553,12 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     // receipt saves meanwhile.
     let hold = StoreHold::new(&test.store);
     let saved = Woken::new();
-    let mut completing = std::pin::pin!(phone.complete(id));
+    let mut completing = pin!(unconstrained(phone.complete(id)));
     assert!(
         saved.poll(completing.as_mut()).is_pending(),
         "complete waits on its verifying write"
     );
-    let mut revoking = std::pin::pin!(test.service.revoke(phone.device.id));
+    let mut revoking = pin!(test.service.revoke(phone.device.id));
     assert!(
         Woken::new().poll(revoking.as_mut()).is_pending(),
         "the revoke waits on its store delete"
@@ -554,7 +575,7 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     // The new announce creates the partial, then waits for the turn the old
     // `complete` holds.
     let announced = Woken::new();
-    let mut announcing = std::pin::pin!(again.announce(&metadata));
+    let mut announcing = pin!(again.announce(&metadata));
     loop {
         assert!(
             announced.poll(announcing.as_mut()).is_pending(),
@@ -599,7 +620,7 @@ async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
 
     let hold = StoreHold::new(&test.store);
     let woken = Woken::new();
-    let mut pairing = std::pin::pin!(common::engine_pair_as(
+    let mut pairing = pin!(common::engine_pair_as(
         &test.service,
         principal,
         phone.device.id,
@@ -609,7 +630,7 @@ async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
         woken.poll(pairing.as_mut()).is_pending(),
         "the pairing waits on its save"
     );
-    let mut revoking = std::pin::pin!(test.service.revoke(phone.device.id));
+    let mut revoking = pin!(test.service.revoke(phone.device.id));
     assert!(
         woken.poll(revoking.as_mut()).is_pending(),
         "the revoke waits on its store delete"

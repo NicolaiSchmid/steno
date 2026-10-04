@@ -124,7 +124,7 @@ async fn concurrent_completes_admit_once_and_keep_the_complete_receipt() {
     let first = phone.complete(id);
     let second = async {
         intake.admitting().await;
-        let retry = phone.complete(id).await;
+        let retry = common::signalled("the retry answers", phone.complete(id)).await;
         intake.release();
         retry
     };
