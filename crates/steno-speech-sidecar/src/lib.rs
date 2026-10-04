@@ -472,6 +472,39 @@ fn tell_fallback(engine: &dyn Engine, told: &mut Option<&'static str>) {
     }
 }
 
+/// Reads the samples of a transcription request and answers it. `Err` is
+/// the exit code when the child must exit instead: the audio is
+/// unreadable, or the engine lost its encoder. That exit sends no reply:
+/// the parent sees a crash with the encoder still on `DirectML`, switches
+/// `DirectML` off and starts a child that loads on the CPU, where an error
+/// reply would leave this child failing every request.
+fn transcribe(
+    engine: &mut dyn Engine,
+    input: &mut impl io::Read,
+    id: u64,
+    sample_count: u64,
+    hint: Option<&LanguageTag>,
+) -> Result<Reply, ExitCode> {
+    let samples = protocol::read_samples(input, sample_count).map_err(|error| {
+        eprintln!("steno-speech-sidecar: unreadable audio: {error}");
+        ExitCode::from(2)
+    })?;
+    match engine.transcribe(&samples, hint) {
+        Ok(segments) => Ok(Reply::Transcript {
+            id,
+            segments,
+            provider: engine.provider(),
+        }),
+        Err(_) if !engine.usable() => {
+            eprintln!(
+                "steno-speech-sidecar: the speech encoder lost its session after a failed run on DirectML, and the CPU could not reopen it"
+            );
+            Err(ExitCode::from(70))
+        }
+        Err(error) => Ok(Reply::Failed { id, error }),
+    }
+}
+
 /// Runs the child until a shutdown request, the end of stdin, a broken
 /// stdout or an unreadable request.
 pub fn serve(options: &Options) -> ExitCode {
@@ -545,33 +578,10 @@ pub fn serve(options: &Options) -> ExitCode {
                 id,
                 sample_count,
                 hint,
-            } => {
-                let samples = match protocol::read_samples(&mut input, sample_count) {
-                    Ok(samples) => samples,
-                    Err(error) => {
-                        eprintln!("steno-speech-sidecar: unreadable audio: {error}");
-                        return ExitCode::from(2);
-                    }
-                };
-                match engine.transcribe(&samples, hint.as_ref()) {
-                    Ok(segments) => Reply::Transcript {
-                        id,
-                        segments,
-                        provider: engine.provider(),
-                    },
-                    // No reply: the parent sees a crash with the encoder
-                    // still on `DirectML`, switches `DirectML` off and
-                    // starts a child that loads on the CPU, where an error
-                    // reply would leave this child failing every request.
-                    Err(_) if !engine.usable() => {
-                        eprintln!(
-                            "steno-speech-sidecar: the speech encoder lost its session after a failed run on DirectML, and the CPU could not reopen it"
-                        );
-                        return ExitCode::from(70);
-                    }
-                    Err(error) => Reply::Failed { id, error },
-                }
-            }
+            } => match transcribe(&mut *engine, &mut input, id, sample_count, hint.as_ref()) {
+                Ok(reply) => reply,
+                Err(code) => return code,
+            },
             Request::Shutdown { id } => {
                 send(&Reply::Bye { id });
                 return ExitCode::SUCCESS;
