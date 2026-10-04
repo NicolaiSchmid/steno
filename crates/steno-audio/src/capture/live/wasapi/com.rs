@@ -34,11 +34,12 @@
 //!   were given, which sends on a channel or records the time under the
 //!   capture watcher's short lock (never held across a WASAPI call); they
 //!   never call back into WASAPI (the documentation forbids it from inside
-//!   `IMMNotificationClient`) and never wait on anything else. Each registration is undone
-//!   in `Drop`. Microsoft does not say whether a callback can still be
-//!   running when the unregister call returns; it does not matter for
-//!   memory safety, because the object is reference counted and its
-//!   closure owns everything it touches (an `Arc` or a `Sender`).
+//!   `IMMNotificationClient`) and never wait on anything else. Each
+//!   registration is undone in `Drop`. Microsoft does not say whether a
+//!   callback can still be running when the unregister call returns; it
+//!   does not matter for memory safety, because the object is reference
+//!   counted and its closure owns everything it touches (an `Arc` or a
+//!   `Sender`).
 
 // `#[implement]` expands to `&T as *const T` casts.
 #![allow(clippy::ref_as_ptr)]

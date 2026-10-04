@@ -18,10 +18,10 @@
 //!   `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`,
 //!   `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) excluding Steno's own
 //!   process tree (Microsoft's API page names build 20438, its sample
-//!   build 20348; reported to work from Windows 10 2004, unverified). Where that activation fails
-//!   for any reason, its timeout included, loopback of the default render
-//!   endpoint, which records Steno's own output too; the switch is only
-//!   logged.
+//!   build 20348; reported to work from Windows 10 2004, unverified).
+//!   Where that activation fails for any reason, its timeout included,
+//!   loopback of the default render endpoint, which records Steno's own
+//!   output too; the switch is only logged.
 //! - **Microphone:** the selected capture endpoint by id, or the default
 //!   (`eCapture`, `eConsole`), shared mode, event-driven.
 //!
