@@ -1174,30 +1174,41 @@ fix is ported to Swift before cutover.
   phone's file reach the intake, also when the phone paired again meanwhile. Both apps
   (Swift #191) count revokes per device (`HandoverEngine.revocations`,
   `State::revocations`); pairing never resets the count. `complete` takes it before
-  the read and refuses when it moved (401, files discarded, receipt forgotten) right
-  after the read and after the hash. A `complete` that starts while a revoke is in
-  flight is refused at entry: Swift's store is a WAL pool, so a read can see a row
-  whose delete has not committed; Rust's is one connection behind a mutex, but the
-  blocking pool may serve a read queued after the revoke's bump before the delete.
-  `pair` clears `revoked` only when no revoke started during its save (Swift
-  `revokeStarts`, Rust the count). In both apps a recording already admitted answers
-  200 with its meeting id after a revoke during the read, and its receipt leaves
-  memory; the files of a revoked device's receipt that is only in the store, and not
-  being completed, wait for the next start's sweep.
-- Revoke during a `complete`, the differences: Rust refuses at entry from the revoke
-  until the device pairs again; Swift only while the revoke runs, after which the read
-  answers 404. Swift also refuses after every verify answer. After the hash Rust
-  answers 401 without touching the files: the revoke found the receipt in memory and
-  discarded them, and only a revoke lets a partial be created again during a verify,
-  so a partial there belongs to a phone that paired again. Swift discards it and binds
-  the hash to the partial's file identity (409 with no chunk listed when it was
-  replaced); Rust relies on the count, since std has no stable file index on Windows
-  and NTFS tunnelling gives a file created again the old creation time. On a failed
-  store delete both republish the receipts. Swift takes back the count when nothing
-  was discarded and `revoked` unless another revoke is in flight; Rust takes back
-  neither, so the device stays paired in the store but its `complete` answers 401
-  until it pairs again or a retried revoke finishes: a half-revoked phone that cannot
-  hand over is safer than one that can.
+  the read and refuses when it moved: right after the read (401, files discarded,
+  receipt forgotten) and after the hash (see the differences below). A `complete` that
+  starts while a revoke is in flight is refused at entry: Swift's store is a WAL pool,
+  so a read can see a row whose delete has not committed; Rust's is one connection
+  behind a mutex, but the blocking pool may serve a read queued after the revoke's
+  bump before the delete. `pair` clears `revoked` only when no revoke started during
+  its save (Swift `revokeStarts`, Rust the count). A recording already admitted
+  answers 200 with its meeting id after a revoke during the read, and its receipt
+  leaves memory. Both bind the hash to the file the intake gets: the partial's
+  identity is taken before the `verifying` write and checked before the promote, and
+  a partial gone or created again meanwhile (a stale `complete`'s refusal, then the
+  phone's retried announce) answers 409 with no chunk listed, so the phone sends every
+  chunk again instead of the intake admitting an empty file. Swift compares APFS file
+  numbers, which are never reused. Rust keeps the partial open from before the
+  `verifying` write to the promote, so its number cannot go to another file on Linux
+  either, where inode numbers are reused; on Windows it reads the file id through the
+  handle (`GetFileInformationByHandleEx`, since std's `file_index` is unstable). Rust
+  also checks the moved file after the rename, because another thread may replace the
+  partial in between; on one thread that cannot happen, so no test reaches it. Both
+  apps share two gaps. The files of a revoked device's receipt that is only in the
+  store, and not being completed, wait for the next start's sweep. A phone that pairs
+  again and announces anew while an old `complete` waits right after its store read
+  has its new files discarded by that `complete`'s refusal; the phone uploads again,
+  nothing is lost. The differences: Rust refuses every recording route (announce,
+  status, chunk, complete; not unpair) from the revoke until the device pairs again;
+  Swift refuses `complete` only while the revoke runs, after which the read answers
+  404. After the hash Swift discards the files whatever the verify answered; Rust
+  answers 401 without a write and discards a partial there only while `revoked` still
+  holds the device (the revoke discarded the files, so only the revoked phone can have
+  created it); once the phone paired again it is the new pairing's upload and stays.
+  On a failed store delete both republish the receipts. Swift takes back the count
+  when nothing was discarded and `revoked` unless another revoke is in flight; Rust
+  takes back neither, so the device stays paired in the store but its recording routes
+  answer 401 until it pairs again or a retried revoke finishes: a half-revoked phone
+  that cannot hand over is safer than one that can.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
@@ -1340,7 +1351,7 @@ PR off `main`.
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | merged |
 | WASAPI follow-ups: slip window and immediate slip, trusted stream sizes, start deadline, detector start and stop serialised (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
 | Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | in review |
-| Revoke during a `complete`, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | in review |
+| Revoke during a `complete`, a verify bound to the file it hashed, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
