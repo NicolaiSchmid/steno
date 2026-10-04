@@ -272,6 +272,14 @@ impl Engine {
         };
         match self.verified_file(&mut receipt, &metadata).await {
             Verification::Answered(response) => response,
+            // The receipt read and the verify yielded. A revoke that landed
+            // meanwhile discarded the files only if it found the receipt in
+            // memory, which after a restart it may not have: the file of a
+            // revoked device never reaches the intake.
+            Verification::File(_) if self.state().revoked.contains(&device.id) => {
+                self.inbox.discard(recording_id);
+                Self::unauthorized()
+            }
             Verification::File(file) => self.admit(&file, &metadata, device, &mut receipt).await,
         }
     }

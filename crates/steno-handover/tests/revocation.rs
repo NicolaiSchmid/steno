@@ -1,7 +1,9 @@
 //! Revoking a phone mid-upload: its partial and receipt are gone, every
 //! bearer route answers 401 at the gate (the phone's "unpaired" signal),
 //! and another phone's upload is untouched. Both ways in: `revoke` from
-//! the computer and `DELETE /v1/pairing` from the phone.
+//! the computer and `DELETE /v1/pairing` from the phone. A request that
+//! read its device or receipt before the revoke brings neither back, and a
+//! `complete` that had not reached the intake yet admits nothing.
 
 #![allow(
     clippy::assert_is_empty,
@@ -14,12 +16,15 @@
 
 mod common;
 
+use std::future::Future as _;
+use std::sync::Arc;
+use std::task::{Context, Wake, Waker};
 use std::time::Duration;
 
 use common::{Phone, TestService, chunks, seeded_bytes};
 use steno_core::RecordingMetadata;
 use steno_handover::pairing::DeviceTokens;
-use steno_handover::wire;
+use steno_handover::{HandoverIdentity, HandoverService, wire};
 use uuid::Uuid;
 
 const CHUNK_SIZE: i64 = 256 * 1024;
@@ -324,4 +329,81 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
     assert_eq!(again.announce(&metadata).await.status.as_u16(), 201);
     assert!(owned(&test.service.engine.receipts_snapshot()));
     assert!(owned(&receipts.borrow()));
+}
+
+#[tokio::test]
+async fn a_complete_that_read_its_receipt_before_a_revoke_admits_nothing() {
+    // After a restart the receipt is only in the store. A revoke that lands
+    // while `complete` reads it finds nothing in memory to discard, so the
+    // files are still there for the verify; the engine itself must refuse
+    // to hand a revoked device's recording to the intake.
+    let chunk_size: i64 = 64 * 1024;
+    let first = TestService::with(common::Options {
+        chunk_size,
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = common::EngineDevice::paired(&first, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * chunk_size as usize, 99);
+    let metadata = phone.metadata(&bytes, chunk_size);
+    phone.upload_all(&metadata, &bytes).await;
+    let id = metadata.recording_id;
+
+    // The computer comes back over the same store and inbox.
+    let intake = common::ScriptedIntake::new(Uuid::new_v4(), 0);
+    let now = first.now;
+    let restarted = Arc::new(HandoverService::new(
+        first.service.configuration.clone(),
+        first.store.clone(),
+        intake.clone(),
+        Arc::new(HandoverIdentity::mint("Steno test identity", now).unwrap()),
+        Arc::new(move || now),
+    ));
+    let device = common::EngineDevice {
+        service: restarted.clone(),
+        device: phone.device.clone(),
+    };
+
+    // `complete` runs to its store read, the read returns, and only then
+    // does the revoke run, whole, before `complete` goes on.
+    let woken = Arc::new(Woken::default());
+    let mut completing = std::pin::pin!(device.complete(id));
+    let waker = Waker::from(woken.clone());
+    assert!(
+        completing
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending(),
+        "complete waits on the store read"
+    );
+    woken.0.notified().await;
+    restarted.revoke(phone.device.id).await.unwrap();
+    let response = completing.await;
+
+    assert_eq!(
+        response.status.as_u16(),
+        401,
+        "the phone learns it is unpaired"
+    );
+    assert_eq!(intake.count(), 0, "the intake never sees the file");
+    let inbox = first.inbox();
+    assert!(
+        !inbox.has_partial(id)
+            && !inbox.has_verified(id, metadata.format)
+            && inbox.load_metadata(id).is_none(),
+        "its files are gone"
+    );
+    assert!(restarted.engine.receipts_snapshot().is_empty());
+    assert_eq!(first.store.handover_receipt(id).unwrap(), None);
+}
+
+/// Tells the test that the future it polled by hand can go on.
+#[derive(Default)]
+struct Woken(tokio::sync::Notify);
+
+impl Wake for Woken {
+    fn wake(self: Arc<Self>) {
+        self.0.notify_one();
+    }
 }

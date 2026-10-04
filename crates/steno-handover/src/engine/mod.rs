@@ -196,7 +196,8 @@ struct State {
     completing: BTreeSet<Uuid>,
     /// Devices revoked since start and not paired again. Their receipts
     /// stay out of `active_receipts` (and the stream), also when a request
-    /// that read one before the revoke writes it back after.
+    /// that read one before the revoke writes it back after, and a
+    /// `complete` that read one before the revoke admits nothing.
     revoked: BTreeSet<Uuid>,
 }
 
@@ -356,7 +357,10 @@ impl Engine {
             .is_some_and(PairingSession::is_open)
     }
 
-    /// Forgets the device and drops whatever it was uploading.
+    /// Forgets the device and drops whatever it was uploading: the files of
+    /// its receipts in memory here, and whatever a `complete` in flight
+    /// verifies, before the intake sees it. Files of a receipt only in the
+    /// store (not read since start) wait for the next start's sweep.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
         {
