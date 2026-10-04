@@ -2,11 +2,15 @@
 //! fixture through the Parakeet engine the platform runs (the speech
 //! sidecar off the Mac, `CoreML` on it) and the ONNX diarizer, the way
 //! `steno process --engine parakeet-v3` wires them, asserting the shape of
-//! the exported `meeting.json`. Set `STENO_MODEL_TESTS=1` (about 0.7 GB of
-//! downloads on first run); `STENO_MODELS_DIR` keeps the models between
-//! runs, `STENO_MODELS_MIRROR` names a mirror. Off the Mac the sidecar
-//! binary must be built in the target directory (`cargo test --workspace`
-//! builds it, as does `cargo build -p steno-speech-sidecar`).
+//! the exported `meeting.json`. Set `STENO_MODEL_TESTS=1`. The diarizer's
+//! models (and, off the Mac, Silero VAD) download on first run; the
+//! Parakeet the platform runs must already be in `STENO_MODELS_DIR`
+//! (`onnx/parakeet-tdt-0.6b-v3-fp32/` off the Mac,
+//! `fluidaudio/parakeet-tdt-0.6b-v3/` on it) or, off the Mac, come from the
+//! mirror `STENO_MODELS_MIRROR` names. `STENO_MODELS_DIR` keeps the models
+//! between runs. Off the Mac the sidecar binary must be built in the target
+//! directory (`cargo test --workspace` builds it, as does
+//! `cargo build -p steno-speech-sidecar`).
 //! Swift: `Tests/StenoEndToEndTests/RealModelsEndToEndTests.swift`.
 
 use std::path::PathBuf;
@@ -33,7 +37,7 @@ mod common;
 async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_export() {
     if std::env::var("STENO_MODEL_TESTS").as_deref() != Ok("1") {
         eprintln!(
-            "set STENO_MODEL_TESTS=1 to run the pipeline over the fixture recording with the ONNX engines"
+            "set STENO_MODEL_TESTS=1 to run the pipeline over the fixture recording with the real engines"
         );
         return;
     }

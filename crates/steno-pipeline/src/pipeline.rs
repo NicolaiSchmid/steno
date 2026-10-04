@@ -593,9 +593,9 @@ impl ProcessingPipeline {
 
     /// [`warm_up`](Self::warm_up) for the diarizer alone, for a speech
     /// engine that frees its models after each job (the speech sidecar):
-    /// loading that one ahead of a job would keep its working set resident
-    /// until the job is done, outside any claim. Rust only: Swift's
-    /// `warmUp` loads both.
+    /// loading that engine ahead of a job would keep the child's working
+    /// set resident until the job is done, outside any claim. Rust only:
+    /// Swift's `warmUp` loads both.
     pub async fn warm_up_diarizer(&self) -> Result<()> {
         let _guard = self.inner.preparing.lock().await;
         attributing(

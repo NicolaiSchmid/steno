@@ -5,7 +5,8 @@
 //! `steno_speech`'s platform policy ([`steno_speech::SpeechRuntime`]): on
 //! Linux and Windows Parakeet runs in the speech sidecar, never in this
 //! process; on the Mac it runs on `CoreML` in this process, with the
-//! sidecar as the fallback the speech settings can choose.
+//! sidecar as the fallback the speech settings can choose; every engine
+//! id other than `parakeet-v3` runs in the sidecar on every platform.
 //! Swift: `makeSpeechEngine`, `makeDiarizer`, `ModelStore`,
 //! `Sources/StenoSpeech/Engines/SpeechEngineID.swift`.
 
@@ -32,6 +33,8 @@ pub const ONNX_THREADS: usize = 4;
 /// `setting` table: the Swift app rewrites that table whole on every save
 /// and would drop rows it does not know. Nothing writes the file; the
 /// settings are configuration, without a place in the Settings window.
+/// The app reads it once, at launch: an edit takes effect at the next
+/// start, not at a Settings save.
 pub const SPEECH_SETTINGS_FILE: &str = "speech.json";
 
 /// The speech settings: [`SPEECH_SETTINGS_FILE`] in the support directory
@@ -90,6 +93,18 @@ pub fn sidecar_config() -> SidecarConfig {
 
 /// What the speech engine and the model service are built from: the
 /// models directory, the speech settings and the sidecar binary.
+///
+/// ```no_run
+/// use steno_core::{Settings, SpeechEngine as _, StenoPaths};
+/// use steno_services::speech::{SpeechSetup, speech_engine};
+///
+/// let settings = Settings::default();
+/// let paths = StenoPaths::new(StenoPaths::default_support_directory());
+/// let setup = SpeechSetup::new(&settings, &paths);
+/// // `CoreML` on the Mac by default, the speech sidecar elsewhere.
+/// let engine = speech_engine(&settings.speech_engine_id, &setup);
+/// assert_eq!(engine.id(), "parakeet-v3");
+/// ```
 #[derive(Debug, Clone)]
 pub struct SpeechSetup {
     /// The directory every engine's models live under ([`models_directory`]).
@@ -101,15 +116,15 @@ pub struct SpeechSetup {
 }
 
 impl SpeechSetup {
-    /// The app's and the CLI's: [`models_directory`], [`speech_settings`]
-    /// and [`sidecar_config`].
+    /// The app's: [`models_directory`], [`speech_settings`] and
+    /// [`sidecar_config`].
     #[must_use]
     pub fn new(settings: &Settings, paths: &StenoPaths) -> Self {
         Self::in_models_directory(models_directory(settings, paths), paths)
     }
 
-    /// [`SpeechSetup::new`] over a models directory chosen elsewhere (the
-    /// CLI's `--models-dir`).
+    /// [`SpeechSetup::new`] over a models directory resolved elsewhere (the
+    /// CLI's, from `--models-dir` or [`models_directory`]).
     #[must_use]
     pub fn in_models_directory(models_directory: PathBuf, paths: &StenoPaths) -> Self {
         SpeechSetup {
@@ -142,7 +157,7 @@ impl SpeechSetup {
 const PARAKEET_V3: &str = OnnxSpeechEngine::ID;
 
 /// [`SpeechSetup::runtime`] over the speech settings alone, for the model
-/// service and the recorder, which keep no models directory of their own.
+/// service, which keeps no models directory of its own.
 pub(crate) fn engine_runtime(engine_id: &str, speech_settings: &SpeechSettings) -> SpeechRuntime {
     if engine_id == PARAKEET_V3 {
         speech_settings.runtime()
@@ -394,6 +409,8 @@ pub struct ModelStoreSpeechModels {
 }
 
 impl ModelStoreSpeechModels {
+    /// The model service over `setup`'s models directory and speech
+    /// settings.
     #[must_use]
     pub fn new(setup: &SpeechSetup) -> Self {
         ModelStoreSpeechModels {
@@ -795,7 +812,7 @@ mod tests {
     /// serves (a closed loopback port) cannot deliver. No network.
     #[cfg(target_os = "macos")]
     #[tokio::test(flavor = "multi_thread")]
-    async fn parakeet_v3_selects_the_coreml_engine_on_the_mac() {
+    async fn parakeet_v3_is_the_coreml_engine_on_the_mac_unless_the_sidecar_is_chosen() {
         let dir = tempfile::tempdir().unwrap();
         let unserved = |onnx_sidecar_on_mac| {
             testing::setup(

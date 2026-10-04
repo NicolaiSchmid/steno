@@ -7,7 +7,7 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue`, `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `apply_retention`, the stages |
+//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue`, `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes, `apply_retention`, the stages |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |

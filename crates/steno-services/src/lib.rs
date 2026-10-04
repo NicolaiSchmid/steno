@@ -23,9 +23,10 @@
 //! platform services (permissions, login item, updater, clip player, QR
 //! encoder) wait for the plan's `WP8`.
 //!
-//! Off the Mac, and on the Mac when the speech settings choose it,
-//! Parakeet runs in the speech sidecar ([`speech::SpeechSetup`]); the
-//! diarizer's ONNX models run in this process.
+//! Off the Mac, and on the Mac when the speech settings choose it or the
+//! stored engine id has no Rust engine, Parakeet runs in the speech
+//! sidecar ([`speech::SpeechSetup::runtime`]); the diarizer's ONNX models
+//! run in this process.
 //!
 //! Secrets live in the platform keyring on macOS (the Keychain) and on
 //! Windows (the credential store). On Linux they live in the 0600
