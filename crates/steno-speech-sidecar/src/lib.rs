@@ -28,31 +28,31 @@
 //! installed; it never downloads and opens no connection. When the parent
 //! asks for `DirectML` on Windows, the encoder runs there if the probe in
 //! `steno_speech::onnx` passes, and the child answers the load with the
-//! provider it chose. Its health reports and transcripts carry the
-//! provider in force, and when the encoder falls back to the CPU it writes
-//! one line saying why, in fixed words. It reads framed requests from stdin with the audio as a binary
-//! payload, answers on stdout, and reports its resident set from a
-//! heartbeat thread so the parent can kill it at the memory ceiling. It
-//! exits on a shutdown request and as soon as stdin ends or stdout breaks,
-//! so a dead parent leaves no child behind. Its log goes to stderr, which
-//! the parent keeps the tail of for crash reports. Its sessions open
-//! through `steno_speech::onnx`, which switches ONNX Runtime's telemetry
-//! off first, so ONNX Runtime sends nothing. With `DirectML` on,
-//! `DirectML.dll` and Direct3D 12 may still log to Windows' own diagnostic
-//! data, as for any program that uses them; the child opens nothing for
-//! it, and no audio or text is involved.
+//! provider it chose. Its health reports and transcripts carry the provider
+//! in force, and when the encoder falls back to the CPU it writes one line
+//! saying why, in fixed words. It reads framed requests from stdin with the
+//! audio as a binary payload, answers on stdout, and reports its resident
+//! set from a heartbeat thread so the parent can kill it at the memory
+//! ceiling. It exits on a shutdown request and as soon as stdin ends or
+//! stdout breaks, so a dead parent leaves no child behind. Its log goes to
+//! stderr, which the parent keeps the tail of for crash reports. Its
+//! sessions open through `steno_speech::onnx`, which switches ONNX
+//! Runtime's telemetry off first, so ONNX Runtime sends nothing. With
+//! `DirectML` on, `DirectML.dll` and Direct3D 12 may still log to Windows'
+//! own diagnostic data, as for any program that uses them; the child opens
+//! nothing for it, and no audio or text is involved.
 //!
 //! # Test faults
 //!
 //! `--fake-engine` replaces Parakeet with an engine that needs no models
-//! and answers with the sample count and peak of the audio it received;
-//! it answers a load that asks for `DirectML` with `DirectML`, and reports
-//! no live provider. Only with it, `--fault <kind>` ([`Fault`]) makes the
-//! next transcription abort, panic, flood stderr and panic, exit, hang,
-//! allocate 4 GiB, write garbage, fail or report a fallback to the CPU, or
-//! the child stay silent or announce another protocol version from the
-//! start; `--fault-once <path>` limits that to the first child that
-//! creates `<path>`, which holds that child's pid. The isolation tests drive the
+//! and answers with the sample count and peak of the audio it received; it
+//! answers a load that asks for `DirectML` with `DirectML`, and reports no
+//! live provider. Only with it, `--fault <kind>` ([`Fault`]) makes the next
+//! transcription abort, panic, flood stderr and panic, exit, hang, allocate
+//! 4 GiB, write garbage, fail or report a fallback to the CPU, or the child
+//! stay silent or announce another protocol version from the start;
+//! `--fault-once <path>` limits that to the first child that creates
+//! `<path>`, which holds that child's pid. The isolation tests drive the
 //! real client against these.
 
 use std::fs::File;
