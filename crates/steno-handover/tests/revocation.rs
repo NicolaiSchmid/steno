@@ -24,7 +24,7 @@ use std::time::Duration;
 use common::{Phone, TestService, chunks, seeded_bytes};
 use steno_core::RecordingMetadata;
 use steno_handover::pairing::DeviceTokens;
-use steno_handover::{HandoverIdentity, HandoverService, wire};
+use steno_handover::{HandoverService, wire};
 use uuid::Uuid;
 
 const CHUNK_SIZE: i64 = 256 * 1024;
@@ -352,13 +352,12 @@ async fn a_complete_that_read_its_receipt_before_a_revoke_admits_nothing() {
 
     // The computer comes back over the same store and inbox.
     let intake = common::ScriptedIntake::new(Uuid::new_v4(), 0);
-    let now = first.now;
     let restarted = Arc::new(HandoverService::new(
         first.service.configuration.clone(),
         first.store.clone(),
         intake.clone(),
-        Arc::new(HandoverIdentity::mint("Steno test identity", now).unwrap()),
-        Arc::new(move || now),
+        first.service.identity.clone(),
+        first.clock.clock(),
     ));
     let device = common::EngineDevice {
         service: restarted.clone(),
