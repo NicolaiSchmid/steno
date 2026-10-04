@@ -2,7 +2,8 @@ import Foundation
 import StenoCore
 
 /// Call: two lanes, `.mic` ("me") and `.system` ("them") with echo
-/// cancellation. In person: one `.mixed` room lane from the microphone, no
+/// cancellation; the pipeline diarizes the mic lane instead when the tap
+/// stayed silent. In person: one `.mixed` room lane from the microphone, no
 /// tap, no echo cancellation.
 public enum CaptureMode: String, Sendable, Equatable, Hashable, CaseIterable {
   case call

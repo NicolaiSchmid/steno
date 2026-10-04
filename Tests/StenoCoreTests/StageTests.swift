@@ -139,6 +139,58 @@ import Testing
     #expect(ProcessingPipeline.diarizedLane(source: .phone, lanes: []) == nil)
   }
 
+  /// A call whose tap holds less than 5 % of the mic's speech and under
+  /// ten seconds is diarized on the mic lane; one with a real partner,
+  /// however quiet, zero mic speech, or no tap at all keeps the standard
+  /// lane.
+  @Test func aCallWhoseTapCarriedNoConversationIsDiarizedOnTheMicLane() {
+    func lanes(mic: [TimeInterval], system: [TimeInterval]) -> [AudioLane: [RawSegment]] {
+      func segments(_ durations: [TimeInterval]) -> [RawSegment] {
+        var start: TimeInterval = 0
+        return durations.map { duration in
+          defer { start += duration }
+          return RawSegment(start: start, end: start + duration, text: "x")
+        }
+      }
+      return [.mic: segments(mic), .system: segments(system)]
+    }
+    let call: [AudioLane] = [.mic, .system]
+    let silentTap = lanes(mic: [10, 20, 30], system: [])
+    #expect(ProcessingPipeline.tapCarriedNoConversation(silentTap))
+    #expect(
+      ProcessingPipeline.diarizedLane(source: .macCall, lanes: call, transcription: silentTap)
+        == .mic)
+    // A chime on the tap: 2 s against 60 s is under 5 %.
+    let chime = lanes(mic: [10, 20, 30], system: [2])
+    #expect(ProcessingPipeline.tapCarriedNoConversation(chime))
+    // Exactly 5 % is a conversation; so is anything above.
+    let boundary = lanes(mic: [60], system: [3])
+    #expect(!ProcessingPipeline.tapCarriedNoConversation(boundary))
+    let partner = lanes(mic: [30], system: [30])
+    #expect(!ProcessingPipeline.tapCarriedNoConversation(partner))
+    // A partner who mostly listens: 60 s against 2000 s is 3 %, but ten
+    // seconds of speech is a conversation.
+    #expect(!ProcessingPipeline.tapCarriedNoConversation(lanes(mic: [2000], system: [60])))
+    #expect(!ProcessingPipeline.tapCarriedNoConversation(lanes(mic: [2000], system: [10])))
+    #expect(ProcessingPipeline.tapCarriedNoConversation(lanes(mic: [2000], system: [9.5])))
+    #expect(
+      ProcessingPipeline.diarizedLane(source: .macCall, lanes: call, transcription: partner)
+        == .system)
+    // Nothing on either lane, or no tap lane, never falls back.
+    #expect(!ProcessingPipeline.tapCarriedNoConversation(lanes(mic: [], system: [])))
+    #expect(
+      !ProcessingPipeline.tapCarriedNoConversation([.mic: [RawSegment(start: 0, end: 5, text: "x")]]
+      ))
+    #expect(
+      ProcessingPipeline.diarizedLane(
+        source: .macInPerson, lanes: [.mixed], transcription: [.mixed: []]) == .mixed)
+    // The silent-tap rule is for calls: an in-person asset with the same
+    // lanes keeps the last lane.
+    #expect(
+      ProcessingPipeline.diarizedLane(source: .macInPerson, lanes: call, transcription: silentTap)
+        == .system)
+  }
+
   /// A run decodes every lane once: the diarize stage reuses the buffer
   /// `decodeAndTranscribe` hands it instead of decoding the lane again.
   @Test func aCallDecodesEachLaneOnce() async throws {

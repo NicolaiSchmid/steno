@@ -6,6 +6,8 @@ extension ProcessingPipeline {
   struct Diarization: Sendable {
     var speakers: [Speaker]
     var clusterSpeakers: [LaneMerger.ClusterSpeaker]
+    /// The lane the clusters cover; nil when nothing was diarized.
+    var lane: AudioLane? = nil
   }
 
   /// Which lane carries the voices to diarize: the tap in a call, else the
@@ -14,6 +16,38 @@ extension ProcessingPipeline {
     let preferred: AudioLane = source == .macCall ? .system : .mixed
     if lanes.contains(preferred) { return preferred }
     return orderedLanes(lanes).last
+  }
+
+  /// `diarizedLane(source:lanes:)`, except for a call whose tap carried no
+  /// conversation: then the microphone heard everyone (a phone on speaker
+  /// next to the Mac, a call app the tap missed) and the mic lane is the
+  /// room lane to diarize, instead of being "me" wholesale.
+  static func diarizedLane(
+    source: MeetingSource, lanes: [AudioLane], transcription: [AudioLane: [RawSegment]]
+  ) -> AudioLane? {
+    if source == .macCall, lanes.contains(.mic), tapCarriedNoConversation(transcription) {
+      return .mic
+    }
+    return diarizedLane(source: source, lanes: lanes)
+  }
+
+  /// The tap carried no conversation when its speech stays under both
+  /// bounds: this share of the mic's speech, and `tapConversationMaximumSeconds`
+  /// outright. A notification chime or a hallucinated word on a silent tap
+  /// stays under both; a partner who mostly listens still clears the
+  /// seconds.
+  static let tapConversationMinimumShare: TimeInterval = 0.05
+  static let tapConversationMaximumSeconds: TimeInterval = 10
+
+  /// True when the mic lane holds speech and the system lane holds less
+  /// than `tapConversationMinimumShare` of it and less than
+  /// `tapConversationMaximumSeconds`.
+  static func tapCarriedNoConversation(_ lanes: [AudioLane: [RawSegment]]) -> Bool {
+    guard let mic = lanes[.mic], let system = lanes[.system] else { return false }
+    let micSpeech = mic.reduce(0.0) { $0 + $1.duration }
+    let tapSpeech = system.reduce(0.0) { $0 + $1.duration }
+    return micSpeech > 0 && tapSpeech < micSpeech * tapConversationMinimumShare
+      && tapSpeech < tapConversationMaximumSeconds
   }
 
   /// The sample clip is at most ten seconds.
@@ -25,19 +59,24 @@ extension ProcessingPipeline {
   /// sample clip range. Each cluster's clip is written as 16 kHz WAV to
   /// `RecordingLayout.sampleClip(speakerID:)` beside the master.
   ///
-  /// `buffer` is the last lane `decodeAndTranscribe` decoded, which under
-  /// today's lane rules is the diarized lane, so the stage reuses it. The
-  /// lane is decoded here only when no buffer was handed or it carries
-  /// another lane, a branch `process` never takes; a caller who does take
-  /// it holds two buffers for the stage's span.
-  func diarize(asset: AudioAsset, meeting: Meeting, buffer handed: DecodedLane?) async throws
-    -> Diarization
-  {
+  /// `lane` is the lane to diarize, `diarizedLane(source:lanes:)` when nil.
+  /// A mic lane in which the diarizer hears fewer than two voices is the
+  /// user alone (headphones, the tap permission missing): the stage returns
+  /// no clusters and no lane, writes no clip, and the merge keeps the mic
+  /// as "me". `buffer` is the last lane `decodeAndTranscribe` decoded, which is the
+  /// diarized lane unless a call fell back to its mic lane, so the stage
+  /// reuses it. The lane is decoded here only when no buffer was handed or
+  /// it carries another lane; a caller who hands another lane's buffer holds
+  /// two buffers for the stage's span.
+  func diarize(
+    asset: AudioAsset, meeting: Meeting, buffer handed: DecodedLane?, lane chosen: AudioLane? = nil
+  ) async throws -> Diarization {
     let decoder = dependencies.decoder
     let diarizer = dependencies.diarizer
     let layout = RecordingLayout(asset: asset)
     return try await run(.diarize, meetingID: meeting.id) {
-      guard let lane = Self.diarizedLane(source: meeting.source, lanes: asset.lanes) else {
+      guard let lane = chosen ?? Self.diarizedLane(source: meeting.source, lanes: asset.lanes)
+      else {
         return Diarization(speakers: [], clusterSpeakers: [])
       }
       let buffer: AudioBuffer16k
@@ -47,6 +86,9 @@ extension ProcessingPipeline {
         buffer = try await decoder.decode(asset, lane: lane)
       }
       let result = try await diarizer.diarize(buffer)
+      if lane == .mic, result.clusters.count < 2 {
+        return Diarization(speakers: [], clusterSpeakers: [])
+      }
       var labels = Set<String>()
       for cluster in result.clusters where !labels.insert(cluster.label).inserted {
         throw PipelineFailure(
@@ -81,7 +123,7 @@ extension ProcessingPipeline {
           ))
         clusterSpeakers.append(LaneMerger.ClusterSpeaker(speakerID: id, ranges: cluster.ranges))
       }
-      return Diarization(speakers: speakers, clusterSpeakers: clusterSpeakers)
+      return Diarization(speakers: speakers, clusterSpeakers: clusterSpeakers, lane: lane)
     }
   }
 }
