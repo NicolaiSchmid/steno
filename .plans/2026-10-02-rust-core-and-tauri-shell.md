@@ -373,6 +373,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     it, and the cached build did not relink it), but every child of that run took
     about 11 s to greet, longer than the 5 s and 10 s start timeouts the tests then
     had; the same binary on the same runner had greeted within 2 s ten minutes earlier.
+    On Forge the first start of a freshly copied binary takes 1.2 s for 16 at once and
+    the next 0.04 s (macOS checks a new executable on its first start); with three
+    other CI jobs on the machine that minute, that or the load alone explains it.
     A loaded runner, then, not a missing build. On a Ryzen
     7 7700 desktop, in a release build, the child loads at 2.2 GB resident and
     transcribes 471 s of FLEURS German in 16.9 s, segment for segment equal to the
