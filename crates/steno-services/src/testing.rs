@@ -41,7 +41,9 @@ pub fn fake_dependencies(store: &Arc<Store>, engine_id: &str) -> PipelineDepende
     )
 }
 
-/// `dependencies` as a build of `parakeet-v3` in the speech sidecar.
+/// `dependencies` as a build of `parakeet-v3` in the speech sidecar; only
+/// the recorder's warm-up reads the engine, and its tests build their own
+/// (`recorder::tests::harness_over`).
 pub fn built(dependencies: PipelineDependencies) -> BuiltPipeline {
     BuiltPipeline {
         dependencies,

@@ -22,7 +22,7 @@ use crate::block_on;
 /// The speech engine a pipeline was built with: the engine id the
 /// settings named at the build and where [`SpeechSetup::runtime`] runs it.
 /// The recorder's warm-up reads it from [`CurrentPipeline`], not the id
-/// stored now.
+/// stored now (Rust only: Swift asked about the stored id).
 ///
 /// [`SpeechSetup::runtime`]: crate::speech::SpeechSetup::runtime
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,11 +35,14 @@ pub struct BuiltEngine {
 
 /// One pipeline's dependencies and the speech engine they hold.
 pub struct BuiltPipeline {
+    /// What `ProcessingPipeline::new` takes.
     pub dependencies: PipelineDependencies,
+    /// Which speech engine `dependencies` hold and where it runs.
     pub engine: BuiltEngine,
 }
 
-/// Rebuilds the dependencies from the stored settings and the API key.
+/// Rebuilds the dependencies, and the engine they hold, from the stored
+/// settings and the API key.
 pub type MakeDependencies = Arc<dyn Fn() -> Result<BuiltPipeline, BuildError> + Send + Sync>;
 
 /// The pipeline [`CurrentPipeline`] holds, with the engine it was built
@@ -91,6 +94,7 @@ impl CurrentPipeline {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// The pipeline new work goes to.
     #[must_use]
     pub fn current(&self) -> ProcessingPipeline {
         self.lock().pipeline.clone()

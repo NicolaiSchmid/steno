@@ -278,6 +278,8 @@ pub trait SpeechModels: Send + Sync {
     /// About how many bytes `asset`'s model takes once installed, shown
     /// before a download and when the installed size cannot be read; the
     /// default is the Swift app's measure, [`ModelAsset::approximate_bytes`].
+    /// The services override it where the model behind an asset is not the
+    /// Swift app's (the fp32 export in the speech sidecar).
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         asset.approximate_bytes()
     }

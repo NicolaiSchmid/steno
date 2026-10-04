@@ -143,9 +143,10 @@ impl SpeechSettingsViewModel {
             .join(" · ")
     }
 
-    /// "Installed · 485 MB", "Downloading… 40%", "Not downloaded · 485 MB",
-    /// the size before a download (or of an installed asset whose size
-    /// could not be read) as `models` expects it.
+    /// "Installed · 485 MB", "Downloading… 40%" or "Not downloaded · 485 MB".
+    /// A size not read from disk (before a download, or of an installed
+    /// asset whose size could not be read) is the one `models` expects
+    /// ([`SpeechModels::expected_bytes`]).
     #[must_use]
     pub fn status_text(&self, asset: ModelAsset, models: &dyn SpeechModels) -> String {
         match self.state_of(asset) {

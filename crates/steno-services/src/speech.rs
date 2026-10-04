@@ -244,7 +244,9 @@ pub fn diarize_store(speech: &ModelStore) -> steno_diarize::models::ModelStore {
 /// The engine `engine_id` names, where [`SpeechSetup::runtime`] runs it:
 /// on the Mac, by default, the `CoreML` Parakeet v3 on the Neural Engine;
 /// otherwise [`sidecar_engine`], the fp32 ONNX export of the same model.
-/// Both report the id `parakeet-v3`.
+/// Both report the id `parakeet-v3`. It decides by
+/// [`SpeechSetup::runtime`] alone; [`BuiltEngine`](crate::pipeline::BuiltEngine)
+/// relies on that.
 #[must_use]
 pub fn speech_engine(engine_id: &str, setup: &SpeechSetup) -> Arc<dyn SpeechEngine> {
     #[cfg(target_os = "macos")]
@@ -989,7 +991,8 @@ mod tests {
 
     /// Settings shows the size of the model the platform runs: the
     /// `CoreML` build's on the Mac by default, the fp32 export's (about
-    /// 2.6 GB) elsewhere. The diarizer keeps the Swift app's measure.
+    /// 2.6 GB) elsewhere. The diarizer keeps the Swift app's measure for
+    /// now (the open item on the diarizer's rows in the plan).
     #[test]
     fn the_expected_size_is_that_of_the_model_the_platform_runs() {
         let models = testing::models_in(Path::new("/tmp/steno-models"));

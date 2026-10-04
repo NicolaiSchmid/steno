@@ -268,8 +268,8 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let runtime = options.runtime;
     let zone = local_zone();
 
-    // The speech settings are read once, here: the pipeline (and every
-    // reload) and the model service share them.
+    // The speech settings and the models directory are read once, here:
+    // the pipeline (and every reload) and the model service share them.
     let speech = SpeechSetup::new(&store.settings()?, &paths);
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
@@ -658,12 +658,12 @@ mod tests {
     }
 
     /// The models directory is decided once, when the app is built: a
-    /// reload after the settings name another directory keeps the first, so
-    /// the pipeline and the model service agree. Both
-    /// directories are plain files, so the engine's `prepare` fails naming
-    /// the one it uses without touching the network (`CoreML` misses its
-    /// bundles under it on the Mac; elsewhere the sidecar's store cannot
-    /// create its folder in it).
+    /// reload after the settings name another directory keeps the first,
+    /// so the pipeline and the model service agree. Both directories are
+    /// plain files, so the engine's `prepare` fails naming the one it uses
+    /// without touching the network (`CoreML` misses its bundles under it
+    /// on the Mac; elsewhere the sidecar's store cannot create its folder
+    /// in it).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_keeps_the_models_directory_the_app_was_built_with() {
         let dir = tempfile::tempdir().unwrap();
