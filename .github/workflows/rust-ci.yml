@@ -61,9 +61,9 @@ name: Rust CI
 # two-thread accounting test in `crates/steno-audio/tests/ring.rs` is what
 # catches a weakened memory ordering on the ring indices, and only a
 # sanitizer sees that on x86. `tests/split_streams.rs` runs there too: its
-# two-thread test drives the WASAPI backend's follower staging ring. It needs nightly and `-Zbuild-std`, so it is
-# its own job and is not a required check: a nightly breakage must not block
-# the workspace jobs.
+# two-thread test drives the WASAPI backend's follower staging ring. It
+# needs nightly and `-Zbuild-std`, so it is its own job and is not a
+# required check: a nightly breakage must not block the workspace jobs.
 
 on:
   pull_request:

@@ -56,9 +56,10 @@ impl ManualClock {
     }
 
     /// Polls until exactly `count` sleeps are in progress, for up to about
-    /// two seconds of wall time; `true` when they are.
+    /// ten seconds of wall time (a loaded CI host can take seconds to
+    /// schedule the thread that arms a timer); `true` when they are.
     pub fn wait_for_sleepers(&self, count: usize) -> bool {
-        for _ in 0..2_000 {
+        for _ in 0..10_000 {
             if self.pending_sleepers() == count {
                 return true;
             }

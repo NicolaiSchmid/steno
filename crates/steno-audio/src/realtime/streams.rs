@@ -1,7 +1,7 @@
 //! Two independent capture streams into one [`LaneFrameSink`]: the bodies
 //! of the WASAPI capture threads (WP10a), kept apart from COM so they run on
 //! every OS under the counting allocator (`tests/realtime.rs`). No Swift
-//! equivalent: Core Audio hands the microphone and the tap to one IOProc
+//! counterpart: Core Audio hands the microphone and the tap to one IOProc
 //! through the aggregate device, WASAPI delivers them as two streams on two
 //! clocks.
 //!
@@ -18,14 +18,35 @@
 //! The staging ring is a jitter buffer with a fixed target: the master
 //! starts pulling once `target` frames are queued beyond its packet (zeros
 //! until then), leaves `target` queued, pads with zeros and re-primes when
-//! the follower falls short (the follower stopped, or its clock runs slow),
-//! and slips back to `target` when the queue passes `high_water` (its clock
-//! runs fast). The two endpoints' clocks are not reconciled by resampling;
-//! the slips are counted as dropped system frames in the sink's accounting,
-//! the shortfalls as underruns. The far-end delay assumes `target`, so the
-//! system lane sits at most `high_water - target` later than the echo
-//! canceller expects; [`FollowerLane::for_period`] keeps that to one
-//! period. Both are a parity item in the plan.
+//! the follower falls short (the follower stopped, or its clock runs
+//! slow), and slips back to `target` when the queue stays above
+//! `high_water` for a whole slip window (its clock runs fast). The window
+//! matters because the queue also rises when the master's thread runs
+//! late and then drains its packets back to back: that is a moment of
+//! jitter, not drift, and the queue falls back on its own, so only the
+//! lowest queue left over a window is judged. A queue more than the
+//! master's own buffer above `high_water` cannot be such lateness (the
+//! master would have lost data first), so it slips at once.
+//!
+//! What the follower queued before the master's first pull is trimmed to
+//! the target, uncounted: audio from before the recording, or, when the
+//! master's first drain is late, the system audio recorded during that
+//! lateness. A full staging ring refuses the newest packets, so one it
+//! refused before that pull (it takes a master that starts more than the
+//! ring's 1.37 s after the follower) leaves only older audio queued: the
+//! first pull drops all of it and the refused packets, uncounted, and the
+//! lane primes on the audio that follows.
+//!
+//! The two endpoints' clocks are not reconciled by resampling; the slips
+//! are counted as dropped system frames in the sink's accounting, the
+//! shortfalls and their re-prime zeros as underruns. The far-end delay assumes `target`, so between
+//! slips the system lane sits later than the echo canceller expects by up
+//! to `high_water - target` (one period with
+//! [`FollowerLane::for_streams`]), plus the follower's worst lateness in a
+//! window (it lowers the window's lowest queue and so hides drift), plus up
+//! to two windows of drift (about 0.1 ms at 100 ppm), and never by more
+//! than one period plus the master's buffer (the immediate slip). The
+//! plan's parity list tracks both the missing resampling and this error.
 //!
 //! Real-time: [`StreamBody::handle`] allocates nothing and takes no lock;
 //! the scratch buffers are allocated when the body is built, before the
@@ -47,43 +68,86 @@ pub struct FollowerLane {
     ring: LaneRingBuffer,
     target: usize,
     high_water: usize,
-    /// Consumer-only state; an atomic only so the lane is `Sync`.
+    window: usize,
+    /// A queue above this after a pull slips at once (see the module doc).
+    ceiling: usize,
+    /// Consumer-only state from here on; atomics only so the lane is
+    /// `Sync`.
     primed: AtomicBool,
+    /// The master's first pull is behind us: nothing is trimmed after it.
+    started: AtomicBool,
     underrun: AtomicUsize,
     slipped: AtomicUsize,
-    /// Staging overflows already handed to the sink's drop count;
-    /// consumer-only.
+    trimmed: AtomicUsize,
+    /// Master frames pulled in the current slip window.
+    window_pulled: AtomicUsize,
+    /// The lowest queue a pull left in the current slip window.
+    window_low: AtomicUsize,
+    /// Staging overflows already handed to the sink's drop count.
     reported_overflow: AtomicUsize,
 }
 
 impl FollowerLane {
-    /// One second of staging at 48 kHz.
+    /// One second of staging at 48 kHz (the ring rounds it up to 65 536
+    /// frames, about 1.37 s).
     pub const CAPACITY: usize = 48_000;
 
-    /// `target` frames are kept queued; a queue beyond `high_water` slips
-    /// back to `target`. `high_water` is raised to `target` if lower.
+    /// Half a second at 48 kHz: how long the queue must stay above the
+    /// high-water mark before it slips. Windows are back to back, so a
+    /// sustained excess slips within one to two windows.
+    pub const SLIP_WINDOW: usize = 24_000;
+
+    /// `target` frames are kept queued; a queue that stays above
+    /// `high_water` for `window` frames of master pulls slips back to
+    /// `target`. `high_water` is raised to `target` if lower. No queue
+    /// slips at once without [`Self::with_max_lateness`].
     #[must_use]
-    pub fn new(target: usize, high_water: usize, capacity: usize) -> Self {
+    pub fn new(target: usize, high_water: usize, window: usize, capacity: usize) -> Self {
         Self {
             ring: LaneRingBuffer::new(capacity.max(high_water)),
             target,
             high_water: high_water.max(target),
+            window,
+            ceiling: usize::MAX,
             primed: AtomicBool::new(false),
+            started: AtomicBool::new(false),
             underrun: AtomicUsize::new(0),
             slipped: AtomicUsize::new(0),
+            trimmed: AtomicUsize::new(0),
+            window_pulled: AtomicUsize::new(0),
+            window_low: AtomicUsize::new(usize::MAX),
             reported_overflow: AtomicUsize::new(0),
         }
     }
 
-    /// The policy for a stream with `period` frames per packet: a target of
-    /// two periods (20 ms at WASAPI's usual 10 ms period) and a high-water
-    /// mark one period above it. The system lane then lags the far-end
-    /// delay by at most one period, a master that runs one period late
-    /// costs nothing, and a slip drops a little over one period.
+    /// The policy for a follower with `period` frames per packet behind a
+    /// master whose buffer holds `master_buffer` frames: a target of two
+    /// periods (20 ms at WASAPI's usual 10 ms period), a high-water mark
+    /// one period above it, [`Self::SLIP_WINDOW`], and a master that runs
+    /// at most `master_buffer` late. A master that runs late and catches up
+    /// costs nothing, and a drift slip drops a little over one period.
+    ///
+    /// ```
+    /// use steno_audio::realtime::FollowerLane;
+    ///
+    /// // 10 ms periods at 48 kHz behind a 100 ms master buffer.
+    /// let lane = FollowerLane::for_streams(480, 4_800);
+    /// assert_eq!(lane.target(), 960);
+    /// ```
     #[must_use]
-    pub fn for_period(period: usize) -> Self {
+    pub fn for_streams(period: usize, master_buffer: usize) -> Self {
         let period = period.max(1);
-        Self::new(2 * period, 3 * period, Self::CAPACITY)
+        Self::new(2 * period, 3 * period, Self::SLIP_WINDOW, Self::CAPACITY)
+            .with_max_lateness(master_buffer)
+    }
+
+    /// The most the master can run late, in frames; a queue more than this
+    /// above the high-water mark after a pull slips to the target at once
+    /// (see the module doc).
+    #[must_use]
+    pub fn with_max_lateness(mut self, frames: usize) -> Self {
+        self.ceiling = self.high_water.saturating_add(frames);
+        self
     }
 
     /// Frames kept queued: how much later the follower lane sits than the
@@ -93,8 +157,9 @@ impl FollowerLane {
         self.target
     }
 
-    /// Frames of zeros the master wrote because the follower had fallen
-    /// short while primed.
+    /// Frames of zeros the master wrote because the follower fell short:
+    /// the shortfall and the re-prime that follows it. The zeros before the
+    /// lane first primes are not counted.
     #[must_use]
     pub fn underrun_frames(&self) -> usize {
         self.underrun.load(Ordering::Relaxed)
@@ -104,6 +169,15 @@ impl FollowerLane {
     #[must_use]
     pub fn slipped_frames(&self) -> usize {
         self.slipped.load(Ordering::Relaxed)
+    }
+
+    /// Frames the follower delivered before the master's first pull that
+    /// were dropped there, not counted as lost: the queue trimmed to the
+    /// target, or all of it and the refused packets after a staging
+    /// overflow (see the module doc).
+    #[must_use]
+    pub fn trimmed_frames(&self) -> usize {
+        self.trimmed.load(Ordering::Relaxed)
     }
 
     /// Frames queued in the staging ring right now.
@@ -116,7 +190,8 @@ impl FollowerLane {
     /// its first two channels, as the macOS tap is folded) into the staging
     /// ring, whole or not at all; a full ring counts the packet as an
     /// overflow, which the next [`Self::pull`] hands to the sink's drop
-    /// count. A packet shorter than it claims is written as zeros.
+    /// count (none before the master's first pull, see the module doc). A
+    /// packet shorter than it claims is written as zeros.
     /// `scratch` is the thread's fold buffer; any length above zero works.
     #[inline(always)]
     pub fn push(&self, packet: SliceView<'_>, scratch: &mut [f32]) {
@@ -162,29 +237,46 @@ impl FollowerLane {
     #[inline(always)]
     pub fn pull(&self, out: &mut [f32]) -> usize {
         let wanted = out.len();
-        let available = self.ring.available_to_read();
+        let mut available = self.ring.available_to_read();
         let mut lost = 0;
+        let first_pull = !self.started.swap(true, Ordering::Relaxed);
         let overflow = self.ring.dropped_samples();
         let reported = self.reported_overflow.load(Ordering::Relaxed);
         if overflow > reported {
-            lost += overflow - reported;
             self.reported_overflow.store(overflow, Ordering::Relaxed);
+            if first_pull {
+                // The full ring refused the newest audio, so what is
+                // queued is older than the gap it left: all of it goes,
+                // uncounted, as the trim below (see the module doc).
+                let discarded = self.ring.discard(available);
+                self.trimmed
+                    .fetch_add(discarded + overflow - reported, Ordering::Relaxed);
+                available -= discarded;
+            } else {
+                lost += overflow - reported;
+            }
+        }
+        if first_pull && available > self.target + wanted {
+            let trimmed = self.ring.discard(available - self.target - wanted);
+            self.trimmed.fetch_add(trimmed, Ordering::Relaxed);
+            available -= trimmed;
         }
         if !self.primed.load(Ordering::Relaxed) {
             if available < self.target + wanted {
                 out.fill(0.0);
+                // Only an underrun unprimes a lane that primed, and it
+                // counts at least one frame: these zeros are its re-prime.
+                if self.underrun.load(Ordering::Relaxed) > 0 {
+                    self.underrun.fetch_add(wanted, Ordering::Relaxed);
+                }
                 return lost;
             }
             self.primed.store(true, Ordering::Relaxed);
+            self.restart_window();
         }
         if available >= wanted {
             self.ring.read(out);
-            let rest = available - wanted;
-            if rest > self.high_water {
-                let skipped = self.ring.discard(rest - self.target);
-                self.slipped.fetch_add(skipped, Ordering::Relaxed);
-                lost += skipped;
-            }
+            lost += self.judge_window(available - wanted, wanted);
         } else {
             let (head, tail) = out.split_at_mut(available);
             self.ring.read(head);
@@ -194,6 +286,47 @@ impl FollowerLane {
             self.primed.store(false, Ordering::Relaxed);
         }
         lost
+    }
+
+    /// Records the queue a pull of `pulled` frames left (`rest`); slips it
+    /// back to the target at once when it is above the ceiling, or at the
+    /// end of a slip window when the window's lowest queue stayed above the
+    /// high-water mark. Returns the frames skipped.
+    #[inline(always)]
+    fn judge_window(&self, rest: usize, pulled: usize) -> usize {
+        if rest > self.ceiling {
+            self.restart_window();
+            return self.slip(rest);
+        }
+        let low = self.window_low.load(Ordering::Relaxed).min(rest);
+        let seen = self.window_pulled.load(Ordering::Relaxed) + pulled;
+        if seen < self.window {
+            self.window_low.store(low, Ordering::Relaxed);
+            self.window_pulled.store(seen, Ordering::Relaxed);
+            return 0;
+        }
+        self.restart_window();
+        if low <= self.high_water {
+            return 0;
+        }
+        // `rest` frames are still queued and `low <= rest`, so this skips
+        // whole and leaves at least the target.
+        self.slip(low)
+    }
+
+    /// Skips `queued - target` frames (`queued` is at most what is queued
+    /// and above the target) and counts them as slipped.
+    #[inline(always)]
+    fn slip(&self, queued: usize) -> usize {
+        let skipped = self.ring.discard(queued - self.target);
+        self.slipped.fetch_add(skipped, Ordering::Relaxed);
+        skipped
+    }
+
+    #[inline(always)]
+    fn restart_window(&self) {
+        self.window_low.store(usize::MAX, Ordering::Relaxed);
+        self.window_pulled.store(0, Ordering::Relaxed);
     }
 }
 

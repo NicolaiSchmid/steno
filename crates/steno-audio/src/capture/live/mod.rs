@@ -5,8 +5,8 @@
 //! capture stream linked to the microphone and the default sink's monitor
 //! (`pipewire`, WP5b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`);
 //! on Windows WASAPI process loopback and the capture endpoint as two
-//! streams on their own threads (`wasapi`, WP10a, compile-tested only; see
-//! its module doc). All three coalesce device changes and report them for
+//! streams on their own threads (`wasapi`, WP10a, not run on hardware;
+//! see its module doc). All three coalesce device changes and report them for
 //! the session's rebuild. Other targets get the stub, failing at `start`.
 //! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
 
@@ -39,13 +39,14 @@ pub use wasapi::{AudioDevices, LiveCaptureBackend};
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub use stub::LiveCaptureBackend;
 
-/// One device as `steno dev audio-devices` and the app's input picker see
-/// it. `uid` is the stable identifier `Settings.input_device_uid` stores.
-/// Filled in by Core Audio here, by PipeWire and WASAPI on the other
-/// platforms (see the module doc).
+/// One device as the app's input picker (and, on the Mac,
+/// `steno dev audio-devices`) sees it. `uid` is the stable identifier
+/// `Settings.input_device_uid` stores. Filled in by Core Audio on macOS and
+/// by WASAPI on Windows; Linux has no device list yet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioDeviceInfo {
-    /// The `AudioObjectID`, valid until the device goes away.
+    /// The `AudioObjectID`, valid until the device goes away; on Windows
+    /// the index in the enumeration (WASAPI has no numeric ids).
     pub id: u32,
     /// The stable UID `Settings` stores.
     pub uid: String,
@@ -65,7 +66,9 @@ pub struct AudioDeviceInfo {
     pub is_default_input: bool,
     /// The system's default output, where calls play.
     pub is_default_output: bool,
-    /// The system's default output for alerts: the aggregate's clock master.
+    /// The system's default output for alerts: the aggregate's clock
+    /// master. On Windows the `eConsole` render endpoint, the same one as
+    /// `is_default_output`.
     pub is_default_system_output: bool,
 }
 

@@ -303,10 +303,11 @@ fn the_sidecar_resampler_allocates_nothing_after_init() {
 /// The WASAPI capture threads' per-packet bodies (WP10a), driven with
 /// synthetic packets, no audio device: the follower folding stereo loopback
 /// packets into its staging ring, the master routing mono microphone
-/// packets plus the staged frames into the sink. One second at WASAPI's
-/// 10 ms period, with a silent loopback packet, a follower burst that
-/// slips at the high-water mark and a gap that underruns and re-primes, all
-/// on this thread under the counting allocator: nothing allocates. On the
+/// packets plus the staged frames into the sink. A second and a half at
+/// WASAPI's 10 ms period, with a silent loopback packet, a gap that
+/// underruns and re-primes, and a follower burst that stays queued and
+/// slips once a whole window has stayed above the high-water mark, all on
+/// this thread under the counting allocator: nothing allocates. On the
 /// Windows runner this is the backend's real-time proof, since the runner
 /// has no device to drive the COM loop with.
 #[test]
@@ -315,7 +316,7 @@ fn the_two_stream_bodies_allocate_nothing() {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = Arc::new(LaneFrameSink::new(&lanes));
-    let follower = Arc::new(FollowerLane::for_period(PERIOD));
+    let follower = Arc::new(FollowerLane::for_streams(PERIOD, 4_800));
     let mut master = StreamBody::Master {
         router: PacketRouter::new(
             plan.layout.sources.clone(),
@@ -325,16 +326,18 @@ fn the_two_stream_bodies_allocate_nothing() {
         sink: Arc::clone(&sink),
     };
     let mut staging = StreamBody::follower(Arc::clone(&follower), 4_800);
-    let material = Material::new(1.1);
-    let mut processed = vec![0.0f32; 110 * PERIOD];
+    let material = Material::new(1.7);
+    let mut processed = vec![0.0f32; 160 * PERIOD];
 
     let mut step = |period: usize| {
         let offset = period * PERIOD;
         let mic = &material.mic[offset..offset + PERIOD];
         let tap = &material.tap[2 * offset..2 * (offset + PERIOD)];
         // Periods 40 to 44 deliver no loopback packets (an underrun and a
-        // re-prime); period 60 delivers a burst of six (a slip); period 30
-        // is flagged silent.
+        // re-prime); period 60 delivers a burst of six, which stays queued
+        // and slips at the end of the second window after the re-prime,
+        // the first that holds only the raised queue; period 30 is flagged
+        // silent.
         let loopback_packets = match period {
             40..45 => 0,
             60 => 6,
@@ -358,7 +361,7 @@ fn the_two_stream_bodies_allocate_nothing() {
         step(period);
     }
     let allocations = CountingAllocator::allocations_during(|| {
-        for period in 10..110 {
+        for period in 10..160 {
             step(period);
         }
         // The consumer side as the processing thread drains it.
@@ -373,7 +376,7 @@ fn the_two_stream_bodies_allocate_nothing() {
     assert_eq!(
         sink.available_to_read(),
         0,
-        "110 periods were delivered and drained"
+        "160 periods were delivered and drained"
     );
     assert!(follower.underrun_frames() > 0, "the gap underran");
     assert!(follower.slipped_frames() > 0, "the burst slipped");

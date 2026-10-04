@@ -3,23 +3,25 @@
 //! of `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS
 //! counterpart is `capture::live::backend`. No Swift counterpart.
 //!
-//! **Compile-tested only.** No Windows machine has run it: this backend is
-//! written against Microsoft's documentation and its samples, compiled,
-//! linted and unit-tested on the `windows-latest` CI runner, which has no
-//! audio device. Nothing here has captured a sample on real hardware;
-//! `tests/live_windows.rs` holds the `--ignored` checks a Windows machine
-//! must run before this ships (the plan's parity list).
+//! **Not run on hardware.** No Windows machine with audio devices has run
+//! it: this backend is written against Microsoft's documentation and its
+//! samples, compiled, linted and tested on the `windows-latest` CI runner.
+//! The runner has no audio endpoint, so no microphone stream ever opens
+//! there; process loopback does run and delivers silence, and
+//! `tests/live_windows.rs` checks that system-lane capture starts,
+//! delivers, stops and restarts. Its `--ignored` tests are the checks a
+//! Windows machine must run before this ships (the plan's parity list).
 //!
 //! # Streams
 //!
 //! - **System lane:** process loopback (`ActivateAudioInterfaceAsync` on
 //!   `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`,
 //!   `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) excluding Steno's own
-//!   process tree (Microsoft documents it from build 20348; reported to
-//!   work from Windows 10 2004, unverified). Where that activation fails
-//!   for any reason, its timeout included, loopback of the default render
-//!   endpoint, which records Steno's own output too; the switch is only
-//!   logged.
+//!   process tree (Microsoft's API page names build 20438, its sample
+//!   build 20348; reported to work from Windows 10 2004, unverified).
+//!   Where that activation fails for any reason, its timeout included,
+//!   loopback of the default render endpoint, which records Steno's own
+//!   output too; the switch is only logged.
 //! - **Microphone:** the selected capture endpoint by id, or the default
 //!   (`eCapture`, `eConsole`), shared mode, event-driven.
 //!
@@ -30,6 +32,11 @@
 //! (the sink's only producer) and [`StreamBody`] is what each thread runs
 //! per packet, with the all-or-nothing reservation across lanes and the
 //! drop accounting of the IOProc path (see `realtime::streams`).
+//!
+//! When the system stream is the only one (a `[System]` lane override),
+//! it is the master, and the timeline advances only as it delivers. Endpoint
+//! loopback delivers no packet while nothing plays, so such a recording is
+//! shorter than the time it ran, its silences left out; nothing pads them.
 //!
 //! # Device changes
 //!
@@ -61,8 +68,10 @@
 //! only producer, so a start that fails has written nothing. Data the
 //! engine itself lost (a packet flagged as a discontinuity, the first one
 //! aside) is counted and logged at stop, not added to the sink's drop
-//! count: WASAPI does not say how much was lost. The follower's underrun
-//! and slip counts are logged at stop too.
+//! count: WASAPI does not say how much was lost. The follower's underrun,
+//! slip and trim counts are logged at stop too. All of these logs are at
+//! `info`, below the shell's default filter: set
+//! `RUST_LOG=steno_audio=info` to see them.
 
 pub(crate) mod com;
 
@@ -77,7 +86,7 @@ use steno_core::AudioLane;
 use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThread};
 use super::AudioDeviceInfo;
 use crate::SAMPLE_RATE;
-use crate::capture::split_streams::far_end_latencies;
+use crate::capture::split_streams::{StreamSizes, far_end_latencies};
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     SplitStreamPlan, StreamSource,
@@ -85,9 +94,12 @@ use crate::capture::{
 use crate::detection::EndpointFlow;
 use crate::realtime::{FollowerLane, LaneFrameSink, PacketRouter, StreamBody};
 
-/// How long a stream thread may take to open its stream (process loopback
-/// activation included) before `start` gives up on it.
-const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `start` waits, in total, for the stream threads to open and
+/// start their streams (process loopback activation included) and for the
+/// watcher to register, before it gives up on a stream; a watcher that
+/// misses it is logged, not a failure. One deadline for every wait, so a
+/// hanging COM call holds the session's lock this long at most.
+const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the asynchronous process-loopback activation may take.
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest a capture thread waits for the engine's event; also how
@@ -97,9 +109,7 @@ const WAIT: Duration = Duration::from_millis(50);
 /// What one stream thread found when it opened its stream.
 #[derive(Debug, Clone)]
 struct StreamInfo {
-    buffer_frames: usize,
-    period_frames: usize,
-    latency_frames: usize,
+    sizes: StreamSizes,
     /// The endpoint the stream runs on: the microphone's, or for the
     /// system stream the default render endpoint at start.
     endpoint_id: Option<String>,
@@ -120,8 +130,8 @@ struct Launched {
     /// Dropped to make a thread that waits for its body exit.
     body: Option<SyncSender<StreamBody>>,
     info: Option<StreamInfo>,
-    /// The thread answered `start` at least once, so it is not stuck in a
-    /// COM call and may be joined.
+    /// The thread answered `start`'s last request, so it is not stuck in
+    /// a COM call and may be joined.
     answered: bool,
 }
 
@@ -134,6 +144,9 @@ struct WatchState {
     /// A stream that stopped on an error, not yet judged.
     failed: Option<StreamSource>,
     stop: bool,
+    /// The watcher thread is past its start-up COM calls and in its loop,
+    /// so `stop()` may join it.
+    ready: bool,
 }
 
 #[derive(Default)]
@@ -147,7 +160,11 @@ impl Watcher {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// From a notification callback: something may have changed.
+    /// From a notification callback: something may have changed. Microsoft
+    /// asks `IMMNotificationClient` callbacks never to wait on a
+    /// synchronization object; this lock is held only for a store and the
+    /// watcher's own short sections, never across a WASAPI call, so the
+    /// wait is bounded and cannot deadlock with the audio service.
     fn note(&self) {
         self.lock().pending = Some(Instant::now());
         self.condvar.notify_all();
@@ -162,9 +179,56 @@ impl Watcher {
         self.condvar.notify_all();
     }
 
-    fn stop(&self) {
-        self.lock().stop = true;
+    /// Stops the watcher thread and joins it if it reached its loop. One
+    /// still in its start-up COM calls is left to finish them: it then
+    /// finds `stop` under the same lock and exits without reporting, so
+    /// nothing is reported once this returns.
+    fn stop_and_join(&self, thread: JoinHandle<()>) {
+        let mut state = self.lock();
+        state.stop = true;
+        let ready = state.ready;
+        drop(state);
         self.condvar.notify_all();
+        if ready {
+            let _ = thread.join();
+        }
+    }
+
+    /// The watcher thread's loop once registered: marks it ready, answers
+    /// `start` through `ready`, then hands every settled burst to `judge`
+    /// with the stream that failed meanwhile, if any, outside the lock,
+    /// until stopped.
+    fn watch(&self, ready: &SyncSender<()>, mut judge: impl FnMut(Option<StreamSource>)) {
+        let mut state = self.lock();
+        state.ready = true;
+        let _ = ready.send(());
+        loop {
+            if state.stop {
+                break;
+            }
+            let Some(last) = state.pending else {
+                state = self
+                    .condvar
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            };
+            let due = last + LiveCaptureBackend::COALESCE_DELAY;
+            let now = Instant::now();
+            if now < due {
+                state = self
+                    .condvar
+                    .wait_timeout(state, due - now)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+                continue;
+            }
+            state.pending = None;
+            let failed = state.failed.take();
+            drop(state);
+            judge(failed);
+            state = self.lock();
+        }
     }
 }
 
@@ -197,8 +261,9 @@ impl DeviceProbe {
 
     /// The devices as they are now, in [`DeviceSnapshot`]'s terms: the
     /// default render endpoint (`eConsole`, the one both loopbacks follow),
-    /// the microphone (the explicit one if still active, else the
-    /// `eConsole` default), whether the endpoints the capture started on
+    /// the microphone (the explicit one while it is active, `None` once it
+    /// is not, as on the Mac; without an explicit one, the `eConsole`
+    /// default), whether the endpoints the capture started on
     /// are still active. `default_output_uid` stays empty: no stream opens
     /// the `eCommunications` default, so its changes cost no rebuild. Fields
     /// for a stream the capture does not open stay empty too, so they never
@@ -255,11 +320,13 @@ struct Active {
     /// The system stream's staging, for its counts at `stop()`.
     follower: Option<Arc<FollowerLane>>,
     watcher: Arc<Watcher>,
-    watcher_thread: Option<JoinHandle<()>>,
+    watcher_thread: JoinHandle<()>,
 }
 
-/// The WASAPI backend; see the module doc. Restartable: `stop()` joins
-/// every thread it started, and `start` opens the streams afresh.
+/// The WASAPI backend; see the module doc. Restartable: `stop()` joins the
+/// stream threads and the watcher, unless the watcher is still in its
+/// start-up COM calls (left to finish on its own), and `start` opens the
+/// streams afresh.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
 }
@@ -333,9 +400,7 @@ fn open(
         }
     };
     let info = StreamInfo {
-        buffer_frames: client.buffer_frames(),
-        period_frames: client.period_frames(),
-        latency_frames: client.latency_frames(),
+        sizes: client.sizes(),
         endpoint_id,
         loopback,
     };
@@ -391,11 +456,11 @@ fn run_stream(
         }
     }
     let _ = client.stop();
-    if client.discontinuities() > 0 {
+    let discontinuities = client.discontinuities();
+    if discontinuities > 0 {
         tracing::info!(
-            "{} stream: {} packets after a glitch (thread late)",
-            source.as_str(),
-            client.discontinuities()
+            "{} stream: {discontinuities} packets after a glitch (thread late)",
+            source.as_str()
         );
     }
     drop(pro_audio);
@@ -417,37 +482,12 @@ fn run_watcher(
     let registration = enumerator.as_ref().and_then(|enumerator| {
         let notify = Arc::clone(watcher);
         enumerator
-            .register(Box::new(move |_| notify.note()))
+            .register(Box::new(move || notify.note()))
             .map_err(|error| tracing::warn!("no device notifications: {error}"))
             .ok()
     });
     let baseline = enumerator.as_ref().map(|e| probe.baseline(e));
-    let _ = ready.send(());
-    let mut state = watcher.lock();
-    loop {
-        if state.stop {
-            break;
-        }
-        let Some(last) = state.pending else {
-            state = watcher
-                .condvar
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
-            continue;
-        };
-        let due = last + LiveCaptureBackend::COALESCE_DELAY;
-        let now = Instant::now();
-        if now < due {
-            state = watcher
-                .condvar
-                .wait_timeout(state, due - now)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-            continue;
-        }
-        state.pending = None;
-        let failed = state.failed.take();
-        drop(state);
+    watcher.watch(ready, |failed| {
         // The WASAPI reads run outside the lock.
         let difference = match (&enumerator, &baseline) {
             (Some(enumerator), Some(baseline)) => probe.resolve(enumerator).difference(baseline),
@@ -465,17 +505,16 @@ fn run_watcher(
         } else {
             tracing::info!("ignored device notification");
         }
-        state = watcher.lock();
-    }
-    drop(state);
+    });
     drop(registration);
     drop(enumerator);
     drop(apartment);
 }
 
-/// Stops and joins the stream threads that answered; a thread that never
-/// answered `start` is left to finish on its own (it holds no body, so it
-/// never writes to the sink).
+/// Stops and joins the stream threads that answered
+/// ([`Launched::answered`]); the others are left to finish on their own.
+/// Such a thread never writes to the sink: it holds no body, or it is
+/// starting its stream and finds `stop` set before its first drain.
 fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) {
     stop.store(true, Ordering::Release);
     for mut launched in streams {
@@ -488,13 +527,14 @@ fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) {
     }
 }
 
-/// The next event from a stream thread within `limit`.
-fn next_event(launched: &Launched, limit: Duration) -> Result<StreamEvent, CaptureError> {
+/// The next event from a stream thread before `deadline`.
+fn next_event(launched: &Launched, deadline: Instant) -> Result<StreamEvent, CaptureError> {
+    let limit = deadline.saturating_duration_since(Instant::now());
     launched.events.recv_timeout(limit).map_err(|error| {
         CaptureError::BackendFailed(match error {
             RecvTimeoutError::Timeout => {
                 format!(
-                    "{} stream did not open within {limit:?}",
+                    "{} stream did not answer within {START_TIMEOUT:?} of the start",
                     launched.source.as_str()
                 )
             }
@@ -552,11 +592,19 @@ fn spawn_streams(
     Ok(streams)
 }
 
-/// The stream thread's next event, which must be `Opened` (`opening`) or
-/// `Started` and a success.
-fn expect_event(launched: &mut Launched, opening: bool) -> Result<(), CaptureError> {
-    let event = next_event(launched, OPEN_TIMEOUT);
-    launched.answered |= event.is_ok();
+/// The stream thread's next event before `deadline`, which must be
+/// `Opened` (`opening`) or `Started` and a success.
+fn expect_event(
+    launched: &mut Launched,
+    opening: bool,
+    deadline: Instant,
+) -> Result<(), CaptureError> {
+    let event = next_event(launched, deadline);
+    // Only this answer counts: a thread that gave it then waits on
+    // `start`'s channel or runs its capture loop, and either way it sees
+    // `stop`. One that missed the deadline may sit in a COM call (the open
+    // or `Start`).
+    launched.answered = event.is_ok();
     match event {
         Ok(StreamEvent::Opened(Ok(info))) if opening => {
             launched.info = Some(info);
@@ -577,9 +625,10 @@ fn expect_event(launched: &mut Launched, opening: bool) -> Result<(), CaptureErr
 fn open_streams(
     stop: &AtomicBool,
     mut streams: Vec<Launched>,
+    deadline: Instant,
 ) -> Result<Vec<Launched>, CaptureError> {
     for index in 0..streams.len() {
-        if let Err(error) = expect_event(&mut streams[index], true) {
+        if let Err(error) = expect_event(&mut streams[index], true, deadline) {
             tear_down(stop, streams);
             return Err(error);
         }
@@ -597,11 +646,12 @@ fn start_streams(
     plan: &SplitStreamPlan,
     follower: Option<&Arc<FollowerLane>>,
     sink: &Arc<LaneFrameSink>,
+    deadline: Instant,
 ) -> Result<Vec<Launched>, CaptureError> {
     // `spawn_streams` put the master first.
     for index in (0..streams.len()).rev() {
         let launched = &mut streams[index];
-        let buffer_frames = launched.info.as_ref().map_or(0, |i| i.buffer_frames);
+        let buffer_frames = launched.info.as_ref().map_or(0, |i| i.sizes.buffer_frames);
         let body = if launched.source == plan.master {
             Some(StreamBody::Master {
                 router: PacketRouter::new(
@@ -618,7 +668,7 @@ fn start_streams(
         if let (Some(body), Some(sender)) = (body, launched.body.take()) {
             let _ = sender.send(body);
         }
-        if let Err(error) = expect_event(launched, false) {
+        if let Err(error) = expect_event(launched, false, deadline) {
             tear_down(stop, streams);
             return Err(error);
         }
@@ -628,11 +678,14 @@ fn start_streams(
 
 /// Starts the watcher thread and waits for it to register. A capture
 /// without device notifications still records, so a slow answer is
-/// logged, not fatal.
+/// logged, not fatal: such a watcher may sit in a COM call, which
+/// `stop()` must not wait on, and once it comes alive it watches as an
+/// on-time one does ([`Watcher::stop_and_join`]).
 fn spawn_watcher(
     watcher: &Arc<Watcher>,
     probe: DeviceProbe,
     sink: &Arc<LaneFrameSink>,
+    deadline: Instant,
 ) -> Result<JoinHandle<()>, CaptureError> {
     let (ready, ready_receiver) = sync_channel(1);
     let thread_watcher = Arc::clone(watcher);
@@ -641,8 +694,9 @@ fn spawn_watcher(
         .name("steno-devices".into())
         .spawn(move || run_watcher(&thread_watcher, &probe, &thread_sink, &ready))
         .map_err(|error| CaptureError::BackendFailed(format!("device watcher: {error}")))?;
-    if ready_receiver.recv_timeout(OPEN_TIMEOUT).is_err() {
-        tracing::warn!("device watcher did not start within {OPEN_TIMEOUT:?}");
+    let limit = deadline.saturating_duration_since(Instant::now());
+    if ready_receiver.recv_timeout(limit).is_err() {
+        tracing::warn!("device watcher did not start within {START_TIMEOUT:?} of the start");
     }
     Ok(thread)
 }
@@ -665,12 +719,13 @@ impl CaptureBackend for LiveCaptureBackend {
             return Err(CaptureError::InvalidState("backend already started".into()));
         }
         let plan = SplitStreamPlan::new(lanes)?;
+        let deadline = Instant::now() + START_TIMEOUT;
         let stop = Arc::new(AtomicBool::new(false));
         let watcher = Arc::new(Watcher::default());
 
         let streams = spawn_streams(&plan, input_device_uid, &stop, &watcher)?;
         // Every stream opened, or none runs.
-        let streams = open_streams(&stop, streams)?;
+        let streams = open_streams(&stop, streams, deadline)?;
         let info = |source: StreamSource| {
             streams
                 .iter()
@@ -679,10 +734,16 @@ impl CaptureBackend for LiveCaptureBackend {
         };
         let mic = info(StreamSource::Microphone);
         let system = info(StreamSource::System);
+        let master_buffer = info(plan.master).map_or(0, |i| i.sizes.buffer_frames);
         let follower = plan.follower.and_then(|source| {
-            info(source).map(|i| Arc::new(FollowerLane::for_period(i.period_frames)))
+            info(source).map(|i| {
+                Arc::new(FollowerLane::for_streams(
+                    i.sizes.period_frames,
+                    master_buffer,
+                ))
+            })
         });
-        let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink)?;
+        let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink, deadline)?;
         if let Some(kind) = system.as_ref().and_then(|s| s.loopback) {
             tracing::info!("system lane on {kind:?} loopback");
         }
@@ -694,7 +755,7 @@ impl CaptureBackend for LiveCaptureBackend {
             mic_endpoint_id: mic.as_ref().and_then(|m| m.endpoint_id.clone()),
             render_endpoint_id: system.as_ref().and_then(|s| s.endpoint_id.clone()),
         };
-        let watcher_thread = match spawn_watcher(&watcher, probe, &sink) {
+        let watcher_thread = match spawn_watcher(&watcher, probe, &sink, deadline) {
             Ok(thread) => thread,
             Err(error) => {
                 tear_down(&stop, streams);
@@ -702,17 +763,24 @@ impl CaptureBackend for LiveCaptureBackend {
             }
         };
 
-        let (input_latency_frames, output_latency_frames) = far_end_latencies(
-            mic.as_ref().map_or(0, |m| m.latency_frames),
-            system.as_ref().map_or(0, |s| s.latency_frames),
-            follower.as_ref().map_or(0, |f| f.target()),
-        );
+        let input_latency = mic.as_ref().map_or(0, |m| m.sizes.latency_frames);
+        let output_latency = system.as_ref().map_or(0, |s| s.sizes.latency_frames);
+        let follower_delay = follower.as_ref().map_or(0, |f| f.target());
+        if follower_delay > input_latency + output_latency {
+            tracing::info!(
+                "the system lane's staging ({follower_delay} frames) exceeds both streams' \
+                 latency ({input_latency} + {output_latency} frames): the far end runs \
+                 that much later than the echo canceller expects"
+            );
+        }
+        let (input_latency_frames, output_latency_frames) =
+            far_end_latencies(input_latency, output_latency, follower_delay);
         *active = Some(Active {
             stop,
             streams,
             follower,
             watcher,
-            watcher_thread: Some(watcher_thread),
+            watcher_thread,
         });
         Ok(CaptureStream {
             sample_rate: SAMPLE_RATE,
@@ -732,15 +800,13 @@ impl CaptureBackend for LiveCaptureBackend {
         if let Some(lane) = &active.follower {
             tracing::info!(
                 "system stream staging: {} frames padded with zeros (underrun), {} skipped \
-                 (slipped)",
+                 (slipped), {} from before the first pull trimmed",
                 lane.underrun_frames(),
-                lane.slipped_frames()
+                lane.slipped_frames(),
+                lane.trimmed_frames()
             );
         }
-        active.watcher.stop();
-        if let Some(thread) = active.watcher_thread.take() {
-            let _ = thread.join();
-        }
+        active.watcher.stop_and_join(active.watcher_thread);
     }
 }
 
@@ -751,8 +817,12 @@ impl Drop for LiveCaptureBackend {
     }
 }
 
-/// The WASAPI endpoints as the input picker and `steno dev audio-devices`
-/// see them. Every call joins COM on the calling thread for its duration.
+/// The WASAPI endpoints for the input picker, under the macOS
+/// `capture::live::devices::AudioDevices` names for the calls both have
+/// (`all`, `inputs`, `device`, `default_input`, `default_system_output`;
+/// Swift: `Sources/StenoAudio/Capture/AudioDevices.swift`); errors are
+/// [`CaptureError`]. Every call joins COM on the calling thread for its
+/// duration.
 pub struct AudioDevices;
 
 impl AudioDevices {
@@ -807,6 +877,11 @@ impl AudioDevices {
             .collect())
     }
 
+    /// The active endpoint with `uid`, or `None` when it is not connected.
+    pub fn device(uid: &str) -> Result<Option<AudioDeviceInfo>, CaptureError> {
+        Ok(Self::all()?.into_iter().find(|d| d.uid == uid))
+    }
+
     /// The default capture endpoint (`eConsole`).
     pub fn default_input() -> Result<AudioDeviceInfo, CaptureError> {
         Self::all()?
@@ -815,11 +890,96 @@ impl AudioDevices {
             .ok_or(CaptureError::InputDeviceUnavailable)
     }
 
-    /// The default render endpoint (`eConsole`).
-    pub fn default_output() -> Result<AudioDeviceInfo, CaptureError> {
+    /// The default render endpoint (`eConsole`), which both loopbacks
+    /// follow.
+    pub fn default_system_output() -> Result<AudioDeviceInfo, CaptureError> {
         Self::all()?
             .into_iter()
-            .find(|d| d.is_default_output)
+            .find(|d| d.is_default_system_output)
             .ok_or(CaptureError::OutputDeviceUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A watcher that is judging a burst when `stop()` comes (a late one
+    /// that came alive behaves the same) is joined: its report lands
+    /// before `stop()` returns, never after.
+    #[test]
+    fn a_watcher_stopped_while_it_judges_is_joined_before_stop_returns() {
+        let watcher = Arc::new(Watcher::default());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (ready, answered) = sync_channel(1);
+        let (entered, judging) = channel();
+        let (open, gate) = channel::<()>();
+        let (judged, judgements) = channel();
+        let thread = {
+            let watcher = Arc::clone(&watcher);
+            let stopped = Arc::clone(&stopped);
+            std::thread::spawn(move || {
+                watcher.watch(&ready, |_| {
+                    let _ = entered.send(());
+                    let _ = gate.recv_timeout(WAIT);
+                    let _ = judged.send(stopped.load(Ordering::SeqCst));
+                });
+            })
+        };
+        answered
+            .recv_timeout(WAIT)
+            .expect("the watcher reached its loop");
+        watcher.note();
+        judging.recv_timeout(WAIT).expect("the burst settled");
+        // The gate opens once `stop_and_join` returns, or after a moment
+        // while it rightly waits for the judgement.
+        let (returned, returns) = channel::<()>();
+        let opener = std::thread::spawn(move || {
+            let _ = returns.recv_timeout(Duration::from_millis(500));
+            let _ = open.send(());
+        });
+        watcher.stop_and_join(thread);
+        stopped.store(true, Ordering::SeqCst);
+        let _ = returned.send(());
+        opener.join().unwrap();
+        assert_eq!(
+            judgements.recv_timeout(WAIT),
+            Ok(false),
+            "judged before stop_and_join returned"
+        );
+    }
+
+    /// A watcher still in its start-up calls when `stop()` comes is not
+    /// waited for; once they return it exits without judging the burst
+    /// that is pending.
+    #[test]
+    fn a_watcher_stopped_before_its_loop_is_not_joined_and_judges_nothing() {
+        let watcher = Arc::new(Watcher::default());
+        let (ready, _answered) = sync_channel(1);
+        let (open, gate) = channel::<()>();
+        let (done, outcome) = channel();
+        watcher.note();
+        let thread = {
+            let watcher = Arc::clone(&watcher);
+            std::thread::spawn(move || {
+                // Stands in for the apartment, the registration and the
+                // baseline.
+                let opened = gate.recv_timeout(WAIT).is_ok();
+                let mut judged = false;
+                watcher.watch(&ready, |_| judged = true);
+                let _ = done.send((opened, judged));
+            })
+        };
+        watcher.stop_and_join(thread);
+        let _ = open.send(());
+        assert_eq!(
+            outcome.recv_timeout(WAIT),
+            Ok((true, false)),
+            "stop did not wait for the start-up, and nothing was judged"
+        );
     }
 }

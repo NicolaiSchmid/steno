@@ -7,7 +7,7 @@
 //!
 //! On Windows the audio sessions of every active endpoint, mapped by
 //! [`processes_from_sessions`](super::processes_from_sessions), with
-//! endpoint and session notifications (WP10a, compile-tested only; see
+//! endpoint and session notifications (WP10a, not run on hardware; see
 //! `capture::live::wasapi`). No Swift counterpart. On Linux the type exists
 //! so callers compile and reports no processes until the PipeWire backend
 //! fills it in.
@@ -58,8 +58,7 @@ mod wasapi {
     use std::time::Duration;
 
     use crate::capture::live::wasapi::com::{
-        Apartment, ComError, EndpointRegistration, Enumerator, SessionManagerRegistration,
-        SessionRegistration,
+        Apartment, ComError, Enumerator, SessionManagerRegistration, SessionRegistration,
     };
     use crate::detection::{
         ActivityError, EndpointFlow, ProcessAudioActivity, ProcessAudioActivitySource,
@@ -88,8 +87,9 @@ mod wasapi {
     }
 
     /// The session-backed source. Each `changes()` call runs one thread
-    /// that holds the COM registrations for as long as the source lives
-    /// (or until the receiver is dropped).
+    /// that holds the COM registrations for as long as the source lives,
+    /// or, once its receiver is dropped, until the next notification: a
+    /// detector started many times holds that many threads until then.
     #[derive(Default)]
     pub struct LiveProcessAudioActivity {
         registrations: Mutex<Vec<Registration>>,
@@ -113,10 +113,11 @@ mod wasapi {
     /// What the notification callbacks tell the notification thread.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Notice {
-        /// A device or a session's state changed.
+        /// A session's state changed.
         Changed,
-        /// A session was created: register for its state too.
-        SessionCreated,
+        /// Sessions may have appeared (one was created, or a device
+        /// changed): register for every session's state again.
+        Reregister,
     }
 
     fn notify(sender: &Sender<Notice>, notice: Notice) -> Box<dyn Fn() + Send + Sync> {
@@ -127,7 +128,8 @@ mod wasapi {
     }
 
     /// The per-endpoint and per-session registrations on every active
-    /// capture endpoint, made afresh after every session creation.
+    /// capture endpoint, made afresh after every session creation and
+    /// every endpoint change.
     struct SessionWatch {
         _sessions: Vec<SessionRegistration>,
         _managers: Vec<SessionManagerRegistration>,
@@ -154,7 +156,7 @@ mod wasapi {
                     }
                 }
                 if let Ok(registration) =
-                    manager.register_created(notify(sender, Notice::SessionCreated))
+                    manager.register_created(notify(sender, Notice::Reregister))
                 {
                     managers.push(registration);
                 }
@@ -177,20 +179,16 @@ mod wasapi {
             return;
         };
         let (sender, notices) = channel();
-        // A device change can bring capture endpoints with sessions, so it
-        // re-registers the session events like a session creation.
-        let endpoint_sender = sender.clone();
-        let endpoints: Option<EndpointRegistration> = enumerator
-            .register(Box::new(move |_| {
-                let _ = endpoint_sender.send(Notice::SessionCreated);
-            }))
+        // A device change can bring capture endpoints with sessions.
+        let endpoints = enumerator
+            .register(notify(&sender, Notice::Reregister))
             .ok();
         let mut sessions = Some(SessionWatch::register(&enumerator, &sender));
         let _ = changes.send(());
         while !stop.load(Ordering::Acquire) {
             match notices.recv_timeout(Duration::from_millis(250)) {
                 Ok(notice) => {
-                    if notice == Notice::SessionCreated {
+                    if notice == Notice::Reregister {
                         // Unregister before registering again.
                         drop(sessions.take());
                         sessions = Some(SessionWatch::register(&enumerator, &sender));
