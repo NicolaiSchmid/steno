@@ -1171,38 +1171,33 @@ fix is ported to Swift before cutover.
   reopen a window cancelled or replaced meanwhile.
 - Revoke during a `complete`: `revoke` discards the files of the receipts in memory
   only, so after a restart a revoke during `complete`'s receipt read let the revoked
-  phone's file reach the intake, also when the phone paired again meanwhile. Swift
-  (#191) closes the race. `HandoverEngine.revocations` is a per-device count that
-  pairing never resets. `complete` takes it before the receipt read and refuses (401,
-  files discarded, receipt forgotten) right after the read, after the hash before any
-  write, and after every verify answer. Because the store is a WAL pool, a read can see
-  a row whose delete has not committed yet, so `revoking` also refuses a `complete` at
-  entry while a revoke of the device is in flight. `revoked` and `remember` are ported.
-  `pair` clears `revoked` only when no revoke started during its save (`revokeStarts`,
-  increment-only). Rust counts in `State::revocations`, never taken back, and checks it
-  after the read (the same refusal) and after the hash; `pair` clears `State::revoked`
-  only when the count is unchanged across its save. Rust's store is one connection
-  behind a mutex, so a read and the delete serialise, but the blocking pool may still
-  run a read queued after the revoke's bump before the delete: `complete` is refused at
-  entry while `State::revoked` holds the device. In both apps a recording already
-  admitted answers 200 with its meeting id after a revoke during the read, and its
-  receipt leaves memory. Both leave the files of a revoked device's receipt that is
-  only in the store, and not being completed, to the next start's sweep.
-- Revoke during a `complete`, the differences: Rust's entry refusal lasts from the
-  revoke until the device pairs again (401), where Swift's ends with the revoke and the
-  read then answers 404. After the hash Rust answers 401 without touching the files:
-  the `verifying` write keeps the receipt in memory, so the revoke discarded them
-  itself, and only a revoke creates a partial again during a verify, so what is there
-  belongs to a phone that paired again; Swift discards it. Swift also binds the hash to
-  the partial's file identity (409 with no chunk listed when the partial was replaced);
-  Rust relies on the count, since only a revoke replaces a partial during a verify (std
-  has no stable file index on Windows, and NTFS tunnelling gives a file created again
-  the old creation time). On a failed store delete Swift takes back the count only when
-  nothing was discarded, takes back `revoked` unless another revoke is in flight, and
-  republishes the receipts; Rust republishes the receipts and takes back neither, so
-  the device stays paired in the store but its `complete` answers 401 until it pairs
-  again or a retried revoke finishes. The user sees the error, and a half-revoked phone
-  that cannot hand over is safer than one that can.
+  phone's file reach the intake, also when the phone paired again meanwhile. Both apps
+  (Swift #191) count revokes per device (`HandoverEngine.revocations`,
+  `State::revocations`); pairing never resets the count. `complete` takes it before
+  the read and refuses when it moved (401, files discarded, receipt forgotten) right
+  after the read and after the hash. A `complete` that starts while a revoke is in
+  flight is refused at entry: Swift's store is a WAL pool, so a read can see a row
+  whose delete has not committed; Rust's is one connection behind a mutex, but the
+  blocking pool may serve a read queued after the revoke's bump before the delete.
+  `pair` clears `revoked` only when no revoke started during its save (Swift
+  `revokeStarts`, Rust the count). In both apps a recording already admitted answers
+  200 with its meeting id after a revoke during the read, and its receipt leaves
+  memory; the files of a revoked device's receipt that is only in the store, and not
+  being completed, wait for the next start's sweep.
+- Revoke during a `complete`, the differences: Rust refuses at entry from the revoke
+  until the device pairs again; Swift only while the revoke runs, after which the read
+  answers 404. Swift also refuses after every verify answer. After the hash Rust
+  answers 401 without touching the files: the revoke found the receipt in memory and
+  discarded them, and only a revoke lets a partial be created again during a verify,
+  so a partial there belongs to a phone that paired again. Swift discards it and binds
+  the hash to the partial's file identity (409 with no chunk listed when it was
+  replaced); Rust relies on the count, since std has no stable file index on Windows
+  and NTFS tunnelling gives a file created again the old creation time. On a failed
+  store delete both republish the receipts. Swift takes back the count when nothing
+  was discarded and `revoked` unless another revoke is in flight; Rust takes back
+  neither, so the device stays paired in the store but its `complete` answers 401
+  until it pairs again or a retried revoke finishes: a half-revoked phone that cannot
+  hand over is safer than one that can.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
