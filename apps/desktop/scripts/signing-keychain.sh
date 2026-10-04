@@ -52,6 +52,8 @@ case "$action" in
     certificate="$(mktemp)"
     trap 'rm -f "$certificate"' EXIT
     base64 --decode <<< "$P12" > "$certificate"
+    # A runner lost mid-run leaves its keychain file behind.
+    security delete-keychain "$keychain" 2>/dev/null || true
     security create-keychain -p "$password" "$keychain"
     security set-keychain-settings -lut 21600 "$keychain"
     security unlock-keychain -p "$password" "$keychain"
@@ -67,7 +69,7 @@ case "$action" in
     ;;
   remove)
     # `delete-keychain` also takes it off the search list; the list is
-    # rewritten only when an entry is left over (a keychain already gone).
+    # rewritten only if delete-keychain leaves the entry.
     security delete-keychain "$keychain" 2>/dev/null || true
     read_list
     if [[ "$listed" == true ]]; then
