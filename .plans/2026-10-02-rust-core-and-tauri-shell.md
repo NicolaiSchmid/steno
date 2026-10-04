@@ -913,6 +913,11 @@ What the bridge crate (WP1) asks of the Swift side before WP6 fills the list:
   Both agree on every tag the fixtures and goldens use; a meeting tagged with a rarer
   language gets "sw" instead of "Swahili" in the prompt on the Rust side until the
   table grows.
+- Ported after WP7a from #154: the cleanup rule that names `[index] Speaker:` as
+  framing (goldens `cleanup-{de,en}.txt`) and `CleanupDraft.strippingSpeakerLabels`
+  (`CleanupDraft::stripping_speaker_labels`, before validation). Rust walks grapheme
+  clusters with `unicode-segmentation` as Swift's `Character` does, so the 32-cluster
+  window and a colon carrying a combining mark agree.
 
 Rust fixes these Swift behaviours; each is ported to Swift or accepted before cutover:
 

@@ -42,11 +42,33 @@ impl SpeakerLabels {
     }
 
     /// The speaker whose label matches, case-insensitively and ignoring
-    /// surrounding whitespace; `None` for unknown labels.
+    /// surrounding spaces and tabs (Foundation's `.whitespaces`); `None`
+    /// for unknown labels.
     #[must_use]
     pub fn speaker_id(&self, label: &str) -> Option<Uuid> {
-        self.ids_by_label.get(&label.trim().to_lowercase()).copied()
+        self.ids_by_label
+            .get(&label.trim_matches(is_swift_whitespace).to_lowercase())
+            .copied()
     }
+
+    /// True for a speaker's label or [`Self::UNKNOWN`], the labels a prompt
+    /// line can start with, case-insensitively and ignoring surrounding
+    /// spaces and tabs (Foundation's `.whitespaces`).
+    #[must_use]
+    pub fn is_label(&self, candidate: &str) -> bool {
+        let normalized = candidate.trim_matches(is_swift_whitespace).to_lowercase();
+        self.ids_by_label.contains_key(&normalized) || normalized == Self::UNKNOWN.to_lowercase()
+    }
+}
+
+/// Foundation's `CharacterSet.whitespaces`: Unicode `Zs` plus tab, no line
+/// breaks.
+pub(crate) fn is_swift_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\t' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
+    )
 }
 
 /// The transcript as the model reads it: `[n] Speaker 1: text`, one line
