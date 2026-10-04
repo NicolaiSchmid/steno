@@ -36,8 +36,8 @@ rejects a commit whose configured root directory does not exist before it
 runs any ignore step, and the Rust branches have no `apps/site`. On
 Cloudflare Pages or a plain web server, upload `out/`.
 
-URLs, install commands and the platform labels live in `src/lib/site.ts`.
-Change them there, nowhere else.
+URLs, install commands and the platforms (name, whether a build is released,
+the note under it) live in `src/lib/site.ts`. Change them there, nowhere else.
 
 ## Design
 

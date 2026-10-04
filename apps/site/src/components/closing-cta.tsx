@@ -1,16 +1,6 @@
 import { DownloadButton } from "@/components/download-button";
-import { AppleIcon, LinuxIcon, WindowsIcon } from "@/components/platform-icons";
-import { site } from "@/lib/site";
-
-const platforms = [
-	{
-		Icon: AppleIcon,
-		label: "macOS",
-		note: "Apple Silicon · signed and notarized",
-	},
-	{ Icon: WindowsIcon, label: "Windows", note: "x64 · arm64" },
-	{ Icon: LinuxIcon, label: "Linux", note: "AppImage · x64" },
-];
+import { platformIcon } from "@/components/platform-icons";
+import { platformIds, platforms, site } from "@/lib/site";
 
 export function ClosingCta() {
 	return (
@@ -42,22 +32,26 @@ export function ClosingCta() {
 					</a>
 				</div>
 				<ul className="mx-auto mt-10 grid max-w-[720px] gap-px overflow-hidden rounded-lg border border-border bg-border sm:grid-cols-3">
-					{platforms.map(({ Icon, label, note }) => (
-						<li
-							className="flex items-center gap-3 bg-bg px-5 py-4 text-left"
-							key={label}
-						>
-							<Icon className="size-4 shrink-0 text-fg-muted" />
-							<span className="min-w-0">
-								<span className="block font-medium text-[14px] tracking-[-0.01em]">
-									{label}
+					{platformIds.map((id) => {
+						const Icon = platformIcon[id];
+						const { name, note } = platforms[id];
+						return (
+							<li
+								className="flex items-center gap-3 bg-bg px-5 py-4 text-left"
+								key={id}
+							>
+								<Icon className="size-4 shrink-0 text-fg-muted" />
+								<span className="min-w-0">
+									<span className="block font-medium text-[14px] tracking-[-0.01em]">
+										{name}
+									</span>
+									<span className="block font-mono text-[11px] text-fg-muted">
+										{note}
+									</span>
 								</span>
-								<span className="block truncate font-mono text-[11px] text-fg-dim">
-									{note}
-								</span>
-							</span>
-						</li>
-					))}
+							</li>
+						);
+					})}
 				</ul>
 			</div>
 		</section>

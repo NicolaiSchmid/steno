@@ -28,15 +28,19 @@ It is hosted at `steno.nicolaischmid.com`.
    buttons. Page order as upstream: hero with a leaning product frame →
    "How it works" (prompt card and pipeline) → "Bring your own model"
    (provider grid, after "Bring your own sub") → "Privacy" (where data goes)
-   → "If you don't like something, fork it." (terminal) → closing CTA →
-   one-row footer. Red, Steno's live colour, is the only hue
-   (`2026-10-02-neutral-accent.md`).
+   → "How it's built" (one tile per desktop, added 2026-10-04 for the Rust
+   core and Tauri shell; nav link "How it's built") → "If you don't like
+   something, fork it." (terminal) → closing CTA → one-row footer. Red,
+   Steno's live colour, is the only hue (`2026-10-02-neutral-accent.md`).
 4. **Content.** Multi-platform: the download button labels itself for the
    visitor's OS (macOS on the server), the closing CTA lists macOS, Windows
-   and Linux. Both link to GitHub releases; flip the Windows and Linux rows
-   once those builds ship. The vault and Obsidian are not mentioned; output
-   is "plain Markdown you own". The hero mock shows the README's example
-   meeting, never a real recording.
+   and Linux. Both link to GitHub releases. `platforms` in
+   `apps/site/src/lib/site.ts` marks which desktops have a released build:
+   on one without (Windows and Linux until their builds ship) the button
+   reads "<OS>: not released yet" and the rows say "Not released yet". Flip
+   `released` and the note there once a build ships. The vault and Obsidian
+   are not mentioned; output is "plain Markdown you own". The hero mock
+   shows the README's example meeting, never a real recording.
 5. **CI and hosting.** `.github/workflows/site-ci.yml` installs from the root
    lockfile with `--filter @steno/site...` and runs Biome, `tsc` and
    `next build`. The Vercel project (team wasc, `steno`, CNAME

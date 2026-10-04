@@ -1,8 +1,11 @@
+import type { ComponentType } from "react";
+import type { Platform } from "@/lib/site";
+
 interface IconProps {
 	className?: string;
 }
 
-export function AppleIcon({ className }: IconProps) {
+function AppleIcon({ className }: IconProps) {
 	return (
 		<svg aria-hidden="true" className={className} viewBox="0 0 814 1000">
 			<path
@@ -13,7 +16,7 @@ export function AppleIcon({ className }: IconProps) {
 	);
 }
 
-export function WindowsIcon({ className }: IconProps) {
+function WindowsIcon({ className }: IconProps) {
 	return (
 		<svg aria-hidden="true" className={className} viewBox="0 0 88 88">
 			<path
@@ -24,7 +27,7 @@ export function WindowsIcon({ className }: IconProps) {
 	);
 }
 
-export function LinuxIcon({ className }: IconProps) {
+function LinuxIcon({ className }: IconProps) {
 	/* A tux silhouette reduced to its outline; no path data from elsewhere. */
 	return (
 		<svg
@@ -42,3 +45,10 @@ export function LinuxIcon({ className }: IconProps) {
 		</svg>
 	);
 }
+
+/** The mark for each desktop, keyed like `platforms` in `@/lib/site`. */
+export const platformIcon: Record<Platform, ComponentType<IconProps>> = {
+	mac: AppleIcon,
+	win: WindowsIcon,
+	linux: LinuxIcon,
+};
