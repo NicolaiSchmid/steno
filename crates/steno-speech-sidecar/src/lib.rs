@@ -39,9 +39,9 @@
 //!
 //! On unix it ignores SIGINT, SIGTERM and SIGHUP once its heartbeat runs.
 //! Those are the signals that end the app, and they reach the child too:
-//! Ctrl-C reaches the terminal's whole foreground group, a closed terminal
-//! its session, and systemd every process in a scope. A child that died of
-//! them would end its job before the app's shutdown began. Ignoring them,
+//! Ctrl-C and a closed terminal reach the terminal's whole foreground
+//! group, and systemd signals every process in a scope. A child that died
+//! of them would end its job before the app's shutdown began. Ignoring them,
 //! the child finishes its request or exits within a heartbeat of its
 //! parent's exit, when stdout breaks. The client never ends a child by
 //! those signals: it asks for a shutdown, closes stdin or kills it with
