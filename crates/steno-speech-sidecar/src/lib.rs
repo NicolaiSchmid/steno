@@ -521,10 +521,8 @@ fn transcribe(
     sample_count: u64,
     hint: Option<&LanguageTag>,
 ) -> Result<Reply, ExitCode> {
-    let samples = protocol::read_samples(input, sample_count).map_err(|error| {
-        eprintln!("steno-speech-sidecar: unreadable audio: {error}");
-        ExitCode::from(2)
-    })?;
+    let samples = protocol::read_samples(input, sample_count)
+        .map_err(|error| give_up("unreadable audio", error))?;
     match engine.transcribe(&samples, hint) {
         Ok(segments) => Ok(Reply::Transcript {
             id,
@@ -539,6 +537,13 @@ fn transcribe(
         }
         Err(error) => Ok(Reply::Failed { id, error }),
     }
+}
+
+/// Says on stderr why the child stops, for the parent's crash report, and
+/// returns the exit status for it.
+fn give_up(why: &str, error: impl std::fmt::Display) -> ExitCode {
+    eprintln!("steno-speech-sidecar: {why}: {error}");
+    ExitCode::from(2)
 }
 
 /// Runs the child until a shutdown request, the end of stdin, a broken
@@ -560,8 +565,7 @@ pub fn serve(options: &Options) -> ExitCode {
         hang();
     }
     if let Err(error) = start_heartbeat(options.heartbeat) {
-        eprintln!("steno-speech-sidecar: no heartbeat thread: {error}");
-        return ExitCode::from(2);
+        return give_up("no heartbeat thread", error);
     }
     #[cfg(unix)]
     ignore_exit_signals();
@@ -583,10 +587,7 @@ pub fn serve(options: &Options) -> ExitCode {
         let request = match protocol::read_header::<_, Request>(&mut input) {
             Ok(Some(request)) => request,
             Ok(None) => return ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("steno-speech-sidecar: unreadable request: {error}");
-                return ExitCode::from(2);
-            }
+            Err(error) => return give_up("unreadable request", error),
         };
         let reply = match request {
             Request::Load {
