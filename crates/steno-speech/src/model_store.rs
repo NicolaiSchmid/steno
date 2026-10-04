@@ -283,27 +283,17 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a download then waits for the response headers.
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The shortest body timeout, for a small file (200 ms under test).
-const MIN_BODY_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 200 } else { 60_000 });
+/// The shortest body timeout, for a small file.
+const MIN_BODY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The slowest average rate, in bytes per second, a body may arrive at.
 const MIN_BODY_RATE: u64 = 64 * 1024;
 
-/// How long a response may take to deliver `size` bytes of body once the
-/// headers are in: `max(MIN_BODY_TIMEOUT, size / MIN_BODY_RATE)`. It bounds
-/// a stalled body without cutting one that keeps moving at 64 KiB/s or
-/// more. `ureq` has no timeout between two reads, so this is what ends a
-/// silent connection: 10 h for a whole 2.4 GB file, which only a host that
-/// ignores `Range` is given, at most [`MAX_CHUNK_TIMEOUT`] for a chunk.
-fn body_timeout(size: u64) -> Duration {
-    MIN_BODY_TIMEOUT.max(Duration::from_secs(size / MIN_BODY_RATE))
-}
-
-/// The longest body timeout of a `Range` request (1 s under test). A chunk
-/// that takes longer is cut there and, since it moved the file on, the
-/// rest is asked for at once, so a slow link still finishes and a silent
-/// one is given up after a few minutes.
-const MAX_CHUNK_TIMEOUT: Duration = Duration::from_millis(if cfg!(test) { 1_000 } else { 128_000 });
+/// The longest body timeout of a `Range` request. A chunk that takes
+/// longer is cut there and, since it moved the file on, the rest is asked
+/// for at once, so a slow link still finishes and a silent one is given up
+/// after a few minutes.
+const MAX_CHUNK_TIMEOUT: Duration = Duration::from_secs(128);
 
 /// The most bytes one request asks for. A file of one chunk is fetched
 /// with a plain request; a larger one with `Range` requests, one chunk
@@ -323,6 +313,10 @@ pub struct ModelStore {
     agent: ureq::Agent,
     /// [`CHUNK`], smaller in tests.
     chunk: u64,
+    /// [`MIN_BODY_TIMEOUT`] and [`MAX_CHUNK_TIMEOUT`], shorter in the tests
+    /// of a stalled body.
+    min_body_timeout: Duration,
+    max_chunk_timeout: Duration,
     /// What a download waiting for another one's lock goes by.
     clock: Clock,
 }
@@ -350,6 +344,8 @@ impl ModelStore {
                 .build()
                 .new_agent(),
             chunk: CHUNK,
+            min_body_timeout: MIN_BODY_TIMEOUT,
+            max_chunk_timeout: MAX_CHUNK_TIMEOUT,
             clock: Clock::System,
         }
     }
@@ -637,6 +633,30 @@ impl ModelStore {
         Ok(())
     }
 
+    /// How long a response may take to deliver `size` bytes of body once
+    /// the headers are in: `max(MIN_BODY_TIMEOUT, size / MIN_BODY_RATE)`.
+    /// It bounds a stalled body without cutting one that keeps moving at
+    /// 64 KiB/s or more. `ureq` has no timeout between two reads, so this
+    /// is what ends a silent connection: 10 h for a whole 2.4 GB file,
+    /// which only a host that ignores `Range` is given.
+    fn body_timeout(&self, size: u64) -> Duration {
+        self.min_body_timeout
+            .max(Duration::from_secs(size / MIN_BODY_RATE))
+    }
+
+    /// The body timeout of a `Range` request for the bytes `offset..end`
+    /// of a file of `size` bytes: [`Self::body_timeout`] of their length,
+    /// at most [`MAX_CHUNK_TIMEOUT`] unless the file is one chunk, whose
+    /// range request may be answered with the whole file.
+    fn range_timeout(&self, size: u64, offset: u64, end: u64) -> Duration {
+        let timeout = self.body_timeout(end - offset);
+        if size <= self.chunk {
+            timeout
+        } else {
+            timeout.min(self.max_chunk_timeout)
+        }
+    }
+
     /// One `GET` of `url`, with a `Range` header when `range` is set and
     /// `body` as its body timeout.
     fn get(
@@ -689,12 +709,7 @@ impl ModelStore {
             // A file of one chunk keeps the timeout for its size, so a `200`
             // to it can stand for the whole file.
             let one_chunk = file.size <= self.chunk;
-            let timeout = if one_chunk {
-                body_timeout(end - offset)
-            } else {
-                body_timeout(end - offset).min(MAX_CHUNK_TIMEOUT)
-            };
-            match self.get(url, Some(range), timeout) {
+            match self.get(url, Some(range), self.range_timeout(file.size, offset, end)) {
                 Ok(response) if response.status().as_u16() == 206 => {
                     if content_range_start(&response) == Some(offset) {
                         return Ok((response, false));
@@ -723,7 +738,7 @@ impl ModelStore {
             }
             partial.restart()?;
         }
-        Ok((self.get(url, None, body_timeout(file.size))?, true))
+        Ok((self.get(url, None, self.body_timeout(file.size))?, true))
     }
 
     /// Streams the rest of the file into `partial` while hashing, one
@@ -842,7 +857,7 @@ const RETRY_DELAY: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 
 
 /// Whether a failed download may succeed when tried again: a 5xx answer, a
 /// connection that could not be made, dropped or timed out, or a body that
-/// stalled past [`body_timeout`]. A wrong size or checksum, a 4xx answer and
+/// stalled past [`ModelStore::body_timeout`]. A wrong size or checksum, a 4xx answer and
 /// a disk error fail at once.
 fn is_transient(error: &SpeechError) -> bool {
     let dropped = |error: &std::io::Error| {
@@ -1397,15 +1412,10 @@ mod tests {
         (format!("http://{address}/model.onnx"), ranges)
     }
 
-    /// `body`, or the part `range` (`bytes=<first>-[<last>]`) asks for
-    /// under `206`, all of it if `stall` is `None`, else that many bytes
-    /// at once and the rest once `stall` fires or is dropped.
-    fn answer(
-        stream: &TcpStream,
-        body: &[u8],
-        range: Option<&str>,
-        stall: Option<(usize, mpsc::Receiver<()>)>,
-    ) {
+    /// The reply to `range` (`bytes=<first>-[<last>]`): the part it asks
+    /// for under `206`, or `body` under `200` without one. Returns the
+    /// reply's bytes and the length of its body.
+    fn reply(body: &[u8], range: Option<&str>) -> (Vec<u8>, usize) {
         let bounds = range.and_then(|r| {
             let (first, last) = r.strip_prefix("bytes=")?.split_once('-')?;
             let first: usize = first.parse().ok()?;
@@ -1414,7 +1424,7 @@ mod tests {
                 .map_or(body.len() - 1, |l| l.min(body.len() - 1));
             Some((first, last))
         });
-        let (part, bytes) = match bounds {
+        match bounds {
             Some((first, last)) => {
                 let part = &body[first..=last];
                 let head = format!(
@@ -1422,15 +1432,27 @@ mod tests {
                     body.len(),
                     part.len()
                 );
-                (part, [head.as_bytes(), part].concat())
+                ([head.as_bytes(), part].concat(), part.len())
             }
-            None => (body, response("200 OK", body)),
-        };
+            None => (response("200 OK", body), body.len()),
+        }
+    }
+
+    /// [`reply`] to `range`, all of it if `stall` is `None`, else that
+    /// many bytes of the body at once and the rest once `stall` fires or
+    /// is dropped.
+    fn answer(
+        stream: &TcpStream,
+        body: &[u8],
+        range: Option<&str>,
+        stall: Option<(usize, mpsc::Receiver<()>)>,
+    ) {
+        let (bytes, length) = reply(body, range);
         let (sent, release) = match stall {
             Some((sent, release)) => (sent, Some(release)),
-            None => (part.len(), None),
+            None => (length, None),
         };
-        let (now, later) = bytes.split_at(bytes.len() - part.len() + sent);
+        let (now, later) = bytes.split_at(bytes.len() - length + sent);
         let mut stream = stream;
         let _ = stream.write_all(now);
         if let Some(release) = release {
@@ -1826,7 +1848,8 @@ mod tests {
         // The first answer sends half the body and then nothing; the second
         // sends it all. Without the body timeout the first read never ends.
         let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::new(dir.path());
+        let mut store = ModelStore::new(dir.path());
+        store.min_body_timeout = Duration::from_millis(200);
         let body = b"not really a model".to_vec();
         let (url, release, _) = serve_held(vec![
             (body.clone(), body.len() / 2),
@@ -1848,28 +1871,29 @@ mod tests {
     }
 
     #[test]
-    fn a_large_file_comes_in_chunks_and_a_stalled_chunk_is_given_up_alone() {
-        // 64 chunks of 64 KiB. Three of them stall half way, more than
-        // `DOWNLOAD_ATTEMPTS`, but each stall follows progress, so the
-        // download goes on. A stall costs one chunk's timeout (1 s), not
-        // the whole file's (64 s).
+    fn a_large_file_comes_in_chunks_and_a_chunk_cut_short_is_resumed_alone() {
+        // 64 chunks of 64 KiB. Three answers end the connection half way
+        // through their chunk, more often than `DOWNLOAD_ATTEMPTS`, but
+        // each cut follows progress, so the download goes on at once from
+        // where it stopped.
         const CHUNK: u32 = 64 << 10;
         let body: Vec<u8> = (0..64 * CHUNK)
             .map(|i| (i.wrapping_mul(7919) % 251) as u8)
             .collect();
         let shared = Arc::new(body.clone());
-        let stalled = [2, 10, 20];
-        let mut holds = Vec::new();
+        let cut = [2, 10, 20];
         let handlers: Vec<Handler> = (0..80)
             .map(|k| {
                 let body = Arc::clone(&shared);
-                let stall = stalled.contains(&k).then(|| {
-                    let (hold, wait) = mpsc::channel::<()>();
-                    holds.push(hold);
-                    (CHUNK as usize / 2, wait)
-                });
+                let cut = cut.contains(&k);
                 Box::new(move |stream: &TcpStream, range: Option<String>| {
-                    answer(stream, &body, range.as_deref(), stall);
+                    if cut {
+                        let (bytes, length) = reply(&body, range.as_deref());
+                        let mut stream = stream;
+                        let _ = stream.write_all(&bytes[..bytes.len() - length / 2]);
+                    } else {
+                        answer(stream, &body, range.as_deref(), None);
+                    }
                 }) as Handler
             })
             .collect();
@@ -1878,23 +1902,13 @@ mod tests {
         let mut store = ModelStore::new(dir.path());
         store.chunk = CHUNK.into();
         let asset = asset(Some(url), &body, &digest(&body));
-        let (done, finished) = mpsc::channel();
-        let installer = store.clone();
-        let wanted = asset.clone();
-        std::thread::spawn(move || {
-            let _ = done.send(installer.ensure(&wanted, &mut |_| {}));
-        });
-        let result = finished
-            .recv_timeout(Duration::from_secs(30))
-            .expect("a stalled chunk held the download");
-        drop(holds);
-        result.unwrap();
+        store.ensure(&asset, &mut |_| {}).unwrap();
         store.verify(&asset).unwrap();
         let ranges = ranges.lock().unwrap();
-        // Each stall leaves half a chunk, so one more request in all.
-        assert_eq!(ranges.len(), 63 + stalled.len(), "{ranges:?}");
+        // Each cut leaves half a chunk, so one more request in all.
+        assert_eq!(ranges.len(), 63 + cut.len(), "{ranges:?}");
         assert_eq!(ranges[0].as_deref(), Some("bytes=0-65535"));
-        // A stalled chunk goes on from where it stopped.
+        // A chunk cut short goes on from where it stopped.
         assert_eq!(ranges[3].as_deref(), Some("bytes=163840-229375"));
         assert_eq!(ranges.last().unwrap().as_deref(), Some("bytes=4161536-"));
     }
@@ -1956,11 +1970,19 @@ mod tests {
             let mut stream = stream;
             let _ = stream.write_all(&response("200 OK", b"<html>sign in</html>"));
         });
+        // A `206` that starts where it was asked to and brings nothing.
         let empty = || -> Handler {
-            Box::new(|stream, _| {
+            Box::new(|stream, range| {
+                let first = range
+                    .as_deref()
+                    .and_then(|r| r.strip_prefix("bytes="))
+                    .and_then(|r| r.split_once('-'))
+                    .unwrap()
+                    .0
+                    .to_owned();
                 let mut stream = stream;
                 let _ = stream.write_all(
-                    b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 65536-65536/196608\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    format!("HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {first}-{first}/196608\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
                 );
             })
         };
@@ -1995,40 +2017,79 @@ mod tests {
     }
 
     #[test]
-    fn a_chunk_slower_than_the_longest_timeout_is_cut_and_the_rest_asked_for() {
-        // 1 MiB chunks: by size a chunk would have 16 s, but no chunk gets
-        // more than `MAX_CHUNK_TIMEOUT` (1 s under test). The first one
-        // stops half way; the rest is asked for at once.
+    fn a_range_s_body_timeout_follows_its_length_up_to_the_longest() {
+        let store = ModelStore::new("/models");
+        let mib = 1 << 20;
+        // 64 KiB/s, but never under a minute.
+        assert_eq!(store.body_timeout(18), Duration::from_secs(60));
+        assert_eq!(store.body_timeout(16 * mib), Duration::from_secs(256));
+        // The whole of `encoder.weights`, for a host that ignores `Range`.
+        assert_eq!(
+            store.body_timeout(2_435_420_160),
+            Duration::from_secs(37_161)
+        );
+        // A chunk of a larger file stops at the longest, 128 s; the last,
+        // small one keeps its own.
+        let weights = 2_435_420_160;
+        assert_eq!(
+            store.range_timeout(weights, 0, CHUNK),
+            Duration::from_secs(128)
+        );
+        assert_eq!(
+            store.range_timeout(weights, weights - mib, weights),
+            Duration::from_secs(60)
+        );
+        // A file of one chunk, whose range may be answered with all of it,
+        // keeps the timeout for its length.
+        assert_eq!(
+            store.range_timeout(CHUNK, mib, CHUNK),
+            Duration::from_secs(1008)
+        );
+    }
+
+    #[test]
+    fn a_silent_chunk_is_given_up_at_the_longest_timeout_not_at_its_length_s() {
+        // 1 MiB chunks of a 2 MiB file and a shortest body timeout of an
+        // hour: by its length a chunk would have an hour, but none gets
+        // more than the longest chunk timeout, here 50 ms. Every answer
+        // sends its head and then nothing, so each attempt fetches nothing
+        // and the download fails after `DOWNLOAD_ATTEMPTS` of them.
         let body: Vec<u8> = (0..2u32 << 20).map(|i| (i % 229) as u8).collect();
         let shared = Arc::new(body.clone());
-        let (hold, wait) = mpsc::channel::<()>();
-        let first: Handler = {
-            let body = Arc::clone(&shared);
-            Box::new(move |stream, range| {
-                answer(stream, &body, range.as_deref(), Some((1 << 19, wait)));
+        let mut holds = Vec::new();
+        let handlers: Vec<Handler> = (0..DOWNLOAD_ATTEMPTS)
+            .map(|_| {
+                let (hold, wait) = mpsc::channel::<()>();
+                holds.push(hold);
+                let body = Arc::clone(&shared);
+                Box::new(move |stream: &TcpStream, range: Option<String>| {
+                    answer(stream, &body, range.as_deref(), Some((0, wait)));
+                }) as Handler
             })
-        };
-        let (url, ranges) = serve_each(vec![
-            first,
-            capping(&shared, usize::MAX),
-            capping(&shared, usize::MAX),
-        ]);
+            .collect();
+        let (url, ranges) = serve_each(handlers);
         let dir = tempfile::tempdir().unwrap();
         let mut store = ModelStore::new(dir.path());
         store.chunk = 1 << 20;
+        store.min_body_timeout = Duration::from_secs(3600);
+        store.max_chunk_timeout = Duration::from_millis(50);
         let asset = asset(Some(url), &body, &digest(&body));
-        let started = std::time::Instant::now();
-        store.ensure(&asset, &mut |_| {}).unwrap();
-        assert!(started.elapsed() < Duration::from_secs(10));
-        drop(hold);
-        store.verify(&asset).unwrap();
+        let (done, finished) = mpsc::channel();
+        let installer = store.clone();
+        let wanted = asset.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(installer.ensure(&wanted, &mut |_| {}));
+        });
+        // Only a hang guard: the hour would hold the test, 50 ms does not.
+        let error = finished
+            .recv_timeout(Duration::from_secs(60))
+            .expect("a silent chunk waited for its length's timeout")
+            .unwrap_err();
+        drop(holds);
+        assert!(is_transient(&error), "{error}");
         assert_eq!(
             *ranges.lock().unwrap(),
-            [
-                Some("bytes=0-1048575".to_owned()),
-                Some("bytes=524288-1572863".to_owned()),
-                Some("bytes=1572864-".to_owned()),
-            ]
+            vec![Some("bytes=0-1048575".to_owned()); DOWNLOAD_ATTEMPTS as usize]
         );
     }
 
