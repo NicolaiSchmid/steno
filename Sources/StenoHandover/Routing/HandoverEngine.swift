@@ -143,8 +143,8 @@ actor HandoverEngine: RequestHandling {
       try await store.delete(deviceID: deviceID)
     } catch {
       // The delete rolled back, so the device is still paired and no read
-      // since the bump was stale. The files discarded above stay gone, so
-      // the count stays then: a `complete` verifying one must still refuse.
+      // since the bump was stale. Files discarded above stay gone, though,
+      // so then the count stays: a `complete` verifying one must refuse.
       // Another revoke in flight keeps `revoked`.
       if !discarded { revocations[deviceID, default: 1] -= 1 }
       if revoking[deviceID] == 1 { revoked.remove(deviceID) }

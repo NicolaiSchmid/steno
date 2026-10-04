@@ -152,8 +152,9 @@ extension HandoverEngine {
   /// still verifying or admitting, and with no chunk listed when the partial
   /// was replaced during the verify; 422 on a hash mismatch, after which the
   /// partial is gone and the phone starts over; 401 while a revoke of the
-  /// device is in flight, or when one landed during the store read or the
-  /// verify of a recording not yet admitted, after which its files are gone.
+  /// device is in flight, and in place of any of these when one landed
+  /// during the store read or the verify of a recording not yet admitted
+  /// (its files are then discarded).
   func complete(_ recordingID: UUID, device: PairedDevice) async -> HandoverResponse {
     guard revoking[device.id] == nil else { return Self.unauthorized }
     let revocation = revocations[device.id, default: 0]

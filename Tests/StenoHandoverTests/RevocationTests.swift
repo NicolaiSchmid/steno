@@ -14,12 +14,13 @@ import Testing
 /// admits nothing: one that read its receipt before the revoke, also when
 /// the phone paired again meanwhile, one that starts before the revoke's
 /// store delete commits, one whose files came back during its verify, and
-/// one verifying files a failed revoke discarded. A partial replaced during
-/// the verify is not admitted either. A recording admitted before still
+/// one verifying files a failed revoke discarded; one whose device paired
+/// again during its verify writes no receipt either. A partial replaced
+/// during the verify is not admitted. A recording admitted before still
 /// answers its meeting, a request that read a receipt before the revoke
 /// does not bring it back into memory (also past a pairing during or after
-/// the revoke, or a second revoke that fails), and a failed revoke leaves
-/// the device working.
+/// the revoke, a second revoke that fails, or one that fails while another
+/// starts during a pairing), and a failed revoke leaves the device working.
 @Suite struct RevocationTests {
   static let chunkSize = 256 * 1024
 
@@ -434,8 +435,8 @@ import Testing
   }
 
   /// A revoke whose delete fails after it discarded the files of a
-  /// `complete` in its verify leaves that `complete` refused, also when the
-  /// phone announced again meanwhile: the files it was verifying are gone.
+  /// `complete` in its verify leaves that `complete` refused, even after the
+  /// phone announced again: the files it was verifying are gone.
   @Test(.timeLimit(.minutes(1)))
   func aCompleteVerifyingFilesAFailedRevokeDiscardedIsRefused() async throws {
     let gated = try await Gated()
@@ -694,9 +695,9 @@ import Testing
   }
 
   /// A revoke whose store delete throws leaves the device paired and no
-  /// revoke in flight. With nothing in memory to discard, nothing of it is
-  /// left; once it discarded the files of an upload, its count stays, and
-  /// the phone announces again and uploads anew.
+  /// revoke in flight. One with nothing to discard takes its count back; one
+  /// that discarded an upload's files keeps it, and the phone announces
+  /// again and uploads anew.
   @Test(.timeLimit(.minutes(1)))
   func aFailedRevokeLeavesTheDeviceWorking() async throws {
     let gated = try await Gated()
@@ -717,7 +718,8 @@ import Testing
     try await phone.uploadAll(gated.metadata, gated.bytes)
     await #expect(throws: (any Error).self) { try await gated.service.revoke(deviceID) }
     #expect(
-      await engine.revocations[deviceID, default: 0] == revocations + 1, "the upload's files went")
+      await engine.revocations[deviceID, default: 0] == revocations + 1,
+      "the count stays: the upload's files are gone")
     let shown = await gated.service.receipts.first { _ in true }
     #expect(shown?.isEmpty == true, "the receipt stream no longer shows the upload")
     try await gated.gate.pool.write { db in try db.execute(sql: "DROP TRIGGER keepDevice") }

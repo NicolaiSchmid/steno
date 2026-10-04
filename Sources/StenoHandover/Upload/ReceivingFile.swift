@@ -50,8 +50,9 @@ enum ReceivingFile {
     }
   }
 
-  /// What names one file on disk whatever its path, so a partial discarded
-  /// and created again is another file, also with the same bytes.
+  /// The volume and file number of a file. A partial discarded and created
+  /// again at the same path gets another one, even with the same bytes
+  /// (APFS does not reuse file numbers).
   struct Identity: Equatable, Sendable {
     let device: UInt64
     let file: UInt64
