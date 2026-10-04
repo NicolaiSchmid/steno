@@ -1109,7 +1109,6 @@ pub fn sha256_of(path: &Path) -> Result<String, SpeechError> {
 mod tests {
     use std::io::BufRead;
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::AtomicUsize;
     use std::sync::{Arc, Mutex, mpsc};
 
     use super::*;
@@ -1147,45 +1146,35 @@ mod tests {
     }
 
     /// Answers one connection per entry of `bodies`, in order of arrival,
-    /// with a `200` carrying that body: the first `head` bytes at once,
-    /// the rest once the k-th sender returned fires or is dropped. Returns
-    /// the URL, the senders and the count of connections accepted.
-    fn serve_held(
-        bodies: Vec<(Vec<u8>, usize)>,
-    ) -> (String, Vec<mpsc::Sender<()>>, Arc<AtomicUsize>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let (senders, receivers): (Vec<_>, Vec<_>) = bodies.iter().map(|_| mpsc::channel()).unzip();
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let count = Arc::clone(&accepted);
-        std::thread::spawn(move || {
-            for ((body, head), release) in bodies.into_iter().zip(receivers) {
-                let (stream, _) = listener.accept().unwrap();
-                count.fetch_add(1, Ordering::SeqCst);
-                std::thread::spawn(move || {
-                    read_request_head(&stream);
-                    let bytes = response("200 OK", &body);
-                    let header = bytes.len() - body.len();
-                    let (now, later) = bytes.split_at(header + head);
-                    let mut stream = &stream;
-                    stream.write_all(now).unwrap();
-                    stream.flush().unwrap();
-                    let _ = release.recv();
-                    let _ = stream.write_all(later);
-                });
-            }
-        });
-        (format!("http://{address}/model.onnx"), senders, accepted)
+    /// with a `200` carrying that body, whatever the range asked: the first
+    /// `head` bytes at once, the rest once the k-th sender returned fires
+    /// or is dropped. Returns the URL, the senders and the `Range` header
+    /// of every request so far.
+    fn serve_held(bodies: Vec<(Vec<u8>, usize)>) -> (String, Vec<mpsc::Sender<()>>, Requests) {
+        let (senders, handlers): (Vec<_>, Vec<Handler>) = bodies
+            .into_iter()
+            .map(|(body, head)| {
+                let (sender, release) = mpsc::channel();
+                let handler: Handler =
+                    Box::new(move |stream, _| answer(stream, &body, None, Some((head, release))));
+                (sender, handler)
+            })
+            .unzip();
+        let (url, requests) = serve_each(handlers);
+        (url, senders, requests)
     }
 
     /// What a connection of [`serve_each`] does: its stream and the
     /// request's `Range` header.
     type Handler = Box<dyn FnOnce(&TcpStream, Option<String>) + Send>;
 
+    /// The `Range` header of every request a test server has read.
+    type Requests = Arc<Mutex<Vec<Option<String>>>>;
+
     /// Answers one connection per handler, in order of arrival, each on a
     /// thread of its own, and returns the URL and the `Range` header of
     /// every request so far.
-    fn serve_each(handlers: Vec<Handler>) -> (String, Arc<Mutex<Vec<Option<String>>>>) {
+    fn serve_each(handlers: Vec<Handler>) -> (String, Requests) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let ranges = Arc::new(Mutex::new(Vec::new()));
@@ -1203,7 +1192,7 @@ mod tests {
 
     /// `body`, or the part `range` (`bytes=<first>-[<last>]`) asks for
     /// under `206`, all of it if `stall` is `None`, else that many bytes
-    /// and then nothing until `stall` fires or is dropped.
+    /// at once and the rest once `stall` fires or is dropped.
     fn answer(
         stream: &TcpStream,
         body: &[u8],
@@ -1218,7 +1207,7 @@ mod tests {
                 .map_or(body.len() - 1, |l| l.min(body.len() - 1));
             Some((first, last))
         });
-        let bytes = match bounds {
+        let (part, bytes) = match bounds {
             Some((first, last)) => {
                 let part = &body[first..=last];
                 let head = format!(
@@ -1226,22 +1215,22 @@ mod tests {
                     body.len(),
                     part.len()
                 );
-                [head.as_bytes(), part].concat()
+                (part, [head.as_bytes(), part].concat())
             }
-            None => response("200 OK", body),
+            None => (body, response("200 OK", body)),
         };
+        let (sent, release) = match stall {
+            Some((sent, release)) => (sent, Some(release)),
+            None => (part.len(), None),
+        };
+        let (now, later) = bytes.split_at(bytes.len() - part.len() + sent);
         let mut stream = stream;
-        match stall {
-            Some((sent, release)) => {
-                let header = bytes.len() - bounds.map_or(body.len(), |(f, l)| l + 1 - f);
-                let _ = stream.write_all(&bytes[..header + sent]);
-                let _ = stream.flush();
-                let _ = release.recv();
-            }
-            None => {
-                let _ = stream.write_all(&bytes);
-            }
+        let _ = stream.write_all(now);
+        if let Some(release) = release {
+            let _ = stream.flush();
+            let _ = release.recv();
         }
+        let _ = stream.write_all(later);
     }
 
     /// Reads a request up to the blank line that ends its head and
@@ -1344,7 +1333,7 @@ mod tests {
         // 2 MB, one chunk, so its body timeout (30 s) is far longer than
         // the hold.
         let body: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8 + 1).collect();
-        let (url, release, accepted) = serve_held(vec![(body.clone(), 50_000), (body.clone(), 0)]);
+        let (url, release, requests) = serve_held(vec![(body.clone(), 50_000), (body.clone(), 0)]);
         let asset = asset(Some(url), &body, &digest(&body));
         let (first_started, first_waits) = mpsc::channel();
         let mut first_received = 0;
@@ -1377,7 +1366,7 @@ mod tests {
         });
         assert_eq!(first_received, body.len() as u64);
         assert_eq!(
-            accepted.load(Ordering::SeqCst),
+            requests.lock().unwrap().len(),
             1,
             "the second download fetched the file again"
         );
@@ -1402,7 +1391,7 @@ mod tests {
         let short = good[..500_000].to_vec();
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
-        let (url, release, accepted) =
+        let (url, release, requests) =
             serve_held(vec![(short, 50_000), (good.clone(), 10_000), (wrong, 0)]);
         let mut asset = asset(Some(url), &good, &digest(&good));
         let (first_started, first_waits) = mpsc::channel();
@@ -1424,7 +1413,7 @@ mod tests {
             assert!(matches!(first, Err(SpeechError::Size { .. })), "{first:?}");
             // The second has the lock and its own request.
             let deadline = std::time::Instant::now() + WAIT;
-            while accepted.load(Ordering::SeqCst) < 2 {
+            while requests.lock().unwrap().len() < 2 {
                 assert!(std::time::Instant::now() < deadline);
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -1436,7 +1425,7 @@ mod tests {
             drop(release);
             third.join().unwrap().unwrap();
         });
-        assert_eq!(accepted.load(Ordering::SeqCst), 2);
+        assert_eq!(requests.lock().unwrap().len(), 2);
         store.verify(&asset).unwrap();
         assert_eq!(names(&store, &asset), ["model.onnx", "model.onnx.lock"]);
         // The lock file counts for nothing: removed, the file is missing.
