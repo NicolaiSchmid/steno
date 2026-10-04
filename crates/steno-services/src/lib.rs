@@ -33,7 +33,7 @@
 //! keyring, which does not survive a reboot (the handover identity and the
 //! LLM API key would vanish), and its Secret Service store needs D-Bus and
 //! a running secret service, which headless machines and the CI runners
-//! do not have. The Secret Service is `WP8`'s Linux release item.
+//! do not have. The Secret Service has no work package yet.
 //!
 //! The shell's launch, in one piece:
 //!

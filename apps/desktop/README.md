@@ -33,22 +33,31 @@ Secrets are not the shell's: the `SecretStore` lives in `steno-services`
 
 Every exit saves first: `App::shutdown` runs once, at most ten seconds,
 and stops and saves a recording in progress (a start or a stop under way
-settles first) and stops the phone listener, as the Swift
-`applicationShouldTerminate` awaited `AppController.shutdown`. Quit in the
-tray's menu or the macOS menu bar, the close that ends the process because
-no tray stands, and SIGTERM (a logout on Linux, `kill`) are exit requests,
-held until the shutdown ended (`exit_request` in `main.rs` over
-`steno_services::app::ExitGate`); a second Quit meanwhile waits too. The
-Dock's Quit, a logout and a shutdown on macOS reach the shell only as the
-run loop's last event, `RunEvent::Exit`, which AppKit waits for, and an
-update's relaunch bypasses the request, so both run the shutdown on their
-own thread first (`shut_down_before_exit`). A Windows logoff saves nothing
-yet (WP10).
+settles first) and stops the handover listener, as the Swift
+`applicationShouldTerminate` awaited `AppController.shutdown`. The exits
+reach it four ways:
+
+- Quit in the tray's menu or the macOS menu bar, the close that ends the
+  process because no tray stands, and SIGTERM (a logout on Linux, a plain
+  `kill`) are exit requests, held until the shutdown ended (`exit_request`
+  in `main.rs` over `steno_services::app::ExitGate`); a second Quit
+  meanwhile waits too, and a second SIGTERM ends the process at once,
+  unsaved. SIGINT and SIGHUP are not caught.
+- The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
+  the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
+  it waits for the shutdown first (`shut_down_before_exit`).
+- An update's relaunch bypasses the request, so it waits for the shutdown
+  first too; on Windows the installer's own exit runs it, and an install
+  that fails after that ends the app once its message is closed.
+- A logoff or a shutdown on Windows also arrives as `RunEvent::Exit` (tao
+  answers `WM_ENDSESSION` with it), within Windows' own end-session
+  timeout; untested on hardware (WP10).
 
 Snapshots reach the windows, the tray and the panels from the main thread
-(`WindowSink` in `host.rs`): the host emits under its own lock, which the
-main thread also takes, and the tray's setters wait for the main thread
-when called from anywhere else.
+(`WindowSink` in `host.rs`): the host emits under its `publishing` lock,
+the main thread can be waiting for a thread that holds it (a Stop from the
+tray joins the recorder's level thread, which publishes), and the tray's
+setters wait for the main thread when called from another.
 
 The tray menu is the Swift menu bar popover's controls: Record (Stop
 recording while recording, with the recorder's words between), Record in
@@ -230,8 +239,10 @@ mounts, when the main window hides on close and when the process ends,
 the login item states, the update lanes, the permission panes per OS,
 the `steno:` link grammar and its case rules, the Linux desktop entry,
 the folder choosers' replies and the host's chosen folder, the alert's
-buttons, and the exit rules: a Quit or a no-tray close while recording
-waits for the save and exits once. `cargo test -p steno-desktop
+buttons, and the exit rules: an exit request runs the shutdown once and
+exits after it, a second Quit meanwhile is held, a close behind a tray
+runs nothing; the window sink delivers on the main thread, in emit order,
+without the emit waiting. `cargo test -p steno-desktop
 --features fixture-host` runs the same with the fixture host, plus the
 fixture table against `index.json` and the mock transport; Rust CI runs
 both. In the web
@@ -359,10 +370,10 @@ get two login items (the plan's parity list). The macOS menu bar has no
 Record menu yet (`⌘⇧R` and Record In Person are the tray's and the
 sidebar's), and no Find Meetings (`⌘F`). Updates are checked only when
 asked (the tray's item, Settings), where Sparkle checks daily on its
-own. On macOS the system audio permission has no status API; the audio
-crate's probe (WP5) records it and until then it reads `unknown`. The
-panels are re-tuned on the Mac once they run there beside the Swift ones
-(the plan's risk list). Linux and Windows keep their native title bar;
+own (WP9's update schedule). On macOS the system audio permission has
+no status API; the audio crate's probe (WP5) records it and until then it
+reads `unknown`. The panels are re-tuned on the Mac once they run there
+beside the Swift ones (the plan's risk list). Linux and Windows keep their native title bar;
 macOS gets the overlay title bar the Swift windows have. The page's
 traffic light inset is a design question for the other two platforms. On
 Linux, WebKitGTK leaks one shared-memory file descriptor per destroyed
