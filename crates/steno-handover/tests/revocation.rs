@@ -500,7 +500,11 @@ async fn an_admitted_recording_answers_its_meeting_after_a_revoke_during_the_rea
 
     let (response, _) = restarted.complete_with_a_revoke_during_the_read(true).await;
 
-    assert_eq!(response.status.as_u16(), 200, "the phone keeps its meeting");
+    assert_eq!(
+        response.status.as_u16(),
+        200,
+        "the phone keeps its meeting (a 404: the store read must be the first wait)"
+    );
     let answered: wire::CompleteResponse = response.decode().unwrap();
     assert_eq!(answered.meeting_id, meeting.meeting_id);
     restarted.assert_nothing_admitted();
@@ -665,10 +669,12 @@ async fn a_partial_created_again_during_the_verify_is_not_promoted() {
     assert_eq!(
         restarted.service.engine.receipts_snapshot()[0].state,
         HandoverState::Verifying,
-        "with the partial open"
+        "the new complete is verifying, with the partial open"
     );
     let Poll::Ready(refused) = Woken::new().poll(stale.as_mut()) else {
-        panic!("the old complete answers without the store");
+        panic!(
+            "the old complete answers without the store (the store read must be the first wait)"
+        );
     };
     assert_eq!(refused.status.as_u16(), 401);
     assert!(!inbox.has_partial(id), "the refusal discarded the partial");
@@ -706,6 +712,52 @@ async fn a_partial_created_again_during_the_verify_is_not_promoted() {
     let admitted = restarted.intake.entries();
     assert_eq!(admitted.len(), 1);
     assert_eq!(std::fs::read(&admitted[0]).unwrap(), restarted.bytes);
+}
+
+#[tokio::test]
+async fn a_partial_gone_during_the_verify_lists_no_chunk() {
+    // As above, without the retried announce: the refusal discarded the
+    // partial the new `complete` hashes, and nothing is at its path when the
+    // hash returns. The 409 lists no chunk, so the phone announces and sends
+    // every chunk again.
+    let restarted = Restarted::new().await;
+    let id = restarted.id();
+    let inbox = restarted.first.inbox();
+    let (mut stale, again) = restarted.revoke_during_the_read(true).await;
+    let again = again.expect("paired again");
+    again
+        .upload_all(&restarted.metadata, &restarted.bytes)
+        .await;
+
+    let hold = StoreHold::new(&restarted.first.store);
+    let mut completing = pin!(unconstrained(again.complete(id)));
+    Woken::new().pending(
+        completing.as_mut(),
+        "the new complete waits on its verifying write",
+    );
+    let Poll::Ready(refused) = Woken::new().poll(stale.as_mut()) else {
+        panic!(
+            "the old complete answers without the store (the store read must be the first wait)"
+        );
+    };
+    assert_eq!(refused.status.as_u16(), 401);
+    assert!(!inbox.has_partial(id), "the refusal discarded the partial");
+    hold.release();
+    let completed = completing.await;
+
+    assert_eq!(completed.status.as_u16(), 409, "not admitted");
+    let status: wire::RecordingStatus = completed.decode().unwrap();
+    assert_eq!(
+        status.received_chunks,
+        Vec::<i64>::new(),
+        "every chunk again"
+    );
+    assert_eq!(restarted.intake.count(), 0, "the intake never sees a file");
+    again
+        .upload_all(&restarted.metadata, &restarted.bytes)
+        .await;
+    assert_eq!(again.complete(id).await.status.as_u16(), 200);
+    assert_eq!(restarted.intake.count(), 1);
 }
 
 #[tokio::test]
@@ -798,8 +850,8 @@ impl Woken {
         future.poll(&mut Context::from_waker(&Waker::from(self.clone())))
     }
 
-    /// Polls `future` once with this waker; it must wait (`what` names on
-    /// what).
+    /// Polls `future` once with this waker and asserts it is pending;
+    /// `what` names what it waits on.
     #[track_caller]
     fn pending<F: Future>(self: &Arc<Self>, future: Pin<&mut F>, what: &str) {
         assert!(self.poll(future).is_pending(), "{what}");
