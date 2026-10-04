@@ -14,10 +14,13 @@
 //! idle or busy, with status 2 on a request it cannot read, and on unix
 //! answer a request that SIGINT, SIGTERM and SIGHUP reach mid-request.
 //!
-//! Nothing here ends a child with `DirectML` in use: that switches
-//! `DirectML` off for the rest of the process's run, so those tests run
-//! in binaries of their own (`directml_switch_off.rs`,
-//! `directml_probe_crash.rs`, `directml_lost_encoder.rs`).
+//! Nothing here ends a child with `DirectML` in use. During a load or a
+//! request that switches `DirectML` off for the rest of the process's run,
+//! so those tests run in binaries of their own (`directml_switch_off.rs`,
+//! `directml_probe_crash.rs`, `directml_lost_encoder.rs`); so do the tests
+//! of a child on `DirectML` that ends between requests
+//! (`directml_idle_death.rs`, `directml_idle_overrun.rs`), so that a
+//! regression there cannot switch it off here.
 //!
 //! The fake engine needs no models; the last test, ignored by default,
 //! runs the real one and fails unless `STENO_MODELS_DIR` holds them

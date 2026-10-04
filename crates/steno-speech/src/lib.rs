@@ -31,7 +31,8 @@
 //!   sidecar hosts.
 //! - [`sidecar`]: [`SidecarSpeechEngine`], the `SpeechEngine` over the
 //!   `steno-speech-sidecar` child process, and its wire protocol, and the
-//!   process-wide switch-off of `DirectML` after a child crashed on it
+//!   process-wide switch-off of `DirectML` after a child crashed, hung or
+//!   overran the memory ceiling on it during a load or a request
 //!   ([`sidecar::directml_switched_off`]).
 //! - [`runtime`]: [`SpeechSettings`] and [`SpeechRuntime`], which engine
 //!   runs on which platform.

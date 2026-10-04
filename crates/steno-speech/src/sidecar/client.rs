@@ -8,9 +8,13 @@
 //! `transcribe` without an error. Either way the next child loads the
 //! models again. Nothing here can take the app down with the child.
 //!
-//! After a child that crashed, hung or overran the memory ceiling with
-//! `DirectML` in use, every later child in this process loads on the CPU
-//! ([`directml_switched_off`]). `DirectML` is asked for on Windows only.
+//! After a child that crashed, hung or overran the memory ceiling during a
+//! load or a request with `DirectML` in use, every later child in this
+//! process loads on the CPU ([`directml_switched_off`]). One that dies
+//! between requests is replaced on `DirectML`: nothing ran on it since its
+//! last answer. One that overruns the ceiling between requests still
+//! counts, as what it holds then is what its last request left, on the GPU
+//! too. `DirectML` is asked for on Windows only.
 //!
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
@@ -127,15 +131,17 @@ pub struct SidecarHealth {
     pub provider: Option<EncoderProvider>,
 }
 
-/// Set once a child crashed, hung or overran the memory ceiling with
-/// `DirectML` in use. Process-wide, so it holds for the rest of the app's
-/// run: `steno-services` builds a new engine on every pipeline reload, and
-/// none of them asks for `DirectML` again. Nothing clears it.
+/// Set once a child crashed, hung or overran the memory ceiling during a
+/// load or a request with `DirectML` in use, or overran it between requests
+/// after one (see the module docs). Process-wide, so it holds for the rest
+/// of the app's run: `steno-services` builds a new engine on every pipeline
+/// reload, and none of them asks for `DirectML` again. Nothing clears it.
 static DIRECTML_SWITCHED_OFF: AtomicBool = AtomicBool::new(false);
 
 /// Whether a child in this process crashed, hung or overran the memory
-/// ceiling with `DirectML` in use; every engine's later loads then ask for
-/// the CPU, for the rest of the app's run.
+/// ceiling during a load or a request with `DirectML` in use, or overran it
+/// between requests after one (see the module docs); every engine's later
+/// loads then ask for the CPU, for the rest of the app's run.
 #[must_use]
 pub fn directml_switched_off() -> bool {
     DIRECTML_SWITCHED_OFF.load(Ordering::SeqCst)
@@ -544,7 +550,10 @@ impl SidecarProcess {
 /// disk past the load timeout). The memory ceiling counts because a child
 /// that passes it on `DirectML` would pass it on every job; on the CPU the
 /// fp32 export stays well under it. A child on the CPU, an error it
-/// reported or a protocol violation does not count.
+/// reported or a protocol violation does not count. A child that died
+/// between requests is passed here with no provider, so it does not count
+/// either; one over the ceiling then is passed as it is
+/// ([`Shared::ensure_loaded`]).
 fn ended_on_directml(
     error: &SidecarError,
     provider: Option<EncoderProvider>,
@@ -619,20 +628,30 @@ impl Shared {
     }
 
     /// Whether the next load asks for `DirectML`: on Windows, when the
-    /// options ask for it and no child has ended on it in this process.
+    /// options ask for it and [`directml_switched_off`] is false.
     fn wants_directml(&self) -> bool {
         cfg!(windows) && self.config.options.directml && !directml_switched_off()
     }
 
     /// Makes sure a child runs with its models loaded, installing them
-    /// first if need be. A child that crashed, hung or overran the memory
-    /// ceiling inside a load that asked for `DirectML` (the probe) switched
-    /// `DirectML` off; no audio was sent yet, so a new child loads on the
-    /// CPU within the same call. Blocking; the caller holds the lock.
+    /// first if need be. A child that failed since its last request is
+    /// replaced without an error: on `DirectML` still if it died, on the
+    /// CPU if it overran the memory ceiling on `DirectML` (see the module
+    /// docs). A child that crashed, hung or overran the ceiling inside a
+    /// load that asked for `DirectML` (the probe) switched `DirectML` off;
+    /// no audio was sent yet, so a new child loads on the CPU within the
+    /// same call. Blocking; the caller holds the lock.
     fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
         if let Some(error) = slot.as_mut().and_then(SidecarProcess::failed_while_idle) {
-            // Replaced without an error; the end still counts against
-            // `DirectML` like one during a request.
+            // Replaced without an error, and on `DirectML` still: no load
+            // or request ran on it. Not after an overrun: what the child
+            // holds then is what its last request left, on the GPU too.
+            if !matches!(error, SidecarError::MemoryCeiling { .. })
+                && let Some(process) = slot.as_mut()
+            {
+                process.provider = None;
+                process.load_asked_directml = false;
+            }
             self.kill_unless_remote(slot, error);
         }
         if slot.as_ref().is_some_and(|p| p.provider.is_some()) {
@@ -843,7 +862,11 @@ impl SidecarSpeechEngine {
 
     /// Asks the running child for its pid, resident set, whether its
     /// models are loaded and where its encoder runs; `None` when no child
-    /// runs. A child that does not answer is killed.
+    /// runs. A child that does not answer is killed. Unlike `prepare` and
+    /// `transcribe`, it does not look for a child that failed since its
+    /// last request first, so a child that died on `DirectML` meanwhile
+    /// counts against `DirectML` here as during a request; only the tests
+    /// call it.
     pub async fn health(&self) -> BoundaryResult<Option<SidecarHealth>> {
         let shared = Arc::clone(&self.shared);
         Ok(blocking(move || {
