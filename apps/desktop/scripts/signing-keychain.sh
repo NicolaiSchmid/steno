@@ -2,33 +2,43 @@
 # The Developer ID certificate in a throwaway keychain for one release run,
 # as .github/workflows/release.yml does for the Swift app: `import` creates
 # and unlocks the keychain, imports the .p12 with a partition list that lets
-# codesign use the key without a prompt, saves the user's keychain search
-# list and puts the keychain in front of it, then prints the SHA-1 of the
-# Developer ID Application identity (what the Tauri bundler signs with,
+# codesign use the key without a prompt, puts the keychain in front of the
+# user's keychain search list, then prints the SHA-1 of the Developer ID
+# Application identity (what the Tauri bundler signs with,
 # `APPLE_SIGNING_IDENTITY`) as the only line on stdout; every tool's own
-# output goes to stderr. `remove` deletes the keychain and puts the saved
-# search list back, never a guess at it: on the self-hosted Mac the runner
-# user may keep other keychains there.
+# output goes to stderr. `remove` deletes the keychain and takes it out of
+# the search list as it is then, so another run's keychain on the
+# self-hosted Mac stays and the user's own keychains are never touched.
 #
 #   P12=<base64 .p12> P12_PASSWORD=<password> \
-#     apps/desktop/scripts/signing-keychain.sh import <keychain> <saved list>
-#   apps/desktop/scripts/signing-keychain.sh remove <keychain> <saved list>
+#     apps/desktop/scripts/signing-keychain.sh import <keychain>
+#   apps/desktop/scripts/signing-keychain.sh remove <keychain>
 #
 # The keychain password is random and lives only for the run. Paths with a
 # trailing space corrupt `security list-keychains -s`, so callers pass
-# plain paths.
+# plain paths; the keychain's directory must exist.
 set -euo pipefail
 
 action="${1:?import or remove}"
 keychain="${2:?keychain path}"
-saved="${3:?file the search list is saved to}"
+# The search list holds the resolved path (no `..`, no symlink), so this
+# one is compared in that form.
+keychain="$(cd "$(dirname "$keychain")" && pwd -P)/$(basename "$keychain")"
 
-# The saved search list as an array, one keychain per line.
-read_saved() {
-  before=()
+# The search list as it is now, minus this run's keychain, into `others`;
+# `listed` says whether the keychain was on it.
+read_list() {
+  local list line
+  list="$(security list-keychains -d user | sed 's/^ *"//; s/"$//')"
+  others=()
+  listed=false
   while IFS= read -r line; do
-    [[ -n "$line" ]] && before+=("$line")
-  done < "$saved"
+    if [[ "$line" == "$keychain" ]]; then
+      listed=true
+    elif [[ -n "$line" ]]; then
+      others+=("$line")
+    fi
+  done <<< "$list"
 }
 
 case "$action" in
@@ -47,21 +57,21 @@ case "$action" in
     security unlock-keychain -p "$password" "$keychain"
     security import "$certificate" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
-    security list-keychains -d user | sed 's/^ *"//; s/"$//' > "$saved"
-    read_saved
-    # `${before[@]+…}`: an empty array under `set -u` is an error in bash 3.2.
-    security list-keychains -d user -s "$keychain" ${before[@]+"${before[@]}"}
+    read_list
+    # `${others[@]+…}`: an empty array under `set -u` is an error in bash 3.2.
+    security list-keychains -d user -s "$keychain" ${others[@]+"${others[@]}"}
     identity="$(security find-identity -v -p codesigning "$keychain" \
       | sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) "Developer ID Application: .*"$/\1/p' | head -n 1)"
     [[ -n "$identity" ]] || { echo "::error::the imported certificate is not a Developer ID Application identity"; exit 1; }
     echo "$identity" >&3
     ;;
   remove)
+    # `delete-keychain` also takes it off the search list; the list is
+    # rewritten only when an entry is left over (a keychain already gone).
     security delete-keychain "$keychain" 2>/dev/null || true
-    if [[ -s "$saved" ]]; then
-      read_saved
-      security list-keychains -d user -s ${before[@]+"${before[@]}"} 2>/dev/null || true
-      rm -f "$saved"
+    read_list
+    if [[ "$listed" == true ]]; then
+      security list-keychains -d user -s ${others[@]+"${others[@]}"} 2>/dev/null || true
     fi
     ;;
   *)

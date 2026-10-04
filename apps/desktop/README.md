@@ -245,11 +245,6 @@ finding.
    `curl -fsSL https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json | jq .version`
    (and `desktop-stable` for a release).
 
-Do not run a desktop release and a Swift release (`release.yml`) at the
-same moment on the self-hosted Mac: both put their keychain in front of
-the user's keychain search list and put the saved list back when they
-finish, so one can drop the other's keychain halfway through signing.
-
 ### When a run fails
 
 - **plan**: the tag does not name the workspace version, or the MSI
@@ -326,10 +321,12 @@ The release binary is built first with no secret in the environment
 `tauri bundle` then signs and packages it with the keys. On macOS the job
 imports the Developer ID certificate into a throwaway keychain
 (`scripts/signing-keychain.sh`, the Swift release's approach) and hands
-its identity to the bundler, which signs the sidecar, the app binary and
-the bundle under the hardened runtime with `Entitlements.plist` (one file
-for every item, so the sidecar carries the two entitlements without using
-them). The bundler then notarises and staples the `.app` with the App
+its identity to the bundler; at the end it takes only that keychain off
+the search list, so another desktop or Swift release running on the
+self-hosted Mac keeps its own. The bundler signs the sidecar, the app
+binary and the bundle under the hardened runtime with `Entitlements.plist`
+(one file for every item, so the sidecar carries the two entitlements
+without using them), then notarises and staples the `.app` with the App
 Store Connect key before it builds the image and the updater archive from
 it, and `scripts/notarize-dmg.sh` notarises and staples the image.
 `check-bundle.sh --signed` checks the Developer ID authority, the runtime

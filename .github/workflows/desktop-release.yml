@@ -114,7 +114,6 @@ jobs:
       # macOS only (signing-keychain.sh). Outside the workspace and named
       # apart from the Swift release's, which may share the runner.
       KEYCHAIN_PATH: ${{ github.workspace }}/../steno-desktop-release.keychain-db
-      KEYCHAINS_BEFORE: ${{ github.workspace }}/../steno-desktop-release.keychains-before
     steps:
       - uses: actions/checkout@v4
 
@@ -215,7 +214,7 @@ jobs:
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         run: |
           set -euo pipefail
-          identity="$(apps/desktop/scripts/signing-keychain.sh import "$KEYCHAIN_PATH" "$KEYCHAINS_BEFORE")"
+          identity="$(apps/desktop/scripts/signing-keychain.sh import "$KEYCHAIN_PATH")"
           key_path="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
           (umask 077 && printf '%s\n' "$ASC_PRIVATE_KEY" > "$key_path")
           {
@@ -287,7 +286,7 @@ jobs:
       - name: Remove keychain and keys
         if: always() && matrix.name == 'macos'
         run: |
-          apps/desktop/scripts/signing-keychain.sh remove "$KEYCHAIN_PATH" "$KEYCHAINS_BEFORE"
+          apps/desktop/scripts/signing-keychain.sh remove "$KEYCHAIN_PATH"
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
   # Only a pushed tag publishes, one run at a time, so two tags never write
