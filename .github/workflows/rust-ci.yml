@@ -281,17 +281,20 @@ jobs:
           path: apps/desktop/screens
           if-no-files-found: ignore
 
-      # The release build as desktop-release.yml drives it, bundled as a
-      # .deb (the quickest installer) and checked for the sidecar beside
-      # the app. The web dist is built above, so beforeBuildCommand goes;
-      # pull requests get no signing key, so the updater artifacts go too.
+      # The release build as desktop-release.yml drives it (`tauri build
+      # --no-bundle`, then `tauri bundle`), bundled as a .deb (the quickest
+      # installer) and checked for the sidecar beside the app. The web dist
+      # is built above, so beforeBuildCommand goes; pull requests get no
+      # signing key, so the updater artifacts go too.
       - name: Desktop release bundle (deb, with the sidecar)
         if: matrix.name == 'linux'
         run: |
           apps/desktop/scripts/stage-sidecar.sh
-          (cd apps/desktop/src-tauri && pnpm dlx @tauri-apps/cli@2.12.1 build --ci --bundles deb \
-            --config tauri.release.conf.json \
+          configs=(--config tauri.release.conf.json
             --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":false}}')
+          (cd apps/desktop/src-tauri \
+            && pnpm dlx @tauri-apps/cli@2.12.1 build --ci --no-bundle "${configs[@]}" \
+            && pnpm dlx @tauri-apps/cli@2.12.1 bundle --ci --bundles deb "${configs[@]}")
           apps/desktop/scripts/check-bundle.sh target/release/bundle deb
 
   # Advisories only warn here, so one published overnight does not block
