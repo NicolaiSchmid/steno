@@ -631,7 +631,7 @@ mod tests {
         let receipt = store.handover_receipt(metadata.recording_id).unwrap();
         assert!(
             !receipt.is_some_and(|receipt| matches!(receipt.state, HandoverState::Complete { .. })),
-            "the receipt says complete"
+            "a receipt whose copy failed is not complete"
         );
         assert_eq!(store.all_meetings().unwrap(), []);
         assert!(!enqueued.load(Ordering::SeqCst));
