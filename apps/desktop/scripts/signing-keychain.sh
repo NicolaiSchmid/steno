@@ -5,12 +5,14 @@
 # codesign use the key without a prompt, saves the user's keychain search
 # list and puts the keychain in front of it, then prints the SHA-1 of the
 # Developer ID Application identity (what the Tauri bundler signs with,
-# `APPLE_SIGNING_IDENTITY`). `remove` deletes the keychain and puts the
-# saved search list back, never a guess at it: on the self-hosted Mac the
-# runner user may keep other keychains there.
+# `APPLE_SIGNING_IDENTITY`) as the only line on stdout; every tool's own
+# output goes to stderr. `remove` deletes the keychain and puts the saved
+# search list back, never a guess at it: on the self-hosted Mac the runner
+# user may keep other keychains there.
 #
-#   P12=<base64 .p12> P12_PASSWORD=<password> signing-keychain.sh import <keychain> <saved list>
-#   signing-keychain.sh remove <keychain> <saved list>
+#   P12=<base64 .p12> P12_PASSWORD=<password> \
+#     apps/desktop/scripts/signing-keychain.sh import <keychain> <saved list>
+#   apps/desktop/scripts/signing-keychain.sh remove <keychain> <saved list>
 #
 # The keychain password is random and lives only for the run. Paths with a
 # trailing space corrupt `security list-keychains -s`, so callers pass
@@ -33,6 +35,9 @@ case "$action" in
   import)
     : "${P12:?P12 (the base64 .p12) missing}"
     : "${P12_PASSWORD:?P12_PASSWORD missing}"
+    # Stdout is the identity alone (`security import` reports what it
+    # imported there), so fd 3 keeps it and everything else goes to stderr.
+    exec 3>&1 1>&2
     password="$(openssl rand -hex 24)"
     certificate="$(mktemp)"
     trap 'rm -f "$certificate"' EXIT
@@ -44,17 +49,18 @@ case "$action" in
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
     security list-keychains -d user | sed 's/^ *"//; s/"$//' > "$saved"
     read_saved
-    security list-keychains -d user -s "$keychain" "${before[@]}"
+    # `${before[@]+…}`: an empty array under `set -u` is an error in bash 3.2.
+    security list-keychains -d user -s "$keychain" ${before[@]+"${before[@]}"}
     identity="$(security find-identity -v -p codesigning "$keychain" \
       | sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) "Developer ID Application: .*"$/\1/p' | head -n 1)"
-    [[ -n "$identity" ]] || { echo "::error::the imported certificate is not a Developer ID Application identity" >&2; exit 1; }
-    echo "$identity"
+    [[ -n "$identity" ]] || { echo "::error::the imported certificate is not a Developer ID Application identity"; exit 1; }
+    echo "$identity" >&3
     ;;
   remove)
     security delete-keychain "$keychain" 2>/dev/null || true
     if [[ -s "$saved" ]]; then
       read_saved
-      security list-keychains -d user -s "${before[@]}" 2>/dev/null || true
+      security list-keychains -d user -s ${before[@]+"${before[@]}"} 2>/dev/null || true
       rm -f "$saved"
     fi
     ;;
