@@ -240,6 +240,16 @@ pub trait Pipeline: Send + Sync {
 /// `Sources/StenoSpeech/Models/ModelStore.swift`.
 pub trait SpeechModels: Send + Sync {
     fn is_installed(&self, asset: ModelAsset) -> bool;
+    /// Whether every model the speech engine `engine_id` loads is on disk,
+    /// so loading it starts no download. The default asks for the engine's
+    /// asset; the services, which pick the engine per platform, answer for
+    /// the engine they build. Swift: `models.isInstalled(engine.asset)` in
+    /// `AppEnvironment.warmUpPipelineIfModelsInstalled`.
+    fn engine_installed(&self, engine_id: &str) -> bool {
+        engine_id
+            .parse::<crate::speech::SpeechEngineId>()
+            .is_ok_and(|engine| self.is_installed(engine.asset()))
+    }
     fn installed_size(&self, asset: ModelAsset) -> Option<i64>;
     /// Downloads the asset, reporting `(fraction, phase)` as it goes;
     /// returns once installed.
@@ -249,6 +259,20 @@ pub trait SpeechModels: Send + Sync {
         progress: &mut dyn FnMut(f64, &str),
     ) -> BoundaryResult<()>;
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()>;
+
+    /// The name the acknowledgements give `asset`. The model behind an
+    /// asset is the services' choice per platform (the Mac's `CoreML` int8
+    /// Parakeet, an fp32 ONNX export elsewhere), so they may name it; the
+    /// default is the Swift app's name, [`ModelAsset::display_name`].
+    fn display_name(&self, asset: ModelAsset) -> &'static str {
+        asset.display_name()
+    }
+
+    /// Where `asset`'s model comes from, for the acknowledgements; the
+    /// default is the Swift app's repository, [`ModelAsset::source_repo`].
+    fn source_repo(&self, asset: ModelAsset) -> &'static str {
+        asset.source_repo()
+    }
 }
 
 /// One entry of the Codex backend's model list. Swift: `CodexModel` in
@@ -276,7 +300,9 @@ pub trait LlmService: Send + Sync {
     /// One line for the Test button, or the failure text.
     fn probe(&self, settings: &Settings, api_key: Option<&str>) -> BoundaryResult<String>;
     /// The account line of the Codex sign-in on this computer, or why
-    /// there is none.
+    /// there is none. Reads the sign-in on disk, never the network: the
+    /// Summaries section reads it with the host's lock held when it loads.
+    /// Swift: `CodexCredentialStore.stored()`.
     fn codex_account(&self) -> BoundaryResult<String>;
     /// The Codex models on offer, listed ones only.
     fn codex_models(&self) -> Result<Vec<CodexModel>, CodexModelsError>;

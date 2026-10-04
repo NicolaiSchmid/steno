@@ -560,6 +560,12 @@ pub fn show_at(
     show_window(app, panel, query, frame)
 }
 
+/// Whether a panel's window is resizable: on Linux only, where GTK holds
+/// a fixed window at its content's natural size (`show_window`). Elsewhere
+/// the user cannot resize a panel at all; the smoke checks each platform's
+/// way of keeping the page's size against this.
+pub const RESIZABLE: bool = cfg!(target_os = "linux");
+
 /// Shows `panel` at `frame`. An existing window is reused: the prompt's
 /// is navigated to the new request first, unless it already shows it (the
 /// same prompt again after the bubble keeps its page and countdown).
@@ -605,7 +611,7 @@ fn show_window(
     // resize cursor and swallows a press, so a drag that starts on the
     // outer 5 px does not move the panel; no control sits there. macOS and
     // Windows honour `set_size` on a fixed window and have no such border.
-    .resizable(cfg!(target_os = "linux"))
+    .resizable(RESIZABLE)
     .min_inner_size(frame.width, frame.height)
     .max_inner_size(frame.width, frame.height)
     .focused(false)
@@ -776,7 +782,9 @@ fn not_a_size(reported: (f64, f64)) -> BridgeError {
 /// Gives a panel's window `size` and holds it there: the minimum and the
 /// maximum become the size (one request, so they never cross), then the
 /// size itself. On Linux, where the window is resizable, the pin is what
-/// keeps a drag on its border from resizing it.
+/// keeps a drag on its border from resizing it. On macOS the minimum and
+/// maximum bound only the user's resizing, which a panel's style mask
+/// rules out anyway; a size set from code goes through whatever they say.
 fn pin_size(window: &WebviewWindow, size: (f64, f64)) -> tauri::Result<()> {
     let width = Some(PixelUnit::Logical(size.0.into()));
     let height = Some(PixelUnit::Logical(size.1.into()));
@@ -813,7 +821,10 @@ mod macos {
     //! deactivates, and moves by its background.
 
     use tauri::WebviewWindow;
-    use tauri_nspanel::{CollectionBehavior, Panel as _, PanelLevel, StyleMask, tauri_panel};
+    use tauri_nspanel::{
+        CollectionBehavior, Panel as _, PanelLevel, StyleMask, objc2_app_kit::NSWindowStyleMask,
+        tauri_panel,
+    };
 
     tauri_panel! {
         panel!(FloatingPanel {
@@ -830,12 +841,7 @@ mod macos {
     pub fn make_panel(window: &WebviewWindow) -> tauri::Result<()> {
         let panel = FloatingPanel::from_window(window)?;
         panel.set_level(PanelLevel::Floating.value());
-        if let Err(error) = panel.set_style_mask(
-            StyleMask::empty()
-                .nonactivating_panel()
-                .borderless()
-                .value(),
-        ) {
+        if let Err(error) = panel.set_style_mask(style_mask()) {
             eprintln!("[steno-desktop] panel style mask: {error}");
         }
         panel.set_collection_behavior(
@@ -852,6 +858,28 @@ mod macos {
         panel.set_released_when_closed(false);
         panel.show();
         Ok(())
+    }
+
+    /// Borderless and non-activating: a click on the panel leaves the
+    /// meeting app frontmost. `borderless()` is the empty mask and clears
+    /// what came before it, so it goes first.
+    ///
+    /// Swift: the `styleMask` in `FloatingPanel.init`.
+    fn style_mask() -> NSWindowStyleMask {
+        StyleMask::empty()
+            .borderless()
+            .nonactivating_panel()
+            .value()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn the_panel_is_borderless_and_non_activating() {
+            assert_eq!(style_mask(), NSWindowStyleMask::NonactivatingPanel);
+        }
     }
 }
 

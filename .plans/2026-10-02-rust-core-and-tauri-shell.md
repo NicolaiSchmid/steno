@@ -86,7 +86,8 @@ with a fake in `steno_host::fakes`, so the whole host runs without a shell on a 
 database; the core's own boundaries (`steno_core::protocols`) are used where one exists.
 One temporary exception: from WP3 until WP6 the shell carries a fixture host behind its
 `fixture-host` feature that answers the bridge from the recorded fixtures, so the UI
-runs on every platform before the pipeline exists.
+runs on every platform before the pipeline exists; since WP6b the real host is the
+default and the feature is opt-in, for UI work without a database.
 
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
@@ -285,16 +286,18 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   parity suite and the ported view model tests; the parity list below is filled from it.
   **WP6b pipeline**: orchestration (`process`, retention, speaker matching, export), the
   CLI, the shell switched from its `fixture-host` feature to `steno-host` (the feature
-  is removed), the real `Recorder` and `Pipeline` behind the host's traits. Parity: the
-  Swift `steno export` of a calibration meeting equals the Rust one field for field. The
-  shell's seams towards the host (the prompt and its dismissal, `panels::set_prompt` and
-  `panels::dismiss_prompt`; the login item and update outcomes; the permissions; the
-  destructive alert; the folder choices; the reveal methods) are filled by WP6b. So is
-  shutdown: Quit, and a close that ends the process because no tray stands, must stop
-  and save a recording in progress first, as `applicationShouldTerminate` in
-  `apps/macos/Steno/StenoApp.swift` does (it awaits `AppController.shutdown`); today the
-  shell ends the process at once. The keyring `SecretStore` is not the shell's: it
-  lives in `steno-services` (#173, WP6b).
+  stays, opt-in, for UI work without a database), the real `Recorder` and `Pipeline`
+  behind the host's traits. Parity: the Swift `steno export` of a calibration meeting
+  equals the Rust one field for field. The shell's seams towards the host, as WP6b left
+  them: the destructive alert, the folder choices, the reveal methods (the `Opener` over
+  `dialogs` and `windows`) and the login item (`autostart::ShellLoginItem`) are wired;
+  the prompt and its dismissal, the permissions and the update outcomes are not, for the
+  reasons under "Pipeline and services (WP6b)". `[x]` Shutdown: Quit from the tray or
+  the macOS menu bar, and a close that ends the process because no tray stands, stop and
+  save a recording in progress first (`exit_request` in `apps/desktop/src-tauri/src/main.rs`
+  over `ExitGate` and `App::shutdown`), as `applicationShouldTerminate` in
+  `apps/macos/Steno/StenoApp.swift` does (it awaits `AppController.shutdown`). The
+  keyring `SecretStore` is not the shell's: it lives in `steno-services` (#173, WP6b).
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
   `wire.ts` contract test). Lands as three PRs: WP7a LLM, WP7b adapters, WP7c handover.
@@ -307,6 +310,11 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   `AGENTS.md`; `cargo deny` with a licence allow list in CI; the signing key for the
   updater artifacts, notarisation, and the tag-triggered release workflow that
   publishes the bundles and the updater manifests.
+  The phone handover identity: on first launch on macOS the cutover either imports the
+  Swift `SecIdentity` (certificate plus private key, exported from the keychain item
+  `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
+  entry `handover-identity`, or accepts that phones re-pair and says so in the release
+  notes; the cutover plan decides which.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
 
 ## Risks
@@ -378,8 +386,9 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [x] `setup.dismissBanner`.
 - [x] `settings.general.setLaunchAtLogin`, `.setDetectionEnabled`,
   `.setDefaultTemplate`, `.requestCalendar`, `.setAutomaticUpdates`, `.openLoginItems`:
-  through the `LoginItem`, `Permissions` and `Updater` traits, which WP6b implements
-  over WP8's shell modules (`autostart`, `permissions`, `updater`).
+  through the `LoginItem`, `Permissions` and `Updater` traits; WP6b implements
+  `LoginItem` over WP8's `autostart`, `Permissions` and `Updater` stay the services'
+  fakes (see "Pipeline and services (WP6b)").
 - [x] `settings.recording.setInputDevice`, `.refreshDevices`, `.chooseFolder` (the
   shell's chooser), `.revealFolder`, `.setRetention` (Forever keeps every recording on
   disk through `Pipeline::keep_all_recordings`), `.requestPermission`.
@@ -416,14 +425,17 @@ still has to draw the window side. `[ ]` is not ported yet.
   reasons): the recorder's policy, WP5; the snapshot side is covered.
 - [ ] Meeting detection (`DetectionController`: one prompt at a time, suppressed while
   recording or when the setting is off): WP5.
-- [ ] Retention sweep at launch and after `retentionApplied`, interrupted recordings
-  marked failed at launch, unfinished processing resumed at launch: WP6b.
-- [ ] Pending speaker reviews (`speakersNeedReview`): not on the bridge; WP6b.
-- [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait, which
-  WP6b implements over WP8's `updater`.
+- [x] Retention sweep at launch and after `retentionApplied`, interrupted recordings
+  marked failed at launch, unfinished processing resumed at launch
+  (`steno_services::App::launch`).
+- [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
+  the host republishes `progress`; the tray (WP8) shows no badge for it yet.
+- [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait is still
+  the services' fake, since WP8's `updater` has no automatic-check or automatic-download
+  flag and no last check time to report (see "Pipeline and services (WP6b)").
 - [x] Login item: registered on the first launch when the setting says so
   (`Host::register_login_item_on_first_launch`), toggled from General, the pane opened;
-  the `LoginItem` trait, which WP6b implements over WP8's `autostart`.
+  the `LoginItem` trait over WP8's `autostart` (`autostart::ShellLoginItem`, WP6b).
 - [ ] Calendar: the event that names a recording and its attendees, looked up at
   recording start: the recorder, WP5.
 - [x] Phone pairing: the QR code, a phone's arrival closing the code, a code running
@@ -453,6 +465,105 @@ still has to draw the window side. `[ ]` is not ported yet.
   - A retried re-export after a refusal happens on the next store change (Swift
     retried on the next `.ready` tick); a pending re-export when the detail goes away
     is attempted once (Swift retried after three seconds in a detached task).
+
+### Pipeline and services (WP6b)
+
+- The web app follows the store through a two-second poll (`App::launch`) where the
+  Swift app had GRDB observation; a row written by the pipeline shows within that
+  interval. Observation inside the Rust store, or a change hook on `Store::write`,
+  removes the poll.
+- The recorder starts without the calendar lookup (title and attendees stay the
+  defaults), without the auto-stop grace after a call ends and without the meeting
+  detection prompt; the detector and the capture session exist, the policy is WP5's
+  and the panel WP8's.
+- `STENO_MODELS_DIR` names the models directory for the app (without one in its
+  settings), the CLI, the `transcribe` example and the FLEURS test alike; the ONNX
+  models sit in its `onnx/` (`steno_speech::ModelStore::in_models_directory`).
+- `speech_engine_id` other than `parakeet-v3` (the Swift `parakeet-ultra`,
+  `parakeet-de`, `whisperkit-large-v3-turbo`) falls back to the ONNX Parakeet v3
+  engine; `steno dev models` lists the four Swift assets and can install only
+  `parakeetV3` and `offlineDiarizer`.
+- The Swift `steno process` stamped `startedAt` from `Date()` minus the duration; the
+  Rust CLI does the same to the millisecond, so a `steno export` of a CLI-processed
+  meeting differs only in the ids both sides mint at random.
+- The CLI's secret store is the 0600 `secrets.json` under the support directory
+  (`STENO_<KEY>` wins, as in Swift); the app's is the platform keyring on macOS and
+  Windows, filed as the Swift app files it: service `uno.schmid.steno.mac`, account the
+  key's raw value (`crates/steno-services/src/secrets.rs` pins both against the Swift
+  sources), so the Rust app reads the API key the Swift app stored. The `keyring`
+  crate sets no label, where Swift wrote "Steno <key>"; lookups ignore it. The CLI and
+  the app do not read each other on macOS and Windows, as Keychain and the file did
+  not. On Linux the app uses the same file, so the two share it; a write is atomic
+  under a lock.
+- A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
+  is the call's error, as in Swift; one that fails after it started, a panic included,
+  posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
+  the detail shows `<operation> failed: <failure>` on its error line, as
+  `MeetingDetailViewModel` did. Difference: a re-export after a speaker change that
+  fails once started shows there too, where Swift kept it quiet and retried on the
+  next `.ready` tick.
+- No host call holds the host's lock across a network request: the probe and the
+  Codex model list, also when confirming ChatGPT (Codex), run with it released, and
+  the sign-in the Summaries section reads under the lock comes from the file
+  (`CodexCredentialStore::stored`), as Swift's `refreshCodexStatus` read it. The
+  calls still block the bridge call that made them, as Swift's awaited calls held the
+  window's task.
+- A meeting a previous process left recording fails at launch with Swift's "Recording
+  was interrupted before it finished." (`Store::INTERRUPTED_RECORDING_REASON`).
+- A recording start warms the pipeline up only when the models of the engine the
+  settings name and the diarizer's are installed (`SpeechModels::engine_installed`),
+  so it never downloads, as Swift's `warmUpPipelineIfModelsInstalled`.
+- The `CoreML` Parakeet runs one call at a time, off the runtime's workers, as Swift's
+  `AsrManager` actor ran it (`OneCallAtATime`).
+- Settings > General acknowledges the Parakeet the platform runs: "Parakeet TDT 0.6B v3
+  (int8)" from the `CoreML` repository on the Mac, as Swift; "Parakeet TDT 0.6B v3
+  (fp32)" from `nvidia/parakeet-tdt-0.6b-v3` elsewhere (`SpeechModels::display_name`
+  and `source_repo`). Open: the diarizer's row still names the Swift app's `CoreML`
+  diarizer, while every platform runs the ONNX pyannote 3.0 and WeSpeaker ResNet34-LM
+  models; the same hook fixes it.
+- The phone intake syncs the copy and its folder to the disk before it marks the
+  receipt complete (`steno_pipeline::files::copy_durably`); Swift's `copyItem` did
+  not, so a power loss after the phone's 200 lost the recording on both devices. The
+  receipt and meeting commits still run under `NORMAL` (the Store item below).
+- Quitting while recording stops the recording with `quit` and saves it before the
+  process exits (`App::shutdown` behind `ExitGate`, at most ten seconds), as Swift's
+  `applicationShouldTerminate` awaited `AppController.shutdown()`. Every exit request
+  goes through `exit_request` in the shell: Quit in the tray's menu and in the macOS
+  menu bar (#172's own item, not muda's `terminate:`), a destroyed main window with no
+  tray, and the last window closing with no tray. Open on macOS: the Dock's Quit, a
+  logout and a system shutdown send `terminate:` to the application directly, and tao
+  answers with `applicationWillTerminate` only, no `ExitRequested`; a recording is not
+  saved there and the next launch marks it failed with the interrupted reason. Closing
+  it needs `applicationShouldTerminate` from tao or a delegate of the shell's own
+  (WP9, with the cutover).
+- The shell's seams WP6b leaves open, each waiting on work outside the shell: (1) the
+  detection prompt: no `DetectionController` is ported (WP5), so nothing calls
+  `panels::set_prompt` and `panels::dismiss_prompt` tells no one; (2) the host's
+  `Permissions` stay the services' fake (all granted): WP8's `permissions` answers
+  `unknown` off the Mac and for the Mac's system audio, and the host's onboarding
+  opener counts anything but `granted` as missing, so wiring it would open onboarding
+  at every launch on Linux and Windows; it waits for the audio crate's tap probe (WP5)
+  and a rule for what `unknown` means; (3) the host's `Updater` stays the fake: WP8's
+  `updater` checks only when asked, keeps no automatic-check or automatic-download flag
+  and no last check time, so the General section's Updates row has nothing real to
+  show, and `updates.check` stays the shell's; filling it is the update schedule WP9
+  decides, and the shell's `UpdateOutcome` stays beside the host's until then; (4) the
+  QR encoder and the clip player are fakes, so the pairing code shows no QR image and a
+  speaker's sample clip does not play: each needs new code (a QR crate, an audio
+  output), not wiring.
+- The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
+  `App::launch` and runs whether or not a code is shown, where Swift ran it only while
+  the Phones pane showed one.
+- At `warn`, the default level, a log line carries ids, stages, counts and error kinds,
+  never transcript or model text, audio, a file path or a secret; the full text goes to
+  `debug` (`steno_services::log_to_stderr`). The CLI prints a failed run once, as Swift
+  did.
+- On the Mac, Parakeet v3 is the `CoreML` model the Swift app installs; Settings and
+  `steno dev models` report its directory, and this build cannot download it.
+- The audio device list is empty off the Mac, so Settings > Recording offers only the
+  default input until the PipeWire (WP5b) and WASAPI (WP10) backends enumerate.
+- The pipeline's `decode` reads a whole lane through symphonia (see Audio); the one
+  buffer alive at a time rule holds, the buffer is the full lane.
 
 ### Store
 
@@ -782,8 +893,10 @@ PR off `main`.
 | WP5a audio (`steno-audio`) | `feat/rust-audio` | #166 | merged |
 | WP4d diarization (`steno-diarize`) | `feat/rust-diarize` | #164 | merged |
 | WP7c handover | `feat/rust-handover` | #169 | merged |
-| WP8 shell completion: tray, floating panels, autostart, updater, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | open |
-| WP5b PipeWire capture | `feat/rust-pipewire` | #176 | open |
+| WP5b PipeWire capture | `feat/rust-pipewire` | #176 | merged |
+| WP8 shell completion: tray, floating panels, autostart, updater, permissions, deep links, single instance, dialogs, installer bundles and the unsigned release workflow (`cargo deny` and signing follow with WP9) | `feat/rust-shell` | #172 | merged |
+| Store opens with `synchronous = NORMAL` | `fix/rust-core-concurrency-flake` | #174 | merged |
+| WP6b pipeline, CLI, services, the shell on the real host, quitting saves first | `feat/rust-pipeline` | #173 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -837,3 +950,20 @@ over a second of cycles, `stop()` leaves no thread and no node behind, the
 device changes are reported once per burst and the rebuild's restart
 runs, and changes that settle back or touch other nodes are not reported.
 Linux items: the list after the Swift defects above.
+WP6b is `crates/steno-pipeline`, `crates/steno-cli` and `crates/steno-services`,
+and `apps/desktop` on the real host. It sits on `main` with every parent merged,
+#172 included: the shell answers the bridge from `steno_host::Host` over the services
+graph, each window's commands through `Host::for_window`, and Quit and a no-tray close
+go through `App::shutdown`; the desktop and panel smokes pass on the real host with an
+empty database.
+`process` runs the Swift stage order, with progress events in core
+(`MeetingEvent`, `ProcessingProgress`), learned stage rates, both intakes, the
+retention sweep and the store-backed cosine memory; `steno` has every Swift command
+(`capture-spike` and `audio-devices` need the Mac's live backend); one `build()`
+assembles the graph; the shell's `fixture-host` is opt-in. The ONNX engine runs
+in-process until `WP4c`; the `CoreML` engine leaves `language` unset (#163), and
+`LanguageTaggingEngine` in the services crate runs `steno_speech`'s tagger after it,
+as `ParakeetMapping` did in Swift. Secrets: the platform keyring on macOS and
+Windows, the 0600 `secrets.json` on Linux (the kernel keyring does not survive a
+reboot; the Secret Service, which needs D-Bus, has no work package yet). Parity items: the Pipeline and services list
+above.

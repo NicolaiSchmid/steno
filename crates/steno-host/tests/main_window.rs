@@ -20,7 +20,8 @@ use steno_bridge::{
     SetTemplateParams, StartRecordingParams, WindowParams,
 };
 use steno_core::{
-    AudioRetention, Delivery, DeliveryStatus, MeetingSource, MeetingState, TitleOrigin,
+    AudioRetention, Delivery, DeliveryStatus, MeetingEvent, MeetingOperation, MeetingSource,
+    MeetingState, PipelineStage, TitleOrigin,
 };
 use steno_host::host::TOPICS;
 use steno_host::labels::{display_title, utc};
@@ -879,6 +880,58 @@ fn tags_templates_and_reruns_reach_the_store_and_the_pipeline() {
     assert_eq!(
         detail["error"],
         "Summary re-run failed: the endpoint did not answer"
+    );
+    assert_eq!(detail["isBusy"], false);
+}
+
+/// A re-run or a re-export that fails after the pipeline accepted it
+/// arrives as `OperationFailed`; the selected meeting's detail shows it on
+/// its error line, another meeting's failure leaves the line alone.
+#[test]
+fn a_background_failure_of_the_selected_meeting_reaches_the_detail_error_line() {
+    let harness = sample();
+    harness.host.meeting_reexport().unwrap();
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        Value::Null
+    );
+    harness.sink.clear();
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::OperationFailed {
+            meeting_id: uuid(MEETING_IN_PERSON),
+            operation: MeetingOperation::Reexport,
+            stage: PipelineStage::Deliver,
+            failure: "deliver: the vault is gone".to_owned(),
+        });
+    assert!(
+        harness.sink.last(BridgeTopic::MeetingDetail).is_none(),
+        "another meeting's failure is not the detail's"
+    );
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::OperationFailed {
+            meeting_id: uuid(MEETING),
+            operation: MeetingOperation::Reexport,
+            stage: PipelineStage::Deliver,
+            failure: "deliver: the vault is gone".to_owned(),
+        });
+    assert_eq!(
+        harness.sink.last(BridgeTopic::MeetingDetail).unwrap()["error"],
+        "Re-export failed: deliver: the vault is gone"
+    );
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::OperationFailed {
+            meeting_id: uuid(MEETING),
+            operation: MeetingOperation::SummaryRerun,
+            stage: PipelineStage::Summarize,
+            failure: "summarize: HTTP 401".to_owned(),
+        });
+    let detail = harness.sink.last(BridgeTopic::MeetingDetail).unwrap();
+    assert_eq!(
+        detail["error"],
+        "Summary re-run failed: summarize: HTTP 401"
     );
     assert_eq!(detail["isBusy"], false);
 }

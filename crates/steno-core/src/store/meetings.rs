@@ -230,10 +230,17 @@ impl Store {
         })
     }
 
+    /// The reason a launch gives a recording that a process left
+    /// `recording`. Swift: the default `reason` of
+    /// `MeetingStore.failInterruptedRecordings` in
+    /// `Sources/StenoCore/Storage/MeetingStore.swift`.
+    pub const INTERRUPTED_RECORDING_REASON: &'static str =
+        "Recording was interrupted before it finished.";
+
     /// Launch reconciliation: every meeting still `recording` belongs to a
     /// process that died mid-meeting. One transaction marks them
     /// `failed(reason)` with `updatedAt = now` and returns their ids,
-    /// oldest first.
+    /// oldest first. The app passes [`Self::INTERRUPTED_RECORDING_REASON`].
     pub fn fail_interrupted_recordings(
         &self,
         reason: &str,

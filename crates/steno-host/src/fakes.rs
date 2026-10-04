@@ -553,6 +553,7 @@ pub struct FakeLlmService {
     pub codex_models: Mutex<Result<Vec<CodexModel>, CodexModelsError>>,
     pub probes: Mutex<Vec<Settings>>,
     pub on_probe: Mutex<Option<ProbeHook>>,
+    pub on_codex_models: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for FakeLlmService {
@@ -573,6 +574,7 @@ impl Default for FakeLlmService {
             codex_models: Mutex::new(Ok(Vec::new())),
             probes: Mutex::new(Vec::new()),
             on_probe: Mutex::new(None),
+            on_codex_models: Mutex::new(None),
         }
     }
 }
@@ -597,6 +599,12 @@ impl FakeLlmService {
     pub fn set_on_probe(&self, hook: impl Fn(&Settings) + Send + Sync + 'static) {
         *lock(&self.on_probe) = Some(Arc::new(hook));
     }
+
+    /// Runs `hook` inside every model list fetch, before it answers; `None`
+    /// removes it.
+    pub fn set_on_codex_models(&self, hook: Option<Arc<dyn Fn() + Send + Sync>>) {
+        *lock(&self.on_codex_models) = hook;
+    }
 }
 
 impl LlmService for FakeLlmService {
@@ -613,6 +621,9 @@ impl LlmService for FakeLlmService {
     }
 
     fn codex_models(&self) -> Result<Vec<CodexModel>, CodexModelsError> {
+        if let Some(hook) = hook_of(&self.on_codex_models) {
+            hook();
+        }
         lock(&self.codex_models).clone()
     }
 }

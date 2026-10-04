@@ -61,6 +61,29 @@ import Testing
     #expect(requests.first?.chat?.responseFormat?.jsonSchema?.name == "transcript_cleanup")
   }
 
+  /// A model that answers `Me: text` for every segment of a call: the
+  /// transcript comes back without the labels and without a retry.
+  @Test func aModelEchoingTheSpeakerLabelIsCleanedWithoutARetry() async throws {
+    let server = try StubChatServer()
+    defer { server.stop() }
+    server.respond(
+      with: Scripts.cleanupEcho(transform: { index, text in
+        index.isMultiple(of: 2)
+          ? "Me: \(Self.fixing(index, text) ?? text)" : "[\(index)] Speaker 1: \(text)"
+      }))
+    let input = CleanupInput(export: Self.call)
+    let output = try await Self.cleaner(
+      server, chunker: TranscriptChunker(targetTokens: 800, maxTokens: 1_200)
+    ).clean(input)
+    #expect(output.failedChunks == [])
+    #expect(output.segments.count == input.segments.count)
+    #expect(!output.segments.contains { $0.text.hasPrefix("Me:") || $0.text.hasPrefix("[") })
+    #expect(output.segments.map(\.rawText) == input.segments.map(\.rawText))
+    #expect(server.requests.allSatisfy { $0.purpose == "cleanup" })
+    let system = try #require(server.requests.first?.chat?.messages.first?.content)
+    #expect(system.contains("return only the text after the colon, never the label"))
+  }
+
   @Test func aWrongCountChunkIsRetriedOnceThenKeptRaw() async throws {
     let server = try StubChatServer()
     defer { server.stop() }

@@ -26,9 +26,12 @@ name: Rust CI
 # (apps/desktop/scripts/smoke-linux.sh; the screenshots are uploaded as
 # `desktop-smoke-screens`), and runs `tauri build --no-bundle` so a
 # packaging regression (the bundle config, the icons, the plists, the
-# release profile) fails here and not in desktop-release.yml. Windows and
-# macOS build the shell without the web dist: build.rs points `frontendDist`
-# at `apps/desktop/src-tauri/placeholder/` so the build goes through; the
+# release profile) fails here and not in desktop-release.yml. macOS builds
+# the web UI after its tests and runs the same smoke in the runner's login
+# session (apps/desktop/scripts/smoke-macos.sh), where the panels are
+# `NSPanel`s. Windows, and macOS up to that step, build the shell without
+# the web dist: build.rs points `frontendDist` at
+# `apps/desktop/src-tauri/placeholder/` so the build goes through; the
 # binary they produce would still load the Vite dev server, as every build
 # without `custom-protocol` does.
 #
@@ -147,16 +150,18 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # The web UI, so the shell embeds the real bundle and the Tauri
-      # transport's tests run beside the shell's.
+      # transport's tests run beside the shell's; on macOS for the smoke
+      # only, and without the pnpm cache, whose upload from Forge costs more
+      # than the install it saves.
       - uses: pnpm/action-setup@v4
-        if: matrix.name == 'linux'
+        if: matrix.name != 'windows'
         with:
           package_json_file: apps/macos/web/package.json
       - uses: actions/setup-node@v4
-        if: matrix.name == 'linux'
+        if: matrix.name != 'windows'
         with:
           node-version: 24
-          cache: pnpm
+          cache: ${{ matrix.name == 'linux' && 'pnpm' || '' }}
           cache-dependency-path: apps/macos/web/pnpm-lock.yaml
       - name: Web install, check and build
         if: matrix.name == 'linux'
@@ -182,6 +187,13 @@ jobs:
         run: cargo test --workspace --locked --no-fail-fast
       - name: Test the core fakes
         run: cargo test -p steno-core --features testing --locked
+      # The shell answers from the real host by default since WP6b; its
+      # opt-in fixture host (the fixture table, the mock replies) is linted
+      # and tested with the feature on. Only the shell rebuilds.
+      - name: Lint and test the shell's fixture host
+        run: |
+          cargo clippy -p steno-desktop --features fixture-host --all-targets --locked -- -D warnings
+          cargo test -p steno-desktop --features fixture-host --locked
       # The handover tests that read the host's network, again with their
       # output, so the log shows the LAN addresses found and whether the
       # interface test ran or printed SKIPPED. `--workspace` keeps the Test
@@ -232,6 +244,18 @@ jobs:
         run: |
           cargo build -p steno-desktop --locked
           apps/desktop/scripts/smoke-linux.sh target/debug/steno-desktop 15
+      # The same smoke on macOS, after the tests so they build as before.
+      # It shows the windows on the runner's screen for 15 s and runs with a
+      # fresh HOME; the script waits for another runner's smoke to end.
+      - name: Desktop smoke (macOS)
+        if: matrix.name == 'macos'
+        timeout-minutes: 10
+        env:
+          TAURI_CONFIG: '{"build":{"devUrl":null}}'
+        run: |
+          (cd apps/macos/web && pnpm install --frozen-lockfile && pnpm build)
+          cargo build -p steno-desktop --locked
+          apps/desktop/scripts/smoke-macos.sh "${CARGO_TARGET_DIR:-target}/debug/steno-desktop" 15
       - name: Upload smoke screenshots
         if: matrix.name == 'linux' && always()
         uses: actions/upload-artifact@v4
