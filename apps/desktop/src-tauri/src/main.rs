@@ -15,23 +15,28 @@
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
 //! instance, and on a Wayland session the `XWayland` backend the panels
-//! need (`display`). Every exit runs `App::shutdown` first, at most
-//! `SHUTDOWN_PATIENCE` (ten seconds), over one `ExitGate`: it stops and
-//! saves a recording in progress and stops the handover listener. Quit
-//! from either menu, the close that ends the process when no tray stands,
-//! and SIGTERM (a plain `kill`, a logout on Linux) are exit requests the
-//! gate holds (`exit_request`); the Dock's Quit, a logout and a shutdown on
-//! macOS, and a logoff and a shutdown on Windows, reach the run loop only
-//! as its last event, and an update's relaunch bypasses the request, so
-//! both run the same shutdown first (`shut_down_before_exit`). Open: the
-//! Windows logoff is untested on hardware (WP10), and SIGINT and SIGHUP
-//! are not caught, so they end the app unsaved. Secrets are not the shell's:
-//! the keyring `SecretStore` lives in `steno-services` (#173, `WP6b`).
-//! Every one is a thin module over a Tauri plugin or an OS API with its
-//! rules in plain functions the tests cover. Everything that is on the
-//! wire (errors, topics, windows, sections, params) is the `steno-bridge`
-//! crate's type; the shell adds only what it needs on top
-//! (`recording::RecorderState`, `windows::Spec`).
+//! need (`display`). Secrets are not the shell's: the keyring
+//! `SecretStore` lives in `steno-services` (#173, `WP6b`). Every one is a
+//! thin module over a Tauri plugin or an OS API with its rules in plain
+//! functions the tests cover. Everything that is on the wire (errors,
+//! topics, windows, sections, params) is the `steno-bridge` crate's type;
+//! the shell adds only what it needs on top (`recording::RecorderState`,
+//! `windows::Spec`).
+//!
+//! Every exit runs `App::shutdown` first, at most `SHUTDOWN_PATIENCE` (ten
+//! seconds), over one `ExitGate`: it stops and saves a recording in
+//! progress and stops the handover listener. Quit from either menu, the
+//! close that ends the process when no tray stands, and SIGTERM, SIGINT
+//! and SIGHUP (a plain `kill`, Ctrl-C, a closed terminal, systemd at a
+//! shutdown) are exit requests the gate holds (`exit_request`,
+//! `exit_on_signals`); the Dock's Quit, a logout and a shutdown on macOS,
+//! and a logoff and a shutdown on Windows, reach the run loop only as its
+//! last event, and an update's relaunch bypasses the request, so both run
+//! the same shutdown first (`shut_down_before_exit`). Open: the Windows
+//! logoff is untested on hardware, and Windows' end-session timeout (about
+//! five seconds) is shorter than `SHUTDOWN_PATIENCE` (WP10); a Linux logout
+//! that closes the display connection before the session manager's SIGTERM
+//! ends the app unsaved (WP9).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The fixture host leaves the real host's seams (the login item, the
@@ -69,11 +74,12 @@ fn main() {
     #[cfg(target_os = "linux")]
     display::choose();
     // The runtime the services graph runs on, beside Tauri's own: the
-    // pipeline, the recorder's saves, the handover listener and the SIGTERM
-    // listener. Leaked, so it is never dropped: dropping a runtime waits,
+    // pipeline, the recorder's saves, the handover listener and the signal
+    // listeners. Leaked, so it is never dropped: dropping a runtime waits,
     // without a bound, for every blocking task on it (a transcription, a
-    // model load), and on Linux and Windows the run loop drops its handler
-    // before the process exits.
+    // model load), and Tauri drops whatever owns it before the process
+    // exits (the `setup` closure; the run loop's handler on Linux and
+    // Windows).
     let runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(
         tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -148,48 +154,119 @@ fn setup(
     // The launch may have registered the login item.
     tray::note_login_item(handle);
     #[cfg(unix)]
-    exit_on_terminate(handle, runtime);
+    exit_on_signals(handle, runtime);
     Ok(())
 }
 
-/// The exit code of a process a second SIGTERM ended, 128 plus the
-/// signal's number, as the shells report it.
+/// The signals that ask for the exit Quit asks for (`exit_on_signals`).
 #[cfg(unix)]
-const TERMINATED_CODE: i32 = 128 + 15;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExitSignal {
+    Terminate,
+    Interrupt,
+    Hangup,
+}
 
-/// SIGTERM asks for the exit Quit asks for, so the shutdown runs first: a
-/// logout or a shutdown on Linux sends it, as a plain `kill` does. On
-/// macOS a logout goes through `RunEvent::Exit` instead. A second SIGTERM
-/// ends the process at once, unsaved, so a run loop that no longer answers
-/// still ends with a plain `kill` twice. Swift had no handler; SIGTERM
-/// ended the app unsaved.
 #[cfg(unix)]
-fn exit_on_terminate(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
-    let app = app.clone();
-    runtime.spawn(async move {
-        let mut terminate =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(terminate) => terminate,
+impl ExitSignal {
+    const ALL: [ExitSignal; 3] = [
+        ExitSignal::Terminate,
+        ExitSignal::Interrupt,
+        ExitSignal::Hangup,
+    ];
+
+    fn kind(self) -> tokio::signal::unix::SignalKind {
+        match self {
+            ExitSignal::Terminate => tokio::signal::unix::SignalKind::terminate(),
+            ExitSignal::Interrupt => tokio::signal::unix::SignalKind::interrupt(),
+            ExitSignal::Hangup => tokio::signal::unix::SignalKind::hangup(),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            ExitSignal::Terminate => "SIGTERM",
+            ExitSignal::Interrupt => "SIGINT",
+            ExitSignal::Hangup => "SIGHUP",
+        }
+    }
+
+    /// The code a second one of this signal ends the process with at
+    /// once, 128 plus the signal's number, as the shells report it; none
+    /// for SIGHUP, which never forces the exit.
+    fn forced_code(self) -> Option<i32> {
+        match self {
+            ExitSignal::Terminate => Some(128 + 15),
+            ExitSignal::Interrupt => Some(128 + 2),
+            ExitSignal::Hangup => None,
+        }
+    }
+}
+
+/// What `signal` does after the exit signals already `seen`, which it
+/// joins: the code to end the process with at once (a second SIGTERM, a
+/// second SIGINT), or none to ask for the Quit exit.
+#[cfg(unix)]
+fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
+    if seen.contains(&signal) {
+        return signal.forced_code();
+    }
+    seen.push(signal);
+    None
+}
+
+/// SIGTERM, SIGINT and SIGHUP ask for the exit Quit asks for, so the
+/// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
+/// terminal, systemd at a shutdown. A Linux logout saves when the session
+/// manager signals the app (systemd stops a session's scope with SIGTERM,
+/// then SIGHUP); when the display connection closes first, GDK ends the
+/// process unsaved (untested, WP9). On macOS a logout goes through
+/// `RunEvent::Exit` instead. A second SIGTERM or a second SIGINT ends the
+/// process at once, unsaved (`forced_exit`), so a run loop that no longer
+/// answers still ends with a plain `kill` or Ctrl-C twice; a SIGHUP never
+/// does, so the one that follows a session scope's SIGTERM still saves.
+/// Swift had no handler; each of them ended the app unsaved.
+#[cfg(unix)]
+fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    for signal in ExitSignal::ALL {
+        let (app, seen) = (app.clone(), seen.clone());
+        runtime.spawn(async move {
+            let mut arrivals = match tokio::signal::unix::signal(signal.kind()) {
+                Ok(arrivals) => arrivals,
                 Err(error) => {
-                    tracing::warn!(%error, "SIGTERM ends the app without saving a recording");
+                    tracing::warn!(
+                        %error,
+                        signal = signal.name(),
+                        "this signal ends the app without saving a recording"
+                    );
                     return;
                 }
             };
-        let mut asked = false;
-        while terminate.recv().await.is_some() {
-            if asked {
-                std::process::exit(TERMINATED_CODE);
+            while arrivals.recv().await.is_some() {
+                let forced = forced_exit(
+                    signal,
+                    &mut seen
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+                match forced {
+                    Some(code) => std::process::exit(code),
+                    None => actions::quit(&app),
+                }
             }
-            asked = true;
-            actions::quit(&app);
-        }
-    });
+        });
+    }
 }
 
 /// Runs the shutdown for an exit no request held, on this thread's behalf,
-/// and returns once it ended (at most `SHUTDOWN_PATIENCE`), waiting for a
-/// held request's shutdown instead of starting one; at once when it
-/// already ran. `RunEvent::Exit` and the updater's relaunch call it.
+/// and returns once it ended (at most `SHUTDOWN_PATIENCE`), waiting for
+/// the one already running (a held request's, an earlier exit's) instead
+/// of starting one; at once when it already ran. `RunEvent::Exit` and the
+/// updater's relaunch call it.
+///
+/// Swift: the Dock's Quit and a logout reached `applicationShouldTerminate`
+/// as Quit did.
 fn shut_down_before_exit(app: &tauri::AppHandle) {
     app.state::<steno_services::app::ExitGate>().exiting(
         steno_services::app::SHUTDOWN_PATIENCE,
@@ -200,8 +277,8 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
 /// One turn of the run loop.
 fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
-        // Quit from either menu, SIGTERM, the smoke's exit, the last
-        // window closing with no tray: the shutdown runs first
+        // Quit from either menu, an exit signal, the smoke's exit, the
+        // last window closing with no tray: the shutdown runs first
         // (`exit_request`).
         tauri::RunEvent::ExitRequested { code, api, .. } => {
             let handle = app.clone();
@@ -215,12 +292,13 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 api.prevent_exit();
             }
         }
-        // The run loop's last event. After a request the gate held the
+        // The run loop's last event. After a request the gate held, the
         // shutdown has run; the Dock's Quit, a logout and a shutdown on
         // macOS raise no request (tao answers `applicationWillTerminate`,
         // which AppKit waits for), nor do a logoff and a shutdown on
-        // Windows (tao answers `WM_ENDSESSION`, within Windows' own
-        // end-session timeout), so the shutdown runs here.
+        // Windows (tao answers `WM_ENDSESSION`), so the shutdown runs
+        // here, on Windows until the end-session timeout, which can be
+        // shorter, ends the process.
         tauri::RunEvent::Exit => shut_down_before_exit(app),
         // The main window closes: hidden and kept while a tray can bring
         // it back (`hides_on_close`); destroyed otherwise. `has_tray` is
@@ -443,7 +521,7 @@ mod tests {
         }
     }
 
-    /// Quit (the tray's item, the menu bar's, `actions::quit`, SIGTERM):
+    /// Quit (the tray's item, the menu bar's, `actions::quit`, a signal):
     /// the request is held, the shutdown runs once, then the process exits
     /// with Quit's code; nothing exits before the shutdown ended, and a
     /// second Quit meanwhile is held too, without a second shutdown.
@@ -480,7 +558,7 @@ mod tests {
                 || panic!("a second shutdown"),
                 |_| panic!("a second exit"),
             ),
-            "a second Quit while saving is held"
+            "a second Quit while the shutdown runs is held"
         );
         assert!(
             exit_seen.recv_timeout(Duration::from_secs(5)).unwrap(),
@@ -577,6 +655,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Only a second SIGTERM or a second SIGINT ends the process at once;
+    /// every other exit signal asks for Quit, and a SIGHUP, the one systemd
+    /// sends right after a session scope's SIGTERM, never forces the exit.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_sigterm_or_sigint_forces_the_exit_and_a_sighup_never_does() {
+        use ExitSignal::{Hangup, Interrupt, Terminate};
+        let mut seen = Vec::new();
+        assert_eq!(forced_exit(Terminate, &mut seen), None);
+        assert_eq!(forced_exit(Hangup, &mut seen), None);
+        assert_eq!(forced_exit(Hangup, &mut seen), None);
+        assert_eq!(forced_exit(Interrupt, &mut seen), None);
+        assert_eq!(forced_exit(Interrupt, &mut seen), Some(130));
+        assert_eq!(forced_exit(Terminate, &mut seen), Some(143));
+
+        let mut seen = Vec::new();
+        assert_eq!(forced_exit(Interrupt, &mut seen), None);
+        assert_eq!(forced_exit(Terminate, &mut seen), None);
+        assert_eq!(forced_exit(Terminate, &mut seen), Some(143));
     }
 
     #[test]

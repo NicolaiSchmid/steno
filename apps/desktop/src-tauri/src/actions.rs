@@ -166,7 +166,7 @@ pub const QUIT_CODE: i32 = 0;
 /// closing, which the tray keeps alive) once the shutdown ran: a recording
 /// in progress is saved first (`main::exit_request`). Quit in the tray's
 /// menu and in the macOS menu bar, a destroyed main window with no tray,
-/// and SIGTERM all end here.
+/// and SIGTERM, SIGINT and SIGHUP all end here.
 pub fn quit(app: &AppHandle) {
     app.exit(QUIT_CODE);
 }
