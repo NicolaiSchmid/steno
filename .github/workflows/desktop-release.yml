@@ -2,52 +2,37 @@ name: Desktop release
 
 # Builds the Tauri shell's installer bundles on the three platforms, signs
 # what can be signed, and on a `desktop-v*` tag publishes them with the
-# updater manifests. WP9 of .plans/2026-10-02-rust-core-and-tauri-shell.md.
+# updater manifests. WP9 of .plans/2026-10-02-rust-core-and-tauri-shell.md;
+# apps/desktop/README.md (Release) describes the whole flow.
 #
-#   macOS    `.app` and `.dmg`, Apple silicon. Signed with the Developer ID
-#            certificate under the hardened runtime by the Tauri bundler,
-#            from a throwaway keychain (apps/desktop/scripts/
-#            signing-keychain.sh, the approach of the Swift release.yml);
-#            the bundler notarises and staples the `.app` through the App
-#            Store Connect API key before it builds the image and the
-#            updater archive, then notarize-dmg.sh notarises and staples
-#            the image.
+#   macOS    `.app` and `.dmg`, Apple silicon. The Tauri bundler signs with
+#            the Developer ID certificate from a throwaway keychain
+#            (signing-keychain.sh) and notarises the `.app`;
+#            notarize-dmg.sh then notarises the image.
 #   Linux    `.deb` and `.AppImage`, x86_64.
 #   Windows  `.msi` and NSIS `.exe`, x86_64. Not code-signed: there is no
-#            Windows certificate, so SmartScreen warns on first install.
+#            Windows certificate.
 #
-# Every bundle carries `steno-speech-sidecar` beside the app's binary, as a
-# Tauri `externalBin` (tauri.release.conf.json, staged by
-# stage-sidecar.sh); check-bundle.sh unpacks each bundle as its installer
-# would, finds the two side by side and starts the sidecar from there.
-# Every updater artifact (`.app.tar.gz`, `.AppImage`, `.deb`, `.msi`,
-# `-setup.exe`) gets a `.sig` from TAURI_SIGNING_PRIVATE_KEY (the private
-# half of `plugins.updater.pubkey` in tauri.conf.json; no password).
+# Every bundle carries `steno-speech-sidecar` beside the app's binary
+# (tauri.release.conf.json, stage-sidecar.sh, checked by check-bundle.sh).
+# Every updater artifact gets a `.sig` from TAURI_SIGNING_PRIVATE_KEY, the
+# private half of `plugins.updater.pubkey` in tauri.conf.json (no password).
 #
-# Triggers. A pushed `desktop-v<version>` tag builds all three platforms
-# and publishes; the version must be the workspace's (`[workspace.package]`
-# in Cargo.toml), which Tauri stamps into the bundles. The Swift app's
-# release.yml owns `v*` and mobile-cd.yml `ios-fp-*`; GitHub matches tag
-# filters from the start of the name, so `desktop-v*` meets neither. A
-# manual run builds, signs and notarises the platforms it is given and
-# uploads them as workflow artifacts; it publishes nothing.
+# A pushed `desktop-v<version>` tag builds all three platforms and
+# publishes; the version must be the one under `[workspace.package]` in
+# Cargo.toml. The prefix keeps clear of the Swift release.yml's `v*` and
+# mobile-cd.yml's `ios-fp-*`. A manual run builds the platforms it is given
+# as workflow artifacts and publishes nothing.
 #
-# Publishing (tags only): one GitHub release per tag with every bundle,
-# its `.sig` and `latest.json`; then the manifest is copied to the rolling
-# `desktop-beta` release, and for a release without a hyphen to
-# `desktop-stable` too, which are the two lanes `updater.rs` reads. Every
-# release this workflow writes is a GitHub pre-release and never "latest":
-# until the Mac cutover (.plans/2026-10-04-mac-cutover.md) the README's and
-# the site's "latest release" links and the Homebrew cask belong to the
-# Swift app.
+# Publishing writes one GitHub release per tag with every bundle, its `.sig`
+# and `latest.json`, then copies the manifest to the rolling `desktop-beta`
+# lane and, for a release without a hyphen, `desktop-stable` (the lanes
+# `updater.rs` reads). Every release here is a pre-release and never
+# "latest": until the Mac cutover (.plans/2026-10-04-mac-cutover.md) the
+# "latest release" belongs to the Swift app.
 #
-# `cargo deny check` (deny.toml) gates the bundles: no build starts while a
-# licence, an advisory, a ban or a source fails.
-#
-# The bundles carry the real host (`steno_host::Host` over the services
-# graph, WP6b); this job builds the crate's default features, so the
-# opt-in `fixture-host` stays out of them. The macOS job follows
-# `MACOS_RUNS_ON` like the other workflows.
+# `cargo deny check` (deny.toml) must pass before any bundle builds. The
+# bundles carry the real host; the opt-in `fixture-host` feature stays out.
 
 on:
   push:
@@ -69,10 +54,7 @@ permissions:
 
 jobs:
   # The version and the platforms. A job-level `if` cannot read the matrix,
-  # so this job turns the input into the include list
-  # (apps/desktop/scripts/release-matrix.sh: any case, an unknown name
-  # fails the run) and the bundle job takes its matrix from it. A tag
-  # builds all three.
+  # so release-matrix.sh turns the input into the include list.
   plan:
     name: plan
     runs-on: ubuntu-latest
@@ -126,12 +108,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
-      # Release panics would otherwise carry the runner's source paths. Set
-      # for the job so the sidecar and the app share one dependency build.
+      # Keeps the runner's source paths out of release panics. Set for the
+      # job so the sidecar and the app share one dependency build.
       RUSTFLAGS: --remap-path-prefix=${{ github.workspace }}=steno
-      # macOS only: the throwaway keychain and the search list saved before
-      # it went in front (signing-keychain.sh). Outside the workspace and
-      # named apart from the Swift release's, which may share the runner.
+      # macOS only (signing-keychain.sh). Outside the workspace and named
+      # apart from the Swift release's, which may share the runner.
       KEYCHAIN_PATH: ${{ github.workspace }}/../steno-desktop-release.keychain-db
       KEYCHAINS_BEFORE: ${{ github.workspace }}/../steno-desktop-release.keychains-before
     steps:
@@ -199,9 +180,9 @@ jobs:
         shell: bash
         run: apps/desktop/scripts/stage-sidecar.sh
 
-      # The bundler signs with the identity this prints; the App Store
-      # Connect key is written for the bundler's notarytool call and for
-      # notarize-dmg.sh, and removed in the last step.
+      # The bundler signs with the identity this prints. The App Store
+      # Connect key serves the bundler and notarize-dmg.sh; the last step
+      # removes it.
       - name: Signing keychain and notarisation key
         if: matrix.name == 'macos'
         env:
@@ -219,20 +200,17 @@ jobs:
             echo "ASC_KEY_PATH=$key_path"
           } >> "$GITHUB_ENV"
 
-      # The Tauri CLI as the npm package: a prebuilt binary in seconds,
-      # where `cargo install tauri-cli` compiles for minutes. Pinned to the
-      # exact version of the `tauri` crate in Cargo.lock and of
-      # `@tauri-apps/api`, because it runs with the signing keys in its
-      # environment. tauri.release.conf.json adds the sidecar, and on
-      # Windows tauri.release.windows.conf.json the DirectML.dll it loads.
+      # The Tauri CLI as the prebuilt npm package, pinned to the `tauri`
+      # crate's version in Cargo.lock because it sees the signing keys.
+      # tauri.release.conf.json adds the sidecar; on Windows
+      # tauri.release.windows.conf.json adds the DirectML.dll it loads.
       - name: Bundle
         shell: bash
         working-directory: apps/desktop/src-tauri
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          # macOS: the bundler notarises when all three are set (and
-          # warns and skips when one is missing, which check-bundle.sh
-          # then fails on); elsewhere they are empty and unread.
+          # macOS: the bundler notarises when all three are set (it only
+          # warns when one is missing; check-bundle.sh then fails).
           APPLE_API_KEY: ${{ matrix.name == 'macos' && secrets.ASC_KEY_ID || '' }}
           APPLE_API_ISSUER: ${{ matrix.name == 'macos' && secrets.ASC_ISSUER_ID || '' }}
           APPLE_API_KEY_PATH: ${{ env.ASC_KEY_PATH }}
@@ -355,8 +333,7 @@ jobs:
         run: |
           set -euo pipefail
           apps/desktop/scripts/updater-manifest.sh "$VERSION" \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" assets > latest.json
-          mv latest.json assets/latest.json
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" assets > assets/latest.json
           cat assets/latest.json
 
       - name: Publish the release
@@ -374,10 +351,9 @@ jobs:
           gh release view "$TAG" --json url --jq .url
 
       # After the release is public, so the manifest's URLs resolve. Each
-      # lane is a release holding only latest.json; its tag moves to this
-      # commit so the lane's page says what it serves. A release moves the
-      # beta lane too, unless that lane already serves a pre-release of a
-      # later version (0.3.0-rc.1 stays when 0.2.1 ships).
+      # lane is a release holding only latest.json, its tag on this commit.
+      # A release moves the beta lane too, unless it serves a pre-release
+      # of a later version (0.3.0-rc.1 stays when 0.2.1 ships).
       - name: Update lanes
         run: |
           set -euo pipefail

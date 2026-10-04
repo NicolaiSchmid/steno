@@ -1,10 +1,7 @@
 # cargo-deny over the Cargo workspace: which licences the shipped binaries
-# may carry, which advisories block, where crates may come from. Rust CI runs
-# `cargo deny check` on every Rust change (advisories there warn only, so an
-# advisory published overnight does not block an unrelated pull request);
-# the desktop release workflow runs all four checks and fails on any of
-# them before it builds a bundle. Plan:
-# .plans/2026-10-02-rust-core-and-tauri-shell.md (WP9).
+# may carry, which advisories block, where crates may come from. Rust CI
+# runs it on every Rust change (advisories warn only there); the desktop
+# release workflow fails on any finding before it builds a bundle.
 
 [graph]
 # The three platforms the bundles ship for; a dependency only another target

@@ -278,15 +278,10 @@ jobs:
           path: apps/desktop/screens
           if-no-files-found: ignore
 
-      # The release build as the Tauri CLI drives it, with the sidecar
-      # staged and declared as in desktop-release.yml, bundled as a .deb
-      # (the quickest installer) and checked for the sidecar beside the
-      # app: a packaging regression (the bundle config, the icons, the
-      # plists, the release profile, the externalBin) fails here and not
-      # in a release. The web dist is already built above, so the config
-      # merge drops beforeBuildCommand; the updater artifacts need the
-      # signing key, which pull requests do not get, so they are off. The
-      # CLI is the version desktop-release.yml pins.
+      # The release build as desktop-release.yml drives it, bundled as a
+      # .deb (the quickest installer) and checked for the sidecar beside
+      # the app. The web dist is built above, so beforeBuildCommand goes;
+      # pull requests get no signing key, so the updater artifacts go too.
       - name: Desktop release bundle (deb, with the sidecar)
         if: matrix.name == 'linux'
         run: |
@@ -296,10 +291,8 @@ jobs:
             --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":false}}')
           apps/desktop/scripts/check-bundle.sh target/release/bundle deb
 
-  # deny.toml: licences, bans and sources fail the job; advisories only
-  # warn here, so an advisory published overnight does not block an
-  # unrelated pull request. desktop-release.yml runs all four and blocks a
-  # release on any of them.
+  # Advisories only warn here, so one published overnight does not block
+  # an unrelated pull request; desktop-release.yml blocks on all four.
   deny:
     name: cargo deny (${{ matrix.checks }})
     runs-on: ubuntu-latest
