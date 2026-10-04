@@ -692,6 +692,25 @@ mod tests {
         assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), Some(143));
     }
 
+    /// The exit signals are SIGTERM, SIGINT and SIGHUP, and only the first
+    /// two force a second time, with 128 plus their number.
+    #[cfg(unix)]
+    #[test]
+    fn the_exit_signals_are_sigterm_sigint_and_sighup() {
+        let listened: Vec<_> = ExitSignal::ALL
+            .iter()
+            .map(|signal| (signal.kind.as_raw_value(), signal.forced_code))
+            .collect();
+        assert_eq!(
+            listened,
+            [
+                (libc::SIGTERM, Some(143)),
+                (libc::SIGINT, Some(130)),
+                (libc::SIGHUP, None)
+            ]
+        );
+    }
+
     /// A signal inherited ignored (`nohup`, a background job's SIGINT) gets
     /// no listener; a default or handled one does, and so does one whose
     /// disposition could not be read. The disposition is read as it is:
