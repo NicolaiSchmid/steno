@@ -402,6 +402,49 @@ import Testing
     #expect(!gate.timedOut, "nothing waited on the held save")
   }
 
+  /// A revoke whose delete fails after it discarded the files of a
+  /// `complete` in its verify leaves that `complete` refused, also when the
+  /// phone announced again meanwhile: the files it was verifying are gone.
+  @Test(.timeLimit(.minutes(1)))
+  func aCompleteVerifyingFilesAFailedRevokeDiscardedIsRefused() async throws {
+    let gated = try await Gated()
+    defer { gated.remove() }
+    let (gate, engine, phone, id) = (gated.gate, gated.engine, gated.phone, gated.id)
+    let deviceID = phone.device.id
+    try await phone.uploadAll(gated.metadata, gated.bytes)
+    try await gate.pool.write { db in
+      try db.execute(
+        sql: """
+          CREATE TRIGGER keepDevice BEFORE DELETE ON pairedDevice
+          BEGIN SELECT RAISE(ABORT, 'kept'); END
+          """)
+    }
+
+    // The `.verifying` save holds the writer; the delete, the announce's
+    // save and the verify's answer queue behind it in that order.
+    gate.receiptWrite.arm()
+    let completing = Task { await phone.complete(id) }
+    await gate.receiptWrite.held()
+    let revoking = Task { try await gated.service.revoke(deviceID) }
+    try await Self.until { await engine.revoking[deviceID] != nil }
+    #expect(!engine.inbox.hasPartial(id), "the revoke discarded the partial")
+    let announcing = Task { try await phone.announce(gated.metadata) }
+    try await Self.until { engine.inbox.hasPartial(id) }
+    gate.receiptWrite.release()
+
+    await #expect(throws: (any Error).self) { try await revoking.value }
+    #expect(await completing.value.code == 401, "its files are gone")
+    #expect(try await announcing.value.code == 200)
+    #expect(await gated.intake.admissions.count == 0, "the intake never sees the file")
+    #expect(!engine.inbox.hasPartial(id), "the refusal discarded the new partial")
+    try await gate.pool.write { db in try db.execute(sql: "DROP TRIGGER keepDevice") }
+    #expect(try await gated.test.store.pairedDevice(id: deviceID) != nil)
+    #expect(await !engine.revoked.contains(deviceID), "the device keeps working")
+    try await phone.uploadAll(gated.metadata, gated.bytes)
+    #expect(await phone.complete(id).code == 200)
+    #expect(!gate.timedOut, "nothing waited on the held save")
+  }
+
   /// A revoke that starts while the phone's new pairing is saved deletes the
   /// device after the save: the pairing must not clear `revoked`, or a
   /// request that read the receipt before brings it back into memory.
