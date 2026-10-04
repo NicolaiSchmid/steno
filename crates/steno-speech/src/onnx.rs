@@ -292,11 +292,6 @@ fn log_fallback(fallback: Fallback, error: &str) {
     tracing::debug!(error, "ONNX Runtime's DirectML error");
 }
 
-/// The encoder's provider, at info level.
-fn log_provider(provider: EncoderProvider) {
-    tracing::info!(provider = provider.as_str(), "speech encoder provider");
-}
-
 /// The element type and declared shape of a tensor outlet (`-1` for a
 /// dynamic axis); `None` for sequences and maps.
 pub(crate) fn outlet_tensor(value: &ValueType) -> Option<(TensorElementType, Vec<i64>)> {
@@ -500,7 +495,10 @@ impl OnnxBackend {
             let silence = mel.features(&vec![0.0; SAMPLE_RATE]);
             encoder.run(|session| encode_on(session, &encoder_inputs, &silence))?;
         }
-        log_provider(encoder.provider);
+        tracing::info!(
+            provider = encoder.provider.as_str(),
+            "speech encoder provider"
+        );
         Ok((
             OnnxBackend {
                 encoder,
