@@ -24,14 +24,14 @@
 //! fetches its own models, `crates/steno-diarize/src/models.rs`) and the
 //! fp32 Parakeet export (2.6 GB, of which `encoder.weights` is 2.4 GB)
 //! goes to Hugging Face, uploaded by `scripts/upload-models.sh` into
-//! `NicolaiSchmid/steno-models` (a placeholder until the plan's parity list settles the account). Until
-//! [`PARAKEET_V3_FP32_REVISION`] names a commit, the export has no source:
-//! its files are produced by `spikes/onnx-speech/export/` and copied into
-//! `<root>/parakeet-tdt-0.6b-v3-fp32/` by hand, or fetched from a mirror,
-//! and [`ModelStore::ensure`] reports [`SpeechError::NotHosted`] when they
-//! are missing. The checksums are those of the export
+//! [`STENO_MODELS_REPO`] and fetched at the commit
+//! [`PARAKEET_V3_FP32_REVISION`]. The checksums are those of the export
 //! `spikes/onnx-speech/export/` produces with torch 2.14.1 and `NeMo`
-//! 3.0.0; a hosted copy must match them or the manifest changes with it.
+//! 3.0.0, and the hosted copy matches them; uploading a different export
+//! means changing them in the manifest too. Every file Steno ships has a
+//! source (a test checks it). Without a mirror, a file the manifest gives
+//! no source has to be put in place by hand: [`ModelStore::ensure`]
+//! reports [`SpeechError::NotHosted`] when it is missing.
 //!
 //! A mirror ([`ModelStore::with_mirror`], the speech setting
 //! `modelsMirror`) replaces every host: the file is fetched from
@@ -105,22 +105,22 @@ impl ModelSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelFile {
     pub name: String,
-    /// `None` until the file is hosted; a mirror serves it regardless.
+    /// `None` for a file without a host; a mirror serves it regardless.
     pub source: Option<ModelSource>,
     /// Lower-case hex.
     pub sha256: String,
     pub size: u64,
 }
 
-/// The Hugging Face repository the fp32 export is uploaded to by
-/// `scripts/upload-models.sh`. A placeholder: which account hosts the models
-/// is open in the plan's parity list.
-pub const STENO_MODELS_REPO: &str = "NicolaiSchmid/steno-models";
+/// The Hugging Face repository that holds the fp32 export,
+/// <https://huggingface.co/nicolaischmid/steno-models>;
+/// `scripts/upload-models.sh` uploads to it.
+pub const STENO_MODELS_REPO: &str = "nicolaischmid/steno-models";
 
-/// The commit of [`STENO_MODELS_REPO`] that holds the export, printed by
-/// `scripts/upload-models.sh`; `None` until it is uploaded, which leaves the
-/// export without a source.
-pub const PARAKEET_V3_FP32_REVISION: Option<&str> = None;
+/// The commit of [`STENO_MODELS_REPO`] that holds the export, as
+/// `scripts/upload-models.sh` printed it.
+pub const PARAKEET_V3_FP32_REVISION: Option<&str> =
+    Some("4a133253481bfd2cb38dc3e77c3f748199562488");
 
 /// One downloadable model bundle; the settings pane shows the display
 /// name, the total size and the licence.
@@ -155,8 +155,7 @@ impl ModelAsset {
 
     /// Our fp32 ONNX export of Parakeet TDT 0.6B v3 with the 10000-frame
     /// position table (decision 3 of the speech-stack plan), from
-    /// [`STENO_MODELS_REPO`] at [`PARAKEET_V3_FP32_REVISION`] once that is
-    /// set, without a source until then.
+    /// [`STENO_MODELS_REPO`] at [`PARAKEET_V3_FP32_REVISION`].
     #[must_use]
     pub fn parakeet_v3_fp32() -> Self {
         match PARAKEET_V3_FP32_REVISION {
@@ -1497,12 +1496,23 @@ mod tests {
     fn hosts_fit_their_limits_and_hugging_face_urls_pin_a_commit() {
         // GitHub release assets cap at 2 GB a file, so a file that large
         // can only come from Hugging Face.
-        let hosted = ModelAsset::parakeet_v3_fp32_from(STENO_MODELS_REPO, "0123abcd");
-        for asset in ModelAsset::all().into_iter().chain([hosted.clone()]) {
+        let hosted = ModelAsset::parakeet_v3_fp32();
+        for asset in ModelAsset::all() {
             for file in &asset.files {
-                if let Some(ModelSource::Url(url)) = &file.source {
-                    assert!(url.starts_with("https://"), "{url}");
-                    assert!(file.size < GITHUB_RELEASE_ASSET_LIMIT, "{}", file.name);
+                match &file.source {
+                    Some(ModelSource::Url(url)) => {
+                        assert!(url.starts_with("https://"), "{url}");
+                        assert!(file.size < GITHUB_RELEASE_ASSET_LIMIT, "{}", file.name);
+                    }
+                    // A full commit, not a branch or a short hash.
+                    Some(ModelSource::HuggingFace { revision, .. }) => assert!(
+                        revision.len() == 40
+                            && revision
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                        "{revision}"
+                    ),
+                    None => panic!("{} has no host; every file Steno ships has one", file.name),
                 }
             }
         }
@@ -1514,12 +1524,10 @@ mod tests {
         assert!(weights.size > GITHUB_RELEASE_ASSET_LIMIT);
         assert_eq!(
             weights.source.as_ref().unwrap().url(),
-            "https://huggingface.co/NicolaiSchmid/steno-models/resolve/0123abcd/parakeet-tdt-0.6b-v3-fp32/encoder.weights"
+            "https://huggingface.co/nicolaischmid/steno-models/resolve/4a133253481bfd2cb38dc3e77c3f748199562488/parakeet-tdt-0.6b-v3-fp32/encoder.weights"
         );
         // Same files, sizes and checksums whether hosted or not.
-        let unhosted = ModelAsset::parakeet_v3_fp32();
-        assert_eq!(PARAKEET_V3_FP32_REVISION, None);
-        assert!(unhosted.files.iter().all(|f| f.source.is_none()));
+        let unhosted = ModelAsset::parakeet_v3_fp32_manifest(|_, _| None);
         let strip = |asset: &ModelAsset| {
             asset
                 .files

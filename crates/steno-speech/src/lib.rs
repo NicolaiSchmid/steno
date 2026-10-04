@@ -46,15 +46,12 @@
 //! [`ModelStore::from_environment`], for the `transcribe` example and the
 //! FLEURS test, takes it from the same variable and default.
 //!
-//! Silero VAD downloads from the sherpa-onnx GitHub release with its
-//! checksum verified. The fp32 Parakeet export (2.6 GB, over GitHub's 2 GB
-//! asset limit) is prepared for Hugging Face (`scripts/upload-models.sh`,
-//! [`ModelSource::HuggingFace`]) but not uploaded yet: until
-//! [`PARAKEET_V3_FP32_REVISION`] is set, produce it with
-//! `spikes/onnx-speech/export/` and place `encoder.onnx`,
-//! `encoder.weights`, `decoder.onnx`, `joiner.onnx` and `tokens.txt` in
-//! `<root>/parakeet-tdt-0.6b-v3-fp32/`, or serve a copy as a mirror
-//! ([`ModelStore::with_mirror`]); `prepare` says so when they are missing.
+//! Both assets download with their checksums verified: Silero VAD from
+//! the sherpa-onnx GitHub release, the fp32 Parakeet export (2.6 GB, over
+//! GitHub's 2 GB asset limit) from the Hugging Face repository
+//! [`STENO_MODELS_REPO`] at the commit [`PARAKEET_V3_FP32_REVISION`]
+//! ([`ModelSource::HuggingFace`], uploaded by `scripts/upload-models.sh`).
+//! A mirror ([`ModelStore::with_mirror`]) serves both instead.
 //!
 //! # Threads and process boundaries
 //!
