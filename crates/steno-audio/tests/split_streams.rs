@@ -45,6 +45,32 @@ fn packet(samples: &[f32], channels: usize) -> SliceView<'_> {
     }
 }
 
+/// A packet flagged silent: its length, no samples.
+fn silent(frames: usize, channels: usize) -> SliceView<'static> {
+    SliceView {
+        frames,
+        channels,
+        samples: None,
+    }
+}
+
+/// The master body for `plan`, pulling from `follower` into `sink`.
+fn master_body(
+    plan: &SplitStreamPlan,
+    follower: &Arc<FollowerLane>,
+    max_frames: usize,
+    sink: &Arc<LaneFrameSink>,
+) -> StreamBody {
+    StreamBody::Master {
+        router: PacketRouter::new(
+            plan.layout.sources.clone(),
+            Some(Arc::clone(follower)),
+            max_frames,
+        ),
+        sink: Arc::clone(sink),
+    }
+}
+
 fn drain(sink: &LaneFrameSink, lane: usize) -> Vec<f32> {
     sink.ring(lane).drain_all()
 }
@@ -202,14 +228,7 @@ fn the_follower_folds_stereo_and_stages_silent_packets_as_zeros() {
     // A fold buffer smaller than the packet folds it in pieces.
     let mut scratch = vec![0.0f32; 100];
     follower.push(packet(&stereo_ramp(0, 480), 2), &mut scratch);
-    follower.push(
-        SliceView {
-            frames: 480,
-            channels: 2,
-            samples: None,
-        },
-        &mut scratch,
-    );
+    follower.push(silent(480, 2), &mut scratch);
     // A packet shorter than it claims becomes zeros, not a short write.
     let short = stereo_ramp(0, 10);
     follower.push(
@@ -257,14 +276,7 @@ fn the_master_routes_its_packet_and_the_followers_frames_as_one_callback() {
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let follower = Arc::new(FollowerLane::new(480, 2_400, 48_000));
-    let mut master = StreamBody::Master {
-        router: PacketRouter::new(
-            plan.layout.sources.clone(),
-            Some(Arc::clone(&follower)),
-            480,
-        ),
-        sink: Arc::clone(&sink),
-    };
+    let mut master = master_body(&plan, &follower, 480, &sink);
     let mut staging = StreamBody::follower(Arc::clone(&follower), 480);
 
     // The follower is one packet ahead: priming needs 480 + 480.
@@ -290,14 +302,7 @@ fn a_silent_master_packet_writes_zeros_and_a_large_one_is_split() {
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = LaneFrameSink::new(&lanes);
     let mut router = PacketRouter::new(plan.layout.sources, None, 256);
-    router.route(
-        SliceView {
-            frames: 100,
-            channels: 1,
-            samples: None,
-        },
-        &sink,
-    );
+    router.route(silent(100, 1), &sink);
     router.route(packet(&ramp(1, 1_000), 1), &sink);
     let mixed = drain(&sink, 0);
     assert_eq!(mixed.len(), 1_100);
@@ -379,29 +384,13 @@ fn a_follower_and_a_master_on_two_threads_account_for_every_frame() {
     // Two seconds per lane hold all 150 periods, so nothing drains early.
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let follower = Arc::new(FollowerLane::for_period(PERIOD));
-    let mut master = StreamBody::Master {
-        router: PacketRouter::new(
-            plan.layout.sources.clone(),
-            Some(Arc::clone(&follower)),
-            PERIOD,
-        ),
-        sink: Arc::clone(&sink),
-    };
+    let mut master = master_body(&plan, &follower, PERIOD, &sink);
     let mut staging = StreamBody::follower(Arc::clone(&follower), PERIOD);
 
     let follower_thread = std::thread::spawn(move || {
-        let mut packet = vec![0.0f32; 2 * PERIOD];
         for index in 0..PACKETS {
-            // Left and right equal, so the fold is the frame's number.
-            for (frame, pair) in packet.as_chunks_mut::<2>().0.iter_mut().enumerate() {
-                let value = (index * PERIOD + frame + 1) as f32;
-                pair.fill(value);
-            }
-            staging.handle(SliceView {
-                frames: PERIOD,
-                channels: 2,
-                samples: Some(&packet),
-            });
+            // The fold is the frame's number, counting from 1.
+            staging.handle(packet(&stereo_ramp(index * PERIOD, PERIOD), 2));
             if index % 3 == 0 {
                 std::thread::yield_now();
             }
