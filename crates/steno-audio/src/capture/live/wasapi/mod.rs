@@ -417,7 +417,7 @@ fn run_watcher(
     let registration = enumerator.as_ref().and_then(|enumerator| {
         let notify = Arc::clone(watcher);
         enumerator
-            .register(Box::new(move |_| notify.note()))
+            .register(Box::new(move || notify.note()))
             .map_err(|error| tracing::warn!("no device notifications: {error}"))
             .ok()
     });

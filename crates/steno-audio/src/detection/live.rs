@@ -58,8 +58,7 @@ mod wasapi {
     use std::time::Duration;
 
     use crate::capture::live::wasapi::com::{
-        Apartment, ComError, EndpointRegistration, Enumerator, SessionManagerRegistration,
-        SessionRegistration,
+        Apartment, ComError, Enumerator, SessionManagerRegistration, SessionRegistration,
     };
     use crate::detection::{
         ActivityError, EndpointFlow, ProcessAudioActivity, ProcessAudioActivitySource,
@@ -179,11 +178,8 @@ mod wasapi {
         let (sender, notices) = channel();
         // A device change can bring capture endpoints with sessions, so it
         // re-registers the session events like a session creation.
-        let endpoint_sender = sender.clone();
-        let endpoints: Option<EndpointRegistration> = enumerator
-            .register(Box::new(move |_| {
-                let _ = endpoint_sender.send(Notice::SessionCreated);
-            }))
+        let endpoints = enumerator
+            .register(notify(&sender, Notice::SessionCreated))
             .ok();
         let mut sessions = Some(SessionWatch::register(&enumerator, &sender));
         let _ = changes.send(());

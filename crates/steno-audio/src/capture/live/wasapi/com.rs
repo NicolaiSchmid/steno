@@ -260,12 +260,15 @@ impl Enumerator {
             .collect())
     }
 
-    /// Calls `on_event` for every endpoint notification until the
-    /// registration is dropped. `on_event` runs on a thread of the audio
-    /// service and must neither block nor call into WASAPI.
+    /// Calls `on_event` for every endpoint notification (a default
+    /// changed, a device added, removed or changing state) until the
+    /// registration is dropped. Which device and role is not passed on:
+    /// the listener resolves the devices again. `on_event` runs on a
+    /// thread of the audio service and must neither block nor call into
+    /// WASAPI.
     pub fn register(
         &self,
-        on_event: Box<dyn Fn(EndpointEvent) + Send + Sync>,
+        on_event: Box<dyn Fn() + Send + Sync>,
     ) -> Result<EndpointRegistration, ComError> {
         let client: IMMNotificationClient = EndpointNotifications { on_event }.into();
         check(
@@ -282,19 +285,9 @@ impl Enumerator {
     }
 }
 
-/// What an endpoint notification was about. The payload (which device,
-/// which role) is not carried: the listener resolves the devices again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndpointEvent {
-    /// `OnDefaultDeviceChanged`.
-    DefaultChanged,
-    /// `OnDeviceStateChanged`, `OnDeviceAdded`, `OnDeviceRemoved`.
-    DeviceChanged,
-}
-
 #[implement(IMMNotificationClient)]
 struct EndpointNotifications {
-    on_event: Box<dyn Fn(EndpointEvent) + Send + Sync>,
+    on_event: Box<dyn Fn() + Send + Sync>,
 }
 
 impl IMMNotificationClient_Impl for EndpointNotifications_Impl {
@@ -303,17 +296,17 @@ impl IMMNotificationClient_Impl for EndpointNotifications_Impl {
         _id: &PCWSTR,
         _state: DEVICE_STATE,
     ) -> windows::core::Result<()> {
-        (self.on_event)(EndpointEvent::DeviceChanged);
+        (self.on_event)();
         Ok(())
     }
 
     fn OnDeviceAdded(&self, _id: &PCWSTR) -> windows::core::Result<()> {
-        (self.on_event)(EndpointEvent::DeviceChanged);
+        (self.on_event)();
         Ok(())
     }
 
     fn OnDeviceRemoved(&self, _id: &PCWSTR) -> windows::core::Result<()> {
-        (self.on_event)(EndpointEvent::DeviceChanged);
+        (self.on_event)();
         Ok(())
     }
 
@@ -323,7 +316,7 @@ impl IMMNotificationClient_Impl for EndpointNotifications_Impl {
         _role: ERole,
         _id: &PCWSTR,
     ) -> windows::core::Result<()> {
-        (self.on_event)(EndpointEvent::DefaultChanged);
+        (self.on_event)();
         Ok(())
     }
 
