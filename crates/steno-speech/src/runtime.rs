@@ -1,5 +1,6 @@
-//! Which engine runs Parakeet where, and the speech settings that choose
-//! it, and on Windows whether the encoder may use `DirectML`. On Linux and Windows the ONNX sidecar
+//! Which engine runs Parakeet where, the speech settings that choose it,
+//! and on Windows whether the encoder may use `DirectML`. On Linux and
+//! Windows the ONNX sidecar
 //! ([`SidecarSpeechEngine`](crate::SidecarSpeechEngine)) is the only
 //! speech engine the app runs: speech inference never shares the app's
 //! process there (the diarizer's ONNX models still run in it).
