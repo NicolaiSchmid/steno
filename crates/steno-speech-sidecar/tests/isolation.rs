@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 use steno_core::{AudioBuffer16k, LanguageTag, SpeechEngine};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
-    ModelAsset, ModelStore, OnnxOptions, OnnxSpeechEngine, SidecarConfig, SidecarError,
-    SidecarSpeechEngine, SpeechError,
+    ExecutionProvider, ModelAsset, ModelStore, OnnxOptions, OnnxSpeechEngine, SidecarConfig,
+    SidecarError, SidecarSpeechEngine, SpeechError,
 };
 
 const BINARY: &str = env!("CARGO_BIN_EXE_steno-speech-sidecar");
@@ -233,6 +233,26 @@ async fn requests_round_trip_the_audio_bit_for_bit_in_one_child() {
     pipeline.release().await.unwrap();
     assert_eq!(engine.pid(), None);
     assert_eq!(engine.health().await.unwrap(), None);
+}
+
+/// The `DirectML` request crosses to the child with the load, and the
+/// provider it answers with comes back in the health report; the fake
+/// engine answers `DirectML` whenever it is asked, as if the probe passed.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_directml_request_reaches_the_child_and_its_provider_comes_back() {
+    for (directml, expected) in [
+        (false, ExecutionProvider::Cpu),
+        (true, ExecutionProvider::DirectMl),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config(&[]);
+        config.options.directml = directml;
+        let engine = engine_in(&dir, config);
+        engine.prepare().await.unwrap();
+        let health = engine.health().await.unwrap().unwrap();
+        assert_eq!(health.provider, Some(expected));
+        engine.shut_down().await.unwrap();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -498,6 +518,7 @@ async fn the_real_engine_reports_missing_models_and_keeps_running() {
     );
     let health = engine.health().await.unwrap().unwrap();
     assert!(!health.loaded);
+    assert_eq!(health.provider, None);
     assert!(engine.shut_down().await.unwrap().unwrap().success());
 }
 
@@ -533,6 +554,7 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
     engine.prepare().await.unwrap();
     let health = engine.health().await.unwrap().unwrap();
     assert!(health.loaded);
+    assert_eq!(health.provider, Some(ExecutionProvider::Cpu));
     eprintln!(
         "sidecar with models loaded: {} MB resident",
         health.rss_bytes >> 20

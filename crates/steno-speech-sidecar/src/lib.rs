@@ -25,10 +25,13 @@
 //! # What the child does
 //!
 //! It loads the models once from the store root the parent names and
-//! installed (it never downloads and opens no connection), reads framed
-//! requests from stdin with the audio as a binary payload, answers on
-//! stdout, and reports its resident set from a heartbeat thread so the
-//! parent can kill it at the memory ceiling. It exits on a shutdown
+//! installed (it never downloads and opens no connection), the encoder on
+//! `DirectML` when the parent asks for it on Windows and the probe in
+//! `steno_speech::onnx` passes, and answers with the provider it chose.
+//! It reads framed requests from stdin with the audio as a binary
+//! payload, answers on stdout, and reports its resident set from a
+//! heartbeat thread so the parent can kill it at the memory ceiling.
+//! It exits on a shutdown
 //! request and as soon as stdin ends or stdout breaks, so a dead parent
 //! leaves no child behind. Its log goes to stderr, which the parent keeps
 //! the tail of for crash reports. Its sessions open through
@@ -38,7 +41,8 @@
 //! # Test faults
 //!
 //! `--fake-engine` replaces Parakeet with an engine that needs no models
-//! and answers with the sample count and peak of the audio it received.
+//! and answers with the sample count and peak of the audio it received;
+//! it reports `DirectML` whenever the load asks for it.
 //! Only with it, `--fault <kind>` ([`Fault`]) makes the next transcription
 //! abort, panic, flood stderr and panic, exit, hang, allocate 4 GiB,
 //! write garbage or fail, or the child stay silent or announce another

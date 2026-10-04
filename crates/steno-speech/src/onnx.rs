@@ -244,7 +244,9 @@ impl AcceleratedSession {
                 // the weights at the same time.
                 self.session = None;
                 self.provider = ExecutionProvider::Cpu;
-                let session = self.session.insert(open_session(&self.path, &self.options)?);
+                let session = self
+                    .session
+                    .insert(open_session(&self.path, &self.options)?);
                 log_provider(self.provider);
                 work(session)
             }
@@ -762,7 +764,10 @@ mod tests {
             match open_directml(&path, &directml_options()) {
                 Ok(_) => println!("DirectML session: opened"),
                 Err((fallback, error)) => {
-                    println!("DirectML session: {} ({fallback:?}): {error}", fallback.describe());
+                    println!(
+                        "DirectML session: {} ({fallback:?}): {error}",
+                        fallback.describe()
+                    );
                 }
             }
         }

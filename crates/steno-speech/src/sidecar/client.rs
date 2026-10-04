@@ -46,7 +46,8 @@ pub struct SidecarConfig {
     /// Arguments before the ones the client adds (`--heartbeat-ms`); the
     /// app passes none, the tests choose the fake engine and a fault.
     pub args: Vec<OsString>,
-    /// Session options the child opens the models with.
+    /// Session options the child opens the models with, `DirectML` for
+    /// the encoder included ([`OnnxOptions::directml`]).
     pub options: OnnxOptions,
     /// The child is killed once its resident set passes this many bytes.
     /// The fp32 export works in 2 to 3 GB; a 2 h recording adds about

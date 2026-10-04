@@ -439,7 +439,13 @@ mod tests {
             r#"{"id":1,"interThreads":1,"intraThreads":4,"modelsRoot":"/m","type":"load"}"#,
         )
         .unwrap();
-        assert!(matches!(old_load, Request::Load { directml: false, .. }));
+        assert!(matches!(
+            old_load,
+            Request::Load {
+                directml: false,
+                ..
+            }
+        ));
         let old_loaded: Reply = serde_json::from_str(r#"{"id":1,"type":"loaded"}"#).unwrap();
         assert_eq!(
             old_loaded,
