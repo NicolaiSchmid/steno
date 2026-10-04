@@ -185,9 +185,12 @@ then quits (see above). The icons in `icons/` come from `cargo tauri
 icon` over the Swift app icon
 (`apps/macos/Steno/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png`),
 the tray's template mark in `icons/tray/` is drawn by hand. The identifier
-stays `uno.schmid.steno.desktop` so the shell installs beside the Swift
-app; the Mac cutover changes it to `uno.schmid.steno.mac`
-(`.plans/2026-10-04-mac-cutover.md`).
+stays `uno.schmid.steno.desktop`, so the shell keeps its own preferences
+and permissions beside the Swift app until the Mac cutover changes it to
+`uno.schmid.steno.mac` (`.plans/2026-10-04-mac-cutover.md`, whose step 1
+decides what becomes of these installs). Both apps are `Steno.app`,
+though: dragged into `/Applications`, the desktop `.dmg` replaces the
+Swift app, so install it elsewhere (`~/Applications`) to keep both.
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the
@@ -239,14 +242,22 @@ finding.
 
 ### Cutting a release
 
-1. On `main`, set `[workspace.package] version` in `Cargo.toml` and merge.
-   A hyphen (`0.2.0-rc.1`) means the beta lane only; a pre-release ends in
-   a number.
+0. Before the first release, and after a change to the workflow: the six
+   secrets in the table below are set, and a manual run on the branch
+   passes:
+   `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
+   It builds, signs and notarises, and publishes nothing.
+1. On `main`, set `[workspace.package] version` in `Cargo.toml`, run
+   `cargo check` so `Cargo.lock` follows (CI builds with `--locked`), and
+   merge both. A hyphen (`0.2.0-rc.1`) means the beta lane only; a
+   pre-release ends in a number.
 2. Tag the merge commit:
    `git tag desktop-v<version> <merge commit> && git push origin desktop-v<version>`.
    Push one tag at a time and wait for its publish: GitHub keeps one
    waiting job per concurrency group, so a third tag cancels the second's
-   waiting publish.
+   waiting publish. Until the macOS job is done, start no Swift release
+   and no other desktop run with macOS: one job signs on the self-hosted
+   Mac at a time (see Signing).
 3. Watch the Desktop release run. `publish` runs only when all three
    platforms bundled.
 4. Check what the lanes serve:
@@ -255,16 +266,19 @@ finding.
 
 ### When a run fails
 
-Re-run only the failed jobs, never all jobs: a full re-run rebuilds and
-replaces the release's assets while the lanes still serve the old
-`latest.json`, whose signatures do not match the new assets until
-**Update lanes** finishes.
+Re-run only the failed jobs (`gh run rerun <run id> --failed`), never all
+jobs: a full re-run rebuilds and replaces the release's assets while the
+lanes still serve the old `latest.json`, whose signatures do not match the
+new assets until **Update lanes** finishes.
 
 - **plan**: the tag does not name the workspace version, or the MSI
   cannot carry the version. Delete the tag
   (`git push origin :refs/tags/desktop-v<version>` and
   `git tag -d desktop-v<version>`), fix the version on `main`, tag again.
 - **Check secrets**: add the secret it names (see the table below).
+- **Signing keychain and notarisation key**: the `.p12` or its password is
+  wrong, or the certificate is not a Developer ID Application one; the
+  `::error::` or `security`'s message says which.
 - **cargo deny**: update the dependency, or name the crate with its reason
   in `deny.toml`.
 - **Build**: a compile error Rust CI would show too; fix it on `main`,
@@ -285,16 +299,21 @@ replaces the release's assets while the lanes still serve the old
 ### A bad release
 
 Installed apps only take a higher version, so no lane can take a user
-back. To stop the spread, put the previous manifest on the lane by hand:
+back. To stop the spread, put the last good version each lane served back
+on it by hand. On `desktop-beta` that is the version before the bad one:
 
 ```sh
-gh release download desktop-v<previous> -p latest.json
+gh release download desktop-v<last good> -p latest.json --clobber
 gh release upload desktop-beta latest.json --clobber
 ```
 
-(and `desktop-stable` for a release). Then fix forward with a higher
-version. Its tag moves the lane as usual, because the lane now serves the
-older version.
+A bad release (no hyphen) moved `desktop-stable` too. That lane gets the
+previous *release*'s manifest, never an rc's, which would offer the rc to
+every stable user: the same two commands with `desktop-v<previous
+release>` and `desktop-stable`. Never re-run the bad tag's publish: its
+**Update lanes** moves the lanes back to it. Then fix forward with a higher
+version. Its tag moves the lanes as usual, because they now serve older
+versions.
 
 ### Secrets
 
@@ -312,9 +331,13 @@ built.
 
 Installed apps verify updates only with the `pubkey` they were built with.
 To rotate the updater key, publish one release whose `tauri.conf.json`
-carries the new public key, signed with the old private key; publish's
-signature check reads the config's key, so for that run it has to be
-pointed at the old one. After that, replace `TAURI_SIGNING_PRIVATE_KEY`.
+carries the new public key, signed with the old private key. Publish's
+signature check reads the config's key, so on that release's commit the
+`pubkey=` line of **Verify the updater signatures** (`desktop-release.yml`)
+reads the old one,
+`pubkey="$(base64 --decode <<< '<the old plugins.updater.pubkey value>')"`,
+and the next commit reverts the line. After that release, replace
+`TAURI_SIGNING_PRIVATE_KEY`.
 An app that never installed that release needs a manual install, and so
 does every app if the key is lost.
 
@@ -362,13 +385,17 @@ The release binary is built first with no secret in the environment
 imports the Developer ID certificate into a throwaway keychain
 (`scripts/signing-keychain.sh`, the Swift release's approach) and hands
 its identity to the bundler; at the end it takes only that keychain off
-the search list, so another desktop or Swift release running on the
-self-hosted Mac keeps its own. The bundler signs the sidecar, the app
-binary and the bundle under the hardened runtime with `Entitlements.plist`
-(one file for every item, so the sidecar carries the two entitlements
-without using them), then notarises and staples the `.app` with the App
-Store Connect key before it builds the image and the updater archive from
-it, and `scripts/notarize-dmg.sh` notarises and staples the image.
+the search list and leaves every other one there. One macOS signing job
+runs at a time on the self-hosted Mac: no Swift release and no other
+desktop run signs while a desktop run signs. Two throwaway keychains
+would hold the same Developer ID identity, and a `codesign` by name (the
+Swift app's `make-dmg.sh` and Xcode export) then fails as ambiguous. The
+bundler signs the sidecar, the app binary and the bundle under the
+hardened runtime with `Entitlements.plist` (one file for every item, so
+the sidecar carries the two entitlements without using them), then
+notarises and staples the `.app` with the App Store Connect key before it
+builds the image and the updater archive from it, and
+`scripts/notarize-dmg.sh` notarises and staples the image.
 `check-bundle.sh --signed` checks the Developer ID authority, the runtime
 flag, the timestamp and the team on all three items, the entitlements,
 the ticket and Gatekeeper's verdict. Linux packages are not signed beyond
