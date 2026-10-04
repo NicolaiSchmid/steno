@@ -1225,8 +1225,8 @@ PR off `main`.
 | Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
 | WP9a signed and notarised release bundles with the speech sidecar, `cargo deny`, the `desktop-v*` release and the updater lanes | `feat/rust-release-signing` | #184 | merged |
 | WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`) | | | planned |
-| Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | in review |
-| Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | open |
+| Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
+| Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
