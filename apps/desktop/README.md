@@ -129,8 +129,36 @@ shell together. Without the CLI, start the dev server yourself and build the she
 ```sh
 pnpm --dir apps/macos/web install --frozen-lockfile
 pnpm --dir apps/macos/web dev &
-cargo build -p steno-desktop && target/debug/steno-desktop
+cargo build -p steno-desktop -p steno-speech-sidecar && target/debug/steno-desktop
 ```
+
+Parakeet, the speech model, runs in its own process, `steno-speech-sidecar`,
+on Linux and Windows. On the Mac `CoreML` runs it inside the shell, unless
+`speech.json` in the support directory holds `{"onnxSidecarOnMac": true}` or
+the stored engine is not Parakeet v3 (Whisper, which Settings offers, or
+Parakeet Ultra or Parakeet DE, which the Swift app may have stored); then the
+sidecar runs it there too. The shell reads `speech.json` once, at launch: an
+edit takes effect at the next start, not at a Settings save. The support
+directory is `~/Library/Application Support/Steno` on the Mac,
+`$XDG_DATA_HOME/Steno` (else `~/.local/share/Steno`) on Linux and
+`%APPDATA%\Steno` on Windows.
+
+`steno-services` starts the sidecar from beside the shell's binary
+(`steno_services::speech::sidecar_config`). `cargo build -p steno-desktop` and
+`cargo tauri dev` do not build it: use the command above, run
+`cargo build -p steno-speech-sidecar` once before `cargo tauri dev`, or run
+`cargo build` at the workspace root, so that `target/debug/` holds both
+binaries. Without the sidecar the windows still work, but processing a
+meeting fails with "could not start" and the path it looked for.
+
+The sidecar also needs the fp32 Parakeet export, which no host serves yet.
+Put its five files (`encoder.onnx`, `encoder.weights`, `decoder.onnx`,
+`joiner.onnx`, `tokens.txt`) in `onnx/parakeet-tdt-0.6b-v3-fp32/` under the
+models directory (`Models` in the support directory, unless `STENO_MODELS_DIR`
+or the settings name another), or set `STENO_MODELS_MIRROR` to a copy.
+"Models" in the `steno-speech` crate doc says how to produce the export.
+Silero VAD, the other model, downloads on first use. The bundles carry the
+sidecar beside the shell (see Release).
 
 Every build without the `custom-protocol` feature loads `devUrl` (the Vite
 dev server on 5173), whatever the profile; that is Tauri's dev build. Set
@@ -150,9 +178,21 @@ cargo build -p steno-desktop --release --features custom-protocol
 
 A release build with the web `dist/` missing fails in `build.rs`, so no
 release bundle carries the placeholder page. The bundles
-(`cargo tauri build`, or `.github/workflows/desktop-release.yml` on a
-manual trigger) carry the real host; a build with `--features
-fixture-host` shows the whole UI with synthetic data instead.
+(`cargo tauri build`, or `.github/workflows/desktop-release.yml`) carry the
+real host; a build with `--features fixture-host` shows the whole UI with
+synthetic data instead.
+
+A bundle that transcribes off the Mac also needs the speech sidecar beside
+the app (see Release); stage it and add the release configuration:
+
+```sh
+apps/desktop/scripts/stage-sidecar.sh
+cd apps/desktop/src-tauri
+pnpm dlx @tauri-apps/cli@2.12.1 build --config tauri.release.conf.json \
+  --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
+(Drop the second `--config` when `TAURI_SIGNING_PRIVATE_KEY` is set.)
 
 ### Bundles and the updater key
 
@@ -173,18 +213,27 @@ then quits (see above). The icons in `icons/` come from `cargo tauri
 icon` over the Swift app icon
 (`apps/macos/Steno/Resources/Assets.xcassets/AppIcon.appiconset/icon_512x512@2x.png`),
 the tray's template mark in `icons/tray/` is drawn by hand. The identifier
-stays `uno.schmid.steno.desktop` so the shell installs beside the Swift
-app; WP9 changes it to `uno.schmid.steno.mac` for the cutover.
+stays `uno.schmid.steno.desktop`, so the shell keeps its own preferences
+and permissions beside the Swift app until the Mac cutover changes it to
+`uno.schmid.steno.mac` (`.plans/2026-10-04-mac-cutover.md`, whose step 1
+decides what becomes of these installs). Both apps are `Steno.app`,
+though: dragged into `/Applications`, the desktop `.dmg` replaces the
+Swift app, so install it elsewhere (`~/Applications`) to keep both.
+
+No bundle carries `steno-speech-sidecar` yet (WP9 adds it), so a `.deb`,
+AppImage, `.msi` or NSIS install opens its windows but fails to process a
+meeting with "could not start". A Mac bundle processes on `CoreML`, except in
+the two cases under Run that send Parakeet to the sidecar.
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the
-repository; it is the GitHub secret `TAURI_SIGNING_PRIVATE_KEY` (with
-`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` when it has one), which WP9 adds
-before the first signed release. Without the secret, `createUpdaterArtifacts`
-is switched off through the configuration merge in the workflows, because a
-public key without a private key fails the build. The lane follows the
-installed version as it did with Sparkle: a pre-release reads the `beta`
-manifest first, a release the stable one only (`updater.rs`).
+repository; it is the secret `TAURI_SIGNING_PRIVATE_KEY` (see Release).
+With `createUpdaterArtifacts` on, a bundle build without the key fails;
+Rust CI and a local build without the key turn it off through the
+configuration merge. The lane follows the installed version, as Sparkle's
+channel does in the Swift app: a pre-release reads the beta manifest first,
+a release the stable one only (`updater.rs`; the manifests are under
+Release).
 
 To run a debug binary against the embedded bundle instead of the dev server
 (what the smoke does), drop the dev URL through Tauri's own configuration
@@ -201,8 +250,205 @@ dropped as above or the feature is on. A plain debug build loads
 `localhost:5173` either way.
 
 Panic messages in a release binary would carry the build host's source
-paths until Cargo's `trim-paths` stabilises; the release workflow sets
-`RUSTFLAGS=--remap-path-prefix` so they read `steno/…` instead.
+paths until Cargo's `trim-paths` stabilises. The release workflow passes
+`--remap-path-prefix` to the sidecar's and the app's builds (through
+`CARGO_ENCODED_RUSTFLAGS`, so a path with a space stays one flag): the
+dependency sources in the cargo home read `cargo/…`. Cargo already gives
+the workspace's own sources relative paths; any absolute one reads
+`steno/…`.
+
+## Release
+
+`.github/workflows/desktop-release.yml` builds the six bundles on the three
+platforms. A pushed `desktop-v<version>` tag builds all of them and
+publishes; the version must be the one under `[workspace.package]` in
+`Cargo.toml`, which Tauri stamps into the bundles, or the run fails before
+it builds. So does a version the MSI cannot carry: WiX takes numbers only,
+so `scripts/wix-version.sh` accepts `X.Y.Z` and `X.Y.Z-<label>.<N>` alone.
+A manual run builds, signs and notarises the platforms it is given
+and keeps the bundles as workflow artifacts; it publishes nothing. The
+`desktop-v` prefix keeps these tags apart from the Swift app's `v*`
+(`release.yml`) and the mobile build tags `ios-fp-*` (`mobile-cd.yml`).
+`cargo deny check` (`deny.toml`: the licence allow list, the MPL-2.0
+crates by name, advisories, sources) runs first and stops the run on any
+finding.
+
+### Cutting a release
+
+0. Before the first release, and after a change to the workflow: the
+   secrets in the table below are set, and a manual run on the branch
+   passes:
+   `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
+1. On `main`, set `[workspace.package] version` in `Cargo.toml`, run
+   `cargo check` so `Cargo.lock` follows (CI builds with `--locked`), and
+   merge both. A hyphen (`0.2.0-rc.1`) means the beta lane only.
+2. Tag the merge commit:
+   `git tag desktop-v<version> <merge commit> && git push origin desktop-v<version>`.
+   Push one tag at a time and wait for its publish: GitHub keeps one
+   waiting job per concurrency group, so a third tag cancels the second's
+   waiting publish. Until the macOS job is done, start no Swift release
+   and no other desktop run with macOS (see Signing).
+3. Watch the Desktop release run. `publish` runs only when all three
+   platforms bundled.
+4. Check what the lanes serve:
+   `curl -fsSL https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json | jq .version`
+   (and `desktop-stable` for a release).
+
+### When a run fails
+
+Re-run only the failed jobs (`gh run rerun <run id> --failed`), never all
+jobs: a full re-run rebuilds and replaces the release's assets while the
+lanes still serve the old `latest.json`, whose signatures do not match the
+new assets until **Update lanes** finishes.
+
+- **plan**: the tag does not name the workspace version, or the MSI
+  cannot carry the version. Delete the tag
+  (`git push origin :refs/tags/desktop-v<version>` and
+  `git tag -d desktop-v<version>`), fix the version on `main`, tag again.
+- **Check secrets**: add the secret it names (see the table below).
+- **Signing keychain and notarisation key**: the `.p12` or its password is
+  wrong, or the certificate is not a Developer ID Application one; the
+  `::error::` or `security`'s message says which.
+- **cargo deny**: update the dependency, or name the crate with its reason
+  in `deny.toml`.
+- **Build**: a compile error Rust CI would show too; fix it on `main`,
+  then delete the tag as above and tag again.
+- **Notarise the disk image**: notarytool's log for the submission is in
+  the step output. A notarisation failure in **Bundle** is the bundler's
+  error in that step's output.
+- **Check the bundles**: the `::error::` names the file or the check that
+  failed.
+- **A job that timed out or lost its runner**: `notarize-dmg.sh` gives up
+  after 45 minutes, but the bundler's own notarisation of the `.app` waits
+  until the job's 90-minute timeout. Check `xcrun notarytool history` with
+  the App Store Connect key, then re-run the failed jobs.
+- **publish**, also one cancelled while it waited (a third tag): re-run it.
+  An existing release is reused and its assets replaced; the lanes move as
+  on the first run.
+
+### A bad release
+
+Installed apps only take a higher version, so no lane can take a user
+back. To stop the spread, put the last good version each lane served back
+on it by hand. On `desktop-beta` that is the version before the bad one:
+
+```sh
+gh release download desktop-v<last good> -p latest.json --clobber
+gh release upload desktop-beta latest.json --clobber
+```
+
+A bad release (no hyphen) moved `desktop-stable` too. That lane gets the
+previous *release*'s manifest, never an rc's, which would offer the rc to
+every stable user: the same two commands with `desktop-v<previous
+release>` and `desktop-stable`. Never re-run the bad tag's publish: its
+**Update lanes** moves the lanes back to it. Then fix forward with a higher
+version, whose tag moves the lanes as usual.
+
+### Secrets
+
+| Secret | Used by | What it is |
+|---|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | every platform's Bundle | The private half of `plugins.updater.pubkey`, empty password; signs every updater artifact |
+| `MACOS_CERTIFICATE_P12_BASE64` | macOS signing keychain | The Developer ID Application certificate and key as a base64 `.p12` (shared with `release.yml`) |
+| `MACOS_CERTIFICATE_PASSWORD` | macOS signing keychain | The `.p12`'s password |
+| `ASC_KEY_ID` | macOS Bundle, `notarize-dmg.sh` | The App Store Connect API key's id |
+| `ASC_ISSUER_ID` | macOS Bundle, `notarize-dmg.sh` | The key's issuer id |
+| `ASC_PRIVATE_KEY` | macOS Bundle, `notarize-dmg.sh` | The key itself, the `.p8` contents |
+
+`scripts/require-secrets.sh` names every missing one before anything is
+built.
+
+Installed apps verify updates only with the `pubkey` they were built with.
+To rotate the updater key, publish one release (no hyphen, and at or
+above what both lanes serve, so both move to it) whose `tauri.conf.json`
+carries the new public key, signed with the old private key. Publish
+checks the signatures against the config's key, so on that release's
+commit the `pubkey=` line of **Verify the updater signatures**
+(`desktop-release.yml`) is set to the old key,
+`pubkey="$(base64 --decode <<< '<the old plugins.updater.pubkey value>')"`,
+and the next commit reverts it. After that release, replace
+`TAURI_SIGNING_PRIVATE_KEY`. An app that never installed that release
+needs a manual install, and so does every app if the key is lost.
+
+### The speech sidecar
+
+Off the Mac, and on the Mac when the ONNX fallback is on,
+`steno-speech-sidecar` runs the speech model in a child process, which
+`SidecarConfig::beside_current_exe` looks for in the directory of the
+running binary. `tauri.release.conf.json` declares it as an `externalBin`;
+`scripts/stage-sidecar.sh` builds it in release and copies it to
+`src-tauri/binaries/steno-speech-sidecar-<target triple>` (ignored by
+git), where the bundler finds it and installs it without the triple. It is
+not in `tauri.conf.json`, because `tauri-build` then requires the file for
+every build, debug and test included. Where it lands:
+
+| Bundle | Installed at | The sidecar |
+|---|---|---|
+| `.app` (in the `.dmg`) | `Steno.app/Contents/MacOS/steno-desktop` | `Steno.app/Contents/MacOS/steno-speech-sidecar` |
+| `.deb` | `/usr/bin/steno-desktop` | `/usr/bin/steno-speech-sidecar` |
+| `.AppImage` | `usr/bin/steno-desktop` in the mounted image | `usr/bin/steno-speech-sidecar` beside it |
+| `.msi` | `Steno\steno-desktop.exe` under Program Files | `steno-speech-sidecar.exe` beside it |
+| NSIS `-setup.exe` | `Steno\steno-desktop.exe` under the user's `AppData\Local` | `steno-speech-sidecar.exe` beside it |
+
+`scripts/check-bundle.sh` proves the table for each build: it unpacks each
+bundle as its installer would (`dpkg-deb -x`, `--appimage-extract`, an
+administrative MSI install, a silent NSIS install), finds the two binaries
+side by side and starts the sidecar from there, which greets and exits
+when its stdin ends.
+
+ONNX Runtime is linked statically, so on macOS and Linux the sidecar needs
+no library beside it. On Windows both binaries load `DirectML.dll`, which
+the MSI picks up from the build directory on its own and the NSIS
+installer does not (an NSIS install would then load the older copy in
+`System32`): `stage-sidecar.sh` stages it and
+`tauri.release.windows.conf.json` installs it beside the app for both.
+`bundle.windows.bundleVCRuntime` puts the Visual C++ runtime
+(`msvcp140.dll` and the rest) there too, so neither installer depends on
+a redistributable the machine may not have.
+
+### Signing
+
+The release binary is built first with no secret in the environment
+(`tauri build --no-bundle`), so no dependency's build script sees one;
+`tauri bundle` then signs and packages it with the keys. On macOS the job
+imports the Developer ID certificate into a throwaway keychain
+(`scripts/signing-keychain.sh`, the Swift release's approach) and hands
+its identity to the bundler; at the end it takes only that keychain off
+the search list. Run only one signing job on the self-hosted Mac at a
+time (no concurrency group spans the two workflows): two throwaway
+keychains would hold the same Developer ID identity, and a `codesign` by
+name (the Swift app's `make-dmg.sh` and Xcode export) then fails as
+ambiguous. The bundler signs the sidecar, the app binary and the bundle
+under the hardened runtime with `Entitlements.plist` (one file for every
+item, so the sidecar carries the two entitlements without using them),
+then notarises and staples the `.app` with the App Store Connect key
+before it builds the image and the updater archive from it, and
+`scripts/notarize-dmg.sh` notarises and staples the image.
+`check-bundle.sh --signed` checks the Developer ID authority, the runtime
+flag, the timestamp and the team on all three items, the entitlements,
+the ticket and Gatekeeper's verdict. Linux packages are not signed beyond
+the updater signature. Windows installers are not code-signed, since there
+is no Windows certificate: SmartScreen asks before the first install, and
+updates install without asking again.
+
+### Publishing, on a tag
+
+One GitHub release per tag carries every bundle, the `.sig` of each
+updater artifact (`.app.tar.gz`, `.AppImage`, `.deb`, `.msi`,
+`-setup.exe`) and `latest.json` (`scripts/updater-manifest.sh`). Each
+signature is checked against `plugins.updater.pubkey` first, so a signing
+key that is not the config key's other half fails the release instead of
+every user's next update. The manifest then goes to the rolling release of
+each lane, `desktop-stable` and `desktop-beta`, and the lane's tag moves to
+the release commit. Each lane only moves forward: the stable lane takes a
+release (no hyphen), the beta lane every version, each only when the
+version is at or above the one the lane serves (`scripts/updater-lanes.sh`,
+SemVer precedence). A rerun of a tag moves the same lanes again; an older
+tag or a hotfix on an older line leaves a lane where it is. Every desktop
+release is a GitHub pre-release and never "latest": until the Mac cutover
+(`.plans/2026-10-04-mac-cutover.md`) the "latest release" that the
+repository README, the site and the Homebrew cask point at is the Swift
+app's.
 
 ## Test
 
@@ -318,19 +564,22 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
-| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | Manual trigger: the six bundles on the three platforms as workflow artifacts, unsigned (WP9 signs, notarises and publishes); the `platforms` input is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
+| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
+| `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check |
+| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json` and the lanes a release moves (each `.sh` with a `.test.sh` is tested in Rust CI) |
 
 ## Not here yet
 
-Signing, notarisation, the GitHub release and the updater manifests are
-WP9, as is `cargo deny`; the release workflow stops at unsigned bundles.
-WP6b filled the host's half of the WP8 seams except four, which wait
-for work outside the shell (the plan's WP6b row): the detection
-controller (WP5) is not ported, so nothing raises the prompt
-(`panels::set_prompt`) and its X (`panels::dismiss_prompt`) tells no
-one; the host's `Permissions` stay the services' fake (all granted),
-because `permissions` answers `unknown` off the Mac and for the Mac's
-system audio, which the host's onboarding opener counts as missing, so
+The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
+removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it lands
+the desktop app installs beside the Swift app on the Mac. WP6b filled the
+host's half of the WP8 seams except four, which wait for work outside the
+shell (the plan's WP6b row): the detection controller (WP5) is not
+ported, so nothing raises the prompt (`panels::set_prompt`) and its X
+(`panels::dismiss_prompt`) tells no one; the host's `Permissions` stay
+the services' fake (all granted), because `permissions` answers
+`unknown` off the Mac and for the Mac's system audio, which the host's
+onboarding opener counts as missing, so
 onboarding would open at every launch until the audio probe (WP5) and a
 rule for `unknown` land; the host's `Updater` stays the fake, because
 `updater` has no automatic-check or automatic-download flag and keeps no
@@ -344,17 +593,18 @@ no `ExitRequested`, so a recording is not saved there and the next
 launch marks it failed (Swift's interrupted reason). The host may
 treat the main window as always present: a close hides it, or ends the
 process when no tray stands, so publishing to it never fails for want of a
-window. Launch at login is a Launch Agent, not `SMAppService`; WP9 has to
-retire the Swift registration at cutover so the user does not get two
-login items (the plan's parity list). The macOS menu bar has no Record
-menu yet (`⌘⇧R` and Record In Person are the tray's and the sidebar's),
-and no Find Meetings (`⌘F`). Updates are checked only when asked (the
-tray's item, Settings), where Sparkle checks daily on its own. On macOS
-the system audio permission has no status API; the audio crate's probe
-(WP5) records it and until then it reads `unknown`. The panels are
-re-tuned on the Mac once they run there beside the Swift ones (the plan's
-risk list). Linux and Windows keep their native title bar; macOS gets the
-overlay title bar the Swift windows have. The page's traffic light inset
+window. Launch at login is a Launch Agent, not `SMAppService`; the cutover
+has to retire the Swift registration so the user does not get two login
+items (the plan's parity list, `.plans/2026-10-04-mac-cutover.md`). The
+macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are the
+tray's and the sidebar's), and no Find Meetings (`⌘F`). Updates are
+checked only when asked (the tray's item, Settings), where Sparkle checks
+daily on its own. On macOS the system audio permission has no status API;
+the audio crate's probe (WP5) records it and until then it reads
+`unknown`. The panels are re-tuned on the Mac once they run there beside
+the Swift ones (the plan's risk list). Linux and Windows keep their
+native title bar; macOS gets the overlay title bar the Swift windows
+have. The page's traffic light inset
 is a design question for the other two platforms. On Linux, WebKitGTK
 leaks one shared-memory file descriptor per destroyed webview that lived
 longer than about 250 ms (29 to 107 fds over 70 Settings open/close

@@ -49,3 +49,5 @@ apps/macos/dist/
 
 # Tauri shell: smoke screenshots (apps/desktop/scripts/smoke-linux.sh)
 apps/desktop/screens/
+# Tauri shell: the staged sidecar (apps/desktop/scripts/stage-sidecar.sh)
+apps/desktop/src-tauri/binaries/

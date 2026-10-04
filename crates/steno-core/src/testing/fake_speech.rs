@@ -21,7 +21,8 @@ pub struct TranscribeCall {
 
 /// A `SpeechEngine` that emits one segment per `segment_seconds` of audio,
 /// tagged with `language`, text `"<prefix> segment <n>"`. Deterministic and
-/// configurable; records every hint it was given.
+/// configurable; records every hint it was given, every `prepare` and
+/// every `release`.
 #[derive(Debug)]
 pub struct FakeSpeechEngine {
     pub id: String,
@@ -31,8 +32,13 @@ pub struct FakeSpeechEngine {
     pub text_prefix: String,
     pub word_timings: bool,
     pub failure: Option<String>,
+    /// A buffer whose peak stays below this is silence and yields no
+    /// segment, the way a real engine hears a tap that recorded nothing.
+    /// `None` (the default) transcribes every buffer.
+    pub silent_below_peak: Option<f32>,
     pub transcriptions: CallLog<TranscribeCall>,
     pub preparations: CallLog<()>,
+    pub releases: CallLog<()>,
 }
 
 impl Default for FakeSpeechEngine {
@@ -45,8 +51,10 @@ impl Default for FakeSpeechEngine {
             text_prefix: "fake".to_owned(),
             word_timings: false,
             failure: None,
+            silent_below_peak: None,
             transcriptions: CallLog::new(),
             preparations: CallLog::new(),
+            releases: CallLog::new(),
         }
     }
 }
@@ -143,6 +151,11 @@ impl SpeechEngine for FakeSpeechEngine {
             hint: hint.cloned(),
         });
         FakeFailure::check(self.failure.as_ref())?;
+        if let Some(peak) = self.silent_below_peak
+            && audio.samples.iter().all(|sample| sample.abs() < peak)
+        {
+            return Ok(Vec::new());
+        }
         Ok(Self::segments(
             audio.duration(),
             self.segment_seconds,
@@ -150,6 +163,11 @@ impl SpeechEngine for FakeSpeechEngine {
             &self.text_prefix,
             self.word_timings,
         ))
+    }
+
+    async fn release(&self) -> BoundaryResult<()> {
+        self.releases.record(());
+        Ok(())
     }
 }
 
@@ -305,6 +323,8 @@ mod tests {
         assert_eq!(timings[2].word, "1");
         assert_eq!(timings[2].end, 1.0);
         assert_eq!(engine.preparations.count(), 1);
+        shared.release().await.unwrap();
+        assert_eq!(engine.releases.count(), 1);
         assert_eq!(
             engine.transcriptions.entries(),
             vec![TranscribeCall {

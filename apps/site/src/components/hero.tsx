@@ -36,8 +36,8 @@ export function Hero() {
 					style={{ "--d": "300ms" } as React.CSSProperties}
 				>
 					Steno records the call from your computer&apos;s own audio,
-					transcribes and summarises it on-device, and writes plain Markdown you
-					own. Nobody sees a notetaker join. Bring your own model. Fork the
+					transcribes it on-device, summarises it with the model you choose, and
+					writes plain Markdown you own. Nobody sees a notetaker join. Fork the
 					whole thing.
 				</p>
 				<div

@@ -5,8 +5,10 @@
 //! The macOS backend (`capture::live`) turns the HAL's `AudioBufferList`
 //! into a slice of [`BufferView`]s on the stack and calls [`deliver`]. No
 //! arrays are created, no closures called, nothing logged inside the
-//! callback. The PipeWire backend turns its one interleaved buffer into a
-//! view with [`interleaved_view`] and calls [`deliver`] the same way.
+//! callback. Safe code holds its buffers as [`SliceView`]s and goes
+//! through [`deliver_slices`], the safe form: the WASAPI capture threads
+//! via [`PacketRouter`](super::PacketRouter), and the PipeWire backend
+//! after [`interleaved_view`] has turned its one mapped buffer into a view.
 
 use super::sink::LaneFrameSink;
 use crate::capture::layout::{ChannelRef, LaneSource};
@@ -95,6 +97,7 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
                     Some((right, right_stride)) => unsafe {
                         sink.write_mixed(lane, left, right, source.left.stride, right_stride);
                     },
+                    // SAFETY: as above, for the one pointer.
                     None => unsafe { sink.write(lane, left, source.left.stride) },
                 }
             }
@@ -104,18 +107,71 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
     sink.end_callback();
 }
 
-/// One PipeWire buffer of interleaved `f32` as a [`BufferView`]: `memory`
+/// One input buffer as safe code holds it: a WASAPI capture packet (valid
+/// from `GetBuffer` to `ReleaseBuffer`), the follower's staging copy, or a
+/// dequeued PipeWire buffer ([`interleaved_view`]), its interleaved samples
+/// borrowed for the call. `None` for a buffer flagged silent
+/// (`AUDCLNT_BUFFERFLAGS_SILENT`) or memory that cannot be read as
+/// interleaved `f32`, which becomes zeros.
+#[derive(Debug, Clone, Copy)]
+pub struct SliceView<'a> {
+    /// Interleaved channels in the buffer.
+    pub channels: usize,
+    /// Frames in the buffer.
+    pub frames: usize,
+    /// `channels * frames` interleaved samples, or `None` for silence.
+    pub samples: Option<&'a [f32]>,
+}
+
+/// The most buffers [`deliver_slices`] takes: the master packet and the
+/// follower's staging copy, with room to spare.
+pub const MAX_SLICE_BUFFERS: usize = 4;
+
+/// [`deliver`] for buffers held as slices: builds the [`BufferView`]s on
+/// the stack and delivers them, so the caller needs no `unsafe`. A slice
+/// shorter than `channels * frames` is treated as silent: its buffer keeps
+/// the length it claims and becomes zeros, so the lanes stay aligned and
+/// nothing reads past its end. Buffers beyond [`MAX_SLICE_BUFFERS`] are
+/// ignored.
+#[inline(always)]
+pub fn deliver_slices(buffers: &[SliceView<'_>], sources: &[LaneSource], sink: &LaneFrameSink) {
+    let count = buffers.len().min(MAX_SLICE_BUFFERS);
+    let mut views = [BufferView {
+        channels: 0,
+        data: None,
+        byte_size: 0,
+    }; MAX_SLICE_BUFFERS];
+    for (view, buffer) in views.iter_mut().zip(&buffers[..count]) {
+        let wanted = buffer.frames * buffer.channels;
+        *view = BufferView {
+            channels: buffer.channels,
+            data: buffer
+                .samples
+                .filter(|samples| samples.len() >= wanted)
+                .map(<[f32]>::as_ptr),
+            byte_size: wanted * 4,
+        };
+    }
+    // SAFETY: every `data` pointer is the start of a slice borrowed for
+    // this call and holding at least `byte_size` bytes (shorter slices get
+    // no pointer above); `deliver` reads a buffer only within the
+    // callback's frames at the buffer's channel count, which its shape
+    // check keeps inside `byte_size`.
+    unsafe { deliver(&views[..count], sources, sink) }
+}
+
+/// One PipeWire buffer of interleaved `f32` as a [`SliceView`]: `memory`
 /// is the mapped `spa_data` (`maxsize` bytes), `offset`, `size` and
 /// `stride` its `spa_chunk`, `channels` the format's channel count. The
-/// chunk's offset is taken modulo the memory size as SPA defines it, and a
+/// chunk's offset is taken modulo the memory size as SPA defines it, a
 /// chunk running past the end is cut to what the memory holds (audio chunks
-/// do not wrap). Memory that is missing, misaligned for `f32`, or strided
-/// unlike `channels` interleaved samples becomes a view without data, so
-/// [`deliver`] writes silence of the chunk's length instead of reading past
-/// the buffer. A stride of 0 (a producer that leaves it unset) is read as
-/// `channels` samples. A handful of integer operations, no allocation; the
-/// view borrows `memory`'s pointer, valid as long as the buffer stays
-/// dequeued.
+/// do not wrap), and a partial last frame is dropped. Memory that is
+/// missing, misaligned for `f32`, or strided unlike `channels` interleaved
+/// samples becomes a view without samples, so [`deliver_slices`] writes
+/// silence of the chunk's length instead of reading past the buffer. A
+/// stride of 0 (a producer that leaves it unset) is read as `channels`
+/// samples. A handful of integer operations, no allocation; the view
+/// borrows `memory`, valid as long as the buffer stays dequeued.
 #[inline(always)]
 #[must_use]
 pub fn interleaved_view(
@@ -124,35 +180,43 @@ pub fn interleaved_view(
     size: u32,
     stride: i32,
     channels: usize,
-) -> BufferView {
+) -> SliceView<'_> {
     let frame_bytes = channels * size_of::<f32>();
-    let size = size as usize;
-    let without_data = |byte_size| BufferView {
-        channels,
-        data: None,
-        byte_size,
-    };
     if frame_bytes == 0 {
-        return without_data(0);
+        return SliceView {
+            channels,
+            frames: 0,
+            samples: None,
+        };
     }
+    let size = size as usize;
+    let without_samples = |frames| SliceView {
+        channels,
+        frames,
+        samples: None,
+    };
     let Some(memory) = memory.filter(|m| !m.is_empty()) else {
-        return without_data(size - size % frame_bytes);
+        return without_samples(size / frame_bytes);
     };
     let start = offset as usize % memory.len();
-    let size = size.min(memory.len() - start);
-    let size = size - size % frame_bytes;
+    let frames = size.min(memory.len() - start) / frame_bytes;
+    let bytes = &memory[start..start + frames * frame_bytes];
     let stride = usize::try_from(stride).unwrap_or(usize::MAX);
-    let first = memory[start..].as_ptr();
-    if (stride != 0 && stride != frame_bytes) || first.addr() % align_of::<f32>() != 0 {
-        return without_data(size);
+    if (stride != 0 && stride != frame_bytes) || bytes.as_ptr().addr() % align_of::<f32>() != 0 {
+        return without_samples(frames);
     }
     // The alignment is checked just above.
     #[allow(clippy::cast_ptr_alignment)]
-    let data = first.cast::<f32>();
-    BufferView {
+    let first = bytes.as_ptr().cast::<f32>();
+    // SAFETY: `bytes` is aligned for `f32` (checked above) and holds
+    // exactly `frames * channels` of them (`frames * frame_bytes` bytes);
+    // every bit pattern is a valid `f32`, and the slice borrows `memory`
+    // for the lifetime it returns with.
+    let samples = unsafe { std::slice::from_raw_parts(first, frames * channels) };
+    SliceView {
         channels,
-        data: Some(data),
-        byte_size: size,
+        frames,
+        samples: Some(samples),
     }
 }
 
@@ -176,7 +240,7 @@ mod tests {
         let memory = bytes(&samples);
         // From the second frame, a chunk far longer than the memory.
         let view = interleaved_view(Some(memory), 12, 4_096, 12, 3);
-        assert_eq!(view.byte_size, 36, "three whole frames are left");
+        assert_eq!(view.frames, 3, "three whole frames are left");
         let lanes = [AudioLane::Mic, AudioLane::System];
         let sources = [
             LaneSource {
@@ -191,8 +255,7 @@ mod tests {
             },
         ];
         let sink = LaneFrameSink::new(&lanes);
-        // SAFETY: the view points into `samples`, alive for the call.
-        unsafe { deliver(&[view], &sources, &sink) };
+        deliver_slices(&[view], &sources, &sink);
         assert_eq!(sink.available_to_read(), 3);
         let (mut mic, mut system) = ([0.0f32; 3], [0.0f32; 3]);
         assert!(sink.ring(0).read(&mut mic) && sink.ring(1).read(&mut system));
@@ -205,9 +268,8 @@ mod tests {
         let samples = [0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let view = interleaved_view(Some(bytes(&samples)), 12, 24, 12, 3);
         assert_eq!(view.channels, 3);
-        assert_eq!(view.byte_size, 24);
-        // SAFETY: the view points into `samples`.
-        assert_eq!(unsafe { *view.data.unwrap() }, 3.0);
+        assert_eq!(view.frames, 2);
+        assert_eq!(view.samples, Some(&samples[3..]));
     }
 
     #[test]
@@ -217,9 +279,9 @@ mod tests {
         // 36 wraps to 12 in 24 bytes of memory; the 12 bytes left there
         // hold one whole stereo frame of 8.
         let view = interleaved_view(Some(memory), 36, 400, 8, 2);
-        assert_eq!(view.byte_size, 8);
+        assert_eq!(view.frames, 1);
         assert_eq!(
-            view.data.map(<*const f32>::cast::<u8>),
+            view.samples.map(|samples| samples.as_ptr().cast::<u8>()),
             Some(memory[12..].as_ptr())
         );
     }
@@ -228,8 +290,8 @@ mod tests {
     fn a_partial_frame_is_dropped_and_a_zero_stride_is_accepted() {
         let samples = [0.0f32; 8];
         let view = interleaved_view(Some(bytes(&samples)), 0, 30, 0, 2);
-        assert_eq!(view.byte_size, 24);
-        assert!(view.data.is_some());
+        assert_eq!(view.frames, 3);
+        assert_eq!(view.samples.map(<[f32]>::len), Some(6));
     }
 
     #[test]
@@ -237,18 +299,18 @@ mod tests {
         let samples = [0.0f32; 8];
         let memory = bytes(&samples);
         let strided = interleaved_view(Some(memory), 0, 32, 16, 2);
-        assert_eq!((strided.data, strided.byte_size), (None, 32));
+        assert_eq!((strided.samples, strided.frames), (None, 4));
         let misaligned = interleaved_view(Some(memory), 2, 16, 8, 2);
-        assert_eq!((misaligned.data, misaligned.byte_size), (None, 16));
+        assert_eq!((misaligned.samples, misaligned.frames), (None, 2));
     }
 
     #[test]
     fn missing_memory_or_channels_carry_no_data() {
         let none = interleaved_view(None, 0, 48, 12, 3);
-        assert_eq!((none.data, none.byte_size), (None, 48));
+        assert_eq!((none.samples, none.frames), (None, 4));
         let empty = interleaved_view(Some(&[]), 0, 48, 12, 3);
-        assert_eq!((empty.data, empty.byte_size), (None, 48));
+        assert_eq!((empty.samples, empty.frames), (None, 4));
         let no_channels = interleaved_view(Some(bytes(&[0.0; 4])), 0, 16, 0, 0);
-        assert_eq!((no_channels.data, no_channels.byte_size), (None, 0));
+        assert_eq!((no_channels.samples, no_channels.frames), (None, 0));
     }
 }

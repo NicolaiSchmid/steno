@@ -4748,6 +4748,8 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows",
+ "windows-core",
 ]
 
 [[package]]
@@ -5015,6 +5017,7 @@ dependencies = [
  "serde",
  "serde_json",
  "steno-core",
+ "steno-speech",
  "thiserror 2.0.21",
  "tokio",
 ]

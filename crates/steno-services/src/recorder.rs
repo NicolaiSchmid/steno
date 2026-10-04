@@ -10,10 +10,11 @@ use std::thread::JoinHandle;
 use chrono::{FixedOffset, Utc};
 use steno_audio::{CaptureConfiguration, CaptureSession, LaneLevels as AudioLevels};
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
-use steno_core::{MeetingSource, RecordingEndReason, Settings, Store};
+use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{LocalRecordingIntake, RecordingResult};
+use steno_speech::SpeechRuntime;
 use uuid::Uuid;
 
 use crate::block_on;
@@ -122,30 +123,44 @@ impl CaptureRecorder {
         LocalRecordingIntake::over(self.store.clone(), self.pipeline.current(), self.zone)
     }
 
-    /// Loads the speech engine and the diarizer in the background while
-    /// the recording runs, so processing does not wait for the cold load;
-    /// only when the models of the engine `settings` name and the
-    /// diarizer's are installed, so it never starts a download. Swift:
+    /// Loads the models processing needs in the background while the
+    /// recording runs, so processing does not wait for the cold load; only
+    /// when the models of the current pipeline's speech engine and the
+    /// diarizer's are installed, so it never starts a download. The engine
+    /// is the one the pipeline was built with ([`BuiltEngine`]), not the id
+    /// stored now (Rust only: Swift asked about the stored id): after a
+    /// failed reload, or an engine the Swift app saved meanwhile, the two
+    /// differ. An engine in this process (`CoreML` on
+    /// the Mac) is loaded with the diarizer, as Swift did. Where the speech
+    /// sidecar runs the engine ([`SpeechRuntime`]), only the diarizer is:
+    /// the child would hold its 2.2 GB through the whole recording, outside
+    /// any job's claim, so the job starts it instead. Swift:
     /// `AppEnvironment.warmUpPipelineIfModelsInstalled`, called when a
     /// recording starts.
-    fn warm_up_if_installed(&self, settings: &Settings) {
-        if !(self
-            .speech_models
-            .engine_installed(&settings.speech_engine_id)
+    ///
+    /// [`BuiltEngine`]: crate::pipeline::BuiltEngine
+    fn warm_up_if_installed(&self) {
+        let (pipeline, engine) = self.pipeline.current_with_engine();
+        if !(self.speech_models.engine_installed(&engine.engine_id)
             && self.speech_models.is_installed(ModelAsset::OfflineDiarizer))
         {
             return;
         }
-        let pipeline = self.pipeline.current();
+        let in_process = engine.runtime == SpeechRuntime::CoreMlInProcess;
         self.runtime.spawn(async move {
-            if let Err(failure) = pipeline.warm_up().await {
+            let warmed = if in_process {
+                pipeline.warm_up().await
+            } else {
+                pipeline.warm_up_diarizer().await
+            };
+            if let Err(failure) = warmed {
                 tracing::debug!(%failure, "warm-up failed; processing loads the models");
             }
         });
     }
 
-    /// Starts the session and the meeting; the settings it started under.
-    fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<Settings, String> {
+    /// Starts the session and the meeting.
+    fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<(), String> {
         let settings = self.store.settings().map_err(|e| e.to_string())?;
         let audio_folder = steno_core::paths::file_url_path(&settings.audio_folder)
             .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
@@ -213,7 +228,7 @@ impl CaptureRecorder {
         if let Some(active) = self.inner().active.as_mut() {
             active.level_thread = Some(thread);
         }
-        Ok(settings)
+        Ok(())
     }
 
     /// Quitting: a recording in progress is stopped with the `quit` end
@@ -326,7 +341,7 @@ impl Recorder for CaptureRecorder {
         }
         self.notify();
         match self.start_inner(mode, call_app) {
-            Ok(settings) => self.warm_up_if_installed(&settings),
+            Ok(()) => self.warm_up_if_installed(),
             Err(error) => {
                 let mut inner = self.inner();
                 inner.status.state = RecordingState::Idle;
@@ -379,13 +394,18 @@ impl Recorder for CaptureRecorder {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
-    use crate::testing::{current_pipeline, eventually, fake_dependencies, temp_store};
+    use crate::app::BuildError;
+    use crate::pipeline::{BuiltEngine, BuiltPipeline, MakeDependencies};
+    use crate::testing::{eventually, fake_dependencies, temp_store};
     use steno_audio::testing::SyntheticCaptureBackend;
     use steno_audio::testing::synthetic::SyntheticOptions;
     use steno_core::paths::file_url;
     use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
     use steno_host::fakes::{FakePermissions, FakeSpeechModels};
+    use steno_speech::SpeechSettings;
 
     struct Harness {
         _dir: tempfile::TempDir,
@@ -393,19 +413,55 @@ mod tests {
         recorder: Arc<CaptureRecorder>,
         engine: Arc<FakeSpeechEngine>,
         diarizer: Arc<FakeDiarizer>,
+        /// While set, a reload fails as a build error would and the
+        /// current pipeline stays.
+        failing_reloads: Arc<AtomicBool>,
+    }
+
+    /// Where the app runs each engine id with `speech_settings`.
+    fn platform_rule(
+        speech_settings: SpeechSettings,
+    ) -> impl Fn(&str) -> SpeechRuntime + Send + Sync + 'static {
+        move |engine_id| crate::speech::engine_runtime(engine_id, &speech_settings)
+    }
+
+    /// The Mac's default rule, on every platform: `parakeet-v3` in this
+    /// process, every other id in the speech sidecar.
+    fn mac_rule(engine_id: &str) -> SpeechRuntime {
+        if engine_id == "parakeet-v3" {
+            SpeechRuntime::CoreMlInProcess
+        } else {
+            SpeechRuntime::OnnxSidecar
+        }
+    }
+
+    /// Fake models with `assets` on disk.
+    fn models_with(assets: &[ModelAsset]) -> Arc<FakeSpeechModels> {
+        let models = Arc::new(FakeSpeechModels::default());
+        for asset in assets {
+            models.set_installed(*asset, None);
+        }
+        models
     }
 
     /// A recorder over fake models with `installed` on disk.
     fn harness(installed: &[ModelAsset]) -> Harness {
-        let models = Arc::new(FakeSpeechModels::default());
-        for asset in installed {
-            models.set_installed(*asset, None);
-        }
-        harness_over(models, "parakeet-v3")
+        harness_over(
+            models_with(installed),
+            "parakeet-v3",
+            platform_rule(SpeechSettings::default()),
+        )
     }
 
-    /// A recorder over `models`, the settings naming `engine_id`.
-    fn harness_over(models: Arc<dyn SpeechModels>, engine_id: &str) -> Harness {
+    /// A recorder over `models`, the settings naming `engine_id`. Each
+    /// build, the first and every reload, records the engine id stored
+    /// at that moment and the runtime `runtime_of` gives it, as
+    /// `app::pipeline_dependencies` does.
+    fn harness_over(
+        models: Arc<dyn SpeechModels>,
+        engine_id: &str,
+        runtime_of: impl Fn(&str) -> SpeechRuntime + Send + Sync + 'static,
+    ) -> Harness {
         let (dir, store) = temp_store();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
@@ -416,7 +472,30 @@ mod tests {
         let mut dependencies = fake_dependencies(&store, "fake-engine");
         dependencies.speech_engine = engine.clone();
         dependencies.diarizer = diarizer.clone();
-        let pipeline = current_pipeline(dependencies);
+        let failing_reloads = Arc::new(AtomicBool::new(false));
+        let make: MakeDependencies = {
+            let (store, failing_reloads) = (store.clone(), failing_reloads.clone());
+            Arc::new(move || {
+                if failing_reloads.load(Ordering::SeqCst) {
+                    return Err(BuildError::DatabaseFolder(std::io::Error::other(
+                        "the build fails",
+                    )));
+                }
+                let engine_id = store.settings()?.speech_engine_id;
+                Ok(BuiltPipeline {
+                    dependencies: dependencies.clone(),
+                    engine: BuiltEngine {
+                        runtime: runtime_of(&engine_id),
+                        engine_id,
+                    },
+                })
+            })
+        };
+        let pipeline = Arc::new(CurrentPipeline::new(
+            make().unwrap(),
+            make,
+            tokio::runtime::Handle::current(),
+        ));
         let make_session: MakeCaptureSession = Arc::new(|configuration: CaptureConfiguration| {
             let lanes = configuration.lanes();
             let mut options =
@@ -446,6 +525,17 @@ mod tests {
             recorder,
             engine,
             diarizer,
+            failing_reloads,
+        }
+    }
+
+    impl Harness {
+        /// Stores `engine_id` as a Settings save does, then reloads.
+        fn save_engine(&self, engine_id: &str) -> Result<(), BuildError> {
+            let mut settings = self.store.settings().unwrap();
+            engine_id.clone_into(&mut settings.speech_engine_id);
+            self.store.save_settings(&settings).unwrap();
+            self.recorder.pipeline.reload()
         }
     }
 
@@ -464,14 +554,39 @@ mod tests {
             .unwrap();
     }
 
+    /// Starts a recording and waits until its warm-up has loaded the
+    /// diarizer, which `warm_up` loads after the speech engine; whether
+    /// the speech engine was loaded too.
+    async fn warmed_the_engine(harness: &Harness) -> bool {
+        start(&harness.recorder).await;
+        eventually("the diarizer was loaded while recording", || {
+            harness.diarizer.preparations.count() > 0
+        })
+        .await;
+        harness.engine.preparations.count() > 0
+    }
+
+    /// With the defaults, the Mac's `CoreML` engine and the diarizer are
+    /// both loaded, as Swift did; off the Mac the speech sidecar runs
+    /// Parakeet, so only the diarizer is.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
         let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
-        start(&harness.recorder).await;
-        eventually("both models were loaded while recording", || {
-            harness.engine.preparations.count() > 0 && harness.diarizer.preparations.count() > 0
-        })
-        .await;
+        assert_eq!(warmed_the_engine(&harness).await, cfg!(target_os = "macos"));
+        stop(&harness.recorder).await;
+    }
+
+    /// With Parakeet in the speech sidecar (here chosen on every
+    /// platform), a recording's warm-up loads the diarizer only: the
+    /// child would otherwise stay resident through the recording.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_start_with_speech_in_the_sidecar_warms_the_diarizer_only() {
+        let harness = harness_over(
+            models_with(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]),
+            "parakeet-v3",
+            platform_rule(crate::speech::testing::sidecar_chosen()),
+        );
+        assert!(!warmed_the_engine(&harness).await);
         stop(&harness.recorder).await;
     }
 
@@ -484,6 +599,56 @@ mod tests {
         assert_eq!(harness.diarizer.preparations.count(), 0);
         // Processing the recording loads them, as it always did.
         stop(&harness.recorder).await;
+    }
+
+    /// The warm-up follows the engine a reload built: the Mac's rule on
+    /// every platform, so moving from an id the sidecar runs to the
+    /// in-process `parakeet-v3` makes the recording load the engine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_warm_up_follows_the_engine_a_reload_built() {
+        let harness = harness_over(
+            models_with(&[
+                ModelAsset::ParakeetV3,
+                ModelAsset::ParakeetUltra,
+                ModelAsset::OfflineDiarizer,
+            ]),
+            "parakeet-ultra",
+            mac_rule,
+        );
+        harness.save_engine("parakeet-v3").unwrap();
+        assert!(warmed_the_engine(&harness).await);
+        stop(&harness.recorder).await;
+    }
+
+    /// After a failed reload the pipeline keeps the engine it was built
+    /// with, and so does the warm-up, whatever id the store holds now (a
+    /// Swift app that saved another engine looks the same): a pipeline on
+    /// the sidecar is not warmed into a child although the store names
+    /// the in-process `parakeet-v3`, and a pipeline on `CoreML` still
+    /// loads its engine although the store names a sidecar id. Each half
+    /// installs only the built engine's model and the diarizer, so the
+    /// installed check must ask about the built engine too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_a_failed_reload_the_warm_up_follows_the_engine_the_pipeline_kept() {
+        let sidecar = harness_over(
+            models_with(&[ModelAsset::ParakeetUltra, ModelAsset::OfflineDiarizer]),
+            "parakeet-ultra",
+            mac_rule,
+        );
+        sidecar.failing_reloads.store(true, Ordering::SeqCst);
+        assert!(sidecar.save_engine("parakeet-v3").is_err());
+        assert!(!warmed_the_engine(&sidecar).await);
+        stop(&sidecar.recorder).await;
+
+        let in_process = harness_over(
+            models_with(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]),
+            "parakeet-v3",
+            mac_rule,
+        );
+        in_process.failing_reloads.store(true, Ordering::SeqCst);
+        assert!(in_process.save_engine("parakeet-ultra").is_err());
+        assert!(warmed_the_engine(&in_process).await);
+        stop(&in_process.recorder).await;
     }
 
     /// Quitting stops the recording with `quit` and saves it: the meeting
@@ -551,21 +716,24 @@ mod tests {
     }
 
     /// The configured engine decides which model counts: with the `CoreML`
-    /// Parakeet and the diarizer on disk but another engine id stored (a
-    /// Swift user who picked Whisper), the ONNX engine would load, its
-    /// models are missing, and the warm-up neither loads nor downloads.
+    /// Parakeet and the diarizer on disk but another engine id stored
+    /// (Whisper, picked in Settings or in the Swift app), the speech
+    /// sidecar would load the ONNX models, which are missing, and the
+    /// warm-up neither loads nor downloads.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_checks_the_models_of_the_configured_engine() {
         let models_dir = tempfile::tempdir().unwrap();
-        let models = Arc::new(crate::speech::ModelStoreSpeechModels::new(
-            models_dir.path(),
-        ));
+        let models = Arc::new(crate::speech::testing::models_in(models_dir.path()));
         crate::speech::testing::install_coreml_parakeet(&models.coreml);
         crate::speech::testing::install_onnx_diarizer(&models);
         assert!(models.is_installed(ModelAsset::OfflineDiarizer));
         let before = crate::speech::testing::files_under(models_dir.path());
 
-        let harness = harness_over(models, "whisperkit-large-v3-turbo");
+        let harness = harness_over(
+            models,
+            "whisperkit-large-v3-turbo",
+            platform_rule(SpeechSettings::default()),
+        );
         start(&harness.recorder).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(harness.engine.preparations.count(), 0);

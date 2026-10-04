@@ -15,7 +15,7 @@ export function HowItWorks() {
 	return (
 		<section className="border-border border-t py-16 sm:py-24" id="how">
 			<div className="mx-auto grid max-w-[1240px] items-center gap-10 px-5 sm:px-8 lg:grid-cols-[1.1fr_1fr] lg:gap-16">
-				<div className="relative flex flex-col items-stretch gap-5">
+				<div className="relative flex min-w-0 flex-col items-stretch gap-5">
 					{/* The capture prompt */}
 					<div className="tile p-5">
 						<div className="mb-3 flex items-center gap-2.5">

@@ -15,7 +15,8 @@ steno_core::string_enum! {
     /// cases as `Settings` and the bridge spell them.
     pub enum CaptureMode {
         /// Two lanes, `Mic` ("me") and `System` ("them"), with echo
-        /// cancellation.
+        /// cancellation; the pipeline diarizes the mic lane instead when
+        /// the tap stayed silent.
         Call = "call",
         /// One `Mixed` room lane from the microphone: no tap, no echo
         /// cancellation.

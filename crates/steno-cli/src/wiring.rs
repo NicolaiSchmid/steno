@@ -7,6 +7,7 @@ use std::sync::Arc;
 use clap::Args;
 use steno_core::{SecretKey, Settings, StenoPaths, Store};
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
+use steno_services::speech::SpeechSetup;
 use uuid::Uuid;
 
 /// A usage error exits 1, a runtime failure 2.
@@ -61,13 +62,18 @@ pub const ENGINE_IDS: [&str; 4] = [
     "whisperkit-large-v3-turbo",
 ];
 
-/// `--engine <id>`: without it the pipeline runs the fakes; with it the
-/// named engine, the ONNX diarizer and cosine speaker memory over the
-/// store, models downloading on first use.
+/// `--engine <id>`: without it the pipeline runs the fakes; with it
+/// Parakeet v3 where the flag's help says, the ONNX diarizer and cosine
+/// speaker memory over the store. The diarizer's models download on first
+/// use; Parakeet's must be installed or, in the speech sidecar, come from
+/// the mirror.
 #[derive(Debug, Clone, Args)]
 pub struct SpeechOptions {
-    /// Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs the ONNX Parakeet v3 engine off the Mac.
-    #[arg(long, value_name = "engine")]
+    #[arg(
+        long,
+        value_name = "engine",
+        help = "Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar."
+    )]
     pub engine: Option<String>,
 }
 
@@ -114,6 +120,15 @@ pub fn paths() -> Result<StenoPaths, Failure> {
     StenoPaths::create_default().map_err(Failure::runtime)
 }
 
+/// The speech setup over `models_directory`, the speech settings read
+/// from the default support directory without creating it.
+pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
+    SpeechSetup::in_models_directory(
+        models_directory,
+        &StenoPaths::new(StenoPaths::default_support_directory()),
+    )
+}
+
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
 /// the 0600 secrets file in the support directory.
 pub async fn api_key() -> Result<Option<String>, Failure> {
@@ -147,28 +162,24 @@ pub fn dependencies(
     llm: Option<steno_services::llm::Passes>,
     events: MeetingEventBus,
 ) -> Result<PipelineDependencies, Failure> {
-    let models_directory = match models_directory {
-        Some(directory) => standardized(directory),
-        None => steno_services::speech::models_directory(settings, &paths()?),
-    };
     let (speech_engine, diarizer, memory): (
         Arc<dyn steno_core::SpeechEngine>,
         Arc<dyn steno_core::Diarizer>,
         Arc<dyn steno_core::SpeakerMemory>,
     ) = match engine {
-        Some(engine) => (
-            // The flag names the engine for this run, as the Swift CLI's
-            // `makeSpeechEngine(engine, ...)` did; the stored id does not.
-            steno_services::speech::speech_engine(
-                &Settings {
-                    speech_engine_id: engine.to_owned(),
-                    ..settings.clone()
-                },
-                &models_directory,
-            ),
-            steno_services::speech::diarizer(&models_directory),
-            Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
-        ),
+        Some(engine) => {
+            let speech = speech_setup(match models_directory {
+                Some(directory) => standardized(directory),
+                None => steno_services::speech::models_directory(settings, &paths()?),
+            });
+            (
+                // The flag names the engine for this run, as the Swift CLI's
+                // `makeSpeechEngine(engine, ...)` did; the stored id does not.
+                steno_services::speech::speech_engine(engine, &speech),
+                steno_services::speech::diarizer(&speech.models_directory),
+                Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
+            )
+        }
         None => (
             Arc::new(steno_core::testing::FakeSpeechEngine::default()),
             Arc::new(steno_core::testing::FakeDiarizer::default()),
@@ -224,31 +235,65 @@ mod tests {
         assert_eq!(standardized(&root.join("..")), root);
     }
 
-    #[test]
-    fn the_engine_flag_wins_over_the_stored_engine() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+    /// `--engine` over the models directory `<dir>/models-\xff` (a name
+    /// that is not UTF-8) passed to `dependencies`, as `steno process`
+    /// passes the settings', with `stored` as the settings' engine: the
+    /// error of the engine's `prepare`, which fails without the network.
+    #[cfg(unix)]
+    async fn prepare_error(dir: &Path, flag: &str, stored: &str) -> (PathBuf, String) {
+        use std::os::unix::ffi::OsStrExt as _;
+        let models = dir.join(std::ffi::OsStr::from_bytes(b"models-\xff"));
+        let store = Arc::new(Store::open(dir.join("steno.sqlite")).unwrap());
         let settings = Settings {
-            speech_engine_id: "whisperkit-large-v3-turbo".to_owned(),
+            speech_engine_id: stored.to_owned(),
             ..Settings::default()
         };
         let dependencies = dependencies(
             store,
             &settings,
-            Some("parakeet-v3"),
-            Some(dir.path()),
+            Some(flag),
+            Some(&models),
             None,
             None,
             MeetingEventBus::new(),
         )
         .unwrap();
-        let named = steno_services::speech::speech_engine(
-            &Settings {
-                speech_engine_id: "parakeet-v3".to_owned(),
-                ..Settings::default()
-            },
-            dir.path(),
+        let error = dependencies.speech_engine.prepare().await.unwrap_err();
+        (models, error.to_string())
+    }
+
+    /// The flag, not the stored id, picks the engine, over the models
+    /// directory the caller passes. Every engine reports `parakeet-v3`, and off
+    /// the Mac every id runs in the speech sidecar, so only the Mac can
+    /// tell the engines apart: there the flag's `parakeet-v3` is the
+    /// `CoreML` engine, the stored Whisper id the sidecar's. `CoreML`
+    /// misses its bundles under the given directory's
+    /// `fluidaudio/parakeet-tdt-0.6b-v3`; the sidecar would refuse the
+    /// root before any download.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_engine_flag_wins_over_the_stored_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let (models, error) =
+            prepare_error(dir.path(), "parakeet-v3", "whisperkit-large-v3-turbo").await;
+        let coreml = steno_services::speech::coreml_model_directory(&models);
+        assert!(
+            error.contains(&coreml.display().to_string()),
+            "the CoreML engine over the given models directory: {error}"
         );
-        assert_eq!(dependencies.speech_engine.id(), named.id());
+    }
+
+    /// Off the Mac the sidecar runs every id; its refusal of the root that
+    /// is not UTF-8 names the `onnx/` folder of the given directory, not
+    /// the default one.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_engine_runs_over_the_models_dir_it_is_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let (models, error) = prepare_error(dir.path(), "parakeet-v3", "parakeet-v3").await;
+        assert!(
+            error.contains(&models.join("onnx").display().to_string()),
+            "the sidecar over the given models directory: {error}"
+        );
     }
 }

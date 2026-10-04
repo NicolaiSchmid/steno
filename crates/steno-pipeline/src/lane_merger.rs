@@ -17,7 +17,11 @@ pub struct ClusterSpeaker {
 
 /// `.mic` segments belong to the deterministic "me" speaker; `.system` and
 /// `.mixed` segments get the diarization cluster covering their midpoint,
-/// and a `.mixed` segment is never assigned to "me".
+/// and a `.mixed` segment is never assigned to "me". When the mic lane is
+/// the diarized lane (a call whose tap carried no conversation), its
+/// segments get clusters like a room lane and the tap's stray segments (a
+/// chime, a hallucinated word) are kept without a speaker: the clusters
+/// describe the room, not the tap, and nothing transcribed is thrown away.
 pub struct LaneMerger;
 
 impl LaneMerger {
@@ -60,20 +64,25 @@ impl LaneMerger {
     }
 
     /// The merged transcript, ordered by start, then lane order, then index.
+    /// `diarized_lane` is the lane the clusters cover; `Some(Mic)` makes
+    /// the mic lane the room.
     #[must_use]
     pub fn merge(
         meeting_id: Uuid,
         lanes: &BTreeMap<AudioLane, Vec<RawSegment>>,
         clusters: &[ClusterSpeaker],
         me_speaker_id: Option<Uuid>,
+        diarized_lane: Option<AudioLane>,
     ) -> Vec<TranscriptSegment> {
+        let mic_is_room = diarized_lane == Some(AudioLane::Mic);
         let mut merged: Vec<((f64, usize, usize), TranscriptSegment)> = Vec::new();
         for (lane_index, lane) in AudioLane::ALL.iter().enumerate() {
             let Some(raw) = lanes.get(lane) else { continue };
             for (index, segment) in raw.iter().enumerate() {
                 let speaker_id = match lane {
-                    AudioLane::Mic => me_speaker_id,
-                    AudioLane::System | AudioLane::Mixed => {
+                    AudioLane::Mic if !mic_is_room => me_speaker_id,
+                    AudioLane::System if mic_is_room => None,
+                    AudioLane::Mic | AudioLane::System | AudioLane::Mixed => {
                         Self::cluster_covering(segment, clusters)
                     }
                 };
@@ -172,7 +181,7 @@ mod tests {
             AudioLane::System,
             vec![raw(0.0, 0.8, "sys a"), raw(1.2, 1.9, "sys b")],
         );
-        let merged = LaneMerger::merge(meeting, &lanes, &clusters, Some(me));
+        let merged = LaneMerger::merge(meeting, &lanes, &clusters, Some(me), None);
         assert_eq!(
             merged.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
             ["sys a", "mic", "sys b"]
@@ -184,6 +193,85 @@ mod tests {
             merged[1].id,
             LaneMerger::segment_id(meeting, AudioLane::Mic, 0)
         );
+    }
+
+    /// A call whose tap carried no conversation: the mic lane is the room,
+    /// its segments get clusters, nobody is "me", and the tap's stray
+    /// segments are kept without a speaker.
+    #[test]
+    fn a_mic_lane_diarized_as_the_room_gets_clusters_and_keeps_the_tap_unassigned() {
+        let meeting = Uuid::new_v4();
+        let me = LaneMerger::me_speaker_id(meeting);
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let clusters = vec![
+            ClusterSpeaker {
+                speaker_id: a,
+                ranges: vec![TimeRange {
+                    lower: 0.0,
+                    upper: 1.5,
+                }],
+            },
+            ClusterSpeaker {
+                speaker_id: b,
+                ranges: vec![TimeRange {
+                    lower: 1.5,
+                    upper: 3.0,
+                }],
+            },
+        ];
+        let mut lanes = BTreeMap::new();
+        lanes.insert(
+            AudioLane::Mic,
+            vec![
+                raw(0.2, 1.0, "a one"),
+                raw(2.0, 2.5, "b one"),
+                raw(5.0, 6.0, "nobody"),
+            ],
+        );
+        lanes.insert(AudioLane::System, vec![raw(3.0, 3.5, "chime")]);
+        let texts = |merged: &[TranscriptSegment]| {
+            merged.iter().map(|s| s.text.clone()).collect::<Vec<_>>()
+        };
+
+        let merged = LaneMerger::merge(meeting, &lanes, &clusters, None, Some(AudioLane::Mic));
+        assert_eq!(texts(&merged), ["a one", "b one", "chime", "nobody"]);
+        assert_eq!(
+            merged.iter().map(|s| s.speaker_id).collect::<Vec<_>>(),
+            [Some(a), Some(b), None, None]
+        );
+        assert_eq!(
+            merged.iter().map(|s| s.lane).collect::<Vec<_>>(),
+            [
+                AudioLane::Mic,
+                AudioLane::Mic,
+                AudioLane::System,
+                AudioLane::Mic
+            ]
+        );
+        // The same lanes with the tap diarized keep the old rules.
+        let standard = LaneMerger::merge(
+            meeting,
+            &lanes,
+            &clusters,
+            Some(me),
+            Some(AudioLane::System),
+        );
+        assert_eq!(texts(&standard), ["a one", "b one", "chime", "nobody"]);
+        assert_eq!(
+            standard.iter().map(|s| s.speaker_id).collect::<Vec<_>>(),
+            [Some(me), Some(me), None, Some(me)]
+        );
+
+        // A stray tap segment inside a room cluster's range still has no
+        // speaker: the clusters describe the mic lane.
+        lanes
+            .get_mut(&AudioLane::System)
+            .unwrap()
+            .push(raw(0.4, 0.6, "click"));
+        let merged = LaneMerger::merge(meeting, &lanes, &clusters, None, Some(AudioLane::Mic));
+        let click = merged.iter().find(|s| s.text == "click").unwrap();
+        assert_eq!(click.speaker_id, None);
     }
 
     #[test]

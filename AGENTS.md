@@ -103,7 +103,8 @@ missing local setup, run it. Do not ask first.
   reserved for the red live state, the primary action is white on dark.
 - Copy presents Steno as multi-platform (macOS, Windows, Linux) and does not
   mention the vault or Obsidian. The hero mock uses the README's example
-  meeting, never a real recording. URLs live in `src/lib/site.ts`.
+  meeting, never a real recording. URLs and which desktops have a released
+  build live in `src/lib/site.ts`.
 
 ## Mobile (`mobile/`)
 

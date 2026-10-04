@@ -55,16 +55,18 @@ unsafe extern "system" {
 
 #[inline(always)]
 fn thread_id() -> usize {
-    // SAFETY: all three are plain, always-available OS calls without
-    // preconditions (`gettid` since glibc 2.30 and musl 1.2.2).
+    // SAFETY: a plain, always-available OS call without preconditions
+    // (`gettid` since glibc 2.30 and musl 1.2.2).
     #[cfg(target_os = "linux")]
     unsafe {
         gettid() as usize
     }
+    // SAFETY: as above.
     #[cfg(all(unix, not(target_os = "linux")))]
     unsafe {
         pthread_self()
     }
+    // SAFETY: as above.
     #[cfg(windows)]
     unsafe {
         GetCurrentThreadId() as usize

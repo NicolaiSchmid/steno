@@ -18,9 +18,9 @@ set -euo pipefail
 platforms="${PLATFORMS:-}"
 mac="${MACOS_RUNS_ON:-\"macos-15\"}"
 
-# The .app is inside the .dmg; the .app.tar.gz exists only as an updater
-# artifact, which the signing key (WP9) switches on, and is uploaded then
-# beside its .sig.
+# The .app is inside the .dmg; the .app.tar.gz is the macOS updater
+# artifact. Every updater artifact's .sig is uploaded beside it (the
+# workflow adds them).
 all='[
   {"name":"linux","os":"ubuntu-latest","bundles":"deb,appimage",
    "artifacts":"target/release/bundle/deb/*.deb\ntarget/release/bundle/appimage/*.AppImage"},

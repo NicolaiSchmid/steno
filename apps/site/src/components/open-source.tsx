@@ -45,10 +45,11 @@ export function OpenSource() {
 								decision live in .plans/
 							</div>
 							<div>
-								<span className="mr-2 text-live-text">$</span>swift test
+								<span className="mr-2 text-live-text">$</span>cargo test
+								--workspace
 							</div>
 							<div className="text-fg-dim">
-								✓ StenoCore · StenoAudio · StenoSpeech · StenoLLM ·{" "}
+								✓ steno-core · steno-audio · steno-speech · steno-llm ·{" "}
 								<span className="text-live-text">all green</span>
 							</div>
 							<div className="flex items-center">
@@ -78,7 +79,7 @@ export function OpenSource() {
 							<div className="flex items-center gap-2 font-mono text-[11px] text-fg-dim">
 								<span>MIT licensed</span>
 								<span aria-hidden="true">·</span>
-								<span>Swift core · Rust port in progress</span>
+								<span>Swift Mac app · Rust core · Tauri shell</span>
 							</div>
 							<div className="flex flex-wrap items-center gap-4">
 								<a

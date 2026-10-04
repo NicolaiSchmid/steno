@@ -3,7 +3,7 @@ export const site = {
 	url: "https://steno.nicolaischmid.com",
 	title: "Steno · Meeting notes without the bot",
 	description:
-		"Steno records your meetings from your computer's own audio, transcribes and summarises them on-device, and writes plain Markdown you own. No bot in the call. No cloud account. Audio never leaves the machine.",
+		"Steno records your meetings from your computer's own audio, transcribes them on-device, summarises them with the model you choose, and writes plain Markdown you own. No bot in the call. No cloud account. Audio never leaves the machine.",
 	repo: "https://github.com/NicolaiSchmid/steno",
 	fork: "https://github.com/NicolaiSchmid/steno/fork",
 	releases: "https://github.com/NicolaiSchmid/steno/releases",
@@ -18,10 +18,25 @@ export const site = {
 	brew: "brew tap nicolaischmid/tap && brew install --cask steno",
 } as const;
 
-export type Platform = "mac" | "win" | "linux";
+/** The desktops in display order: macOS, Windows, Linux. */
+export const platformIds = ["mac", "win", "linux"] as const;
 
-export const platformLabel: Record<Platform, string> = {
-	mac: "Download for macOS",
-	win: "Download for Windows",
-	linux: "Download for Linux",
+export type Platform = (typeof platformIds)[number];
+
+/**
+ * One entry per desktop. The download button reads `released`; the closing
+ * CTA and the "How it's built" tiles show `note`. Once Windows or Linux
+ * ships, flipping both here is the whole change.
+ */
+export const platforms: Record<
+	Platform,
+	{ name: string; released: boolean; note: string }
+> = {
+	mac: {
+		name: "macOS",
+		released: true,
+		note: "Apple Silicon · notarised",
+	},
+	win: { name: "Windows", released: false, note: "Not released yet" },
+	linux: { name: "Linux", released: false, note: "Not released yet" },
 };

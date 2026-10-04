@@ -335,7 +335,7 @@ export function ProductFrame() {
 							<dl className="mt-2 divide-y divide-border text-[11px] leading-4">
 								{[
 									["Transcribe", "Parakeet TDT v3 · 1:42"],
-									["Diarize", "3 speakers · 0:38"],
+									["Diarise", "3 speakers · 0:38"],
 									["Cleanup", "Denglish → de · 0:21"],
 									["Summary", "Default · 0:17"],
 									["Export", "Markdown, VTT, JSON"],

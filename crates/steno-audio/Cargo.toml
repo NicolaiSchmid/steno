@@ -25,6 +25,10 @@ objc2-core-audio-types.workspace = true
 objc2-core-foundation.workspace = true
 objc2-foundation.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+windows-core.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 pipewire.workspace = true
 serde_json.workspace = true

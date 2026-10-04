@@ -448,6 +448,118 @@ fn the_models_variable_names_the_models_directory() {
     );
 }
 
+/// `steno dev models <args> --models-dir <home>/models` with `home`'s
+/// support directory, which must succeed.
+fn dev_models(home: &Path, args: &[&str]) -> Run {
+    let models = home.join("models");
+    let mut command = vec!["dev", "models"];
+    command.extend_from_slice(args);
+    command.extend(["--models-dir", models.to_str().unwrap()]);
+    let run = steno(&command, home);
+    assert_eq!(run.status, 0, "{args:?}: {}", run.stderr);
+    run
+}
+
+/// `dev models list` and `remove` act on the `--models-dir` they are given,
+/// not on the default models directory.
+#[test]
+fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let models = home.join("models");
+
+    // The diarizer's two files in `--models-dir`.
+    let diarization = models.join("onnx").join("diarization");
+    std::fs::create_dir_all(&diarization).unwrap();
+    let diarizer_files = [
+        diarization.join(steno_diarize::models::PYANNOTE_SEGMENTATION_3_0.file_name),
+        diarization.join(steno_diarize::models::WESPEAKER_RESNET34_LM.file_name),
+    ];
+    for file in &diarizer_files {
+        std::fs::write(file, b"onnx").unwrap();
+    }
+    let list = dev_models(home, &["list"]);
+    assert!(
+        list.stdout
+            .contains(&format!("models: {}", models.display())),
+        "{}",
+        list.stdout
+    );
+    assert_eq!(
+        list.stdout.matches("not installed (~").count(),
+        4,
+        "four absent assets: {}",
+        list.stdout
+    );
+    assert!(
+        list.stdout
+            .lines()
+            .any(|line| line.starts_with("offlineDiarizer ") && line.contains(": installed (")),
+        "the diarizer in --models-dir: {}",
+        list.stdout
+    );
+    dev_models(home, &["remove", "offlineDiarizer"]);
+    assert!(
+        diarizer_files.iter().all(|file| !file.exists()),
+        "removed from --models-dir"
+    );
+    // Removing an asset that is not installed succeeds.
+    dev_models(home, &["remove", "parakeetV3"]);
+}
+
+/// The line of `asset` in `steno dev models list` over [`dev_models`].
+fn models_list_line(home: &Path, asset: &str) -> String {
+    let list = dev_models(home, &["list"]);
+    list.stdout
+        .lines()
+        .find(|line| line.starts_with(&format!("{asset} ")))
+        .unwrap_or_else(|| panic!("{}", list.stdout))
+        .to_owned()
+}
+
+/// Parakeet v3 is listed with the size of the model the platform runs:
+/// the `CoreML` build's on the Mac by default; the fp32 export's (about
+/// 2.6 GB) elsewhere, and on the Mac too once `speech.json` chooses the
+/// speech sidecar.
+#[test]
+fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let not_installed =
+        |bytes: i64| format!("not installed (~{})", steno_host::labels::file_size(bytes));
+    let coreml = not_installed(steno_host::speech::ModelAsset::ParakeetV3.approximate_bytes());
+    let fp32 = not_installed(
+        i64::try_from(steno_speech::ModelAsset::parakeet_v3_fp32().total_size()).unwrap(),
+    );
+    assert_ne!(coreml, fp32);
+
+    let line = models_list_line(home, "parakeetV3");
+    let expected = if cfg!(target_os = "macos") {
+        &coreml
+    } else {
+        &fp32
+    };
+    assert!(line.ends_with(expected.as_str()), "{line}");
+
+    let environment = [
+        ("HOME", home.to_path_buf()),
+        ("XDG_DATA_HOME", home.join("share")),
+        ("APPDATA", home.join("appdata")),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_string_lossy().into_owned()))
+    .collect();
+    let support = steno_core::StenoPaths::support_directory(&environment);
+    std::fs::create_dir_all(&support).unwrap();
+    std::fs::write(
+        support.join("speech.json"),
+        br#"{"onnxSidecarOnMac": true}"#,
+    )
+    .unwrap();
+    let line = models_list_line(home, "parakeetV3");
+    assert!(line.ends_with(fp32.as_str()), "the sidecar chosen: {line}");
+}
+
 // Every usage error of the Swift test in one place.
 #[allow(clippy::too_many_lines)]
 #[test]
@@ -499,42 +611,6 @@ fn usage_errors_exit_one_and_name_the_known_values() {
     assert_eq!(bad_bakeoff.status, 1);
     assert!(bad_bakeoff.stderr.contains("nope") && bad_bakeoff.stderr.contains("parakeet-v3"));
 
-    let list = steno(
-        &[
-            "dev",
-            "models",
-            "list",
-            "--models-dir",
-            models.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert_eq!(list.status, 0, "{}", list.stderr);
-    assert!(
-        list.stdout
-            .contains(&format!("models: {}", models.display())),
-        "{}",
-        list.stdout
-    );
-    assert_eq!(
-        list.stdout.matches("not installed (~").count(),
-        5,
-        "five absent assets: {}",
-        list.stdout
-    );
-
-    let remove = steno(
-        &[
-            "dev",
-            "models",
-            "remove",
-            "parakeetV3",
-            "--models-dir",
-            models.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert_eq!(remove.status, 0, "{}", remove.stderr);
     let bad_asset = steno(
         &[
             "dev",

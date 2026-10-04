@@ -261,8 +261,9 @@ pub trait SpeechModels: Send + Sync {
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()>;
 
     /// The name the acknowledgements give `asset`. The model behind an
-    /// asset is the services' choice per platform (the Mac's `CoreML` int8
-    /// Parakeet, an fp32 ONNX export elsewhere), so they may name it; the
+    /// asset is the services' choice per platform (the `CoreML` int8
+    /// Parakeet where the Mac runs it, the fp32 ONNX export in the speech
+    /// sidecar), so they may name it; the
     /// default is the Swift app's name, [`ModelAsset::display_name`].
     fn display_name(&self, asset: ModelAsset) -> &'static str {
         asset.display_name()
@@ -272,6 +273,15 @@ pub trait SpeechModels: Send + Sync {
     /// default is the Swift app's repository, [`ModelAsset::source_repo`].
     fn source_repo(&self, asset: ModelAsset) -> &'static str {
         asset.source_repo()
+    }
+
+    /// About how many bytes `asset`'s model takes once installed, shown
+    /// before a download and when the installed size cannot be read; the
+    /// default is the Swift app's measure, [`ModelAsset::approximate_bytes`].
+    /// The services override it where the model behind an asset is not the
+    /// Swift app's (the fp32 export in the speech sidecar).
+    fn expected_bytes(&self, asset: ModelAsset) -> i64 {
+        asset.approximate_bytes()
     }
 }
 

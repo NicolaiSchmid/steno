@@ -9,6 +9,10 @@
 //! in flight fails instead of interleaving writes with the first. Stage
 //! durations feed the `stageRate` table when the meeting was alone in
 //! flight for the whole stage, so overlapping runs never pollute the rates.
+//! Once a job's lanes are transcribed and no other job is between its
+//! warm-up and its last lane, the speech engine is released
+//! ([`SpeechEngine::release`]): the speech sidecar's child exits and its
+//! working set goes back before the diarizer runs.
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -209,13 +213,18 @@ struct State {
     /// The background runs started by `enqueue` and `resume_unfinished`,
     /// by asset id.
     running: HashMap<Uuid, JoinHandle<()>>,
+    /// Claims on the speech engine: jobs between their warm-up and their
+    /// last lane ([`SpeechClaim`]).
+    speech_claims: usize,
 }
 
 struct Inner {
     dependencies: PipelineDependencies,
     state: Mutex<State>,
-    /// Serialises `warm_up`: one preparation at a time, so two runs that
-    /// start together load each engine once.
+    /// Serialises the warm-ups (`warm_up`, `warm_up_diarizer`) and the
+    /// release after a job's lanes: one preparation at a time, so two runs
+    /// that start together load each engine once, and a warm-up never
+    /// overlaps a release.
     preparing: AsyncMutex<()>,
 }
 
@@ -251,6 +260,16 @@ struct DecodedLane {
 struct Diarization {
     speakers: Vec<Speaker>,
     cluster_speakers: Vec<ClusterSpeaker>,
+    /// The lane the clusters cover; `None` when nothing was diarized.
+    lane: Option<AudioLane>,
+}
+
+impl Diarization {
+    const NONE: Diarization = Diarization {
+        speakers: Vec::new(),
+        cluster_speakers: Vec::new(),
+        lane: None,
+    };
 }
 
 struct Merged {
@@ -312,6 +331,57 @@ pub fn diarized_lane(source: MeetingSource, lanes: &[AudioLane]) -> Option<Audio
         return Some(preferred);
     }
     ordered_lanes(lanes).last().copied()
+}
+
+/// [`diarized_lane`], except for a call whose tap carried no conversation:
+/// then the microphone heard everyone (a phone on speaker next to the Mac,
+/// a call app the tap missed) and the mic lane is the room lane to
+/// diarize, instead of being "me" wholesale. Swift:
+/// `diarizedLane(source:lanes:transcription:)`.
+#[must_use]
+pub fn diarized_lane_after_transcription(
+    source: MeetingSource,
+    lanes: &[AudioLane],
+    transcription: &BTreeMap<AudioLane, Vec<RawSegment>>,
+) -> Option<AudioLane> {
+    if source == MeetingSource::MacCall
+        && lanes.contains(&AudioLane::Mic)
+        && tap_carried_no_conversation(transcription)
+    {
+        return Some(AudioLane::Mic);
+    }
+    diarized_lane(source, lanes)
+}
+
+/// The tap carried no conversation when its speech stays under both
+/// bounds: this share of the mic's speech, and
+/// [`TAP_CONVERSATION_MAXIMUM_SECONDS`] outright. A notification chime or a
+/// hallucinated word on a silent tap stays under both; a partner who
+/// mostly listens still clears the seconds. Swift:
+/// `tapConversationMinimumShare`.
+pub const TAP_CONVERSATION_MINIMUM_SHARE: f64 = 0.05;
+/// Swift: `tapConversationMaximumSeconds`.
+pub const TAP_CONVERSATION_MAXIMUM_SECONDS: f64 = 10.0;
+
+/// True when the mic lane holds speech and the system lane holds less than
+/// [`TAP_CONVERSATION_MINIMUM_SHARE`] of it and less than
+/// [`TAP_CONVERSATION_MAXIMUM_SECONDS`]. Swift: `tapCarriedNoConversation`.
+#[must_use]
+pub fn tap_carried_no_conversation(lanes: &BTreeMap<AudioLane, Vec<RawSegment>>) -> bool {
+    let (Some(mic), Some(system)) = (lanes.get(&AudioLane::Mic), lanes.get(&AudioLane::System))
+    else {
+        return false;
+    };
+    let speech = |segments: &[RawSegment]| {
+        segments
+            .iter()
+            .fold(0.0, |total, segment| total + segment.duration())
+    };
+    let mic_speech = speech(mic);
+    let tap_speech = speech(system);
+    mic_speech > 0.0
+        && tap_speech < mic_speech * TAP_CONVERSATION_MINIMUM_SHARE
+        && tap_speech < TAP_CONVERSATION_MAXIMUM_SECONDS
 }
 
 fn attributing<T, E: fmt::Display + 'static>(
@@ -521,6 +591,19 @@ impl ProcessingPipeline {
         Ok(())
     }
 
+    /// [`warm_up`](Self::warm_up) for the diarizer alone, for a speech
+    /// engine that frees its models after each job (the speech sidecar):
+    /// loading that engine ahead of a job would keep the child's working
+    /// set resident until the job is done, outside any claim. Rust only:
+    /// Swift's `warmUp` loads both.
+    pub async fn warm_up_diarizer(&self) -> Result<()> {
+        let _guard = self.inner.preparing.lock().await;
+        attributing(
+            PipelineStage::Diarize,
+            self.inner.dependencies.diarizer.prepare().await,
+        )
+    }
+
     /// Runs every stage: `queued → processing → ready`, or `failed(reason)`
     /// with whatever was persisted so far. Once `persist` has marked the
     /// meeting `ready` nothing downgrades it: a `retention` error is
@@ -562,26 +645,40 @@ impl ProcessingPipeline {
         asset: &AudioAsset,
         meeting: Meeting,
     ) -> Result<AudioAsset> {
-        self.warm_up().await?;
-        attributing(
-            PipelineStage::Decode,
-            self.store()
-                .set_state(meeting.id, MeetingState::Processing, self.now()),
-        )?;
-        let settings = attributing(PipelineStage::Decode, self.store().settings())?;
-        self.begin_run(
-            &meeting,
-            &asset.lanes,
-            None,
-            PipelineStage::ALL.to_vec(),
-            &settings,
-        )?;
-        let mut current = meeting;
-        current.state = MeetingState::Processing;
+        let claim = self.claim_speech();
+        let transcribed: Result<_> = async {
+            self.warm_up().await?;
+            attributing(
+                PipelineStage::Decode,
+                self.store()
+                    .set_state(meeting.id, MeetingState::Processing, self.now()),
+            )?;
+            let settings = attributing(PipelineStage::Decode, self.store().settings())?;
+            self.begin_run(
+                &meeting,
+                &asset.lanes,
+                None,
+                PipelineStage::ALL.to_vec(),
+                &settings,
+            )?;
+            let mut current = meeting;
+            current.state = MeetingState::Processing;
+            let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
+            Ok((current, settings, transcription, last))
+        }
+        .await;
+        self.finish_speech(claim).await;
+        let (mut current, settings, transcription, last) = transcribed?;
         // The last decoded lane is handed to `diarize` and dropped there, so
-        // no buffer is alive from `match_speakers` on.
-        let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
-        let mut diarized = self.diarize(asset, &current, last).await?;
+        // no buffer is alive from `match_speakers` on. The lane to diarize
+        // is decided from the transcription (a call whose tap carried
+        // nothing falls back to its mic lane); a handed buffer of another
+        // lane is dropped before `diarize` decodes the right one, so one
+        // buffer is alive at a time.
+        let lane =
+            diarized_lane_after_transcription(current.source, &asset.lanes, &transcription.lanes);
+        let handed = last.filter(|decoded| Some(decoded.lane) == lane);
+        let mut diarized = self.diarize(asset, &current, lane, handed).await?;
         current.language = transcription.language;
         diarized.speakers = self
             .match_speakers(diarized.speakers, current.id, &settings)
@@ -599,6 +696,39 @@ impl ProcessingPipeline {
             .summarize(current, &cleaned.segments, &merged.speakers)
             .await?;
         self.persist(&current, asset).await
+    }
+
+    /// Counts a job as needing the speech engine until the claim is
+    /// dropped or handed to [`finish_speech`](Self::finish_speech).
+    fn claim_speech(&self) -> SpeechClaim {
+        self.state().speech_claims += 1;
+        SpeechClaim {
+            pipeline: self.clone(),
+        }
+    }
+
+    /// Ends `claim` and releases the speech engine when no other job is
+    /// between its warm-up and its last lane. Another claim seen before
+    /// the lock ends the call at once, so a finisher never waits on a
+    /// warm-up only to leave the engine loaded. Under `preparing`, the
+    /// count is checked again: a job that claims the engine meanwhile
+    /// either keeps it loaded or warms it up again after the release,
+    /// never before it. A job that panics or is cancelled only drops its
+    /// claim, so the engine stays loaded until the next job ends. A failed
+    /// release is logged and never fails the job.
+    async fn finish_speech(&self, claim: SpeechClaim) {
+        drop(claim);
+        if self.state().speech_claims > 0 {
+            return;
+        }
+        let _guard = self.inner.preparing.lock().await;
+        if self.state().speech_claims > 0 {
+            return;
+        }
+        if let Err(error) = self.inner.dependencies.speech_engine.release().await {
+            tracing::warn!(target: BACKGROUND_RUN_LOG, "the speech engine was not released");
+            tracing::debug!(target: BACKGROUND_RUN_LOG, %error, "speech engine release failure");
+        }
     }
 
     /// Summarize again with another template, then deliver. A failure is
@@ -942,30 +1072,35 @@ impl ProcessingPipeline {
         Ok((Transcription { lanes, language }, last))
     }
 
-    /// Runs the diarizer over the diarized lane and turns every cluster
-    /// into a `Speaker` with a deterministic id. Each cluster's clip is
-    /// written as 16 kHz WAV beside the master.
+    /// Runs the diarizer over `lane` and turns every cluster into a
+    /// `Speaker` with a deterministic id. Each cluster's clip is written as
+    /// 16 kHz WAV beside the master. A mic lane in which the diarizer hears
+    /// fewer than two voices is the user alone (headphones, the tap
+    /// permission missing): the stage returns no clusters and no lane,
+    /// writes no clip, and the merge keeps the mic as "me". `handed` is
+    /// reused when it carries `lane`, else the lane is decoded here.
     async fn diarize(
         &self,
         asset: &AudioAsset,
         meeting: &Meeting,
+        lane: Option<AudioLane>,
         handed: Option<DecodedLane>,
     ) -> Result<Diarization> {
         let decoder = &self.inner.dependencies.decoder;
         let diarizer = &self.inner.dependencies.diarizer;
         let meeting_id = meeting.id;
         self.run(PipelineStage::Diarize, 0, meeting_id, async {
-            let Some(lane) = diarized_lane(meeting.source, &asset.lanes) else {
-                return Ok::<_, PipelineFailure>(Diarization {
-                    speakers: Vec::new(),
-                    cluster_speakers: Vec::new(),
-                });
+            let Some(lane) = lane else {
+                return Ok::<_, PipelineFailure>(Diarization::NONE);
             };
             let buffer = match handed {
                 Some(handed_lane) if handed_lane.lane == lane => handed_lane.buffer,
                 _ => attributing(PipelineStage::Diarize, decoder.decode(asset, lane).await)?,
             };
             let result = attributing(PipelineStage::Diarize, diarizer.diarize(&buffer).await)?;
+            if lane == AudioLane::Mic && result.clusters.len() < 2 {
+                return Ok(Diarization::NONE);
+            }
             let mut labels = BTreeSet::new();
             for cluster in &result.clusters {
                 if !labels.insert(cluster.label.clone()) {
@@ -1012,6 +1147,7 @@ impl ProcessingPipeline {
             Ok(Diarization {
                 speakers,
                 cluster_speakers,
+                lane: Some(lane),
             })
         })
         .await
@@ -1051,8 +1187,11 @@ impl ProcessingPipeline {
 
     /// Merges the lanes into one ordered transcript and persists it with
     /// the speakers and the meeting's elected language in one transaction.
-    /// When the asset has a `mic` lane, the "me" participant and speaker
-    /// exist before any segment points at them.
+    /// When the asset has a `mic` lane that is "me" (not the lane diarized
+    /// as the room), the "me" participant and speaker exist before any
+    /// segment points at them. When the mic lane is the room, a "me"
+    /// participant an earlier run of this pipeline created is removed
+    /// again; one the app wrote stays.
     async fn merge(
         &self,
         meeting: &Meeting,
@@ -1064,7 +1203,10 @@ impl ProcessingPipeline {
         self.run(PipelineStage::Merge, 0, meeting.id, async {
             let mut all_speakers = diarization.speakers.clone();
             let mut me_speaker_id = None;
-            if lanes.contains_key(&AudioLane::Mic) {
+            let mic_is_room = diarization.lane == Some(AudioLane::Mic);
+            if mic_is_room {
+                store.delete_participant(LaneMerger::me_participant_id(meeting.id))?;
+            } else if lanes.contains_key(&AudioLane::Mic) {
                 let me = ensure_me_participant(store, meeting.id)?;
                 let me_speaker = LaneMerger::me_speaker(meeting.id, me.person_id);
                 me_speaker_id = Some(me_speaker.id);
@@ -1075,6 +1217,7 @@ impl ProcessingPipeline {
                 lanes,
                 &diarization.cluster_speakers,
                 me_speaker_id,
+                diarization.lane,
             );
             let mut updated = meeting.clone();
             updated.updated_at = now;
@@ -1366,6 +1509,18 @@ impl Drop for Admitted {
         let mut guard = self.pipeline.state();
         guard.in_flight.remove(&self.meeting_id);
         guard.runs.remove(&self.meeting_id);
+    }
+}
+
+/// A job's claim on the speech engine, counted in `speech_claims`;
+/// dropping it ends the claim.
+struct SpeechClaim {
+    pipeline: ProcessingPipeline,
+}
+
+impl Drop for SpeechClaim {
+    fn drop(&mut self) {
+        self.pipeline.state().speech_claims -= 1;
     }
 }
 
