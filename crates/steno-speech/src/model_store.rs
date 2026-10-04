@@ -985,13 +985,7 @@ impl Partial {
             let _ = fs::remove_file(&path);
             return Ok(None);
         }
-        let handle = File::options()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|e| SpeechError::io(&path, e))?;
+        let handle = open_or_create(&path).map_err(|e| SpeechError::io(&path, e))?;
         let mut partial = Partial::new(path, handle, Some(lock));
         partial.adopt(file.size)?;
         Ok(Some(partial))
@@ -1135,7 +1129,7 @@ fn try_lock_download(path: &Path) -> Result<DownloadLock, NotLocked> {
     if held.contains(path) {
         return Err(NotLocked::Busy);
     }
-    let file = open_lock(path).map_err(NotLocked::Open)?;
+    let file = open_or_create(path).map_err(NotLocked::Open)?;
     match file.try_lock() {
         Ok(()) => {
             held.insert(path.to_path_buf());
@@ -1218,8 +1212,9 @@ fn lock_download(
     }
 }
 
-/// Opens, or creates, a `<name>.lock` file.
-fn open_lock(path: &Path) -> std::io::Result<File> {
+/// Opens `path` to read and write, creating it, keeping what it holds:
+/// `<name>.lock` and `<name>.partial`.
+fn open_or_create(path: &Path) -> std::io::Result<File> {
     File::options()
         .read(true)
         .write(true)
@@ -2132,7 +2127,7 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let lock = directory.join("model.onnx.lock");
         let partial = directory.join("model.onnx.partial");
-        let held = open_lock(&lock).unwrap();
+        let held = open_or_create(&lock).unwrap();
         held.lock().unwrap();
         let mut holder = File::create(&partial).unwrap();
         holder.write_all(&body[..1000]).unwrap();
@@ -2157,7 +2152,7 @@ mod tests {
         // Stopped: 1000 bytes and then nothing.
         fs::remove_file(directory.join("model.onnx")).unwrap();
         fs::write(&partial, &body[..1000]).unwrap();
-        let held = open_lock(&lock).unwrap();
+        let held = open_or_create(&lock).unwrap();
         held.lock().unwrap();
         let waiter = drive(&store, &asset);
         waiter.asleep();
@@ -2393,7 +2388,7 @@ mod tests {
         fs::write(&partial, &body[..4]).unwrap();
         fs::write(directory.join("model.onnx"), &body).unwrap();
         // While another download holds the lock, it stays.
-        let held = open_lock(&directory.join("model.onnx.lock")).unwrap();
+        let held = open_or_create(&directory.join("model.onnx.lock")).unwrap();
         held.lock().unwrap();
         store.ensure(&asset, &mut |_| {}).unwrap();
         assert!(partial.exists());
