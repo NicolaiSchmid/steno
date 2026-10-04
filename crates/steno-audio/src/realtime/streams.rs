@@ -42,7 +42,8 @@
 //! [`FollowerLane::for_streams`]), plus the follower's worst lateness in a
 //! window (it lowers the window's lowest queue and so hides drift), plus up
 //! to two windows of drift (about 0.1 ms at 100 ppm), and never by more
-//! than the master's buffer above that. Both are a parity item in the plan.
+//! than one period plus the master's buffer (the immediate slip). The
+//! plan's parity list tracks both the missing resampling and this error.
 //!
 //! Real-time: [`StreamBody::handle`] allocates nothing and takes no lock;
 //! the scratch buffers are allocated when the body is built, before the
@@ -65,7 +66,7 @@ pub struct FollowerLane {
     target: usize,
     high_water: usize,
     window: usize,
-    /// A queue above this after a pull slips at once.
+    /// A queue above this after a pull slips at once (see the module doc).
     ceiling: usize,
     /// Consumer-only state from here on; atomics only so the lane is
     /// `Sync`.
@@ -96,8 +97,7 @@ impl FollowerLane {
     /// `target` frames are kept queued; a queue that stays above
     /// `high_water` for `window` frames of master pulls slips back to
     /// `target`. `high_water` is raised to `target` if lower. No queue
-    /// slips at once until [`Self::with_max_lateness`] says how late the
-    /// master can run.
+    /// slips at once without [`Self::with_max_lateness`].
     #[must_use]
     pub fn new(target: usize, high_water: usize, window: usize, capacity: usize) -> Self {
         Self {
@@ -122,7 +122,7 @@ impl FollowerLane {
     /// periods (20 ms at WASAPI's usual 10 ms period), a high-water mark
     /// one period above it, [`Self::SLIP_WINDOW`], and a master that runs
     /// at most `master_buffer` late. A master that runs late and catches up
-    /// costs nothing, and a slip drops a little over one period.
+    /// costs nothing, and a drift slip drops a little over one period.
     ///
     /// ```
     /// use steno_audio::realtime::FollowerLane;
@@ -138,10 +138,9 @@ impl FollowerLane {
             .with_max_lateness(master_buffer)
     }
 
-    /// The most the master can run late, in frames (its own buffer: a
-    /// later master loses data in the engine first). A queue more than
-    /// this above the high-water mark after a pull slips back to the
-    /// target at once instead of at the end of its window.
+    /// The most the master can run late, in frames; a queue more than this
+    /// above the high-water mark after a pull slips to the target at once
+    /// (see the module doc).
     #[must_use]
     pub fn with_max_lateness(mut self, frames: usize) -> Self {
         self.ceiling = self.high_water.saturating_add(frames);
@@ -234,8 +233,8 @@ impl FollowerLane {
     pub fn pull(&self, out: &mut [f32]) -> usize {
         let wanted = out.len();
         let mut available = self.ring.available_to_read();
-        let first_pull = !self.started.swap(true, Ordering::Relaxed);
         let mut lost = 0;
+        let first_pull = !self.started.swap(true, Ordering::Relaxed);
         let overflow = self.ring.dropped_samples();
         let reported = self.reported_overflow.load(Ordering::Relaxed);
         if overflow > reported {

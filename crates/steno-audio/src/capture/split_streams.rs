@@ -1,9 +1,9 @@
 //! Which capture stream feeds which lane when the microphone and the system
-//! audio arrive as two streams (WASAPI, WP10a), and the latency arithmetic
-//! for them, and which of the engine's answers about a stream are trusted
-//! ([`stream_sizes`]). Pure, so it is tested on every OS; the Windows
-//! backend (`capture::live::wasapi`) builds on it. No Swift counterpart
-//! (one IOProc there).
+//! audio arrive as two streams (WASAPI, WP10a), with the latency arithmetic
+//! for them. It also decides which of the engine's answers about a stream
+//! are trusted ([`stream_sizes`]). Pure, so it is tested on every OS; the
+//! Windows backend (`capture::live::wasapi`) builds on it. No Swift
+//! counterpart (one IOProc there).
 //!
 //! The plan describes the two streams in [`StreamLayout`]'s terms, so the
 //! master thread delivers through the same
@@ -145,11 +145,12 @@ pub fn far_end_latencies(input: usize, output: usize, follower_delay: usize) -> 
 
 // Durations below are `REFERENCE_TIME`, in 100 ns units.
 
-/// The shared-mode buffer a stream asks for: 100 ms, so a capture thread
-/// that is late by several periods loses nothing. Microsoft's `Initialize`
-/// page asks event-driven shared-mode clients for 0 here, while its own
-/// loopback sample passes a duration; the engine treats it as a minimum
-/// either way, and the buffer it chose is read back ([`stream_sizes`]).
+/// The shared-mode buffer a stream asks for, as a `REFERENCE_TIME` (100 ns
+/// units): 100 ms, so a capture thread that is late by several periods
+/// loses nothing. Microsoft's `Initialize` page asks event-driven
+/// shared-mode clients for 0 here, while its own loopback sample passes a
+/// duration; the engine treats it as a minimum either way, and the buffer
+/// it chose is read back ([`stream_sizes`]).
 pub const BUFFER_DURATION: i64 = 1_000_000;
 
 /// The device periods trusted: 1 ms up to the buffer asked for.
@@ -161,8 +162,8 @@ pub const DEFAULT_PERIOD: i64 = 100_000;
 /// The stream latencies trusted: up to 200 ms.
 pub const TRUSTED_LATENCIES: RangeInclusive<i64> = 0..=2_000_000;
 
-/// The largest buffer trusted, in frames: the follower's staging capacity,
-/// one second.
+/// The largest buffer trusted, in frames: one second, so the follower's
+/// staging holds what it queues while the master runs a whole buffer late.
 pub const MAX_BUFFER_FRAMES: usize = FollowerLane::CAPACITY;
 
 /// What a capture stream runs with, in frames at 48 kHz.
@@ -176,7 +177,8 @@ pub struct StreamSizes {
     pub latency_frames: usize,
 }
 
-/// The sizes a stream runs with, from what its engine answered:
+/// The sizes a stream runs with, from what its engine answered (`period`
+/// and `latency` as `REFERENCE_TIME`, in 100 ns units):
 /// `buffer_frames` from `GetBufferSize`, `period` from `GetDevicePeriod`
 /// (a polled stream passes its poll interval), `latency` from
 /// `GetStreamLatency`, `None` where the call failed. The process-loopback
@@ -184,7 +186,8 @@ pub struct StreamSizes {
 /// no error, and may implement neither of the others, so no answer is
 /// taken on trust:
 ///
-/// - a period outside [`TRUSTED_PERIODS`] is [`DEFAULT_PERIOD`];
+/// - a period outside [`TRUSTED_PERIODS`] is [`DEFAULT_PERIOD`] (the period
+///   sizes the follower's jitter buffer);
 /// - a latency outside [`TRUSTED_LATENCIES`] is 0, like an unknown one:
 ///   understating the far-end delay stays inside the echo canceller's
 ///   tail, overstating it does not ([`far_end_latencies`]);

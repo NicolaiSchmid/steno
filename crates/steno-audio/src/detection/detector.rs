@@ -2,7 +2,7 @@
 //! starting) and when it lets go.
 //! Swift: `Sources/StenoAudio/Detection/MeetingDetector.swift`.
 //!
-//! Reads [`ProcessAudioActivitySource::snapshot`] on every HAL change
+//! Reads [`ProcessAudioActivitySource::snapshot`] on every change
 //! notification and on a 1 s poll (the listener behaviour is undocumented,
 //! so the poll is the safety net; on macOS a snapshot is a handful of
 //! property reads), ignores its own PID, and debounces both edges by 2 s so a
@@ -196,7 +196,8 @@ impl MeetingDetector {
     }
 
     /// Stops the poll and listen threads, drops a pending debounce and forgets
-    /// the holder; a second call does nothing.
+    /// the holder; a second call does nothing. An evaluation in flight
+    /// finishes first; none applies afterwards.
     pub fn stop(&self) {
         // An evaluation in flight finishes first; one that waits for the
         // lock finds `running` cancelled and applies nothing.
@@ -239,7 +240,6 @@ impl Core {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn evaluate_ignoring_errors(self: &Arc<Self>, running: &Cancel) {
     fn evaluating(&self) -> std::sync::MutexGuard<'_, ()> {
         self.evaluating
             .lock()
@@ -248,6 +248,7 @@ impl Core {
 
     /// The listener's and the poller's evaluation; `running` is their flag:
     /// once `stop` raised it, nothing is applied.
+    fn evaluate_ignoring_errors(self: &Arc<Self>, running: &Cancel) {
         let _evaluating = self.evaluating();
         if running.is_cancelled() {
             return;

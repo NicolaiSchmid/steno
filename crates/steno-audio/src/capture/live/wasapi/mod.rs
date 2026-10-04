@@ -68,8 +68,8 @@
 //! only producer, so a start that fails has written nothing. Data the
 //! engine itself lost (a packet flagged as a discontinuity, the first one
 //! aside) is counted and logged at stop, not added to the sink's drop
-//! count: WASAPI does not say how much was lost. The follower's underrun
-//! and slip counts are logged at stop too. All of these logs are at
+//! count: WASAPI does not say how much was lost. The follower's underrun,
+//! slip and trim counts are logged at stop too. All of these logs are at
 //! `info`, below the shell's default filter: set
 //! `RUST_LOG=steno_audio=info` to see them.
 
@@ -489,10 +489,10 @@ fn run_watcher(
     drop(apartment);
 }
 
-/// Stops and joins the stream threads that answered; a thread still in a
-/// COM call is left to finish on its own. It never writes to the sink: it
-/// holds no body, or it is starting its stream and finds `stop` set before
-/// its first drain.
+/// Stops and joins the stream threads that answered
+/// ([`Launched::answered`]); the others are left to finish on their own.
+/// Such a thread never writes to the sink: it holds no body, or it is
+/// starting its stream and finds `stop` set before its first drain.
 fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) {
     stop.store(true, Ordering::Release);
     for mut launched in streams {
@@ -578,9 +578,9 @@ fn expect_event(
     deadline: Instant,
 ) -> Result<(), CaptureError> {
     let event = next_event(launched, deadline);
-    // Only this answer counts: a thread handed its body calls `Start`
-    // next, which may hang, and until it answers `tear_down` must not
-    // join it.
+    // Only this answer counts: the thread is joinable only while it waits
+    // on `start`'s channel; one that missed the deadline may sit in a COM
+    // call (the open or `Start`).
     launched.answered = event.is_ok();
     match event {
         Ok(StreamEvent::Opened(Ok(info))) if opening => {
