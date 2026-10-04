@@ -1270,8 +1270,9 @@ the hardware checks wait behind `--ignored` in `tests/live_windows.rs`.
 Parity items: the Windows list under Audio.
 
 WP10b puts the speech encoder on DirectML on Windows when the speech setting
-`directmlOnWindows` asks for it (`OnnxOptions::directml`, carried to the sidecar
-in its load request; the child answers with the provider it chose). Only the
+`directmlOnWindows` asks for it (`OnnxOptions::directml`, set from the setting by
+`steno_services::speech::SpeechSetup` and carried to the sidecar in its load
+request, on Windows only; the child answers with the provider it chose). Only the
 encoder moves: the decoder and the joiner run once per token on one frame, and
 Silero on 32 ms frames, where a round trip to the GPU costs more than the step;
 the diarizer stays on the CPU because it runs in the app's process, where
@@ -1280,14 +1281,19 @@ DirectML in the ONNX Runtime build, a hardware DirectX 12 adapter (the device
 filter leaves out WARP), the session created, one encoder run on a second of
 silence. Any failure opens the encoder on the CPU, and a later run that fails on
 DirectML reopens it on the CPU for good and runs again, so the job does not fail.
-An abort inside the driver still ends the sidecar and that job; a child that
-crashes or hangs with DirectML in use, the probe included, makes the parent ask
-every later child for the CPU for the rest of the app's run. The provider is
-logged at info level, with no paths: by the backend when it runs in-process, and
-by the parent from the child's answers, which carry the provider in force, so a
-fallback after the load shows in the parent's log and in `SidecarHealth`. The
-child's own log reaches only the parent's crash tail, so the child writes the
-reason for a fallback to stderr in fixed words. What is and is not proven:
+
+An abort inside the driver still ends the sidecar. A child that crashes, hangs or
+overruns the memory ceiling with DirectML in use switches DirectML off for the rest
+of the app's run: the switch is process-wide, so the engines `steno-services`
+builds on every pipeline reload ask for the CPU too. Inside the probe such an end
+costs no job: no audio was sent yet, so the same call loads again in a new child
+on the CPU. Mid-run it costs that job. The provider is logged at info level, with
+no paths: by the backend when it runs in-process, and by the parent from the
+child's answers, which carry the provider in force, so a fallback after the load
+shows in the parent's log and in `SidecarHealth`. The child has no log
+subscriber; its stderr reaches the parent's log (at debug level, the fallback line
+at info) and the crash tail, so the child writes the reason for a fallback there
+in fixed words. What is and is not proven:
 
 - **Off by default.** Gate G4 (at least three times the CPU's speed on an
   integrated GPU) is open with no machine, and so is whether DirectML's
@@ -1304,22 +1310,29 @@ reason for a fallback to stderr in fixed words. What is and is not proven:
   because no device matches the default filter (`NoDevice`), and the session runs
   on the CPU; the step fails if the log says otherwise. Under wine 11 with the MSVC
   build (`cargo xwin`) the probe ends the same way.
+- **After a failure.** A failed run moving to the CPU is tested on a hand-written
+  ONNX model with a CPU session labelled `DirectML`. The switch-off is tested with
+  the fake engine on Windows: an abort on DirectML leaves the next child and every
+  later engine on the CPU, an abort inside the probe loads again on the CPU within
+  the same call, and an error, a release or a crash after a fallback to the CPU
+  leaves DirectML on. No real GPU fault has run.
 - **`DirectML.dll` is a load-time import** of every Windows binary that links
   ONNX Runtime, with or without this package: pyke publishes only DirectML builds
-  of ONNX Runtime for Windows, and `ort-sys` links `DirectML.lib` for them. A
-  binary without the DLL beside it loads the one in `System32`. ONNX Runtime calls
-  `DMLCreateDevice1`, which DirectML 1.1 added, so that copy works from Windows 10
-  2004 on; on 1903 and 1909, which ship DirectML 1.0, the process does not start
-  at all. #184 will ship the redistributable beside the binaries. Neither case has
-  run on Windows.
+  of ONNX Runtime for Windows, and `ort-sys` links `DirectML.lib` for them. ONNX
+  Runtime calls `DMLCreateDevice1(.., DML_FEATURE_LEVEL_5_0, ..)`, which needs
+  DirectML 1.8. The bundles from #184 install `DirectML.dll` beside the binaries,
+  so the app does not depend on the copy in `System32`. A binary without the DLL
+  beside it loads that copy, which is 1.8 only from Windows 11 22H2 (Windows 10
+  2004 has 1.1, Windows 11 21H2 has 1.6): from Windows 10 2004 the process starts
+  but DirectML falls back with `NoDevice`, and on 1903 and 1909 the process does
+  not start at all. The G4 machine needs the DLL beside the binary. Neither case
+  has run on Windows.
 - **Privacy.** ONNX Runtime's telemetry stays off. With DirectML on, `DirectML.dll`
   and Direct3D 12 may log to Windows' own diagnostic data as for any program that
   uses them; Steno opens nothing for it, and no audio or text is involved. Before
   the default flips, the measurement records which event providers a DirectML
-  session uses, and #184 is to carry the redistributable's licence notice.
-- **The setting reaches the sidecar** once `steno-services` reads the speech
-  settings and starts the sidecar (#183): `SidecarConfig::options.directml` from
-  `SpeechSettings::directml_on_windows`.
+  session uses, and the bundles are to carry the redistributable's licence notice,
+  which they do not yet.
 - **Not done:** CUDA on Linux and the whisper.cpp Vulkan engine (speech-stack
   WP4), a device choice (the system's default GPU is used), and the setting in
   the Settings window (the parity item under Speech).
