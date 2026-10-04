@@ -33,10 +33,12 @@ expect 0.11.0-beta.12 0.11.0.12
 expect 1.0.0-pre-release.0 1.0.0.0
 expect 0.2.0-rc.65534 0.2.0.65534
 expect 255.255.65535 255.255.65535.65535
+expect 3.9.7-rc.7 3.9.7.7
 
 refuse 0.2.0-rc
 refuse 0.2.0-rc.a
 refuse 0.2.0-rc.1.2
+refuse 0.2.0-5
 refuse 0.2.0+5
 refuse 0.2.0-rc.1+5
 refuse 0.2

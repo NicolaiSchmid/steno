@@ -3,13 +3,18 @@
 # WiX takes only `major.minor.patch.build`, numbers only, and the Tauri
 # bundler rejects a pre-release that is not a bare number (`0.2.0-rc.1`).
 #
-#   0.2.0          0.2.0.65535  (a release sorts above its pre-releases)
+#   0.2.0          0.2.0.65535
 #   0.2.0-rc.3     0.2.0.3      (one label, then a number up to 65534)
+#
+# The fourth field is informational: Windows Installer ignores it when it
+# compares versions, and the bundler's `main.wxs` declares
+# `<MajorUpgrade AllowDowngrades="yes">` (`allowDowngrades` is not set, so
+# its default applies). Across labels it does not follow SemVer either
+# (`beta.12` gives 12, `rc.1` gives 1).
 #
 # Anything else, or a major or minor above 255 or a patch above 65535 (the
 # WiX limits), is an `::error::` and exit 1, so the release run stops
-# before it builds. Prints the MSI version. Windows Installer compares only
-# the first three fields when it upgrades; the fourth tells builds apart.
+# before it builds. Prints the MSI version.
 #
 #   apps/desktop/scripts/wix-version.sh <version>
 #
