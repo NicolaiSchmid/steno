@@ -128,8 +128,9 @@ impl CaptureRecorder {
     /// when the models of the current pipeline's speech engine and the
     /// diarizer's are installed, so it never starts a download. The engine
     /// is the one the pipeline was built with ([`BuiltEngine`]), not the id
-    /// stored now: after a failed reload, or an engine the Swift app saved
-    /// meanwhile, the two differ. An engine in this process (`CoreML` on
+    /// stored now (Rust only: Swift asked about the stored id): after a
+    /// failed reload, or an engine the Swift app saved meanwhile, the two
+    /// differ. An engine in this process (`CoreML` on
     /// the Mac) is loaded with the diarizer, as Swift did. Where the speech
     /// sidecar runs the engine ([`SpeechRuntime`]), only the diarizer is:
     /// the child would hold its 2.2 GB through the whole recording, outside
@@ -621,23 +622,29 @@ mod tests {
 
     /// After a failed reload the pipeline keeps the engine it was built
     /// with, and so does the warm-up, whatever id the store holds now (a
-    /// Swift app that saved another engine looks the same): a pipeline
-    /// whose engine runs in the sidecar is never warmed up into a child,
-    /// because the store now names the in-process `parakeet-v3`.
+    /// Swift app that saved another engine looks the same): a pipeline on
+    /// the sidecar is not warmed into a child although the store names
+    /// the in-process `parakeet-v3`, and a pipeline on `CoreML` still
+    /// loads its engine although the store names a sidecar id. Each half
+    /// installs only the built engine's model and the diarizer, so the
+    /// installed check must ask about the built engine too.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn after_a_failed_reload_the_warm_up_keeps_to_the_pipeline_s_engine() {
-        let installed = [
-            ModelAsset::ParakeetV3,
-            ModelAsset::ParakeetUltra,
-            ModelAsset::OfflineDiarizer,
-        ];
-        let sidecar = harness_over(models_with(&installed), "parakeet-ultra", mac_rule);
+    async fn after_a_failed_reload_the_warm_up_follows_the_engine_the_pipeline_kept() {
+        let sidecar = harness_over(
+            models_with(&[ModelAsset::ParakeetUltra, ModelAsset::OfflineDiarizer]),
+            "parakeet-ultra",
+            mac_rule,
+        );
         sidecar.failing_reloads.store(true, Ordering::SeqCst);
         assert!(sidecar.save_engine("parakeet-v3").is_err());
         assert!(!warmed_the_engine(&sidecar).await);
         stop(&sidecar.recorder).await;
 
-        let in_process = harness_over(models_with(&installed), "parakeet-v3", mac_rule);
+        let in_process = harness_over(
+            models_with(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]),
+            "parakeet-v3",
+            mac_rule,
+        );
         in_process.failing_reloads.store(true, Ordering::SeqCst);
         assert!(in_process.save_engine("parakeet-ultra").is_err());
         assert!(warmed_the_engine(&in_process).await);
@@ -709,10 +716,10 @@ mod tests {
     }
 
     /// The configured engine decides which model counts: with the `CoreML`
-    /// Parakeet and the diarizer on disk but another engine id stored (a
-    /// Swift user who picked Whisper), the speech sidecar would load the
-    /// ONNX models, which are missing, and the warm-up neither loads nor
-    /// downloads.
+    /// Parakeet and the diarizer on disk but another engine id stored
+    /// (Whisper, picked in Settings or in the Swift app), the speech
+    /// sidecar would load the ONNX models, which are missing, and the
+    /// warm-up neither loads nor downloads.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_checks_the_models_of_the_configured_engine() {
         let models_dir = tempfile::tempdir().unwrap();
