@@ -1040,11 +1040,6 @@ fix is ported to Swift before cutover.
   whenever no window is open, also after a cancel. Rust numbers the windows and pairs
   only against the one the gate matched (`Principal::Pairing`); a failed save does not
   reopen a window cancelled or replaced meanwhile.
-- Revoked receipts: Swift's `HandoverEngine.persist` puts a receipt back into
-  `activeReceipts` after a revoke removed it, when a `complete` that read it before the
-  revoke writes it back; the receipt stream then shows an upload of a revoked phone
-  until restart. Rust keeps the receipts of a device revoked since start out of memory
-  until it pairs again.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
