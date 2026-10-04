@@ -483,10 +483,11 @@ removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it lands
 the desktop app installs beside the Swift app on the Mac. WP6b filled the
 host's half of the WP8 seams except four, which wait for work outside the
 shell (the plan's WP6b row): the detection controller (WP5) is not
-ported, so nothing raises the prompt (`panels::set_prompt`) and its X (`panels::dismiss_prompt`) tells no
-one; the host's `Permissions` stay the services' fake (all granted),
-because `permissions` answers `unknown` off the Mac and for the Mac's
-system audio, which the host's onboarding opener counts as missing, so
+ported, so nothing raises the prompt (`panels::set_prompt`) and its X
+(`panels::dismiss_prompt`) tells no one; the host's `Permissions` stay
+the services' fake (all granted), because `permissions` answers
+`unknown` off the Mac and for the Mac's system audio, which the host's
+onboarding opener counts as missing, so
 onboarding would open at every launch until the audio probe (WP5) and a
 rule for `unknown` land; the host's `Updater` stays the fake, because
 `updater` has no automatic-check or automatic-download flag and keeps no
@@ -506,12 +507,12 @@ items (the plan's parity list, `.plans/2026-10-04-mac-cutover.md`). The
 macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are the
 tray's and the sidebar's), and no Find Meetings (`⌘F`). Updates are
 checked only when asked (the tray's item, Settings), where Sparkle checks
-daily on its own. On macOS
-the system audio permission has no status API; the audio crate's probe
-(WP5) records it and until then it reads `unknown`. The panels are
-re-tuned on the Mac once they run there beside the Swift ones (the plan's
-risk list). Linux and Windows keep their native title bar; macOS gets the
-overlay title bar the Swift windows have. The page's traffic light inset
+daily on its own. On macOS the system audio permission has no status API;
+the audio crate's probe (WP5) records it and until then it reads
+`unknown`. The panels are re-tuned on the Mac once they run there beside
+the Swift ones (the plan's risk list). Linux and Windows keep their
+native title bar; macOS gets the overlay title bar the Swift windows
+have. The page's traffic light inset
 is a design question for the other two platforms. On Linux, WebKitGTK
 leaks one shared-memory file descriptor per destroyed webview that lived
 longer than about 250 ms (29 to 107 fds over 70 Settings open/close
