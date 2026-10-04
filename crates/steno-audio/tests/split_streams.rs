@@ -235,9 +235,15 @@ fn a_follower_that_falls_short_pads_counts_and_reprimes() {
         out.iter().all(|s| *s == 0.0),
         "re-priming: one packet is not target + packet"
     );
+    assert_eq!(
+        follower.underrun_frames(),
+        600,
+        "the re-prime's zeros count as underrun"
+    );
     follower.push(packet(&ramp(2_480, 480), 1), &mut scratch);
     follower.pull(&mut out);
     assert_eq!(out, ramp(2_000, 480), "primed again, nothing skipped");
+    assert_eq!(follower.underrun_frames(), 600);
 }
 
 #[test]
@@ -640,24 +646,38 @@ fn a_full_staging_ring_refuses_whole_packets_and_the_master_counts_them() {
 }
 
 /// A follower that fills its staging before the master's first pull (a
-/// slow start of the master's stream) loses only audio from before the
-/// recording: uncounted, as the trim is. An overflow after the first pull
-/// is counted.
+/// master slow to start) refuses its newest packet, so all it queued is
+/// older than that gap: the first pull drops it and the refused packet,
+/// uncounted, and the lane primes on what follows. An overflow after the
+/// first pull is counted.
 #[test]
-fn an_overflow_before_the_first_pull_is_not_counted_as_lost() {
+fn an_overflow_before_the_first_pull_drops_the_stale_queue_uncounted() {
     let follower = FollowerLane::new(0, 1_024, 4_800, 1_024);
     let mut scratch = vec![0.0f32; 512];
-    let mut out = vec![0.0f32; 480];
+    let mut out = vec![1.0f32; 480];
     follower.push(packet(&ramp(0, 1_000), 1), &mut scratch);
     follower.push(packet(&ramp(1_000, 100), 1), &mut scratch);
     assert_eq!(follower.queued(), 1_000, "the second packet did not fit");
-    assert_eq!(follower.pull(&mut out), 0, "nothing recorded was lost");
-    assert_eq!(out, ramp(520, 480), "trimmed to the newest queued frames");
+    assert_eq!(
+        follower.pull(&mut out),
+        0,
+        "not counted before the first pull"
+    );
+    assert!(out.iter().all(|s| *s == 0.0), "nothing stale is delivered");
+    assert_eq!(follower.queued(), 0);
+    assert_eq!(
+        follower.trimmed_frames(),
+        1_100,
+        "the queue and the refused"
+    );
+    assert_eq!(follower.underrun_frames(), 0, "never primed: no underrun");
 
     follower.push(packet(&ramp(1_100, 1_000), 1), &mut scratch);
     follower.push(packet(&ramp(2_100, 100), 1), &mut scratch);
     assert_eq!(follower.pull(&mut out), 100, "refused after the first pull");
+    assert_eq!(out, ramp(1_100, 480), "primed on the audio after the gap");
     assert_eq!(follower.pull(&mut out), 0, "an overflow is reported once");
+    assert_eq!(follower.trimmed_frames(), 1_100);
 }
 
 #[test]

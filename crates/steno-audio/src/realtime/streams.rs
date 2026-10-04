@@ -31,12 +31,15 @@
 //! What the follower queued before the master's first pull is trimmed to
 //! the target, uncounted: audio from before the recording, or, when the
 //! master's first drain is late, the system audio recorded during that
-//! lateness. A packet the full staging ring refused before that pull is
-//! uncounted too.
+//! lateness. A full staging ring refuses the newest packets, so one it
+//! refused before that pull (it takes a master that starts more than the
+//! ring's 1.37 s after the follower) leaves only older audio queued: the
+//! first pull drops all of it and the refused packets, uncounted, and the
+//! lane primes on the audio that follows.
 //!
 //! The two endpoints' clocks are not reconciled by resampling; the slips
 //! are counted as dropped system frames in the sink's accounting, the
-//! shortfalls as underruns. The far-end delay assumes `target`, so between
+//! shortfalls and their re-prime zeros as underruns. The far-end delay assumes `target`, so between
 //! slips the system lane sits later than the echo canceller expects by up
 //! to `high_water - target` (one period with
 //! [`FollowerLane::for_streams`]), plus the follower's worst lateness in a
@@ -154,8 +157,9 @@ impl FollowerLane {
         self.target
     }
 
-    /// Frames of zeros the master wrote because the follower had fallen
-    /// short while primed.
+    /// Frames of zeros the master wrote because the follower fell short:
+    /// the shortfall and the re-prime that follows it. The zeros before the
+    /// lane first primes are not counted.
     #[must_use]
     pub fn underrun_frames(&self) -> usize {
         self.underrun.load(Ordering::Relaxed)
@@ -167,9 +171,10 @@ impl FollowerLane {
         self.slipped.load(Ordering::Relaxed)
     }
 
-    /// Frames the follower queued before the master's first pull that
-    /// were trimmed to the target, not counted as lost (see the module
-    /// doc).
+    /// Frames the follower delivered before the master's first pull that
+    /// were dropped there, not counted as lost: the queue trimmed to the
+    /// target, or all of it and the refused packets after a staging
+    /// overflow (see the module doc).
     #[must_use]
     pub fn trimmed_frames(&self) -> usize {
         self.trimmed.load(Ordering::Relaxed)
@@ -238,12 +243,18 @@ impl FollowerLane {
         let overflow = self.ring.dropped_samples();
         let reported = self.reported_overflow.load(Ordering::Relaxed);
         if overflow > reported {
-            // Refused before the first pull: audio from before the
-            // recording, as uncounted as the trim below.
-            if !first_pull {
+            self.reported_overflow.store(overflow, Ordering::Relaxed);
+            if first_pull {
+                // The full ring refused the newest audio, so what is
+                // queued is older than the gap it left: all of it goes,
+                // uncounted, as the trim below (see the module doc).
+                let discarded = self.ring.discard(available);
+                self.trimmed
+                    .fetch_add(discarded + overflow - reported, Ordering::Relaxed);
+                available -= discarded;
+            } else {
                 lost += overflow - reported;
             }
-            self.reported_overflow.store(overflow, Ordering::Relaxed);
         }
         if first_pull && available > self.target + wanted {
             let trimmed = self.ring.discard(available - self.target - wanted);
@@ -253,6 +264,11 @@ impl FollowerLane {
         if !self.primed.load(Ordering::Relaxed) {
             if available < self.target + wanted {
                 out.fill(0.0);
+                // Only an underrun unprimes a lane that primed, and it
+                // counts at least one frame: these zeros are its re-prime.
+                if self.underrun.load(Ordering::Relaxed) > 0 {
+                    self.underrun.fetch_add(wanted, Ordering::Relaxed);
+                }
                 return lost;
             }
             self.primed.store(true, Ordering::Relaxed);
