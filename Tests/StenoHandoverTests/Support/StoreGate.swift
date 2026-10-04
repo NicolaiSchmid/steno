@@ -22,12 +22,15 @@ final class StoreGate: Sendable {
   let receiptWrite = Hold(matching: "UPDATE \"handoverReceipt\"")
   /// The next paired device delete (a revoke), executed but not committed.
   let deviceDelete = Hold(matching: "DELETE FROM \"pairedDevice\"")
+  /// The next save of an existing paired device (pairing again under its
+  /// id), executed but not committed.
+  let deviceSave = Hold(matching: "UPDATE \"pairedDevice\"")
   private let holds: [Hold]
   private let directory: URL
 
   init() throws {
     directory = try Fixtures.temporaryDirectory("store-gate")
-    let holds = [receiptRead, receiptWrite, deviceDelete]
+    let holds = [receiptRead, receiptWrite, deviceDelete, deviceSave]
     self.holds = holds
     var configuration = Configuration()
     configuration.prepareDatabase { db in

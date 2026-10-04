@@ -367,6 +367,70 @@ import Testing
     #expect(!gate.timedOut, "nothing waited on the held save")
   }
 
+  /// A revoke that starts while the phone's new pairing is saved deletes the
+  /// device after the save: the pairing must not clear `revoked`, or a
+  /// request that read the receipt before brings it back into memory.
+  @Test(.timeLimit(.minutes(1)))
+  func aRevokeDuringAPairingOfTheSameDeviceKeepsItRevoked() async throws {
+    let restarted = try await Gated.restartedAfterUpload()
+    defer { restarted.remove() }
+    let (gate, engine, device) = (restarted.gate, restarted.engine, restarted.phone.device)
+
+    gate.receiptRead.arm()
+    let reading = Task { await restarted.phone.status(restarted.id) }
+    await gate.receiptRead.held()
+    _ = await engine.beginPairing()
+    gate.deviceSave.arm()
+    let pairing = Task {
+      try await EngineClient(engine: engine).pair(deviceID: device.id, deviceName: device.name)
+    }
+    await gate.deviceSave.held()
+    let revoking = Task { try await restarted.service.revoke(device.id) }
+    try await Self.until { await engine.revoking[device.id] != nil }
+    gate.deviceSave.release()
+
+    #expect(try await pairing.value.code == 200)
+    try await revoking.value
+    #expect(try await restarted.test.store.pairedDevice(id: device.id) == nil)
+    #expect(await engine.revoked.contains(device.id))
+    gate.receiptRead.release()
+    #expect(await reading.value.code == 200, "it read before the revoke")
+    #expect(await engine.receiptsSnapshot.isEmpty, "the deleted device's receipt stays out")
+    #expect(!gate.timedOut, "nothing waited on a held statement")
+  }
+
+  /// A pairing whose save fails leaves the device revoked, so a request that
+  /// read the receipt before the revoke does not bring it back.
+  @Test(.timeLimit(.minutes(1)))
+  func aFailedPairingAfterARevokeKeepsTheDeviceRevoked() async throws {
+    let restarted = try await Gated.restartedAfterUpload()
+    defer { restarted.remove() }
+    let (gate, engine, device) = (restarted.gate, restarted.engine, restarted.phone.device)
+
+    gate.receiptRead.arm()
+    let reading = Task { await restarted.phone.status(restarted.id) }
+    await gate.receiptRead.held()
+    try await restarted.service.revoke(device.id)
+    try await gate.pool.write { db in
+      try db.execute(
+        sql: """
+          CREATE TRIGGER refuseDevice BEFORE INSERT ON pairedDevice
+          BEGIN SELECT RAISE(ABORT, 'refused'); END
+          """)
+    }
+    _ = await engine.beginPairing()
+    let pairing = try await EngineClient(engine: engine).pair(
+      deviceID: device.id, deviceName: device.name)
+    #expect(pairing.code == 500)
+    try await gate.pool.write { db in try db.execute(sql: "DROP TRIGGER refuseDevice") }
+
+    #expect(await engine.revoked.contains(device.id))
+    gate.receiptRead.release()
+    #expect(await reading.value.code == 200, "it read before the revoke")
+    #expect(await engine.receiptsSnapshot.isEmpty, "the revoked device's receipt stays out")
+    #expect(!gate.timedOut, "nothing waited on the held read")
+  }
+
   /// A revoke whose store delete throws leaves the device paired and no
   /// revoke in flight. With nothing in memory to discard, nothing of it is
   /// left; once it discarded the files of an upload, its count stays, and

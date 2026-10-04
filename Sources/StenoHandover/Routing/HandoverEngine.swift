@@ -255,13 +255,15 @@ actor HandoverEngine: RequestHandling {
     let timestamp = now()
     let device = PairedDevice(
       id: body.deviceID, name: name, pairedAt: timestamp, lastSeenAt: timestamp)
+    let revocation = revocations[device.id, default: 0]
     do {
       try await store.save(device, tokenHash: DeviceTokens.hash(token))
     } catch {
       if pairing == nil { pairing = session }
       return .internalError("saving the device", error)
     }
-    revoked.remove(device.id)
+    // A revoke that started during the save deletes the device after it.
+    if revocations[device.id, default: 0] == revocation { revoked.remove(device.id) }
     return .json(
       .ok,
       Wire.PairResponse(token: token, macID: identity.macID, macName: configuration.serviceName))
