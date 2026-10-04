@@ -67,7 +67,7 @@ pub const ENGINE_IDS: [&str; 4] = [
 /// store, models downloading on first use.
 #[derive(Debug, Clone, Args)]
 pub struct SpeechOptions {
-    /// Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs the ONNX Parakeet v3 engine off the Mac.
+    /// Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3, in the speech sidecar beside `steno` except parakeet-v3 on the Mac, which runs on `CoreML`.
     #[arg(long, value_name = "engine")]
     pub engine: Option<String>,
 }
@@ -164,19 +164,21 @@ pub fn dependencies(
     llm: Option<steno_services::llm::Passes>,
     events: MeetingEventBus,
 ) -> Result<PipelineDependencies, Failure> {
-    let speech = speech_setup(settings, models_directory)?;
     let (speech_engine, diarizer, memory): (
         Arc<dyn steno_core::SpeechEngine>,
         Arc<dyn steno_core::Diarizer>,
         Arc<dyn steno_core::SpeakerMemory>,
     ) = match engine {
-        Some(engine) => (
-            // The flag names the engine for this run, as the Swift CLI's
-            // `makeSpeechEngine(engine, ...)` did; the stored id does not.
-            steno_services::speech::speech_engine(engine, &speech),
-            steno_services::speech::diarizer(&speech.models_directory),
-            Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
-        ),
+        Some(engine) => {
+            let speech = speech_setup(settings, models_directory)?;
+            (
+                // The flag names the engine for this run, as the Swift CLI's
+                // `makeSpeechEngine(engine, ...)` did; the stored id does not.
+                steno_services::speech::speech_engine(engine, &speech),
+                steno_services::speech::diarizer(&speech.models_directory),
+                Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
+            )
+        }
         None => (
             Arc::new(steno_core::testing::FakeSpeechEngine::default()),
             Arc::new(steno_core::testing::FakeDiarizer::default()),
@@ -232,9 +234,20 @@ mod tests {
         assert_eq!(standardized(&root.join("..")), root);
     }
 
-    #[test]
-    fn the_engine_flag_wins_over_the_stored_engine() {
+    /// The flag, not the stored id, picks the engine. Every engine reports
+    /// `parakeet-v3`, and off the Mac every id runs in the speech sidecar,
+    /// so only the Mac can tell: there the flag's `parakeet-v3` is the
+    /// `CoreML` engine, the stored Whisper id the sidecar's. `prepare` over
+    /// a models directory whose name is not UTF-8 tells them apart without
+    /// the network: `CoreML` misses its bundles under
+    /// `fluidaudio/parakeet-tdt-0.6b-v3`, the sidecar refuses the root
+    /// before any download.
+    #[cfg(target_os = "macos")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_engine_flag_wins_over_the_stored_engine() {
+        use std::os::unix::ffi::OsStrExt as _;
         let dir = tempfile::tempdir().unwrap();
+        let models = dir.path().join(std::ffi::OsStr::from_bytes(b"models-\xff"));
         let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
         let settings = Settings {
             speech_engine_id: "whisperkit-large-v3-turbo".to_owned(),
@@ -244,16 +257,18 @@ mod tests {
             store,
             &settings,
             Some("parakeet-v3"),
-            Some(dir.path()),
+            Some(&models),
             None,
             None,
             MeetingEventBus::new(),
         )
         .unwrap();
-        let named = steno_services::speech::speech_engine(
-            "parakeet-v3",
-            &speech_setup(&Settings::default(), Some(dir.path())).unwrap(),
+        let error = dependencies.speech_engine.prepare().await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("fluidaudio/parakeet-tdt-0.6b-v3"),
+            "the CoreML engine: {error}"
         );
-        assert_eq!(dependencies.speech_engine.id(), named.id());
     }
 }

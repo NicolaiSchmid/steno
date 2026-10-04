@@ -499,6 +499,17 @@ fn usage_errors_exit_one_and_name_the_known_values() {
     assert_eq!(bad_bakeoff.status, 1);
     assert!(bad_bakeoff.stderr.contains("nope") && bad_bakeoff.stderr.contains("parakeet-v3"));
 
+    // The diarizer's two files in `--models-dir`, so `list` and `remove`
+    // show that they act there and not on the default directory.
+    let diarization = models.join("onnx").join("diarization");
+    std::fs::create_dir_all(&diarization).unwrap();
+    let diarizer_files = [
+        diarization.join(steno_diarize::models::PYANNOTE_SEGMENTATION_3_0.file_name),
+        diarization.join(steno_diarize::models::WESPEAKER_RESNET34_LM.file_name),
+    ];
+    for file in &diarizer_files {
+        std::fs::write(file, b"onnx").unwrap();
+    }
     let list = steno(
         &[
             "dev",
@@ -518,9 +529,32 @@ fn usage_errors_exit_one_and_name_the_known_values() {
     );
     assert_eq!(
         list.stdout.matches("not installed (~").count(),
-        5,
-        "five absent assets: {}",
+        4,
+        "four absent assets: {}",
         list.stdout
+    );
+    assert!(
+        list.stdout
+            .lines()
+            .any(|line| line.starts_with("offlineDiarizer ") && line.contains(": installed (")),
+        "the diarizer in --models-dir: {}",
+        list.stdout
+    );
+    let remove_diarizer = steno(
+        &[
+            "dev",
+            "models",
+            "remove",
+            "offlineDiarizer",
+            "--models-dir",
+            models.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(remove_diarizer.status, 0, "{}", remove_diarizer.stderr);
+    assert!(
+        diarizer_files.iter().all(|file| !file.exists()),
+        "removed from --models-dir"
     );
 
     let remove = steno(
