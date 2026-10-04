@@ -3,7 +3,7 @@ import { platformIcon } from "@/components/platform-icons";
 import { SectionHead } from "@/components/section-head";
 import { type Platform, platformIds, platforms } from "@/lib/site";
 
-const onnxSpeech = "Parakeet TDT v3 through ONNX Runtime";
+const onnxSpeech = "Parakeet TDT v3 through ONNX Runtime, in its own process";
 
 /** The native layer per desktop; everything above it is shared. */
 const native: Record<Platform, { audio: string; speech: string }> = {
@@ -12,13 +12,16 @@ const native: Record<Platform, { audio: string; speech: string }> = {
 		speech: "Parakeet TDT v3 on the Neural Engine (CoreML)",
 	},
 	win: { audio: "WASAPI process loopback", speech: onnxSpeech },
-	linux: { audio: "PipeWire, from the output's monitor", speech: onnxSpeech },
+	linux: {
+		audio: "PipeWire monitor of the default output",
+		speech: onnxSpeech,
+	},
 };
 
 const shared = [
 	"One Rust core and one interface, in a Tauri shell",
-	"Speaker recognition on-device",
-	"On-device echo cancellation, so sound from your speakers stays off your side of the transcript",
+	"On-device speaker recognition",
+	"Echo cancellation keeps the call off your side of the transcript",
 	"Phone recordings arrive over your local network",
 ];
 
@@ -28,8 +31,8 @@ export function HowItsBuilt() {
 			<div className="mx-auto max-w-[1240px] px-5 sm:px-8">
 				<SectionHead eyebrow="How it's built" title="One core, every desktop.">
 					Steno is moving every desktop onto one Rust core and the same
-					interface. Only the layer that touches the hardware changes, and on
-					each system it is the native one.
+					interface. Only audio capture and the speech runtime change from
+					system to system, and capture uses each system's own audio API.
 				</SectionHead>
 				<ul className="grid gap-5 lg:grid-cols-3">
 					{platformIds.map((id) => {
@@ -69,12 +72,16 @@ export function HowItsBuilt() {
 					})}
 				</ul>
 				<div className="mt-7 border-border border-t border-dashed pt-6">
-					<Checklist className="lg:grid lg:grid-cols-2" items={shared} />
+					<Checklist
+						className="lg:grid lg:grid-cols-2 lg:gap-x-12"
+						items={shared}
+					/>
 				</div>
 				<p className="mt-7 max-w-[720px] text-[15px] text-fg-muted leading-[1.6]">
-					The Mac download today is the original Swift app. The Rust build
-					replaces it once it does everything the Swift app does, and it reads
-					the same library, so switching is a download, not a migration.
+					The Mac download today is the original Swift app. The Rust version
+					replaces it once it does everything the Swift app does. It opens your
+					existing meetings and settings, so switching is a download, not a
+					migration.
 				</p>
 			</div>
 		</section>
