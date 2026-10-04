@@ -51,6 +51,12 @@ struct Core {
     ignoring_pids: BTreeSet<i32>,
     debounce: Duration,
     poll_interval: Duration,
+    /// Held across a whole `evaluate`, snapshot included, so the listener
+    /// and the poller apply their snapshots in the order they read them:
+    /// a poll snapshot read before a change and applied after it would
+    /// otherwise cancel the debounce the change armed. The Swift detector
+    /// is an actor, which serialises the same way. Taken before `inner`.
+    evaluating: Mutex<()>,
     inner: Mutex<Inner>,
 }
 
@@ -94,6 +100,7 @@ impl MeetingDetector {
                 ignoring_pids: ignoring_pids.unwrap_or_else(|| BTreeSet::from([own])),
                 debounce,
                 poll_interval,
+                evaluating: Mutex::new(()),
                 inner: Mutex::new(Inner::default()),
             }),
         }
@@ -229,6 +236,10 @@ impl Core {
     /// Compares the snapshot with what was reported and arms or disarms
     /// the debounce timer.
     fn evaluate(self: &Arc<Self>) -> Result<(), ActivityError> {
+        let _evaluating = self
+            .evaluating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut active: Vec<ProcessAudioActivity> = self
             .source
             .snapshot()?

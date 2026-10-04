@@ -17,11 +17,14 @@
 )]
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use steno_audio::detection::{MeetingDetector, MeetingEvent, ProcessAudioActivity};
+use steno_audio::detection::{
+    ActivityError, MeetingDetector, MeetingEvent, ProcessAudioActivity, ProcessAudioActivitySource,
+};
 use steno_audio::testing::{FakeProcessAudioActivity, ManualClock};
 
 fn face_time() -> ProcessAudioActivity {
@@ -208,5 +211,85 @@ fn a_failing_snapshot_fails_start_and_is_tolerated_later() {
         }
     );
     assert_eq!(detector.holder(), Some(zoom()));
+    detector.stop();
+}
+
+/// A source whose poll thread, once armed, stops right after it read its
+/// snapshot and waits to be let go before the detector applies it.
+struct HeldPoll {
+    inner: FakeProcessAudioActivity,
+    armed: AtomicBool,
+    entered: Mutex<Option<Sender<()>>>,
+    release: Mutex<Option<Receiver<()>>>,
+}
+
+impl ProcessAudioActivitySource for HeldPoll {
+    fn snapshot(&self) -> Result<Vec<ProcessAudioActivity>, ActivityError> {
+        let snapshot = self.inner.snapshot();
+        if std::thread::current().name() == Some("steno-det-poll")
+            && self.armed.swap(false, Ordering::SeqCst)
+        {
+            if let Some(entered) = self.entered.lock().unwrap().take() {
+                let _ = entered.send(());
+            }
+            if let Some(release) = self.release.lock().unwrap().take() {
+                let _ = release.recv();
+            }
+        }
+        snapshot
+    }
+
+    fn changes(&self) -> Receiver<()> {
+        self.inner.changes()
+    }
+}
+
+/// A poll snapshot read while the call was still on, applied after the
+/// listener saw it end, must not cancel the release debounce the listener
+/// armed: the release fires one debounce later all the same.
+#[test]
+fn a_stale_poll_snapshot_does_not_cancel_a_pending_release() {
+    let clock = Arc::new(ManualClock::new());
+    let fake = FakeProcessAudioActivity::new(vec![idle_zoom()]);
+    let (entered, entered_receiver) = channel();
+    let (release, release_receiver) = channel();
+    let source = Arc::new(HeldPoll {
+        inner: fake.clone(),
+        armed: AtomicBool::new(false),
+        entered: Mutex::new(Some(entered)),
+        release: Mutex::new(Some(release_receiver)),
+    });
+    let detector = MeetingDetector::new(
+        Arc::clone(&source) as Arc<dyn ProcessAudioActivitySource>,
+        Arc::clone(&clock) as Arc<dyn steno_audio::Clock>,
+        Some(BTreeSet::from([1])),
+        MeetingDetector::DEFAULT_DEBOUNCE,
+        MeetingDetector::DEFAULT_POLL_INTERVAL,
+    );
+    let events = detector.events();
+    detector.start().unwrap();
+    assert!(clock.wait_for_sleepers(1), "the poll timer is armed");
+    fake.set(vec![zoom()]);
+    assert!(clock.wait_for_sleepers(2), "the open debounce is armed");
+    source.armed.store(true, Ordering::SeqCst);
+    clock.advance(Duration::from_secs(2));
+    // The poller has read "Zoom is recording" and is held there.
+    entered_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the poll reads its snapshot");
+    assert!(matches!(
+        next(&events),
+        MeetingEvent::MicrophoneOpened { pid: 5_151, .. }
+    ));
+    // The call ends; the listener evaluates now or right after the poll.
+    fake.set(vec![idle_zoom()]);
+    std::thread::sleep(Duration::from_millis(200));
+    release.send(()).unwrap();
+    assert!(
+        clock.wait_for_sleepers(2),
+        "the poll timer and the release debounce are armed"
+    );
+    clock.advance(Duration::from_secs(2));
+    assert_eq!(next(&events), MeetingEvent::MicrophoneReleased);
     detector.stop();
 }
