@@ -15,28 +15,30 @@
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
 //! instance, and on a Wayland session the `XWayland` backend the panels
-//! need (`display`). Secrets are not the shell's: the keyring
-//! `SecretStore` lives in `steno-services` (#173, `WP6b`). Every one is a
-//! thin module over a Tauri plugin or an OS API with its rules in plain
-//! functions the tests cover. Everything that is on the wire (errors,
-//! topics, windows, sections, params) is the `steno-bridge` crate's type;
-//! the shell adds only what it needs on top (`recording::RecorderState`,
-//! `windows::Spec`).
+//! need (`display`). Every one is a thin module over a Tauri plugin or an
+//! OS API with its rules in plain functions the tests cover. Everything
+//! that is on the wire (errors, topics, windows, sections, params) is the
+//! `steno-bridge` crate's type; the shell adds only what it needs on top
+//! (`recording::RecorderState`, `windows::Spec`). Secrets are not the
+//! shell's: the keyring `SecretStore` lives in `steno-services` (#173,
+//! `WP6b`).
 //!
 //! Every exit runs `App::shutdown` first, at most `SHUTDOWN_PATIENCE` (ten
-//! seconds), over one `ExitGate`: it stops and saves a recording in
-//! progress and stops the handover listener. Quit from either menu, the
-//! close that ends the process when no tray stands, and SIGTERM, SIGINT
-//! and SIGHUP (a plain `kill`, Ctrl-C, a closed terminal, systemd at a
-//! shutdown) are exit requests the gate holds (`exit_request`,
-//! `exit_on_signals`); the Dock's Quit, a logout and a shutdown on macOS,
-//! and a logoff and a shutdown on Windows, reach the run loop only as its
-//! last event, and an update's relaunch bypasses the request, so both run
-//! the same shutdown first (`shut_down_before_exit`). Open: the Windows
-//! logoff is untested on hardware, and Windows' end-session timeout (about
-//! five seconds) is shorter than `SHUTDOWN_PATIENCE` (WP10); a Linux logout
-//! that closes the display connection before the session manager's SIGTERM
-//! ends the app unsaved (WP9).
+//! seconds), over one `ExitGate`: it stops the pipeline, stops and saves a
+//! recording in progress and stops the handover listener. Quit from either
+//! menu, the close that ends the process when no tray stands, and on Linux
+//! and macOS SIGTERM, SIGINT and SIGHUP (a plain `kill`, Ctrl-C, a closed
+//! terminal, systemd at a shutdown) are exit requests the gate holds
+//! (`exit_request`, `exit_on_signals`); the Dock's Quit, a logout and a
+//! shutdown on macOS, and a logoff and a shutdown on Windows, reach the run
+//! loop only as its last event, and an update's relaunch bypasses the
+//! request, so both run the same shutdown first (`shut_down_before_exit`).
+//! The one exception: a second SIGTERM or SIGINT ends the process at once,
+//! unsaved (`forced_exit`). Open: the Windows logoff is untested on
+//! hardware, and Windows' end-session timeout (about five seconds) is
+//! shorter than `SHUTDOWN_PATIENCE` (WP10); a Linux logout saves only when
+//! logind signals the app, which is untested (before the first Linux
+//! release; no work package yet).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The fixture host leaves the real host's seams (the login item, the
@@ -224,10 +226,12 @@ fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
 
 /// SIGTERM, SIGINT and SIGHUP ask for the exit Quit asks for, so the
 /// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
-/// terminal, systemd at a shutdown. A Linux logout saves when the session
-/// manager signals the app (systemd stops a session's scope with SIGTERM,
-/// then SIGHUP); when the display connection closes first, GDK ends the
-/// process unsaved (untested, WP9). On macOS a logout goes through
+/// terminal, systemd at a shutdown. A logout on Linux saves when logind
+/// ends the session's processes (with `KillUserProcesses=yes`, systemd
+/// stops the scope with SIGTERM, then SIGHUP). Otherwise nothing signals
+/// the app, and when the display connection closes first, GDK ends the
+/// process unsaved; untested (before the first Linux release; no work
+/// package yet). On macOS a logout goes through
 /// `RunEvent::Exit` instead. A second SIGTERM or a second SIGINT ends the
 /// process at once, unsaved (`forced_exit`), so a run loop that no longer
 /// answers still ends with a plain `kill` or Ctrl-C twice; a SIGHUP never

@@ -743,10 +743,18 @@ still has to draw the window side. `[ ]` is not ported yet.
   muda's `terminate:`), a destroyed main window with no tray, the last window closing
   with no tray, and SIGTERM, SIGINT and SIGHUP on Linux and macOS (a plain `kill`,
   Ctrl-C, a closed terminal, systemd at a shutdown); a second SIGTERM or a second
-  SIGINT ends the process at once, unsaved, and a SIGHUP never does. A Linux logout
-  saves when the session manager signals the app: systemd stops a session's scope with
-  SIGTERM, then SIGHUP at once. When the display connection closes first (GNOME and
-  KDE often close it), GDK ends the process unsaved; that is untested (WP9). The
+  SIGINT ends the process at once, unsaved, and a SIGHUP never does; a signal the app
+  inherited ignored (`nohup`, a background job's SIGINT) stays ignored. A logout on
+  Linux saves when logind ends the session's processes (with `KillUserProcesses=yes`,
+  systemd stops the scope with SIGTERM, then SIGHUP). Otherwise nothing signals the
+  app, and when the display connection closes first, GDK ends the process unsaved;
+  untested (before the first Linux release; no work package yet). Once the shutdown
+  has begun, the pipeline starts no job and persists no job's failure
+  (`ProcessingPipeline::quit`): a signal that reaches the speech sidecar with the app
+  (Ctrl-C reaches the terminal's whole foreground group, systemd a scope's every
+  process) ends its job, and the meeting stays `processing` for the next launch, as
+  it did when the Swift app died with its job; the recording the shutdown saves stays
+  `queued` until then. The
   Dock's Quit, a logout and a system shutdown on macOS send `terminate:` directly; tao
   answers with `applicationWillTerminate` only, which reaches the shell as
   `RunEvent::Exit` and which AppKit waits for, so the shutdown runs there

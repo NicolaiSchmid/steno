@@ -34,20 +34,25 @@ Secrets are not the shell's: the `SecretStore` lives in `steno-services`
 Every exit saves first: `App::shutdown` runs once, at most ten seconds,
 and stops and saves a recording in progress (a start or a stop under way
 settles first) and stops the handover listener, as the Swift
-`applicationShouldTerminate` awaited `AppController.shutdown`. The exits
-reach it these ways:
+`applicationShouldTerminate` awaited `AppController.shutdown`. It first
+stops the pipeline: no job starts, so the saved recording stays queued
+until the next launch processes it, and a job the exit ends (Ctrl-C and
+systemd signal the speech sidecar with the app) leaves its meeting
+processing for the next launch, not failed. The exits reach it these ways:
 
 - Quit in the tray's menu or the macOS menu bar, the close that ends the
   process because no tray stands, and SIGTERM, SIGINT and SIGHUP (a plain
   `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are exit
   requests, held until the shutdown ended (`exit_request` in `main.rs`
-  over `steno_services::app::ExitGate`); a second Quit meanwhile waits
-  too. A second SIGTERM or a second SIGINT ends the process at once,
-  unsaved; a SIGHUP never does.
-- A logout on Linux saves when the session manager signals the app
-  (systemd stops the session's scope with SIGTERM, then SIGHUP). When the
-  display connection closes first, as GNOME and KDE often do, GDK ends the
-  process unsaved; untested (WP9, before the first Linux release).
+  over `steno_services::app::ExitGate`); a second Quit meanwhile is
+  held too. A second SIGTERM or a second SIGINT ends the process at once,
+  unsaved; a SIGHUP never does. A signal the app inherited ignored
+  (`nohup`, a background job's SIGINT) stays ignored.
+- A logout on Linux saves when logind ends the session's processes (with
+  `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
+  SIGHUP). Otherwise nothing signals the app, and when the display
+  connection closes first, GDK ends the process unsaved; untested (before
+  the first Linux release; no work package yet).
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
