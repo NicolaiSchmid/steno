@@ -205,8 +205,8 @@ extension HandoverEngine {
   }
 
   /// 401 when the device was revoked since `complete` took `revocation`.
-  /// The revoke may have missed the receipt, so its files are discarded and
-  /// it leaves memory here.
+  /// That revoke may have missed the receipt, so the files are discarded and
+  /// the receipt forgotten here.
   private func refusal(_ recordingID: UUID, device: PairedDevice, revokedSince revocation: Int)
     -> HandoverResponse?
   {

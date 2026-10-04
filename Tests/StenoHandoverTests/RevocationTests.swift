@@ -7,9 +7,13 @@ import Testing
 /// Revoking a phone mid-upload: its partial and receipt are gone, every
 /// bearer route answers 401 at the gate (the phone's "unpaired" signal), and
 /// another phone's upload is untouched. Both ways in: `revoke(_:)` from the
-/// Mac and `DELETE /v1/pairing` from the phone. A `complete` that read its
-/// receipt before the revoke admits nothing, also when the phone paired again
-/// meanwhile.
+/// Mac and `DELETE /v1/pairing` from the phone. A `complete` racing a revoke
+/// admits nothing: one that read its receipt before the revoke, also when
+/// the phone paired again meanwhile, one that starts before the revoke's
+/// store delete commits, and one whose files came back during its verify.
+/// A recording admitted before still answers its meeting, a request that
+/// read a receipt before the revoke leaves it out of memory, and a failed
+/// revoke leaves the device working.
 @Suite struct RevocationTests {
   static let chunkSize = 256 * 1024
 
@@ -254,6 +258,7 @@ import Testing
     try await revoking.value
 
     try await restarted.expectNothingAdmitted()
+    // The only check that fails when the revoke counts itself after the delete.
     #expect(!gate.timedOut, "nothing waited on the held delete")
   }
 

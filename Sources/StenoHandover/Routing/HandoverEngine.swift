@@ -31,9 +31,10 @@ actor HandoverEngine: RequestHandling {
   /// across its receipt read and verify admits nothing. Pairing again does
   /// not reset it: the phone pairs again under the same device id.
   var revocations: [UUID: Int] = [:]
-  /// Revokes per device that have not returned yet. Until a revoke's store
-  /// delete commits, a store read still returns the device's receipts, so a
-  /// `complete` that starts meanwhile is refused before it reads.
+  /// Revokes in flight per device. Until a revoke's store delete commits, a
+  /// store read still returns the device's receipts, and a `complete` that
+  /// starts meanwhile takes the count after the bump, so it is refused
+  /// before it reads.
   var revoking: [UUID: Int] = [:]
   /// Devices revoked since start and not paired again. Their receipts stay
   /// out of `activeReceipts` (and the stream), also when a request that
