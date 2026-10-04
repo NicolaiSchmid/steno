@@ -832,6 +832,27 @@ mod tests {
         app_recording_with(dir, store, crate::testing::synthetic_capture())
     }
 
+    /// `app`'s host with the hook `App::launch` wires, without the launch's
+    /// tasks: one stuck on the host's lock would hang the runtime's
+    /// shutdown, and with it the test.
+    fn wired_host(app: &App) -> Host {
+        let host = app.host().unwrap();
+        let changed = host.clone();
+        app.recorder
+            .on_change(Arc::new(move || changed.recorder_changed()));
+        host
+    }
+
+    /// Calls `method` through `host` on a thread of its own, failing the
+    /// test unless it returns, and returns success, within [`PATIENCE`].
+    fn call(host: &Host, method: steno_bridge::BridgeMethod, params: Option<serde_json::Value>) {
+        let dispatcher = steno_bridge::Dispatcher::new(host.clone());
+        let reply = on_own_thread(PATIENCE, &format!("{method} returned"), move || {
+            dispatcher.call(method, params)
+        });
+        assert!(reply.is_ok(), "{method}: {reply:?}");
+    }
+
     /// A recording that cannot start (no capture device), from the sidebar
     /// and the tray's Record and Stop: every recorder command through the
     /// host returns, though each change the recorder reports re-enters the
@@ -846,13 +867,7 @@ mod tests {
             &store,
             Arc::new(|_| Err("no capture device".to_owned())),
         );
-        let host = Arc::new(app.host().unwrap());
-        // The hook `App::launch` wires, without the launch's tasks: one
-        // stuck on the host's lock would hang the runtime's shutdown, and
-        // with it the test.
-        let changed = host.clone();
-        app.recorder
-            .on_change(Arc::new(move || changed.recorder_changed()));
+        let host = wired_host(&app);
         let start = serde_json::json!({ "mode": "inPerson" });
         let failed = Some("Recording could not start: no capture device".to_owned());
         for (method, params, error) in [
@@ -862,11 +877,7 @@ mod tests {
             (BridgeMethod::RecordingStop, None, failed),
             (BridgeMethod::RecordingClearMessages, None, None),
         ] {
-            let dispatcher = steno_bridge::Dispatcher::new((*host).clone());
-            let reply = on_own_thread(PATIENCE, &format!("{method} returned"), move || {
-                dispatcher.call(method, params)
-            });
-            assert!(reply.is_ok(), "{method}: {reply:?}");
+            call(&host, method, params);
             let status = app.recorder.status();
             assert_eq!(status.state, steno_bridge::RecordingState::Idle, "{method}");
             assert_eq!(status.error, error, "{method}");
@@ -884,20 +895,10 @@ mod tests {
         use steno_host::services::Recorder as _;
         let (dir, store) = temp_store();
         let app = recording_app(&dir, &store);
-        let host = Arc::new(app.host().unwrap());
-        // The hook `App::launch` wires, as above.
-        let changed = host.clone();
-        app.recorder
-            .on_change(Arc::new(move || changed.recorder_changed()));
-        let call = |method: BridgeMethod, params: Option<serde_json::Value>| {
-            let dispatcher = steno_bridge::Dispatcher::new((*host).clone());
-            let reply = on_own_thread(PATIENCE, &format!("{method} returned"), move || {
-                dispatcher.call(method, params)
-            });
-            assert!(reply.is_ok(), "{method}: {reply:?}");
-        };
+        let host = wired_host(&app);
         for stop in [BridgeMethod::RecordingStop, BridgeMethod::RecordingToggle] {
             call(
+                &host,
                 BridgeMethod::RecordingStart,
                 Some(serde_json::json!({ "mode": "inPerson" })),
             );
@@ -908,7 +909,7 @@ mod tests {
                 "{stop}"
             );
             let meeting_id = status.meeting_id.expect("recording");
-            call(stop, None);
+            call(&host, stop, None);
             let status = app.recorder.status();
             assert_eq!(status.state, steno_bridge::RecordingState::Idle, "{stop}");
             assert_eq!(status.error, None, "{stop}");
