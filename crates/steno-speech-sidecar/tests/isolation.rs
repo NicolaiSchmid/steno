@@ -9,7 +9,8 @@
 //! test process down, and leave an engine that works on the next call.
 //! Dropping the engine stops its child, inside a runtime or not. Driven by
 //! hand, without the client, a child must exit when its parent's pipes
-//! close, idle or busy.
+//! close, idle or busy, and on unix answer a request that SIGINT, SIGTERM
+//! and SIGHUP reach mid-request.
 //!
 //! Nothing here ends a child with `DirectML` in use: that switches
 //! `DirectML` off for the rest of the process's run, so those tests run
@@ -29,7 +30,7 @@
 
 mod common;
 
-use std::io::BufReader;
+use std::io::{BufReader, Write as _};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -514,6 +515,64 @@ fn a_busy_child_exits_when_its_parent_goes_away() {
     drop(stdin);
     drop(stdout);
     let status = exit_status(&mut child, "the busy child outlived its parent's pipes");
+    assert!(status.success(), "{status}");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
+    // Driven by hand: the child has half of a request's audio, so it is
+    // inside the request when the signals arrive, as Ctrl-C, a closed
+    // terminal or systemd deliver them to the app's child too.
+    let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "20"]);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let (_, pid) = ready(&mut stdout);
+    let samples = [0.5f32; 160];
+    let mut frame = Vec::new();
+    protocol::write_frame(
+        &mut frame,
+        &Request::Transcribe {
+            id: 1,
+            sample_count: samples.len() as u64,
+            hint: None,
+        },
+        &protocol::encode_samples(&samples),
+    )
+    .unwrap();
+    let (first, rest) = frame.split_at(frame.len() - 100);
+    stdin.write_all(first).unwrap();
+    stdin.flush().unwrap();
+    for signal in ["-INT", "-TERM", "-HUP"] {
+        let sent = Command::new("kill")
+            .args([signal, &pid.to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success(), "kill {signal}");
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "a signal ended the child"
+    );
+    stdin.write_all(rest).unwrap();
+    stdin.flush().unwrap();
+    let segments = loop {
+        match protocol::read_header::<_, Reply>(&mut stdout)
+            .unwrap()
+            .unwrap()
+        {
+            Reply::Transcript {
+                id: 1, segments, ..
+            } => break segments,
+            Reply::Memory { .. } => {}
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(segments[0].text, "160 samples, peak 0.5");
+    drop(stdin);
+    drop(stdout);
+    let status = exit_status(&mut child, "the child outlived its stdin");
     assert!(status.success(), "{status}");
 }
 

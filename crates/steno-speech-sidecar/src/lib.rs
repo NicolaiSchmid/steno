@@ -37,6 +37,16 @@
 //! stdout breaks, so a dead parent leaves no child behind. Its log goes to
 //! stderr, which the parent logs and keeps the tail of for crash reports.
 //!
+//! On unix it ignores SIGINT, SIGTERM and SIGHUP once its heartbeat runs.
+//! Those are the signals that end the app, and they reach the child too:
+//! Ctrl-C reaches the terminal's whole foreground group, a closed terminal
+//! its session, and systemd every process in a scope. A child that died of
+//! them would end its job before the app's shutdown began. Ignoring them,
+//! the child finishes its request or exits within a heartbeat of its
+//! parent's exit, when stdout breaks. The client never ends a child by
+//! those signals: it asks for a shutdown, closes stdin or kills it with
+//! SIGKILL (the memory ceiling, a deadline, a broken protocol).
+//!
 //! # Privacy
 //!
 //! Its sessions open through `steno_speech::onnx`, which switches ONNX
@@ -437,6 +447,20 @@ fn send(reply: &Reply) {
     }
 }
 
+/// Ignores SIGINT, SIGTERM and SIGHUP for the rest of the child's life
+/// (see the crate docs); only once the heartbeat runs, which ends a child
+/// whose parent is gone.
+#[cfg(unix)]
+fn ignore_exit_signals() {
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: `SIG_IGN` installs no handler, so no code runs in a
+        // signal's context.
+        unsafe {
+            libc::signal(signal, libc::SIG_IGN);
+        }
+    }
+}
+
 /// Reports the resident set every `interval` from a thread of its own,
 /// between and during requests.
 fn start_heartbeat(interval: Duration) -> io::Result<()> {
@@ -506,7 +530,8 @@ fn transcribe(
 }
 
 /// Runs the child until a shutdown request, the end of stdin, a broken
-/// stdout or an unreadable request.
+/// stdout or an unreadable request; on unix SIGINT, SIGTERM and SIGHUP do
+/// not end it (see the crate docs).
 pub fn serve(options: &Options) -> ExitCode {
     let fake = options.fake_engine.then(|| FakeEngine {
         loaded: false,
@@ -526,6 +551,8 @@ pub fn serve(options: &Options) -> ExitCode {
         eprintln!("steno-speech-sidecar: no heartbeat thread: {error}");
         return ExitCode::from(2);
     }
+    #[cfg(unix)]
+    ignore_exit_signals();
     let mut engine: Box<dyn Engine> = match fake {
         Some(fake) => Box::new(fake),
         None => Box::new(OnnxEngine::default()),
