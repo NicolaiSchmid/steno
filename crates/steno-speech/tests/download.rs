@@ -1,8 +1,9 @@
 //! The model store against a local HTTP server that serves a temporary
 //! directory: resumable `.partial` downloads (a cut connection, a partial
-//! a killed run left, a corrupt prefix, a host that ignores `Range`, a
-//! `206` from the wrong offset or without `Content-Range`), the mirror
-//! layout and the checksum gate. No network beyond 127.0.0.1.
+//! a killed run left, a corrupt prefix, a complete partial, a host that
+//! ignores `Range`, a `206` from the wrong offset or without
+//! `Content-Range`), the mirror layout and the checksum gate. No network
+//! beyond 127.0.0.1.
 
 #![allow(clippy::cast_possible_truncation)]
 
@@ -341,11 +342,16 @@ fn a_partial_longer_than_the_file_or_already_complete_is_handled() {
     f.leave_partial(&vec![1; 20_000]);
     f.install();
     assert_eq!(f.server.seen()[0].range, None);
-    // Complete but never renamed (killed between the sync and the rename):
-    // the range is past the end, the host answers 416, and the file is
-    // fetched whole once more.
+    // Complete but never renamed (killed between the sync and the rename,
+    // or a rename Windows refused): verified and installed without a
+    // request.
     f.store.remove(&f.asset).unwrap();
     f.leave_partial(&contents);
+    f.install();
+    assert_eq!(f.server.seen().len(), 1);
+    // Complete but wrong: checked, then fetched once more from zero.
+    f.store.remove(&f.asset).unwrap();
+    f.leave_partial(&vec![7; contents.len()]);
     f.install();
     let ranges: Vec<_> = f
         .server
@@ -354,7 +360,7 @@ fn a_partial_longer_than_the_file_or_already_complete_is_handled() {
         .skip(1)
         .map(|s| s.range)
         .collect();
-    assert_eq!(ranges, [Some("bytes=10000-".to_owned()), None]);
+    assert_eq!(ranges, [None]);
 }
 
 #[test]
