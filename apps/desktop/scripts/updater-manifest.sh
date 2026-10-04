@@ -14,7 +14,7 @@
 # signature, or the script fails naming the missing file, so a manifest
 # never offers a platform half its installers. Prints the manifest on
 # stdout. PUB_DATE overrides the publication time (RFC 3339, for tests).
-# Tested by updater-manifest.test.sh in Rust CI.
+# apps/desktop/scripts/updater-manifest.test.sh checks it; rust-ci.yml runs that.
 set -euo pipefail
 
 version="${1:?version, e.g. 0.11.0}"
