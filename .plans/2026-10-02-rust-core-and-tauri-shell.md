@@ -900,26 +900,29 @@ it:
   wine has no process loopback), the `--ignored` tests included.
 - **Two clocks, no drift compensation.** The microphone and the system audio
   are two WASAPI streams on their endpoints' clocks; the Core Audio
-  aggregate drift-compensates, the Windows backend does not. The system
-  lane sits in a jitter buffer behind the microphone (`realtime::streams`)
-  sized from the system stream's period: a target of two periods (20 ms at
-  the usual 10 ms period), a slip back to the target once the lowest queue
-  over half a second stayed more than one period above it (counted as
-  dropped system frames; a master thread that runs late and drains its
-  packets back to back raises the queue only for a moment and slips
-  nothing), an immediate slip once the queue is more than the
-  microphone's buffer above the high-water mark (no late master explains
-  it), and zeros with a re-prime after an underrun. What the follower
-  queued before the master's first pull is trimmed to the target, not
-  counted: audio from before the recording, or, when the master's first
-  drain is late, the system audio recorded during that lateness. A packet
-  the full staging refused before that pull is not counted either.
-  `underrun_frames` counts the shortfall only, not the re-prime zeros that
-  follow it. The underrun, slip and trim counts are logged at `info` when
-  the capture stops (the shell's default filter is `warn`: set
-  `RUST_LOG=steno_audio=info`; `tests/live_windows.rs` prints them).
-  Measure the slip rate on a USB headset against built-in speakers; a plan
-  decides whether to resample instead.
+  aggregate drift-compensates, the Windows backend does not. The system lane
+  sits in a jitter buffer behind the microphone (`realtime::streams`) sized
+  from the system stream's period: a target of two periods (20 ms at the
+  usual 10 ms period), a slip back to the target once the lowest queue over
+  half a second stayed more than one period above it (counted as dropped
+  system frames; a master thread that runs late and drains its packets back
+  to back raises the queue only for a moment and slips nothing), an
+  immediate slip once the queue is more than the microphone's buffer above
+  the high-water mark (no late master explains it), and zeros with a
+  re-prime after an underrun. What the follower queued before the master's
+  first pull is trimmed to the target, not counted: audio from before the
+  recording, or, when the master's first drain is late, the system audio
+  recorded during that lateness. The full staging refuses the newest
+  packets, so when it refused one before that pull (a microphone that starts
+  more than 1.37 s after the system stream), the first pull drops everything
+  queued and the refused packets, uncounted too, and the lane primes on the
+  audio that follows. `underrun_frames` counts the shortfall and the
+  re-prime zeros that follow it, not the zeros before the lane first primes.
+  The underrun, slip and trim counts are logged at `info` when the capture
+  stops (the shell's default filter is `warn`: set
+  `RUST_LOG=steno_audio=info`; `tests/live_windows.rs` prints them). Measure
+  the slip rate on a USB headset against built-in speakers; a plan decides
+  whether to resample instead.
 - **Engine data loss is not a drop.** A packet the engine flags as a
   discontinuity (the capture thread was late and the engine lost data) is
   counted and logged at stop, never added to `CaptureStatistics`' drops:
@@ -934,15 +937,14 @@ it:
   buffer's target. Between slips the queue sits above the target by up to
   one period (10 ms), plus the follower's worst lateness in a window, plus
   up to two windows of drift (a fraction of a millisecond at the drift of
-  real clocks), and never more than one period plus the microphone's
-  buffer (the immediate slip); that is the echo canceller's alignment
-  error from the buffer. The
-  process-loopback client may not implement `GetStreamLatency`; a failed
-  read or a latency above 200 ms counts as 0, since understating the delay
-  stays inside the canceller's tail and overstating it does not. A
-  staging delay larger than both latencies is logged at `info`. A loopback
-  stream's latency is not the render path's; check the echo canceller's
-  alignment on hardware.
+  real clocks), and never more than one period plus the microphone's buffer
+  (the immediate slip); that is the echo canceller's alignment error from
+  the buffer. The process-loopback client may not implement
+  `GetStreamLatency`; a failed read or a latency above 200 ms counts as 0,
+  since understating the delay stays inside the canceller's tail and
+  overstating it does not. A staging delay larger than both latencies is
+  logged at `info`. A loopback stream's latency is not the render path's;
+  check the echo canceller's alignment on hardware.
 - **Process loopback scope.** Excluding Steno's process tree records every
   other process; whether that follows the default render endpoint or mixes
   every endpoint is unverified. Microsoft's API page names build 20438 for
@@ -982,8 +984,16 @@ it:
 - **A hanging start.** `start` waits at most 10 s in all for both streams
   to open and start and for the watcher to register, holding the session's
   lock meanwhile (the long hold in `capture::session`'s doc). A stream
-  thread or a watcher still in a COM call at the deadline is left running
-  unjoined until the call returns.
+  thread still in a COM call at the deadline is left running unjoined
+  until the call returns. A watcher that missed it but comes alive later
+  watches as an on-time one does; `stop()` joins a watcher once it has
+  reached its loop, and one still in its start-up calls finds the stop
+  flag when they return and exits without reporting.
+- **One notification thread per detector start.** Each `start()` of the
+  meeting detector calls the session source's `changes()`, which runs a
+  thread holding its COM registrations until the source is dropped or,
+  after the detector stopped, the next notification arrives. A detector
+  started and stopped many times holds that many idle threads until then.
 
 Six Swift defects the port does not share; fix them in Swift if it ships
 another release, otherwise the cutover closes them:
