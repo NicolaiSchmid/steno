@@ -252,12 +252,10 @@ though: dragged into `/Applications`, the desktop `.dmg` replaces the
 Swift app, so install it elsewhere (`~/Applications`) to keep both.
 
 Every release bundle carries `steno-speech-sidecar` beside the app (see
-"The speech sidecar" under Release), but no host serves the fp32 Parakeet
-export yet, so a `.deb`, AppImage, `.msi` or NSIS install fails to process
-a meeting until the export is in its models directory or
-`STENO_MODELS_MIRROR` names a copy (see Run). A Mac bundle processes on
-`CoreML`, except in the two cases under Run that send Parakeet to the
-sidecar.
+"The speech sidecar" under Release), so a `.deb`, AppImage, `.msi` or NSIS
+install processes a meeting once the sidecar's models are downloaded (see
+Run). A Mac bundle processes on `CoreML`, except in the two cases under Run
+that send Parakeet to the sidecar.
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the
