@@ -39,7 +39,9 @@ pub const SIDECAR_BINARY: &str = if cfg!(windows) {
 /// How the client starts and limits the child.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SidecarConfig {
-    /// The `steno-speech-sidecar` binary.
+    /// The `steno-speech-sidecar` binary, by absolute path: the child is
+    /// handed the meeting's audio, so a bare or relative name is never
+    /// looked up on `PATH` or in the working directory, and fails to start.
     pub program: PathBuf,
     /// Arguments before the ones the client adds (`--heartbeat-ms`); the
     /// app passes none, the tests choose the fake engine and a fault.
@@ -213,6 +215,15 @@ fn keep_stderr_tail(
 impl SidecarProcess {
     /// Spawns the child and waits for its [`Reply::Ready`].
     fn spawn(config: &SidecarConfig) -> Result<Self, SidecarError> {
+        if !config.program.is_absolute() {
+            return Err(SidecarError::Spawn {
+                program: config.program.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "not an absolute path, and the sidecar is never looked up on PATH",
+                ),
+            });
+        }
         let mut child = command(config)
             .spawn()
             .map_err(|source| SidecarError::Spawn {
@@ -783,6 +794,24 @@ mod tests {
         assert_eq!(engine.health().await.unwrap(), None);
         assert_eq!(engine.shut_down().await.unwrap(), None);
         engine.release().await.unwrap();
+    }
+
+    /// A bare name is refused, never looked up: `sh` (`cmd` on Windows)
+    /// is on every `PATH`, and still nothing starts.
+    #[tokio::test]
+    async fn a_program_that_is_not_an_absolute_path_never_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let on_path = if cfg!(windows) { "cmd" } else { "sh" };
+        let engine = SidecarSpeechEngine::with_assets(
+            ModelStore::new(dir.path()),
+            SidecarConfig::new(on_path),
+            Vec::new(),
+        );
+        let error = engine.prepare().await.unwrap_err().to_string();
+        assert!(error.contains("could not start"), "{error}");
+        assert!(error.contains("not an absolute path"), "{error}");
+        assert_eq!(engine.spawns(), 0);
+        assert_eq!(engine.pid(), None);
     }
 
     #[cfg(unix)]
