@@ -158,49 +158,36 @@ fn setup(
     Ok(())
 }
 
-/// The signals that ask for the exit Quit asks for (`exit_on_signals`).
+/// A signal that asks for the exit Quit asks for (`exit_on_signals`).
 #[cfg(unix)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExitSignal {
-    Terminate,
-    Interrupt,
-    Hangup,
+struct ExitSignal {
+    kind: tokio::signal::unix::SignalKind,
+    name: &'static str,
+    /// The code a second one ends the process with at once, 128 plus the
+    /// signal's number, as the shells report it; none for SIGHUP, which
+    /// never forces the exit.
+    forced_code: Option<i32>,
 }
 
 #[cfg(unix)]
 impl ExitSignal {
-    const ALL: [ExitSignal; 3] = [
-        ExitSignal::Terminate,
-        ExitSignal::Interrupt,
-        ExitSignal::Hangup,
-    ];
-
-    fn kind(self) -> tokio::signal::unix::SignalKind {
-        match self {
-            ExitSignal::Terminate => tokio::signal::unix::SignalKind::terminate(),
-            ExitSignal::Interrupt => tokio::signal::unix::SignalKind::interrupt(),
-            ExitSignal::Hangup => tokio::signal::unix::SignalKind::hangup(),
-        }
-    }
-
-    fn name(self) -> &'static str {
-        match self {
-            ExitSignal::Terminate => "SIGTERM",
-            ExitSignal::Interrupt => "SIGINT",
-            ExitSignal::Hangup => "SIGHUP",
-        }
-    }
-
-    /// The code a second one of this signal ends the process with at
-    /// once, 128 plus the signal's number, as the shells report it; none
-    /// for SIGHUP, which never forces the exit.
-    fn forced_code(self) -> Option<i32> {
-        match self {
-            ExitSignal::Terminate => Some(128 + 15),
-            ExitSignal::Interrupt => Some(128 + 2),
-            ExitSignal::Hangup => None,
-        }
-    }
+    const TERMINATE: Self = Self {
+        kind: tokio::signal::unix::SignalKind::terminate(),
+        name: "SIGTERM",
+        forced_code: Some(128 + 15),
+    };
+    const INTERRUPT: Self = Self {
+        kind: tokio::signal::unix::SignalKind::interrupt(),
+        name: "SIGINT",
+        forced_code: Some(128 + 2),
+    };
+    const HANGUP: Self = Self {
+        kind: tokio::signal::unix::SignalKind::hangup(),
+        name: "SIGHUP",
+        forced_code: None,
+    };
+    const ALL: [Self; 3] = [Self::TERMINATE, Self::INTERRUPT, Self::HANGUP];
 }
 
 /// What `signal` does after the exit signals already `seen`, which it
@@ -209,7 +196,7 @@ impl ExitSignal {
 #[cfg(unix)]
 fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
     if seen.contains(&signal) {
-        return signal.forced_code();
+        return signal.forced_code;
     }
     seen.push(signal);
     None
@@ -232,12 +219,12 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
     for signal in ExitSignal::ALL {
         let (app, seen) = (app.clone(), seen.clone());
         runtime.spawn(async move {
-            let mut arrivals = match tokio::signal::unix::signal(signal.kind()) {
+            let mut arrivals = match tokio::signal::unix::signal(signal.kind) {
                 Ok(arrivals) => arrivals,
                 Err(error) => {
                     tracing::warn!(
                         %error,
-                        signal = signal.name(),
+                        signal = signal.name,
                         "this signal ends the app without saving a recording"
                     );
                     return;
@@ -663,19 +650,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_second_sigterm_or_sigint_forces_the_exit_and_a_sighup_never_does() {
-        use ExitSignal::{Hangup, Interrupt, Terminate};
         let mut seen = Vec::new();
-        assert_eq!(forced_exit(Terminate, &mut seen), None);
-        assert_eq!(forced_exit(Hangup, &mut seen), None);
-        assert_eq!(forced_exit(Hangup, &mut seen), None);
-        assert_eq!(forced_exit(Interrupt, &mut seen), None);
-        assert_eq!(forced_exit(Interrupt, &mut seen), Some(130));
-        assert_eq!(forced_exit(Terminate, &mut seen), Some(143));
+        assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::HANGUP, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::HANGUP, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::INTERRUPT, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::INTERRUPT, &mut seen), Some(130));
+        assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), Some(143));
 
         let mut seen = Vec::new();
-        assert_eq!(forced_exit(Interrupt, &mut seen), None);
-        assert_eq!(forced_exit(Terminate, &mut seen), None);
-        assert_eq!(forced_exit(Terminate, &mut seen), Some(143));
+        assert_eq!(forced_exit(ExitSignal::INTERRUPT, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), None);
+        assert_eq!(forced_exit(ExitSignal::TERMINATE, &mut seen), Some(143));
     }
 
     #[test]
