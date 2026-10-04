@@ -12,8 +12,9 @@
 //! close, idle or busy.
 //!
 //! Nothing here ends a child with `DirectML` in use: that switches
-//! `DirectML` off for the rest of the process's run, so those tests run in
-//! binaries of their own (`directml_switch_off.rs`, `directml_probe_crash.rs`).
+//! `DirectML` off for the rest of the process's run, so those tests run
+//! in binaries of their own (`directml_switch_off.rs`,
+//! `directml_probe_crash.rs`, `directml_lost_encoder.rs`).
 //!
 //! The fake engine needs no models; the last test, ignored by default,
 //! runs the real one when `STENO_MODELS_DIR` holds them
@@ -212,10 +213,12 @@ async fn the_provider_follows_a_fallback_after_the_load() {
 /// The transcript carries the provider too: a child that fell back to
 /// the CPU mid-job and then dies, before any health request, ended on the
 /// CPU, so the next child is asked for `DirectML` again. The crash report
-/// holds the child's line about the fallback.
+/// holds the child's line about the fallback, written once though two
+/// answers followed it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_dies_after_falling_back_to_the_cpu_leaves_directml_on() {
     let (engine, _dir) = engine_with_fault("fallback", |c| c.options.directml = true);
+    assert_works(&engine, &tone(0.5)).await;
     assert_works(&engine, &tone(0.5)).await;
     let pid = engine.pid().unwrap();
     assert!(kill(pid));
@@ -225,7 +228,7 @@ async fn a_child_that_dies_after_falling_back_to_the_cpu_leaves_directml_on() {
     let error = engine.transcribe(&tone(0.1), None).await.unwrap_err();
     match sidecar_error(error.as_ref()) {
         SidecarError::Crashed { stderr, .. } => {
-            assert!(stderr.contains(FALLBACK_NOTICE), "{stderr}");
+            assert_eq!(stderr.matches(FALLBACK_NOTICE).count(), 1, "{stderr}");
         }
         other => panic!("{other}"),
     }
@@ -251,6 +254,24 @@ async fn an_error_or_a_release_leaves_directml_on() {
     engine.prepare().await.unwrap();
     assert_eq!(engine.spawns(), 2);
     assert_eq!(provider(&engine).await, Some(ASKED_FOR_DIRECTML));
+    assert!(!directml_switched_off());
+}
+
+/// A child that dies inside a load on the CPU is a crash, with no second
+/// child within the call: only a load that asked for `DirectML` is the
+/// probe's to retry. The next call starts a child that loads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_inside_a_load_on_the_cpu_is_not_retried_within_the_call() {
+    let (engine, _dir) = engine_with_fault("abort-on-load", |_| {});
+    let error = engine.prepare().await.unwrap_err();
+    assert!(
+        matches!(sidecar_error(error.as_ref()), SidecarError::Crashed { .. }),
+        "{error}"
+    );
+    assert_eq!(engine.spawns(), 1);
+    assert_eq!(engine.pid(), None);
+    assert_works(&engine, &tone(0.5)).await;
+    assert_eq!(engine.spawns(), 2);
     assert!(!directml_switched_off());
 }
 

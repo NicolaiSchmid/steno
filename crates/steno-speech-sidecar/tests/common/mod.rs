@@ -13,8 +13,9 @@ use steno_speech::{
 
 pub const BINARY: &str = env!("CARGO_BIN_EXE_steno-speech-sidecar");
 
-/// What a load with `DirectML` asked for gets from the fake engine:
-/// `DirectML` on Windows; elsewhere the client asks for the CPU.
+/// The provider the fake engine reports to an engine whose options ask for
+/// `DirectML`: `DirectML` on Windows; elsewhere the client asks for the
+/// CPU.
 pub const ASKED_FOR_DIRECTML: EncoderProvider = if cfg!(windows) {
     EncoderProvider::DirectMl
 } else {
