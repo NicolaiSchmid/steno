@@ -1512,6 +1512,8 @@ mod tests {
         let error = store.ensure(&missing, &mut |_| {}).unwrap_err();
         assert!(matches!(&error, SpeechError::Download { .. }), "{error}");
         assert!(!store.is_installed(&missing));
+        // A partial without a byte in it is not kept.
+        assert_eq!(names(&store, &missing), ["model.onnx.lock"]);
     }
 
     #[test]
@@ -1707,6 +1709,11 @@ mod tests {
         fs::write(directory.join("model.onnx"), &body).unwrap();
         assert_eq!(store.ensure(&asset, &mut |_| {}).unwrap(), directory);
         store.verify(&asset).unwrap();
+        // Lower-case, as the manifest writes it.
+        assert_eq!(
+            sha256_of(&directory.join("model.onnx")).unwrap(),
+            digest(&body)
+        );
         fs::write(directory.join("model.onnx"), b"tampered!!").unwrap();
         assert!(matches!(
             store.verify(&asset),
