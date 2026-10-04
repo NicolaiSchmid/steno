@@ -24,9 +24,11 @@ name: Rust CI
 # Linux also builds the web UI (its bridge transports are the shell's other
 # half), checks it, runs the Tauri shell's headless smoke under Xvfb
 # (apps/desktop/scripts/smoke-linux.sh; the screenshots are uploaded as
-# `desktop-smoke-screens`), and runs `tauri build --no-bundle` so a
+# `desktop-smoke-screens`), and bundles a `.deb` with the speech sidecar
+# (apps/desktop/scripts/check-bundle.sh finds it beside the app) so a
 # packaging regression (the bundle config, the icons, the plists, the
-# release profile) fails here and not in desktop-release.yml. macOS builds
+# release profile, the sidecar) fails here and not in desktop-release.yml.
+# The `deny` job runs `cargo deny` over deny.toml. macOS builds
 # the web UI after its tests and runs the same smoke in the runner's login
 # session (apps/desktop/scripts/smoke-macos.sh), where the panels are
 # `NSPanel`s. Windows, and macOS up to that step, build the shell without
@@ -70,6 +72,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'rustfmt.toml'
+      - 'deny.toml'
       - 'crates/**'
       - 'apps/desktop/**'
       - 'apps/macos/web/fixtures/bridge/**'
@@ -86,6 +89,7 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'rustfmt.toml'
+      - 'deny.toml'
       - 'crates/**'
       - 'apps/desktop/**'
       - 'apps/macos/web/fixtures/bridge/**'
@@ -229,10 +233,15 @@ jobs:
           cargo test -p steno-audio --test pipewire --locked
           -- --ignored --test-threads=1 --nocapture
 
-      # The desktop release workflow's platform filter.
-      - name: Desktop release matrix
+      # The desktop release workflow's platform filter, MSI version, updater
+      # manifest and lanes.
+      - name: Desktop release scripts
         if: matrix.name == 'linux'
-        run: apps/desktop/scripts/release-matrix.test.sh
+        run: |
+          apps/desktop/scripts/release-matrix.test.sh
+          apps/desktop/scripts/wix-version.test.sh
+          apps/desktop/scripts/updater-manifest.test.sh
+          apps/desktop/scripts/updater-lanes.test.sh
 
       # The WASAPI smoke tests again with their output, so the log shows what
       # COM answered on the runner (endpoints, sessions, why a capture
@@ -272,18 +281,38 @@ jobs:
           path: apps/desktop/screens
           if-no-files-found: ignore
 
-      # The release build as the Tauri CLI drives it, without the installer
-      # step: the web dist is already built above, so the config merge
-      # drops beforeBuildCommand, and the updater artifacts need the
-      # signing key WP9 brings, so they are off here. The CLI is the
-      # version desktop-release.yml pins.
-      - name: Desktop release build (no bundle)
+      # The release build as desktop-release.yml drives it (`tauri build
+      # --no-bundle`, then `tauri bundle`), bundled as a .deb (the quickest
+      # installer) and checked for the sidecar beside the app. The web dist
+      # is built above, so beforeBuildCommand goes; pull requests get no
+      # signing key, so the updater artifacts go too.
+      - name: Desktop release bundle (deb, with the sidecar)
         if: matrix.name == 'linux'
-        working-directory: apps/desktop/src-tauri
         run: |
-          pnpm dlx @tauri-apps/cli@2.12.1 build --ci --no-bundle \
-            --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":false}}'
-          test -x ../../../target/release/steno-desktop
+          apps/desktop/scripts/stage-sidecar.sh
+          configs=(--config tauri.release.conf.json
+            --config '{"build":{"beforeBuildCommand":null},"bundle":{"createUpdaterArtifacts":false}}')
+          (cd apps/desktop/src-tauri \
+            && pnpm dlx @tauri-apps/cli@2.12.1 build --ci --no-bundle "${configs[@]}" \
+            && pnpm dlx @tauri-apps/cli@2.12.1 bundle --ci --bundles deb "${configs[@]}")
+          apps/desktop/scripts/check-bundle.sh target/release/bundle deb
+
+  # Advisories only warn here, so one published overnight does not block
+  # an unrelated pull request; desktop-release.yml blocks on all four.
+  deny:
+    name: cargo deny (${{ matrix.checks }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        checks: [advisories, bans licenses sources]
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}
 
   msrv:
     name: msrv

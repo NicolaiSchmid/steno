@@ -1,0 +1,84 @@
+# cargo-deny over the Cargo workspace: which licences the shipped binaries
+# may carry, which advisories block, where crates may come from. Rust CI
+# runs it on every Rust change (advisories warn only there); the desktop
+# release workflow fails on any finding before it builds a bundle.
+
+[graph]
+# The three platforms the bundles ship for; a dependency only another target
+# pulls in (Android, iOS) is not in a bundle and is not checked.
+targets = [
+  "x86_64-unknown-linux-gnu",
+  "aarch64-apple-darwin",
+  "x86_64-pc-windows-msvc",
+]
+# The opt-in features too (`fixture-host`, the diarizer's backends), so a
+# feature cannot bring a licence in unchecked.
+all-features = true
+
+[licenses]
+# Permissive licences only. Steno is MIT; every crate here may be linked
+# into an MIT binary without conditions beyond keeping the notice.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "ISC",
+  "MIT",
+  "Unicode-3.0",
+  "Zlib",
+]
+confidence-threshold = 0.8
+# MPL-2.0 is file-level copyleft: the covered files stay MPL and their
+# source stays available, which unmodified crates from crates.io satisfy;
+# the rest of the binary keeps its own licence. It is allowed per crate, not
+# globally, so a new MPL dependency is a decision, not an accident.
+exceptions = [
+  # Tauri's HTML handling (tauri-utils over dom_query).
+  { crate = "cssparser", allow = ["MPL-2.0"] },
+  { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+  { crate = "dtoa-short", allow = ["MPL-2.0"] },
+  { crate = "selectors", allow = ["MPL-2.0"] },
+  # `directories`, the per-OS data and config paths.
+  { crate = "option-ext", allow = ["MPL-2.0"] },
+  # The audio decoder steno-audio imports recordings with.
+  { crate = "symphonia", allow = ["MPL-2.0"] },
+  { crate = "symphonia-bundle-mp3", allow = ["MPL-2.0"] },
+  { crate = "symphonia-codec-aac", allow = ["MPL-2.0"] },
+  { crate = "symphonia-codec-pcm", allow = ["MPL-2.0"] },
+  { crate = "symphonia-core", allow = ["MPL-2.0"] },
+  { crate = "symphonia-format-caf", allow = ["MPL-2.0"] },
+  { crate = "symphonia-format-isomp4", allow = ["MPL-2.0"] },
+  { crate = "symphonia-format-riff", allow = ["MPL-2.0"] },
+  { crate = "symphonia-metadata", allow = ["MPL-2.0"] },
+  { crate = "symphonia-utils-xiph", allow = ["MPL-2.0"] },
+]
+
+[licenses.private]
+# The workspace's own crates are `publish = false` and MIT.
+ignore = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+  # proc-macro-error is unmaintained. A build-time macro of glib-macros in
+  # the GTK 3 bindings (gtk-rs 0.18) that Tauri's Linux webview, menus and
+  # tray need; no maintained GTK 3 binding exists to move to, and it runs
+  # in the compiler only, never in a shipped binary.
+  { id = "RUSTSEC-2024-0370", reason = "build-time macro of the GTK 3 bindings Tauri depends on; nothing to upgrade to" },
+]
+
+[bans]
+# Tauri's tree carries several majors of windows-sys, syn, toml and others;
+# duplicates cost build time, not correctness.
+multiple-versions = "allow"
+wildcards = "deny"
+# The workspace's path dependencies carry no version, which is a wildcard
+# to cargo-deny; they are never published.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

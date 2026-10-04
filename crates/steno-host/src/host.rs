@@ -580,6 +580,7 @@ impl Host {
             )),
             BridgeTopic::SettingsTranscription => to_value(settings_snapshots::transcription(
                 &inner.speech,
+                self.shared.services.speech_models.as_ref(),
                 inner.subtitle(SettingsSection::Transcription),
             )),
             BridgeTopic::SettingsSummaries => to_value(settings_snapshots::summaries(

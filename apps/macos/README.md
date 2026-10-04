@@ -141,7 +141,9 @@ user confirms it in onboarding or Settings > Summaries
 
 1. `Check secrets` (`scripts/check-release-secrets.sh`, unit-tested in `ReleaseScriptsTests`)
    fails early with the missing names; a dry run needs only the certificate pair.
-2. The Developer ID certificate is imported into a throwaway keychain.
+2. The Developer ID certificate is imported into a throwaway keychain. Start a Swift release
+   only while no Desktop release run with macOS is in progress, since both import the same
+   Developer ID identity (see `apps/desktop/README.md`, Signing).
 3. `scripts/build-release.sh <version> <build>` archives and exports with Developer ID and the
    hardened runtime, then verifies: `codesign --verify --deep --strict`, the Developer ID
    authority, the runtime flag, a secure timestamp, exactly the two entitlements

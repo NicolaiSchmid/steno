@@ -659,6 +659,312 @@ async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
     assert!(error.reason.contains("no LLM endpoint"));
 }
 
+/// The world's dependencies with `engine` as the speech engine.
+fn with_engine(world: &World, engine: Arc<dyn steno_core::SpeechEngine>) -> PipelineDependencies {
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.speech_engine = engine;
+    dependencies
+}
+
+/// Enqueues the two-lane call as a meeting of its own; its id.
+fn enqueue_call(world: &World, pipeline: &ProcessingPipeline) -> Uuid {
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    meeting.id
+}
+
+fn meeting_state(world: &World, id: Uuid) -> MeetingState {
+    world.store.meeting(id).unwrap().unwrap().state
+}
+
+/// The speech engine is released once a job's lanes are transcribed,
+/// before the diarizer runs, so the speech sidecar's working set is back
+/// before the stages after transcription.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_is_released_after_the_last_lane_before_diarization() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(FakeSpeechEngine::default());
+    // (transcriptions, releases) as the diarizer saw them.
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let diarizer = {
+        let (engine, seen) = (engine.clone(), seen.clone());
+        FakeDiarizer::answering(move |audio| {
+            seen.lock()
+                .unwrap()
+                .push((engine.transcriptions.count(), engine.releases.count()));
+            FakeDiarizer::round_robin(audio.duration(), 2, 1.5)
+        })
+    };
+    let mut dependencies = with_engine(&world, engine.clone());
+    dependencies.diarizer = Arc::new(diarizer);
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(2, 1)],
+        "both lanes, then the release"
+    );
+    assert_eq!(engine.preparations.count(), 1);
+    assert_eq!(engine.releases.count(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_transcription_fails_releases_the_engine_too() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let failing = Arc::new(FakeSpeechEngine {
+        failure: Some("no model".to_owned()),
+        ..FakeSpeechEngine::default()
+    });
+    let pipeline = ProcessingPipeline::new(with_engine(&world, failing.clone()));
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        meeting_state(&world, meeting),
+        MeetingState::Failed {
+            reason: "transcribe: no model".to_owned()
+        }
+    );
+    assert_eq!(failing.releases.count(), 1);
+}
+
+/// A lane that cannot be decoded fails the job in `decode`, after the
+/// engine was loaded; the engine is released all the same.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_lane_cannot_be_decoded_releases_the_engine_too() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(FakeSpeechEngine::default());
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    let layout = RecordingLayout::from_asset(&asset).unwrap();
+    std::fs::remove_file(layout.sidecar(AudioLane::System)).unwrap();
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    let MeetingState::Failed { reason } = meeting_state(&world, meeting.id) else {
+        panic!("the job failed");
+    };
+    assert!(reason.starts_with("decode: "), "{reason}");
+    assert_eq!(engine.preparations.count(), 1);
+    assert_eq!(engine.releases.count(), 1);
+}
+
+/// A diarizer whose models cannot load.
+struct UnloadableDiarizer;
+
+#[async_trait]
+impl steno_core::Diarizer for UnloadableDiarizer {
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        Err("no diarizer model".into())
+    }
+
+    async fn diarize(
+        &self,
+        _audio: &steno_core::AudioBuffer16k,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::DiarizationResult> {
+        Err("never loaded".into())
+    }
+}
+
+/// A warm-up that loads the speech engine and then fails on the diarizer
+/// fails the job in `diarize` and still releases the engine it loaded.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_warm_up_fails_releases_the_engine_too() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(FakeSpeechEngine::default());
+    let mut dependencies = with_engine(&world, engine.clone());
+    dependencies.diarizer = Arc::new(UnloadableDiarizer);
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        meeting_state(&world, meeting),
+        MeetingState::Failed {
+            reason: "diarize: no diarizer model".to_owned()
+        }
+    );
+    assert_eq!(engine.preparations.count(), 1);
+    assert_eq!(engine.transcriptions.count(), 0);
+    assert_eq!(engine.releases.count(), 1);
+}
+
+/// Which call of a [`GatedEngine`] is gated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Gate {
+    FirstTranscription,
+    FirstRelease,
+}
+
+/// A fake engine whose first transcription or first release waits until
+/// `open` is notified (or panics, with `panics`), logging each `prepare`
+/// and the start and end of each `release`.
+struct GatedEngine {
+    inner: FakeSpeechEngine,
+    gate: Gate,
+    panics: bool,
+    /// Set once the gated call has started.
+    entered: std::sync::atomic::AtomicBool,
+    open: tokio::sync::Notify,
+    log: Mutex<Vec<&'static str>>,
+}
+
+impl GatedEngine {
+    fn new(gate: Gate) -> Self {
+        GatedEngine {
+            inner: FakeSpeechEngine::default(),
+            gate,
+            panics: false,
+            entered: false.into(),
+            open: tokio::sync::Notify::new(),
+            log: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Waits until the gated call has started.
+    async fn wait_until_entered(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !self.entered.load(std::sync::atomic::Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the gated call started");
+    }
+
+    /// The first call through `gate` panics or waits for `open`.
+    async fn pass(&self, gate: Gate) {
+        if self.gate == gate && !self.entered.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            assert!(!self.panics, "the engine broke");
+            self.open.notified().await;
+        }
+    }
+
+    fn log(&self) -> Vec<&'static str> {
+        self.log.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl steno_core::SpeechEngine for GatedEngine {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        self.inner.supported_languages()
+    }
+
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        self.log.lock().unwrap().push("prepare");
+        self.inner.prepare().await
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+        hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
+        self.pass(Gate::FirstTranscription).await;
+        self.inner.transcribe(audio, hint).await
+    }
+
+    async fn release(&self) -> steno_core::protocols::BoundaryResult<()> {
+        self.log.lock().unwrap().push("release");
+        self.pass(Gate::FirstRelease).await;
+        let released = self.inner.release().await;
+        self.log.lock().unwrap().push("released");
+        released
+    }
+}
+
+/// Two jobs on one engine: the one that finishes while the other is still
+/// transcribing leaves the engine loaded; the last one releases it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_leaves_the_engine_loaded_while_another_still_transcribes() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+
+    let slow = enqueue_call(&world, &pipeline);
+    engine.wait_until_entered().await;
+
+    let fast = enqueue_call(&world, &pipeline);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while meeting_state(&world, fast) != MeetingState::Ready {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the second job finished while the first waited");
+    assert_eq!(
+        engine.inner.releases.count(),
+        0,
+        "the first job still needs the engine"
+    );
+
+    engine.open.notify_one();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, slow), MeetingState::Ready);
+    assert_eq!(engine.inner.releases.count(), 1);
+}
+
+/// A job that claims the engine while another job's release runs waits
+/// for the release and prepares again after it, never during it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_starts_during_a_release_prepares_again_after_it() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine::new(Gate::FirstRelease));
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+
+    let first = enqueue_call(&world, &pipeline);
+    engine.wait_until_entered().await;
+
+    let second = enqueue_call(&world, &pipeline);
+    // Time enough for the second job's warm-up, were it not held.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(engine.log(), ["prepare", "release"]);
+
+    engine.open.notify_one();
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        engine.log(),
+        [
+            "prepare", "release", "released", "prepare", "release", "released"
+        ]
+    );
+    for meeting in [first, second] {
+        assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    }
+}
+
+/// A job that panics gives its claim back without a release, so the next
+/// job on the same pipeline still releases the engine after its lanes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_panics_gives_its_claim_on_the_engine_back() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine {
+        panics: true,
+        ..GatedEngine::new(Gate::FirstTranscription)
+    });
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+    enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        engine.inner.releases.count(),
+        0,
+        "a panic only drops the claim"
+    );
+
+    let next = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, next), MeetingState::Ready);
+    assert_eq!(engine.inner.releases.count(), 1);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_stage_marks_the_meeting_failed_with_its_name() {
     let world = world(false, None, AudioRetention::KeepForever);

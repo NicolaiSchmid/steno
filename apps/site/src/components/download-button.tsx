@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AppleIcon, LinuxIcon, WindowsIcon } from "@/components/platform-icons";
+import { platformIcon } from "@/components/platform-icons";
 import { cn } from "@/lib/cn";
-import { type Platform, platformLabel, site } from "@/lib/site";
+import { type Platform, platforms, site } from "@/lib/site";
 
 interface DownloadButtonProps {
 	className?: string;
@@ -20,6 +20,7 @@ function detectPlatform(): Platform {
 /**
  * The primary download: labelled for the visitor's platform once hydrated,
  * macOS on the server so the static HTML is never wrong for the main build.
+ * A platform without a released build says so and opens the releases page.
  */
 export function DownloadButton({
 	className,
@@ -31,22 +32,20 @@ export function DownloadButton({
 		setPlatform(detectPlatform());
 	}, []);
 
-	const Icon =
-		platform === "win"
-			? WindowsIcon
-			: platform === "linux"
-				? LinuxIcon
-				: AppleIcon;
+	const { name, released } = platforms[platform];
+	const Icon = platformIcon[platform];
 
 	return (
 		<a
 			className={cn("btn btn-primary", size === "lg" && "btn-lg", className)}
-			href={site.download}
+			href={released ? site.download : site.releases}
 			rel="noreferrer"
 			target="_blank"
 		>
 			<Icon className="size-3.5 shrink-0" />
-			<span>{platformLabel[platform]}</span>
+			<span>
+				{released ? `Download for ${name}` : `${name}: not released yet`}
+			</span>
 		</a>
 	);
 }

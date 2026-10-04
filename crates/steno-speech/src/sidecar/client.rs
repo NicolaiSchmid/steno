@@ -39,7 +39,9 @@ pub const SIDECAR_BINARY: &str = if cfg!(windows) {
 /// How the client starts and limits the child.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SidecarConfig {
-    /// The `steno-speech-sidecar` binary.
+    /// The `steno-speech-sidecar` binary, by absolute path: the child is
+    /// handed the meeting's audio, so a bare or relative name is never
+    /// looked up on `PATH` or in the working directory, and fails to start.
     pub program: PathBuf,
     /// Arguments before the ones the client adds (`--heartbeat-ms`); the
     /// app passes none, the tests choose the fake engine and a fault.
@@ -213,6 +215,15 @@ fn keep_stderr_tail(
 impl SidecarProcess {
     /// Spawns the child and waits for its [`Reply::Ready`].
     fn spawn(config: &SidecarConfig) -> Result<Self, SidecarError> {
+        if !config.program.is_absolute() {
+            return Err(SidecarError::Spawn {
+                program: config.program.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "not an absolute path; the sidecar is never looked up on PATH or in the working directory",
+                ),
+            });
+        }
         let mut child = command(config)
             .spawn()
             .map_err(|source| SidecarError::Spawn {
@@ -513,8 +524,8 @@ impl Shared {
 /// child never opens a connection), spawns the child and has it load them;
 /// `transcribe` sends the samples over the pipe. A failed child is
 /// replaced on the next call. [`SpeechEngine::release`] stops the child
-/// and frees its working set; WP6b's pipeline is to call it after each
-/// job, and until then nothing frees it.
+/// and frees its working set; the pipeline (`steno-pipeline`) calls it
+/// once a job's lanes are transcribed and no other job needs the engine.
 ///
 /// ```no_run
 /// use steno_core::{AudioBuffer16k, SpeechEngine};
@@ -575,6 +586,13 @@ impl SidecarSpeechEngine {
     #[must_use]
     pub fn config(&self) -> &SidecarConfig {
         &self.shared.config
+    }
+
+    /// The store `prepare` installs the models into and the child loads
+    /// them from.
+    #[must_use]
+    pub fn store(&self) -> &ModelStore {
+        &self.shared.store
     }
 
     /// The running child's pid; `None` when there is none. Readable while
@@ -776,6 +794,31 @@ mod tests {
         assert_eq!(engine.health().await.unwrap(), None);
         assert_eq!(engine.shut_down().await.unwrap(), None);
         engine.release().await.unwrap();
+    }
+
+    /// A bare or relative name is refused, never looked up: `sh` (`cmd`
+    /// on Windows) is on every `PATH`, and still nothing starts; nor does
+    /// `./sh` (`.\cmd`) from the working directory.
+    #[tokio::test]
+    async fn a_program_that_is_not_an_absolute_path_never_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = if cfg!(windows) {
+            ["cmd", ".\\cmd"]
+        } else {
+            ["sh", "./sh"]
+        };
+        for program in names {
+            let engine = SidecarSpeechEngine::with_assets(
+                ModelStore::new(dir.path()),
+                SidecarConfig::new(program),
+                Vec::new(),
+            );
+            let error = engine.prepare().await.unwrap_err().to_string();
+            assert!(error.contains("could not start"), "{program}: {error}");
+            assert!(error.contains("not an absolute path"), "{program}: {error}");
+            assert_eq!(engine.spawns(), 0, "{program}");
+            assert_eq!(engine.pid(), None, "{program}");
+        }
     }
 
     #[cfg(unix)]
