@@ -1,7 +1,8 @@
 //! Which engine runs Parakeet where, and the speech settings that choose
 //! it. On Linux and Windows the ONNX sidecar
 //! ([`SidecarSpeechEngine`](crate::SidecarSpeechEngine)) is the only
-//! engine the app runs: inference never shares the app's process there.
+//! speech engine the app runs: speech inference never shares the app's
+//! process there (the diarizer's ONNX models still run in it).
 //! On macOS the in-process `CoreML` engine (`steno-speech-coreml`) is the
 //! default, so the Mac stays one process; the ONNX sidecar is a fallback
 //! behind [`SpeechSettings::onnx_sidecar_on_mac`], for a Mac where the
@@ -10,7 +11,7 @@
 //! drive; the app never runs it on its own thread.
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,17 +26,19 @@ pub enum SpeechRuntime {
     OnnxSidecar,
 }
 
-/// The speech settings `steno-services` persists beside the app's
-/// settings. Absent keys take their defaults, so an empty object is the
-/// default.
+/// The speech settings, which `steno-services` reads from `speech.json`
+/// in the support directory (not the database's `setting` table, which
+/// the Swift app rewrites whole). Absent keys take their defaults, so an
+/// empty object is the default.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SpeechSettings {
     /// macOS only: run the ONNX sidecar instead of `CoreML`. Ignored
     /// elsewhere, where the sidecar is the only choice.
     pub onnx_sidecar_on_mac: bool,
-    /// A mirror every model is fetched from instead of its host
-    /// ([`ModelStore::with_mirror`]); `None` uses the hosts.
+    /// A mirror the speech models (Silero VAD and the Parakeet export) are
+    /// fetched from instead of their hosts ([`ModelStore::with_mirror`]);
+    /// the diarizer's models keep their hosts. `None` uses the hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_mirror: Option<String>,
 }
@@ -58,10 +61,12 @@ impl SpeechSettings {
         }
     }
 
-    /// A store over `root` with these settings' mirror.
+    /// The ONNX store of the models directory `models_directory` (its
+    /// `onnx/` folder, [`ModelStore::in_models_directory`]) with these
+    /// settings' mirror.
     #[must_use]
-    pub fn model_store(&self, root: impl Into<PathBuf>) -> ModelStore {
-        ModelStore::new(root).with_mirror(self.models_mirror.clone())
+    pub fn model_store(&self, models_directory: &Path) -> ModelStore {
+        ModelStore::in_models_directory(models_directory).with_mirror(self.models_mirror.clone())
     }
 }
 
@@ -107,10 +112,22 @@ mod tests {
             serde_json::from_str::<SpeechSettings>("{}").unwrap(),
             SpeechSettings::default()
         );
+    }
+
+    #[test]
+    fn the_model_store_is_the_models_directory_s_onnx_folder_with_the_mirror() {
+        let settings = SpeechSettings {
+            models_mirror: Some("http://mirror.example:8000/models".to_owned()),
+            ..SpeechSettings::default()
+        };
+        let store = settings.model_store(Path::new("/models"));
+        assert_eq!(store.root(), Path::new("/models").join("onnx"));
+        assert_eq!(store.mirror(), Some("http://mirror.example:8000/models"));
         assert_eq!(
-            settings.model_store("/models").mirror(),
-            Some("http://mirror.example:8000/models")
+            SpeechSettings::default()
+                .model_store(Path::new("/m"))
+                .mirror(),
+            None
         );
-        assert_eq!(SpeechSettings::default().model_store("/m").mirror(), None);
     }
 }

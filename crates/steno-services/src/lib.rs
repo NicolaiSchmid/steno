@@ -9,9 +9,9 @@
 //! | Module | What it holds |
 //! |--------|---------------|
 //! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()` and `launch()`, [`BuildError`] |
-//! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline), and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
+//! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with, and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
-//! | [`speech`] | The models directory, the speech engine per platform, the ONNX diarizer, the host's `SpeechModels` |
+//! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels` |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring and the 0600 secrets file behind `SecretStore` |
@@ -21,8 +21,12 @@
 //!
 //! What stays a fake here is named in [`build`]'s doc: the shell's
 //! platform services (permissions, login item, updater, clip player, QR
-//! encoder) wait for the plan's `WP8`; the speech sidecar process is `WP4c`'s,
-//! so ONNX inference runs in this process until it lands.
+//! encoder) wait for the plan's `WP8`.
+//!
+//! Off the Mac, and on the Mac when the speech settings choose it or the
+//! stored engine id has no Rust engine, Parakeet runs in the speech
+//! sidecar ([`speech::SpeechSetup::runtime`]); the diarizer's ONNX models
+//! run in this process.
 //!
 //! Secrets live in the platform keyring on macOS (the Keychain) and on
 //! Windows (the credential store). On Linux they live in the 0600
