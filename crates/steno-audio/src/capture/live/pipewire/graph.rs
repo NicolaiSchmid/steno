@@ -581,25 +581,9 @@ mod tests {
     #[test]
     fn a_virtual_source_records_from_its_monitor_output() {
         let mut graph = laptop();
-        graph.add_node(
-            60,
-            props(&[
-                ("node.name", "virtual-mic"),
-                ("media.class", "Audio/Source/Virtual"),
-            ]),
-        );
-        for (id, dir, monitor) in [(61, "in", "false"), (62, "out", "true")] {
-            graph.add_port(
-                id,
-                props(&[
-                    ("node.id", "60"),
-                    ("port.direction", dir),
-                    ("port.monitor", monitor),
-                    ("audio.channel", "MONO"),
-                    ("port.id", "0"),
-                ]),
-            );
-        }
+        node(&mut graph, 60, 1060, "virtual-mic", "Audio/Source/Virtual");
+        port(&mut graph, 61, 1061, 60, "in", "MONO");
+        port(&mut graph, 62, 1062, 60, "out", "monitor_MONO");
         let targets = graph
             .resolve(&[AudioLane::Mic], Some("virtual-mic"))
             .unwrap();
@@ -642,25 +626,13 @@ mod tests {
     #[test]
     fn a_mono_sink_feeds_one_channel_and_a_sink_without_monitors_fails() {
         let mut graph = Graph::default();
-        graph.add_node(
-            1,
-            props(&[("node.name", "mono-sink"), ("media.class", "Audio/Sink")]),
-        );
+        node(&mut graph, 1, 1001, "mono-sink", "Audio/Sink");
         graph.set_default(Some(DEFAULT_SINK_KEY), Some(r#"{"name":"mono-sink"}"#));
         assert!(matches!(
             graph.resolve(&[AudioLane::System], None),
             Err(CaptureError::UnexpectedStreamLayout(_))
         ));
-        graph.add_port(
-            2,
-            props(&[
-                ("node.id", "1"),
-                ("port.direction", "out"),
-                ("port.monitor", "true"),
-                ("audio.channel", "MONO"),
-                ("port.id", "0"),
-            ]),
-        );
+        port(&mut graph, 2, 1002, 1, "out", "monitor_MONO");
         let targets = graph.resolve(&[AudioLane::System], None).unwrap();
         assert_eq!(targets.feeds, vec![(1, 2)]);
         assert_eq!(targets.layout.sources[0].right, None);
@@ -670,19 +642,9 @@ mod tests {
     #[test]
     fn stream_ports_wait_for_every_channel() {
         let mut graph = laptop();
-        let aux = |graph: &mut Graph, id: u32, channel: &str| {
-            graph.add_port(
-                id,
-                props(&[
-                    ("node.id", "90"),
-                    ("port.direction", "in"),
-                    ("audio.channel", channel),
-                ]),
-            );
-        };
-        aux(&mut graph, 92, "AUX1");
+        port(&mut graph, 92, 1092, 90, "in", "AUX1");
         assert_eq!(graph.stream_ports(90, 2), None);
-        aux(&mut graph, 91, "AUX0");
+        port(&mut graph, 91, 1091, 90, "in", "AUX0");
         assert_eq!(graph.stream_ports(90, 2), Some(vec![91, 92]));
     }
 
@@ -740,10 +702,7 @@ mod tests {
             "a lost connection loses the output first"
         );
         assert!(graph.remove(40));
-        graph.add_node(
-            40,
-            props(&[("node.name", "a-new-node"), ("media.class", "Audio/Sink")]),
-        );
+        node(&mut graph, 40, 2040, "a-new-node", "Audio/Sink");
         assert_eq!(
             graph.snapshot(&targets, None, false).difference(&baseline),
             Some(crate::capture::DeviceChangeReason::OutputDeviceGone),
