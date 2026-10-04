@@ -10,8 +10,8 @@
 //!   CI platforms: [`chunking`] (window layout, silence-aligned starts,
 //!   the end-aligned final window, the adaptive speech gate), [`decoder`]
 //!   (FluidAudio's TDT loop: `steno_speech`'s shared loop under
-//!   FluidAudio's guards, with steps of its own), [`merge`] (the overlap merge, seam-word
-//!   collapse, seam-gap splice rules),
+//!   FluidAudio's guards, with steps of its own), [`merge`] (the overlap
+//!   merge, seam-word collapse, seam-gap splice rules),
 //!   [`vocab`] (the SentencePiece vocabulary and its derived id sets),
 //!   [`segments`] (tokens to timed words to `RawSegment`s, as
 //!   `StenoSpeech` does it), [`wav`] (the harness's 16 kHz WAV reader) and
