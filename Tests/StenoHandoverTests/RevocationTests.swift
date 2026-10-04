@@ -115,6 +115,16 @@ import Testing
     }
   }
 
+  /// Polls `condition`, set by the engine before a suspension, for at most
+  /// five seconds.
+  private static func until(_ condition: () async -> Bool) async throws {
+    for _ in 0..<5000 {
+      if await condition() { return }
+      try await Task.sleep(for: .milliseconds(1))
+    }
+    Issue.record("the condition never held")
+  }
+
   /// The Mac comes back over the store and inbox of a phone that uploaded
   /// every chunk: after a restart its receipt is only in the store.
   private struct Restarted {
@@ -295,6 +305,62 @@ import Testing
     #expect(await restarted.intake.admissions.count == 0, "nothing is admitted again")
     #expect(await restarted.service.engine.receiptsSnapshot.isEmpty)
     #expect(!gate.timedOut, "nothing waited on the held read")
+  }
+
+  /// A revoke during the `.verifying` save discards the files, but the
+  /// phone, still passing the gate before the delete commits, announces and
+  /// sends the chunks again. The first chunk's save is still held, so the
+  /// store lists no chunk and both are written: a complete partial is back
+  /// for the verify. Only the check after the verify keeps it from the
+  /// intake.
+  @Test(.timeLimit(.minutes(1)))
+  func aRevokeDuringTheVerifyingSaveWhoseFilesCameBackAdmitsNothing() async throws {
+    let gate = try StoreGate()
+    defer { gate.remove() }
+    let chunkSize = 64 * 1024
+    let test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
+    defer { try? FileManager.default.removeItem(at: test.directory) }
+    let engine = test.service.engine
+    let phone = try await EngineClient.paired(test)
+    let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 5)
+    let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+    let chunks = Phone.chunks(of: bytes, size: chunkSize)
+    let id = metadata.recordingID
+    #expect(try await phone.announce(metadata).code == 201)
+
+    // The first chunk's save holds the writer; every later write queues.
+    gate.receiptWrite.arm()
+    let first = Task { await phone.upload(id, chunk: 0, chunks[0]) }
+    await gate.receiptWrite.held()
+    let second = Task { await phone.upload(id, chunk: 1, chunks[1]) }
+    try await Self.until { await engine.activeReceipts[id]?.receivedChunks == [0, 1] }
+    let completing = Task { await phone.complete(id) }
+    try await Self.until { await engine.activeReceipts[id]?.state.kind == .verifying }
+    let revoking = Task { try await test.service.revoke(phone.device.id) }
+    try await Self.until { await engine.revoking[phone.device.id] != nil }
+    #expect(!engine.inbox.hasPartial(id), "the revoke discarded the partial")
+
+    let announcing = Task { try await phone.announce(metadata) }
+    try await Self.until { engine.inbox.loadMetadata(id) != nil }
+    for (index, chunk) in chunks.enumerated() {
+      // Written, then answered 404: the receipt stays out of memory.
+      #expect(await phone.upload(id, chunk: index, chunk).code == 404)
+    }
+    #expect(engine.inbox.hasPartial(id), "the partial is back")
+    gate.receiptWrite.release()
+
+    #expect(await completing.value.code == 401, "the phone learns it was unpaired")
+    try await revoking.value
+    #expect(try await announcing.value.code == 500, "its save fails on the deleted device")
+    #expect(await first.value.code == 204)
+    #expect(await second.value.code == 204)
+    #expect(await test.intake.admissions.count == 0, "the intake never sees the file")
+    #expect(
+      !engine.inbox.hasPartial(id) && !engine.inbox.hasVerified(id, format: metadata.format)
+        && engine.inbox.loadMetadata(id) == nil, "its files are gone")
+    #expect(await engine.receiptsSnapshot.isEmpty)
+    #expect(try await test.store.handoverReceipt(recordingID: id) == nil)
+    #expect(!gate.timedOut, "nothing waited on the held save")
   }
 
   /// A revoke whose store delete throws leaves the device paired and no

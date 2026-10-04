@@ -190,8 +190,13 @@ extension HandoverEngine {
     case .answered(let response):
       return response
     case .file(let file):
-      // Again after the verify, which suspends. Nothing suspends between
-      // this check and the intake call.
+      // Again after the verify, which suspends. A revoke then finds the
+      // receipt in memory and discards the files itself, but the phone,
+      // still passing the gate before the delete commits or after pairing
+      // again, can announce and send the chunks again, so a partial is back.
+      // The hash (of the old file it still read, or of the same bytes sent
+      // again) matches and `promote` moves the new partial: only this check
+      // stops the admit. Nothing suspends between it and the intake call.
       if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
         return refused
       }
