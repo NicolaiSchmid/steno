@@ -6,11 +6,11 @@
 #   0.2.0          0.2.0.65535
 #   0.2.0-rc.3     0.2.0.3      (one label, then a number up to 65534)
 #
-# The fourth field is informational: Windows Installer ignores it when it
-# compares versions, and the bundler's `main.wxs` declares
-# `<MajorUpgrade AllowDowngrades="yes">` (`allowDowngrades` is not set, so
-# its default applies). Across labels it does not follow SemVer either
-# (`beta.12` gives 12, `rc.1` gives 1).
+# The fourth field is informational: Windows Installer compares only the
+# first three, and the bundler's `main.wxs` allows downgrades by default
+# (`<MajorUpgrade AllowDowngrades="yes">`), so any MSI, `0.2.0` over
+# `0.2.0-rc.3` included, replaces the installed one. Across labels the
+# field does not follow SemVer either (`beta.12` gives 12, `rc.1` gives 1).
 #
 # Anything else, or a major or minor above 255 or a patch above 65535 (the
 # WiX limits), is an `::error::` and exit 1, so the release run stops
