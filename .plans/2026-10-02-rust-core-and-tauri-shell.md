@@ -673,15 +673,14 @@ still has to draw the window side. `[ ]` is not ported yet.
   `RunEvent::Exit` and which AppKit waits for, so the shutdown runs there
   (`shut_down_before_exit`). A logoff or a shutdown on Windows arrives the same way:
   tao answers `WM_ENDSESSION` with the run loop's end, `RunEvent::Exit`, and the
-  shutdown runs there until Windows' end-session timeout, which can be shorter, ends
-  the process: Windows allows about five seconds, less than `SHUTDOWN_PATIENCE`
-  (WP10). The updater's relaunch bypasses the exit request and runs the shutdown
-  before it relaunches; on Windows the installer's own exit runs it (`on_before_exit`),
-  and an install that fails after it ends the app once its message is closed. The
-  services runtime is never dropped: dropping it waits, without a bound, for a
-  transcription or a model load in progress. Open: the Windows logoff is untested on
-  hardware and can outlast the end-session timeout (WP10), and a Linux logout that
-  closes the display first ends the app unsaved (WP9).
+  shutdown runs there until Windows' end-session timeout ends the process: about five
+  seconds, less than `SHUTDOWN_PATIENCE` (WP10). The updater's relaunch bypasses the
+  exit request and runs the shutdown before it relaunches; on Windows the installer's
+  own exit runs it (`on_before_exit`), and an install that fails after it ends the app
+  once its message is closed. The services runtime is never dropped: dropping it
+  waits, without a bound, for a transcription or a model load in progress. Open: the
+  Windows logoff is untested on hardware and can outlast the end-session timeout
+  (WP10), and a Linux logout that closes the display first ends the app unsaved (WP9).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes), and the tray's setters wait for the main thread when called from

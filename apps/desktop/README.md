@@ -56,9 +56,8 @@ reach it these ways:
   that fails after that ends the app once its message is closed.
 - A logoff or a shutdown on Windows also arrives as `RunEvent::Exit` (tao
   answers `WM_ENDSESSION` with it), and the shutdown runs until Windows'
-  end-session timeout, which can be shorter, ends the process: Windows
-  allows about five seconds, less than the ten above. Untested on hardware
-  (WP10).
+  end-session timeout ends the process: about five seconds, less than the
+  ten above. Untested on hardware (WP10).
 
 Snapshots reach the windows, the tray and the panels from the main thread
 (`WindowSink` in `host.rs`): the host emits under its `publishing` lock,

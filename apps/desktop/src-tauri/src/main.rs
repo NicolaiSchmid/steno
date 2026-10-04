@@ -284,8 +284,8 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         // macOS raise no request (tao answers `applicationWillTerminate`,
         // which AppKit waits for), nor do a logoff and a shutdown on
         // Windows (tao answers `WM_ENDSESSION`), so the shutdown runs
-        // here, on Windows until the end-session timeout, which can be
-        // shorter, ends the process.
+        // here, on Windows until the end-session timeout (about five
+        // seconds) ends the process.
         tauri::RunEvent::Exit => shut_down_before_exit(app),
         // The main window closes: hidden and kept while a tray can bring
         // it back (`hides_on_close`); destroyed otherwise. `has_tray` is
