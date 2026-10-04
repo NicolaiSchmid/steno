@@ -8,8 +8,11 @@
 //!
 //! - Platform-independent, built everywhere so its tests run on all three
 //!   CI platforms: [`chunking`] (window layout, silence-aligned starts,
-//!   the end-aligned final window, the adaptive speech gate), [`merge`]
-//!   (the overlap merge, seam-word collapse, seam-gap splice rules),
+//!   the end-aligned final window, the adaptive speech gate), [`decoder`]
+//!   (FluidAudio's TDT loop: `steno_speech`'s shared loop under
+//!   FluidAudio's guards, the last window's flush and the warm-up
+//!   window's emission cutoff), [`merge`] (the overlap merge, seam-word
+//!   collapse, seam-gap splice rules),
 //!   [`vocab`] (the SentencePiece vocabulary and its derived id sets),
 //!   [`segments`] (tokens to timed words to `RawSegment`s, as
 //!   `StenoSpeech` does it), [`wav`] (the harness's 16 kHz WAV reader) and
@@ -17,8 +20,8 @@
 //! - macOS only (plain names, because the modules do not exist in a
 //!   Linux or Windows build of these docs): `coreml` (the one module
 //!   allowed `unsafe`, wrapping `objc2-core-ml`), `backend` (the four
-//!   model calls: preprocessor, encoder, decoder step, joint step),
-//!   `decoder` (the greedy TDT loop), `pipeline` (windows in parallel,
+//!   model calls: preprocessor, encoder, decoder step, joint step, and the
+//!   window the shared loop decodes), `pipeline` (windows in parallel,
 //!   merge, repair), `engine` (the `SpeechEngine` implementation) and
 //!   `parity` (the harness against the Swift baseline).
 //!
@@ -30,9 +33,9 @@
 //! around it change in most FluidAudio releases, which is why the parity
 //! harness exists.
 //!
-//! Until the shared-decoder follow-up moves it onto `steno-speech`'s
-//! `SpeechBackend` loop, this crate carries its own pipeline over the four
-//! backend calls; that step swaps the loop and keeps the backend.
+//! The decode loop is `steno_speech`'s (plan invariant 4); the chunker,
+//! the merge, the recovery and the segmentation are still this crate's
+//! own, and the WP4 notes in the plan list where they differ.
 
 #![deny(unsafe_code)]
 // The docs name FluidAudio, CoreML, SentencePiece and the work packages on
@@ -40,6 +43,7 @@
 #![allow(clippy::doc_markdown)]
 
 pub mod chunking;
+pub mod decoder;
 pub mod merge;
 pub mod segments;
 pub mod vocab;
@@ -54,8 +58,6 @@ pub mod backend;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 pub mod coreml;
-#[cfg(target_os = "macos")]
-pub mod decoder;
 #[cfg(target_os = "macos")]
 pub mod engine;
 #[cfg(target_os = "macos")]
@@ -80,4 +82,17 @@ pub struct Token {
     pub confidence: f32,
     /// Frames the decoder advanced after emitting; `0` when unknown.
     pub duration: usize,
+}
+
+/// The shared decoder's token with the id as this crate's vocabulary
+/// indexes it.
+impl From<steno_speech::Token> for Token {
+    fn from(token: steno_speech::Token) -> Self {
+        Token {
+            id: token.id as usize,
+            frame: token.frame,
+            confidence: token.confidence,
+            duration: token.duration,
+        }
+    }
 }

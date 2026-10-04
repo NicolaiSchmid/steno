@@ -1,8 +1,9 @@
 //! Steno's speech pipeline above the tensors: voice activity detection, the
 //! pause-aligned chunker, the greedy TDT decoder, the overlap merge and the
 //! mapping from pieces to segments, with the model calls behind one trait
-//! (ONNX Runtime here) so the `CoreML` backend can later run the same loop;
-//! the WP4 notes in the plan list where the two differ today. Plan:
+//! (ONNX Runtime here). The `CoreML` backend runs the same decode loop
+//! through [`TdtModel`]; the WP4 notes in the plan list where the rest of
+//! its pipeline still differs. Plan:
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md` (WP4, invariant 4) and
 //! decisions 1 to 5 of `.plans/2026-10-01-cross-platform-speech-stack.md`.
 //!
@@ -11,7 +12,8 @@
 //!   logits split.
 //! - [`features`]: the `NeMo` mel preprocessor in Rust.
 //! - [`vocab`]: `tokens.txt`, word boundaries, the splice-safe set.
-//! - [`decoder`]: the greedy TDT loop over one encoder window.
+//! - [`decoder`]: the greedy TDT loop over one encoder window, shared with
+//!   the `CoreML` backend through [`TdtModel`].
 //! - [`vad`]: [`VoiceActivityDetector`], Silero through ONNX Runtime and an
 //!   energy detector for tests.
 //! - [`chunker`]: the longest-pause layout with the 60 s memory clamp.
@@ -124,7 +126,9 @@ pub use backend::{
     JointDecision, ModelShape, SAMPLE_RATE, SpeechBackend, sample_count, split_logits,
 };
 pub use chunker::{Chunk, ChunkerConfig, Cut};
-pub use decoder::{DecodeStats, DecoderConfig, Token};
+pub use decoder::{
+    DecodeStats, Decoded, DecoderConfig, TdtModel, Token, TokenBudget, TokenDuration, WindowEnd,
+};
 pub use engine::OnnxSpeechEngine;
 pub use error::{SidecarError, SpeechError};
 pub use features::MelExtractor;

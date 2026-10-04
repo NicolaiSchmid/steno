@@ -13,6 +13,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+use steno_speech::DecodeStats;
+
 use crate::SpeechError;
 use crate::Token;
 use crate::backend::{Backend, Scratch};
@@ -21,7 +23,7 @@ use crate::chunking::{
     adaptive_speech_rms_threshold, encoder_frames, plan_windows, silence_aligned_chunk_starts,
     speech_end_samples, speech_like_seconds,
 };
-use crate::decoder::{DecodeCounts, Hypothesis, WindowSpec, decode_window};
+use crate::decoder::{Hypothesis, WindowSpec, decode_window};
 use crate::merge::{
     collapse_seam_word_duplicates, enforce_monotonic, merge_chunks, splice_candidate, word_neighbor,
 };
@@ -424,11 +426,10 @@ impl Transcriber {
         let encoder = self.backend.encode(&mel)?;
         let after_encoder = Instant::now();
         let actual_frames = encoder_frames(effective_len);
-        let mut counts = DecodeCounts::default();
+        let mut counts = DecodeStats::default();
         let hypothesis = decode_window(
-            &self.backend,
-            scratch,
-            &encoder,
+            &mut self.backend.window_model(scratch, &encoder),
+            encoder.valid,
             WindowSpec {
                 actual_frames,
                 frame_offset: placement.frame_offset,

@@ -4,8 +4,8 @@
 //! range the layout chose; a window is the range actually decoded, the
 //! chunk itself or, after a recovery, the chunk with more audio around it.
 //! Generic over [`SpeechBackend`], so a fake backend drives it in tests;
-//! the integration step moves the `CoreML` backend of #163 behind this
-//! trait, and the WP4 notes in the plan list where the loops differ.
+//! the `CoreML` backend of #163 shares the decode loop but not yet this
+//! pipeline, and the WP4 notes in the plan list where the two differ.
 //! Swift: `Sources/StenoSpeech/Engines/ParakeetEngine.swift` and
 //! `ParakeetMapping.swift`, with `FluidAudio`'s `ChunkProcessor` in between.
 

@@ -1,8 +1,9 @@
 //! The four model calls of a Parakeet TDT transducer behind one trait, so
 //! the decoder, the chunker and the merge are written once over any
-//! backend ([`crate::onnx`] here); the integration step moves the `CoreML`
-//! backend of #163 behind this trait, and the WP4 notes in the plan list
-//! where the loops differ.
+//! backend ([`crate::onnx`] here). The `CoreML` backend of #163 already
+//! runs the decoder through its narrower [`TdtModel`](crate::TdtModel);
+//! moving it behind this trait is the rest of the integration, and the WP4
+//! notes in the plan list where the pipelines differ.
 //! Swift: `FluidAudio`'s `AsrModels` (Preprocessor, Encoder, Decoder,
 //! `JointDecisionv3`), which `ParakeetEngine` drives through `AsrManager`.
 //!
