@@ -249,7 +249,7 @@ every build, debug and test included. Where it lands:
 bundle as its installer would (`dpkg-deb -x`, `--appimage-extract`, an
 administrative MSI install, a silent NSIS install), finds the two binaries side
 by side and starts the sidecar from there, which greets and exits when its
-stdin ends (the NSIS check installs silently into a scratch directory).
+stdin ends.
 ONNX Runtime is linked statically, so on macOS and Linux the sidecar needs
 no library beside it. On Windows both binaries load `DirectML.dll`, which
 the MSI picks up from the build directory on its own and the NSIS
@@ -416,9 +416,9 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 
 The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
 removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it lands
-the desktop app installs beside the Swift app on the Mac. WP6b filled the host's half of the WP8 seams except four, which wait
-for work outside the shell (the plan's WP6b row): the detection
-controller (WP5) is not ported, so nothing raises the prompt
+the desktop app installs beside the Swift app on the Mac. WP6b filled the
+host's half of the WP8 seams except four, which wait for work outside the
+shell (the plan's WP6b row): the detection controller (WP5) is not ported, so nothing raises the prompt
 (`panels::set_prompt`) and its X (`panels::dismiss_prompt`) tells no
 one; the host's `Permissions` stay the services' fake (all granted),
 because `permissions` answers `unknown` off the Mac and for the Mac's
@@ -436,11 +436,11 @@ no `ExitRequested`, so a recording is not saved there and the next
 launch marks it failed (Swift's interrupted reason). The host may
 treat the main window as always present: a close hides it, or ends the
 process when no tray stands, so publishing to it never fails for want of a
-window. Launch at login is a Launch Agent, not `SMAppService`; the cutover has
-to retire the Swift registration so the user does not get two login items
-(the plan's parity list, `.plans/2026-10-04-mac-cutover.md`). The macOS menu bar has no Record
-menu yet (`⌘⇧R` and Record In Person are the tray's and the sidebar's),
-and no Find Meetings (`⌘F`). Updates are checked only when asked (the
+window. Launch at login is a Launch Agent, not `SMAppService`; the cutover
+has to retire the Swift registration so the user does not get two login
+items (the plan's parity list, `.plans/2026-10-04-mac-cutover.md`). The
+macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are the
+tray's and the sidebar's), and no Find Meetings (`⌘F`). Updates are checked only when asked (the
 tray's item, Settings), where Sparkle checks daily on its own. On macOS
 the system audio permission has no status API; the audio crate's probe
 (WP5) records it and until then it reads `unknown`. The panels are
