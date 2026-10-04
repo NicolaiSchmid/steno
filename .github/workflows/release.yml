@@ -137,16 +137,19 @@ jobs:
           keychain_password="$(openssl rand -hex 24)"
           cert_path="$RUNNER_TEMP/steno-release.p12"
           echo "$P12" | base64 --decode > "$cert_path"
+          # A runner lost mid-run leaves its keychain file behind.
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           security create-keychain -p "$keychain_password" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$keychain_password" "$KEYCHAIN_PATH"
           security import "$cert_path" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$KEYCHAIN_PATH" >/dev/null
           # Put the throwaway keychain in front of the search list as it is
-          # (on Forge it may hold more than the login keychain).
+          # (on Forge it may hold more than the login keychain), read first so
+          # a failing `security` stops the step.
+          list="$(security list-keychains -d user | sed 's/^ *"//; s/"$//')"
           before=()
-          while IFS= read -r line; do [ -n "$line" ] && before+=("$line"); done \
-            < <(security list-keychains -d user | sed 's/^ *"//; s/"$//')
+          while IFS= read -r line; do [ -n "$line" ] && before+=("$line"); done <<< "$list"
           security list-keychains -d user -s "$KEYCHAIN_PATH" "${before[@]}"
           rm -f "$cert_path"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -q 'Developer ID Application' \

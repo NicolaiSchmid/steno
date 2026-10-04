@@ -176,15 +176,15 @@ final class ReleaseScriptsTests: XCTestCase {
 
   /// The throwaway keychain goes in front of the runner user's keychain
   /// search list as it is, and the cleanup takes only that keychain off the
-  /// list as it is then: never a saved copy, never a reset to a guess.
+  /// list as it is then.
   func testReleaseWorkflowKeepsTheOtherKeychainsOnTheSearchList() throws {
     let workflow = try String(
       contentsOf: TestSupport.repositoryRoot.appendingPathComponent(
         ".github/workflows/release.yml"),
       encoding: .utf8)
     let saved = try XCTUnwrap(
-      workflow.range(of: "security list-keychains -d user | ")?.lowerBound,
-      "the import step reads the current search list")
+      workflow.range(of: "list=\"$(security list-keychains -d user | ")?.lowerBound,
+      "the import step reads the current search list into a variable, so a failure stops it")
     let cleanup = try XCTUnwrap(workflow.range(of: "- name: Remove keychain and keys")?.lowerBound)
     XCTAssertLessThan(saved, cleanup)
     let cleanupBody = workflow[cleanup...]
