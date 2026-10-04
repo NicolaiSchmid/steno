@@ -237,31 +237,64 @@ async fn the_provider_follows_a_fallback_after_the_load() {
 }
 
 /// The transcript carries the provider too: a child that fell back to
-/// the CPU mid-job and then dies, before any health request, ended on the
-/// CPU, so the next child is asked for `DirectML` again. The crash report
-/// holds the child's line about the fallback, written once though two
-/// answers followed it.
+/// the CPU mid-job and then dies between jobs, before any health request,
+/// ended on the CPU, so the child that replaces it is asked for `DirectML`
+/// again.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_dies_after_falling_back_to_the_cpu_leaves_directml_on() {
     let (engine, _dir) = engine_with_fault("fallback", |c| c.options.directml = true);
     assert_works(&engine, &tone(0.5)).await;
-    assert_works(&engine, &tone(0.5)).await;
     let pid = engine.pid().unwrap();
     assert!(kill(pid));
-    // Not `gone_soon`: the client has not reaped the child, and a zombie
-    // counts as alive.
-    std::thread::sleep(Duration::from_millis(200));
-    let error = engine.transcribe(&tone(0.1), None).await.unwrap_err();
-    match sidecar_error(error.as_ref()) {
-        SidecarError::Crashed { stderr, .. } => {
-            assert_eq!(stderr.matches(FALLBACK_NOTICE).count(), 1, "{stderr}");
-        }
-        other => panic!("{other}"),
-    }
-    engine.prepare().await.unwrap();
+    // Dead, a zombie until the engine reaps it.
+    assert!(within_ten_seconds(|| ended(pid).then_some(())).is_some());
+    assert_works(&engine, &tone(0.5)).await;
     assert_eq!(engine.spawns(), 2);
     assert_eq!(provider(&engine).await, Some(ASKED_FOR_DIRECTML));
     assert!(!directml_switched_off());
+}
+
+/// Driven by hand: the line about the fallback goes to stderr once,
+/// though every answer after it reports the CPU.
+#[test]
+fn a_child_says_once_that_its_encoder_fell_back_to_the_cpu() {
+    let mut child = spawn_by_hand(&["--fake-engine", "--fault", "fallback"]);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    ready(&mut stdout);
+    let samples = [0.5f32; 160];
+    for id in 1..=2 {
+        let request = Request::Transcribe {
+            id,
+            sample_count: samples.len() as u64,
+            hint: None,
+        };
+        protocol::write_frame(&mut stdin, &request, &protocol::encode_samples(&samples)).unwrap();
+        loop {
+            match protocol::read_header::<_, Reply>(&mut stdout)
+                .unwrap()
+                .unwrap()
+            {
+                Reply::Transcript { provider, .. } => {
+                    assert_eq!(provider, Some(EncoderProvider::Cpu));
+                    break;
+                }
+                Reply::Memory { .. } => {}
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+    drop(stdin);
+    let status = exit_status(&mut child, "the child outlived its stdin");
+    assert!(status.success(), "{status}");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    assert_eq!(stderr.matches(FALLBACK_NOTICE).count(), 1, "{stderr}");
 }
 
 /// An error the child reports and a release are no reason to give up on

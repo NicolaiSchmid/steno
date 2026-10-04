@@ -552,7 +552,7 @@ fn failure_kind(error: &SidecarError) -> &'static str {
         SidecarError::Spawn { .. } => "it could not start",
         SidecarError::Pipe(_) => "a pipe to it failed",
         SidecarError::Protocol(_) => "it broke the protocol",
-        SidecarError::Crashed { .. } => "it died mid-request",
+        SidecarError::Crashed { .. } => "it died",
         SidecarError::Timeout { .. } => "it did not answer in time",
         SidecarError::MemoryCeiling { .. } => "it passed the memory ceiling",
         SidecarError::Remote(_) => "it reported an error",
