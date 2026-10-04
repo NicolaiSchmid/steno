@@ -1,12 +1,12 @@
 //! The parent side: spawns `steno-speech-sidecar`, supervises it and
 //! implements `SpeechEngine` over it. Every request has a deadline; the
 //! reader thread checks the child's heartbeat against the memory ceiling
-//! and ends the current request (or the next, for an idle child) once it
-//! is over; a child that dies, hangs, overruns the ceiling or breaks the
-//! protocol is killed and reaped, the call returns
-//! [`SpeechError::Sidecar`], and the next call starts a new child and
-//! loads the models again. Nothing here can take the app down with the
-//! child.
+//! and ends the current request once it is over. A child that dies,
+//! hangs, overruns the ceiling or breaks the protocol during a request is
+//! killed and reaped, and the call returns [`SpeechError::Sidecar`]. One
+//! that does so between requests is replaced by the next `prepare` or
+//! `transcribe` without an error. Either way the next child loads the
+//! models again. Nothing here can take the app down with the child.
 //!
 //! After a child that crashed, hung or overran the memory ceiling with
 //! `DirectML` in use, every later child in this process loads on the CPU
@@ -221,9 +221,10 @@ fn stderr_level(line: &str) -> tracing::Level {
 }
 
 /// How long a crash report waits for the stderr reader to reach the end
-/// of a dead child's stderr, which a loaded machine may take a while to
-/// schedule.
-const STDERR_DRAIN: Duration = Duration::from_secs(1);
+/// of a dead child's stderr, which a loaded machine may take more than a
+/// second to schedule. The wait ends as soon as stderr closes, so only a
+/// child whose stderr outlives it (a grandchild holding it) costs this.
+const STDERR_DRAIN: Duration = Duration::from_secs(5);
 
 /// The last lines of the child's stderr and the thread that reads them.
 struct StderrTail {
@@ -456,7 +457,7 @@ impl SidecarProcess {
     /// Why this child, idle since its last request, cannot take the next
     /// one: it has exited (killed for memory by the system, say), or the
     /// reader queued the end of its stdout, garbage or a heartbeat over the
-    /// ceiling. Between requests nothing else is queued.
+    /// ceiling; anything else queued between requests is a fault too.
     fn failed_while_idle(&mut self) -> Option<SidecarError> {
         if let Ok(Some(_)) = self.child.try_wait() {
             return Some(self.crashed(None));

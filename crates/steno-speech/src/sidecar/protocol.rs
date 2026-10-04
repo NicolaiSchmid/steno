@@ -12,9 +12,10 @@
 //! The child sends [`Reply::Ready`] first, then [`Reply::Memory`] every
 //! heartbeat interval from a thread of its own, between and during
 //! requests, and one reply per request with the request's `id`. It exits
-//! after [`Request::Shutdown`] and when its stdin or stdout closes, so a
-//! dead parent leaves no child behind, and with status 2, after a line on
-//! stderr, on a frame it cannot read.
+//! with status 0 after [`Request::Shutdown`] and when its stdin or stdout
+//! closes, so a dead parent leaves no child behind. It exits with status
+//! 2, after a line on stderr, when it cannot read a frame, write a reply
+//! or start its heartbeat.
 //!
 //! ```
 //! use steno_speech::sidecar::protocol::{self, Request};
