@@ -79,7 +79,7 @@ export function OpenSource() {
 							<div className="flex items-center gap-2 font-mono text-[11px] text-fg-dim">
 								<span>MIT licensed</span>
 								<span aria-hidden="true">·</span>
-								<span>Rust core · Tauri shell</span>
+								<span>Swift Mac app · Rust core · Tauri shell</span>
 							</div>
 							<div className="flex flex-wrap items-center gap-4">
 								<a

@@ -16,7 +16,7 @@ const jsonLd = {
 	description: site.description,
 	url: site.url,
 	applicationCategory: "BusinessApplication",
-	operatingSystem: "macOS; Windows and Linux in preview",
+	operatingSystem: "macOS",
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	license: "https://opensource.org/licenses/MIT",
 	downloadUrl: site.download,
