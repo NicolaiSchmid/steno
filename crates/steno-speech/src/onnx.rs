@@ -117,6 +117,7 @@ pub fn init_environment() -> bool {
 /// [`init_environment`] configures.
 fn builder(options: &OnnxOptions) -> Result<SessionBuilder, SpeechError> {
     init_environment();
+    let options_error = |e: ort::Error<SessionBuilder>| SpeechError::SessionOptions(e.to_string());
     Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(options_error)?
@@ -124,13 +125,6 @@ fn builder(options: &OnnxOptions) -> Result<SessionBuilder, SpeechError> {
         .map_err(options_error)?
         .with_inter_threads(options.inter_threads.max(1))
         .map_err(options_error)
-}
-
-/// A builder error as text: it carries the builder for recovery, which is
-/// not `Send`.
-#[allow(clippy::needless_pass_by_value)] // the shape `map_err` hands over
-fn options_error(error: ort::Error<SessionBuilder>) -> SpeechError {
-    SpeechError::SessionOptions(error.to_string())
 }
 
 /// Opens one model file on the CPU with the shared options.
@@ -203,26 +197,20 @@ impl AcceleratedSession {
     /// Opens `path` on `DirectML` first when asked for on Windows, on the
     /// CPU after any failure there and everywhere else.
     fn open(path: &Path, options: &OnnxOptions) -> Result<Self, SpeechError> {
-        let mut opened = AcceleratedSession {
-            session: None,
-            provider: ExecutionProvider::Cpu,
+        let opened = |session, provider| AcceleratedSession {
+            session: Some(session),
+            provider,
             path: path.to_path_buf(),
             options: options.clone(),
         };
         #[cfg(windows)]
         if options.directml {
             match open_directml(path, options) {
-                Ok(session) => {
-                    opened.session = Some(session);
-                    opened.provider = ExecutionProvider::DirectMl;
-                }
+                Ok(session) => return Ok(opened(session, ExecutionProvider::DirectMl)),
                 Err((fallback, error)) => log_fallback(fallback, &error),
             }
         }
-        if opened.session.is_none() {
-            opened.session = Some(open_session(path, options)?);
-        }
-        Ok(opened)
+        Ok(opened(open_session(path, options)?, ExecutionProvider::Cpu))
     }
 
     fn session(&self) -> Result<&Session, SpeechError> {
@@ -488,9 +476,7 @@ impl OnnxBackend {
             vocab,
         ))
     }
-}
 
-impl OnnxBackend {
     /// Where the encoder runs: [`ExecutionProvider::DirectMl`] only when
     /// [`OnnxOptions::directml`] asked for it on Windows and the probe
     /// passed; a failed run on `DirectML` moves it to the CPU.
@@ -559,9 +545,8 @@ impl SpeechBackend for OnnxBackend {
                 data: Vec::new(),
             });
         }
-        let inputs = &self.encoder_inputs;
         self.encoder
-            .run(|session| encode_on(session, inputs, features))
+            .run(|session| encode_on(session, &self.encoder_inputs, features))
     }
 
     fn decoder_step(
