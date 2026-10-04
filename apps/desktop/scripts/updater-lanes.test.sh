@@ -64,6 +64,7 @@ expect 1.0.0-0a 1.0.0-1 '' desktop-beta
 # Build metadata does not count.
 expect 0.2.0+2 0.2.0+5 0.2.0+5 desktop-stable,desktop-beta
 expect 0.2.0+01 0.2.0 0.2.0 desktop-stable,desktop-beta
+expect 0.2.0+build.5 0.2.0 0.2.0 desktop-stable,desktop-beta
 
 refuse x '' ''
 refuse 0.2 '' ''
