@@ -27,7 +27,7 @@ use super::protocol::{self, FrameError, PROTOCOL_VERSION, Reply, Request};
 use crate::engine::{OnnxSpeechEngine, blocking, log_download};
 use crate::error::{SidecarError, SpeechError};
 use crate::model_store::{ModelAsset, ModelStore};
-use crate::onnx::OnnxOptions;
+use crate::onnx::{ExecutionProvider, OnnxOptions};
 
 /// The binary's file name, `steno-speech-sidecar` plus `.exe` on Windows.
 pub const SIDECAR_BINARY: &str = if cfg!(windows) {
@@ -113,6 +113,9 @@ pub struct SidecarHealth {
     pub rss_bytes: u64,
     /// Whether its models are loaded.
     pub loaded: bool,
+    /// Where its encoder runs, as it reported when it loaded; `None`
+    /// before then.
+    pub provider: Option<ExecutionProvider>,
 }
 
 /// What the reader threads hand the waiting request. Heartbeats are not
@@ -140,7 +143,8 @@ struct SidecarProcess {
     stderr: Arc<Mutex<VecDeque<String>>>,
     pid: u32,
     next_id: u64,
-    loaded: bool,
+    /// Where the child's encoder runs, once its models are loaded.
+    loaded: Option<ExecutionProvider>,
     ceiling: u64,
 }
 
@@ -277,7 +281,7 @@ impl SidecarProcess {
             stderr: tail,
             pid,
             next_id: 1,
-            loaded: false,
+            loaded: None,
             ceiling,
         };
         match process.wait_for(None, config.startup_timeout)? {
@@ -463,7 +467,7 @@ impl Shared {
     /// Makes sure a child runs with its models loaded, installing them
     /// first if need be. Blocking; the caller holds the lock.
     fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
-        if slot.as_ref().is_some_and(|p| p.loaded) {
+        if slot.as_ref().is_some_and(|p| p.loaded.is_some()) {
             return Ok(());
         }
         self.install()?;
@@ -480,18 +484,25 @@ impl Shared {
                 models_root: self.store.root().to_path_buf(),
                 intra_threads: self.config.options.intra_threads,
                 inter_threads: self.config.options.inter_threads,
+                directml: self.config.options.directml,
             },
             Vec::new(),
             self.config.load_timeout,
             "loaded",
             |reply| match reply {
-                Reply::Loaded { .. } => Ok(()),
+                Reply::Loaded { provider, .. } => Ok(provider),
                 other => Err(other),
             },
         );
         match reply {
-            Ok(()) => {
-                process.loaded = true;
+            Ok(provider) => {
+                tracing::info!(
+                    pid = process.pid,
+                    provider = provider.as_str(),
+                    directml_requested = self.config.options.directml,
+                    "speech sidecar loaded"
+                );
+                process.loaded = Some(provider);
                 Ok(())
             }
             Err(error) => Err(self.kill_unless_remote(slot, error).into()),
@@ -618,6 +629,7 @@ impl SidecarSpeechEngine {
             let Some(process) = slot.as_mut() else {
                 return Ok(None);
             };
+            let provider = process.loaded;
             process
                 .request(
                     |id| Request::Health { id },
@@ -634,6 +646,7 @@ impl SidecarSpeechEngine {
                             pid,
                             rss_bytes,
                             loaded,
+                            provider,
                         }),
                         other => Err(other),
                     },

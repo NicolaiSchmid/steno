@@ -55,7 +55,8 @@ use std::time::Duration;
 use steno_core::{AudioBuffer16k, LanguageTag, RawSegment};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
-    ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, Transcriber, VadConfig,
+    ExecutionProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
+    Transcriber, VadConfig,
 };
 
 steno_core::string_enum! {
@@ -152,7 +153,12 @@ impl Options {
 
 /// What the child runs requests on.
 trait Engine {
-    fn load(&mut self, models_root: &Path, options: &OnnxOptions) -> Result<(), String>;
+    /// Loads the models once; returns where the encoder runs.
+    fn load(
+        &mut self,
+        models_root: &Path,
+        options: &OnnxOptions,
+    ) -> Result<ExecutionProvider, String>;
     fn loaded(&self) -> bool;
     fn transcribe(
         &mut self,
@@ -168,18 +174,24 @@ struct OnnxEngine {
 }
 
 impl Engine for OnnxEngine {
-    fn load(&mut self, models_root: &Path, options: &OnnxOptions) -> Result<(), String> {
-        if self.transcriber.is_none() {
-            let transcriber = OnnxSpeechEngine::load_installed(
-                &ModelStore::new(models_root),
-                options,
-                PipelineConfig::default(),
-                VadConfig::default(),
-            )
-            .map_err(|e| e.to_string())?;
-            self.transcriber = Some(transcriber);
-        }
-        Ok(())
+    fn load(
+        &mut self,
+        models_root: &Path,
+        options: &OnnxOptions,
+    ) -> Result<ExecutionProvider, String> {
+        let transcriber = match &mut self.transcriber {
+            Some(transcriber) => transcriber,
+            None => self.transcriber.insert(
+                OnnxSpeechEngine::load_installed(
+                    &ModelStore::new(models_root),
+                    options,
+                    PipelineConfig::default(),
+                    VadConfig::default(),
+                )
+                .map_err(|e| e.to_string())?,
+            ),
+        };
+        Ok(transcriber.backend().provider())
     }
 
     fn loaded(&self) -> bool {
@@ -230,9 +242,15 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
-    fn load(&mut self, _: &Path, _: &OnnxOptions) -> Result<(), String> {
+    /// Reports `DirectML` when asked for it, as if the probe had passed, so
+    /// the tests see the setting reach the child and the answer come back.
+    fn load(&mut self, _: &Path, options: &OnnxOptions) -> Result<ExecutionProvider, String> {
         self.loaded = true;
-        Ok(())
+        Ok(if options.directml {
+            ExecutionProvider::DirectMl
+        } else {
+            ExecutionProvider::Cpu
+        })
     }
 
     fn loaded(&self) -> bool {
@@ -385,13 +403,15 @@ pub fn serve(options: &Options) -> ExitCode {
                 models_root,
                 intra_threads,
                 inter_threads,
+                directml,
             } => {
                 let options = OnnxOptions {
                     intra_threads,
                     inter_threads,
+                    directml,
                 };
                 match engine.load(&models_root, &options) {
-                    Ok(()) => Reply::Loaded { id },
+                    Ok(provider) => Reply::Loaded { id, provider },
                     Err(error) => Reply::Failed { id, error },
                 }
             }

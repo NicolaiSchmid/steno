@@ -36,6 +36,15 @@ pub struct SpeechSettings {
     /// macOS only: run the ONNX sidecar instead of `CoreML`. Ignored
     /// elsewhere, where the sidecar is the only choice.
     pub onnx_sidecar_on_mac: bool,
+    /// Windows only: run the speech encoder on `DirectML` when a DirectX 12
+    /// GPU takes it, on the CPU otherwise
+    /// ([`OnnxOptions::directml`](crate::OnnxOptions::directml),
+    /// the probe in [`crate::onnx`]). Off by default until gate G4 of the
+    /// speech-stack plan is measured: no Windows machine with a GPU has
+    /// run it, its speed on an integrated GPU and its transcripts against
+    /// the CPU's are unknown, and a driver fault inside a run ends the
+    /// sidecar and the job with it. Ignored elsewhere.
+    pub directml_on_windows: bool,
     /// A mirror the speech models (Silero VAD and the Parakeet export) are
     /// fetched from instead of their hosts ([`ModelStore::with_mirror`]);
     /// the diarizer's models keep their hosts. `None` uses the hosts.
@@ -77,6 +86,7 @@ mod tests {
     #[test]
     fn the_sidecar_is_the_default_off_the_mac_and_the_fallback_on_it() {
         let default = SpeechSettings::default();
+        assert!(!default.directml_on_windows, "DirectML is opt-in");
         assert_eq!(default.runtime_on(true), SpeechRuntime::CoreMlInProcess);
         assert_eq!(default.runtime_on(false), SpeechRuntime::OnnxSidecar);
         let fallback = SpeechSettings {
@@ -97,12 +107,13 @@ mod tests {
     fn settings_round_trip_in_camel_case_and_default_when_absent() {
         let settings = SpeechSettings {
             onnx_sidecar_on_mac: true,
+            directml_on_windows: true,
             models_mirror: Some("http://mirror.example:8000/models".to_owned()),
         };
         let json = steno_core::json::to_column_string(&settings).unwrap();
         assert_eq!(
             json,
-            r#"{"modelsMirror":"http://mirror.example:8000/models","onnxSidecarOnMac":true}"#
+            r#"{"directmlOnWindows":true,"modelsMirror":"http://mirror.example:8000/models","onnxSidecarOnMac":true}"#
         );
         assert_eq!(
             serde_json::from_str::<SpeechSettings>(&json).unwrap(),

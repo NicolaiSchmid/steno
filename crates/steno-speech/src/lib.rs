@@ -22,7 +22,9 @@
 //! - [`language`]: the per-segment language tagger.
 //! - [`pipeline`]: [`Transcriber`], which runs the above in order and
 //!   retries empty chunks with a wider window.
-//! - [`onnx`]: the ONNX Runtime backend over our fp32 export.
+//! - [`onnx`]: the ONNX Runtime backend over our fp32 export, with the
+//!   encoder on `DirectML` on Windows when the settings ask and the probe
+//!   passes ([`ExecutionProvider`]).
 //! - [`model_store`]: the manifest, its two hosts and the checksummed,
 //!   resumable download.
 //! - [`engine`]: [`OnnxSpeechEngine`], the in-process `SpeechEngine` the
@@ -135,7 +137,7 @@ pub use model_store::{
     DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore, PARAKEET_V3_FP32_REVISION,
     STENO_MODELS_REPO,
 };
-pub use onnx::{OnnxBackend, OnnxOptions};
+pub use onnx::{ExecutionProvider, OnnxBackend, OnnxOptions};
 pub use pipeline::{PipelineConfig, RecoveryConfig, Transcriber, Transcript};
 pub use runtime::{SpeechRuntime, SpeechSettings};
 pub use segmentation::{TokenAggregator, TranscriptSegmenter};

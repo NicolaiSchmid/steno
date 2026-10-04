@@ -21,6 +21,14 @@ tracing.workspace = true
 ureq.workspace = true
 whatlang.workspace = true
 
+# DirectML on Windows (`onnx::ExecutionProvider::DirectMl`). It moves no
+# binary: pyke publishes only DirectML builds of ONNX Runtime for Windows, so
+# the build `download-binaries` fetches there is the same with or without
+# the feature, which only adds `ort::ep::DirectML` to the API. Elsewhere the
+# feature stays off (no Linux or macOS build carries DirectML).
+[target.'cfg(windows)'.dependencies]
+ort = { workspace = true, features = ["directml"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 

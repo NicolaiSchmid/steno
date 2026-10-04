@@ -19,17 +19,37 @@
 //! `open_session`, in `steno-diarize` through its `session`. A
 //! Microsoft-built ONNX Runtime library would otherwise report model and
 //! usage details to Microsoft.
+//!
+//! # `DirectML`
+//!
+//! On Windows the encoder can run on `DirectML`, on any DirectX 12 GPU
+//! (integrated ones included), when [`OnnxOptions::directml`] asks for it
+//! (speech-stack decision 4; off by default, see
+//! [`SpeechSettings::directml_on_windows`](crate::SpeechSettings::directml_on_windows)).
+//! The probe is the session itself: `DirectML` must be in the ONNX Runtime
+//! build, find a GPU (the device filter leaves out software adapters such
+//! as WARP), take the session, and run the encoder once on a second of
+//! silence. Any of those failing opens the encoder on the CPU instead, and
+//! a later run that fails on `DirectML` moves it to the CPU for good and
+//! runs again there, so a GPU that cannot do the work never fails the job
+//! (an abort inside the driver still ends the process, which is why it is
+//! the sidecar's). The provider in force is logged at info level, without
+//! paths; [`OnnxBackend::provider`] reports it. Only the encoder moves: the
+//! decoder and the joiner run once per token on one frame, where a round
+//! trip to the GPU costs more than the step, and Silero runs on 32 ms
+//! frames. Gate G4 (at least three times the CPU's speed on an integrated
+//! GPU) is open: no Windows machine with a GPU has run this.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use ort::session::builder::GraphOptimizationLevel;
+use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::{Session, SessionInputValue};
 use ort::value::{Tensor, TensorElementType, ValueType};
 
 use crate::backend::{
-    DecoderState, DecoderStep, EncoderOutput, Features, JointDecision, ModelShape, SpeechBackend,
-    split_logits,
+    DecoderState, DecoderStep, EncoderOutput, Features, JointDecision, ModelShape, SAMPLE_RATE,
+    SpeechBackend, split_logits,
 };
 use crate::error::SpeechError;
 use crate::features::MelExtractor;
@@ -46,6 +66,9 @@ pub struct OnnxOptions {
     pub intra_threads: usize,
     /// Parallel operators; one, the graphs are sequential.
     pub inter_threads: usize,
+    /// Windows only: run the encoder on `DirectML` when the probe passes
+    /// (see [`DirectML`](self#directml)); ignored elsewhere. Off by default.
+    pub directml: bool,
 }
 
 impl Default for OnnxOptions {
@@ -53,7 +76,21 @@ impl Default for OnnxOptions {
         OnnxOptions {
             intra_threads: 4,
             inter_threads: 1,
+            directml: false,
         }
+    }
+}
+
+steno_core::string_enum! {
+    /// Where ONNX Runtime runs the encoder.
+    #[derive(Default)]
+    pub enum ExecutionProvider {
+        /// ONNX Runtime's CPU provider; every platform, and every model
+        /// but the encoder.
+        #[default]
+        Cpu = "cpu",
+        /// `DirectML` on a DirectX 12 GPU; Windows only.
+        DirectMl = "directml",
     }
 }
 
@@ -76,21 +113,159 @@ pub fn init_environment() -> bool {
     })
 }
 
-/// Opens one model file with the shared options, in the environment
+/// A session builder with the shared options, in the environment
 /// [`init_environment`] configures.
-pub(crate) fn open_session(path: &Path, options: &OnnxOptions) -> Result<Session, SpeechError> {
+fn builder(options: &OnnxOptions) -> Result<SessionBuilder, SpeechError> {
     init_environment();
-    let options_error = |e: ort::Error<ort::session::builder::SessionBuilder>| {
-        SpeechError::SessionOptions(e.to_string())
-    };
-    let mut builder = Session::builder()?
+    Session::builder()?
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(options_error)?
         .with_intra_threads(options.intra_threads.max(1))
         .map_err(options_error)?
         .with_inter_threads(options.inter_threads.max(1))
-        .map_err(options_error)?;
-    Ok(builder.commit_from_file(path)?)
+        .map_err(options_error)
+}
+
+/// A builder error as text: it carries the builder for recovery, which is
+/// not `Send`.
+#[allow(clippy::needless_pass_by_value)] // the shape `map_err` hands over
+fn options_error(error: ort::Error<SessionBuilder>) -> SpeechError {
+    SpeechError::SessionOptions(error.to_string())
+}
+
+/// Opens one model file on the CPU with the shared options.
+pub(crate) fn open_session(path: &Path, options: &OnnxOptions) -> Result<Session, SpeechError> {
+    Ok(builder(options)?.commit_from_file(path)?)
+}
+
+/// Why the encoder did not open on `DirectML`, in words without paths or
+/// ONNX Runtime's text, for the log.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fallback {
+    /// The ONNX Runtime build has no `DirectML` provider.
+    NotInBuild,
+    /// `DirectML` did not start: no DirectX 12 GPU, or a `DirectML.dll`
+    /// too old for ONNX Runtime.
+    NoDevice,
+    /// `DirectML` started and refused the model.
+    Session,
+    /// A run on `DirectML` failed (the probe run at load, or a later one).
+    Run,
+}
+
+impl Fallback {
+    fn describe(self) -> &'static str {
+        match self {
+            Fallback::NotInBuild => "this ONNX Runtime build has no DirectML",
+            Fallback::NoDevice => "DirectML found no usable DirectX 12 GPU",
+            Fallback::Session => "DirectML refused the model",
+            Fallback::Run => "a run on DirectML failed",
+        }
+    }
+}
+
+/// Opens `path` on `DirectML` (Windows only): the provider registered with
+/// `error_on_failure`, so a missing GPU is an error here and not a silent
+/// CPU session, and memory patterns off, which `DirectML` does not support.
+/// The default device filter takes hardware GPUs only.
+#[cfg(windows)]
+fn open_directml(path: &Path, options: &OnnxOptions) -> Result<Session, (Fallback, String)> {
+    use ort::ep::ExecutionProvider as _;
+    let directml = ort::ep::DirectML::default();
+    if !directml.is_available().unwrap_or(false) {
+        return Err((Fallback::NotInBuild, String::new()));
+    }
+    let session = |e: &dyn std::fmt::Display| (Fallback::Session, e.to_string());
+    builder(options)
+        .map_err(|e| session(&e))?
+        .with_memory_pattern(false)
+        .map_err(|e| session(&e))?
+        .with_execution_providers([directml.build().error_on_failure()])
+        .map_err(|e| (Fallback::NoDevice, e.to_string()))?
+        .commit_from_file(path)
+        .map_err(|e| session(&e))
+}
+
+/// A session that runs on `DirectML` when [`OnnxOptions::directml`] asks
+/// for it and the probe passes, and on the CPU otherwise; the encoder's.
+struct AcceleratedSession {
+    /// `None` only between dropping a failed `DirectML` session and the CPU
+    /// session that replaces it, or when that replacement failed to open.
+    session: Option<Session>,
+    provider: ExecutionProvider,
+    /// Kept to reopen the model on the CPU after a failed run.
+    path: PathBuf,
+    options: OnnxOptions,
+}
+
+impl AcceleratedSession {
+    /// Opens `path` on `DirectML` first when asked for on Windows, on the
+    /// CPU after any failure there and everywhere else.
+    fn open(path: &Path, options: &OnnxOptions) -> Result<Self, SpeechError> {
+        let mut opened = AcceleratedSession {
+            session: None,
+            provider: ExecutionProvider::Cpu,
+            path: path.to_path_buf(),
+            options: options.clone(),
+        };
+        #[cfg(windows)]
+        if options.directml {
+            match open_directml(path, options) {
+                Ok(session) => {
+                    opened.session = Some(session);
+                    opened.provider = ExecutionProvider::DirectMl;
+                }
+                Err((fallback, error)) => log_fallback(fallback, &error),
+            }
+        }
+        if opened.session.is_none() {
+            opened.session = Some(open_session(path, options)?);
+        }
+        Ok(opened)
+    }
+
+    fn session(&self) -> Result<&Session, SpeechError> {
+        self.session.as_ref().ok_or(SpeechError::NotPrepared)
+    }
+
+    /// Runs `work` on the session. On `DirectML` a failure reopens the model
+    /// on the CPU, for this and every later run, and runs `work` there
+    /// once more; on the CPU it is returned.
+    fn run<T>(
+        &mut self,
+        mut work: impl FnMut(&mut Session) -> Result<T, SpeechError>,
+    ) -> Result<T, SpeechError> {
+        let session = self.session.as_mut().ok_or(SpeechError::NotPrepared)?;
+        match work(session) {
+            Err(error) if self.provider == ExecutionProvider::DirectMl => {
+                log_fallback(Fallback::Run, &error.to_string());
+                // The DirectML session goes first, so the two never hold
+                // the weights at the same time.
+                self.session = None;
+                self.provider = ExecutionProvider::Cpu;
+                let session = self.session.insert(open_session(&self.path, &self.options)?);
+                log_provider(self.provider);
+                work(session)
+            }
+            result => result,
+        }
+    }
+}
+
+/// The fallback to the CPU, at warn level in fixed words; ONNX Runtime's
+/// text, which can hold the model's path, at debug level only.
+fn log_fallback(fallback: Fallback, error: &str) {
+    tracing::warn!(
+        reason = fallback.describe(),
+        "DirectML is not usable; the speech encoder runs on the CPU"
+    );
+    tracing::debug!(error, "DirectML");
+}
+
+/// The encoder's provider, at info level.
+fn log_provider(provider: ExecutionProvider) {
+    tracing::info!(provider = provider.as_str(), "speech encoder provider");
 }
 
 /// The element type and declared shape of a tensor outlet (`-1` for a
@@ -191,7 +366,7 @@ fn inputs(session: &Session, model: &str, expected: usize) -> Result<Inputs, Spe
 
 /// The three sessions and the preprocessor.
 pub struct OnnxBackend {
-    encoder: Session,
+    encoder: AcceleratedSession,
     decoder: Session,
     joiner: Session,
     mel: MelExtractor,
@@ -215,15 +390,15 @@ impl OnnxBackend {
     /// vocabulary.
     pub fn load(directory: &Path, options: &OnnxOptions) -> Result<(Self, Vocab), SpeechError> {
         let vocab = Vocab::load(&directory.join("tokens.txt"))?;
-        let encoder = open_session(&directory.join("encoder.onnx"), options)?;
+        let mut encoder = AcceleratedSession::open(&directory.join("encoder.onnx"), options)?;
         let decoder = open_session(&directory.join("decoder.onnx"), options)?;
         let mut joiner = open_session(&directory.join("joiner.onnx"), options)?;
-        let encoder_inputs = inputs(&encoder, "encoder", 2)?;
+        let encoder_inputs = inputs(encoder.session()?, "encoder", 2)?;
         let decoder_inputs = inputs(&decoder, "decoder", 4)?;
         let joiner_inputs = inputs(&joiner, "joiner", 2)?;
 
         let (declared_vocab, declared_layers, declared_hidden) = {
-            let metadata = encoder.metadata()?;
+            let metadata = encoder.session()?.metadata()?;
             let custom = |key: &str| {
                 metadata
                     .custom(key)
@@ -288,12 +463,21 @@ impl OnnxBackend {
             decoder_hidden,
             encoder_hidden,
         };
+        let mut mel = MelExtractor::new();
+        if encoder.provider == ExecutionProvider::DirectMl {
+            // The probe's last step: one run on a second of silence, so a
+            // GPU that takes the session but cannot run it falls back here
+            // rather than in the first meeting.
+            let silence = mel.features(&vec![0.0; SAMPLE_RATE]);
+            encoder.run(|session| encode_on(session, &encoder_inputs, &silence))?;
+        }
+        log_provider(encoder.provider);
         Ok((
             OnnxBackend {
                 encoder,
                 decoder,
                 joiner,
-                mel: MelExtractor::new(),
+                mel,
                 shape,
                 encoder_inputs,
                 decoder_inputs,
@@ -302,6 +486,58 @@ impl OnnxBackend {
             vocab,
         ))
     }
+}
+
+impl OnnxBackend {
+    /// Where the encoder runs: [`ExecutionProvider::DirectMl`] only when
+    /// [`OnnxOptions::directml`] asked for it on Windows and the probe
+    /// passed; a failed run on `DirectML` moves it to the CPU.
+    #[must_use]
+    pub fn provider(&self) -> ExecutionProvider {
+        self.encoder.provider
+    }
+}
+
+/// One encoder run over a window of at least one frame, its output
+/// frame-major.
+fn encode_on(
+    session: &mut Session,
+    inputs: &Inputs,
+    features: &Features,
+) -> Result<EncoderOutput, SpeechError> {
+    let frames =
+        i64::try_from(features.frames).map_err(|_| SpeechError::Shape("window too long".into()))?;
+    let audio = f32_tensor(vec![1, features.mels as i64, frames], features.data.clone())?;
+    let length = int_tensor(inputs.types[1], vec![1], &[frames])?;
+    let outputs = session.run(vec![
+        (inputs.names[0].as_str(), audio),
+        (inputs.names[1].as_str(), length),
+    ])?;
+    if outputs.len() < 2 {
+        return Err(SpeechError::Shape(format!(
+            "encoder has {} outputs, expected 2",
+            outputs.len()
+        )));
+    }
+    let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
+    let (Some(hidden), Some(frames_out)) = (dimension(shape, 1), dimension(shape, 2)) else {
+        return Err(SpeechError::Shape(format!(
+            "encoder output shape {shape:?}"
+        )));
+    };
+    let len = extract_length(&outputs[1])?.min(frames_out);
+    // [1, hidden, frames] to frame-major.
+    let mut frame_major = vec![0.0f32; len * hidden];
+    for (h, row) in data.chunks_exact(frames_out).enumerate().take(hidden) {
+        for (t, &x) in row.iter().enumerate().take(len) {
+            frame_major[t * hidden + h] = x;
+        }
+    }
+    Ok(EncoderOutput {
+        hidden,
+        len,
+        data: frame_major,
+    })
 }
 
 impl SpeechBackend for OnnxBackend {
@@ -321,39 +557,9 @@ impl SpeechBackend for OnnxBackend {
                 data: Vec::new(),
             });
         }
-        let frames = i64::try_from(features.frames)
-            .map_err(|_| SpeechError::Shape("window too long".into()))?;
-        let audio = f32_tensor(vec![1, features.mels as i64, frames], features.data.clone())?;
-        let length = int_tensor(self.encoder_inputs.types[1], vec![1], &[frames])?;
-        let outputs = self.encoder.run(vec![
-            (self.encoder_inputs.names[0].as_str(), audio),
-            (self.encoder_inputs.names[1].as_str(), length),
-        ])?;
-        if outputs.len() < 2 {
-            return Err(SpeechError::Shape(format!(
-                "encoder has {} outputs, expected 2",
-                outputs.len()
-            )));
-        }
-        let (shape, data) = outputs[0].try_extract_tensor::<f32>()?;
-        let (Some(hidden), Some(frames_out)) = (dimension(shape, 1), dimension(shape, 2)) else {
-            return Err(SpeechError::Shape(format!(
-                "encoder output shape {shape:?}"
-            )));
-        };
-        let len = extract_length(&outputs[1])?.min(frames_out);
-        // [1, hidden, frames] to frame-major.
-        let mut frame_major = vec![0.0f32; len * hidden];
-        for (h, row) in data.chunks_exact(frames_out).enumerate().take(hidden) {
-            for (t, &x) in row.iter().enumerate().take(len) {
-                frame_major[t * hidden + h] = x;
-            }
-        }
-        Ok(EncoderOutput {
-            hidden,
-            len,
-            data: frame_major,
-        })
+        let inputs = &self.encoder_inputs;
+        self.encoder
+            .run(|session| encode_on(session, inputs, features))
     }
 
     fn decoder_step(
@@ -431,6 +637,214 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::*;
+
+    /// A model small enough to write by hand, `y = x · W + b` with `x` of
+    /// shape `[n, 3]`, as ONNX protobuf bytes (opset 13): enough for
+    /// ONNX Runtime, and `DirectML` where there is one, to open and run.
+    fn affine_model() -> Vec<u8> {
+        fn varint(mut value: u64, out: &mut Vec<u8>) {
+            while value >= 0x80 {
+                out.push((value as u8) | 0x80);
+                value >>= 7;
+            }
+            out.push(value as u8);
+        }
+        fn number(field: u64, value: u64, out: &mut Vec<u8>) {
+            varint(field << 3, out);
+            varint(value, out);
+        }
+        fn bytes(field: u64, value: &[u8], out: &mut Vec<u8>) {
+            varint((field << 3) | 2, out);
+            varint(value.len() as u64, out);
+            out.extend_from_slice(value);
+        }
+        fn message(build: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+            let mut out = Vec::new();
+            build(&mut out);
+            out
+        }
+        const FLOAT: u64 = 1;
+        // TensorProto: dims 1, data_type 2, name 8, raw_data 9.
+        let tensor = |name: &str, dims: &[u64], values: &[f32]| {
+            message(|t| {
+                for &d in dims {
+                    number(1, d, t);
+                }
+                number(2, FLOAT, t);
+                bytes(8, name.as_bytes(), t);
+                let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+                bytes(9, &raw, t);
+            })
+        };
+        // ValueInfoProto: name 1, type 2 (TypeProto.tensor_type 1:
+        // elem_type 1, shape 2 of dims 1, each dim_value 1 or dim_param 2).
+        let value_info = |name: &str, width: u64| {
+            message(|v| {
+                bytes(1, name.as_bytes(), v);
+                let shape = message(|s| {
+                    bytes(1, &message(|d| bytes(2, b"n", d)), s);
+                    bytes(1, &message(|d| number(1, width, d)), s);
+                });
+                let tensor_type = message(|t| {
+                    number(1, FLOAT, t);
+                    bytes(2, &shape, t);
+                });
+                bytes(2, &message(|t| bytes(1, &tensor_type, t)), v);
+            })
+        };
+        // NodeProto: input 1, output 2, op_type 4.
+        let node = |inputs: &[&str], output: &str, op: &str| {
+            message(|n| {
+                for input in inputs {
+                    bytes(1, input.as_bytes(), n);
+                }
+                bytes(2, output.as_bytes(), n);
+                bytes(4, op.as_bytes(), n);
+            })
+        };
+        // GraphProto: node 1, name 2, initializer 5, input 11, output 12.
+        let graph = message(|g| {
+            bytes(1, &node(&["x", "w"], "xw", "MatMul"), g);
+            bytes(1, &node(&["xw", "b"], "y", "Add"), g);
+            bytes(2, b"affine", g);
+            bytes(5, &tensor("w", &[3, 2], &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]), g);
+            bytes(5, &tensor("b", &[2], &[0.5, -0.5]), g);
+            bytes(11, &value_info("x", 3), g);
+            bytes(12, &value_info("y", 2), g);
+        });
+        // ModelProto: ir_version 1, graph 7, opset_import 8 (version 2).
+        message(|m| {
+            number(1, 8, m);
+            bytes(7, &graph, m);
+            bytes(8, &message(|o| number(2, 13, o)), m);
+        })
+    }
+
+    /// The affine model in a temporary directory.
+    fn affine_model_file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("affine.onnx");
+        std::fs::write(&path, affine_model()).unwrap();
+        (dir, path)
+    }
+
+    /// `y` for `x = [[1, 2, 3], [0, 0, 0]]`: `[[4.5, 4.5], [0.5, -0.5]]`.
+    fn run_affine(session: &mut Session) -> Result<Vec<f32>, SpeechError> {
+        let x = f32_tensor(vec![2, 3], vec![1.0, 2.0, 3.0, 0.0, 0.0, 0.0])?;
+        let outputs = session.run(vec![("x", x)])?;
+        Ok(outputs[0].try_extract_tensor::<f32>()?.1.to_vec())
+    }
+
+    const AFFINE_Y: [f32; 4] = [4.5, 4.5, 0.5, -0.5];
+
+    fn directml_options() -> OnnxOptions {
+        OnnxOptions {
+            directml: true,
+            ..OnnxOptions::default()
+        }
+    }
+
+    /// The probe on this machine, with its findings printed: CI runs it
+    /// with `--nocapture` on Windows, where the runner has no GPU, so its
+    /// log records what `DirectML` makes of that. Whatever it decides, the
+    /// session answers right; off Windows the request is ignored.
+    #[test]
+    fn directml_probe_opens_a_working_session_on_whatever_this_machine_has() {
+        let (_dir, path) = affine_model_file();
+        #[cfg(windows)]
+        {
+            use ort::ep::ExecutionProvider as _;
+            init_environment();
+            println!(
+                "DirectML in this ONNX Runtime build: {:?}",
+                ort::ep::DirectML::default().is_available()
+            );
+            match open_directml(&path, &directml_options()) {
+                Ok(_) => println!("DirectML session: opened"),
+                Err((fallback, error)) => {
+                    println!("DirectML session: {} ({fallback:?}): {error}", fallback.describe());
+                }
+            }
+        }
+        let mut accelerated = AcceleratedSession::open(&path, &directml_options()).unwrap();
+        println!("provider chosen: {}", accelerated.provider);
+        if !cfg!(windows) {
+            assert_eq!(accelerated.provider, ExecutionProvider::Cpu);
+        }
+        assert_eq!(accelerated.run(run_affine).unwrap(), AFFINE_Y);
+        assert_eq!(
+            AcceleratedSession::open(&path, &OnnxOptions::default())
+                .unwrap()
+                .provider,
+            ExecutionProvider::Cpu,
+            "without the request the CPU is the provider everywhere"
+        );
+    }
+
+    #[test]
+    fn a_model_that_opens_nowhere_is_an_error_with_or_without_directml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("broken.onnx");
+        std::fs::write(&path, b"not a model").unwrap();
+        for options in [OnnxOptions::default(), directml_options()] {
+            assert!(AcceleratedSession::open(&path, &options).is_err());
+        }
+    }
+
+    /// A session as `open` leaves it after the probe passed, without a GPU:
+    /// a CPU session labelled `DirectML`, so the fallback can be driven.
+    fn as_if_on_directml(path: &Path) -> AcceleratedSession {
+        let mut session = AcceleratedSession::open(path, &directml_options()).unwrap();
+        session.provider = ExecutionProvider::DirectMl;
+        session
+    }
+
+    #[test]
+    fn a_failed_run_on_directml_moves_to_the_cpu_for_good_and_runs_again() {
+        let (_dir, path) = affine_model_file();
+        let mut session = as_if_on_directml(&path);
+        let mut calls = 0;
+        let y = session
+            .run(|s| {
+                calls += 1;
+                if calls == 1 {
+                    Err(SpeechError::Shape("device removed".into()))
+                } else {
+                    run_affine(s)
+                }
+            })
+            .unwrap();
+        assert_eq!((y.as_slice(), calls), (AFFINE_Y.as_slice(), 2));
+        assert_eq!(session.provider, ExecutionProvider::Cpu);
+
+        // On the CPU a failure is the caller's, with no second try.
+        let mut calls = 0;
+        let error = session
+            .run(|_| -> Result<(), SpeechError> {
+                calls += 1;
+                Err(SpeechError::Shape("bad input".into()))
+            })
+            .unwrap_err();
+        assert!(matches!(error, SpeechError::Shape(_)));
+        assert_eq!(calls, 1);
+        assert_eq!(session.run(run_affine).unwrap(), AFFINE_Y);
+    }
+
+    #[test]
+    fn when_the_cpu_cannot_reopen_the_model_the_run_fails_and_stays_failed() {
+        let (dir, path) = affine_model_file();
+        let mut session = as_if_on_directml(&path);
+        drop(dir);
+        let fail = |_: &mut Session| -> Result<(), SpeechError> {
+            Err(SpeechError::Shape("device removed".into()))
+        };
+        assert!(matches!(session.run(fail), Err(SpeechError::Runtime(_))));
+        assert_eq!(session.provider, ExecutionProvider::Cpu);
+        assert!(matches!(
+            session.run(run_affine),
+            Err(SpeechError::NotPrepared)
+        ));
+    }
 
     #[test]
     fn telemetry_is_switched_off_before_any_session() {
