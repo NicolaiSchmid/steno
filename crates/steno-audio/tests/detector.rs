@@ -219,8 +219,8 @@ fn a_failing_snapshot_fails_start_and_is_tolerated_later() {
 struct HeldPoll {
     inner: FakeProcessAudioActivity,
     armed: AtomicBool,
-    entered: Mutex<Option<Sender<()>>>,
-    release: Mutex<Option<Receiver<()>>>,
+    entered: Sender<()>,
+    release: Mutex<Receiver<()>>,
 }
 
 impl ProcessAudioActivitySource for HeldPoll {
@@ -229,12 +229,8 @@ impl ProcessAudioActivitySource for HeldPoll {
         if std::thread::current().name() == Some("steno-det-poll")
             && self.armed.swap(false, Ordering::SeqCst)
         {
-            if let Some(entered) = self.entered.lock().unwrap().take() {
-                let _ = entered.send(());
-            }
-            if let Some(release) = self.release.lock().unwrap().take() {
-                let _ = release.recv();
-            }
+            let _ = self.entered.send(());
+            let _ = self.release.lock().unwrap().recv();
         }
         snapshot
     }
@@ -256,8 +252,8 @@ fn a_stale_poll_snapshot_does_not_cancel_a_pending_release() {
     let source = Arc::new(HeldPoll {
         inner: fake.clone(),
         armed: AtomicBool::new(false),
-        entered: Mutex::new(Some(entered)),
-        release: Mutex::new(Some(release_receiver)),
+        entered,
+        release: Mutex::new(release_receiver),
     });
     let detector = MeetingDetector::new(
         Arc::clone(&source) as Arc<dyn ProcessAudioActivitySource>,
