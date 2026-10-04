@@ -69,7 +69,7 @@ export default function OpenGraphImage() {
 						lineHeight: 1.3,
 					}}
 				>
-					Records from your computer&apos;s own audio, processes on-device,
+					Records from your computer&apos;s own audio, transcribes on-device,
 					writes Markdown you own.
 				</div>
 			</div>
