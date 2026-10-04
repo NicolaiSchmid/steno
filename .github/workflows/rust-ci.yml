@@ -177,6 +177,13 @@ jobs:
         run: cargo test --workspace --locked --no-fail-fast
       - name: Test the core fakes
         run: cargo test -p steno-core --features testing --locked
+      # The shell answers from the real host by default since WP6b; its
+      # opt-in fixture host (the fixture table, the mock replies) is linted
+      # and tested with the feature on. Only the shell rebuilds.
+      - name: Lint and test the shell's fixture host
+        run: |
+          cargo clippy -p steno-desktop --features fixture-host --all-targets --locked -- -D warnings
+          cargo test -p steno-desktop --features fixture-host --locked
       # The handover tests that read the host's network, again with their
       # output, so the log shows the LAN addresses found and whether the
       # interface test ran or printed SKIPPED. `--workspace` keeps the Test

@@ -20,10 +20,11 @@ use std::path::{Path, PathBuf};
 
 use steno_speech::{ModelAsset, ModelStore};
 
-/// The model store, when both assets are installed under the root
+/// The model store, when both assets are installed in the models directory
 /// `STENO_MODELS_DIR` names; read the way [`ModelStore::from_environment`] reads it.
 pub fn installed_store() -> Option<ModelStore> {
-    let store = ModelStore::new(ModelStore::environment_root()?);
+    let directory = ModelStore::environment_models_directory()?;
+    let store = ModelStore::in_models_directory(&directory);
     [ModelAsset::parakeet_v3_fp32(), ModelAsset::silero_vad()]
         .iter()
         .all(|asset| store.is_installed(asset))

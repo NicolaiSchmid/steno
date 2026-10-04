@@ -7,8 +7,9 @@
 # ImageMagick's `import` is available, the Xvfb root is captured near the
 # end of the wait into apps/desktop/screens/ as review evidence, with one
 # crop per window and per panel (`magick` from ImageMagick 7, `convert`
-# from 6); the windows carry only fixture data. Xvfb has no compositor, so
-# the panels' transparent corners render black there.
+# from 6); the windows carry what the host's database holds (nothing on
+# a fresh runner). Xvfb has no compositor, so the panels' transparent
+# corners render black there.
 #
 #   [STENO_SMOKE_DPI=<dpi>] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #

@@ -11,7 +11,8 @@ publish.workspace = true
 [features]
 # The fakes in `fakes` and the core's `testing` fakes behind the boundaries
 # the host consumes (`InMemorySecretStore`): what the tests and the CLI's
-# dry run build their `Services` from. Off in the shell's build.
+# dry run build their `Services` from. `steno-services` turns it on for the
+# platform services that stay fakes until WP8.
 fakes = ["steno-core/testing"]
 
 [dependencies]

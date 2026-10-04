@@ -7,8 +7,8 @@ use chrono::{DateTime, Utc};
 use steno_bridge::DetailTab;
 use steno_core::protocols::{BoundaryResult, BoxError};
 use steno_core::{
-    AudioRetention, Delivery, Meeting, MeetingExport, MeetingStateKind, Settings, Store,
-    StoreError, SummaryTemplate, paths::file_url_path,
+    AudioRetention, Delivery, Meeting, MeetingExport, MeetingOperation, MeetingStateKind, Settings,
+    Store, StoreError, SummaryTemplate, paths::file_url_path,
 };
 use uuid::Uuid;
 
@@ -374,6 +374,14 @@ impl MeetingDetailViewModel {
             Err(error) => self.error = Some(format!("{what} failed: {error}")),
         }
         self.is_busy = false;
+    }
+
+    /// A re-run or a re-export the pipeline accepted failed later, in the
+    /// background (`MeetingEvent::OperationFailed`): the error line says so
+    /// in the words a refused call gets there, as Swift's awaited
+    /// call did for both.
+    pub fn operation_failed(&mut self, operation: MeetingOperation, failure: &str) {
+        self.error = Some(format!("{} failed: {failure}", operation.label()));
     }
 }
 
