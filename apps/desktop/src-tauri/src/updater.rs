@@ -143,7 +143,10 @@ fn notify(app: &AppHandle, kind: MessageDialogKind, message: impl Into<String>) 
 /// The relaunch bypasses the exit request, so the shutdown runs first
 /// (`shut_down_before_exit`), as Sparkle's relaunch went through
 /// `applicationShouldTerminate`; on Windows the installer's own exit runs
-/// it (`check`).
+/// it (`check`). An install that fails after that shutdown ran (Windows:
+/// the installer did not launch) ends the app once its message is
+/// closed: the recorder starts nothing after a shutdown, and the next Quit
+/// would run none.
 pub async fn check_and_offer(app: &AppHandle) {
     let update = match check(app).await {
         Ok(Some(update)) => update,
@@ -190,11 +193,17 @@ pub async fn check_and_offer(app: &AppHandle) {
         Err(error) => {
             app.state::<Updates>()
                 .record(UpdateOutcome::Failed(error.to_string()));
-            notify(
-                app,
-                MessageDialogKind::Error,
-                format!("The update could not be installed: {error}"),
-            );
+            let shut_down = app.state::<steno_services::app::ExitGate>().released();
+            let handle = app.clone();
+            app.dialog()
+                .message(format!("The update could not be installed: {error}"))
+                .title("Steno")
+                .kind(MessageDialogKind::Error)
+                .show(move |_| {
+                    if shut_down {
+                        handle.exit(0);
+                    }
+                });
         }
     }
 }
