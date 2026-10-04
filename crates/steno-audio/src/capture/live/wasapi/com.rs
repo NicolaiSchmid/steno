@@ -50,9 +50,7 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::Duration;
 
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE, S_OK, WAIT_OBJECT_0,
-};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE, S_OK};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
@@ -668,16 +666,16 @@ impl CaptureClient {
     }
 
     /// Waits for the engine's signal, at most `timeout` (a polled stream
-    /// sleeps [`POLL_INTERVAL`] instead). `false` on timeout; the caller
-    /// drains anyway.
-    pub fn wait(&self, timeout: Duration) -> bool {
+    /// sleeps [`POLL_INTERVAL`] instead). The caller drains either way, so
+    /// a timeout is not reported.
+    pub fn wait(&self, timeout: Duration) {
         let Some(event) = &self.event else {
             std::thread::sleep(POLL_INTERVAL);
-            return false;
+            return;
         };
         let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
         // SAFETY: the handle is a live event owned by `self`.
-        unsafe { WaitForSingleObject(event.0, milliseconds) == WAIT_OBJECT_0 }
+        let _ = unsafe { WaitForSingleObject(event.0, milliseconds) };
     }
 
     /// Hands every queued packet to `handle`, then returns. The real-time

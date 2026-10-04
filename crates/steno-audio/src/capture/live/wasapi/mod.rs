@@ -391,11 +391,11 @@ fn run_stream(
         }
     }
     let _ = client.stop();
-    if client.discontinuities() > 0 {
+    let discontinuities = client.discontinuities();
+    if discontinuities > 0 {
         tracing::info!(
-            "{} stream: {} packets after a glitch (thread late)",
-            source.as_str(),
-            client.discontinuities()
+            "{} stream: {discontinuities} packets after a glitch (thread late)",
+            source.as_str()
         );
     }
     drop(pro_audio);
