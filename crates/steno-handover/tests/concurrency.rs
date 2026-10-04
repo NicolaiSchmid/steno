@@ -43,7 +43,7 @@ async fn a_pairing_secret_pairs_exactly_once_under_concurrent_use() {
     let runtime = tokio::runtime::Handle::current();
     for round in 0..ROUNDS {
         let payload = test.service.begin_pairing();
-        let principal = common::pairing_principal(&test, &payload).await;
+        let principal = common::pairing_principal(&test.service, &payload).await;
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let racers = [
             (Uuid::new_v4(), "Nicolai's iPhone"),

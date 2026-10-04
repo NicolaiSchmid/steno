@@ -3,7 +3,8 @@
 //! and another phone's upload is untouched. Both ways in: `revoke` from
 //! the computer and `DELETE /v1/pairing` from the phone. A request that
 //! read its device or receipt before the revoke brings neither back, and a
-//! `complete` that had not reached the intake yet admits nothing.
+//! `complete` that had not reached the intake yet admits nothing, also when
+//! the phone paired again meanwhile.
 
 #![allow(
     clippy::assert_is_empty,
@@ -16,13 +17,13 @@
 
 mod common;
 
-use std::future::Future as _;
+use std::pin::Pin;
 use std::sync::{Arc, mpsc};
-use std::task::{Context, Wake, Waker};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use common::{Phone, TestService, chunks, seeded_bytes};
-use steno_core::RecordingMetadata;
+use steno_core::{RecordingMetadata, Store};
 use steno_handover::pairing::DeviceTokens;
 use steno_handover::{HandoverService, wire};
 use uuid::Uuid;
@@ -302,7 +303,7 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
         intake.release();
     };
     let (_, ()) = tokio::join!(completing, revoking);
-    assert_eq!(intake.count(), 1, "the revoke landed while the intake ran");
+    assert_eq!(intake.count(), 1, "the intake admitted once");
 
     let owned = |receipts: &[steno_core::HandoverReceipt]| {
         receipts
@@ -317,13 +318,7 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
     assert_eq!(test.store.handover_receipt(id).unwrap(), None);
 
     // Paired again under the same id, the phone's uploads are live again.
-    let payload = test.service.begin_pairing();
-    let repaired = common::engine_pair(&test, &payload, phone.device.id, "Direct iPhone").await;
-    assert_eq!(repaired.status.as_u16(), 200);
-    let again = common::EngineDevice {
-        service: test.service.clone(),
-        device: test.store.paired_device(phone.device.id).unwrap().unwrap(),
-    };
+    let again = phone.pair_again().await;
     let bytes = seeded_bytes(chunk_size as usize, 98);
     let metadata = again.metadata(&bytes, chunk_size);
     assert_eq!(again.announce(&metadata).await.status.as_u16(), 201);
@@ -331,70 +326,106 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
     assert!(owned(&receipts.borrow()));
 }
 
-#[tokio::test]
-async fn a_complete_that_read_its_receipt_before_a_revoke_admits_nothing() {
-    // After a restart the receipt is only in the store. A revoke that lands
-    // while `complete` reads it finds nothing in memory to discard, so the
-    // files are still there for the verify; the engine itself must refuse
-    // to hand a revoked device's recording to the intake.
-    let chunk_size: i64 = 64 * 1024;
-    let first = TestService::with(common::Options {
-        chunk_size,
-        start: false,
-        ..common::Options::default()
-    })
-    .await;
-    let phone = common::EngineDevice::paired(&first, "Direct iPhone").await;
-    let bytes = seeded_bytes(2 * chunk_size as usize, 99);
-    let metadata = phone.metadata(&bytes, chunk_size);
-    phone.upload_all(&metadata, &bytes).await;
-    let id = metadata.recording_id;
+/// The computer comes back over the store and inbox of a phone that
+/// uploaded every chunk: after a restart its receipt is only in the store.
+struct Restarted {
+    first: TestService,
+    metadata: RecordingMetadata,
+    bytes: Vec<u8>,
+    service: Arc<HandoverService>,
+    intake: Arc<common::ScriptedIntake>,
+    /// The phone's view of the restarted engine.
+    phone: common::EngineDevice,
+}
 
-    // The computer comes back over the same store and inbox.
-    let intake = common::ScriptedIntake::new(Uuid::new_v4(), 0);
-    let restarted = Arc::new(HandoverService::new(
-        first.service.configuration.clone(),
-        first.store.clone(),
-        intake.clone(),
-        first.service.identity.clone(),
-        first.clock.clock(),
-    ));
-    let device = common::EngineDevice {
-        service: restarted.clone(),
-        device: phone.device.clone(),
-    };
+impl Restarted {
+    async fn new() -> Restarted {
+        let chunk_size: i64 = 64 * 1024;
+        let first = TestService::with(common::Options {
+            chunk_size,
+            start: false,
+            ..common::Options::default()
+        })
+        .await;
+        let before = common::EngineDevice::paired(&first, "Direct iPhone").await;
+        let bytes = seeded_bytes(2 * chunk_size as usize, 99);
+        let metadata = before.metadata(&bytes, chunk_size);
+        before.upload_all(&metadata, &bytes).await;
+        let intake = common::ScriptedIntake::new(Uuid::new_v4(), 0);
+        let service = Arc::new(HandoverService::new(
+            first.service.configuration.clone(),
+            first.store.clone(),
+            intake.clone(),
+            first.service.identity.clone(),
+            first.clock.clock(),
+        ));
+        let phone = common::EngineDevice {
+            service: service.clone(),
+            device: before.device,
+        };
+        Restarted {
+            first,
+            metadata,
+            bytes,
+            service,
+            intake,
+            phone,
+        }
+    }
+
+    fn id(&self) -> Uuid {
+        self.metadata.recording_id
+    }
+
+    /// Nothing reached the intake, and nothing of the upload is left in
+    /// memory or the store.
+    fn assert_nothing_admitted(&self) {
+        assert_eq!(self.intake.count(), 0, "the intake never sees the file");
+        assert!(self.service.engine.receipts_snapshot().is_empty());
+        assert_eq!(self.first.store.handover_receipt(self.id()).unwrap(), None);
+    }
+
+    /// The upload's files are gone from the inbox.
+    fn files_are_gone(&self) -> bool {
+        let inbox = self.first.inbox();
+        let id = self.id();
+        !inbox.has_partial(id)
+            && !inbox.has_verified(id, self.metadata.format)
+            && inbox.load_metadata(id).is_none()
+    }
+}
+
+/// A revoke that lands while `complete` reads the store finds nothing in
+/// memory to discard, so the files are still there for the verify; the
+/// engine itself must keep a revoked device's recording from the intake.
+/// With `pairs_again`, the phone pairs again under the same device id
+/// before `complete` goes on.
+async fn complete_after_a_revoke_during_its_receipt_read(pairs_again: bool) {
+    let restarted = Restarted::new().await;
 
     // `complete` runs to its store read and waits there: the store is held,
     // so the read cannot finish before the first poll returns. Once the
-    // read has returned the row, the revoke runs whole; then `complete`
-    // goes on.
-    let (held, store_is_held) = mpsc::channel();
-    let (release, released) = mpsc::channel::<()>();
-    let store = first.store.clone();
-    let holder = std::thread::spawn(move || {
-        store
-            .write(|_| {
-                held.send(()).unwrap();
-                released.recv().unwrap();
-                Ok(())
-            })
-            .unwrap();
-    });
-    store_is_held.recv().unwrap();
-    let woken = Arc::new(Woken::default());
-    let mut completing = std::pin::pin!(device.complete(id));
-    let waker = Waker::from(woken.clone());
+    // read has returned the row, the revoke runs to completion; then
+    // `complete` goes on.
+    let hold = StoreHold::new(&restarted.first.store);
+    let woken = Woken::new();
+    let mut completing = std::pin::pin!(restarted.phone.complete(restarted.id()));
     assert!(
-        completing
-            .as_mut()
-            .poll(&mut Context::from_waker(&waker))
-            .is_pending(),
+        woken.poll(completing.as_mut()).is_pending(),
         "complete waits on the store read"
     );
-    release.send(()).unwrap();
-    holder.join().unwrap();
-    woken.0.notified().await;
-    restarted.revoke(phone.device.id).await.unwrap();
+    hold.release();
+    woken.wait("the store read returns").await;
+    restarted
+        .service
+        .revoke(restarted.phone.device.id)
+        .await
+        .unwrap();
+    let again = if pairs_again {
+        Some(restarted.phone.pair_again().await)
+    } else {
+        None
+    };
     let response = completing.await;
 
     assert_eq!(
@@ -402,21 +433,110 @@ async fn a_complete_that_read_its_receipt_before_a_revoke_admits_nothing() {
         401,
         "the phone learns it is unpaired"
     );
-    assert_eq!(intake.count(), 0, "the intake never sees the file");
-    let inbox = first.inbox();
-    assert!(
-        !inbox.has_partial(id)
-            && !inbox.has_verified(id, metadata.format)
-            && inbox.load_metadata(id).is_none(),
-        "its files are gone"
-    );
-    assert!(restarted.engine.receipts_snapshot().is_empty());
-    assert_eq!(first.store.handover_receipt(id).unwrap(), None);
+    restarted.assert_nothing_admitted();
+    assert!(restarted.files_are_gone(), "its files are gone");
+    if let Some(again) = again {
+        // The new pairing uploads the recording again, and it goes through.
+        again
+            .upload_all(&restarted.metadata, &restarted.bytes)
+            .await;
+        assert_eq!(again.complete(restarted.id()).await.status.as_u16(), 200);
+        assert_eq!(restarted.intake.count(), 1);
+    }
 }
 
-/// Tells the test that the future it polled by hand can go on.
-#[derive(Default)]
+#[tokio::test]
+async fn a_complete_that_read_its_receipt_before_a_revoke_admits_nothing() {
+    complete_after_a_revoke_during_its_receipt_read(false).await;
+}
+
+#[tokio::test]
+async fn a_phone_that_paired_again_does_not_let_the_old_complete_through() {
+    complete_after_a_revoke_during_its_receipt_read(true).await;
+}
+
+#[tokio::test]
+async fn a_complete_during_a_revokes_store_delete_admits_nothing() {
+    // Until the revoke's store delete commits, a store read still returns
+    // the device's receipt, and a pairing after the revoke would let a
+    // check of the revoked set pass. A `complete` that starts meanwhile is
+    // refused before it reads: with the store held, any answer on the
+    // first poll comes from the entry check.
+    let restarted = Restarted::new().await;
+    let hold = StoreHold::new(&restarted.first.store);
+    let woken = Woken::new();
+    let mut revoking = std::pin::pin!(restarted.service.revoke(restarted.phone.device.id));
+    assert!(
+        woken.poll(revoking.as_mut()).is_pending(),
+        "the revoke waits on its store delete"
+    );
+    let mut completing = std::pin::pin!(restarted.phone.complete(restarted.id()));
+    let Poll::Ready(response) = woken.poll(completing.as_mut()) else {
+        panic!("complete is refused before it reads the store");
+    };
+    assert_eq!(response.status.as_u16(), 401);
+    hold.release();
+    revoking.await.unwrap();
+
+    restarted.assert_nothing_admitted();
+    // Neither the refused `complete` nor the revoke knew the receipt; the
+    // next start's sweep takes its files.
+    restarted.service.engine.sweep_orphans().await;
+    assert!(restarted.files_are_gone(), "the sweep takes the files");
+}
+
+/// Holds the store's one connection from another thread until
+/// [`StoreHold::release`], so a store call of the engine waits on it.
+struct StoreHold {
+    release: mpsc::Sender<()>,
+    holder: std::thread::JoinHandle<()>,
+}
+
+impl StoreHold {
+    fn new(store: &Arc<Store>) -> StoreHold {
+        let (held, store_is_held) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let store = store.clone();
+        let holder = std::thread::spawn(move || {
+            store
+                .write(|_| {
+                    held.send(()).unwrap();
+                    // A test that failed meanwhile drops the sender.
+                    let _ = released.recv();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        store_is_held
+            .recv_timeout(common::SIGNAL_BOUND)
+            .expect("the store is held");
+        StoreHold { release, holder }
+    }
+
+    fn release(self) {
+        self.release.send(()).unwrap();
+        self.holder.join().unwrap();
+    }
+}
+
+/// The waker of a future the test polls by hand.
 struct Woken(tokio::sync::Notify);
+
+impl Woken {
+    fn new() -> Arc<Woken> {
+        Arc::new(Woken(tokio::sync::Notify::new()))
+    }
+
+    /// Polls `future` once with this waker.
+    fn poll<F: Future>(self: &Arc<Self>, future: Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(&Waker::from(self.clone())))
+    }
+
+    /// Returns once a future polled with this waker can go on.
+    async fn wait(&self, what: &str) {
+        common::signalled(what, self.0.notified()).await;
+    }
+}
 
 impl Wake for Woken {
     fn wake(self: Arc<Self>) {

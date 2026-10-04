@@ -828,11 +828,32 @@ impl EngineDevice {
     pub async fn paired(test: &TestService, device_name: &str) -> EngineDevice {
         let payload = test.service.begin_pairing();
         let device_id = Uuid::new_v4();
-        let response = engine_pair(test, &payload, device_id, device_name).await;
+        let response = engine_pair(&test.service, &payload, device_id, device_name).await;
         assert_eq!(response.status, 200);
         let device = test.store.paired_device(device_id).unwrap().unwrap();
         EngineDevice {
             service: test.service.clone(),
+            device,
+        }
+    }
+
+    /// Pairs again under the same device id and name, as a revoked phone
+    /// that scans a new code does, and returns the new pairing's view.
+    pub async fn pair_again(&self) -> EngineDevice {
+        let payload = self.service.begin_pairing();
+        let response =
+            engine_pair(&self.service, &payload, self.device.id, &self.device.name).await;
+        assert_eq!(response.status, 200, "paired again");
+        let device = self
+            .service
+            .paired_devices()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|device| device.id == self.device.id)
+            .expect("the device is paired");
+        EngineDevice {
+            service: self.service.clone(),
             device,
         }
     }
@@ -906,12 +927,11 @@ impl EngineDevice {
 /// What the gate makes of `POST /v1/pair` with the secret of `payload`;
 /// panics on a rejection.
 pub async fn pairing_principal(
-    test: &TestService,
+    service: &HandoverService,
     payload: &steno_handover::PairingPayload,
 ) -> Principal {
     let authorization = pairing(&payload.secret);
-    match test
-        .service
+    match service
         .engine
         .authenticate(Route::Pair, Some(&authorization))
         .await
@@ -924,24 +944,24 @@ pub async fn pairing_principal(
 /// `POST /v1/pair` with the secret of `payload`, the gate and the body
 /// straight into the engine.
 pub async fn engine_pair(
-    test: &TestService,
+    service: &HandoverService,
     payload: &steno_handover::PairingPayload,
     device_id: Uuid,
     device_name: &str,
 ) -> HandoverResponse {
-    let principal = pairing_principal(test, payload).await;
-    engine_pair_as(test, principal, device_id, device_name).await
+    let principal = pairing_principal(service, payload).await;
+    engine_pair_as(service, principal, device_id, device_name).await
 }
 
 /// The body of `POST /v1/pair` straight into the engine, as `principal`,
 /// the gate's answer at the head.
 pub async fn engine_pair_as(
-    test: &TestService,
+    service: &HandoverService,
     principal: Principal,
     device_id: Uuid,
     device_name: &str,
 ) -> HandoverResponse {
-    test.service
+    service
         .engine
         .handle(
             HandoverRequest::new(Route::Pair, principal).with_body(
