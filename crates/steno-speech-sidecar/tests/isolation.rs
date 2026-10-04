@@ -544,7 +544,6 @@ fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
     .unwrap();
     let (first, rest) = frame.split_at(frame.len() - 100);
     stdin.write_all(first).unwrap();
-    stdin.flush().unwrap();
     for signal in ["-INT", "-TERM", "-HUP"] {
         let sent = Command::new("kill")
             .args([signal, &pid.to_string()])
@@ -558,7 +557,6 @@ fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
         "a signal ended the child"
     );
     stdin.write_all(rest).unwrap();
-    stdin.flush().unwrap();
     let segments = loop {
         match protocol::read_header::<_, Reply>(&mut stdout)
             .unwrap()
