@@ -408,6 +408,15 @@ impl Store {
         self.write(|transaction| save_participant(transaction, participant))
     }
 
+    /// Removes one participant; a missing id is not an error. Swift:
+    /// `MeetingStore.deleteParticipant(id:)`.
+    pub fn delete_participant(&self, id: Uuid) -> Result<()> {
+        self.write(|transaction| {
+            transaction.execute("DELETE FROM participant WHERE id = ?1", [DbUuid(id)])?;
+            Ok(())
+        })
+    }
+
     /// The meeting's participants by display name.
     pub fn participants(&self, meeting_id: Uuid) -> Result<Vec<Participant>> {
         self.read(|connection| participants_of_meeting(connection, meeting_id))

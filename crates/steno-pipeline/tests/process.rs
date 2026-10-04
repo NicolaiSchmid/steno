@@ -4,6 +4,7 @@
 //! Swift: `Tests/StenoCoreTests/PipelineIntegrationTests.swift`,
 //! `StageTests.swift`, `RetentionSweepTests.swift`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -14,13 +15,15 @@ use steno_core::testing::{
 };
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Delivery, DeliveryDispatcher,
-    DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingState, PipelineStage,
-    SpeakerAssignmentKind, Store, async_trait,
+    DeliveryStatus, Destination, Meeting, MeetingEvent, MeetingExport, MeetingSource, MeetingState,
+    ParticipantRole, PipelineStage, RawSegment, RecordingLayout, SpeakerAssignmentKind, Store,
+    async_trait,
     paths::{file_url, file_url_path},
 };
+use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no_conversation};
 use steno_pipeline::{
-    MeetingEventBus, MonotonicClock, PipelineDependencies, ProcessingPipeline, RetentionSweep,
-    StageRates,
+    LaneMerger, MeetingEventBus, MonotonicClock, PipelineDependencies, ProcessingPipeline,
+    RetentionSweep, StageRates,
 };
 use uuid::Uuid;
 
@@ -82,6 +85,8 @@ struct World {
     store: Arc<Store>,
     events: MeetingEventBus,
     pipeline: ProcessingPipeline,
+    decoder: Arc<WavDecoder>,
+    diarizer: Arc<FakeDiarizer>,
     audio: PathBuf,
     vault: PathBuf,
     now: DateTime<Utc>,
@@ -93,6 +98,23 @@ fn world(
     summarizer: bool,
     destination: Option<fn(&Path) -> FakeDestination>,
     retention: AudioRetention,
+) -> World {
+    world_with(
+        summarizer,
+        destination,
+        retention,
+        FakeSpeechEngine::default(),
+        FakeDiarizer::default(),
+    )
+}
+
+/// [`world`] over the given speech engine and diarizer.
+fn world_with(
+    summarizer: bool,
+    destination: Option<fn(&Path) -> FakeDestination>,
+    retention: AudioRetention,
+    engine: FakeSpeechEngine,
+    diarizer: FakeDiarizer,
 ) -> World {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
@@ -120,10 +142,12 @@ fn world(
         now,
     });
     let people = store.persons().unwrap();
+    let decoder = Arc::new(WavDecoder::default());
+    let diarizer = Arc::new(diarizer);
     let mut dependencies = PipelineDependencies::new(
-        Arc::new(WavDecoder),
-        Arc::new(FakeSpeechEngine::default()),
-        Arc::new(FakeDiarizer::default()),
+        decoder.clone(),
+        Arc::new(engine),
+        diarizer.clone(),
         Arc::new(InMemorySpeakerMemory::new(people)),
         dispatcher,
         store.clone(),
@@ -139,6 +163,8 @@ fn world(
     }
     World {
         pipeline: ProcessingPipeline::new(dependencies),
+        decoder,
+        diarizer,
         _dir: dir,
         store,
         events,
@@ -148,9 +174,12 @@ fn world(
     }
 }
 
-/// Reads the 16 kHz mono WAV fixtures; the real decoders live in
-/// `steno-audio`.
-struct WavDecoder;
+/// Reads the 16 kHz mono WAV fixtures and logs the lanes it decoded; the
+/// real decoders live in `steno-audio`.
+#[derive(Default)]
+struct WavDecoder {
+    decodes: Mutex<Vec<AudioLane>>,
+}
 
 fn read_wav(path: &Path) -> std::io::Result<Vec<f32>> {
     let bytes = std::fs::read(path)?;
@@ -169,6 +198,7 @@ impl steno_core::AudioDecoder for WavDecoder {
         asset: &AudioAsset,
         lane: AudioLane,
     ) -> steno_core::protocols::BoundaryResult<steno_core::AudioBuffer16k> {
+        self.decodes.lock().unwrap().push(lane);
         let url = asset.sidecars_16k.get(&lane).unwrap_or(&asset.url);
         let path = file_url_path(url).ok_or("not a file URL")?;
         Ok(steno_core::AudioBuffer16k::new(read_wav(&path)?))
@@ -202,6 +232,30 @@ fn call_meeting(now: DateTime<Utc>) -> Meeting {
 
 fn call_asset(audio: &Path, meeting_id: Uuid, retention: AudioRetention) -> AudioAsset {
     steno_pipeline::fixtures::two_lane_call(audio, meeting_id, retention).unwrap()
+}
+
+/// Six seconds of digital silence over the asset's system sidecar: the tap
+/// of a phone call held on speaker next to the Mac.
+fn silence_the_tap(asset: &AudioAsset) {
+    let layout = RecordingLayout::from_asset(asset).unwrap();
+    steno_pipeline::fixtures::write_wav(&layout.sidecar(AudioLane::System), &vec![0; 6 * 16_000])
+        .unwrap();
+}
+
+/// The fake engine hearing nothing in a silent buffer.
+fn engine_deaf_to_silence() -> FakeSpeechEngine {
+    FakeSpeechEngine {
+        silent_below_peak: Some(1e-4),
+        ..FakeSpeechEngine::default()
+    }
+}
+
+fn labels(export: &MeetingExport) -> Vec<&str> {
+    export
+        .speakers
+        .iter()
+        .map(|s| s.cluster_label.as_str())
+        .collect()
 }
 
 fn drain(receiver: &mut steno_pipeline::EventReceiver) -> Vec<MeetingEvent> {
@@ -366,6 +420,218 @@ async fn a_mac_call_runs_every_stage_to_ready_and_delivers() {
         audio.expires_at
     );
     assert_eq!(stages(&drain(&mut receiver)), [PipelineStage::Deliver]);
+}
+
+/// A call whose tap holds less than 5 % of the mic's speech and under ten
+/// seconds is diarized on the mic lane; one with a real partner, however
+/// quiet, zero mic speech, or no tap at all keeps the standard lane.
+/// Swift: `StageTests.aCallWhoseTapCarriedNoConversationIsDiarizedOnTheMicLane`.
+#[test]
+fn a_call_whose_tap_carried_no_conversation_is_diarized_on_the_mic_lane() {
+    fn segments(durations: &[f64]) -> Vec<RawSegment> {
+        let mut start = 0.0;
+        durations
+            .iter()
+            .map(|duration| {
+                let segment = RawSegment {
+                    start,
+                    end: start + duration,
+                    text: "x".to_owned(),
+                    language: None,
+                    word_timings: None,
+                };
+                start += duration;
+                segment
+            })
+            .collect()
+    }
+    let lanes = |mic: &[f64], system: &[f64]| {
+        BTreeMap::from([
+            (AudioLane::Mic, segments(mic)),
+            (AudioLane::System, segments(system)),
+        ])
+    };
+    let call = [AudioLane::Mic, AudioLane::System];
+    let silent_tap = lanes(&[10.0, 20.0, 30.0], &[]);
+    assert!(tap_carried_no_conversation(&silent_tap));
+    assert_eq!(
+        diarized_lane_after_transcription(MeetingSource::MacCall, &call, &silent_tap),
+        Some(AudioLane::Mic)
+    );
+    // A chime on the tap: 2 s against 60 s is under 5 %.
+    assert!(tap_carried_no_conversation(&lanes(
+        &[10.0, 20.0, 30.0],
+        &[2.0]
+    )));
+    // Exactly 5 % is a conversation; so is anything above.
+    assert!(!tap_carried_no_conversation(&lanes(&[60.0], &[3.0])));
+    let partner = lanes(&[30.0], &[30.0]);
+    assert!(!tap_carried_no_conversation(&partner));
+    // A partner who mostly listens: 60 s against 2000 s is 3 %, but ten
+    // seconds of speech is a conversation.
+    assert!(!tap_carried_no_conversation(&lanes(&[2000.0], &[60.0])));
+    assert!(!tap_carried_no_conversation(&lanes(&[2000.0], &[10.0])));
+    assert!(tap_carried_no_conversation(&lanes(&[2000.0], &[9.5])));
+    assert_eq!(
+        diarized_lane_after_transcription(MeetingSource::MacCall, &call, &partner),
+        Some(AudioLane::System)
+    );
+    // Nothing on either lane, or no tap lane, never falls back.
+    assert!(!tap_carried_no_conversation(&lanes(&[], &[])));
+    assert!(!tap_carried_no_conversation(&BTreeMap::from([(
+        AudioLane::Mic,
+        segments(&[5.0])
+    )])));
+    assert_eq!(
+        diarized_lane_after_transcription(
+            MeetingSource::MacInPerson,
+            &[AudioLane::Mixed],
+            &BTreeMap::from([(AudioLane::Mixed, Vec::new())])
+        ),
+        Some(AudioLane::Mixed)
+    );
+    // The silent-tap rule is for calls: an in-person asset with the same
+    // lanes keeps the last lane.
+    assert_eq!(
+        diarized_lane_after_transcription(MeetingSource::MacInPerson, &call, &silent_tap),
+        Some(AudioLane::System)
+    );
+}
+
+/// A phone call on speaker next to the Mac: the tap records silence and the
+/// microphone hears both people. The mic lane is diarized like a room,
+/// nobody is "me", the mic is decoded a second time for the diarizer, and
+/// the kept recording and lanes are untouched. Swift:
+/// `PipelineIntegrationTests.aCallWithASilentTapDiarizesTheMicLaneAndHasNoMe`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_call_with_a_silent_tap_diarizes_the_mic_lane_and_has_no_me() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepDays(30),
+        engine_deaf_to_silence(),
+        FakeDiarizer::default(),
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(30));
+    silence_the_tap(&asset);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+
+    let export = world.store.export(meeting.id).unwrap();
+    assert_eq!(export.meeting.state, MeetingState::Ready);
+    assert_eq!(
+        export.meeting.source,
+        MeetingSource::MacCall,
+        "it was a call, just not through the Mac"
+    );
+    assert_eq!(labels(&export), ["Speaker 1", "Speaker 2"]);
+    assert_eq!(export.participants, [], "no \"me\" participant is invented");
+    assert_eq!(export.segments.len(), 6);
+    assert!(
+        export
+            .segments
+            .iter()
+            .all(|s| s.lane == AudioLane::Mic && s.speaker_id.is_some())
+    );
+    let used: std::collections::BTreeSet<_> = export
+        .segments
+        .iter()
+        .filter_map(|s| s.speaker_id)
+        .collect();
+    let speakers: std::collections::BTreeSet<_> = export.speakers.iter().map(|s| s.id).collect();
+    assert_eq!(used, speakers);
+    assert_eq!(
+        *world.decoder.decodes.lock().unwrap(),
+        [AudioLane::Mic, AudioLane::System, AudioLane::Mic]
+    );
+    assert_eq!(world.diarizer.diarizations.entries(), [6.0]);
+    assert_eq!(
+        export.audio.unwrap().lanes,
+        [AudioLane::Mic, AudioLane::System]
+    );
+}
+
+/// A silent tap with one voice on the mic is the user alone (headphones,
+/// the tap permission missing): the standard rules stand, the mic is "me",
+/// and no clip is written for a cluster that was never made a speaker.
+/// Swift: `PipelineIntegrationTests.aSilentTapWithOneVoiceOnTheMicKeepsTheMicAsMe`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_silent_tap_with_one_voice_on_the_mic_keeps_the_mic_as_me() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepDays(30),
+        engine_deaf_to_silence(),
+        FakeDiarizer {
+            cluster_count: 1,
+            ..FakeDiarizer::default()
+        },
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(30));
+    silence_the_tap(&asset);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+
+    let export = world.store.export(meeting.id).unwrap();
+    assert_eq!(export.meeting.state, MeetingState::Ready);
+    assert_eq!(labels(&export), ["Me"]);
+    assert_eq!(
+        export
+            .participants
+            .iter()
+            .map(|p| p.role)
+            .collect::<Vec<_>>(),
+        [ParticipantRole::Me]
+    );
+    let me = LaneMerger::me_speaker_id(meeting.id);
+    assert_eq!(export.segments.len(), 6);
+    assert!(
+        export
+            .segments
+            .iter()
+            .all(|s| s.lane == AudioLane::Mic && s.speaker_id == Some(me))
+    );
+    let layout = RecordingLayout::from_asset(&asset).unwrap();
+    assert!(!layout.speakers_directory().exists());
+}
+
+/// Processing again after the tap went quiet: the "me" participant the
+/// first run created goes with the "me" speaker, so the export does not
+/// advertise a participant nobody speaks as. Swift:
+/// `PipelineIntegrationTests.aRerunThatFallsBackToTheMicLaneRemovesThePipelinesMeParticipant`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_that_falls_back_to_the_mic_lane_removes_the_pipelines_me_participant() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepDays(30),
+        engine_deaf_to_silence(),
+        FakeDiarizer::default(),
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(30));
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let first = world.store.export(meeting.id).unwrap();
+    assert_eq!(
+        first
+            .participants
+            .iter()
+            .map(|p| p.role)
+            .collect::<Vec<_>>(),
+        [ParticipantRole::Me]
+    );
+    assert_eq!(labels(&first), ["Me", "Speaker 1", "Speaker 2"]);
+
+    silence_the_tap(&asset);
+    world.pipeline.process(asset.id).await.unwrap();
+    let second = world.store.export(meeting.id).unwrap();
+    assert_eq!(second.meeting.state, MeetingState::Ready);
+    assert_eq!(second.participants, []);
+    assert_eq!(labels(&second), ["Speaker 1", "Speaker 2"]);
+    assert!(second.segments.iter().all(|s| s.speaker_id.is_some()));
 }
 
 #[tokio::test(flavor = "multi_thread")]

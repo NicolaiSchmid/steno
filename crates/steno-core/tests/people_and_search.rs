@@ -1,6 +1,7 @@
 //! The queries the windows ask for: the export, full-text search, the
-//! speaker picker's people lists, resolving a typed name and confirming a
-//! speaker (with the merge a second confirmation triggers).
+//! speaker picker's people lists, resolving a typed name, confirming a
+//! speaker (with the merge a second confirmation triggers) and removing a
+//! participant.
 
 mod common;
 
@@ -26,6 +27,22 @@ fn the_export_carries_the_meeting_and_the_persons_it_points_at() {
         Err(StoreError::MeetingNotFound(_))
     ));
     assert_eq!(store.all_meetings().unwrap(), vec![meeting]);
+}
+
+/// `delete_participant` removes one row; a missing id is not an error.
+/// Swift: `MeetingStore.deleteParticipant(id:)`.
+#[test]
+fn deleting_a_participant_removes_that_row_only() {
+    let (store, meeting) = populated();
+    let participant = store.participants(meeting.id).unwrap()[0].clone();
+    store.delete_participant(uuid::Uuid::new_v4()).unwrap();
+    assert_eq!(
+        store.participants(meeting.id).unwrap(),
+        std::slice::from_ref(&participant)
+    );
+    store.delete_participant(participant.id).unwrap();
+    assert_eq!(store.participants(meeting.id).unwrap(), []);
+    assert_eq!(store.export(meeting.id).unwrap().meeting, meeting);
 }
 
 #[test]
