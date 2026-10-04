@@ -100,10 +100,14 @@ pub fn tone(seconds: f64) -> AudioBuffer16k {
     AudioBuffer16k::new((0..n).map(|i| (i as f32 * 0.05).sin() * 0.5).collect())
 }
 
-/// The sidecar error inside a boundary error.
+/// The sidecar error inside a boundary error: as the cause of a
+/// [`SpeechError`] (`prepare`, `transcribe`), or itself (`health`).
 pub fn sidecar_error<'a>(
     error: &'a (dyn std::error::Error + Send + Sync + 'static),
 ) -> &'a SidecarError {
+    if let Some(inner) = error.downcast_ref::<SidecarError>() {
+        return inner;
+    }
     match error.downcast_ref::<SpeechError>() {
         Some(SpeechError::Sidecar(inner)) => inner,
         _ => panic!("not a sidecar error: {error}"),
@@ -129,4 +133,66 @@ pub async fn assert_works(engine: &SidecarSpeechEngine, audio: &AudioBuffer16k) 
     );
     assert_eq!(segments[0].language, Some(LanguageTag::from("de")));
     assert_eq!(segments[0].end, audio.duration());
+}
+
+/// Whether a process with `pid` exists (a zombie counts).
+pub fn alive(pid: u32) -> bool {
+    if cfg!(windows) {
+        let out = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
+    } else {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+}
+
+/// Kills `pid`: a child the test ends, or one a failed test left running.
+pub fn kill(pid: u32) -> bool {
+    let status = if cfg!(windows) {
+        Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .status()
+    } else {
+        Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()
+    };
+    status.unwrap().success()
+}
+
+/// Polls `probe` every 20 ms for up to ten seconds.
+pub fn within_ten_seconds<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
+        }
+        if Instant::now() > deadline {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Kills the engine's idle child and waits until its reader has queued
+/// the end of its stdout, so the next call finds the child dead rather
+/// than send it a request. Not until the pid is a zombie: the main thread
+/// of a child with several shows as one before the others have exited
+/// and closed stdout. Returns the child's pid.
+pub fn kill_idle_child(engine: &SidecarSpeechEngine) -> u32 {
+    let pid = engine.pid().unwrap();
+    assert!(kill(pid));
+    assert!(
+        within_ten_seconds(|| engine.fault_queued().then_some(())).is_some(),
+        "the reader never queued the end of the killed child's stdout"
+    );
+    pid
 }

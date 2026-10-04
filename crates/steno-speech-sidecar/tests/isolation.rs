@@ -39,8 +39,8 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use common::{
-    ASKED_FOR_DIRECTML, assert_works, binary, config, engine_in, engine_with_fault, provider,
-    sidecar_error, tone,
+    ASKED_FOR_DIRECTML, alive, assert_works, binary, config, engine_in, engine_with_fault, kill,
+    kill_idle_child, provider, sidecar_error, tone, within_ten_seconds,
 };
 use steno_core::{AudioBuffer16k, SpeechEngine};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
@@ -50,58 +50,9 @@ use steno_speech::{
     SidecarConfig, SidecarError, SidecarSpeechEngine,
 };
 
-/// Whether a process with `pid` exists (a zombie counts).
-fn alive(pid: u32) -> bool {
-    if cfg!(windows) {
-        let out = Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
-            .output()
-            .unwrap();
-        String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\""))
-    } else {
-        Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .stderr(Stdio::null())
-            .status()
-            .unwrap()
-            .success()
-    }
-}
-
-/// Polls `probe` every 20 ms for up to ten seconds.
-fn within_ten_seconds<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(value) = probe() {
-            return Some(value);
-        }
-        if Instant::now() > deadline {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
 /// Waits up to ten seconds for `pid` to be gone.
 fn gone_soon(pid: u32) -> bool {
     within_ten_seconds(|| (!alive(pid)).then_some(())).is_some()
-}
-
-/// Waits up to ten seconds for `pid` to end: to be gone, or a zombie its
-/// parent has not reaped.
-fn ended_soon(pid: u32) -> bool {
-    let ended = || {
-        if cfg!(windows) {
-            return !alive(pid);
-        }
-        let out = Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        let stat = String::from_utf8_lossy(&out.stdout);
-        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
-    };
-    within_ten_seconds(|| ended().then_some(())).is_some()
 }
 
 /// The pid the `--fault-once` marker in `dir` holds, once the faulting
@@ -173,21 +124,6 @@ fn exit_status(child: &mut Child, outlived: &str) -> ExitStatus {
         let _ = child.wait();
         panic!("{outlived}")
     })
-}
-
-/// Kills `pid`, for a test that failed with a child left running.
-fn kill(pid: u32) -> bool {
-    let status = if cfg!(windows) {
-        Command::new("taskkill")
-            .args(["/F", "/PID", &pid.to_string()])
-            .stdout(Stdio::null())
-            .status()
-    } else {
-        Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .status()
-    };
-    status.unwrap().success()
 }
 
 /// The fault fires on the first transcription; it must fail with an error
@@ -269,18 +205,26 @@ async fn the_provider_follows_a_fallback_after_the_load() {
 }
 
 /// The transcript carries the provider too: a child that fell back to
-/// the CPU mid-job and then dies between jobs, before any health request,
-/// ended on the CPU, so the child that replaces it is asked for `DirectML`
-/// again.
+/// the CPU mid-job and then dies, before any health request, ended on the
+/// CPU, so the next child is asked for `DirectML` again. The death is
+/// found by a health request, which counts it as one during a request
+/// (`prepare` and `transcribe` would replace the child on `DirectML`
+/// whatever its provider). The crash report holds the child's line about
+/// the fallback, written once though two answers followed it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_that_dies_after_falling_back_to_the_cpu_leaves_directml_on() {
     let (engine, _dir) = engine_with_fault("fallback", |c| c.options.directml = true);
     assert_works(&engine, &tone(0.5)).await;
-    let pid = engine.pid().unwrap();
-    assert!(kill(pid));
-    // Dead, a zombie until the engine reaps it.
-    assert!(ended_soon(pid));
     assert_works(&engine, &tone(0.5)).await;
+    kill_idle_child(&engine);
+    let error = engine.health().await.unwrap_err();
+    match sidecar_error(error.as_ref()) {
+        SidecarError::Crashed { stderr, .. } => {
+            assert_eq!(stderr.matches(FALLBACK_NOTICE).count(), 1, "{stderr}");
+        }
+        other => panic!("{other}"),
+    }
+    engine.prepare().await.unwrap();
     assert_eq!(engine.spawns(), 2);
     assert_eq!(provider(&engine).await, Some(ASKED_FOR_DIRECTML));
     assert!(!directml_switched_off());
@@ -707,10 +651,7 @@ async fn a_child_that_died_while_idle_is_replaced_without_an_error() {
     let dir = tempfile::tempdir().unwrap();
     let engine = engine_in(&dir, config(&[]));
     engine.prepare().await.unwrap();
-    let pid = engine.pid().unwrap();
-    assert!(kill(pid));
-    // Dead, a zombie until the engine reaps it.
-    assert!(ended_soon(pid));
+    let pid = kill_idle_child(&engine);
     assert_works(&engine, &tone(0.5)).await;
     assert_ne!(engine.pid(), Some(pid));
     assert_eq!(engine.spawns(), 2);
@@ -727,7 +668,7 @@ async fn a_child_over_the_ceiling_while_idle_is_replaced_without_an_error() {
     // The report is queued while no request runs, so the next call finds
     // it before it sends one.
     assert!(
-        within_ten_seconds(|| engine.over_ceiling_queued().then_some(())).is_some(),
+        within_ten_seconds(|| engine.fault_queued().then_some(())).is_some(),
         "the reader never queued the report over the ceiling"
     );
     assert_works(&engine, &tone(0.5)).await;

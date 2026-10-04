@@ -177,9 +177,9 @@ struct SidecarProcess {
     /// crash counts as the probe's.
     load_asked_directml: bool,
     ceiling: u64,
-    /// Set by the stdout reader once it has queued
-    /// [`Event::OverCeiling`].
-    over_ceiling: Arc<AtomicBool>,
+    /// Set by the stdout reader once it has queued a fault:
+    /// [`Event::OverCeiling`], [`Event::Closed`] or [`Event::Garbage`].
+    fault_queued: Arc<AtomicBool>,
 }
 
 /// The lines of the child's stderr kept for a crash report.
@@ -323,8 +323,8 @@ impl SidecarProcess {
         let (sender, events) = mpsc::channel();
         let replies = sender.clone();
         let ceiling = config.memory_ceiling_bytes;
-        let over_ceiling = Arc::new(AtomicBool::new(false));
-        let over = Arc::clone(&over_ceiling);
+        let fault_queued = Arc::new(AtomicBool::new(false));
+        let queued = Arc::clone(&fault_queued);
         std::thread::Builder::new()
             .name(format!("sidecar-{pid}-stdout"))
             .spawn(move || {
@@ -332,23 +332,26 @@ impl SidecarProcess {
                 loop {
                     let event = match protocol::read_header::<_, Reply>(&mut stdout) {
                         Ok(Some(Reply::Memory { rss_bytes })) => {
-                            if over.load(Ordering::SeqCst) || rss_bytes <= ceiling {
+                            if queued.load(Ordering::SeqCst) || rss_bytes <= ceiling {
                                 continue;
                             }
-                            if replies.send(Event::OverCeiling(rss_bytes)).is_err() {
-                                return;
-                            }
-                            // After the send: whoever reads it finds the
-                            // event queued.
-                            over.store(true, Ordering::SeqCst);
-                            continue;
+                            Event::OverCeiling(rss_bytes)
                         }
                         Ok(Some(reply)) => Event::Reply(reply),
                         Ok(None) | Err(FrameError::Truncated | FrameError::Io(_)) => Event::Closed,
                         Err(error) => Event::Garbage(error.to_string()),
                     };
+                    let fault = !matches!(event, Event::Reply(_));
                     let last = matches!(event, Event::Closed | Event::Garbage(_));
-                    if replies.send(event).is_err() || last {
+                    if replies.send(event).is_err() {
+                        return;
+                    }
+                    // After the send: whoever reads the flag finds the
+                    // event queued.
+                    if fault {
+                        queued.store(true, Ordering::SeqCst);
+                    }
+                    if last {
                         return;
                     }
                 }
@@ -366,7 +369,7 @@ impl SidecarProcess {
             provider: None,
             load_asked_directml: false,
             ceiling,
-            over_ceiling,
+            fault_queued,
         };
         match process.wait_for(None, config.startup_timeout)? {
             Reply::Ready { protocol, .. } if protocol == PROTOCOL_VERSION => Ok(process),
@@ -825,16 +828,17 @@ impl SidecarSpeechEngine {
         self.shared.spawns.load(Ordering::SeqCst)
     }
 
-    /// For tests: whether the running child's report of a resident set
-    /// over the ceiling is queued, for the next call to find. Blocking,
-    /// and it waits for a request that runs.
+    /// For tests: whether a fault of the running child is queued for the
+    /// next call to find: the end of its stdout, garbage on it or a report
+    /// of a resident set over the ceiling. Blocking, and it waits for a
+    /// request that runs.
     #[doc(hidden)]
     #[must_use]
-    pub fn over_ceiling_queued(&self) -> bool {
+    pub fn fault_queued(&self) -> bool {
         self.shared
             .lock()
             .as_ref()
-            .is_some_and(|p| p.over_ceiling.load(Ordering::SeqCst))
+            .is_some_and(|p| p.fault_queued.load(Ordering::SeqCst))
     }
 
     /// Asks the running child for its pid, resident set, whether its
