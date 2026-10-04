@@ -544,12 +544,11 @@ fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
     .unwrap();
     let (first, rest) = frame.split_at(frame.len() - 100);
     stdin.write_all(first).unwrap();
-    for signal in ["-INT", "-TERM", "-HUP"] {
-        let sent = Command::new("kill")
-            .args([signal, &pid.to_string()])
-            .status()
-            .unwrap();
-        assert!(sent.success(), "kill {signal}");
+    let pid = libc::pid_t::try_from(pid).unwrap();
+    for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+        // SAFETY: `kill` only sends `signal` to the child's pid.
+        let sent = unsafe { libc::kill(pid, signal) };
+        assert_eq!(sent, 0, "signal {signal}");
     }
     std::thread::sleep(Duration::from_millis(200));
     assert!(
