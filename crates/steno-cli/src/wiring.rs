@@ -67,8 +67,13 @@ pub const ENGINE_IDS: [&str; 4] = [
 /// store, models downloading on first use.
 #[derive(Debug, Clone, Args)]
 pub struct SpeechOptions {
-    /// Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar.
-    #[arg(long, value_name = "engine")]
+    // A `help` string, not a doc comment: clap prints it as written, and
+    // the doc lint would ask for backticks around CoreML.
+    #[arg(
+        long,
+        value_name = "engine",
+        help = "Speech engine id (parakeet-v3, parakeet-ultra, parakeet-de, whisperkit-large-v3-turbo); every id runs Parakeet v3 in steno-speech-sidecar, which must sit beside steno, except parakeet-v3 on the Mac, which runs on CoreML unless speech.json chooses the sidecar."
+    )]
     pub engine: Option<String>,
 }
 
