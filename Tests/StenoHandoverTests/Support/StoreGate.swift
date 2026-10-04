@@ -22,11 +22,13 @@ final class StoreGate: Sendable {
   let receiptWrite = Hold(matching: "UPDATE \"handoverReceipt\"")
   /// The next paired device delete (a revoke), executed but not committed.
   let deviceDelete = Hold(matching: "DELETE FROM \"pairedDevice\"")
+  private let holds: [Hold]
   private let directory: URL
 
   init() throws {
     directory = try Fixtures.temporaryDirectory("store-gate")
     let holds = [receiptRead, receiptWrite, deviceDelete]
+    self.holds = holds
     var configuration = Configuration()
     configuration.prepareDatabase { db in
       let connection = ObjectIdentifier(db)
@@ -43,13 +45,11 @@ final class StoreGate: Sendable {
 
   /// Whether a hold went on by itself after `Hold.limit`: the test waited on
   /// something the held statement blocked.
-  var timedOut: Bool { receiptRead.timedOut || receiptWrite.timedOut || deviceDelete.timedOut }
+  var timedOut: Bool { holds.contains { $0.timedOut } }
 
   /// Lets any held statement go on and deletes the database directory.
   func remove() {
-    receiptRead.release()
-    receiptWrite.release()
-    deviceDelete.release()
+    for hold in holds { hold.release() }
     try? FileManager.default.removeItem(at: directory)
   }
 
