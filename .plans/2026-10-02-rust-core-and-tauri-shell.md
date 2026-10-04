@@ -44,7 +44,8 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
    loop are shared; the backends are CoreML (`objc2-core-ml`) on the Mac and ONNX
    Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
-   one process while `CoreML` runs Parakeet (the default).
+   one process while `CoreML` runs Parakeet (the default). The diarizer does not yet:
+   the open item under "Pipeline and services (WP6b)".
 5. **No allocation and no lock on the audio thread**, proven by the counting allocator
    in `crates/steno-audio/src/testing/rt.rs` in a test build.
 6. **Scope stays the scope.** No new features in the port; a Rust behaviour that
@@ -307,7 +308,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     `crates/steno-speech/tests/frames.rs`.
   - Limits: the parent installs the models (the child opens no connection), then
     enforces a per-request deadline (120 s plus 1 s per second of audio by default;
-    300 s for `load`) and a memory ceiling (6 GiB) against the heartbeat. A child that
+    300 s for `load`) and a memory ceiling (6 GiB) against the heartbeat. The client
+    starts only an absolute program path, never one looked up on `PATH` or in the
+    working directory (`a_program_that_is_not_an_absolute_path_never_starts`): the
+    child is handed the meeting's audio. A child that
     dies, hangs, overruns or breaks the protocol is killed and reaped, the call fails
     with `SpeechError::Sidecar`, and the next call spawns and loads again; an error the
     child reports keeps it (`an_error_the_child_reports_keeps_the_child`). The child
@@ -331,7 +335,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     `a_session_opens_only_once_telemetry_is_off`,
     `the_workspace_configures_onnx_runtime_in_one_place_with_telemetry_off`).
   - Platform policy (`crates/steno-speech/src/runtime.rs`): on Linux and Windows the
-    sidecar is the only engine the app runs; on macOS the in-process CoreML engine is
+    sidecar is the only speech engine the app runs; on macOS the in-process CoreML engine is
     the default and the sidecar a fallback behind `SpeechSettings::onnx_sidecar_on_mac`.
     The in-process `OnnxSpeechEngine` is what the child hosts and what the example and
     the FLEURS test drive. Test: `the_sidecar_is_the_default_off_the_mac_and_the_fallback_on_it`.
@@ -611,16 +615,22 @@ still has to draw the window side. `[ ]` is not ported yet.
   fails with "could not start" and the path. The Settings model rows, the warm-up's
   installed check and `steno dev models` follow the same policy, so with the Mac's
   fallback on, Parakeet v3 is the fp32 export there too
-  (`with_the_sidecar_chosen_parakeet_v3_is_the_onnx_export`). `build()` reads the
-  speech settings once and hands them to the pipeline (and every reload), the model
-  service and the recorder, so the three agree.
+  (`with_the_sidecar_chosen_parakeet_v3_is_the_onnx_export`); they show the fp32
+  export's size from its manifest there (`SpeechModels::expected_bytes`,
+  `the_expected_size_is_that_of_the_model_the_platform_runs`). `build()` reads the
+  speech settings and the models directory once, at launch, and hands them to the
+  pipeline (and every reload) and the model service, so the two agree
+  (`a_reload_keeps_the_models_directory_the_app_was_built_with`); an edit of
+  `speech.json` takes effect at the next launch.
 - The pipeline releases the speech engine once a job's lanes are transcribed, before
   the diarizer runs, unless another job is between its warm-up and its last lane
   (`ProcessingPipeline::finish_speech`, under the warm-up's lock):
   `the_engine_is_released_after_the_last_lane_before_diarization`,
   `a_job_leaves_the_engine_loaded_while_another_still_transcribes`,
   `a_job_that_starts_during_a_release_prepares_again_after_it`,
-  `a_job_that_panics_gives_its_claim_on_the_engine_back`, and against the real binary
+  `a_job_that_panics_gives_its_claim_on_the_engine_back`,
+  `a_job_whose_lane_cannot_be_decoded_releases_the_engine_too`,
+  `a_job_whose_warm_up_fails_releases_the_engine_too`, and against the real binary
   `each_job_starts_the_sidecar_and_frees_it_once_its_lanes_are_transcribed`. So each
   job in the speech sidecar loads the 2.6 GB export again; the Mac's `CoreML` engine
   ignores the release and stays warm. A job that panics or is cancelled leaves the
@@ -631,16 +641,21 @@ still has to draw the window side. `[ ]` is not ported yet.
   process, `CoreML` on the Mac, as Swift did; with Parakeet in the speech sidecar it
   loads the diarizer only (`ProcessingPipeline::warm_up_diarizer`), so no 2.2 GB
   child is resident through the recording or left without a job when the save fails.
-  The engine id comes from the settings at the recording's start, as the reloaded
-  pipeline's does
+  Both the installed check and that choice follow the engine the current pipeline was
+  built with (`CurrentPipeline::current_with_engine`, set by each successful build and
+  reload), not the id stored now, so neither a failed reload nor an engine the Swift
+  app saved meanwhile can start the sidecar outside a job's claim
   (`a_recording_start_with_speech_in_the_sidecar_warms_the_diarizer_only`,
-  `the_warm_up_follows_the_engine_the_current_settings_name`). Rust only: the job
-  after the recording starts the child cold.
+  `the_warm_up_follows_the_engine_a_reload_built`,
+  `after_a_failed_reload_the_warm_up_keeps_to_the_pipeline_s_engine`). Rust only:
+  Swift loaded the engine during every recording; with Parakeet in the sidecar, the
+  job after a recording starts the child cold.
 - Open, against invariant 4: the ONNX diarizer (pyannote segmentation and the
   WeSpeaker embeddings) still runs in the app's process on every platform, so a crash
-  in ONNX Runtime there ends the app; its two models work in far less memory than
-  Parakeet's export. Moving it into the sidecar needs a request of its own in the
-  sidecar protocol; no work package has it yet.
+  in ONNX Runtime there ends the app. Memory is not the reason to move it (the larger
+  of its two models is 26 MB, against Parakeet's 2.6 GB export); crash isolation is.
+  Moving it needs a request of its own in the sidecar protocol; no work package has it
+  yet.
 - The Swift `steno process` stamped `startedAt` from `Date()` minus the duration; the
   Rust CLI does the same to the millisecond, so a `steno export` of a CLI-processed
   meeting differs only in the ids both sides mint at random.
@@ -668,8 +683,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   window's task.
 - A meeting a previous process left recording fails at launch with Swift's "Recording
   was interrupted before it finished." (`Store::INTERRUPTED_RECORDING_REASON`).
-- A recording start warms the pipeline up only when the models of the engine the
-  settings name and the diarizer's are installed (`SpeechModels::engine_installed`),
+- A recording start warms the pipeline up only when the models of the current
+  pipeline's engine and the diarizer's are installed (`SpeechModels::engine_installed`),
   so it never downloads, as Swift's `warmUpPipelineIfModelsInstalled`.
 - The `CoreML` Parakeet runs one call at a time, off the runtime's workers, as Swift's
   `AsrManager` actor ran it (`OneCallAtATime`).
@@ -1198,8 +1213,8 @@ empty database.
 (`MeetingEvent`, `ProcessingProgress`), learned stage rates, both intakes, the
 retention sweep and the store-backed cosine memory; `steno` has every Swift command
 (`capture-spike` and `audio-devices` need the Mac's live backend); one `build()`
-assembles the graph; the shell's `fixture-host` is opt-in. The ONNX engine ran
-in-process until the services moved onto the sidecar (#183); the
+assembles the graph; the shell's `fixture-host` is opt-in. Parakeet's ONNX engine ran
+in the app's process until #183 moved it into the speech sidecar; the
 `CoreML` engine leaves `language` unset (#163), and
 `LanguageTaggingEngine` in the services crate runs `steno_speech`'s tagger after it,
 as `ParakeetMapping` did in Swift. Secrets: the platform keyring on macOS and

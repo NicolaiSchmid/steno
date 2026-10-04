@@ -132,19 +132,32 @@ pnpm --dir apps/macos/web dev &
 cargo build -p steno-desktop -p steno-speech-sidecar && target/debug/steno-desktop
 ```
 
-Off the Mac, Parakeet runs in the speech sidecar, `steno-speech-sidecar`. It
-also runs there on the Mac when `speech.json` in the support directory holds
-`{"onnxSidecarOnMac": true}`. `steno-services` starts the sidecar from beside
-the shell's binary (`steno_services::speech::sidecar_config`).
-`cargo build -p steno-desktop` and `cargo tauri dev` do not build it. Add
-`-p steno-speech-sidecar` as above, or run `cargo build` at the workspace
-root, so that `target/debug/` holds both binaries. Without the sidecar the
-windows still work, but processing a meeting fails with "could not start"
-and the path it looked for. The sidecar also needs the fp32 Parakeet export,
-which no host serves yet: place the files in the models directory's `onnx/`
-folder, or set `STENO_MODELS_MIRROR` to a copy (see "Models" in the
-`steno-speech` crate doc). The bundles do not carry the binary until WP9, so a
-bundle built today cannot process off the Mac either.
+Parakeet, the speech model, runs in its own process, `steno-speech-sidecar`,
+on Linux and Windows. On the Mac `CoreML` runs it inside the shell, unless
+`speech.json` in the support directory holds `{"onnxSidecarOnMac": true}` or
+the stored engine is not Parakeet v3 (a Swift user who picked Parakeet Ultra,
+Parakeet DE or Whisper); then the sidecar runs it there too. The shell reads
+`speech.json` once, at launch: an edit takes effect at the next start, not at
+a Settings save. The support directory is
+`~/Library/Application Support/Steno` on the Mac, `$XDG_DATA_HOME/Steno`
+(else `~/.local/share/Steno`) on Linux and `%APPDATA%\Steno` on Windows.
+
+`steno-services` starts the sidecar from beside the shell's binary
+(`steno_services::speech::sidecar_config`). `cargo build -p steno-desktop` and
+`cargo tauri dev` do not build it: use the command above, run
+`cargo build -p steno-speech-sidecar` once before `cargo tauri dev`, or run
+`cargo build` at the workspace root, so that `target/debug/` holds both
+binaries. Without the sidecar the windows still work, but processing a
+meeting fails with "could not start" and the path it looked for.
+
+The sidecar also needs the fp32 Parakeet export, which no host serves yet.
+Put its five files (`encoder.onnx`, `encoder.weights`, `decoder.onnx`,
+`joiner.onnx`, `tokens.txt`) in `onnx/parakeet-tdt-0.6b-v3-fp32/` under the
+models directory (`Models` in the support directory, unless `STENO_MODELS_DIR`
+or the settings name another), or set `STENO_MODELS_MIRROR` to a copy.
+"Models" in the `steno-speech` crate doc says how to produce the export.
+Silero VAD, the other model, downloads on first use. Bundles do not carry the
+sidecar yet (see Build).
 
 Every build without the `custom-protocol` feature loads `devUrl` (the Vite
 dev server on 5173), whatever the profile; that is Tauri's dev build. Set
@@ -192,8 +205,8 @@ app; WP9 changes it to `uno.schmid.steno.mac` for the cutover.
 
 No bundle carries `steno-speech-sidecar` yet (WP9 adds it), so a `.deb`,
 AppImage, `.msi` or NSIS install opens its windows but fails to process a
-meeting with "could not start"; on the Mac, the default `CoreML` engine
-needs no sidecar.
+meeting with "could not start". A Mac bundle processes on `CoreML`, except in
+the two cases under Run that send Parakeet to the sidecar.
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the
