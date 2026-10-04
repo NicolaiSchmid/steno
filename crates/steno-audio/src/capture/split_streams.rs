@@ -1,7 +1,7 @@
 //! Which capture stream feeds which lane when the microphone and the system
 //! audio arrive as two streams (WASAPI, WP10a), and the latency arithmetic
 //! for them. Pure, so it is tested on every OS; the Windows backend
-//! (`capture::live::wasapi`) builds on it. No Swift equivalent (one IOProc
+//! (`capture::live::wasapi`) builds on it. No Swift counterpart (one IOProc
 //! there).
 //!
 //! The plan describes the two streams in [`StreamLayout`]'s terms, so the
@@ -61,6 +61,19 @@ pub struct SplitStreamPlan {
 
 impl SplitStreamPlan {
     /// The plan for `lanes`, in sink order.
+    ///
+    /// ```
+    /// use steno_audio::capture::{SplitStreamPlan, StreamSource};
+    /// use steno_core::AudioLane;
+    ///
+    /// let plan = SplitStreamPlan::new(&[AudioLane::Mic, AudioLane::System]).unwrap();
+    /// assert_eq!(plan.master, StreamSource::Microphone);
+    /// assert_eq!(plan.follower, Some(StreamSource::System));
+    ///
+    /// let system_only = SplitStreamPlan::new(&[AudioLane::System]).unwrap();
+    /// assert_eq!(system_only.master, StreamSource::System);
+    /// assert_eq!(system_only.follower, None);
+    /// ```
     pub fn new(lanes: &[AudioLane]) -> Result<Self, CaptureError> {
         if lanes.is_empty() {
             return Err(CaptureError::UnexpectedStreamLayout(

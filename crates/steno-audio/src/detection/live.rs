@@ -114,8 +114,9 @@ mod wasapi {
     enum Notice {
         /// A device or a session's state changed.
         Changed,
-        /// A session was created: register for its state too.
-        SessionCreated,
+        /// Sessions may have appeared (one was created, or a device
+        /// changed): register for every session's state again.
+        Reregister,
     }
 
     fn notify(sender: &Sender<Notice>, notice: Notice) -> Box<dyn Fn() + Send + Sync> {
@@ -153,7 +154,7 @@ mod wasapi {
                     }
                 }
                 if let Ok(registration) =
-                    manager.register_created(notify(sender, Notice::SessionCreated))
+                    manager.register_created(notify(sender, Notice::Reregister))
                 {
                     managers.push(registration);
                 }
@@ -176,17 +177,16 @@ mod wasapi {
             return;
         };
         let (sender, notices) = channel();
-        // A device change can bring capture endpoints with sessions, so it
-        // re-registers the session events like a session creation.
+        // A device change can bring capture endpoints with sessions.
         let endpoints = enumerator
-            .register(notify(&sender, Notice::SessionCreated))
+            .register(notify(&sender, Notice::Reregister))
             .ok();
         let mut sessions = Some(SessionWatch::register(&enumerator, &sender));
         let _ = changes.send(());
         while !stop.load(Ordering::Acquire) {
             match notices.recv_timeout(Duration::from_millis(250)) {
                 Ok(notice) => {
-                    if notice == Notice::SessionCreated {
+                    if notice == Notice::Reregister {
                         // Unregister before registering again.
                         drop(sessions.take());
                         sessions = Some(SessionWatch::register(&enumerator, &sender));

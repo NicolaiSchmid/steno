@@ -25,9 +25,9 @@
 //!
 //! # Threads and hand-offs
 //!
-//! One recording runs on four threads; every arrow is a hand-off through a
-//! type that owns exactly that boundary. The first two arrows are
-//! real-time: nothing on them allocates, locks, logs or waits (plan
+//! On macOS one recording runs on four threads; every arrow is a hand-off
+//! through a type that owns exactly that boundary. The first two arrows
+//! are real-time: nothing on them allocates, locks, logs or waits (plan
 //! invariant 5, proven by [`testing::rt`] in `tests/realtime.rs`).
 //!
 //! ```text
@@ -59,8 +59,8 @@
 //! On Windows the top of the diagram is two WASAPI capture threads
 //! (`capture::live::wasapi`): the microphone thread is the first arrow,
 //! routing each packet through `realtime::PacketRouter`, and the system
-//! thread stages its packets into a `realtime::FollowerLane` that router
-//! pulls from.
+//! thread stages its packets into a `realtime::FollowerLane` that the
+//! router pulls from.
 //!
 //! The synthetic backend ([`testing::SyntheticCaptureBackend`]) is a
 //! producer thread speaking the `LaneFrameSink` protocol in place of the
@@ -95,7 +95,7 @@
 // compared exactly on purpose (48 000 is 48 000 or the device is wrong),
 // `#[inline(always)]` marks the real-time path as Swift's
 // `@inline(__always)` does, and the docs are full of HAL names (IOProc,
-// CoreAudio, PipeWire) that are not code.
+// CoreAudio, PipeWire, WASAPI) that are not code.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -115,7 +115,8 @@ pub mod realtime;
 pub mod testing;
 pub mod writer;
 
-/// The rate the aggregate device runs at and the master file is written in.
+/// The rate the aggregate device runs at, the Linux and Windows streams are
+/// opened at, and the master file is written in.
 pub const SAMPLE_RATE: f64 = 48_000.0;
 /// One processing frame: 10 ms at 48 kHz. The echo canceller, the level
 /// meter and the writer all work in this unit.

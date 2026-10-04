@@ -1,5 +1,7 @@
-//! The real-time path: the rings the IOProc writes, the processing thread
-//! that drains them in 10 ms frames, and the relay to the writer thread.
+//! The real-time path: the rings the IOProc writes, the callback views and
+//! `deliver` the live backends share (`io_proc`), the two-stream bodies of
+//! the Windows backend (`streams`), the processing thread that drains the
+//! rings in 10 ms frames, and the relay to the writer thread.
 //! Nothing here allocates or locks once constructed.
 //! Swift: `Sources/StenoAudio/RealTime/`.
 
