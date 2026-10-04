@@ -579,6 +579,50 @@ import Testing
     #expect(!gate.timedOut, "nothing waited on a held statement")
   }
 
+  /// A revoke that fails with nothing to discard takes back its count while
+  /// another starts during a pairing's save, so `revocations` looks
+  /// unchanged across the save. The second revoke deletes the device after
+  /// it: the pairing must still keep `revoked`.
+  @Test(.timeLimit(.minutes(1)))
+  func aFailedRevokeAndOneDuringAPairingKeepTheDeviceRevoked() async throws {
+    let restarted = try await Gated.restartedAfterUpload()
+    defer { restarted.remove() }
+    let (gate, engine, device) = (restarted.gate, restarted.engine, restarted.phone.device)
+    let deletes = HeldDeletes()
+    try await gate.pool.write { db in try deletes.install(db) }
+    defer { deletes.releaseAll() }
+
+    gate.receiptRead.arm()
+    let reading = Task { await restarted.phone.status(restarted.id) }
+    await gate.receiptRead.held()
+    let first = Task { try await restarted.service.revoke(device.id) }
+    try await Self.until { deletes.started == 1 }
+    // The pairing takes the counts with the first revoke in them; its save
+    // queues behind the first delete.
+    _ = await engine.beginPairing()
+    gate.deviceSave.arm()
+    let pairing = Task {
+      try await EngineClient(engine: engine).pair(deviceID: device.id, deviceName: device.name)
+    }
+    try await Self.until { await !engine.pairingIsOpen }
+    deletes.release(0)
+    await #expect(throws: (any Error).self) { try await first.value }
+    await gate.deviceSave.held()
+    let second = Task { try await restarted.service.revoke(device.id) }
+    try await Self.until { await engine.revoking[device.id] != nil }
+    gate.deviceSave.release()
+    #expect(try await pairing.value.code == 200)
+    deletes.release(1)
+    try await second.value
+
+    #expect(try await restarted.test.store.pairedDevice(id: device.id) == nil)
+    #expect(await engine.revoked.contains(device.id))
+    gate.receiptRead.release()
+    #expect(await reading.value.code == 200, "it read before the revokes")
+    #expect(await engine.receiptsSnapshot.isEmpty, "the deleted device's receipt stays out")
+    #expect(!gate.timedOut, "nothing waited on a held statement")
+  }
+
   /// A pairing whose save fails leaves the device revoked, so a request that
   /// read the receipt before the revoke does not bring it back.
   @Test(.timeLimit(.minutes(1)))

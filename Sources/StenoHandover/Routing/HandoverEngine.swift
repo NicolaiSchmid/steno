@@ -36,6 +36,11 @@ actor HandoverEngine: RequestHandling {
   /// starts meanwhile takes the count after the bump, so it is refused
   /// before it reads.
   var revoking: [UUID: Int] = [:]
+  /// Revokes started per device since start, never taken back. A pairing
+  /// that sees it change across its save keeps `revoked`; `revocations`
+  /// could look unchanged there, a failed revoke's undo cancelling the bump
+  /// of one that started meanwhile.
+  var revokeStarts: [UUID: Int] = [:]
   /// Devices revoked since start and not paired again. Their receipts stay
   /// out of `activeReceipts` (and the stream), also when a request that
   /// read one before the revoke caches or writes it after.
@@ -119,6 +124,7 @@ actor HandoverEngine: RequestHandling {
     // Before the first suspension: a request that starts or checks while
     // the store delete is awaited must already see this revoke.
     revocations[deviceID, default: 0] += 1
+    revokeStarts[deviceID, default: 0] += 1
     revoking[deviceID, default: 0] += 1
     revoked.insert(deviceID)
     defer {
@@ -255,7 +261,7 @@ actor HandoverEngine: RequestHandling {
     let timestamp = now()
     let device = PairedDevice(
       id: body.deviceID, name: name, pairedAt: timestamp, lastSeenAt: timestamp)
-    let revocation = revocations[device.id, default: 0]
+    let revokeStart = revokeStarts[device.id, default: 0]
     do {
       try await store.save(device, tokenHash: DeviceTokens.hash(token))
     } catch {
@@ -263,7 +269,7 @@ actor HandoverEngine: RequestHandling {
       return .internalError("saving the device", error)
     }
     // A revoke that started during the save deletes the device after it.
-    if revocations[device.id, default: 0] == revocation { revoked.remove(device.id) }
+    if revokeStarts[device.id, default: 0] == revokeStart { revoked.remove(device.id) }
     return .json(
       .ok,
       Wire.PairResponse(token: token, macID: identity.macID, macName: configuration.serviceName))
