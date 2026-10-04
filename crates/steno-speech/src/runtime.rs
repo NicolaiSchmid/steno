@@ -38,12 +38,13 @@ pub struct SpeechSettings {
     pub onnx_sidecar_on_mac: bool,
     /// Windows only: run the speech encoder on `DirectML` when a DirectX 12
     /// GPU takes it, on the CPU otherwise
-    /// ([`OnnxOptions::directml`](crate::OnnxOptions::directml),
-    /// the probe in [`crate::onnx`]). Off by default until gate G4 of the
+    /// ([`OnnxOptions::directml`](crate::OnnxOptions::directml), the probe
+    /// in [`crate::onnx#directml`]). Off by default until gate G4 of the
     /// speech-stack plan is measured: no Windows machine with a GPU has
-    /// run it, its speed on an integrated GPU and its transcripts against
-    /// the CPU's are unknown, and a driver fault inside a run ends the
-    /// sidecar and the job with it. Ignored elsewhere.
+    /// run it, so its speed on an integrated GPU, its transcripts against
+    /// the CPU's and how its drivers fail are unknown; a driver that aborts
+    /// mid-run takes the sidecar and that job with it, and the encoder runs
+    /// on the CPU for the rest of the app's run. Ignored elsewhere.
     pub directml_on_windows: bool,
     /// A mirror the speech models (Silero VAD and the Parakeet export) are
     /// fetched from instead of their hosts ([`ModelStore::with_mirror`]);

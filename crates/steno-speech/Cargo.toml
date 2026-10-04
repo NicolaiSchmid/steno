@@ -21,7 +21,7 @@ tracing.workspace = true
 ureq.workspace = true
 whatlang.workspace = true
 
-# DirectML on Windows (`onnx::EncoderProvider::DirectMl`). It moves no
+# DirectML on Windows (`onnx::EncoderProvider::DirectMl`). It changes no
 # binary: pyke publishes only DirectML builds of ONNX Runtime for Windows, so
 # the build `download-binaries` fetches there is the same with or without
 # the feature, which only adds `ort::ep::DirectML` to the API. Elsewhere the

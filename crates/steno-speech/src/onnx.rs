@@ -18,27 +18,43 @@
 //! environment with telemetry disabled before the first one: here through
 //! `open_session`, in `steno-diarize` through its `session`. A
 //! Microsoft-built ONNX Runtime library would otherwise report model and
-//! usage details to Microsoft.
+//! usage details to Microsoft. That switch covers ONNX Runtime only: with
+//! `DirectML` on, `DirectML.dll` and Direct3D 12 may log to Windows' own
+//! diagnostic data, as for any program that uses them, under the system's
+//! diagnostic data settings. Steno opens nothing for it, and no audio or
+//! text is involved.
 //!
 //! # `DirectML`
 //!
-//! On Windows the encoder can run on `DirectML`, on any DirectX 12 GPU
-//! (integrated ones included), when [`OnnxOptions::directml`] asks for it
-//! (speech-stack decision 4; off by default, see
-//! [`SpeechSettings::directml_on_windows`](crate::SpeechSettings::directml_on_windows)).
-//! The probe is the session itself: `DirectML` must be in the ONNX Runtime
-//! build, find a GPU (the device filter leaves out software adapters such
-//! as WARP), take the session, and run the encoder once on a second of
-//! silence. Any of those failing opens the encoder on the CPU instead, and
-//! a later run that fails on `DirectML` moves it to the CPU for good and
-//! runs again there, so a GPU that cannot do the work never fails the job
-//! (an abort inside the driver still ends the process, which is why it is
-//! the sidecar's). The provider in force is logged at info level, without
-//! paths; [`OnnxBackend::provider`] reports it. Only the encoder moves: the
-//! decoder and the joiner run once per token on one frame, where a round
-//! trip to the GPU costs more than the step, and Silero runs on 32 ms
-//! frames. Gate G4 (at least three times the CPU's speed on an integrated
-//! GPU) is open: no Windows machine with a GPU has run this.
+//! On Windows the encoder can run on `DirectML`, on any DirectX 12 GPU,
+//! integrated ones included, when [`OnnxOptions::directml`] asks for it
+//! (speech-stack decision 4). It is off by default
+//! ([`SpeechSettings::directml_on_windows`]): gate G4 (at least three
+//! times the CPU's speed on an integrated GPU) is open, because no
+//! Windows machine with a GPU has run this.
+//!
+//! The probe is the session itself. `DirectML` must be in the ONNX Runtime
+//! build, start on a hardware GPU (the default device filter leaves out
+//! software adapters such as WARP), take the session, and run the encoder
+//! once on a second of silence. If any step fails, the encoder opens on the
+//! CPU. A later run that fails on `DirectML` moves the encoder to the CPU
+//! for good and runs it again there, so a GPU that cannot do the work does
+//! not fail the job. An abort inside the driver still ends the process,
+//! which is why the app runs the engine in the sidecar.
+//! [`OnnxBackend::provider`] reports the provider in force; it is logged at
+//! info level, without paths.
+//!
+//! The probe's second is about 100 feature frames, while the chunker's
+//! windows are around 25 s and up to 60 s. A failure that shows only at
+//! those lengths (out of GPU memory, a shape `DirectML` cannot take)
+//! surfaces at the first real window, where the fallback above catches it.
+//!
+//! Only the encoder moves. The decoder and the joiner run once per token
+//! on one frame, where a round trip to the GPU costs more than the step,
+//! and Silero runs on 32 ms frames. The diarizer stays on the CPU in the
+//! app's process (decision 5).
+//!
+//! [`SpeechSettings::directml_on_windows`]: crate::SpeechSettings::directml_on_windows
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -82,7 +98,10 @@ impl Default for OnnxOptions {
 }
 
 steno_core::string_enum! {
-    /// Where ONNX Runtime runs the encoder.
+    /// Where ONNX Runtime runs the encoder. The sidecar protocol carries
+    /// it by name, and a peer that does not know a name fails to read the
+    /// whole reply, so a new variant bumps
+    /// [`PROTOCOL_VERSION`](crate::sidecar::protocol::PROTOCOL_VERSION).
     #[derive(Default)]
     pub enum EncoderProvider {
         /// ONNX Runtime's CPU provider; every platform, and every model
@@ -139,6 +158,8 @@ pub(crate) fn open_session(path: &Path, options: &OnnxOptions) -> Result<Session
 enum Fallback {
     /// The ONNX Runtime build has no `DirectML` provider.
     NotInBuild,
+    /// ONNX Runtime refused the session options `DirectML` needs.
+    Options,
     /// `DirectML` did not start: no DirectX 12 GPU, or a `DirectML.dll`
     /// too old for ONNX Runtime.
     NoDevice,
@@ -152,7 +173,10 @@ impl Fallback {
     fn describe(self) -> &'static str {
         match self {
             Fallback::NotInBuild => "this ONNX Runtime build has no DirectML",
-            Fallback::NoDevice => "DirectML found no usable DirectX 12 GPU",
+            Fallback::Options => "ONNX Runtime refused the session options for DirectML",
+            Fallback::NoDevice => {
+                "DirectML did not start (no usable DirectX 12 GPU, or an old DirectML.dll)"
+            }
             Fallback::Session => "DirectML refused the model",
             Fallback::Run => "a run on DirectML failed",
         }
@@ -166,19 +190,20 @@ impl Fallback {
 #[cfg(windows)]
 fn open_directml(path: &Path, options: &OnnxOptions) -> Result<Session, (Fallback, String)> {
     use ort::ep::ExecutionProvider as _;
+    init_environment();
     let directml = ort::ep::DirectML::default();
     if !directml.is_available().unwrap_or(false) {
         return Err((Fallback::NotInBuild, String::new()));
     }
-    let session = |e: &dyn std::fmt::Display| (Fallback::Session, e.to_string());
+    let refused = |fallback, e: &dyn std::fmt::Display| (fallback, e.to_string());
     builder(options)
-        .map_err(|e| session(&e))?
+        .map_err(|e| refused(Fallback::Options, &e))?
         .with_memory_pattern(false)
-        .map_err(|e| session(&e))?
+        .map_err(|e| refused(Fallback::Options, &e))?
         .with_execution_providers([directml.build().error_on_failure()])
-        .map_err(|e| (Fallback::NoDevice, e.to_string()))?
+        .map_err(|e| refused(Fallback::NoDevice, &e))?
         .commit_from_file(path)
-        .map_err(|e| session(&e))
+        .map_err(|e| refused(Fallback::Session, &e))
 }
 
 /// A session that runs on `DirectML` when [`OnnxOptions::directml`] asks
@@ -188,6 +213,8 @@ struct AcceleratedSession {
     /// session that replaces it, or when that replacement failed to open.
     session: Option<Session>,
     provider: EncoderProvider,
+    /// Why the session is not on `DirectML` though it was asked for.
+    fallback: Option<Fallback>,
     /// Kept to reopen the model on the CPU after a failed run.
     path: PathBuf,
     options: OnnxOptions,
@@ -197,20 +224,32 @@ impl AcceleratedSession {
     /// Opens `path` on `DirectML` first when asked for on Windows, on the
     /// CPU after any failure there and everywhere else.
     fn open(path: &Path, options: &OnnxOptions) -> Result<Self, SpeechError> {
-        let opened = |session, provider| AcceleratedSession {
+        let opened = |session, provider, fallback| AcceleratedSession {
             session: Some(session),
             provider,
+            fallback,
             path: path.to_path_buf(),
             options: options.clone(),
         };
         #[cfg(windows)]
-        if options.directml {
+        let fallback = if options.directml {
             match open_directml(path, options) {
-                Ok(session) => return Ok(opened(session, EncoderProvider::DirectMl)),
-                Err((fallback, error)) => log_fallback(fallback, &error),
+                Ok(session) => return Ok(opened(session, EncoderProvider::DirectMl, None)),
+                Err((reason, error)) => {
+                    log_fallback(reason, &error);
+                    Some(reason)
+                }
             }
-        }
-        Ok(opened(open_session(path, options)?, EncoderProvider::Cpu))
+        } else {
+            None
+        };
+        #[cfg(not(windows))]
+        let fallback = None;
+        Ok(opened(
+            open_session(path, options)?,
+            EncoderProvider::Cpu,
+            fallback,
+        ))
     }
 
     fn session(&self) -> Result<&Session, SpeechError> {
@@ -232,10 +271,10 @@ impl AcceleratedSession {
                 // the weights at the same time.
                 self.session = None;
                 self.provider = EncoderProvider::Cpu;
+                self.fallback = Some(Fallback::Run);
                 let session = self
                     .session
                     .insert(open_session(&self.path, &self.options)?);
-                log_provider(self.provider);
                 work(session)
             }
             result => result,
@@ -250,7 +289,7 @@ fn log_fallback(fallback: Fallback, error: &str) {
         reason = fallback.describe(),
         "DirectML is not usable; the speech encoder runs on the CPU"
     );
-    tracing::debug!(error, "DirectML");
+    tracing::debug!(error, "ONNX Runtime's DirectML error");
 }
 
 /// The encoder's provider, at info level.
@@ -480,9 +519,23 @@ impl OnnxBackend {
     /// Where the encoder runs: [`EncoderProvider::DirectMl`] only when
     /// [`OnnxOptions::directml`] asked for it on Windows and the probe
     /// passed; a failed run on `DirectML` moves it to the CPU.
+    ///
+    /// `DirectMl` means the provider is registered for the encoder's
+    /// session. ONNX Runtime still places any node `DirectML` does not
+    /// support on the CPU, and does not tell the caller.
     #[must_use]
     pub fn provider(&self) -> EncoderProvider {
         self.encoder.provider
+    }
+
+    /// Why the encoder is not on `DirectML` though
+    /// [`OnnxOptions::directml`] asked for it, in fixed words without
+    /// paths: the probe failed, or a later run did. `None` while it runs
+    /// there, and whenever it was not asked to (off Windows the request is
+    /// ignored).
+    #[must_use]
+    pub fn fallback(&self) -> Option<&'static str> {
+        self.encoder.fallback.map(Fallback::describe)
     }
 }
 
@@ -650,6 +703,7 @@ mod tests {
             build(&mut out);
             out
         }
+        // Field numbers from onnx.proto.
         const FLOAT: u64 = 1;
         // TensorProto: dims 1, data_type 2, name 8, raw_data 9.
         let tensor = |name: &str, dims: &[u64], values: &[f32]| {
@@ -699,7 +753,8 @@ mod tests {
             bytes(11, &value_info("x", 3), g);
             bytes(12, &value_info("y", 2), g);
         });
-        // ModelProto: ir_version 1, graph 7, opset_import 8 (version 2).
+        // ModelProto: ir_version 1 (8 here), graph 7, opset_import 8 (its
+        // version 2, 13 here).
         message(|m| {
             number(1, 8, m);
             bytes(7, &graph, m);
@@ -734,7 +789,7 @@ mod tests {
     /// The probe on this machine, with its findings printed: CI runs it
     /// with `--nocapture` on Windows, where the runner has no GPU, so its
     /// log records what `DirectML` makes of that. Whatever it decides, the
-    /// session answers right; off Windows the request is ignored.
+    /// session's answer is correct; off Windows the request is ignored.
     #[test]
     fn directml_probe_opens_a_working_session_on_whatever_this_machine_has() {
         let (_dir, path) = affine_model_file();
@@ -758,6 +813,11 @@ mod tests {
         }
         let mut accelerated = AcceleratedSession::open(&path, &directml_options()).unwrap();
         println!("provider chosen: {}", accelerated.provider);
+        assert_eq!(
+            accelerated.fallback.is_some(),
+            cfg!(windows) && accelerated.provider == EncoderProvider::Cpu,
+            "a reason exactly when DirectML was asked for and not used"
+        );
         if !cfg!(windows) {
             assert_eq!(accelerated.provider, EncoderProvider::Cpu);
         }
@@ -768,6 +828,10 @@ mod tests {
                 .provider,
             EncoderProvider::Cpu,
             "without the request the CPU is the provider everywhere"
+        );
+        assert!(
+            !OnnxOptions::default().directml,
+            "DirectML is opt-in until gate G4 passes"
         );
     }
 
@@ -786,6 +850,7 @@ mod tests {
     fn as_if_on_directml(path: &Path) -> AcceleratedSession {
         let mut session = AcceleratedSession::open(path, &directml_options()).unwrap();
         session.provider = EncoderProvider::DirectMl;
+        session.fallback = None;
         session
     }
 
@@ -806,6 +871,7 @@ mod tests {
             .unwrap();
         assert_eq!((y.as_slice(), calls), (AFFINE_Y.as_slice(), 2));
         assert_eq!(session.provider, EncoderProvider::Cpu);
+        assert_eq!(session.fallback, Some(Fallback::Run));
 
         // On the CPU a failure is the caller's, with no second try.
         let mut calls = 0;
