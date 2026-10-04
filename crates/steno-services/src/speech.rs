@@ -7,6 +7,8 @@
 //! process; on the Mac it runs on `CoreML` in this process, with the
 //! sidecar as the fallback the speech settings can choose; every engine
 //! id other than `parakeet-v3` runs in the sidecar on every platform.
+//! On Windows the speech setting `directmlOnWindows` lets the sidecar run
+//! the encoder on `DirectML` ([`SpeechSetup::sidecar`]).
 //! Swift: `makeSpeechEngine`, `makeDiarizer`, `ModelStore`,
 //! `Sources/StenoSpeech/Engines/SpeechEngineID.swift`.
 

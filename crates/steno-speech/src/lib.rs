@@ -30,7 +30,9 @@
 //! - [`engine`]: [`OnnxSpeechEngine`], the in-process `SpeechEngine` the
 //!   sidecar hosts.
 //! - [`sidecar`]: [`SidecarSpeechEngine`], the `SpeechEngine` over the
-//!   `steno-speech-sidecar` child process, and its wire protocol.
+//!   `steno-speech-sidecar` child process, and its wire protocol, and the
+//!   process-wide switch-off of `DirectML` after a child crashed on it
+//!   ([`sidecar::directml_switched_off`]).
 //! - [`runtime`]: [`SpeechSettings`] and [`SpeechRuntime`], which engine
 //!   runs on which platform.
 //! - [`wav`]: the 16 kHz PCM-16 reader of the example and the tests.
