@@ -1212,6 +1212,8 @@ mod tests {
     //! ran the queued stop right after the finalise, so Swift has no
     //! counterpart.
 
+    use std::path::Path;
+
     use super::*;
     use crate::capture::CaptureMode;
     use crate::testing::SyntheticCaptureBackend;
@@ -1257,7 +1259,7 @@ mod tests {
     /// `second` meeting, a `start()` for it takes the lock. Returns the
     /// session, what that `stop()` returned and the first meeting.
     fn stop_that_waited(
-        directory: &std::path::Path,
+        directory: &Path,
         second: Option<Uuid>,
     ) -> (CaptureSession, Result<CaptureResult, CaptureError>, Uuid) {
         let (release, released) = channel();
