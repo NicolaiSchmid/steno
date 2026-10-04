@@ -516,6 +516,79 @@ async fn a_complete_during_a_revokes_store_delete_admits_nothing() {
     assert!(restarted.files_are_gone(), "the sweep takes the files");
 }
 
+#[tokio::test]
+async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
+    // The revoke lands while `complete` writes `verifying`; it finds the
+    // receipt in memory and discards the files. The phone pairs again and
+    // announces anew before the old `complete` goes on, which creates the
+    // partial again. The old `complete` must neither discard that partial,
+    // write `failed` over the new receipt nor promote it.
+    let chunk_size: i64 = 64 * 1024;
+    let intake = common::ScriptedIntake::new(Uuid::new_v4(), 0);
+    let test = TestService::with(common::Options {
+        chunk_size,
+        intake: Some(intake.clone() as Arc<dyn steno_core::HandoverIntake>),
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = common::EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * chunk_size as usize, 96);
+    let metadata = phone.metadata(&bytes, chunk_size);
+    phone.upload_all(&metadata, &bytes).await;
+    let id = metadata.recording_id;
+    let inbox = test.inbox();
+
+    // `complete` waits on its `verifying` write and holds the turn of the
+    // receipt saves meanwhile.
+    let hold = StoreHold::new(&test.store);
+    let woken = Woken::new();
+    let mut completing = std::pin::pin!(phone.complete(id));
+    assert!(
+        woken.poll(completing.as_mut()).is_pending(),
+        "complete waits on its verifying write"
+    );
+    let mut revoking = std::pin::pin!(test.service.revoke(phone.device.id));
+    assert!(
+        woken.poll(revoking.as_mut()).is_pending(),
+        "the revoke waits on its store delete"
+    );
+    assert!(!inbox.has_partial(id), "the revoke discarded the partial");
+    hold.release();
+    revoking.await.unwrap();
+    let again = phone.pair_again().await;
+
+    // The new announce creates the partial, then waits for the turn the old
+    // `complete` holds.
+    let announced = Woken::new();
+    let mut announcing = std::pin::pin!(again.announce(&metadata));
+    loop {
+        assert!(
+            announced.poll(announcing.as_mut()).is_pending(),
+            "the announce waits for the old complete's turn"
+        );
+        if inbox.has_partial(id) {
+            break;
+        }
+        announced.wait("the announce's store read returns").await;
+    }
+    let (old, announce) = tokio::join!(completing, announcing);
+
+    assert_eq!(old.status.as_u16(), 401, "the old complete is refused");
+    assert_eq!(announce.status.as_u16(), 201);
+    assert!(inbox.has_partial(id), "the new partial stays");
+    let receipts = test.service.engine.receipts_snapshot();
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(
+        receipts[0].state,
+        steno_core::HandoverState::Receiving,
+        "the new receipt is not failed"
+    );
+    again.upload_all(&metadata, &bytes).await;
+    assert_eq!(again.complete(id).await.status.as_u16(), 200);
+    assert_eq!(intake.count(), 1);
+}
+
 /// Holds the store's one connection from another thread until
 /// [`StoreHold::release`], so a store call of the engine waits on it.
 struct StoreHold {

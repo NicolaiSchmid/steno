@@ -287,7 +287,7 @@ impl Engine {
         // this one may be only in the store: the file of a revoked device
         // must not reach the intake. Checked here, before the `verifying`
         // write, which would put the row back once the phone paired again,
-        // and again after the verify.
+        // and again after the hash (`verified_file`).
         if let Some(refused) = self.refusal(recording_id, device, revocation) {
             return refused;
         }
@@ -301,27 +301,20 @@ impl Engine {
         let Some(metadata) = self.inbox.load_metadata(recording_id) else {
             return HandoverResponse::problem(StatusCode::NOT_FOUND, "no metadata; announce again");
         };
-        match self.verified_file(&mut receipt, &metadata).await {
+        match self
+            .verified_file(&mut receipt, &metadata, device, revocation)
+            .await
+        {
             Verification::Answered(response) => response,
-            // A revoke during the verify finds the receipt in memory and
-            // discards the files itself, but the phone, still passing the
-            // gate before the delete commits or after pairing again, can
-            // announce and send the chunks again, so a partial is back. The
-            // hash (of the old file it still reads, or of the same bytes
-            // sent again) matches and the promote moves the new partial:
-            // only this check stops the admit. Nothing yields between it
-            // and the intake call.
-            Verification::File(file) => match self.refusal(recording_id, device, revocation) {
-                Some(refused) => refused,
-                None => self.admit(&file, &metadata, device, &mut receipt).await,
-            },
+            Verification::File(file) => self.admit(&file, &metadata, device, &mut receipt).await,
         }
     }
 
     /// 401 when the device was revoked since `complete` took `revocation`.
     /// The count sees every such revoke, also one followed by a pairing,
     /// which takes the device out of `revoked`. The revoke may have missed
-    /// the receipt, so its files are discarded and it leaves memory here.
+    /// the receipt during its read, so its files are discarded and it leaves
+    /// memory here.
     fn refusal(
         &self,
         recording_id: Uuid,
@@ -351,11 +344,15 @@ impl Engine {
     /// failure, else the partial once every chunk is present (409 with the
     /// status otherwise) and the whole file hashes to the announced value
     /// (422 and the partial is discarded otherwise), promoted to its final
-    /// name.
+    /// name; 401 when the device was revoked since `complete` took
+    /// `revocation`. Nothing yields between the revoke check and the return,
+    /// nor in `complete` between the return and the intake call.
     async fn verified_file(
         &self,
         receipt: &mut HandoverReceipt,
         metadata: &RecordingMetadata,
+        device: &PairedDevice,
+        revocation: u64,
     ) -> Verification {
         let recording_id = receipt.recording_id;
         if self.inbox.has_verified(recording_id, metadata.format) {
@@ -386,6 +383,16 @@ impl Engine {
             Ok(_) => Ok(false),
             Err(error) => Err(error),
         };
+        // The `verifying` write kept the receipt in memory, so a revoke
+        // during the write or the hash found it there and discarded the
+        // files itself. Only a revoke re-creates a partial during a verify
+        // (every other discard needs the `completing` mark or runs at
+        // start), so whatever is at the path now is the upload of a phone
+        // that paired again and announced anew: neither discard it, write
+        // `failed` over its receipt nor promote it.
+        if self.revoked_since(device, revocation) {
+            return Verification::Answered(Self::unauthorized());
+        }
         let verified = match verified {
             Ok(verified) => verified,
             Err(error) => {

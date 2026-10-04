@@ -364,7 +364,8 @@ impl Engine {
 
     /// Forgets the device and drops what it was uploading: the files of its
     /// receipts in memory. A `complete` in flight that has not reached the
-    /// intake discards its own files when it sees the revoke. An admission
+    /// intake answers 401 when it sees the revoke, and discards the files
+    /// when the revoke missed its receipt in the store. An admission
     /// already under way finishes, and its receipt then stays out of memory
     /// and out of the store. Files of a receipt only in the store (not read
     /// since start) wait for the next start's sweep.
