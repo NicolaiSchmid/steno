@@ -5,6 +5,7 @@
 //! Swift: `Routing/RecordingHandler.swift`.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
@@ -17,7 +18,8 @@ use uuid::Uuid;
 
 use super::{Engine, HandoverRequest, HandoverResponse};
 use crate::pinning::constant_time_equals;
-use crate::upload::{MetadataValidation, receiving_file};
+use crate::upload::MetadataValidation;
+use crate::upload::receiving_file::{self, Identity};
 use crate::wire;
 
 enum Verification {
@@ -246,11 +248,12 @@ impl Engine {
     /// `POST /v1/recordings/{id}/complete`: 200 `{meetingID}` once every
     /// chunk is present and the whole file hashes to the announced value;
     /// 409 with the status while chunks are missing or while an earlier
-    /// `complete` is still verifying or admitting; 422 on a hash mismatch,
-    /// after which the partial is gone and the phone starts over; 401 from
-    /// the revoke of the device until it pairs again, or when a revoke landed
-    /// during the receipt read or the verify of a recording not yet
-    /// admitted, after which the files are gone.
+    /// `complete` is still verifying or admitting, and with no chunk listed
+    /// when the partial was replaced during the verify; 422 on a hash
+    /// mismatch, after which the partial is gone and the phone starts over;
+    /// 401 from the revoke of the device until it pairs again, and when a
+    /// revoke landed during the receipt read or the verify of a recording
+    /// not yet admitted.
     pub(super) async fn complete(
         &self,
         recording_id: Uuid,
@@ -281,10 +284,10 @@ impl Engine {
             }
             return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });
         }
-        // A revoke during the read discards the files of receipts in memory
-        // only, and after a restart this one may be only in the store.
-        // Checked before the `verifying` write, which would put the row back
-        // once the phone paired again, and after the hash (`verified_file`).
+        // A revoke during the read missed the receipt if it was only in the
+        // store. Refuse before the `verifying` write, which would put its row
+        // back once the phone paired again; `verified_file` checks again
+        // after the hash.
         if let Some(refused) = self.refusal(recording_id, device, revocation) {
             return refused;
         }
@@ -334,9 +337,12 @@ impl Engine {
     /// failure, else the partial once every chunk is present (409 with the
     /// status otherwise) and the whole file hashes to the announced value
     /// (422 and the partial is discarded otherwise), promoted to its final
-    /// name; 401 when the device was revoked since `complete` took
-    /// `revocation`. Nothing yields between the revoke check and the return,
-    /// nor in `complete` between the return and the intake call.
+    /// name. The partial stays open from before the `verifying` write to
+    /// the promote, and a partial gone or replaced meanwhile answers 409
+    /// with no chunk listed: the hash must be of the file the intake gets.
+    /// 401 when the device was revoked since `complete` took `revocation`;
+    /// that check is the decision point, and a revoke after it finds the
+    /// admission under way.
     async fn verified_file(
         &self,
         receipt: &mut HandoverReceipt,
@@ -361,26 +367,35 @@ impl Engine {
                 &Self::status_of(receipt),
             ));
         }
+        // Opened before the `verifying` write, the first yield. A partial
+        // discarded meanwhile and created again (a stale `complete`'s
+        // refusal, then the phone's announce) is another file, and the open
+        // handle keeps the old file's number from going to the new one.
+        let partial = self.inbox.partial(recording_id);
+        let opened = std::fs::File::open(&partial)
+            .and_then(|file| Ok((Identity::of(&file)?, Arc::new(file))));
+        let (identity, file) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                return Verification::Answered(HandoverResponse::internal_error(
+                    "reading the partial",
+                    &error,
+                ));
+            }
+        };
         let _ = self
             .transition(receipt, HandoverState::Verifying, None)
             .await;
 
-        let partial = self.inbox.partial(recording_id);
-        let verified = match receiving_file::size(&partial) {
-            Ok(size) if i64::try_from(size) == Ok(receipt.byte_count) => {
-                receiving_file::hash_matches(partial, receipt.sha256.clone()).await
+        let verified = match file.metadata() {
+            Ok(opened) if i64::try_from(opened.len()) == Ok(receipt.byte_count) => {
+                receiving_file::hash_matches(file.clone(), receipt.sha256.clone()).await
             }
             Ok(_) => Ok(false),
             Err(error) => Err(error),
         };
-        // The `verifying` write kept the receipt in memory, so a revoke
-        // since then discarded the files itself. Only a revoke lets a partial
-        // be created again during a verify (every other discard needs the
-        // `completing` mark or runs at start), so a partial there now is the
-        // upload of a phone that paired again: leave it and its receipt
-        // alone.
         if self.revoked_since(device, revocation) {
-            return Verification::Answered(Self::unauthorized());
+            return Verification::Answered(self.revoked_during_the_verify(recording_id, device));
         }
         let verified = match verified {
             Ok(verified) => verified,
@@ -392,6 +407,9 @@ impl Engine {
             }
         };
         self.refresh(receipt);
+        if Identity::at(&partial).ok() != Some(identity) {
+            return Verification::Answered(self.replaced_during_the_verify(receipt).await);
+        }
         if !verified {
             self.inbox.discard(recording_id);
             let _ = self
@@ -406,13 +424,54 @@ impl Engine {
                 "sha256 mismatch; the partial was discarded",
             ));
         }
-        match self.inbox.promote(recording_id, metadata.format) {
-            Ok(file) => Verification::File(file),
-            Err(error) => Verification::Answered(HandoverResponse::internal_error(
-                "moving the verified file",
-                &error,
-            )),
+        let promoted = match self.inbox.promote(recording_id, metadata.format) {
+            Ok(promoted) => promoted,
+            Err(error) => {
+                return Verification::Answered(HandoverResponse::internal_error(
+                    "moving the verified file",
+                    &error,
+                ));
+            }
+        };
+        // Another thread may have replaced the partial between the check
+        // above and the rename: the file moved must still be the one hashed.
+        // A file moved in its place is not this upload's; it goes.
+        if Identity::at(&promoted).ok() != Some(identity) {
+            let _ = std::fs::remove_file(&promoted);
+            return Verification::Answered(self.replaced_during_the_verify(receipt).await);
         }
+        // Closed before the intake, which moves or deletes the file.
+        drop(file);
+        Verification::File(promoted)
+    }
+
+    /// The 401 of a `complete` whose device was revoked during the verify,
+    /// without a write: once the phone paired again, one would put back the
+    /// row the revoke deleted. The `verifying` write kept the receipt in
+    /// memory, so the revoke discarded the files itself; a partial there
+    /// now was created after that. While `revoked` holds the device it can
+    /// only be the revoked phone's (an announce that passed the gate before
+    /// the revoke), and it goes. Once the device paired again it is the new
+    /// pairing's upload, and it stays.
+    fn revoked_during_the_verify(
+        &self,
+        recording_id: Uuid,
+        device: &PairedDevice,
+    ) -> HandoverResponse {
+        if self.state().revoked.contains(&device.id) {
+            self.inbox.discard(recording_id);
+        }
+        Self::unauthorized()
+    }
+
+    /// The 409 of a partial gone or created again during the verify: the
+    /// chunk set is emptied, so the phone sends every chunk again into the
+    /// partial there now. Swift answers the same.
+    async fn replaced_during_the_verify(&self, receipt: &mut HandoverReceipt) -> HandoverResponse {
+        let _ = self
+            .transition(receipt, HandoverState::Receiving, Some(Vec::new()))
+            .await;
+        HandoverResponse::json(StatusCode::CONFLICT, &Self::status_of(receipt))
     }
 
     /// Hands the verified file to the intake. On success the receipt is

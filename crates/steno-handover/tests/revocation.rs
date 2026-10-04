@@ -6,7 +6,7 @@
 //! `complete` that had not reached the intake yet admits nothing, also when
 //! the phone paired again meanwhile. A recording already admitted answers
 //! its meeting, and a pairing that a revoke overtakes leaves the device
-//! revoked.
+//! revoked, and a partial created again during a verify is never promoted.
 
 #![allow(
     clippy::assert_is_empty,
@@ -25,7 +25,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use common::{EngineDevice, Phone, ScriptedIntake, StoreHold, TestService, chunks, seeded_bytes};
-use steno_core::{HandoverIntake, RecordingMetadata};
+use steno_core::{HandoverIntake, HandoverState, RecordingMetadata};
 use steno_handover::engine::HandoverResponse;
 use steno_handover::pairing::DeviceTokens;
 use steno_handover::{HandoverService, wire};
@@ -652,6 +652,116 @@ async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
         404,
         "the next pairing clears it"
     );
+}
+
+#[tokio::test]
+async fn a_partial_created_again_during_the_verify_is_not_promoted() {
+    // An old `complete` waits right after its store read while the phone
+    // is revoked, pairs again, uploads anew and completes. While the new
+    // `complete` writes `verifying`, the old one goes on: refused, it
+    // discards the new partial. The phone's retried announce creates the
+    // partial again, empty. The new `complete` hashes the file it opened,
+    // the discarded one, and must not promote the empty partial in its
+    // place: the intake would admit an empty file and the phone delete its
+    // recording.
+    let restarted = Restarted::new().await;
+    let id = restarted.id();
+    let inbox = restarted.first.inbox();
+    let (mut stale, again) = restarted.revoke_during_the_read(true).await;
+    let again = again.expect("paired again");
+    again
+        .upload_all(&restarted.metadata, &restarted.bytes)
+        .await;
+
+    let hold = StoreHold::new(&restarted.first.store);
+    let mut completing = pin!(unconstrained(again.complete(id)));
+    assert!(
+        Woken::new().poll(completing.as_mut()).is_pending(),
+        "the new complete waits on its verifying write"
+    );
+    assert_eq!(
+        restarted.service.engine.receipts_snapshot()[0].state,
+        HandoverState::Verifying,
+        "with the partial open"
+    );
+    let Poll::Ready(refused) = Woken::new().poll(stale.as_mut()) else {
+        panic!("the old complete answers without the store");
+    };
+    assert_eq!(refused.status.as_u16(), 401);
+    assert!(!inbox.has_partial(id), "the refusal discarded the partial");
+
+    // The retried announce reads the receipt the refusal forgot from the
+    // store, creates the partial, then waits for the turn the new
+    // `complete` holds.
+    let announced = Woken::new();
+    let mut announcing = pin!(unconstrained(again.announce(&restarted.metadata)));
+    assert!(
+        announced.poll(announcing.as_mut()).is_pending(),
+        "the announce waits on its store read"
+    );
+    hold.release();
+    while !inbox.has_partial(id) {
+        announced.wait("the announce's store read returns").await;
+        assert!(
+            announced.poll(announcing.as_mut()).is_pending(),
+            "the announce waits for the new complete's turn"
+        );
+    }
+    let (completed, announce) = tokio::join!(completing, announcing);
+
+    assert_eq!(completed.status.as_u16(), 409, "not admitted");
+    let status: wire::RecordingStatus = completed.decode().unwrap();
+    assert_eq!(
+        status.received_chunks,
+        Vec::<i64>::new(),
+        "every chunk again"
+    );
+    assert_eq!(announce.status.as_u16(), 200);
+    assert_eq!(restarted.intake.count(), 0, "the intake never sees a file");
+    assert!(inbox.has_partial(id), "the partial created again stays");
+    again
+        .upload_all(&restarted.metadata, &restarted.bytes)
+        .await;
+    assert_eq!(again.complete(id).await.status.as_u16(), 200);
+    let admitted = restarted.intake.entries();
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(std::fs::read(&admitted[0]).unwrap(), restarted.bytes);
+}
+
+#[tokio::test]
+async fn a_revoked_phones_partial_created_during_the_verify_is_discarded() {
+    // The revoke lands while `complete` writes `verifying` and discards the
+    // files. An announce of the revoked phone that passed the gate before
+    // the revoke creates the partial again (here straight through the
+    // inbox, as its `Inbox::begin` does). No pairing followed, so the
+    // partial can only be the revoked phone's: the refused `complete`
+    // discards it.
+    let intake = ScriptedIntake::new(Uuid::new_v4(), 0);
+    let (test, phone, metadata, _) = uploaded(Some(intake.clone()), 94).await;
+    let id = metadata.recording_id;
+    let inbox = test.inbox();
+
+    let hold = StoreHold::new(&test.store);
+    let mut completing = pin!(unconstrained(phone.complete(id)));
+    assert!(
+        Woken::new().poll(completing.as_mut()).is_pending(),
+        "complete waits on its verifying write"
+    );
+    let mut revoking = pin!(test.service.revoke(phone.device.id));
+    assert!(
+        Woken::new().poll(revoking.as_mut()).is_pending(),
+        "the revoke waits on its store delete"
+    );
+    assert!(!inbox.has_partial(id), "the revoke discarded the partial");
+    inbox.begin(&metadata).unwrap();
+    hold.release();
+    let (refused, revoked) = tokio::join!(completing, revoking);
+
+    assert_eq!(refused.status.as_u16(), 401);
+    revoked.unwrap();
+    assert!(!inbox.has_partial(id), "the partial created again is gone");
+    assert!(inbox.load_metadata(id).is_none());
+    assert_eq!(intake.count(), 0);
 }
 
 /// The waker of a future the test polls by hand.
