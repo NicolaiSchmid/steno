@@ -3,7 +3,10 @@
 //! Windows the ONNX sidecar
 //! ([`SidecarSpeechEngine`](crate::SidecarSpeechEngine)) is the only
 //! speech engine the app runs: speech inference never shares the app's
-//! process there (the diarizer's ONNX models still run in it).
+//! process there (the diarizer's ONNX models still run in it). An uncaught
+//! C++ exception in ONNX Runtime ends the process, and ONNX Runtime works
+//! in 2 to 3 GB; in a child such an end costs one request, and the memory
+//! goes back when the child exits.
 //! On macOS the in-process `CoreML` engine (`steno-speech-coreml`) is the
 //! default, so the Mac stays one process; the ONNX sidecar is a fallback
 //! behind [`SpeechSettings::onnx_sidecar_on_mac`], for a Mac where the
