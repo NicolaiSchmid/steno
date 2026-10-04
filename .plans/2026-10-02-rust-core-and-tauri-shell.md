@@ -1210,6 +1210,7 @@ PR off `main`.
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | open |
+| WASAPI capture follow-ups from review (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
