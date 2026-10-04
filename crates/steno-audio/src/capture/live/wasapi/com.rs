@@ -609,18 +609,19 @@ impl CaptureClient {
         // 10 ms period stand in.
         // SAFETY: plain call on the initialised client.
         let latency = unsafe { client.GetStreamLatency() }.unwrap_or(0);
-        let mut period: i64 = 0;
-        // SAFETY: `period` is a live i64 for the call to write.
         let period = if event.is_none() {
             // A polled stream is drained once per poll, so that is its
             // packet rhythm, whatever the engine's period.
             POLL_INTERVAL_HUNDRED_NANOSECONDS
-        } else if unsafe { client.GetDevicePeriod(Some(&raw mut period), None) }.is_ok()
-            && period > 0
-        {
-            period
         } else {
-            100_000
+            let mut period: i64 = 0;
+            // SAFETY: `period` is a live i64 for the call to write.
+            let read = unsafe { client.GetDevicePeriod(Some(&raw mut period), None) };
+            if read.is_ok() && period > 0 {
+                period
+            } else {
+                100_000
+            }
         };
         Ok(Self {
             capture,
