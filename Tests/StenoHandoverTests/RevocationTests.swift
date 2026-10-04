@@ -123,13 +123,18 @@ import Testing
   }
 
   /// Polls `condition`, set by the engine before a suspension, for at most
-  /// five seconds.
-  private static func until(_ condition: () async -> Bool) async throws {
-    for _ in 0..<5000 {
-      if await condition() { return }
+  /// five seconds; else fails at the caller's line and throws, so the test
+  /// stops there.
+  private static func until(
+    _ condition: () async -> Bool, sourceLocation: SourceLocation = #_sourceLocation
+  ) async throws {
+    let deadline = ContinuousClock.now + .seconds(5)
+    var held = await condition()
+    while !held, ContinuousClock.now < deadline {
       try await Task.sleep(for: .milliseconds(1))
+      held = await condition()
     }
-    Issue.record("the condition never held")
+    try #require(held, "the condition never held", sourceLocation: sourceLocation)
   }
 
   /// A phone paired over an on-disk `StoreGate` store, with a two-chunk
