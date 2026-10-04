@@ -160,8 +160,11 @@ the app (see Release); stage it and add the release configuration:
 ```sh
 apps/desktop/scripts/stage-sidecar.sh
 cd apps/desktop/src-tauri
-pnpm dlx @tauri-apps/cli@2.12.1 build --config tauri.release.conf.json
+pnpm dlx @tauri-apps/cli@2.12.1 build --config tauri.release.conf.json \
+  --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
+
+(Drop the second `--config` when `TAURI_SIGNING_PRIVATE_KEY` is set.)
 
 ### Bundles and the updater key
 
@@ -188,13 +191,12 @@ app; the Mac cutover changes it to `uno.schmid.steno.mac`
 
 Updates are signed: `plugins.updater.pubkey` is the public half of a key
 pair from `cargo tauri signer generate`. The private half is never in the
-repository; it is the GitHub secret `TAURI_SIGNING_PRIVATE_KEY`, with an
-empty password. A build without the key fails, because a public key
-without a private key does; Rust CI switches `createUpdaterArtifacts` off
-through the configuration merge, and so does a local build that has no
-key. The lane follows the installed version as it did with Sparkle: a
-pre-release reads the beta manifest first, a release the stable one only
-(`updater.rs`; the manifests are under Release).
+repository; it is the secret `TAURI_SIGNING_PRIVATE_KEY` (see Release).
+With `createUpdaterArtifacts` on, a bundle build without the key fails;
+Rust CI and a local build without the key turn it off through the
+configuration merge. The lane follows the installed version as it did with
+Sparkle: a pre-release reads the beta manifest first, a release the stable
+one only (`updater.rs`; the manifests are under Release).
 
 To run a debug binary against the embedded bundle instead of the dev server
 (what the smoke does), drop the dev URL through Tauri's own configuration
@@ -220,15 +222,71 @@ paths until Cargo's `trim-paths` stabilises; the release workflow sets
 platforms. A pushed `desktop-v<version>` tag builds all of them and
 publishes; the version must be the one under `[workspace.package]` in
 `Cargo.toml`, which Tauri stamps into the bundles, or the run fails before
-it builds. A manual run builds, signs and notarises the platforms it is
-given and keeps the bundles as workflow artifacts. The Swift app's
-`release.yml` owns `v*` tags and the mobile workflow `ios-fp-*`, so the
-desktop prefix cannot start either. `cargo deny check` (`deny.toml`: the
-licence allow list, the MPL-2.0 crates by name, advisories, sources) runs
-first and stops the run on any finding.
+it builds. So does a version the MSI cannot carry: WiX takes numbers only,
+so `scripts/wix-version.sh` turns a release `X.Y.Z` into `X.Y.Z.65535` and
+a pre-release `X.Y.Z-<label>.<N>` into `X.Y.Z.N`, and refuses any other
+form. A manual run builds, signs and notarises the platforms it is given
+and keeps the bundles as workflow artifacts; it publishes nothing. The
+`desktop-v` prefix keeps these tags apart from the Swift app's `v*`
+(`release.yml`) and the mobile build tags `ios-fp-*` (`mobile-cd.yml`).
+`cargo deny check` (`deny.toml`: the licence allow list, the MPL-2.0
+crates by name, advisories, sources) runs first and stops the run on any
+finding.
 
-The speech sidecar. Off the Mac, and on the Mac when the ONNX fallback is
-on, `steno-speech-sidecar` runs the speech model in a child process, which
+### Cutting a release
+
+1. On `main`, set `[workspace.package] version` in `Cargo.toml` and merge.
+   A hyphen (`0.2.0-rc.1`) means the beta lane only; a pre-release ends in
+   a number.
+2. `git tag desktop-v<version> <commit> && git push origin desktop-v<version>`.
+3. Watch the Desktop release run. `publish` runs only when all three
+   platforms bundled.
+4. Check what the lanes serve:
+   `curl -fsSL https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json | jq .version`
+   (and `desktop-stable` for a release).
+
+Do not run a desktop release and a Swift release (`release.yml`) at the
+same moment on the self-hosted Mac: both put their keychain in front of
+the user's keychain search list and put the saved list back when they
+finish, so one can drop the other's keychain halfway through signing.
+
+### When a run fails
+
+- **plan**: the tag does not name the workspace version, or the MSI
+  cannot carry the version. Delete the tag, fix the version on `main`, tag
+  again.
+- **Check secrets**: add the secret it names (see the table below).
+- **cargo deny**: update the dependency, or name the crate with its reason
+  in `deny.toml`.
+- **Build**: a compile error Rust CI would show too; fix it on `main`,
+  then delete the tag and tag again.
+- **Notarise the disk image**: notarytool's log for the submission is in
+  the step output. A notarisation failure in **Bundle** is the bundler's
+  error in that step's output.
+- **Check the bundles**: the `::error::` names the file or the check that
+  failed.
+- **publish**: re-run the failed jobs. An existing release is reused and
+  its assets replaced; the lanes move as on the first run, never
+  backwards.
+
+### Secrets
+
+| Secret | Used by | What it is |
+|---|---|---|
+| `TAURI_SIGNING_PRIVATE_KEY` | every platform's Bundle | The private half of `plugins.updater.pubkey`, empty password; signs every updater artifact |
+| `MACOS_CERTIFICATE_P12_BASE64` | macOS signing keychain | The Developer ID Application certificate and key as a base64 `.p12` (shared with `release.yml`) |
+| `MACOS_CERTIFICATE_PASSWORD` | macOS signing keychain | The `.p12`'s password |
+| `ASC_KEY_ID` | macOS Bundle, `notarize-dmg.sh` | The App Store Connect API key's id |
+| `ASC_ISSUER_ID` | macOS Bundle, `notarize-dmg.sh` | The key's issuer id |
+| `ASC_PRIVATE_KEY` | macOS Bundle, `notarize-dmg.sh` | The key itself, the `.p8` contents |
+
+`scripts/require-secrets.sh` names every missing one before anything is
+built.
+
+### The speech sidecar
+
+Off the Mac, and on the Mac when the ONNX fallback is on,
+`steno-speech-sidecar` runs the speech model in a child process, which
 `SidecarConfig::beside_current_exe` looks for in the directory of the
 running binary. `tauri.release.conf.json` declares it as an `externalBin`;
 `scripts/stage-sidecar.sh` builds it in release and copies it to
@@ -247,9 +305,10 @@ every build, debug and test included. Where it lands:
 
 `scripts/check-bundle.sh` proves the table for each build: it unpacks each
 bundle as its installer would (`dpkg-deb -x`, `--appimage-extract`, an
-administrative MSI install, a silent NSIS install), finds the two binaries side
-by side and starts the sidecar from there, which greets and exits when its
-stdin ends.
+administrative MSI install, a silent NSIS install), finds the two binaries
+side by side and starts the sidecar from there, which greets and exits
+when its stdin ends.
+
 ONNX Runtime is linked statically, so on macOS and Linux the sidecar needs
 no library beside it. On Windows both binaries load `DirectML.dll`, which
 the MSI picks up from the build directory on its own and the NSIS
@@ -260,39 +319,44 @@ installer does not (an NSIS install would then load the older copy in
 (`msvcp140.dll` and the rest) there too, so neither installer depends on
 a redistributable the machine may not have.
 
-Signing. On macOS the job imports the Developer ID certificate
-(`MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`) into a
-throwaway keychain (`scripts/signing-keychain.sh`, the Swift release's
-approach) and hands its identity to the bundler, which signs the sidecar,
-the app binary and the bundle under the hardened runtime with
-`Entitlements.plist` (one file for every item, so the sidecar carries the
-two entitlements without using them). The bundler then notarises and
-staples the `.app` with the App Store Connect key (`ASC_KEY_ID`,
-`ASC_ISSUER_ID`, `ASC_PRIVATE_KEY`) before it builds the image and the
-updater archive from it, and `scripts/notarize-dmg.sh` notarises and
-staples the image. `check-bundle.sh --signed` checks the Developer ID
-authority, the runtime flag, the timestamp and the team on all three
-items, the entitlements, the ticket and Gatekeeper's verdict. Linux
-packages are not signed beyond the updater signature. Windows installers
-are not code-signed, since there is no Windows certificate: SmartScreen
-asks before the first install, and updates install without asking again.
-`scripts/require-secrets.sh` names a missing secret before anything is
-built.
+### Signing
 
-Publishing, on a tag. One GitHub release per tag carries every bundle, the
-`.sig` of each updater artifact (`.app.tar.gz`, `.AppImage`, `.deb`,
-`.msi`, `-setup.exe`) and `latest.json` (`scripts/updater-manifest.sh`).
-Each signature is checked against `plugins.updater.pubkey` first, so a
-signing key that is not the config key's other half fails the release
-instead of every user's next update. The manifest then goes to the
-rolling release of each lane the version moves: `desktop-beta` for a
-pre-release, `desktop-stable` and `desktop-beta` for a release (the beta
-lane is left alone when it already serves a pre-release of a later
-version). Each lane's tag moves to the release commit. Every desktop
-release is a GitHub pre-release and never "latest": until the Mac cutover
-(`.plans/2026-10-04-mac-cutover.md`) the "latest release" that the
-repository README, the site and the Homebrew cask point at is the Swift
-app's.
+The release binary is built first with no secret in the environment
+(`tauri build --no-bundle`), so no dependency's build script sees one;
+`tauri bundle` then signs and packages it with the keys. On macOS the job
+imports the Developer ID certificate into a throwaway keychain
+(`scripts/signing-keychain.sh`, the Swift release's approach) and hands
+its identity to the bundler, which signs the sidecar, the app binary and
+the bundle under the hardened runtime with `Entitlements.plist` (one file
+for every item, so the sidecar carries the two entitlements without using
+them). The bundler then notarises and staples the `.app` with the App
+Store Connect key before it builds the image and the updater archive from
+it, and `scripts/notarize-dmg.sh` notarises and staples the image.
+`check-bundle.sh --signed` checks the Developer ID authority, the runtime
+flag, the timestamp and the team on all three items, the entitlements,
+the ticket and Gatekeeper's verdict. Linux packages are not signed beyond
+the updater signature. Windows installers are not code-signed, since there
+is no Windows certificate: SmartScreen asks before the first install, and
+updates install without asking again.
+
+### Publishing, on a tag
+
+One GitHub release per tag carries every bundle, the `.sig` of each
+updater artifact (`.app.tar.gz`, `.AppImage`, `.deb`, `.msi`,
+`-setup.exe`) and `latest.json` (`scripts/updater-manifest.sh`). Each
+signature is checked against `plugins.updater.pubkey` first, so a signing
+key that is not the config key's other half fails the release instead of
+every user's next update. The manifest then goes to the rolling release of
+each lane, `desktop-stable` and `desktop-beta`, and the lane's tag moves to
+the release commit. Each lane only moves forward: the stable lane takes a
+release (no hyphen), the beta lane every version, each only when the
+version is at or above the one the lane serves (`scripts/updater-lanes.sh`,
+SemVer precedence). A rerun of a tag moves the same lanes again; an older
+tag or a hotfix on an older line leaves a lane where it is. One publish
+runs at a time. Every desktop release is a GitHub pre-release and never
+"latest": until the Mac cutover (`.plans/2026-10-04-mac-cutover.md`) the
+"latest release" that the repository README, the site and the Homebrew
+cask point at is the Swift app's.
 
 ## Test
 
@@ -410,7 +474,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
 | `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check |
-| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `updater-manifest.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, and `latest.json` (tested in Rust CI by `updater-manifest.test.sh`) |
+| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json` and the lanes a release moves (each `.sh` with a `.test.sh` is tested in Rust CI) |
 
 ## Not here yet
 
@@ -418,8 +482,8 @@ The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
 removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it lands
 the desktop app installs beside the Swift app on the Mac. WP6b filled the
 host's half of the WP8 seams except four, which wait for work outside the
-shell (the plan's WP6b row): the detection controller (WP5) is not ported, so nothing raises the prompt
-(`panels::set_prompt`) and its X (`panels::dismiss_prompt`) tells no
+shell (the plan's WP6b row): the detection controller (WP5) is not
+ported, so nothing raises the prompt (`panels::set_prompt`) and its X (`panels::dismiss_prompt`) tells no
 one; the host's `Permissions` stay the services' fake (all granted),
 because `permissions` answers `unknown` off the Mac and for the Mac's
 system audio, which the host's onboarding opener counts as missing, so
@@ -440,8 +504,9 @@ window. Launch at login is a Launch Agent, not `SMAppService`; the cutover
 has to retire the Swift registration so the user does not get two login
 items (the plan's parity list, `.plans/2026-10-04-mac-cutover.md`). The
 macOS menu bar has no Record menu yet (`⌘⇧R` and Record In Person are the
-tray's and the sidebar's), and no Find Meetings (`⌘F`). Updates are checked only when asked (the
-tray's item, Settings), where Sparkle checks daily on its own. On macOS
+tray's and the sidebar's), and no Find Meetings (`⌘F`). Updates are
+checked only when asked (the tray's item, Settings), where Sparkle checks
+daily on its own. On macOS
 the system audio permission has no status API; the audio crate's probe
 (WP5) records it and until then it reads `unknown`. The panels are
 re-tuned on the Mac once they run there beside the Swift ones (the plan's
