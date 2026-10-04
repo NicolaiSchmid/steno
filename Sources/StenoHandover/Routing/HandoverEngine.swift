@@ -35,6 +35,10 @@ actor HandoverEngine: RequestHandling {
   /// delete commits, a store read still returns the device's receipts, so a
   /// `complete` that starts meanwhile is refused before it reads.
   var revoking: [UUID: Int] = [:]
+  /// Devices revoked since start and not paired again. Their receipts stay
+  /// out of `activeReceipts` (and the stream), also when a request that
+  /// read one before the revoke caches or writes it after.
+  var revoked: Set<UUID> = []
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -102,15 +106,19 @@ actor HandoverEngine: RequestHandling {
 
   var pairingIsOpen: Bool { pairing?.isOpen ?? false }
 
-  /// Forgets the device and drops whatever it was uploading: the files of
-  /// its receipts in memory. A `complete` in flight that has not reached the
-  /// intake discards its own files when it sees the revoke (`revocations`).
-  /// Files of a receipt only in the store wait for the next start's sweep.
+  /// Forgets the device and drops whatever it was uploading. The files of
+  /// its receipts in memory go here; a `complete` reading a receipt from the
+  /// store discards that one's files itself (`revocations`); the rest wait
+  /// for the next start's sweep. A `complete` that starts before this
+  /// returns is refused (`revoking`), and until the device pairs again its
+  /// receipts stay out of memory (`revoked`). A failed delete leaves the
+  /// device paired, though the files of its uploads in memory are gone.
   func revoke(_ deviceID: UUID) async throws {
-    // Before the first suspension: a `complete` that starts or checks while
+    // Before the first suspension: a request that starts or checks while
     // the store delete is awaited must already see this revoke.
     revocations[deviceID, default: 0] += 1
     revoking[deviceID, default: 0] += 1
+    revoked.insert(deviceID)
     defer {
       let left = revoking[deviceID, default: 1] - 1
       revoking[deviceID] = left > 0 ? left : nil
@@ -121,7 +129,15 @@ actor HandoverEngine: RequestHandling {
       }
       activeReceipts.removeValue(forKey: recordingID)
     }
-    try await store.delete(deviceID: deviceID)
+    do {
+      try await store.delete(deviceID: deviceID)
+    } catch {
+      // The delete rolled back, so the device is still paired and no read
+      // since the bump was stale. Another revoke in flight keeps `revoked`.
+      revocations[deviceID, default: 1] -= 1
+      if revoking[deviceID] == 1 { revoked.remove(deviceID) }
+      throw error
+    }
     receiptUpdates.send(receiptsSnapshot)
   }
 
@@ -238,6 +254,7 @@ actor HandoverEngine: RequestHandling {
       if pairing == nil { pairing = session }
       return .internalError("saving the device", error)
     }
+    revoked.remove(device.id)
     return .json(
       .ok,
       Wire.PairResponse(token: token, macID: identity.macID, macName: configuration.serviceName))
@@ -274,20 +291,27 @@ actor HandoverEngine: RequestHandling {
     try await persist(receipt)
   }
 
-  /// Drops the receipt from memory and tells the observers; the store row,
-  /// if any, stays.
-  func forget(_ recordingID: UUID) {
-    activeReceipts.removeValue(forKey: recordingID)
-    receiptUpdates.send(receiptsSnapshot)
-  }
-
   /// Writes the receipt and tells the observers. Memory is updated before
   /// the awaited save: the actor is reentrant at that `await`, and the phone
   /// keeps two chunks in flight, so the next request must already see this
   /// one's chunk or it would persist a stale copy over it.
   func persist(_ receipt: HandoverReceipt) async throws {
-    activeReceipts[receipt.recordingID] = receipt
+    remember(receipt)
     try await store.save(receipt)
+    receiptUpdates.send(receiptsSnapshot)
+  }
+
+  /// Keeps `receipt` as the live copy, unless its device was revoked.
+  func remember(_ receipt: HandoverReceipt) {
+    if !revoked.contains(receipt.deviceID) {
+      activeReceipts[receipt.recordingID] = receipt
+    }
+  }
+
+  /// Drops the receipt from memory and tells the observers; the store row,
+  /// if any, stays.
+  func forget(_ recordingID: UUID) {
+    activeReceipts.removeValue(forKey: recordingID)
     receiptUpdates.send(receiptsSnapshot)
   }
 }

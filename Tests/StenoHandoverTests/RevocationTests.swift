@@ -240,4 +240,70 @@ import Testing
     try await restarted.expectNothingAdmitted()
     #expect(!gate.timedOut, "nothing waited on the held delete")
   }
+
+  /// A status read that returns after a revoke leaves the receipt out of
+  /// memory, so a `complete` that passed the gate before the delete
+  /// committed does not find it there and verify the files the revoke
+  /// missed. An announce like that does not put a receipt in memory either.
+  @Test(.timeLimit(.minutes(1)))
+  func aRequestThatReadItsReceiptBeforeARevokeLeavesItOutOfMemory() async throws {
+    let restarted = try await Restarted()
+    defer { restarted.remove() }
+    let gate = restarted.gate
+    let engine = restarted.service.engine
+
+    gate.receiptRead.arm()
+    let reading = Task { await restarted.phone.status(restarted.id) }
+    await gate.receiptRead.held()
+    try await restarted.service.revoke(restarted.paired.id)
+    gate.receiptRead.release()
+
+    #expect(await reading.value.code == 200, "it read before the revoke")
+    #expect(await engine.receiptsSnapshot.isEmpty, "the revoked phone's receipt stays out")
+    #expect(await restarted.phone.complete(restarted.id).code == 404)
+    #expect(await restarted.intake.admissions.count == 0, "the intake never sees the file")
+    #expect(try await restarted.phone.announce(restarted.metadata).code == 500)
+    #expect(await engine.receiptsSnapshot.isEmpty, "a failed announce leaves nothing")
+    #expect(!gate.timedOut, "nothing waited on the held read")
+  }
+
+  /// A revoke whose store delete throws leaves the device paired and no
+  /// trace of the revoke; only the files of its upload are gone, so the
+  /// phone announces again and uploads anew.
+  @Test(.timeLimit(.minutes(1)))
+  func aFailedRevokeLeavesNoRevokeInFlight() async throws {
+    let gate = try StoreGate()
+    defer { gate.remove() }
+    let chunkSize = 64 * 1024
+    let test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
+    defer { try? FileManager.default.removeItem(at: test.directory) }
+    let engine = test.service.engine
+    let phone = try await EngineClient.paired(test)
+    let deviceID = phone.device.id
+    let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 6)
+    let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+    let id = metadata.recordingID
+    try await phone.uploadAll(metadata, bytes)
+    let revocations = await engine.revocations[deviceID, default: 0]
+
+    try await gate.pool.write { db in
+      try db.execute(
+        sql: """
+          CREATE TRIGGER keepDevice BEFORE DELETE ON pairedDevice
+          BEGIN SELECT RAISE(ABORT, 'kept'); END
+          """)
+    }
+    await #expect(throws: (any Error).self) { try await test.service.revoke(deviceID) }
+    try await gate.pool.write { db in try db.execute(sql: "DROP TRIGGER keepDevice") }
+
+    #expect(try await test.store.pairedDevice(id: deviceID) != nil, "the device is still paired")
+    #expect(await engine.revoking.isEmpty, "no revoke is in flight")
+    #expect(await !engine.revoked.contains(deviceID))
+    #expect(await engine.revocations[deviceID, default: 0] == revocations)
+    #expect(await phone.status(id).code == 200)
+    #expect(await engine.activeReceipts[id] != nil, "the status read is in memory again")
+    try await phone.uploadAll(metadata, bytes)
+    #expect(await phone.complete(id).code == 200)
+    #expect(await test.intake.admissions.count == 1)
+  }
 }

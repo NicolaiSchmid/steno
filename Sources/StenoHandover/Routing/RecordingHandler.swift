@@ -304,7 +304,7 @@ extension HandoverEngine {
       return nil
     }
     if let active = activeReceipts[recordingID] { return active }
-    activeReceipts[recordingID] = stored
+    remember(stored)
     return stored
   }
 

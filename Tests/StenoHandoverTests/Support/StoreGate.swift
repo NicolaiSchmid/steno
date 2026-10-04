@@ -12,6 +12,8 @@ import Synchronization
 /// commit meanwhile, and a read sees the last commit while a write is held.
 final class StoreGate: Sendable {
   let store: MeetingStore
+  /// The store's pool, for a test that changes the schema under it.
+  let pool: DatabasePool
   /// The next handover receipt read; the engine resumes with a receipt that
   /// may no longer be in the store.
   let receiptRead = Hold(matching: "FROM \"handoverReceipt\"")
@@ -30,10 +32,10 @@ final class StoreGate: Sendable {
         for hold in holds { hold.observe(statement.sql, on: connection) }
       }
     }
-    store = try MeetingStore(
-      writer: DatabasePool(
-        path: directory.appendingPathComponent("steno.sqlite").path,
-        configuration: configuration))
+    pool = try DatabasePool(
+      path: directory.appendingPathComponent("steno.sqlite").path,
+      configuration: configuration)
+    store = try MeetingStore(writer: pool)
   }
 
   /// Whether a hold went on by itself after `Hold.limit`: the test waited on
