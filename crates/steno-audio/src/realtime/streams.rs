@@ -30,8 +30,9 @@
 //!
 //! What the follower queued before the master's first pull is trimmed to
 //! the target, uncounted: audio from before the recording, or, when the
-//! master's first drain is late and carries several buffered packets, up
-//! to that lateness of system audio recorded alongside them.
+//! master's first drain is late, the system audio recorded during that
+//! lateness. A packet the full staging ring refused before that pull is
+//! uncounted too.
 //!
 //! The two endpoints' clocks are not reconciled by resampling; the slips
 //! are counted as dropped system frames in the sink's accounting, the
@@ -185,7 +186,8 @@ impl FollowerLane {
     /// its first two channels, as the macOS tap is folded) into the staging
     /// ring, whole or not at all; a full ring counts the packet as an
     /// overflow, which the next [`Self::pull`] hands to the sink's drop
-    /// count. A packet shorter than it claims is written as zeros.
+    /// count (none before the master's first pull, see the module doc). A
+    /// packet shorter than it claims is written as zeros.
     /// `scratch` is the thread's fold buffer; any length above zero works.
     #[inline(always)]
     pub fn push(&self, packet: SliceView<'_>, scratch: &mut [f32]) {
@@ -232,14 +234,19 @@ impl FollowerLane {
     pub fn pull(&self, out: &mut [f32]) -> usize {
         let wanted = out.len();
         let mut available = self.ring.available_to_read();
+        let first_pull = !self.started.swap(true, Ordering::Relaxed);
         let mut lost = 0;
         let overflow = self.ring.dropped_samples();
         let reported = self.reported_overflow.load(Ordering::Relaxed);
         if overflow > reported {
-            lost += overflow - reported;
+            // Refused before the first pull: audio from before the
+            // recording, as uncounted as the trim below.
+            if !first_pull {
+                lost += overflow - reported;
+            }
             self.reported_overflow.store(overflow, Ordering::Relaxed);
         }
-        if !self.started.swap(true, Ordering::Relaxed) && available > self.target + wanted {
+        if first_pull && available > self.target + wanted {
             let trimmed = self.ring.discard(available - self.target - wanted);
             self.trimmed.fetch_add(trimmed, Ordering::Relaxed);
             available -= trimmed;

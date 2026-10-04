@@ -547,11 +547,6 @@ fn the_follower_folds_stereo_and_stages_silent_packets_as_zeros() {
 #[test]
 fn a_full_staging_ring_refuses_whole_packets_and_the_master_counts_them() {
     let follower = Arc::new(FollowerLane::new(0, 1_024, 4_800, 1_024));
-    let mut scratch = vec![0.0f32; 512];
-    follower.push(packet(&ramp(0, 1_000), 1), &mut scratch);
-    follower.push(packet(&ramp(1_000, 100), 1), &mut scratch);
-    assert_eq!(follower.queued(), 1_000, "the second packet did not fit");
-
     let lanes = [AudioLane::Mic, AudioLane::System];
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = LaneFrameSink::new(&lanes);
@@ -561,7 +556,7 @@ fn a_full_staging_ring_refuses_whole_packets_and_the_master_counts_them() {
     assert_eq!(dropped.get(&AudioLane::System), Some(&100));
     assert_eq!(dropped.get(&AudioLane::Mic), None);
 
-    router.route(packet(&ramp(480, 480), 1), &sink);
+    router.route(packet(&ramp(960, 480), 1), &sink);
     assert_eq!(
         sink.dropped_samples().get(&AudioLane::System),
         Some(&100),
@@ -624,7 +619,14 @@ fn a_full_sink_drops_the_callback_on_every_lane() {
     let sink = LaneFrameSink::with_handler(&lanes, 1_000.0, 1.0, Box::new(|_| {}));
     let follower = Arc::new(FollowerLane::new(0, 4_800, 4_800, 48_000));
     let mut scratch = vec![0.0f32; 2_048];
+    // The master's first pull, before the follower delivers.
     follower.push(packet(&ramp(0, 2_048), 1), &mut scratch);
+
+    let mut scratch = vec![0.0f32; 512];
+    follower.push(packet(&ramp(0, 1_000), 1), &mut scratch);
+    follower.push(packet(&ramp(1_000, 100), 1), &mut scratch);
+    assert_eq!(follower.queued(), 1_000, "the second packet did not fit");
+    router.route(packet(&ramp(480, 480), 1), &sink);
     let mut router = PacketRouter::new(plan.layout.sources, Some(follower), 2_048);
     // The rings hold 1 024 samples; 2 048 frames do not fit.
     router.route(packet(&ramp(0, 2_048), 1), &sink);
@@ -637,6 +639,27 @@ fn a_full_sink_drops_the_callback_on_every_lane() {
 #[test]
 fn a_system_only_master_folds_its_stereo_packet() {
     let lanes = [AudioLane::System];
+/// A follower that fills its staging before the master's first pull (a
+/// slow start of the master's stream) loses only audio from before the
+/// recording: uncounted, as the trim is. An overflow after the first pull
+/// is counted.
+#[test]
+fn an_overflow_before_the_first_pull_is_not_counted_as_lost() {
+    let follower = FollowerLane::new(0, 1_024, 4_800, 1_024);
+    let mut scratch = vec![0.0f32; 512];
+    let mut out = vec![0.0f32; 480];
+    follower.push(packet(&ramp(0, 1_000), 1), &mut scratch);
+    follower.push(packet(&ramp(1_000, 100), 1), &mut scratch);
+    assert_eq!(follower.queued(), 1_000, "the second packet did not fit");
+    assert_eq!(follower.pull(&mut out), 0, "nothing recorded was lost");
+    assert_eq!(out, ramp(520, 480), "trimmed to the newest queued frames");
+
+    follower.push(packet(&ramp(1_100, 1_000), 1), &mut scratch);
+    follower.push(packet(&ramp(2_100, 100), 1), &mut scratch);
+    assert_eq!(follower.pull(&mut out), 100, "refused after the first pull");
+    assert_eq!(follower.pull(&mut out), 0, "an overflow is reported once");
+}
+
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = LaneFrameSink::new(&lanes);
     let mut router = PacketRouter::new(plan.layout.sources, None, 480);
