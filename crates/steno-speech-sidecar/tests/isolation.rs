@@ -87,17 +87,21 @@ fn gone_soon(pid: u32) -> bool {
     within_ten_seconds(|| (!alive(pid)).then_some(())).is_some()
 }
 
-/// Whether `pid` has ended: gone, or a zombie its parent has not reaped.
-fn ended(pid: u32) -> bool {
-    if cfg!(windows) {
-        return !alive(pid);
-    }
-    let out = Command::new("ps")
-        .args(["-o", "stat=", "-p", &pid.to_string()])
-        .output()
-        .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+/// Waits up to ten seconds for `pid` to end: to be gone, or a zombie its
+/// parent has not reaped.
+fn ended_soon(pid: u32) -> bool {
+    let ended = || {
+        if cfg!(windows) {
+            return !alive(pid);
+        }
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+    };
+    within_ten_seconds(|| ended().then_some(())).is_some()
 }
 
 /// The pid the `--fault-once` marker in `dir` holds, once the faulting
@@ -131,17 +135,34 @@ fn spawn_by_hand(args: &[&str]) -> Child {
         .unwrap()
 }
 
-/// Reads past the heartbeats to the child's ready message: its protocol
-/// and pid. A child that never sends one fails the test, not hangs it.
-fn ready(stdout: &mut BufReader<ChildStdout>) -> (u32, u32) {
+/// Reads past the heartbeats to the child's next other message. A child
+/// that sends none fails the test, not hangs it.
+fn next_reply(stdout: &mut BufReader<ChildStdout>) -> Reply {
     for _ in 0..100 {
         match protocol::read_header::<_, Reply>(stdout).unwrap().unwrap() {
-            Reply::Ready { protocol, pid } => return (protocol, pid),
             Reply::Memory { .. } => {}
-            other => panic!("{other:?}"),
+            reply => return reply,
         }
     }
-    panic!("no ready message");
+    panic!("nothing but heartbeats");
+}
+
+/// Reads past the heartbeats to the child's ready message.
+fn ready(stdout: &mut BufReader<ChildStdout>) {
+    let reply = next_reply(stdout);
+    assert!(matches!(reply, Reply::Ready { .. }), "{reply:?}");
+}
+
+/// All the child's stderr, once it has exited.
+fn stderr_of(child: &mut Child) -> String {
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    stderr
 }
 
 /// Waits up to ten seconds for `child` to exit; kills it and panics with
@@ -258,7 +279,7 @@ async fn a_child_that_dies_after_falling_back_to_the_cpu_leaves_directml_on() {
     let pid = engine.pid().unwrap();
     assert!(kill(pid));
     // Dead, a zombie until the engine reaps it.
-    assert!(within_ten_seconds(|| ended(pid).then_some(())).is_some());
+    assert!(ended_soon(pid));
     assert_works(&engine, &tone(0.5)).await;
     assert_eq!(engine.spawns(), 2);
     assert_eq!(provider(&engine).await, Some(ASKED_FOR_DIRECTML));
@@ -281,30 +302,17 @@ fn a_child_says_once_that_its_encoder_fell_back_to_the_cpu() {
             hint: None,
         };
         protocol::write_frame(&mut stdin, &request, &protocol::encode_samples(&samples)).unwrap();
-        loop {
-            match protocol::read_header::<_, Reply>(&mut stdout)
-                .unwrap()
-                .unwrap()
-            {
-                Reply::Transcript { provider, .. } => {
-                    assert_eq!(provider, Some(EncoderProvider::Cpu));
-                    break;
-                }
-                Reply::Memory { .. } => {}
-                other => panic!("{other:?}"),
+        match next_reply(&mut stdout) {
+            Reply::Transcript { provider, .. } => {
+                assert_eq!(provider, Some(EncoderProvider::Cpu));
             }
+            other => panic!("{other:?}"),
         }
     }
     drop(stdin);
     let status = exit_status(&mut child, "the child outlived its stdin");
     assert!(status.success(), "{status}");
-    let mut stderr = String::new();
-    child
-        .stderr
-        .take()
-        .unwrap()
-        .read_to_string(&mut stderr)
-        .unwrap();
+    let stderr = stderr_of(&mut child);
     assert_eq!(stderr.matches(FALLBACK_NOTICE).count(), 1, "{stderr}");
 }
 
@@ -602,7 +610,7 @@ fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
     let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "20"]);
     let mut stdin = child.stdin.take().unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let (_, pid) = ready(&mut stdout);
+    ready(&mut stdout);
     let samples = [0.5f32; 160];
     let mut frame = Vec::new();
     protocol::write_frame(
@@ -617,7 +625,7 @@ fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
     .unwrap();
     let (first, rest) = frame.split_at(frame.len() - 100);
     stdin.write_all(first).unwrap();
-    let pid = libc::pid_t::try_from(pid).unwrap();
+    let pid = libc::pid_t::try_from(child.id()).unwrap();
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         // SAFETY: `kill` only sends `signal` to the child's pid.
         let sent = unsafe { libc::kill(pid, signal) };
@@ -702,7 +710,7 @@ async fn a_child_that_died_while_idle_is_replaced_without_an_error() {
     let pid = engine.pid().unwrap();
     assert!(kill(pid));
     // Dead, a zombie until the engine reaps it.
-    assert!(within_ten_seconds(|| ended(pid).then_some(())).is_some());
+    assert!(ended_soon(pid));
     assert_works(&engine, &tone(0.5)).await;
     assert_ne!(engine.pid(), Some(pid));
     assert_eq!(engine.spawns(), 2);
@@ -786,13 +794,7 @@ fn a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2() {
         write(&mut stdin);
         drop(stdin);
         let status = exit_status(&mut child, "the child outlived a request it could not read");
-        let mut stderr = String::new();
-        child
-            .stderr
-            .take()
-            .unwrap()
-            .read_to_string(&mut stderr)
-            .unwrap();
+        let stderr = stderr_of(&mut child);
         assert_eq!(status.code(), Some(2), "{why}: {status}");
         assert!(stderr.contains(why), "{why}: {stderr}");
     }
