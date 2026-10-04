@@ -101,6 +101,8 @@ let package = Package(
         "StenoHandover",
         .product(name: "X509", package: "swift-certificates"),
         .product(name: "Crypto", package: "swift-crypto"),
+        // GRDB only to hold a store statement open in the revocation tests.
+        .product(name: "GRDB", package: "GRDB.swift"),
         .product(name: "NIOCore", package: "swift-nio"),
         // The read-timeout tests drive `HTTPHandler` on an embedded channel.
         .product(name: "NIOEmbedded", package: "swift-nio"),

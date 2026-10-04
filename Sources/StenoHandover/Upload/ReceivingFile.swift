@@ -50,6 +50,24 @@ enum ReceivingFile {
     }
   }
 
+  /// The volume and file number of a file. A partial discarded and created
+  /// again at the same path gets another one, even with the same bytes
+  /// (APFS does not reuse file numbers).
+  struct Identity: Equatable, Sendable {
+    let device: UInt64
+    let file: UInt64
+  }
+
+  static func identity(of url: URL) throws -> Identity {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    guard let device = attributes[.systemNumber] as? NSNumber,
+      let file = attributes[.systemFileNumber] as? NSNumber
+    else {
+      throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: url.path])
+    }
+    return Identity(device: device.uint64Value, file: file.uint64Value)
+  }
+
   static func size(of url: URL) throws -> Int64 {
     let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
     return (attributes[.size] as? NSNumber)?.int64Value ?? 0

@@ -10,7 +10,7 @@ import Testing
 @Suite struct IdempotencyTests {
   static let chunkSize = 1024 * 1024
 
-  @Test func receiptsStreamReachesComplete() async throws {
+  @Test(.timeLimit(.minutes(1))) func receiptsStreamReachesComplete() async throws {
     let meetingID = UUID(uuidString: "1DEA0000-0000-4000-8000-000000000002")!
     try await TestService.run(
       chunkSize: Self.chunkSize, intake: FakeHandoverIntake(meetingID: meetingID)

@@ -12,7 +12,8 @@ import Testing
   static let chunkSize = 1024 * 1024
   static let meetingID = UUID(uuidString: "0EE71E00-0000-4000-8000-00000000C0DE")!
 
-  @Test func uploadSurvivesDisconnectResumesSkipsDuplicatesAndCompletes() async throws {
+  @Test(.timeLimit(.minutes(1)))
+  func uploadSurvivesDisconnectResumesSkipsDuplicatesAndCompletes() async throws {
     let intake = FakeHandoverIntake(meetingID: Self.meetingID)
     try await TestService.run(chunkSize: Self.chunkSize, intake: intake) { test in
       let phone = try await Phone.pair(test.service)
