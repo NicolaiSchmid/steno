@@ -1087,6 +1087,7 @@ PR off `main`.
 | Store opens with `synchronous = NORMAL` | `fix/rust-core-concurrency-flake` | #174 | merged |
 | WP6b pipeline, CLI, services, the shell on the real host, quitting saves first | `feat/rust-pipeline` | #173 | merged |
 | WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | merged |
+| Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
