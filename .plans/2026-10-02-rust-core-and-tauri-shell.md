@@ -1183,30 +1183,28 @@ fix is ported to Swift before cutover.
   its save (Swift `revokeStarts`, Rust the count). A recording already admitted
   answers 200 with its meeting id after a revoke during the read, and its receipt
   leaves memory. Both bind the hash to the file the intake gets: the partial's
-  identity is taken before the `verifying` write and checked before the promote, and
-  a partial gone or created again meanwhile (a stale `complete`'s refusal, then the
+  identity is taken before the `verifying` write and checked before the promote, and a
+  partial gone or created again meanwhile (a stale `complete`'s refusal, then the
   phone's retried announce) answers 409 with no chunk listed, so the phone sends every
   chunk again instead of the intake admitting an empty file. Swift compares APFS file
   numbers, which are never reused. Rust holds the partial open until the promote, so
-  its number (dev and inode, on Windows the file id from
-  `GetFileInformationByHandleEx`) cannot go to another file, and also checks the moved
-  file after the rename against another thread replacing the partial in between; no
-  single-threaded test reaches that check. Both apps share two gaps. The files of a revoked device's receipt that is only in the
-  store, and not being completed, wait for the next start's sweep. A phone that pairs
-  again and announces anew while an old `complete` waits right after its store read
-  has its new files discarded by that `complete`'s refusal; the phone uploads again,
-  nothing is lost. The differences: Rust refuses every recording route (announce,
-  status, chunk, complete; not unpair) from the revoke until the device pairs again;
-  Swift refuses `complete` only while the revoke runs, after which the read answers
-  404. After the hash Swift discards the files whatever the verify answered; Rust
-  answers 401 without a write and discards a partial there only while `revoked` still
-  holds the device (the revoke discarded the files, so only the revoked phone can have
-  created it); once the phone paired again it is the new pairing's upload and stays.
-  On a failed store delete both republish the receipts. Swift takes back the count
-  when nothing was discarded and `revoked` unless another revoke is in flight; Rust
-  takes back neither, so the device stays paired in the store but its recording routes
-  answer 401 until it pairs again or a retried revoke finishes: a half-revoked phone
-  that cannot hand over is safer than one that can.
+  its number cannot go to another file. Both apps share two gaps. The files of a
+  revoked device's receipt that is only in the store, and not being completed, wait
+  for the next start's sweep. A phone that pairs again and announces anew while an old
+  `complete` waits right after its store read has its new files discarded by that
+  `complete`'s refusal; the phone uploads again, nothing is lost. The differences:
+  Rust refuses every recording route (announce, status, chunk, complete; not unpair)
+  from the revoke until the device pairs again; Swift refuses `complete` only while
+  the revoke runs, after which the read answers 404. After the hash Swift discards the
+  files whatever the verify answered; Rust answers 401 without a write and discards a
+  partial there only while `revoked` still holds the device (the revoke discarded the
+  files, so only the revoked phone can have created it); once the phone paired again
+  it is the new pairing's upload and stays. On a failed store delete both republish
+  the receipts. Swift takes back the count when nothing was discarded and `revoked`
+  unless another revoke is in flight; Rust takes back neither, so the device stays
+  paired in the store but its recording routes answer 401 until it pairs again, a
+  retried revoke finishes or the app restarts: a half-revoked phone that cannot hand
+  over is safer than one that can.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
