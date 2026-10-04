@@ -1187,13 +1187,11 @@ fix is ported to Swift before cutover.
   a partial gone or created again meanwhile (a stale `complete`'s refusal, then the
   phone's retried announce) answers 409 with no chunk listed, so the phone sends every
   chunk again instead of the intake admitting an empty file. Swift compares APFS file
-  numbers, which are never reused. Rust keeps the partial open from before the
-  `verifying` write to the promote, so its number cannot go to another file on Linux
-  either, where inode numbers are reused; on Windows it reads the file id through the
-  handle (`GetFileInformationByHandleEx`, since std's `file_index` is unstable). Rust
-  also checks the moved file after the rename, because another thread may replace the
-  partial in between; on one thread that cannot happen, so no test reaches it. Both
-  apps share two gaps. The files of a revoked device's receipt that is only in the
+  numbers, which are never reused. Rust holds the partial open until the promote, so
+  its number (dev and inode, on Windows the file id from
+  `GetFileInformationByHandleEx`) cannot go to another file, and also checks the moved
+  file after the rename against another thread replacing the partial in between; no
+  single-threaded test reaches that check. Both apps share two gaps. The files of a revoked device's receipt that is only in the
   store, and not being completed, wait for the next start's sweep. A phone that pairs
   again and announces anew while an old `complete` waits right after its store read
   has its new files discarded by that `complete`'s refusal; the phone uploads again,
