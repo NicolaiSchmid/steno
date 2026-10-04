@@ -129,8 +129,17 @@ shell together. Without the CLI, start the dev server yourself and build the she
 ```sh
 pnpm --dir apps/macos/web install --frozen-lockfile
 pnpm --dir apps/macos/web dev &
-cargo build -p steno-desktop && target/debug/steno-desktop
+cargo build -p steno-desktop -p steno-speech-sidecar && target/debug/steno-desktop
 ```
+
+Off the Mac, and on the Mac when the speech settings choose it, Parakeet
+runs in the speech sidecar, `steno-speech-sidecar`, which the services
+start from beside the shell's binary (`steno_services::speech::sidecar_config`).
+`cargo build -p steno-desktop` and `cargo tauri dev` do not build it; add
+`-p steno-speech-sidecar` as above, or run `cargo build` at the workspace
+root, so `target/debug/` holds both. Without it the windows work, and
+processing a meeting fails with "could not start" and the path it looked
+for. Bundles carry the binary from WP9 on.
 
 Every build without the `custom-protocol` feature loads `devUrl` (the Vite
 dev server on 5173), whatever the profile; that is Tauri's dev build. Set

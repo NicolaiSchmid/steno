@@ -9,6 +9,10 @@
 //! in flight fails instead of interleaving writes with the first. Stage
 //! durations feed the `stageRate` table when the meeting was alone in
 //! flight for the whole stage, so overlapping runs never pollute the rates.
+//! Once a job's lanes are transcribed and no other job is between its
+//! warm-up and its last lane, the speech engine is released
+//! ([`SpeechEngine::release`]): the speech sidecar's child exits and its
+//! working set goes back before the diarizer loads.
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -209,13 +213,16 @@ struct State {
     /// The background runs started by `enqueue` and `resume_unfinished`,
     /// by asset id.
     running: HashMap<Uuid, JoinHandle<()>>,
+    /// Jobs between their warm-up and their last lane ([`SpeechJob`]).
+    speech_jobs: usize,
 }
 
 struct Inner {
     dependencies: PipelineDependencies,
     state: Mutex<State>,
-    /// Serialises `warm_up`: one preparation at a time, so two runs that
-    /// start together load each engine once.
+    /// Serialises `warm_up` and the release after a job's lanes: one
+    /// preparation at a time, so two runs that start together load each
+    /// engine once, and a warm-up never overlaps a release.
     preparing: AsyncMutex<()>,
 }
 
@@ -244,6 +251,15 @@ struct Transcription {
 struct DecodedLane {
     lane: AudioLane,
     buffer: AudioBuffer16k,
+}
+
+/// A job once its lanes are transcribed: the meeting as it stands, the
+/// settings the run read, the transcription and the last decoded lane.
+struct Transcribed {
+    meeting: Meeting,
+    settings: Settings,
+    transcription: Transcription,
+    last: Option<DecodedLane>,
 }
 
 /// What the diarize stage hands on. Swift: `Diarization` in
@@ -623,29 +639,19 @@ impl ProcessingPipeline {
         asset: &AudioAsset,
         meeting: Meeting,
     ) -> Result<AudioAsset> {
-        self.warm_up().await?;
-        attributing(
-            PipelineStage::Decode,
-            self.store()
-                .set_state(meeting.id, MeetingState::Processing, self.now()),
-        )?;
-        let settings = attributing(PipelineStage::Decode, self.store().settings())?;
-        self.begin_run(
-            &meeting,
-            &asset.lanes,
-            None,
-            PipelineStage::ALL.to_vec(),
-            &settings,
-        )?;
-        let mut current = meeting;
-        current.state = MeetingState::Processing;
-        // The last decoded lane is handed to `diarize` and dropped there, so
-        // no buffer is alive from `match_speakers` on. The lane to diarize
-        // is decided from the transcription (a call whose tap carried
-        // nothing falls back to its mic lane); a handed buffer of another
-        // lane is dropped before `diarize` decodes the right one, so one
-        // buffer is alive at a time.
-        let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
+        let speech = self.claim_speech();
+        let transcribed = self.prepare_and_transcribe(asset, meeting).await;
+        self.finish_speech(speech).await;
+        let Transcribed {
+            meeting: mut current,
+            settings,
+            transcription,
+            last,
+        } = transcribed?;
+        // The lane to diarize is decided from the transcription (a call
+        // whose tap carried nothing falls back to its mic lane); a handed
+        // buffer of another lane is dropped before `diarize` decodes the
+        // right one, so one buffer is alive at a time.
         let lane =
             diarized_lane_after_transcription(current.source, &asset.lanes, &transcription.lanes);
         let handed = last.filter(|decoded| Some(decoded.lane) == lane);
@@ -667,6 +673,68 @@ impl ProcessingPipeline {
             .summarize(current, &cleaned.segments, &merged.speakers)
             .await?;
         self.persist(&current, asset).await
+    }
+
+    /// The stages up to the last lane's transcription: warm-up, the
+    /// `processing` state, the run's estimate, decode and transcribe.
+    async fn prepare_and_transcribe(
+        &self,
+        asset: &AudioAsset,
+        meeting: Meeting,
+    ) -> Result<Transcribed> {
+        self.warm_up().await?;
+        attributing(
+            PipelineStage::Decode,
+            self.store()
+                .set_state(meeting.id, MeetingState::Processing, self.now()),
+        )?;
+        let settings = attributing(PipelineStage::Decode, self.store().settings())?;
+        self.begin_run(
+            &meeting,
+            &asset.lanes,
+            None,
+            PipelineStage::ALL.to_vec(),
+            &settings,
+        )?;
+        let mut current = meeting;
+        current.state = MeetingState::Processing;
+        // The last decoded lane is handed to `diarize` and dropped there, so
+        // no buffer is alive from `match_speakers` on.
+        let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
+        Ok(Transcribed {
+            meeting: current,
+            settings,
+            transcription,
+            last,
+        })
+    }
+
+    /// Counts a job as needing the speech engine until the mark is
+    /// dropped or handed to [`finish_speech`](Self::finish_speech).
+    fn claim_speech(&self) -> SpeechJob {
+        self.state().speech_jobs += 1;
+        SpeechJob {
+            pipeline: self.clone(),
+        }
+    }
+
+    /// Ends `job`'s use of the speech engine and releases the engine when
+    /// no other job is between its warm-up and its last lane. Under
+    /// `preparing`: a job that claims the engine meanwhile either keeps it
+    /// loaded or warms it up again after the release, never before it. A
+    /// job that panics or is cancelled only drops its mark, so the engine
+    /// stays loaded until the next job ends. A failed release is logged
+    /// and never fails the job.
+    async fn finish_speech(&self, job: SpeechJob) {
+        drop(job);
+        let _guard = self.inner.preparing.lock().await;
+        if self.state().speech_jobs > 0 {
+            return;
+        }
+        if let Err(error) = self.inner.dependencies.speech_engine.release().await {
+            tracing::warn!(target: BACKGROUND_RUN_LOG, "the speech engine was not released");
+            tracing::debug!(target: BACKGROUND_RUN_LOG, %error, "speech engine release failure");
+        }
     }
 
     /// Summarize again with another template, then deliver. A failure is
@@ -1447,6 +1515,18 @@ impl Drop for Admitted {
         let mut guard = self.pipeline.state();
         guard.in_flight.remove(&self.meeting_id);
         guard.runs.remove(&self.meeting_id);
+    }
+}
+
+/// A job's claim on the speech engine, counted in `speech_jobs`;
+/// dropping it ends the claim.
+struct SpeechJob {
+    pipeline: ProcessingPipeline,
+}
+
+impl Drop for SpeechJob {
+    fn drop(&mut self) {
+        self.pipeline.state().speech_jobs -= 1;
     }
 }
 

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use clap::Args;
 use steno_core::{SecretKey, Settings, StenoPaths, Store};
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
+use steno_services::speech::SpeechSetup;
 use uuid::Uuid;
 
 /// A usage error exits 1, a runtime failure 2.
@@ -114,6 +115,22 @@ pub fn paths() -> Result<StenoPaths, Failure> {
     StenoPaths::create_default().map_err(Failure::runtime)
 }
 
+/// The speech setup over `models_directory` when given (`--models-dir`),
+/// else over the settings' models directory. The speech settings file is
+/// only read, so a given directory leaves the support directory uncreated.
+pub fn speech_setup(
+    settings: &Settings,
+    models_directory: Option<&std::path::Path>,
+) -> Result<SpeechSetup, Failure> {
+    Ok(match models_directory {
+        Some(directory) => SpeechSetup::in_models_directory(
+            standardized(directory),
+            &StenoPaths::new(StenoPaths::default_support_directory()),
+        ),
+        None => SpeechSetup::new(settings, &paths()?),
+    })
+}
+
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
 /// the 0600 secrets file in the support directory.
 pub async fn api_key() -> Result<Option<String>, Failure> {
@@ -147,10 +164,7 @@ pub fn dependencies(
     llm: Option<steno_services::llm::Passes>,
     events: MeetingEventBus,
 ) -> Result<PipelineDependencies, Failure> {
-    let models_directory = match models_directory {
-        Some(directory) => standardized(directory),
-        None => steno_services::speech::models_directory(settings, &paths()?),
-    };
+    let speech = speech_setup(settings, models_directory)?;
     let (speech_engine, diarizer, memory): (
         Arc<dyn steno_core::SpeechEngine>,
         Arc<dyn steno_core::Diarizer>,
@@ -159,14 +173,8 @@ pub fn dependencies(
         Some(engine) => (
             // The flag names the engine for this run, as the Swift CLI's
             // `makeSpeechEngine(engine, ...)` did; the stored id does not.
-            steno_services::speech::speech_engine(
-                &Settings {
-                    speech_engine_id: engine.to_owned(),
-                    ..settings.clone()
-                },
-                &models_directory,
-            ),
-            steno_services::speech::diarizer(&models_directory),
+            steno_services::speech::speech_engine(engine, &speech),
+            steno_services::speech::diarizer(&speech.models_directory),
             Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
         ),
         None => (
@@ -243,11 +251,8 @@ mod tests {
         )
         .unwrap();
         let named = steno_services::speech::speech_engine(
-            &Settings {
-                speech_engine_id: "parakeet-v3".to_owned(),
-                ..Settings::default()
-            },
-            dir.path(),
+            "parakeet-v3",
+            &speech_setup(&Settings::default(), Some(dir.path())).unwrap(),
         );
         assert_eq!(dependencies.speech_engine.id(), named.id());
     }

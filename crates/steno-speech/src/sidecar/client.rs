@@ -513,8 +513,8 @@ impl Shared {
 /// child never opens a connection), spawns the child and has it load them;
 /// `transcribe` sends the samples over the pipe. A failed child is
 /// replaced on the next call. [`SpeechEngine::release`] stops the child
-/// and frees its working set; WP6b's pipeline is to call it after each
-/// job, and until then nothing frees it.
+/// and frees its working set; the pipeline (`steno-pipeline`) calls it
+/// once a job's lanes are transcribed and no other job needs the engine.
 ///
 /// ```no_run
 /// use steno_core::{AudioBuffer16k, SpeechEngine};
@@ -575,6 +575,13 @@ impl SidecarSpeechEngine {
     #[must_use]
     pub fn config(&self) -> &SidecarConfig {
         &self.shared.config
+    }
+
+    /// The store `prepare` installs the models into and the child loads
+    /// them from.
+    #[must_use]
+    pub fn store(&self) -> &ModelStore {
+        &self.shared.store
     }
 
     /// The running child's pid; `None` when there is none. Readable while

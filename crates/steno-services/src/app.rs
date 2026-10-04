@@ -26,7 +26,7 @@ use crate::pipeline::{CurrentPipeline, HostPipeline, MakeDependencies, run_sweep
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, MakeCaptureSession};
 use crate::secrets::secret_store;
-use crate::speech::ModelStoreSpeechModels;
+use crate::speech::{ModelStoreSpeechModels, SpeechSetup};
 
 /// What stops the graph from being built: the database could not be
 /// opened or read. A secret store that cannot be read and a handover
@@ -149,13 +149,13 @@ pub fn pipeline_dependencies(
         tracing::warn!("{warning}");
         None
     });
-    let models_directory = crate::speech::models_directory(&settings, paths);
+    let speech = SpeechSetup::new(&settings, paths);
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
     let dependencies = PipelineDependencies::new(
         Arc::new(SymphoniaAudioCodec::new()),
-        crate::speech::speech_engine(&settings, &models_directory),
-        crate::speech::diarizer(&models_directory),
+        crate::speech::speech_engine(&settings.speech_engine_id, &speech),
+        crate::speech::diarizer(&speech.models_directory),
         Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
         Arc::new(DeliveryCoordinator::new(store.clone())),
         store.clone(),
@@ -235,8 +235,8 @@ fn handover_listener(
 }
 
 /// Builds the graph. Real: store, settings, secret store, speech engine
-/// (`CoreML` on the Mac, ONNX elsewhere, in this process until the speech
-/// sidecar lands), ONNX diarizer, cosine speaker memory over the store,
+/// (`CoreML` in this process on the Mac, the ONNX speech sidecar elsewhere
+/// and as the Mac's fallback; [`SpeechSetup::runtime`]), ONNX diarizer, cosine speaker memory over the store,
 /// LLM passes, delivery coordinator, handover listener, capture session,
 /// recorder, the speech models, folder usage, preferences, and the login item
 /// when the shell passes its own ([`AppOptions::login_item`]). Fakes where no
@@ -268,10 +268,10 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     ));
     let sweep = RetentionSweep::new(store.clone());
     let settings = store.settings()?;
-    let models_directory = crate::speech::models_directory(&settings, &paths);
+    let speech = SpeechSetup::new(&settings, &paths);
 
     let permissions = Arc::new(FakePermissions::all_granted());
-    let speech_models = Arc::new(ModelStoreSpeechModels::new(&models_directory));
+    let speech_models = Arc::new(ModelStoreSpeechModels::new(&speech));
     let recorder = Arc::new(CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
@@ -334,7 +334,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         services,
         handover: handover.map(|(service, _)| service),
         recorder,
-        models_directory,
+        models_directory: speech.models_directory,
         zone,
         runtime,
         version: options.version,
