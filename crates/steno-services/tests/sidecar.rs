@@ -1,42 +1,23 @@
-//! The pipeline over the speech sidecar: the two-lane fixture call through
-//! the real `steno-speech-sidecar` binary (its fake engine, so no models)
-//! as the app runs Parakeet off the Mac. The child starts at the job's
-//! warm-up, transcribes both lanes, and is gone before the diarizer runs,
-//! so its working set is back before the next stage loads models; the next
-//! job starts a child of its own.
+//! The pipeline over a `SidecarSpeechEngine` on the real
+//! `steno-speech-sidecar` binary (its fake engine, so no models), the
+//! engine the app runs Parakeet on off the Mac: the two-lane fixture call.
+//! The child starts at the job's warm-up, transcribes both lanes, and is
+//! gone before the diarizer runs; the next job starts a child of its own.
 //!
 //! The binary is the one in the target directory, which
 //! `cargo test --workspace` builds (as does
 //! `cargo build -p steno-speech-sidecar`).
 
 use std::ffi::OsString;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::testing::{FakeDiarizer, InMemorySpeakerMemory, sample_data};
 use steno_core::{AudioRetention, MeetingState, SpeechEngine, Store, paths::file_url};
 use steno_pipeline::{MeetingEventBus, PipelineDependencies, ProcessingPipeline};
-use steno_speech::sidecar::SIDECAR_BINARY;
 use steno_speech::{ModelStore, SidecarConfig, SidecarSpeechEngine};
 
-/// The sidecar binary in the target directory: the test binary sits in
-/// its `deps/`, the binaries one folder up.
-fn sidecar_binary() -> PathBuf {
-    let exe = std::env::current_exe().unwrap();
-    let binary = exe
-        .parent()
-        .and_then(std::path::Path::parent)
-        .unwrap()
-        .join(SIDECAR_BINARY);
-    assert!(
-        binary.is_file(),
-        "{} is missing: build it with `cargo build -p steno-speech-sidecar` \
-         or run `cargo test --workspace`",
-        binary.display()
-    );
-    binary
-}
+mod common;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn each_job_starts_the_sidecar_and_frees_it_once_its_lanes_are_transcribed() {
@@ -47,7 +28,7 @@ async fn each_job_starts_the_sidecar_and_frees_it_once_its_lanes_are_transcribed
     settings.audio_folder = file_url(&audio, true);
     store.save_settings(&settings).unwrap();
 
-    let mut config = SidecarConfig::new(sidecar_binary());
+    let mut config = SidecarConfig::new(common::sidecar_binary());
     config.args = vec![OsString::from("--fake-engine")];
     let engine = Arc::new(SidecarSpeechEngine::with_assets(
         ModelStore::new(dir.path().join("models")),

@@ -14,6 +14,7 @@ use steno_core::{MeetingSource, RecordingEndReason, Settings, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{LocalRecordingIntake, RecordingResult};
+use steno_speech::{SpeechRuntime, SpeechSettings};
 use uuid::Uuid;
 
 use crate::block_on;
@@ -57,6 +58,9 @@ pub struct CaptureRecorder {
     permissions: Arc<dyn Permissions>,
     /// Whether the models are on disk, so a warm-up never downloads.
     speech_models: Arc<dyn SpeechModels>,
+    /// The speech settings the pipeline's engine is built with, which
+    /// decide whether a warm-up loads the speech engine.
+    speech_settings: SpeechSettings,
     zone: FixedOffset,
     runtime: tokio::runtime::Handle,
     inner: Mutex<Inner>,
@@ -65,6 +69,8 @@ pub struct CaptureRecorder {
 }
 
 impl CaptureRecorder {
+    // The graph's parts, each one `build` hands over.
+    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         store: Arc<Store>,
@@ -72,6 +78,7 @@ impl CaptureRecorder {
         make_session: MakeCaptureSession,
         permissions: Arc<dyn Permissions>,
         speech_models: Arc<dyn SpeechModels>,
+        speech_settings: SpeechSettings,
         zone: FixedOffset,
         runtime: tokio::runtime::Handle,
     ) -> Self {
@@ -81,6 +88,7 @@ impl CaptureRecorder {
             make_session,
             permissions,
             speech_models,
+            speech_settings,
             zone,
             runtime,
             inner: Mutex::new(Inner {
@@ -127,7 +135,11 @@ impl CaptureRecorder {
     /// only when the models of the engine `settings` name and the
     /// diarizer's are installed, so it never starts a download. Swift:
     /// `AppEnvironment.warmUpPipelineIfModelsInstalled`, called when a
-    /// recording starts.
+    /// recording starts. The speech engine is loaded only where it runs
+    /// in this process (`CoreML` on the Mac, [`SpeechRuntime`]); the speech
+    /// sidecar's child would hold its 2.2 GB through the whole recording,
+    /// and with no job after it (a save that fails) until the next one, so
+    /// there only the diarizer is loaded and the job starts the child.
     fn warm_up_if_installed(&self, settings: &Settings) {
         if !(self
             .speech_models
@@ -136,9 +148,17 @@ impl CaptureRecorder {
         {
             return;
         }
+        let in_process =
+            crate::speech::engine_runtime(&settings.speech_engine_id, &self.speech_settings)
+                == SpeechRuntime::CoreMlInProcess;
         let pipeline = self.pipeline.current();
         self.runtime.spawn(async move {
-            if let Err(failure) = pipeline.warm_up().await {
+            let warmed = if in_process {
+                pipeline.warm_up().await
+            } else {
+                pipeline.warm_up_diarizer().await
+            };
+            if let Err(failure) = warmed {
                 tracing::debug!(%failure, "warm-up failed; processing loads the models");
             }
         });
@@ -401,11 +421,15 @@ mod tests {
         for asset in installed {
             models.set_installed(*asset, None);
         }
-        harness_over(models, "parakeet-v3")
+        harness_over(models, "parakeet-v3", SpeechSettings::default())
     }
 
     /// A recorder over `models`, the settings naming `engine_id`.
-    fn harness_over(models: Arc<dyn SpeechModels>, engine_id: &str) -> Harness {
+    fn harness_over(
+        models: Arc<dyn SpeechModels>,
+        engine_id: &str,
+        speech_settings: SpeechSettings,
+    ) -> Harness {
         let (dir, store) = temp_store();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
@@ -437,6 +461,7 @@ mod tests {
             make_session,
             Arc::new(FakePermissions::all_granted()),
             models,
+            speech_settings,
             chrono::FixedOffset::east_opt(0).unwrap(),
             tokio::runtime::Handle::current(),
         ));
@@ -464,14 +489,50 @@ mod tests {
             .unwrap();
     }
 
+    /// With the defaults, the Mac's `CoreML` engine and the diarizer are
+    /// both loaded, as Swift did; off the Mac the speech sidecar runs
+    /// Parakeet, so only the diarizer is.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
         let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
         start(&harness.recorder).await;
-        eventually("both models were loaded while recording", || {
-            harness.engine.preparations.count() > 0 && harness.diarizer.preparations.count() > 0
+        eventually("the diarizer was loaded while recording", || {
+            harness.diarizer.preparations.count() > 0
         })
         .await;
+        if cfg!(target_os = "macos") {
+            eventually("the CoreML engine was loaded while recording", || {
+                harness.engine.preparations.count() > 0
+            })
+            .await;
+        } else {
+            assert_eq!(harness.engine.preparations.count(), 0);
+        }
+        stop(&harness.recorder).await;
+    }
+
+    /// With Parakeet in the speech sidecar (here chosen on every
+    /// platform), a recording's warm-up loads the diarizer only: the
+    /// child would otherwise stay resident through the recording.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_start_with_speech_in_the_sidecar_warms_the_diarizer_only() {
+        let models = Arc::new(FakeSpeechModels::default());
+        models.set_installed(ModelAsset::ParakeetV3, None);
+        models.set_installed(ModelAsset::OfflineDiarizer, None);
+        let harness = harness_over(
+            models,
+            "parakeet-v3",
+            SpeechSettings {
+                onnx_sidecar_on_mac: true,
+                ..SpeechSettings::default()
+            },
+        );
+        start(&harness.recorder).await;
+        eventually("the diarizer was loaded while recording", || {
+            harness.diarizer.preparations.count() > 0
+        })
+        .await;
+        assert_eq!(harness.engine.preparations.count(), 0);
         stop(&harness.recorder).await;
     }
 
@@ -483,6 +544,31 @@ mod tests {
         assert_eq!(harness.engine.preparations.count(), 0);
         assert_eq!(harness.diarizer.preparations.count(), 0);
         // Processing the recording loads them, as it always did.
+        stop(&harness.recorder).await;
+    }
+
+    /// The warm-up asks about the engine the settings name when the
+    /// recording starts, as the pipeline a Settings save reloads does: an
+    /// engine id saved after the recorder was built (one without a Rust
+    /// engine, so the speech sidecar's on every platform) warms the
+    /// diarizer only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_warm_up_follows_the_engine_the_current_settings_name() {
+        let harness = harness(&[
+            ModelAsset::ParakeetV3,
+            ModelAsset::ParakeetUltra,
+            ModelAsset::OfflineDiarizer,
+        ]);
+        let mut settings = harness.store.settings().unwrap();
+        "parakeet-ultra".clone_into(&mut settings.speech_engine_id);
+        harness.store.save_settings(&settings).unwrap();
+        harness.recorder.pipeline.reload().unwrap();
+        start(&harness.recorder).await;
+        eventually("the diarizer was loaded while recording", || {
+            harness.diarizer.preparations.count() > 0
+        })
+        .await;
+        assert_eq!(harness.engine.preparations.count(), 0);
         stop(&harness.recorder).await;
     }
 
@@ -552,8 +638,9 @@ mod tests {
 
     /// The configured engine decides which model counts: with the `CoreML`
     /// Parakeet and the diarizer on disk but another engine id stored (a
-    /// Swift user who picked Whisper), the ONNX engine would load, its
-    /// models are missing, and the warm-up neither loads nor downloads.
+    /// Swift user who picked Whisper), the speech sidecar would load the
+    /// ONNX models, which are missing, and the warm-up neither loads nor
+    /// downloads.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_checks_the_models_of_the_configured_engine() {
         let models_dir = tempfile::tempdir().unwrap();
@@ -563,7 +650,11 @@ mod tests {
         assert!(models.is_installed(ModelAsset::OfflineDiarizer));
         let before = crate::speech::testing::files_under(models_dir.path());
 
-        let harness = harness_over(models, "whisperkit-large-v3-turbo");
+        let harness = harness_over(
+            models,
+            "whisperkit-large-v3-turbo",
+            SpeechSettings::default(),
+        );
         start(&harness.recorder).await;
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(harness.engine.preparations.count(), 0);

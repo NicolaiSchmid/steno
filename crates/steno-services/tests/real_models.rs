@@ -25,6 +25,8 @@ use steno_pipeline::{
 };
 use steno_services::speech::SpeechSetup;
 
+mod common;
+
 // One flow: the setup is most of it.
 #[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread")]
@@ -45,18 +47,14 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     "parakeet-v3".clone_into(&mut settings.speech_engine_id);
     store.save_settings(&settings).unwrap();
 
-    // The test binary sits in the target directory's `deps/`, the sidecar
-    // binary one folder up.
-    let exe = std::env::current_exe().unwrap();
-    let target = exe.parent().and_then(std::path::Path::parent).unwrap();
-    let setup = SpeechSetup {
-        models_directory: models.clone(),
-        settings: steno_services::speech::speech_settings(&StenoPaths::new(dir.path())),
-        sidecar: steno_speech::SidecarConfig::new(
-            target.join(steno_speech::sidecar::SIDECAR_BINARY),
-        ),
-    };
+    // The app's setup, over a support directory without `speech.json`
+    // (so `STENO_MODELS_MIRROR` still applies), with the sidecar binary
+    // from the target directory.
+    let mut setup = SpeechSetup::in_models_directory(models.clone(), &StenoPaths::new(dir.path()));
     let runtime = setup.runtime(&settings.speech_engine_id);
+    if runtime == steno_speech::SpeechRuntime::OnnxSidecar {
+        setup.sidecar.program = common::sidecar_binary();
+    }
     let speech_store = setup.model_store();
     let engine = steno_services::speech::speech_engine(&settings.speech_engine_id, &setup);
     let diarizer = steno_services::speech::diarizer(&models);

@@ -133,12 +133,15 @@ fn api_key(
         .map_err(|error| format!("Could not read the LLM API key from the secret store: {error}"))
 }
 
-/// The dependencies of one pipeline from the stored settings and the API
-/// key, shared by the first build and every reload. A secret store that
-/// cannot be read is logged and the passes are built without a key.
+/// The dependencies of one pipeline from the stored settings, the API key
+/// and `speech`, shared by the first build and every reload. `speech` is
+/// read once by [`build`] and also backs the model service and the
+/// recorder's warm-up, so the three agree on where each engine runs. A
+/// secret store that cannot be read is logged and the passes are built
+/// without a key.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
-    paths: &StenoPaths,
+    speech: &SpeechSetup,
     secrets: &Arc<dyn SecretStore>,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
@@ -149,12 +152,11 @@ pub fn pipeline_dependencies(
         tracing::warn!("{warning}");
         None
     });
-    let speech = SpeechSetup::new(&settings, paths);
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
     let dependencies = PipelineDependencies::new(
         Arc::new(SymphoniaAudioCodec::new()),
-        crate::speech::speech_engine(&settings.speech_engine_id, &speech),
+        crate::speech::speech_engine(&settings.speech_engine_id, speech),
         crate::speech::diarizer(&speech.models_directory),
         Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
         Arc::new(DeliveryCoordinator::new(store.clone())),
@@ -170,21 +172,21 @@ pub fn pipeline_dependencies(
 /// [`pipeline_dependencies`] over clones of its inputs, for the reloads.
 fn make_dependencies(
     store: &Arc<Store>,
-    paths: &StenoPaths,
+    speech: &SpeechSetup,
     secrets: &Arc<dyn SecretStore>,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
 ) -> MakeDependencies {
-    let (store, paths, secrets, codex, events, runtime) = (
+    let (store, speech, secrets, codex, events, runtime) = (
         store.clone(),
-        paths.clone(),
+        speech.clone(),
         secrets.clone(),
         codex.clone(),
         events.clone(),
         runtime.clone(),
     );
-    Arc::new(move || pipeline_dependencies(&store, &paths, &secrets, &codex, &events, &runtime))
+    Arc::new(move || pipeline_dependencies(&store, &speech, &secrets, &codex, &events, &runtime))
 }
 
 /// The phone intake over whichever pipeline is current when a recording
@@ -259,17 +261,18 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let runtime = options.runtime;
     let zone = local_zone();
 
+    // The speech settings are read once, here: the pipeline (and every
+    // reload), the model service and the recorder share them.
+    let speech = SpeechSetup::new(&store.settings()?, &paths);
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
-    let make = make_dependencies(&store, &paths, &secrets, &codex, &events, &runtime);
+    let make = make_dependencies(&store, &speech, &secrets, &codex, &events, &runtime);
     let pipeline = Arc::new(CurrentPipeline::new(
         ProcessingPipeline::new(make()?),
         make,
         runtime.clone(),
     ));
     let sweep = RetentionSweep::new(store.clone());
-    let settings = store.settings()?;
-    let speech = SpeechSetup::new(&settings, &paths);
 
     let permissions = Arc::new(FakePermissions::all_granted());
     let speech_models = Arc::new(ModelStoreSpeechModels::new(&speech));
@@ -279,6 +282,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         options.make_capture_session,
         permissions.clone(),
         speech_models.clone(),
+        speech.speech_settings.clone(),
         zone,
         runtime.clone(),
     ));
@@ -815,7 +819,7 @@ mod tests {
         let paths = StenoPaths::new(dir.path().join("support"));
         let dependencies = pipeline_dependencies(
             &store,
-            &paths,
+            &SpeechSetup::new(&store.settings().unwrap(), &paths),
             &secrets,
             &codex_store(),
             &MeetingEventBus::new(),

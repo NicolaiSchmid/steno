@@ -60,7 +60,7 @@ fn speech_settings_with(file: &Path, mirror: Option<String>) -> SpeechSettings {
             SpeechSettings::default()
         }
     };
-    if let Some(mirror) = mirror.filter(|m| !m.is_empty()) {
+    if let Some(mirror) = mirror.filter(|m| !m.trim().is_empty()) {
         settings.models_mirror = Some(mirror);
     }
     settings
@@ -68,16 +68,22 @@ fn speech_settings_with(file: &Path, mirror: Option<String>) -> SpeechSettings {
 
 /// The speech sidecar binary beside the running executable
 /// ([`SidecarConfig::beside_current_exe`]), its sessions on
-/// [`ONNX_THREADS`]. In a bundle the installer puts it there; in a
-/// development build `cargo build` at the workspace root (or
+/// [`ONNX_THREADS`]. The bundles are to carry it there (WP9 of
+/// `.plans/2026-10-02-rust-core-and-tauri-shell.md`); until then a
+/// bundled app's `prepare` fails with "could not start". In a
+/// development build, `cargo build` at the workspace root (or
 /// `cargo build -p steno-speech-sidecar`) puts it beside `steno` and
-/// `steno-desktop` in the target directory. Where the executable's path
-/// cannot be read, the bare file name, which `prepare` reports as not
-/// started.
+/// `steno-desktop` in the target directory. If the executable's path
+/// cannot be read, the config holds the bare file name, which the client
+/// never looks up on `PATH`: `prepare` fails with "could not start".
 #[must_use]
 pub fn sidecar_config() -> SidecarConfig {
-    let mut config = SidecarConfig::beside_current_exe()
-        .unwrap_or_else(|_| SidecarConfig::new(steno_speech::sidecar::SIDECAR_BINARY));
+    let mut config = SidecarConfig::beside_current_exe().unwrap_or_else(|error| {
+        tracing::warn!(kind = ?error.kind(), "the running executable's path could not be read; the speech sidecar cannot start");
+        SidecarConfig::new(steno_speech::sidecar::SIDECAR_BINARY)
+    });
+    // `OnnxOptions::default()` uses four threads too; set here so the
+    // app's count stays the measured one whatever that default becomes.
     config.options.intra_threads = ONNX_THREADS;
     config
 }
@@ -86,8 +92,11 @@ pub fn sidecar_config() -> SidecarConfig {
 /// models directory, the speech settings and the sidecar binary.
 #[derive(Debug, Clone)]
 pub struct SpeechSetup {
+    /// The directory every engine's models live under ([`models_directory`]).
     pub models_directory: PathBuf,
-    pub settings: SpeechSettings,
+    /// The speech settings ([`speech_settings`]), not the app's `Settings`.
+    pub speech_settings: SpeechSettings,
+    /// How the speech sidecar starts ([`sidecar_config`]).
     pub sidecar: SidecarConfig,
 }
 
@@ -105,30 +114,40 @@ impl SpeechSetup {
     pub fn in_models_directory(models_directory: PathBuf, paths: &StenoPaths) -> Self {
         SpeechSetup {
             models_directory,
-            settings: speech_settings(paths),
+            speech_settings: speech_settings(paths),
             sidecar: sidecar_config(),
         }
     }
 
-    /// Where the engine `engine_id` runs: `CoreML` in this process for
-    /// `parakeet-v3` on the Mac unless the speech settings choose the
-    /// sidecar there; the speech sidecar for every other id (the engine
-    /// ids the Swift app offered beyond Parakeet v3 have no Rust
-    /// counterpart yet; the parity list says so) and everywhere else.
+    /// Where the engine `engine_id` runs. `parakeet-v3` runs on `CoreML` in
+    /// this process on the Mac, unless the speech settings choose the
+    /// sidecar there; it runs in the speech sidecar everywhere else. Every
+    /// other id runs in the speech sidecar on every platform: the engines
+    /// the Swift app offered beyond Parakeet v3 have no Rust counterpart
+    /// yet (the parity list says so).
     #[must_use]
     pub fn runtime(&self, engine_id: &str) -> SpeechRuntime {
-        if engine_id == OnnxSpeechEngine::ID {
-            self.settings.runtime()
-        } else {
-            SpeechRuntime::OnnxSidecar
-        }
+        engine_runtime(engine_id, &self.speech_settings)
     }
 
     /// The ONNX store: the models directory's `onnx/` folder, with the
     /// speech settings' mirror.
     #[must_use]
     pub fn model_store(&self) -> ModelStore {
-        self.settings.model_store(&self.models_directory)
+        self.speech_settings.model_store(&self.models_directory)
+    }
+}
+
+/// The id both Parakeet v3 engines report (ONNX and `CoreML`).
+const PARAKEET_V3: &str = OnnxSpeechEngine::ID;
+
+/// [`SpeechSetup::runtime`] over the speech settings alone, for the model
+/// service and the recorder, which keep no models directory of their own.
+pub(crate) fn engine_runtime(engine_id: &str, speech_settings: &SpeechSettings) -> SpeechRuntime {
+    if engine_id == PARAKEET_V3 {
+        speech_settings.runtime()
+    } else {
+        SpeechRuntime::OnnxSidecar
     }
 }
 
@@ -369,8 +388,9 @@ pub struct ModelStoreSpeechModels {
     pub speech: ModelStore,
     /// The `CoreML` Parakeet's directory.
     pub coreml: PathBuf,
-    /// How [`speech_engine`] places each engine id.
-    setup: SpeechSetup,
+    /// The speech settings, which decide where [`speech_engine`] runs
+    /// each engine id.
+    speech_settings: SpeechSettings,
 }
 
 impl ModelStoreSpeechModels {
@@ -379,18 +399,18 @@ impl ModelStoreSpeechModels {
         ModelStoreSpeechModels {
             speech: setup.model_store(),
             coreml: coreml_model_directory(&setup.models_directory),
-            setup: setup.clone(),
+            speech_settings: setup.speech_settings.clone(),
         }
     }
 
     /// Whether `engine_id` runs on the `CoreML` model.
     fn runs_on_coreml(&self, engine_id: &str) -> bool {
-        self.setup.runtime(engine_id) == SpeechRuntime::CoreMlInProcess
+        engine_runtime(engine_id, &self.speech_settings) == SpeechRuntime::CoreMlInProcess
     }
 
     /// Whether Parakeet v3 is the `CoreML` model.
-    fn coreml_parakeet(&self) -> bool {
-        self.runs_on_coreml(OnnxSpeechEngine::ID)
+    fn parakeet_on_coreml(&self) -> bool {
+        self.runs_on_coreml(PARAKEET_V3)
     }
 
     fn speech_asset(asset: ModelAsset) -> Option<steno_speech::ModelAsset> {
@@ -422,9 +442,9 @@ impl ModelStoreSpeechModels {
 }
 
 impl SpeechModels for ModelStoreSpeechModels {
-    /// The engine [`speech_engine`] builds for `engine_id`: the `CoreML`
-    /// Parakeet's files, or every model the ONNX engine loads (the VAD and
-    /// the fp32 Parakeet), whatever id the settings hold.
+    /// The engine [`speech_engine`] builds for `engine_id`
+    /// ([`SpeechSetup::runtime`]): the `CoreML` Parakeet's files, or every
+    /// model the speech sidecar loads (the VAD and the fp32 Parakeet).
     fn engine_installed(&self, engine_id: &str) -> bool {
         if self.runs_on_coreml(engine_id) {
             coreml_parakeet_installed(&self.coreml)
@@ -438,7 +458,7 @@ impl SpeechModels for ModelStoreSpeechModels {
     fn is_installed(&self, asset: ModelAsset) -> bool {
         match asset {
             ModelAsset::OfflineDiarizer => self.diarizer_paths().iter().all(|path| path.is_file()),
-            ModelAsset::ParakeetV3 if self.coreml_parakeet() => {
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
                 coreml_parakeet_installed(&self.coreml)
             }
             other => {
@@ -455,7 +475,7 @@ impl SpeechModels for ModelStoreSpeechModels {
             ModelAsset::OfflineDiarizer => {
                 self.diarizer_paths().iter().map(|p| Self::size_of(p)).sum()
             }
-            ModelAsset::ParakeetV3 if self.coreml_parakeet() => Self::size_of(&self.coreml),
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Self::size_of(&self.coreml),
             other => Self::size_of(&self.speech.directory(&Self::speech_asset(other)?)),
         })
     }
@@ -475,7 +495,7 @@ impl SpeechModels for ModelStoreSpeechModels {
                 progress(1.0, "Installed");
                 Ok(())
             }
-            ModelAsset::ParakeetV3 if self.coreml_parakeet() => Err(
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Err(
                 "This build cannot download the CoreML Parakeet v3 model; install it from the Steno Mac app."
                     .into(),
             ),
@@ -517,7 +537,7 @@ impl SpeechModels for ModelStoreSpeechModels {
                 }
                 Ok(())
             }
-            ModelAsset::ParakeetV3 if self.coreml_parakeet() => {
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
                 match std::fs::remove_dir_all(&self.coreml) {
                     Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
                     _ => Ok(()),
@@ -531,20 +551,22 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// Off the Mac, Parakeet v3 is the fp32 ONNX export of NVIDIA's model,
-    /// not the Swift app's `CoreML` int8 build; on the Mac it is that build,
-    /// under the Swift app's name.
+    /// Where the speech sidecar runs Parakeet v3 (off the Mac, and on the
+    /// Mac with the fallback chosen), it is the fp32 ONNX export of
+    /// NVIDIA's model, not the Swift app's `CoreML` int8 build; where
+    /// `CoreML` runs it, it is that build, under the Swift app's name.
     fn display_name(&self, asset: ModelAsset) -> &'static str {
         match asset {
-            ModelAsset::ParakeetV3 if !self.coreml_parakeet() => "Parakeet TDT 0.6B v3 (fp32)",
+            ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "Parakeet TDT 0.6B v3 (fp32)",
             other => other.display_name(),
         }
     }
 
-    /// Off the Mac, the model the ONNX export was converted from.
+    /// Where the speech sidecar runs Parakeet v3, the model the ONNX
+    /// export was converted from.
     fn source_repo(&self, asset: ModelAsset) -> &'static str {
         match asset {
-            ModelAsset::ParakeetV3 if !self.coreml_parakeet() => "nvidia/parakeet-tdt-0.6b-v3",
+            ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "nvidia/parakeet-tdt-0.6b-v3",
             other => other.source_repo(),
         }
     }
@@ -560,12 +582,12 @@ pub(crate) mod testing {
 
     use super::{COREML_PARAKEET_FILES, ModelStoreSpeechModels, SpeechSetup};
 
-    /// A setup over `models_directory` with `settings` and a sidecar
+    /// A setup over `models_directory` with `speech_settings` and a sidecar
     /// binary that does not exist, so nothing starts one.
-    pub fn setup(models_directory: &Path, settings: SpeechSettings) -> SpeechSetup {
+    pub fn setup(models_directory: &Path, speech_settings: SpeechSettings) -> SpeechSetup {
         SpeechSetup {
             models_directory: models_directory.to_path_buf(),
-            settings,
+            speech_settings,
             sidecar: SidecarConfig::new(models_directory.join("no-such-sidecar")),
         }
     }
@@ -746,13 +768,36 @@ mod tests {
         );
     }
 
+    /// On the Mac `parakeet-v3` is the `CoreML` engine, and with the
+    /// fallback chosen the sidecar's. Both report the same id, so what
+    /// `prepare` misses in an empty models directory tells them apart:
+    /// the `CoreML` bundles, or the ONNX models, which a mirror nobody
+    /// serves (a closed loopback port) cannot deliver. No network.
     #[cfg(target_os = "macos")]
-    #[test]
-    fn parakeet_v3_selects_the_coreml_engine_on_the_mac() {
-        let setup = testing::setup(Path::new("/tmp/steno-models"), SpeechSettings::default());
-        let engine = speech_engine(steno_speech_coreml::ENGINE_ID, &setup);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parakeet_v3_selects_the_coreml_engine_on_the_mac() {
+        let dir = tempfile::tempdir().unwrap();
+        let unserved = |onnx_sidecar_on_mac| {
+            testing::setup(
+                dir.path(),
+                SpeechSettings {
+                    onnx_sidecar_on_mac,
+                    models_mirror: Some("http://127.0.0.1:9/".to_owned()),
+                },
+            )
+        };
+        let coreml = coreml_model_directory(dir.path()).display().to_string();
+        let engine = speech_engine(PARAKEET_V3, &unserved(false));
         assert_eq!(engine.id(), steno_speech_coreml::ENGINE_ID);
         assert_eq!(engine.supported_languages().len(), 25);
+        let error = engine.prepare().await.unwrap_err().to_string();
+        assert!(error.contains(&coreml), "the CoreML engine: {error}");
+        let error = speech_engine(PARAKEET_V3, &unserved(true))
+            .prepare()
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains(&coreml), "the sidecar engine: {error}");
     }
 
     /// The platform policy per engine id: `CoreML` in this process only
@@ -805,6 +850,15 @@ mod tests {
         assert_eq!(engine.config(), &setup.sidecar);
         assert_eq!(engine.id(), "parakeet-v3");
         assert_eq!(engine.pid(), None, "nothing starts before prepare");
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            SpeechSetup::in_models_directory(
+                dir.path().join("Models"),
+                &StenoPaths::new(dir.path())
+            )
+            .models_directory,
+            dir.path().join("Models")
+        );
     }
 
     #[test]
@@ -842,11 +896,13 @@ mod tests {
             models_mirror: Some("http://file.example/m".to_owned()),
         };
         assert_eq!(speech_settings_with(&file, None), stored);
-        assert_eq!(
-            speech_settings_with(&file, Some(String::new())),
-            stored,
-            "an empty variable is unset"
-        );
+        for empty in ["", " "] {
+            assert_eq!(
+                speech_settings_with(&file, Some(empty.to_owned())),
+                stored,
+                "an empty variable is unset"
+            );
+        }
         assert_eq!(
             speech_settings_with(&file, Some("http://env.example/m".to_owned())),
             SpeechSettings {
@@ -857,11 +913,6 @@ mod tests {
         );
         std::fs::write(&file, b"{not json").unwrap();
         assert_eq!(speech_settings_with(&file, None), SpeechSettings::default());
-        let paths = StenoPaths::new(dir.path());
-        assert_eq!(
-            SpeechSetup::in_models_directory(dir.path().join("Models"), &paths).models_directory,
-            dir.path().join("Models")
-        );
     }
 
     /// With the sidecar chosen on the Mac (and always elsewhere), Parakeet
