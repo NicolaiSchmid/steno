@@ -232,24 +232,24 @@ impl AcceleratedSession {
             options: options.clone(),
         };
         #[cfg(windows)]
-        let fallback = if options.directml {
+        let refused = if options.directml {
             match open_directml(path, options) {
                 Ok(session) => return Ok(opened(session, EncoderProvider::DirectMl, None)),
-                Err((reason, error)) => {
-                    log_fallback(reason, &error);
-                    Some(reason)
-                }
+                Err(refused) => Some(refused),
             }
         } else {
             None
         };
         #[cfg(not(windows))]
-        let fallback = None;
-        Ok(opened(
-            open_session(path, options)?,
-            EncoderProvider::Cpu,
-            fallback,
-        ))
+        let refused: Option<(Fallback, String)> = None;
+        let session = open_session(path, options)?;
+        // Logged once the CPU took the model: for a model that opens
+        // nowhere, the CPU's error is the one that matters.
+        let fallback = refused.map(|(reason, error)| {
+            log_fallback(reason, &error);
+            reason
+        });
+        Ok(opened(session, EncoderProvider::Cpu, fallback))
     }
 
     fn session(&self) -> Result<&Session, SpeechError> {
