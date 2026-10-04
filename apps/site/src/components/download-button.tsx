@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AppleIcon, LinuxIcon, WindowsIcon } from "@/components/platform-icons";
+import { platformIcon } from "@/components/platform-icons";
 import { cn } from "@/lib/cn";
 import { type Platform, platforms, site } from "@/lib/site";
 
@@ -33,12 +33,7 @@ export function DownloadButton({
 	}, []);
 
 	const { name, released } = platforms[platform];
-	const Icon =
-		platform === "win"
-			? WindowsIcon
-			: platform === "linux"
-				? LinuxIcon
-				: AppleIcon;
+	const Icon = platformIcon[platform];
 
 	return (
 		<a

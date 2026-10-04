@@ -1,12 +1,11 @@
 import { DownloadButton } from "@/components/download-button";
-import { AppleIcon, LinuxIcon, WindowsIcon } from "@/components/platform-icons";
-import { platforms, site } from "@/lib/site";
+import { platformIcon } from "@/components/platform-icons";
+import { platformIds, platforms, site } from "@/lib/site";
 
-const rows = [
-	{ Icon: AppleIcon, ...platforms.mac },
-	{ Icon: WindowsIcon, ...platforms.win },
-	{ Icon: LinuxIcon, ...platforms.linux },
-];
+const rows = platformIds.map((id) => ({
+	Icon: platformIcon[id],
+	...platforms[id],
+}));
 
 export function ClosingCta() {
 	return (

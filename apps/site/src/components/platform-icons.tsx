@@ -1,3 +1,6 @@
+import type { ComponentType } from "react";
+import type { Platform } from "@/lib/site";
+
 interface IconProps {
 	className?: string;
 }
@@ -42,3 +45,10 @@ export function LinuxIcon({ className }: IconProps) {
 		</svg>
 	);
 }
+
+/** The mark for each desktop, keyed like `platforms` in `@/lib/site`. */
+export const platformIcon: Record<Platform, ComponentType<IconProps>> = {
+	mac: AppleIcon,
+	win: WindowsIcon,
+	linux: LinuxIcon,
+};

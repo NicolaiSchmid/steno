@@ -35,3 +35,6 @@ export const platforms: Record<
 	win: { name: "Windows", released: false, note: "Preview · not released yet" },
 	linux: { name: "Linux", released: false, note: "Preview · not released yet" },
 };
+
+/** The desktops in display order: macOS, Windows, Linux. */
+export const platformIds = Object.keys(platforms) as Platform[];
