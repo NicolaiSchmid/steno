@@ -1,5 +1,5 @@
 //! Which engine runs Parakeet where, and the speech settings that choose
-//! it. On Linux and Windows the ONNX sidecar
+//! it, and on Windows whether the encoder may use `DirectML`. On Linux and Windows the ONNX sidecar
 //! ([`SidecarSpeechEngine`](crate::SidecarSpeechEngine)) is the only
 //! speech engine the app runs: speech inference never shares the app's
 //! process there (the diarizer's ONNX models still run in it).
@@ -42,9 +42,10 @@ pub struct SpeechSettings {
     /// in [`crate::onnx#directml`]). Off by default until gate G4 of the
     /// speech-stack plan is measured: no Windows machine with a GPU has
     /// run it, so its speed on an integrated GPU, its transcripts against
-    /// the CPU's and how its drivers fail are unknown; a driver that aborts
-    /// mid-run takes the sidecar and that job with it, and the encoder runs
-    /// on the CPU for the rest of the app's run. Ignored elsewhere.
+    /// the CPU's and how its drivers fail are unknown. A driver that aborts
+    /// mid-run takes the sidecar and that job with it (one that aborts in
+    /// the probe costs no job), and the encoder runs on the CPU for the rest
+    /// of the app's run. Ignored elsewhere.
     pub directml_on_windows: bool,
     /// A mirror the speech models (Silero VAD and the Parakeet export) are
     /// fetched from instead of their hosts ([`ModelStore::with_mirror`]);

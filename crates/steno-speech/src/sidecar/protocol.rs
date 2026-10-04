@@ -28,7 +28,9 @@ use thiserror::Error;
 use crate::onnx::EncoderProvider;
 
 /// Bumped on any change a peer of the old version would misread; the
-/// client refuses a child whose [`Reply::Ready`] names another.
+/// client refuses a child whose [`Reply::Ready`] names another. A field
+/// added with a default for its absence (`directml`, `provider`) is no such
+/// change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The longest header either side accepts. A transcript of a long meeting
@@ -122,10 +124,10 @@ pub enum Reply {
         pid: u32,
         rss_bytes: u64,
         loaded: bool,
-        /// Where the encoder runs now, which a failed run on `DirectML`
-        /// moves to the CPU after [`Reply::Loaded`]; absent before a load
-        /// and from a child that does not say, which leaves the parent
-        /// with the provider it last heard.
+        /// Where the encoder runs now; a failed run on `DirectML` moves it
+        /// to the CPU after [`Reply::Loaded`]. Absent before a load and
+        /// from a child that does not say; the parent then keeps the
+        /// provider it last heard.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<EncoderProvider>,
     },
