@@ -12,7 +12,9 @@ use steno_core::{
 
 use crate::budget::{BudgetPolicy, counted_usage};
 use crate::concurrency::map_bounded;
-use crate::labels::{SpeakerLabels, render_lines};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::labels::{SpeakerLabels, is_swift_whitespace, render_lines};
 use crate::language::OutputLanguage;
 use crate::{
     JsonSchema, LlmEndpoint, LlmError, StructuredOutputDecoder, TokenBudget, TranscriptChunk,
@@ -108,6 +110,73 @@ impl CleanupDraft {
         problems
     }
 
+    /// The draft with the framing of a prompt line stripped from the front
+    /// of every text: an optional `[n]` index, then a speaker label from
+    /// `labels` and its colon. The model reads `[3] Me: words` and some
+    /// models answer `Me: words`; the label is one word, so the word-count
+    /// check alone lets it through into the transcript.
+    #[must_use]
+    pub fn stripping_speaker_labels(mut self, labels: &SpeakerLabels) -> Self {
+        for segment in &mut self.segments {
+            segment.text = Self::stripping_label(&segment.text, labels).to_owned();
+        }
+        self
+    }
+
+    /// `text` without a leading `[n]` index and a speaker label; `text`
+    /// itself when neither is there. The label may be wrapped in markdown or
+    /// brackets (`**Me:**`, `(Me)`) and end in a colon, a closing bracket or
+    /// a spaced dash (`Me - `); a first word that is no label ("Meeting:
+    /// agenda", "Me-too products") is left alone. Walks grapheme clusters
+    /// as Swift's `Character` does, so a colon carrying a combining mark is
+    /// no separator.
+    ///
+    /// ```
+    /// use steno_llm::cleanup::CleanupDraft;
+    /// use steno_llm::labels::SpeakerLabels;
+    ///
+    /// let labels = SpeakerLabels::default();
+    /// assert_eq!(CleanupDraft::stripping_label("[3] Unknown speaker: Hi.", &labels), "Hi.");
+    /// assert_eq!(CleanupDraft::stripping_label("Meeting: agenda", &labels), "Meeting: agenda");
+    /// ```
+    #[must_use]
+    pub fn stripping_label<'a>(text: &'a str, labels: &SpeakerLabels) -> &'a str {
+        let mut rest = drop_graphemes(text, starts_with_whitespace);
+        let mut stripped = false;
+        if rest.graphemes(true).next() == Some("[")
+            && let Some((close, _)) = rest.grapheme_indices(true).find(|(_, g)| *g == "]")
+            && rest[1..close].parse::<i64>().is_ok()
+        {
+            rest = drop_graphemes(&rest[close + 1..], starts_with_whitespace);
+            stripped = true;
+        }
+        if let Some(separator) = Self::label_separator(rest)
+            && labels.is_label(rest[..separator].trim_matches(is_label_decoration))
+        {
+            rest = drop_graphemes(&rest[separator + 1..], |g| {
+                g.chars().all(is_label_decoration)
+            });
+            stripped = true;
+        }
+        if stripped { rest } else { text }
+    }
+
+    /// The byte offset of the first `:` or `)` in the opening stretch of
+    /// `text`, or of a `-` that follows whitespace; `None` when the opening
+    /// stretch has none. The stretch (32 grapheme clusters) is long enough
+    /// for `**Unknown speaker:**` and short enough that a colon deep in a
+    /// sentence is never taken for a label's.
+    fn label_separator(text: &str) -> Option<usize> {
+        let mut after_whitespace = false;
+        for (index, grapheme) in text.grapheme_indices(true).take(32) {
+            if grapheme == ":" || grapheme == ")" || (grapheme == "-" && after_whitespace) {
+                return Some(index);
+            }
+            after_whitespace = starts_with_whitespace(grapheme);
+        }
+        None
+    }
+
     /// The cleaned texts in segment order, trimmed; meaningful once
     /// [`problems`](Self::problems) is empty.
     #[must_use]
@@ -124,6 +193,26 @@ impl CleanupDraft {
     pub fn word_count(text: &str) -> usize {
         text.split_whitespace().count()
     }
+}
+
+/// Markdown emphasis, brackets and spaces a model may wrap a label in.
+fn is_label_decoration(c: char) -> bool {
+    "*_~`()[]".contains(c) || is_swift_whitespace(c)
+}
+
+/// Swift's `Character.isWhitespace`: the cluster's first scalar is
+/// Unicode `White_Space`.
+fn starts_with_whitespace(grapheme: &str) -> bool {
+    grapheme.chars().next().is_some_and(char::is_whitespace)
+}
+
+/// `text` from its first grapheme cluster `drop` refuses.
+fn drop_graphemes(text: &str, drop: impl Fn(&str) -> bool) -> &str {
+    let start = text
+        .grapheme_indices(true)
+        .find(|(_, grapheme)| !drop(grapheme))
+        .map_or(text.len(), |(index, _)| index);
+    &text[start..]
 }
 
 /// Names the cleanup pass must spell exactly: participants (calendar
@@ -213,6 +302,7 @@ impl CleanupPromptBuilder {
             String::new(),
             "Rules:".to_owned(),
             format!("- Return exactly {count} segments with the indices 0 to {}, each once, in order. Never merge, split, drop, add, shorten, expand or summarise a segment.", count.saturating_sub(1)),
+            "- A line reads `[index] Speaker: text`. The index and the speaker label before the colon are framing, not part of the segment: return only the text after the colon, never the label.".to_owned(),
             "- Fix speech-to-text mistakes only: misheard anglicisms and product names (\"git hub\" to \"GitHub\", \"kuber netes\" to \"Kubernetes\"), the names listed above, German noun capitalisation, sentence-initial capitals, punctuation.".to_owned(),
             "- Keep the wording, the word order and the speaker's register. Keep fillers unless they are transcription noise.".to_owned(),
             "- When a segment needs no change, return its text unchanged.".to_owned(),
@@ -309,9 +399,10 @@ impl CleanupPromptBuilder {
 }
 
 /// Pass 1: the transcript in chunks through the model, at most
-/// `endpoint.max_concurrent_requests` at a time. A chunk whose answer is
-/// refused, fails validation (count, indices, emptied or reworded segments)
-/// or does not decode is retried once with the reason appended, then kept
+/// `endpoint.max_concurrent_requests` at a time. A speaker label the model
+/// echoed into a text (`Me: words`) is stripped before validation. A chunk
+/// whose answer is refused, fails validation (count, indices, emptied or
+/// reworded segments) or does not decode is retried once with the reason appended, then kept
 /// as raw text and listed in `failed_chunks`. Network and HTTP failures
 /// propagate: the pipeline keeps the raw transcript and marks the stage
 /// failed. `raw_text` is never touched; ids, order and count come back as
@@ -366,7 +457,7 @@ impl LlmTranscriptCleaner {
             |position| {
                 let chunk = &chunks[position];
                 let request = builder.build(chunk, input.language.as_ref(), &glossary, &labels);
-                self.clean_chunk(request, chunk)
+                self.clean_chunk(request, chunk, &labels)
             },
         )
         .await?;
@@ -400,6 +491,7 @@ impl LlmTranscriptCleaner {
         &self,
         request: LlmRequest,
         chunk: &TranscriptChunk,
+        labels: &SpeakerLabels,
     ) -> BoundaryResult<(Option<Vec<String>>, LlmUsage)> {
         let mut request = request;
         let mut usage = LlmUsage::ZERO;
@@ -432,6 +524,7 @@ impl LlmTranscriptCleaner {
             usage = usage + counted_usage(&response);
             let rejection = match StructuredOutputDecoder::decode::<CleanupDraft>(&response) {
                 Ok(draft) => {
+                    let draft = draft.stripping_speaker_labels(labels);
                     let problems = draft.problems(chunk);
                     if problems.is_empty() {
                         return Ok((Some(draft.ordered_texts()), usage));
