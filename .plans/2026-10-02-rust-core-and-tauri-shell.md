@@ -173,7 +173,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
       (`DecoderConfig::max_symbols_per_frame`, NeMo's `max_symbols` 10). There:
       `crates/steno-speech-coreml/src/decoder.rs` (`FLUID_AUDIO`: two symbols a frame,
       the forced advance recorded as the duration, `TokenDuration::Advanced`). Resolve: measure.
-    - [ ] Token budget. Here: `crates/steno-speech/src/decoder.rs` (`DecoderConfig::max_tokens_per_second`,
+    - [ ] Token budget. Here: `crates/steno-speech/src/decoder.rs` (`TokenBudget::PerSecond`,
       40 a second of window plus 16). There: `crates/steno-speech-coreml/src/decoder.rs` (`MAX_TOKENS_PER_CHUNK`,
       150 a window, `TokenBudget::PerWindow`). Resolve: the per-second budget; 150 truncates a 60 s chunk.
     - [ ] Short window. Here: `crates/steno-speech/src/decoder.rs` (`decode_window`, one frame decodes).

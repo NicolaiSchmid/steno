@@ -4,15 +4,7 @@
 //! `steno_speech`'s shared greedy loop under [`FLUID_AUDIO`] plus the
 //! three steps around it that serve this crate's chunker: the early exit
 //! for a window under two frames, the end-of-audio flush of the last
-//! window, and the emission cutoff of the warm-up window.
-//!
-//! The loop: prime the LSTM with blank as start of sequence, then walk
-//! the encoder frames; a blank skips `duration` frames without touching
-//! the LSTM, a token is emitted, fed to the LSTM and the frame advances by
-//! its duration. Guards ([`FLUID_AUDIO`]): a blank's zero duration and a
-//! frame's second zero-duration emission advance one frame, a token whose
-//! duration reaches the window end is dropped, at most
-//! [`MAX_TOKENS_PER_CHUNK`] tokens per window. The last window keeps
+//! window, and the emission cutoff of the warm-up window. The flush keeps
 //! probing three boundary frames until five blanks in a row.
 
 use steno_speech::decoder::{
@@ -34,9 +26,9 @@ pub const CONSECUTIVE_BLANK_LIMIT: usize = 5;
 
 /// `TdtDecoderV3`'s guards in the shared loop's terms.
 ///
-/// Swift forces a duration of zero to one when the frame already emitted
-/// a token, and acts on (and records) the forced value: two symbols per
-/// frame, the forced advance recorded. Its own symbol limit
+/// Swift forces a zero duration to one when the frame already emitted a
+/// token, and records the forced value: two symbols per frame,
+/// [`TokenDuration::Advanced`]. Its own symbol limit
 /// ([`MAX_SYMBOLS_PER_STEP`] emissions on one frame before a forced
 /// advance) never fires behind that guard, since a frame's second
 /// emission always moves on. A token is emitted only while the frame it
@@ -116,12 +108,9 @@ pub fn decode_window<M: TdtModel<Error = SpeechError> + ?Sized>(
     spec: WindowSpec,
     stats: &mut DecodeStats,
 ) -> Result<Hypothesis, SpeechError> {
-    // Early exit for very short audio (under two frames).
-    if valid <= 1 {
-        return Ok(Hypothesis::default());
-    }
     let effective_len = valid.min(spec.actual_frames);
-    if effective_len == 0 {
+    // Early exit for very short audio (under two frames).
+    if valid <= 1 || effective_len == 0 {
         return Ok(Hypothesis::default());
     }
     let decoded = decode_frames(model, effective_len, spec.frame_offset, &FLUID_AUDIO, stats)?;

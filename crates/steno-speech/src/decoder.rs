@@ -7,12 +7,12 @@
 //!
 //! [`DecoderConfig::default`] is `NeMo`'s reference semantics
 //! (`GreedyTDTInfer`), which sherpa-onnx matched at 5.3 % WER in spike F,
-//! and what the ONNX pipeline runs ([`decode_window`]). The other fields
-//! hold `FluidAudio`'s guards, which `crates/steno-speech-coreml` sets for
-//! its parity with the Swift app; its tail pass over the last window and
-//! the emission cutoff of its warm-up window stay there, beside its
-//! chunker. The WP4 notes in the plan list where the two configurations
-//! differ.
+//! and what the ONNX pipeline runs ([`decode_window`]). The other variants
+//! of [`TokenBudget`], [`WindowEnd`] and [`TokenDuration`] are `FluidAudio`'s
+//! guards, which `crates/steno-speech-coreml` sets for parity with the
+//! Swift app; its tail pass over the last window and the emission cutoff
+//! of its warm-up window stay there, beside its chunker. The WP4 notes in
+//! the plan list where the two configurations differ.
 //!
 //! The model side is [`TdtModel`]: the prediction network and the joint
 //! over one window's encoder frames, which [`decode_window`] builds over a
@@ -162,14 +162,11 @@ pub fn decode_frames<M: TdtModel + ?Sized>(
     config: &DecoderConfig,
     stats: &mut DecodeStats,
 ) -> Result<Decoded, M::Error> {
-    let mut tokens = Vec::new();
     stats.windows += 1;
     if frames == 0 {
-        return Ok(Decoded {
-            tokens,
-            stop_frame: 0,
-        });
+        return Ok(Decoded::default());
     }
+    let mut tokens = Vec::new();
     let blank = model.blank_id();
     model.start()?;
     stats.decoder_calls += 1;
@@ -302,12 +299,10 @@ pub fn decode_window<B: SpeechBackend + ?Sized>(
     let mut window = BackendWindow {
         backend,
         encoder,
+        // Replaced by `start` before the first joint.
         step: DecoderStep {
             projection: Vec::new(),
-            state: DecoderState {
-                h: Vec::new(),
-                c: Vec::new(),
-            },
+            state: DecoderState::zeros(0, 0),
         },
     };
     Ok(decode_frames(&mut window, frames, frame_offset, config, stats)?.tokens)
