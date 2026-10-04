@@ -874,6 +874,57 @@ mod tests {
         assert_eq!(store.all_meetings().unwrap(), []);
     }
 
+    /// A recording in progress, stopped from the sidebar or the tray (Stop,
+    /// then Toggle): each command through the host returns, though the
+    /// recorder's `Stopping` and `Idle` re-enter the host
+    /// (`Host::recorder_changed`), and each recording is saved.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_a_recording_through_the_host_returns_and_saves_it() {
+        use steno_bridge::BridgeMethod;
+        use steno_host::services::Recorder as _;
+        let (dir, store) = temp_store();
+        let app = recording_app(&dir, &store);
+        let host = Arc::new(app.host().unwrap());
+        // The hook `App::launch` wires, as above.
+        let changed = host.clone();
+        app.recorder
+            .on_change(Arc::new(move || changed.recorder_changed()));
+        let call = |method: BridgeMethod, params: Option<serde_json::Value>| {
+            let dispatcher = steno_bridge::Dispatcher::new((*host).clone());
+            let reply = on_own_thread(PATIENCE, &format!("{method} returned"), move || {
+                dispatcher.call(method, params)
+            });
+            assert!(reply.is_ok(), "{method}: {reply:?}");
+        };
+        for stop in [BridgeMethod::RecordingStop, BridgeMethod::RecordingToggle] {
+            call(
+                BridgeMethod::RecordingStart,
+                Some(serde_json::json!({ "mode": "inPerson" })),
+            );
+            let status = app.recorder.status();
+            assert_eq!(
+                status.state,
+                steno_bridge::RecordingState::Recording,
+                "{stop}"
+            );
+            let meeting_id = status.meeting_id.expect("recording");
+            call(stop, None);
+            let status = app.recorder.status();
+            assert_eq!(status.state, steno_bridge::RecordingState::Idle, "{stop}");
+            assert_eq!(status.error, None, "{stop}");
+            let meeting = store.meeting(meeting_id).unwrap().unwrap();
+            assert_eq!(
+                meeting.end_reason,
+                Some(steno_core::RecordingEndReason::Manual),
+                "{stop}"
+            );
+            assert!(
+                store.asset(meeting_id).unwrap().is_some(),
+                "{stop}: the asset"
+            );
+        }
+    }
+
     /// What every exit runs first: a recording in progress is stopped with
     /// `quit` and saved by the time the shutdown returns.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
