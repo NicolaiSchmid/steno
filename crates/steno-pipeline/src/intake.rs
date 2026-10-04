@@ -588,6 +588,61 @@ mod tests {
         assert_eq!(admitted.lock().unwrap().len(), 1);
     }
 
+    /// A copy that fails leaves the receipt short of complete and admits
+    /// nothing: the phone, told nothing landed, keeps its recording.
+    #[tokio::test]
+    async fn an_upload_that_cannot_be_copied_is_not_marked_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let mut settings = store.settings().unwrap();
+        settings.audio_folder = file_url(&dir.path().join("audio"), true);
+        store.save_settings(&settings).unwrap();
+        let now = Utc::now();
+        let enqueued = Arc::new(AtomicBool::new(false));
+        let enqueue: Enqueue = {
+            let enqueued = enqueued.clone();
+            Arc::new(move |_, _| {
+                enqueued.store(true, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            })
+        };
+        let intake = RecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(move || now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let device = PairedDevice {
+            id: Uuid::new_v4(),
+            name: "Phone".to_owned(),
+            paired_at: now,
+            last_seen_at: None,
+        };
+        store.save_paired_device(&device, &[1; 32]).unwrap();
+        let metadata = RecordingMetadata {
+            recording_id: Uuid::new_v4(),
+            started_at: now,
+            duration_seconds: 12.0,
+            byte_count: 9,
+            sha256: vec![0; 32],
+            chunk_size: 9,
+            format: AudioFormat::M4aAac,
+            device_name: "Phone".to_owned(),
+        };
+        let missing = dir.path().join("gone.m4a");
+        intake
+            .admit(&missing, &metadata, &device)
+            .await
+            .expect_err("nothing to copy");
+        let receipt = store.handover_receipt(metadata.recording_id).unwrap();
+        assert!(
+            !receipt.is_some_and(|receipt| matches!(receipt.state, HandoverState::Complete { .. })),
+            "the receipt says complete"
+        );
+        assert_eq!(store.all_meetings().unwrap(), []);
+        assert!(!enqueued.load(Ordering::SeqCst));
+    }
+
     #[test]
     fn attendees_are_deduplicated_by_email_then_name() {
         let meeting = Uuid::new_v4();
