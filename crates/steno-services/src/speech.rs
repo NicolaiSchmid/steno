@@ -111,13 +111,15 @@ pub struct SpeechSetup {
     pub models_directory: PathBuf,
     /// The speech settings ([`speech_settings`]), not the app's `Settings`.
     pub speech_settings: SpeechSettings,
-    /// How the speech sidecar starts ([`sidecar_config`]).
+    /// How the speech sidecar starts ([`sidecar_config`]), its encoder on
+    /// `DirectML` when the speech settings ask for it on Windows
+    /// ([`SpeechSettings::directml_on_windows`]).
     pub sidecar: SidecarConfig,
 }
 
 impl SpeechSetup {
     /// The app's: [`models_directory`], [`speech_settings`] and
-    /// [`sidecar_config`].
+    /// [`sidecar_config`] with the settings' `DirectML` choice.
     #[must_use]
     pub fn new(settings: &Settings, paths: &StenoPaths) -> Self {
         Self::in_models_directory(models_directory(settings, paths), paths)
@@ -127,10 +129,14 @@ impl SpeechSetup {
     /// CLI's, from `--models-dir` or [`models_directory`]).
     #[must_use]
     pub fn in_models_directory(models_directory: PathBuf, paths: &StenoPaths) -> Self {
+        let speech_settings = speech_settings(paths);
+        let mut sidecar = sidecar_config();
+        // The client asks for it on Windows only.
+        sidecar.options.directml = speech_settings.directml_on_windows;
         SpeechSetup {
             models_directory,
-            speech_settings: speech_settings(paths),
-            sidecar: sidecar_config(),
+            speech_settings,
+            sidecar,
         }
     }
 
@@ -1078,6 +1084,24 @@ mod tests {
     }
 
     #[test]
+    fn the_directml_setting_reaches_the_sidecar_config() {
+        for directml in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join(SPEECH_SETTINGS_FILE),
+                format!(r#"{{"directmlOnWindows": {directml}}}"#),
+            )
+            .unwrap();
+            let setup = SpeechSetup::in_models_directory(
+                dir.path().join("Models"),
+                &StenoPaths::new(dir.path()),
+            );
+            assert_eq!(setup.speech_settings.directml_on_windows, directml);
+            assert_eq!(setup.sidecar.options.directml, directml);
+        }
+    }
+
+    #[test]
     fn the_sidecar_binary_sits_beside_the_executable_with_the_onnx_threads() {
         let config = sidecar_config();
         assert_eq!(
@@ -1104,11 +1128,12 @@ mod tests {
         );
         std::fs::write(
             &file,
-            r#"{"onnxSidecarOnMac":true,"modelsMirror":"http://file.example/m"}"#,
+            r#"{"directmlOnWindows":true,"onnxSidecarOnMac":true,"modelsMirror":"http://file.example/m"}"#,
         )
         .unwrap();
         let stored = SpeechSettings {
             onnx_sidecar_on_mac: true,
+            directml_on_windows: true,
             models_mirror: Some("http://file.example/m".to_owned()),
         };
         assert_eq!(speech_settings_with(&file, None), stored);
