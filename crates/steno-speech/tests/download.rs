@@ -402,14 +402,19 @@ fn a_download_waits_for_the_one_holding_its_partial_and_resumes_it() {
     let contents = body(20_000);
     let f = fixture(&contents, Behaviour::default());
     f.leave_partial(&contents[..7_000]);
-    let held = File::create(f.directory().join(LOCK)).unwrap();
-    held.lock().unwrap();
-    let holder = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        drop(held);
-    });
-    f.install();
-    holder.join().unwrap();
+    let mut held = Some(File::create(f.directory().join(LOCK)).unwrap());
+    held.as_ref().unwrap().lock().unwrap();
+    // While the lock is held, a report can only come from the wait; the
+    // first one lets go of it.
+    let mut reports = Vec::new();
+    f.store
+        .ensure(&f.asset, &mut |p| {
+            reports.push((p.received, held.is_some()));
+            held = None;
+        })
+        .unwrap();
+    f.store.verify(&f.asset).unwrap();
+    assert_eq!(reports[0], (7_000, true));
     let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
     assert_eq!(ranges, [Some("bytes=7000-".to_owned())]);
     assert_eq!(names(&f.directory()), [NAME, LOCK]);
