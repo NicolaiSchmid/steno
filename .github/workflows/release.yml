@@ -263,9 +263,9 @@ jobs:
         run: |
           security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           # delete-keychain also takes it off the search list. If an entry is
-          # left, drop it from the list as it is now, never put back a saved
-          # copy: on Forge another release run's keychain or the user's own
-          # may be on it. The list holds the resolved path (no `..`).
+          # left, drop only it from the list as it is now: on Forge another
+          # release run's keychain or the user's own may be on it. The list
+          # holds the resolved path (no `..`).
           keychain="$(cd "$(dirname "$KEYCHAIN_PATH")" && pwd -P)/$(basename "$KEYCHAIN_PATH")"
           others=()
           listed=false
