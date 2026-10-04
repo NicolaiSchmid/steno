@@ -732,4 +732,29 @@ import Testing
     #expect(await phone.complete(id).code == 200)
     #expect(await gated.intake.admissions.count == 1)
   }
+
+  /// A failed revoke that found only an admitted recording in memory
+  /// discarded no files, so it takes its count back: a `complete` of the
+  /// device in flight is not refused for it.
+  @Test(.timeLimit(.minutes(1)))
+  func aFailedRevokeOfAnAdmittedRecordingTakesItsCountBack() async throws {
+    let gated = try await Gated()
+    defer { gated.remove() }
+    let (engine, phone, id) = (gated.engine, gated.phone, gated.id)
+    let deviceID = phone.device.id
+    try await phone.uploadAll(gated.metadata, gated.bytes)
+    #expect(await phone.complete(id).code == 200)
+    #expect(await engine.activeReceipts[id]?.state.kind == .complete)
+    let revocations = await engine.revocations[deviceID, default: 0]
+    try await gated.gate.pool.write { db in
+      try db.execute(
+        sql: """
+          CREATE TRIGGER keepDevice BEFORE DELETE ON pairedDevice
+          BEGIN SELECT RAISE(ABORT, 'kept'); END
+          """)
+    }
+
+    await #expect(throws: (any Error).self) { try await gated.service.revoke(deviceID) }
+    #expect(await engine.revocations[deviceID, default: 0] == revocations, "nothing discarded")
+  }
 }
