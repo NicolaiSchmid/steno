@@ -24,21 +24,23 @@
 //! `WP6b`).
 //!
 //! Every exit runs `App::shutdown` first, at most `SHUTDOWN_PATIENCE` (ten
-//! seconds), over one `ExitGate`: it stops the pipeline, stops and saves a
-//! recording in progress and stops the handover listener. Quit from either
-//! menu, the close that ends the process when no tray stands, and on Linux
-//! and macOS SIGTERM, SIGINT and SIGHUP (a plain `kill`, Ctrl-C, a closed
-//! terminal, systemd at a shutdown) are exit requests the gate holds
-//! (`exit_request`, `exit_on_signals`); the Dock's Quit, a logout and a
-//! shutdown on macOS, and a logoff and a shutdown on Windows, reach the run
-//! loop only as its last event, and an update's relaunch bypasses the
-//! request, so both run the same shutdown first (`shut_down_before_exit`).
-//! The one exception: a second SIGTERM or SIGINT ends the process at once,
-//! unsaved (`forced_exit`). Open: the Windows logoff is untested on
-//! hardware, and Windows' end-session timeout (about five seconds) is
-//! shorter than `SHUTDOWN_PATIENCE` (WP10); a Linux logout saves only when
-//! logind signals the app, which is untested (before the first Linux
-//! release; no work package yet).
+//! seconds), over one `ExitGate`: it quits the pipeline (no new job
+//! starts), stops and saves a recording in progress and stops the handover
+//! listener. Quit from either menu, the close that ends the process when no
+//! tray stands, and on Linux and macOS SIGTERM, SIGINT and SIGHUP (a plain
+//! `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are exit
+//! requests the gate holds (`exit_request`, `exit_on_signals`); a signal
+//! quits the pipeline at once, before its request reaches the main thread.
+//! A signal the app inherited ignored stays ignored (`ignored`). The Dock's
+//! Quit, a logout and a shutdown on macOS, and a logoff and a shutdown on
+//! Windows, reach the run loop only as its last event, and an update's
+//! relaunch bypasses the request, so both run the same shutdown first
+//! (`shut_down_before_exit`). The one exception: a second SIGTERM or a
+//! second SIGINT ends the process at once, unsaved (`forced_exit`). Open:
+//! the Windows logoff is untested on hardware, and Windows' end-session
+//! timeout (about five seconds) is shorter than `SHUTDOWN_PATIENCE`
+//! (WP10); a Linux logout saves only when logind signals the app, which is
+//! untested (before the first Linux release; no work package yet).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The fixture host leaves the real host's seams (the login item, the
@@ -224,13 +226,15 @@ fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
 /// stops the scope with SIGTERM, then SIGHUP). Otherwise nothing signals
 /// the app, and when the display connection closes first, GDK ends the
 /// process unsaved; untested (before the first Linux release; no work
-/// package yet). On macOS a logout goes through
-/// `RunEvent::Exit` instead. A second SIGTERM or a second SIGINT ends the
-/// process at once, unsaved (`forced_exit`), so a run loop that no longer
-/// answers still ends with a plain `kill` or Ctrl-C twice; a SIGHUP never
-/// does, so the one that follows a session scope's SIGTERM still saves.
-/// A signal the app inherited ignored stays ignored (`ignored`). Swift had
-/// no handler; each of them ended the app unsaved.
+/// package yet). On macOS a logout goes through `RunEvent::Exit` instead.
+/// Each signal quits the pipeline here, off the main thread, before it asks
+/// for the exit (`Host::quit_pipeline`), so a job a busy main thread would
+/// let fail first stays resumable. A second SIGTERM or a second SIGINT
+/// ends the process at once, unsaved (`forced_exit`), so a run loop that no
+/// longer answers still ends with a plain `kill` or Ctrl-C twice; a SIGHUP
+/// never does, so the one that follows a session scope's SIGTERM still
+/// saves. A signal the app inherited ignored stays ignored (`ignored`).
+/// Swift had no handler; each of them ended the app unsaved.
 #[cfg(unix)]
 fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -262,10 +266,11 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner),
                 );
-                match forced {
-                    Some(code) => std::process::exit(code),
-                    None => actions::quit(&app),
+                if let Some(code) = forced {
+                    std::process::exit(code);
                 }
+                host::host(&app).quit_pipeline();
+                actions::quit(&app);
             }
         });
     }
@@ -708,13 +713,13 @@ mod tests {
         );
     }
 
-    /// A signal inherited ignored (`nohup`, a background job's SIGINT) gets
-    /// no listener; a default one does, and so does one whose disposition
-    /// cannot be read (no such signal). The disposition is read as it is:
-    /// SIGUSR2, which nothing here uses, ignored for the test.
+    /// A signal ignored at launch (`nohup`, a background job's SIGINT)
+    /// reads as ignored; a default one does not, nor does one whose
+    /// disposition cannot be read (no such signal). The disposition is read
+    /// as it is: SIGUSR2, which nothing here uses, ignored for the test.
     #[cfg(unix)]
     #[test]
-    fn a_signal_inherited_ignored_stays_ignored() {
+    fn a_signal_ignored_at_launch_reads_as_ignored() {
         assert!(!ignored(-1));
 
         // SAFETY: SIGUSR2 has no handler in this binary; it is set back.

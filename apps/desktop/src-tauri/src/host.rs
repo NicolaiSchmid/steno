@@ -601,9 +601,10 @@ impl Host {
         self.inner.host.onboarding_window_closed();
     }
 
-    /// What every exit runs first (`steno_services::App::shutdown`): a
-    /// recording in progress is stopped and saved, the handover listener
-    /// stops; a no-op for the fixtures.
+    /// What every exit runs first (`steno_services::App::shutdown`): the
+    /// pipelines quit, a start or a stop settles, a recording in progress
+    /// is stopped and saved, the handover listener stops; a no-op for the
+    /// fixtures.
     pub fn shutdown_action(&self) -> impl FnOnce() + Send + 'static {
         #[cfg(not(feature = "fixture-host"))]
         {
@@ -614,6 +615,15 @@ impl Host {
         {
             || {}
         }
+    }
+
+    /// Quits the pipelines (`steno_services::pipeline::CurrentPipeline::quit`)
+    /// ahead of the shutdown, which quits them again: an exit signal calls
+    /// it before its request waits for the main thread. A no-op for the
+    /// fixtures.
+    pub fn quit_pipeline(&self) {
+        #[cfg(not(feature = "fixture-host"))]
+        self.inner.app.pipeline.quit();
     }
 
     /// The launch sequence on the runtime; a no-op for the fixtures.
