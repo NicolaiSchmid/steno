@@ -432,12 +432,10 @@ impl Shared {
         self.process.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Installs the assets, then makes sure a child runs with its models
-    /// loaded. Blocking; the caller holds the lock.
-    fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
-        if slot.as_ref().is_some_and(|p| p.loaded) {
-            return Ok(());
-        }
+    /// Installs the assets in this process; a no-op once they are.
+    /// Blocking, and without the lock, so a download does not hold up
+    /// `health`, `release` or a transcription in a running child.
+    fn install(&self) -> Result<(), SpeechError> {
         // The `load` request carries the root as a JSON string.
         if self.store.root().to_str().is_none() {
             return Err(SidecarError::NotUtf8 {
@@ -448,6 +446,16 @@ impl Shared {
         for asset in &self.assets {
             self.store.ensure(asset, &mut log_download)?;
         }
+        Ok(())
+    }
+
+    /// Makes sure a child runs with its models loaded, installing them
+    /// first if need be. Blocking; the caller holds the lock.
+    fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
+        if slot.as_ref().is_some_and(|p| p.loaded) {
+            return Ok(());
+        }
+        self.install()?;
         if slot.is_none() {
             let process = SidecarProcess::spawn(&self.config)?;
             self.spawns.fetch_add(1, Ordering::SeqCst);
@@ -661,7 +669,13 @@ impl SpeechEngine for SidecarSpeechEngine {
 
     async fn prepare(&self) -> BoundaryResult<()> {
         let shared = Arc::clone(&self.shared);
-        blocking(move || shared.ensure_loaded(&mut shared.lock())).await??;
+        blocking(move || {
+            // The download runs before the lock; `ensure_loaded` then finds
+            // the files in place.
+            shared.install()?;
+            shared.ensure_loaded(&mut shared.lock())
+        })
+        .await??;
         Ok(())
     }
 
