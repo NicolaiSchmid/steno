@@ -908,11 +908,12 @@ it:
   dropped system frames; a master thread that runs late and drains its
   packets back to back raises the queue only for a moment and slips
   nothing), an immediate slip once the queue is more than the
-  microphone's buffer above that (no late master explains it), and zeros
-  with a re-prime after an underrun. What the follower queued before the
-  master's first pull is trimmed to the target, not counted: audio from
-  before the recording, or, when the master's first drain is late, up to
-  that lateness of system audio recorded with its first packets.
+  microphone's buffer above the high-water mark (no late master explains
+  it), and zeros with a re-prime after an underrun. What the follower
+  queued before the master's first pull is trimmed to the target, not
+  counted: audio from before the recording, or, when the master's first
+  drain is late, the system audio recorded during that lateness. A packet
+  the full staging refused before that pull is not counted either.
   `underrun_frames` counts the shortfall only, not the re-prime zeros that
   follow it. The underrun, slip and trim counts are logged at `info` when
   the capture stops (the shell's default filter is `warn`: set
@@ -933,8 +934,9 @@ it:
   buffer's target. Between slips the queue sits above the target by up to
   one period (10 ms), plus the follower's worst lateness in a window, plus
   up to two windows of drift (a fraction of a millisecond at the drift of
-  real clocks), and never by more than the microphone's buffer above
-  that; that is the echo canceller's alignment error from the buffer. The
+  real clocks), and never more than one period plus the microphone's
+  buffer (the immediate slip); that is the echo canceller's alignment
+  error from the buffer. The
   process-loopback client may not implement `GetStreamLatency`; a failed
   read or a latency above 200 ms counts as 0, since understating the delay
   stays inside the canceller's tail and overstating it does not. A
@@ -979,7 +981,9 @@ it:
   transport type and `is_running_somewhere` are not read.
 - **A hanging start.** `start` waits at most 10 s in all for both streams
   to open and start and for the watcher to register, holding the session's
-  lock meanwhile (the long hold in `capture::session`'s doc).
+  lock meanwhile (the long hold in `capture::session`'s doc). A stream
+  thread or a watcher still in a COM call at the deadline is left running
+  unjoined until the call returns.
 
 Six Swift defects the port does not share; fix them in Swift if it ships
 another release, otherwise the cutover closes them:
@@ -1221,7 +1225,7 @@ PR off `main`.
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | open |
-| WASAPI follow-ups: slip window, COM clamps, start deadline, detector serialisation (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
+| WASAPI follow-ups: slip window and immediate slip, trusted stream sizes, start deadline, detector start and stop serialised (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
