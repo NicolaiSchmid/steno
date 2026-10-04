@@ -124,16 +124,13 @@ impl Gate {
         }
     }
 
-    /// Steps in; whether the gate is open. Every `enter` needs a
-    /// [`Self::leave`], open or not.
+    /// Runs `work` if the gate is open, counted inside while it does.
     #[inline(always)]
-    fn enter(&self) -> bool {
+    fn pass(&self, work: impl FnOnce()) {
         self.inside.fetch_add(1, Ordering::SeqCst);
-        self.open.load(Ordering::SeqCst)
-    }
-
-    #[inline(always)]
-    fn leave(&self) {
+        if self.open.load(Ordering::SeqCst) {
+            work();
+        }
         self.inside.fetch_sub(1, Ordering::SeqCst);
     }
 
@@ -180,14 +177,11 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     let chunk = data.chunk();
     let (offset, size, stride) = (chunk.offset(), chunk.size(), chunk.stride());
     let view = interleaved_view(data.data().as_deref(), offset, size, stride, rt.channels);
-    if rt.gate.enter() {
-        // SAFETY: the view points into the buffer's memory, mapped by
-        // `MAP_BUFFERS` and valid for `byte_size` bytes while the buffer
-        // stays dequeued, which it does until `buffer` drops at the end of
-        // this call.
-        unsafe { deliver(&[view], &rt.sources, &rt.sink) };
-    }
-    rt.gate.leave();
+    // SAFETY: the view points into the buffer's memory, mapped by
+    // `MAP_BUFFERS` and valid for `byte_size` bytes while the buffer stays
+    // dequeued, which it does until `buffer` drops at the end of this call.
+    rt.gate
+        .pass(|| unsafe { deliver(&[view], &rt.sources, &rt.sink) });
     // Release: `start` returns on seeing it, and the frames `deliver`
     // wrote are then in the rings.
     rt.cycle_frames.store(
@@ -853,13 +847,10 @@ impl Capture {
         );
         match snapshot.difference(&self.baseline) {
             None => tracing::info!("ignored a PipeWire graph change"),
-            Some(reason) => {
-                if self.gate.enter() {
-                    tracing::info!("PipeWire graph change reported {reason:?}");
-                    self.sink.report_device_change(reason);
-                }
-                self.gate.leave();
-            }
+            Some(reason) => self.gate.pass(|| {
+                tracing::info!("PipeWire graph change reported {reason:?}");
+                self.sink.report_device_change(reason);
+            }),
         }
     }
 }
@@ -1078,10 +1069,9 @@ mod tests {
             let (gate, passed, done) = (Arc::clone(&gate), Arc::clone(&passed), Arc::clone(&done));
             move || {
                 while !done.load(Ordering::Relaxed) {
-                    if gate.enter() {
+                    gate.pass(|| {
                         passed.fetch_add(1, Ordering::Relaxed);
-                    }
-                    gate.leave();
+                    });
                 }
             }
         });
