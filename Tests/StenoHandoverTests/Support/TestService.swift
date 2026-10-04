@@ -21,16 +21,17 @@ struct TestService {
   /// The service before `start()`, for tests that watch it come up or drive
   /// the engine without a listener. A `customIntake` (such as a scripted one
   /// that fails first) replaces the fake behind the service; `intake` stays
-  /// what `test.intake` reads.
+  /// what `test.intake` reads. A `store` replaces the in-memory one.
   static func prepare(
     chunkSize: Int = 1024 * 1024,
+    store: MeetingStore? = nil,
     intake: FakeHandoverIntake = FakeHandoverIntake(),
     customIntake: (any HandoverIntake)? = nil,
     now: Date = Date(timeIntervalSince1970: 1_790_000_000),
     readTimeout: Duration = .seconds(30)
   ) throws -> TestService {
     let directory = try Fixtures.temporaryDirectory("handover")
-    let store = try MeetingStore.inMemory()
+    let store = try store ?? MeetingStore.inMemory()
     let clock = WallClock(now)
     let configuration = HandoverConfiguration(
       serviceName: "Test Mac", advertise: false, chunkSize: chunkSize,

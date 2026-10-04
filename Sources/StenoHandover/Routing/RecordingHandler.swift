@@ -149,14 +149,31 @@ extension HandoverEngine {
   /// `POST /v1/recordings/{id}/complete`: 200 `{meetingID}` once every chunk
   /// is present and the whole file hashes to the announced value; 409 with
   /// the status while chunks are missing or while an earlier `complete` is
-  /// still verifying or admitting; 422 on a hash mismatch, after which the
-  /// partial is gone and the phone starts over.
+  /// still verifying or admitting, and with no chunk listed when the partial
+  /// was replaced during the verify; 422 on a hash mismatch, after which the
+  /// partial is gone and the phone starts over; 401 while a revoke of the
+  /// device is in flight, and in place of any of these when one landed
+  /// during the store read or the verify of a recording not yet admitted
+  /// (its files are then discarded).
   func complete(_ recordingID: UUID, device: PairedDevice) async -> HandoverResponse {
+    guard revoking[device.id] == nil else { return Self.unauthorized }
+    let revocation = revocations[device.id, default: 0]
     guard var receipt = await ownedReceipt(recordingID, device: device) else {
       return .problem(.notFound, "no such recording")
     }
     if let meetingID = receipt.state.meetingID {
+      // Admitted before, so a revoke during the read admits nothing new:
+      // answer the meeting and drop the stale copy from memory. A 401 would
+      // make the phone keep the recording, and its upload after pairing
+      // again would become a second meeting.
+      if revocations[device.id, default: 0] != revocation { forget(recordingID) }
       return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
+    }
+    // A revoke during the store read missed the receipt. Refuse before the
+    // `.verifying` write, which would put its row back once the phone paired
+    // again.
+    if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
+      return refused
     }
     // One `complete` per recording at a time: the phone retries after its
     // own timeout, and a second verify or admission of the same file must
@@ -170,12 +187,34 @@ extension HandoverEngine {
     guard let metadata = inbox.loadMetadata(recordingID) else {
       return .problem(.notFound, "no metadata; announce again")
     }
-    switch await verifiedFile(for: &receipt, metadata: metadata) {
+    let verification = await verifiedFile(
+      for: &receipt, metadata: metadata, revokedSince: revocation)
+    // Again after the verify, which suspends, whatever it answered. A
+    // revoke then discards the files itself, but a phone that still passes
+    // the gate (before the delete commits, or paired again) can announce
+    // and send the chunks again: this check discards the new partial and
+    // answers 401. Nothing suspends between it and the intake call.
+    if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
+      return refused
+    }
+    switch verification {
     case .answered(let response):
       return response
     case .file(let file):
       return await admit(file, metadata: metadata, device: device, receipt: &receipt)
     }
+  }
+
+  /// 401 when the device was revoked since `complete` took `revocation`.
+  /// That revoke may have missed the receipt, so the files are discarded and
+  /// the receipt forgotten here.
+  private func refusal(_ recordingID: UUID, device: PairedDevice, revokedSince revocation: Int)
+    -> HandoverResponse?
+  {
+    guard revocations[device.id, default: 0] != revocation else { return nil }
+    inbox.discard(recordingID)
+    forget(recordingID)
+    return Self.unauthorized
   }
 
   private enum Verification {
@@ -186,10 +225,12 @@ extension HandoverEngine {
   /// The verified file: the one already waiting after an earlier intake
   /// failure, else the partial once every chunk is present (409 with the
   /// status otherwise) and the whole file hashes to the announced value (422
-  /// and the partial is discarded otherwise), promoted to its final name.
-  private func verifiedFile(for receipt: inout HandoverReceipt, metadata: RecordingMetadata)
-    async -> Verification
-  {
+  /// and the partial is discarded otherwise), promoted to its final name. A
+  /// partial gone or replaced during the hash answers 409 with no chunk
+  /// listed, and a revoke since `complete` took `revocation` answers 401.
+  private func verifiedFile(
+    for receipt: inout HandoverReceipt, metadata: RecordingMetadata, revokedSince revocation: Int
+  ) async -> Verification {
     let recordingID = receipt.recordingID
     if inbox.hasVerified(recordingID, format: metadata.format) {
       return .file(inbox.verified(recordingID, format: metadata.format))
@@ -202,9 +243,18 @@ extension HandoverEngine {
       }
       return .answered(.json(.conflict, Self.status(of: receipt)))
     }
+    // Taken before the `.verifying` write, the first suspension: the hash
+    // must be of the file `promote` moves. A partial discarded meanwhile
+    // and created again (a revoke, then an announce) is another file.
+    let partial = inbox.partial(recordingID)
+    let identity: ReceivingFile.Identity
+    do {
+      identity = try ReceivingFile.identity(of: partial)
+    } catch {
+      return .answered(.internalError("reading the partial", error))
+    }
     try? await transition(&receipt, to: .verifying)
 
-    let partial = inbox.partial(recordingID)
     let verified: Bool
     do {
       verified =
@@ -213,7 +263,17 @@ extension HandoverEngine {
     } catch {
       return .answered(.internalError("verifying the file", error))
     }
+    // Before any write: once the phone paired again, one would put back
+    // the row the revoke deleted. `complete` discards the files.
+    guard revocations[receipt.deviceID, default: 0] == revocation else {
+      return .answered(Self.unauthorized)
+    }
     receipt = activeReceipts[recordingID] ?? receipt
+    guard (try? ReceivingFile.identity(of: partial)) == identity else {
+      // Gone or another file: the phone sends every chunk again.
+      try? await transition(&receipt, to: .receiving, receivedChunks: [])
+      return .answered(.json(.conflict, Self.status(of: receipt)))
+    }
     guard verified else {
       inbox.discard(recordingID)
       try? await transition(&receipt, to: .failed("sha256 mismatch"), receivedChunks: [])
@@ -267,15 +327,16 @@ extension HandoverEngine {
     return Wire.RecordingStatus(state: receipt.state.kind, receivedChunks: receipt.receivedChunks)
   }
 
-  /// The receipt from memory or the store. Another request may have loaded
-  /// and advanced it while the store read was awaited; memory wins then.
+  /// The receipt from memory or the store, kept in memory (`remember`).
+  /// Another request may have loaded and advanced it while the store read
+  /// was awaited; memory wins then.
   func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
     if let active = activeReceipts[recordingID] { return active }
     guard let stored = try? await store.handoverReceipt(recordingID: recordingID) else {
       return nil
     }
     if let active = activeReceipts[recordingID] { return active }
-    activeReceipts[recordingID] = stored
+    remember(stored)
     return stored
   }
 

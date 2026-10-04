@@ -12,8 +12,12 @@ import StenoCore
 struct EngineClient {
   let engine: HandoverEngine
 
+  init(engine: HandoverEngine) {
+    self.engine = engine
+  }
+
   init(_ test: TestService) {
-    self.engine = test.service.engine
+    self.init(engine: test.service.engine)
   }
 
   func hello() async -> HandoverResponse {

@@ -27,6 +27,24 @@ actor HandoverEngine: RequestHandling {
   /// intake's answer. The verify and the admit suspend the actor, so a
   /// retried `complete` must not start a second verify or admission.
   var completing: Set<UUID> = []
+  /// Revokes per device since start. A `complete` that sees the count change
+  /// across its receipt read and verify admits nothing. Pairing again does
+  /// not reset it: the phone pairs again under the same device id.
+  var revocations: [UUID: Int] = [:]
+  /// Revokes in flight per device. Until a revoke's store delete commits, a
+  /// store read still returns the device's receipts, and a `complete` that
+  /// starts meanwhile takes the count after the bump, so it is refused
+  /// before it reads.
+  var revoking: [UUID: Int] = [:]
+  /// Revokes started per device since start, never taken back. A pairing
+  /// that sees it change across its save keeps `revoked`; `revocations`
+  /// could look unchanged there, a failed revoke's undo cancelling the bump
+  /// of one that started meanwhile.
+  var revokeStarts: [UUID: Int] = [:]
+  /// Devices revoked since start and not paired again. Their receipts stay
+  /// out of `activeReceipts` (and the stream), also when a request that
+  /// read one before the revoke caches or writes it after.
+  var revoked: Set<UUID> = []
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -94,15 +112,45 @@ actor HandoverEngine: RequestHandling {
 
   var pairingIsOpen: Bool { pairing?.isOpen ?? false }
 
-  /// Forgets the device and drops whatever it was uploading.
+  /// Forgets the device and drops whatever it was uploading. The files of
+  /// its receipts in memory go here; a `complete` reading a receipt from the
+  /// store discards that one's files itself (`revocations`); the rest wait
+  /// for the next start's sweep. A `complete` that starts before this
+  /// returns is refused (`revoking`), and until the device pairs again its
+  /// receipts stay out of memory (`revoked`). A failed delete leaves the
+  /// device paired, though the files of its uploads in memory are gone and
+  /// a `complete` verifying one of them is refused.
   func revoke(_ deviceID: UUID) async throws {
+    // Before the first suspension: a request that starts or checks while
+    // the store delete is awaited must already see this revoke.
+    revocations[deviceID, default: 0] += 1
+    revokeStarts[deviceID, default: 0] += 1
+    revoking[deviceID, default: 0] += 1
+    revoked.insert(deviceID)
+    defer {
+      let left = revoking[deviceID, default: 1] - 1
+      revoking[deviceID] = left > 0 ? left : nil
+    }
+    var discarded = false
     for (recordingID, receipt) in activeReceipts where receipt.deviceID == deviceID {
       if receipt.state.kind != .complete {
         inbox.discard(recordingID)
+        discarded = true
       }
       activeReceipts.removeValue(forKey: recordingID)
     }
-    try await store.delete(deviceID: deviceID)
+    do {
+      try await store.delete(deviceID: deviceID)
+    } catch {
+      // The delete rolled back, so the device is still paired and no read
+      // since the bump was stale. Files discarded above stay gone, though,
+      // so then the count stays: a `complete` verifying one must refuse.
+      // Another revoke in flight keeps `revoked`.
+      if !discarded { revocations[deviceID, default: 1] -= 1 }
+      if revoking[deviceID] == 1 { revoked.remove(deviceID) }
+      receiptUpdates.send(receiptsSnapshot)
+      throw error
+    }
     receiptUpdates.send(receiptsSnapshot)
   }
 
@@ -213,12 +261,15 @@ actor HandoverEngine: RequestHandling {
     let timestamp = now()
     let device = PairedDevice(
       id: body.deviceID, name: name, pairedAt: timestamp, lastSeenAt: timestamp)
+    let revokeStart = revokeStarts[device.id, default: 0]
     do {
       try await store.save(device, tokenHash: DeviceTokens.hash(token))
     } catch {
       if pairing == nil { pairing = session }
       return .internalError("saving the device", error)
     }
+    // A revoke that started during the save deletes the device after it.
+    if revokeStarts[device.id, default: 0] == revokeStart { revoked.remove(device.id) }
     return .json(
       .ok,
       Wire.PairResponse(token: token, macID: identity.macID, macName: configuration.serviceName))
@@ -255,13 +306,28 @@ actor HandoverEngine: RequestHandling {
     try await persist(receipt)
   }
 
-  /// Writes the receipt and tells the observers. Memory is updated before
-  /// the awaited save: the actor is reentrant at that `await`, and the phone
-  /// keeps two chunks in flight, so the next request must already see this
-  /// one's chunk or it would persist a stale copy over it.
+  /// Writes the receipt and tells the observers. Memory (`remember`) is
+  /// updated before the awaited save: the actor is reentrant at that
+  /// `await`, and the phone keeps two chunks in flight, so the next request
+  /// must already see this one's chunk or it would persist a stale copy over
+  /// it.
   func persist(_ receipt: HandoverReceipt) async throws {
-    activeReceipts[receipt.recordingID] = receipt
+    remember(receipt)
     try await store.save(receipt)
+    receiptUpdates.send(receiptsSnapshot)
+  }
+
+  /// Keeps `receipt` as the live copy, unless its device was revoked.
+  func remember(_ receipt: HandoverReceipt) {
+    if !revoked.contains(receipt.deviceID) {
+      activeReceipts[receipt.recordingID] = receipt
+    }
+  }
+
+  /// Drops the receipt from memory and tells the observers; the store row,
+  /// if any, stays.
+  func forget(_ recordingID: UUID) {
+    activeReceipts.removeValue(forKey: recordingID)
     receiptUpdates.send(receiptsSnapshot)
   }
 }
