@@ -14,7 +14,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -52,6 +52,40 @@ pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
     tokio::time::timeout(SIGNAL_BOUND, signal)
         .await
         .unwrap_or_else(|_| panic!("{what} within {SIGNAL_BOUND:?}"))
+}
+
+/// Holds the store's one connection from another thread until
+/// [`StoreHold::release`], so a store call of the engine waits on it.
+pub struct StoreHold {
+    release: mpsc::Sender<()>,
+    holder: std::thread::JoinHandle<()>,
+}
+
+impl StoreHold {
+    pub fn new(store: &Arc<Store>) -> StoreHold {
+        let (held, store_is_held) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let store = store.clone();
+        let holder = std::thread::spawn(move || {
+            store
+                .write(|_| {
+                    held.send(()).unwrap();
+                    // A test that failed meanwhile drops the sender.
+                    let _ = released.recv();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        store_is_held
+            .recv_timeout(SIGNAL_BOUND)
+            .expect("the store is held");
+        StoreHold { release, holder }
+    }
+
+    pub fn release(self) {
+        self.release.send(()).unwrap();
+        self.holder.join().unwrap();
+    }
 }
 
 /// The one time source the service reads; tests move it to expire a

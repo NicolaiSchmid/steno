@@ -18,18 +18,20 @@
 mod common;
 
 use std::pin::Pin;
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-use common::{Phone, TestService, chunks, seeded_bytes};
-use steno_core::{RecordingMetadata, Store};
+use common::{EngineDevice, Phone, ScriptedIntake, StoreHold, TestService, chunks, seeded_bytes};
+use steno_core::{HandoverIntake, RecordingMetadata};
 use steno_handover::engine::HandoverResponse;
 use steno_handover::pairing::DeviceTokens;
 use steno_handover::{HandoverService, wire};
 use uuid::Uuid;
 
 const CHUNK_SIZE: i64 = 256 * 1024;
+/// The chunk size of the tests that drive the engine directly.
+const DIRECT_CHUNK_SIZE: i64 = 64 * 1024;
 
 struct Upload {
     phone: Phone,
@@ -63,6 +65,26 @@ impl Upload {
     fn id(&self) -> Uuid {
         self.metadata.recording_id
     }
+}
+
+/// A service that does not listen, with `intake`, and a phone paired
+/// straight into the engine that uploaded every chunk of a recording.
+async fn uploaded(
+    intake: Option<Arc<dyn HandoverIntake>>,
+    seed: u64,
+) -> (TestService, EngineDevice, RecordingMetadata, Vec<u8>) {
+    let test = TestService::with(common::Options {
+        chunk_size: DIRECT_CHUNK_SIZE,
+        intake,
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * DIRECT_CHUNK_SIZE as usize, seed);
+    let metadata = phone.metadata(&bytes, DIRECT_CHUNK_SIZE);
+    phone.upload_all(&metadata, &bytes).await;
+    (test, phone, metadata, bytes)
 }
 
 #[tokio::test]
@@ -280,20 +302,8 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
     // after the intake answers; the store refuses the write (the device is
     // gone), and memory must not keep it either, or the receipt stream
     // shows an upload of a revoked phone until restart.
-    let chunk_size: i64 = 64 * 1024;
-    let meeting_id = Uuid::new_v4();
-    let intake = common::ScriptedIntake::gated(meeting_id, false);
-    let test = TestService::with(common::Options {
-        chunk_size,
-        intake: Some(intake.clone() as std::sync::Arc<dyn steno_core::HandoverIntake>),
-        start: false,
-        ..common::Options::default()
-    })
-    .await;
-    let phone = common::EngineDevice::paired(&test, "Direct iPhone").await;
-    let bytes = seeded_bytes(2 * chunk_size as usize, 97);
-    let metadata = phone.metadata(&bytes, chunk_size);
-    phone.upload_all(&metadata, &bytes).await;
+    let intake = ScriptedIntake::gated(Uuid::new_v4(), false);
+    let (test, phone, metadata, _) = uploaded(Some(intake.clone()), 97).await;
     let id = metadata.recording_id;
     let receipts = test.service.receipts();
 
@@ -320,8 +330,8 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
 
     // Paired again under the same id, the phone's uploads are live again.
     let again = phone.pair_again().await;
-    let bytes = seeded_bytes(chunk_size as usize, 98);
-    let metadata = again.metadata(&bytes, chunk_size);
+    let bytes = seeded_bytes(DIRECT_CHUNK_SIZE as usize, 98);
+    let metadata = again.metadata(&bytes, DIRECT_CHUNK_SIZE);
     assert_eq!(again.announce(&metadata).await.status.as_u16(), 201);
     assert!(owned(&test.service.engine.receipts_snapshot()));
     assert!(owned(&receipts.borrow()));
@@ -334,25 +344,15 @@ struct Restarted {
     metadata: RecordingMetadata,
     bytes: Vec<u8>,
     service: Arc<HandoverService>,
-    intake: Arc<common::ScriptedIntake>,
+    intake: Arc<ScriptedIntake>,
     /// The phone's view of the restarted engine.
-    phone: common::EngineDevice,
+    phone: EngineDevice,
 }
 
 impl Restarted {
     async fn new() -> Restarted {
-        let chunk_size: i64 = 64 * 1024;
-        let first = TestService::with(common::Options {
-            chunk_size,
-            start: false,
-            ..common::Options::default()
-        })
-        .await;
-        let before = common::EngineDevice::paired(&first, "Direct iPhone").await;
-        let bytes = seeded_bytes(2 * chunk_size as usize, 99);
-        let metadata = before.metadata(&bytes, chunk_size);
-        before.upload_all(&metadata, &bytes).await;
-        let intake = common::ScriptedIntake::new(Uuid::new_v4(), 0);
+        let (first, before, metadata, bytes) = uploaded(None, 99).await;
+        let intake = ScriptedIntake::new(Uuid::new_v4(), 0);
         let service = Arc::new(HandoverService::new(
             first.service.configuration.clone(),
             first.store.clone(),
@@ -360,7 +360,7 @@ impl Restarted {
             first.service.identity.clone(),
             first.clock.clock(),
         ));
-        let phone = common::EngineDevice {
+        let phone = EngineDevice {
             service: service.clone(),
             device: before.device,
         };
@@ -402,7 +402,7 @@ impl Restarted {
     async fn complete_with_a_revoke_during_the_read(
         &self,
         pairs_again: bool,
-    ) -> (HandoverResponse, Option<common::EngineDevice>) {
+    ) -> (HandoverResponse, Option<EngineDevice>) {
         // `complete` runs to its store read and waits there: the store is
         // held, so the read cannot finish before the first poll returns.
         // Once the read has returned the row, the revoke runs to completion;
@@ -471,7 +471,7 @@ async fn an_admitted_recording_answers_its_meeting_after_a_revoke_during_the_rea
     // receipt back into memory; the receipt is gone from the store, so it
     // must not stay in the stream either.
     let restarted = Restarted::new().await;
-    let before = common::EngineDevice {
+    let before = EngineDevice {
         service: restarted.first.service.clone(),
         device: restarted.phone.device.clone(),
     };
@@ -523,19 +523,8 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     // announces anew before the old `complete` goes on, which creates the
     // partial again. The old `complete` must neither discard that partial,
     // write `failed` over the new receipt nor promote it.
-    let chunk_size: i64 = 64 * 1024;
-    let intake = common::ScriptedIntake::new(Uuid::new_v4(), 0);
-    let test = TestService::with(common::Options {
-        chunk_size,
-        intake: Some(intake.clone() as Arc<dyn steno_core::HandoverIntake>),
-        start: false,
-        ..common::Options::default()
-    })
-    .await;
-    let phone = common::EngineDevice::paired(&test, "Direct iPhone").await;
-    let bytes = seeded_bytes(2 * chunk_size as usize, 96);
-    let metadata = phone.metadata(&bytes, chunk_size);
-    phone.upload_all(&metadata, &bytes).await;
+    let intake = ScriptedIntake::new(Uuid::new_v4(), 0);
+    let (test, phone, metadata, bytes) = uploaded(Some(intake.clone()), 96).await;
     let id = metadata.recording_id;
     let inbox = test.inbox();
 
@@ -604,7 +593,7 @@ async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
         ..common::Options::default()
     })
     .await;
-    let phone = common::EngineDevice::paired(&test, "Direct iPhone").await;
+    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
     let payload = test.service.begin_pairing();
     let principal = common::pairing_principal(&test.service, &payload).await;
 
@@ -642,40 +631,6 @@ async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
         404,
         "the next pairing clears it"
     );
-}
-
-/// Holds the store's one connection from another thread until
-/// [`StoreHold::release`], so a store call of the engine waits on it.
-struct StoreHold {
-    release: mpsc::Sender<()>,
-    holder: std::thread::JoinHandle<()>,
-}
-
-impl StoreHold {
-    fn new(store: &Arc<Store>) -> StoreHold {
-        let (held, store_is_held) = mpsc::channel();
-        let (release, released) = mpsc::channel::<()>();
-        let store = store.clone();
-        let holder = std::thread::spawn(move || {
-            store
-                .write(|_| {
-                    held.send(()).unwrap();
-                    // A test that failed meanwhile drops the sender.
-                    let _ = released.recv();
-                    Ok(())
-                })
-                .unwrap();
-        });
-        store_is_held
-            .recv_timeout(common::SIGNAL_BOUND)
-            .expect("the store is held");
-        StoreHold { release, holder }
-    }
-
-    fn release(self) {
-        self.release.send(()).unwrap();
-        self.holder.join().unwrap();
-    }
 }
 
 /// The waker of a future the test polls by hand.

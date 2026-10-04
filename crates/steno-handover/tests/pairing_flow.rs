@@ -15,7 +15,6 @@
 
 mod common;
 
-use std::sync::mpsc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -357,33 +356,19 @@ async fn pair_during_a_held_save(
     principal: Principal,
     meanwhile: impl FnOnce(),
 ) -> u16 {
-    let (held, held_rx) = mpsc::channel();
-    let (release, release_rx) = mpsc::channel::<()>();
-    let store = test.store.clone();
-    let holder = std::thread::spawn(move || {
-        store
-            .read(|_| {
-                held.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok(())
-            })
-            .unwrap();
-    });
-    held_rx.recv().unwrap();
-
+    let hold = common::StoreHold::new(&test.store);
     let pair = common::engine_pair_as(&test.service, principal, Uuid::new_v4(), "iPhone");
     let drive = async {
         while test.service.engine.pairing_is_open() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         meanwhile();
-        release.send(()).unwrap();
+        hold.release();
     };
     let (response, ()) =
         tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(pair, drive) })
             .await
             .expect("the save was held and released");
-    holder.join().unwrap();
     response.status.as_u16()
 }
 
