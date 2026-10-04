@@ -1,10 +1,10 @@
 //! The host's `Recorder` over the capture session and the Mac recording
 //! intake. Swift: `apps/macos/Steno/Recording/RecordingController.swift`.
 //! The calendar lookup, the auto-stop after a call ends and the detection
-//! prompt wait for the shell's platform work (plan: `WP8`); the status
+//! prompt are WP5's recorder policy (the plan's parity list); the status
 //! carries what the capture session reports.
 
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use chrono::{FixedOffset, Utc};
@@ -36,6 +36,9 @@ struct Active {
 struct Inner {
     status: RecorderStatus,
     active: Option<Active>,
+    /// Set by [`CaptureRecorder::stop_for_quit`]: the app is ending, so
+    /// no recording starts any more.
+    quitting: bool,
 }
 
 /// dBFS to the `0...1` RMS the bridge carries.
@@ -88,6 +91,7 @@ impl CaptureRecorder {
             inner: Mutex::new(Inner {
                 status: RecorderStatus::idle(),
                 active: None,
+                quitting: false,
             }),
             changes: Condvar::new(),
             changed: Mutex::new(None),
@@ -116,10 +120,10 @@ impl CaptureRecorder {
         }
     }
 
-    /// Waits until no start or stop is in progress and returns the state
-    /// it settled in, `Idle` or `Recording`. Swift:
+    /// Waits until no start or stop is in progress and hands back the
+    /// lock, the recorder `Idle` or `Recording` under it. Swift:
     /// `RecordingController.awaitSettled`.
-    fn settle(&self) -> RecordingState {
+    fn settle(&self) -> MutexGuard<'_, Inner> {
         self.changes
             .wait_while(self.inner(), |inner| {
                 matches!(
@@ -128,11 +132,9 @@ impl CaptureRecorder {
                 )
             })
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .status
-            .state
     }
 
-    fn inner(&self) -> std::sync::MutexGuard<'_, Inner> {
+    fn inner(&self) -> MutexGuard<'_, Inner> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -239,26 +241,41 @@ impl CaptureRecorder {
     /// Quitting: once a start or a stop in progress has settled, a
     /// recording is stopped with the `quit` end reason and saved (the
     /// asset written and the meeting enqueued) before this returns; a
-    /// stop already under way is waited for instead, also one that takes
-    /// the session after the state was read. Swift: `awaitSettled()` and
-    /// then `stop(reason: .quit)` in `AppController.shutdown`.
+    /// stop already under way is waited for instead, so its reason stands.
+    /// No recording starts afterwards. Swift: `awaitSettled()` and then
+    /// `stop(reason: .quit)` in `AppController.shutdown`.
     pub fn stop_for_quit(&self) {
-        while self.settle() == RecordingState::Recording {
-            self.stop_inner(RecordingEndReason::Quit);
+        let active = {
+            let mut inner = self.settle();
+            inner.quitting = true;
+            Self::begin_stop(&mut inner)
+        };
+        if let Some(active) = active {
+            self.notify();
+            self.finish_stop(active, RecordingEndReason::Quit);
             self.notify();
         }
     }
 
+    /// Takes the session of the recording in progress and marks the
+    /// recorder `Stopping`; none when nothing records.
+    fn begin_stop(inner: &mut Inner) -> Option<Active> {
+        let active = inner.active.take()?;
+        inner.status.state = RecordingState::Stopping;
+        Some(active)
+    }
+
     fn stop_inner(&self, reason: RecordingEndReason) {
-        let active = {
-            let mut inner = self.inner();
-            let Some(active) = inner.active.take() else {
-                return;
-            };
-            inner.status.state = RecordingState::Stopping;
-            active
+        let Some(active) = Self::begin_stop(&mut self.inner()) else {
+            return;
         };
         self.notify();
+        self.finish_stop(active, reason);
+    }
+
+    /// Stops the session `begin_stop` took and saves the recording, then
+    /// leaves the recorder `Idle` with the outcome's message.
+    fn finish_stop(&self, active: Active, reason: RecordingEndReason) {
         let intake = self.intake();
         let outcome = match active.session.stop() {
             Ok(result) => {
@@ -337,11 +354,13 @@ impl Recorder for CaptureRecorder {
     }
 
     fn start(&self, mode: CaptureMode, call_app: Option<&str>) {
-        if self.inner().status.state != RecordingState::Idle {
-            return;
-        }
         {
+            // One guard for the check and the change, so two starts at once
+            // cannot both begin.
             let mut inner = self.inner();
+            if inner.quitting || inner.status.state != RecordingState::Idle {
+                return;
+            }
             inner.status.state = RecordingState::Starting;
             inner.status.error = None;
             inner.status.warning = None;
@@ -476,11 +495,13 @@ mod tests {
             .unwrap();
     }
 
-    async fn quit(recorder: &Arc<CaptureRecorder>) {
+    /// Quits on a thread of its own, failing the test rather than hanging
+    /// it when quitting never returns.
+    fn quit(recorder: &Arc<CaptureRecorder>) {
         let quitting = recorder.clone();
-        tokio::task::spawn_blocking(move || quitting.stop_for_quit())
-            .await
-            .unwrap();
+        on_own_thread(PATIENCE, "quitting returned", move || {
+            quitting.stop_for_quit();
+        });
     }
 
     /// Every change that finds the recorder in `state` holds it there for
@@ -532,7 +553,7 @@ mod tests {
         let harness = harness(&[]);
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        quit(&harness.recorder).await;
+        quit(&harness.recorder);
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
         assert_eq!(meeting.end_reason, Some(RecordingEndReason::Quit));
@@ -555,7 +576,7 @@ mod tests {
         let stopper = harness.recorder.clone();
         let manual = std::thread::spawn(move || stopper.stop());
         stop_seen.recv_timeout(PATIENCE).expect("the stop began");
-        quit(&harness.recorder).await;
+        quit(&harness.recorder);
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
         let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
@@ -572,12 +593,54 @@ mod tests {
         let starter = harness.recorder.clone();
         let start = std::thread::spawn(move || starter.start(CaptureMode::InPerson, None));
         start_seen.recv_timeout(PATIENCE).expect("the start began");
-        quit(&harness.recorder).await;
+        quit(&harness.recorder);
         start.join().unwrap();
         assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         let meetings = harness.store.all_meetings().unwrap();
         assert_eq!(meetings.len(), 1);
         assert_eq!(meetings[0].end_reason, Some(RecordingEndReason::Quit));
+        assert!(harness.store.asset(meetings[0].id).unwrap().is_some());
+    }
+
+    /// Once quitting ran, a start (the tray's Record while the exit waits)
+    /// records nothing, so no meeting is left recording past the exit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_recording_starts_after_quitting() {
+        let harness = harness(&[]);
+        quit(&harness.recorder);
+        let starter = harness.recorder.clone();
+        on_own_thread(PATIENCE, "the start returned", move || {
+            starter.start(CaptureMode::InPerson, None);
+        });
+        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
+        assert_eq!(harness.store.all_meetings().unwrap(), []);
+    }
+
+    /// Starts at the same moment begin one recording between them: the
+    /// others return without a session, and stopping saves that one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn starts_at_once_begin_one_recording() {
+        let harness = harness(&[]);
+        let all_ready = Arc::new(std::sync::Barrier::new(8));
+        let starters: Vec<_> = (0..8)
+            .map(|_| {
+                let (starter, ready) = (harness.recorder.clone(), all_ready.clone());
+                std::thread::spawn(move || {
+                    ready.wait();
+                    starter.start(CaptureMode::InPerson, None);
+                })
+            })
+            .collect();
+        on_own_thread(PATIENCE, "every start returned", move || {
+            for starter in starters {
+                starter.join().unwrap();
+            }
+        });
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        assert_eq!(harness.store.all_meetings().unwrap().len(), 1);
+        quit(&harness.recorder);
+        let meetings = harness.store.all_meetings().unwrap();
+        assert_eq!(meetings.len(), 1);
         assert!(harness.store.asset(meetings[0].id).unwrap().is_some());
     }
 
