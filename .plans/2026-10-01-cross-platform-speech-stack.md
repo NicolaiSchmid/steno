@@ -6,7 +6,7 @@ laptop speed) and G4 (GPU) are open. Follows `.plans/2026-10-01-cross-platform-s
 which owns the question, the method, the baseline and spikes A to C. This plan does not
 widen the scope plan's "Windows, Linux" non-goal; a later platform plan does if G2 and G3
 pass. Until then it is spike work under `spikes/` and no product target depends on it.
-Next: WP2 (sidecar and decode loop) and the G2 measurement (WP1c).
+Next: the G2 measurement (WP1c).
 
 ## Problem
 
@@ -77,35 +77,25 @@ reports keep the interim reasoning.
    timeout and isolates the GPU driver; the Mac app stays one process with CoreML speech
    in-process, as `.plans/2026-09-29-macos-webview-ui.md` requires. Why: ONNX Runtime
    errors are C++ exceptions that abort through the FFI, and the 2 to 3 GB working set
-   should be released after processing. Rules out: in-process inference off the Mac.
+   should be released after processing. Rules out: in-process speech inference off the
+   Mac. The ONNX diarizer (decision 6) runs in the app's process for now; whether it
+   moves into the sidecar is open under "Speech" in the parity list of
+   `.plans/2026-10-02-rust-core-and-tauri-shell.md`.
 
    Implemented by WP4c of `.plans/2026-10-02-rust-core-and-tauri-shell.md`:
    `crates/steno-speech-sidecar` with `SidecarSpeechEngine` in `crates/steno-speech`.
-   The child is spawned on demand, serves both lanes of a job and is to be stopped
-   by `release()` after it once WP6b calls it; the JSON headers follow the bridge convention and the audio
-   crosses the pipe as raw `f32`. On macOS the sidecar is a fallback behind a setting,
-   CoreML in-process stays the default.
+   The child is spawned on demand, serves both lanes of a job and is stopped by
+   `release()` once a job's lanes are transcribed; the JSON headers follow the bridge
+   convention and the audio crosses the pipe as raw `f32`. On macOS the sidecar is a
+   fallback behind a setting; CoreML in-process stays the default.
 
-   Open (WP2): whether the sidecar drives ONNX Runtime directly through the `ort` crate
-   with our own feature extraction and TDT greedy loop, or wraps the sherpa-onnx
-   recognizer. The CoreML loop in `spikes/coreml-rs/src/decoder.rs` is shared only above
-   the joint: the CoreML joint emits an argmax token and a duration bin, while the ONNX
-   joiner emits logits that the loop must split into vocabulary and duration ranges
-   (`spikes/onnx-speech/export/ort_decode.py`), and that split is unvalidated; the only
-   own ONNX loop so far scores 64 % WER on FLEURS (spike F), and the CoreML loop's
-   frame-for-frame match is inferred from word timings where the text already agrees, at
-   8.7 % disagreement with the Swift transcript. Driving ONNX Runtime directly would give
-   one chunker, one decoder, one merger and two tensor backends (CoreML on the Mac, ONNX
-   Runtime elsewhere) and would remove the dynamic-library and C++-exception problems of
-   the binding for ASR; VAD (decision 1) would still go through the sherpa-onnx C API
-   until ported in its turn, while segmentation and embedding already run through `ort`
-   (decision 6). Against it:
-   the sherpa-onnx recognizer is so far the only ONNX decode of this export shown to be
-   accurate, so any own loop is validated against FLEURS, not word counts. The window of
-   c0cd3671 that decodes to zero tokens belongs to the same package: spike D blamed int8
-   quantisation, spike E reproduced it with fp32 and blamed the sherpa-onnx recognizer,
-   and spike F showed the loop spike E used as a control is itself broken, so its cause
-   is open.
+   Settled by WP4a and WP4c of `.plans/2026-10-02-rust-core-and-tauri-shell.md`: the
+   sidecar drives ONNX Runtime through `ort` with Steno's own features, TDT loop and
+   Silero VAD (`crates/steno-speech`), not the sherpa-onnx recognizer or its C API; the
+   logits split passed the FLEURS gate there. The window of c0cd3671 that decodes to zero
+   tokens is not settled by it: spike D blamed int8 quantisation, spike E reproduced it
+   with fp32 and blamed the sherpa-onnx recognizer, and spike F showed the loop spike E
+   used as a control is itself broken, so its cause is open.
 6. **Diarization rebuilt on the matching embedding.** Segmentation (pyannote 3.0) and
    embedding (WeSpeaker ResNet34-LM), the sherpa-onnx model files run through `ort` with
    Steno's own WeSpeaker fbank front end rather than the sherpa-onnx C API, our own
@@ -163,13 +153,10 @@ Open:
   threads), the x86 FLEURS run that completes G1, and a clean 10-thread timing on Forge,
   owed since spikes B and D. If the memory figure is too high for the laptop class, the
   calibrated static int8 or fp16-weights experiment from decision 3 follows here.
-- WP2: sidecar process with the JSON job protocol, length guards, timeout, memory
-  release; crash tests. First task: settle decision 5 by validating an own TDT decode
-  loop against FLEURS (find the bug in the spike E loop: the logits split at the joiner,
-  feature extraction against the NeMo preprocessor, or the decoder state hand-off), and
-  check whether it or sherpa-onnx 1.12.15 clears the zero-token window on c0cd3671
-  (worth about 7 points on that file). Replace the 190 s clamp with the 60 s
-  memory-derived clamp from decision 1; the position-table cap is not the guard.
+- WP2: built as WP4a (decode loop, with the 60 s memory clamp of decision 1) and WP4c
+  (sidecar) of `.plans/2026-10-02-rust-core-and-tauri-shell.md`. Still open from it:
+  whether the own loop clears the zero-token window on c0cd3671 (worth about 7 points
+  on that file).
 - WP3: diarization with our clustering and refinement, WeSpeaker ResNet34-LM as the
   first embedding; segmentation gate and embedding licence confirmed first; calibration
   run on Forge (G3). Moved to the Rust port plan as WP4d on 2026-10-02

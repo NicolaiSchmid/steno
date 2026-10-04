@@ -353,35 +353,51 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   - Crash isolation (`crates/steno-speech-sidecar/tests/isolation.rs`, the real client
     against the real binary with `--fake-engine --fault`): killed mid-request, abort
     (the way an uncaught C++ exception in ONNX Runtime ends the process), panic, a
-    panic after 1 MiB of stderr (the crash report stays bounded), exit,
-    hang past the deadline, allocation past the ceiling, garbage on stdout, silence at
-    start and another protocol version each end in an error and a working next call
-    in a new child. On a Ryzen 7 7700 desktop, in a release build, the child loads at
-    2.2 GB resident and transcribes 471 s of FLEURS German in 16.9 s, segment for
-    segment equal to the
+    panic after 1 MiB of stderr (the crash report stays bounded), exit, hang past the
+    deadline, allocation past the ceiling, garbage on stdout, silence at start and
+    another protocol version each end in an error and a working next call in a new
+    child. A crash report waits up to 1 s for the end of the child's stderr, so it
+    keeps the child's last words on a loaded machine. A child that died between
+    requests is replaced by the next call without an error
+    (`a_child_that_died_while_idle_is_replaced_without_an_error`), and a request the
+    child cannot read ends it with status 2 and a line on stderr
+    (`a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2`). On a Ryzen
+    7 7700 desktop, in a release build, the child loads at 2.2 GB resident and
+    transcribes 471 s of FLEURS German in 16.9 s, segment for segment equal to the
     in-process engine (`the_real_models_load_and_transcribe_in_the_sidecar_when_installed`,
-    ignored by default, gated on `STENO_MODELS_DIR` and `STENO_FLEURS_DIR`, not run in
-    CI).
+    ignored by default, needs `STENO_MODELS_DIR` and fails without the models,
+    compares with `STENO_FLEURS_DIR` when set, not run in CI).
   - Models: a file's source is a URL (GitHub release assets, 2 GB at most: Silero;
-    `steno-diarize` fetches its own models, `crates/steno-diarize/src/models.rs`) or a Hugging Face repository at a
-    pinned commit, `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the
-    2.6 GB fp32 export (`encoder.weights` alone is 2.4 GB). `scripts/upload-models.sh`
-    verifies the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and
-    uploads it to `nicolaischmid/steno-models`, pinned at commit `4a133253`
-    (`STENO_MODELS_REPO`, `PARAKEET_V3_FP32_REVISION`). Downloads resume
-    `<name>.partial` under a file lock with `Range` requests, across retries and runs;
-    a second download of the same file, in this process or another, waits for the
-    lock and then finds the file installed or resumes it, so the bytes cross the wire
-    once. The partial goes once its file is installed; a mirror
-    (`SpeechSettings::models_mirror`) serves `<mirror>/<asset id>/<file>`. Tests:
-    `crates/steno-speech/tests/download.rs` (`a_cut_connection_resumes_with_a_range_request`,
+    `steno-diarize` fetches its own models, `crates/steno-diarize/src/models.rs`) or
+    a Hugging Face repository at a pinned commit,
+    `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the 2.6 GB fp32
+    export (`encoder.weights` alone is 2.4 GB). `scripts/upload-models.sh` verifies
+    the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and uploads
+    it to `nicolaischmid/steno-models`, pinned at commit `4a133253`
+    (`STENO_MODELS_REPO`, `PARAKEET_V3_FP32_REVISION`). A download holds a lock on
+    `<name>.lock`, which no download deletes, and opens, resumes and renames
+    `<name>.partial` only while it holds it. A file over 8 MiB comes in `Range`
+    requests of 8 MiB, each with a body timeout for its own size (128 s), so a silent
+    connection costs minutes, not hours; an attempt that moved the file on resets
+    the count of failures. Downloads resume across retries and runs; a second
+    download of the same file, in this process or another, waits for the lock while
+    reporting the first one's progress, then finds the file installed or resumes
+    it, so the bytes cross the wire once, also when the first one failed and threw
+    its partial away. The partial goes once its file is installed; a mirror
+    (`SpeechSettings::models_mirror`) serves `<mirror>/<asset id>/<file>` for the
+    speech models. Tests: `crates/steno-speech/tests/download.rs`
+    (`a_cut_connection_resumes_with_a_range_request`,
     `a_partial_a_killed_run_left_is_resumed_not_fetched_again`,
     `a_206_from_the_wrong_offset_or_without_a_range_is_not_appended`,
     `a_mirror_serves_every_file_from_asset_id_and_file_name`) and the unit tests in
     `crates/steno-speech/src/model_store.rs`
     (`a_second_download_of_one_file_waits_for_the_first_and_fetches_nothing`,
+    `a_download_that_waited_installs_the_file_after_the_first_threw_its_partial_away`,
+    `a_large_file_comes_in_chunks_and_a_stalled_chunk_is_given_up_alone`,
     `a_partial_is_deleted_once_its_file_is_installed_another_way`,
-    `a_download_that_finds_its_file_installed_leaves_no_partial`).
+    `a_download_that_finds_its_file_installed_leaves_no_partial`). The engine
+    installs the models on first use and outside its lock
+    (`the_engine_installs_its_models_on_first_use_and_outside_its_lock`).
   - Shipped beside the app by WP9's first half: every bundle carries the binary as a
     Tauri `externalBin` (`apps/desktop/src-tauri/tauri.release.conf.json`), checked in
     its installed layout by `apps/desktop/scripts/check-bundle.sh`.
@@ -586,6 +602,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   pipeline-side downloads in the row of the engine that runs (and map those engines'
   rows to Parakeet v3's models), or fail processing with "Download the speech model in
   Settings" until the engine's models are installed.
+- [ ] One model store: `steno-diarize` keeps its own `ModelStore` and `ModelAsset`
+  (`crates/steno-diarize/src/models.rs`: `.part` files, no resume, no lock, no
+  mirror), so a mirror serves only the speech models. It could fetch through
+  `steno_speech::ModelStore`; its root `onnx/diarization` already fits
+  `<root>/<asset id>/`.
 
 ### Beyond the bridge
 
