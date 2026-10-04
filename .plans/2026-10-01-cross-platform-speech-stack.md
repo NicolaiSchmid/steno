@@ -125,7 +125,7 @@ reports keep the interim reasoning.
 | G1 transcript quality | Absolute WER against human references (FLEURS German test) on the same machine | Within 1 point of CoreML Parakeet | **Passed 2026-10-01 on arm64** (spike F): own fp32 ONNX 5.3 % vs CoreML 5.5 % on ten 7-minute files with the chunker in the loop, 5.7 % vs 5.9 % on 151 single utterances. x86 run owed with G2 (WP1c): spike B showed x86 and arm64 transcripts differ |
 | G2 idle laptop speed | RTFx and peak RSS of the full ONNX pipeline at 4 threads on an idle x86 Linux laptop of the class users have (8 cores or fewer, 16 GB or less; not atlas under load) | RTFx 20 or better, which is a 60-minute meeting in 3 minutes, and peak RSS no higher than the 3.4 GB measured on the M4 Pro. Incremental transcription (WP5) is measured separately and does not count towards G2 | Open (WP1c). RTFx 20 is what the M4 Pro reaches at 4 threads, so an x86 laptop may miss it; a miss re-sets the gate from the measurement rather than waving it through |
 | G3 diarization | Speaker counts on the full seven calls vs `truth.json` | All five 1:1 calls = 1; the two group calls within 1 of the count in `truth.json` (up to 7). FluidAudio's 2 on both is not the target | **Passed 2026-10-03** (PR #164, WP4d of the Rust port plan): both backends 7 of 7 at every cut from 0.20 to 0.60; 0.32 kept as derived from FluidAudio's 0.8 rather than fitted |
-| G4 GPU | RTFx with DirectML on an integrated GPU and CUDA on a discrete one | At least 3x the same machine's CPU figure | Open; no machine |
+| G4 GPU | RTFx with DirectML on an integrated GPU and CUDA on a discrete one | At least 3x the same machine's CPU figure | Open; no machine. DirectML is implemented for the encoder behind a probe with the CPU as the fallback, off by default (WP10b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`); CUDA is not started |
 
 G1 was originally disagreement with the CoreML transcript on the seven calls (mean
 under 8 %, no file over 15 %); spikes D and E measured 16.2 % and 11.5 % against it, and
@@ -177,7 +177,9 @@ Open:
   ERes2Net was not measured (decision 6).
 - WP4: GPU providers (DirectML, CUDA) behind a runtime probe with CPU fallback;
   whisper.cpp Vulkan engine (G4). Needs a Windows machine with an integrated GPU and a
-  Linux machine with NVIDIA; neither exists in the current fleet.
+  Linux machine with NVIDIA; neither exists in the current fleet. DirectML is built
+  (WP10b of the Rust port plan) and waits for the measurement; CUDA and the Vulkan
+  engine are open.
 - WP5: incremental transcription during recording, with the battery and call-quality
   measurement.
 

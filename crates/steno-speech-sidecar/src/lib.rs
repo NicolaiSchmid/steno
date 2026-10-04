@@ -25,26 +25,40 @@
 //! # What the child does
 //!
 //! It loads the models once from the store root the parent names and
-//! installed (it never downloads and opens no connection), reads framed
-//! requests from stdin with the audio as a binary payload, answers on
-//! stdout, and reports its resident set from a heartbeat thread so the
-//! parent can kill it at the memory ceiling. It exits on a shutdown
-//! request and as soon as stdin ends or stdout breaks, so a dead parent
-//! leaves no child behind. Its log goes to stderr, which the parent keeps
-//! the tail of for crash reports. Its sessions open through
-//! `steno_speech::onnx`, which switches ONNX Runtime's telemetry off first,
-//! so the child sends nothing anywhere.
+//! installed; it never downloads and opens no connection. When the parent
+//! asks for `DirectML` on Windows, the encoder runs there if the probe in
+//! `steno_speech::onnx` passes, and the child answers the load with the
+//! provider it chose. Its health reports and transcripts carry the provider
+//! in force, and when the encoder falls back to the CPU it writes one line
+//! saying why, in fixed words. It reads framed requests from stdin with the
+//! audio as a binary payload, answers on stdout, and reports its resident
+//! set from a heartbeat thread so the parent can kill it at the memory
+//! ceiling. It exits on a shutdown request and as soon as stdin ends or
+//! stdout breaks, so a dead parent leaves no child behind. Its log goes to
+//! stderr, which the parent logs and keeps the tail of for crash reports.
+//!
+//! # Privacy
+//!
+//! Its sessions open through `steno_speech::onnx`, which switches ONNX
+//! Runtime's telemetry off first, so ONNX Runtime sends nothing. With
+//! `DirectML` on, `DirectML.dll` and Direct3D 12 may still log to Windows'
+//! own diagnostic data, as for any program that uses them; the child opens
+//! nothing for it, and no audio or text is involved.
 //!
 //! # Test faults
 //!
 //! `--fake-engine` replaces Parakeet with an engine that needs no models
-//! and answers with the sample count and peak of the audio it received.
-//! Only with it, `--fault <kind>` ([`Fault`]) makes the next transcription
-//! abort, panic, flood stderr and panic, exit, hang, allocate 4 GiB,
-//! write garbage or fail, or the child stay silent or announce another
-//! protocol version from the start; `--fault-once <path>` limits that to the first child that creates
-//! `<path>`, which holds that child's pid. The isolation tests drive the
-//! real client against these.
+//! and answers with the sample count and peak of the audio it received; it
+//! answers a load that asks for `DirectML` with `DirectML`, and reports no
+//! live provider until `--fault fallback`. Only with it, `--fault <kind>`
+//! ([`Fault`]) makes the next transcription abort, panic, flood stderr and
+//! panic, exit, hang, allocate 4 GiB, write garbage, fail, report a
+//! fallback to the CPU or lose the encoder, the child abort on any load or
+//! on a load that asks for `DirectML`, or stay silent or announce another
+//! protocol version from the start; `--fault-once <path>` limits that to
+//! the first child that creates `<path>`, which holds that child's pid.
+//! The isolation tests and the `DirectML` test binaries drive the real
+//! client against these.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -53,9 +67,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use steno_core::{AudioBuffer16k, LanguageTag, RawSegment};
+use steno_speech::sidecar::FALLBACK_NOTICE;
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
-    ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig, Transcriber, VadConfig,
+    EncoderProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
+    Transcriber, VadConfig,
 };
 
 steno_core::string_enum! {
@@ -82,6 +98,19 @@ steno_core::string_enum! {
         Garbage = "garbage",
         /// Answers with an error and keeps running.
         Error = "error",
+        /// Answers, and from then on reports the CPU as the encoder's
+        /// provider and writes why to stderr, as a child does after a run
+        /// that failed on `DirectML`.
+        Fallback = "fallback",
+        /// Fails and leaves the engine without an encoder, as a run that
+        /// failed on `DirectML` does when the CPU cannot reopen the model;
+        /// the child then exits without answering.
+        LoseEncoder = "lose-encoder",
+        /// `std::process::abort` inside any load.
+        AbortOnLoad = "abort-on-load",
+        /// `std::process::abort` inside a load that asks for `DirectML`,
+        /// the way a driver may end the probe; a load on the CPU works.
+        AbortOnDirectmlLoad = "abort-on-directml-load",
         /// At start: sends nothing, reads nothing, hangs.
         Silent = "silent",
         /// At start: announces protocol version 0 in its ready message.
@@ -152,8 +181,27 @@ impl Options {
 
 /// What the child runs requests on.
 trait Engine {
-    fn load(&mut self, models_root: &Path, options: &OnnxOptions) -> Result<(), String>;
+    /// Loads the models once; returns where the encoder runs.
+    fn load(
+        &mut self,
+        models_root: &Path,
+        options: &OnnxOptions,
+    ) -> Result<EncoderProvider, String>;
     fn loaded(&self) -> bool;
+    /// Where the encoder runs now; `None` before a load, or when the
+    /// engine cannot tell.
+    fn provider(&self) -> Option<EncoderProvider>;
+    /// Why the encoder is on the CPU though the load asked for `DirectML`,
+    /// in fixed words ([`OnnxBackend::fallback`]).
+    fn fallback(&self) -> Option<&'static str> {
+        None
+    }
+    /// Whether the engine can still run: `false` once a loaded encoder
+    /// lost its session ([`OnnxBackend::usable`]), after which the child
+    /// exits rather than answer every request with an error.
+    fn usable(&self) -> bool {
+        true
+    }
     fn transcribe(
         &mut self,
         samples: &[f32],
@@ -168,22 +216,42 @@ struct OnnxEngine {
 }
 
 impl Engine for OnnxEngine {
-    fn load(&mut self, models_root: &Path, options: &OnnxOptions) -> Result<(), String> {
-        if self.transcriber.is_none() {
-            let transcriber = OnnxSpeechEngine::load_installed(
-                &ModelStore::new(models_root),
-                options,
-                PipelineConfig::default(),
-                VadConfig::default(),
-            )
-            .map_err(|e| e.to_string())?;
-            self.transcriber = Some(transcriber);
-        }
-        Ok(())
+    fn load(
+        &mut self,
+        models_root: &Path,
+        options: &OnnxOptions,
+    ) -> Result<EncoderProvider, String> {
+        let transcriber = match &mut self.transcriber {
+            Some(transcriber) => transcriber,
+            None => self.transcriber.insert(
+                OnnxSpeechEngine::load_installed(
+                    &ModelStore::new(models_root),
+                    options,
+                    PipelineConfig::default(),
+                    VadConfig::default(),
+                )
+                .map_err(|e| e.to_string())?,
+            ),
+        };
+        Ok(transcriber.backend().provider())
     }
 
     fn loaded(&self) -> bool {
         self.transcriber.is_some()
+    }
+
+    fn provider(&self) -> Option<EncoderProvider> {
+        Some(self.transcriber.as_ref()?.backend().provider())
+    }
+
+    fn fallback(&self) -> Option<&'static str> {
+        self.transcriber.as_ref()?.backend().fallback()
+    }
+
+    fn usable(&self) -> bool {
+        self.transcriber
+            .as_ref()
+            .is_none_or(|transcriber| transcriber.backend().usable())
     }
 
     fn transcribe(
@@ -207,6 +275,10 @@ struct FakeEngine {
     loaded: bool,
     fault: Option<Fault>,
     fault_once: Option<PathBuf>,
+    /// Set by [`Fault::Fallback`].
+    fell_back: bool,
+    /// Set by [`Fault::LoseEncoder`].
+    lost_encoder: bool,
 }
 
 impl FakeEngine {
@@ -230,13 +302,45 @@ impl FakeEngine {
 }
 
 impl Engine for FakeEngine {
-    fn load(&mut self, _: &Path, _: &OnnxOptions) -> Result<(), String> {
+    /// Reports `DirectML` when asked for it, as if the probe had passed, so
+    /// the tests see the setting reach the child and the answer come back;
+    /// with [`Fault::AbortOnLoad`], or [`Fault::AbortOnDirectmlLoad`] when
+    /// asked for `DirectML`, aborts there instead.
+    fn load(&mut self, _: &Path, options: &OnnxOptions) -> Result<EncoderProvider, String> {
+        let aborts = match self.fault {
+            Some(Fault::AbortOnLoad) => true,
+            Some(Fault::AbortOnDirectmlLoad) => options.directml,
+            _ => false,
+        };
+        if aborts && self.fault_now().is_some() {
+            std::process::abort();
+        }
         self.loaded = true;
-        Ok(())
+        Ok(if options.directml {
+            EncoderProvider::DirectMl
+        } else {
+            EncoderProvider::Cpu
+        })
     }
 
     fn loaded(&self) -> bool {
         self.loaded
+    }
+
+    /// `None`, as from a child that does not say, until
+    /// [`Fault::Fallback`].
+    fn provider(&self) -> Option<EncoderProvider> {
+        self.fell_back.then_some(EncoderProvider::Cpu)
+    }
+
+    /// Fixed words of its own after [`Fault::Fallback`].
+    fn fallback(&self) -> Option<&'static str> {
+        self.fell_back.then_some("the fake engine fell back")
+    }
+
+    /// `false` after [`Fault::LoseEncoder`].
+    fn usable(&self) -> bool {
+        !self.lost_encoder
     }
 
     fn transcribe(
@@ -278,22 +382,39 @@ impl Engine for FakeEngine {
                 hang()
             }
             Some(Fault::Error) => Err("simulated failure in the speech engine".to_owned()),
-            // The start faults were committed, if at all, at start.
-            Some(Fault::Silent | Fault::WrongProtocol) | None => {
-                let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-                // Exact up to 2^53 samples, as in `AudioBuffer16k::duration`.
-                #[allow(clippy::cast_precision_loss)]
-                let seconds = samples.len() as f64 / AudioBuffer16k::SAMPLE_RATE;
-                Ok(vec![RawSegment {
-                    start: 0.0,
-                    end: seconds,
-                    text: format!("{} samples, peak {peak}", samples.len()),
-                    language: hint.cloned(),
-                    word_timings: None,
-                }])
+            Some(Fault::Fallback) => {
+                self.fell_back = true;
+                Ok(describe(samples, hint))
             }
+            Some(Fault::LoseEncoder) => {
+                self.lost_encoder = true;
+                Err("simulated loss of the speech encoder".to_owned())
+            }
+            // The start and load faults were committed, if at all, there.
+            Some(
+                Fault::Silent
+                | Fault::WrongProtocol
+                | Fault::AbortOnLoad
+                | Fault::AbortOnDirectmlLoad,
+            )
+            | None => Ok(describe(samples, hint)),
         }
     }
+}
+
+/// The fake engine's answer: one segment naming what arrived.
+fn describe(samples: &[f32], hint: Option<&LanguageTag>) -> Vec<RawSegment> {
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    // Exact up to 2^53 samples, as in `AudioBuffer16k::duration`.
+    #[allow(clippy::cast_precision_loss)]
+    let seconds = samples.len() as f64 / AudioBuffer16k::SAMPLE_RATE;
+    vec![RawSegment {
+        start: 0.0,
+        end: seconds,
+        text: format!("{} samples, peak {peak}", samples.len()),
+        language: hint.cloned(),
+        word_timings: None,
+    }]
 }
 
 fn hang() -> ! {
@@ -338,6 +459,52 @@ fn start_heartbeat(interval: Duration) -> io::Result<()> {
         .map(drop)
 }
 
+/// Writes to stderr why the encoder is on the CPU though the load asked
+/// for `DirectML`, once per reason: the child has no log subscriber, and
+/// the parent logs its stderr, a line that starts with
+/// [`FALLBACK_NOTICE`] at info level.
+fn tell_fallback(engine: &dyn Engine, told: &mut Option<&'static str>) {
+    if let Some(reason) = engine.fallback()
+        && *told != Some(reason)
+    {
+        eprintln!("{FALLBACK_NOTICE} ({reason}); the speech encoder runs on the CPU");
+        *told = Some(reason);
+    }
+}
+
+/// Reads the samples of a transcription request and answers it. `Err` is
+/// the exit code when the child must exit instead: the audio is
+/// unreadable, or the engine lost its encoder. That exit sends no reply:
+/// the parent sees a crash with the encoder still on `DirectML`, switches
+/// `DirectML` off and starts a child that loads on the CPU, where an error
+/// reply would leave this child failing every request.
+fn transcribe(
+    engine: &mut dyn Engine,
+    input: &mut impl io::Read,
+    id: u64,
+    sample_count: u64,
+    hint: Option<&LanguageTag>,
+) -> Result<Reply, ExitCode> {
+    let samples = protocol::read_samples(input, sample_count).map_err(|error| {
+        eprintln!("steno-speech-sidecar: unreadable audio: {error}");
+        ExitCode::from(2)
+    })?;
+    match engine.transcribe(&samples, hint) {
+        Ok(segments) => Ok(Reply::Transcript {
+            id,
+            segments,
+            provider: engine.provider(),
+        }),
+        Err(_) if !engine.usable() => {
+            eprintln!(
+                "steno-speech-sidecar: the speech encoder lost its session after a failed run on DirectML, and the CPU could not reopen it"
+            );
+            Err(ExitCode::from(70))
+        }
+        Err(error) => Ok(Reply::Failed { id, error }),
+    }
+}
+
 /// Runs the child until a shutdown request, the end of stdin, a broken
 /// stdout or an unreadable request.
 pub fn serve(options: &Options) -> ExitCode {
@@ -345,6 +512,8 @@ pub fn serve(options: &Options) -> ExitCode {
         loaded: false,
         fault: options.fault,
         fault_once: options.fault_once.clone(),
+        fell_back: false,
+        lost_encoder: false,
     });
     let start_fault = fake
         .as_ref()
@@ -370,6 +539,7 @@ pub fn serve(options: &Options) -> ExitCode {
         pid: std::process::id(),
     });
     let mut input = BufReader::new(io::stdin().lock());
+    let mut fallback_told = None;
     loop {
         let request = match protocol::read_header::<_, Request>(&mut input) {
             Ok(Some(request)) => request,
@@ -385,13 +555,15 @@ pub fn serve(options: &Options) -> ExitCode {
                 models_root,
                 intra_threads,
                 inter_threads,
+                directml,
             } => {
                 let options = OnnxOptions {
                     intra_threads,
                     inter_threads,
+                    directml,
                 };
                 match engine.load(&models_root, &options) {
-                    Ok(()) => Reply::Loaded { id },
+                    Ok(provider) => Reply::Loaded { id, provider },
                     Err(error) => Reply::Failed { id, error },
                 }
             }
@@ -400,29 +572,22 @@ pub fn serve(options: &Options) -> ExitCode {
                 pid: std::process::id(),
                 rss_bytes: rss_bytes(),
                 loaded: engine.loaded(),
+                provider: engine.provider(),
             },
             Request::Transcribe {
                 id,
                 sample_count,
                 hint,
-            } => {
-                let samples = match protocol::read_samples(&mut input, sample_count) {
-                    Ok(samples) => samples,
-                    Err(error) => {
-                        eprintln!("steno-speech-sidecar: unreadable audio: {error}");
-                        return ExitCode::from(2);
-                    }
-                };
-                match engine.transcribe(&samples, hint.as_ref()) {
-                    Ok(segments) => Reply::Transcript { id, segments },
-                    Err(error) => Reply::Failed { id, error },
-                }
-            }
+            } => match transcribe(&mut *engine, &mut input, id, sample_count, hint.as_ref()) {
+                Ok(reply) => reply,
+                Err(code) => return code,
+            },
             Request::Shutdown { id } => {
                 send(&Reply::Bye { id });
                 return ExitCode::SUCCESS;
             }
         };
+        tell_fallback(&*engine, &mut fallback_told);
         send(&reply);
     }
 }
@@ -458,6 +623,8 @@ mod tests {
             loaded: false,
             fault: Some(Fault::Error),
             fault_once: Some(dir.path().join("marker")),
+            fell_back: false,
+            lost_encoder: false,
         };
         assert_eq!(engine.fault_now(), Some(Fault::Error));
         assert_eq!(engine.fault_now(), None);

@@ -25,8 +25,12 @@ use serde::{Deserialize, Serialize};
 use steno_core::{LanguageTag, RawSegment};
 use thiserror::Error;
 
+use crate::onnx::EncoderProvider;
+
 /// Bumped on any change a peer of the old version would misread; the
-/// client refuses a child whose [`Reply::Ready`] names another.
+/// client refuses a child whose [`Reply::Ready`] names another. A field
+/// added with a default for its absence (`directml`, `provider`) is no such
+/// change.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The longest header either side accepts. A transcript of a long meeting
@@ -54,6 +58,10 @@ pub enum Request {
         models_root: PathBuf,
         intra_threads: usize,
         inter_threads: usize,
+        /// [`OnnxOptions::directml`](crate::OnnxOptions::directml); absent
+        /// is `false`, so a parent from before it still loads on the CPU.
+        #[serde(default)]
+        directml: bool,
     },
     /// Answer with [`Reply::Health`].
     Health { id: u64 },
@@ -102,17 +110,35 @@ pub enum Reply {
     Ready { protocol: u32, pid: u32 },
     /// The heartbeat: the child's resident set, for the parent's ceiling.
     Memory { rss_bytes: u64 },
-    /// The models are loaded.
-    Loaded { id: u64 },
+    /// The models are loaded, the encoder on `provider`
+    /// ([`OnnxBackend::provider`](crate::OnnxBackend::provider)); absent is
+    /// the CPU, which a child from before it always used.
+    Loaded {
+        id: u64,
+        #[serde(default)]
+        provider: EncoderProvider,
+    },
     /// The answer to [`Request::Health`]; `loaded` once a load succeeded.
     Health {
         id: u64,
         pid: u32,
         rss_bytes: u64,
         loaded: bool,
+        /// Where the encoder runs now; a failed run on `DirectML` moves it
+        /// to the CPU after [`Reply::Loaded`]. Absent before a load and
+        /// from a child that does not say; the parent then keeps the
+        /// provider it last heard.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<EncoderProvider>,
     },
-    /// The answer to [`Request::Transcribe`].
-    Transcript { id: u64, segments: Vec<RawSegment> },
+    /// The answer to [`Request::Transcribe`], with `provider` as in
+    /// [`Reply::Health`], after the run.
+    Transcript {
+        id: u64,
+        segments: Vec<RawSegment>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<EncoderProvider>,
+    },
     /// The request failed inside the child; the child keeps running.
     Failed { id: u64, error: String },
     /// The answer to [`Request::Shutdown`], the child's last message.
@@ -125,7 +151,7 @@ impl Reply {
     pub fn id(&self) -> Option<u64> {
         match self {
             Reply::Ready { .. } | Reply::Memory { .. } => None,
-            Reply::Loaded { id }
+            Reply::Loaded { id, .. }
             | Reply::Health { id, .. }
             | Reply::Transcript { id, .. }
             | Reply::Failed { id, .. }
@@ -284,6 +310,7 @@ mod tests {
                 models_root: PathBuf::from("/models"),
                 intra_threads: 4,
                 inter_threads: 1,
+                directml: true,
             },
             Request::Health { id: 2 },
             Request::Transcribe {
@@ -307,15 +334,20 @@ mod tests {
                 pid: 42,
             },
             Reply::Memory { rss_bytes: 1 << 30 },
-            Reply::Loaded { id: 1 },
+            Reply::Loaded {
+                id: 1,
+                provider: EncoderProvider::DirectMl,
+            },
             Reply::Health {
                 id: 2,
                 pid: 42,
                 rss_bytes: 7,
                 loaded: true,
+                provider: Some(EncoderProvider::DirectMl),
             },
             Reply::Transcript {
                 id: 3,
+                provider: Some(EncoderProvider::Cpu),
                 segments: vec![RawSegment {
                     start: 0.08,
                     end: 1.5,
@@ -393,6 +425,96 @@ mod tests {
             u32::from_le_bytes(wire[..4].try_into().unwrap()) as usize,
             wire.len() - 4
         );
+    }
+
+    /// [`Reply::Transcript`] as a parent from before its `provider` reads it.
+    #[derive(Deserialize)]
+    #[serde(tag = "type", rename_all = "camelCase")]
+    enum OldReply {
+        Transcript { id: u64, segments: Vec<RawSegment> },
+    }
+
+    #[test]
+    fn the_provider_fields_are_camel_case_and_default_when_absent() {
+        fn header(message: &impl Serialize) -> String {
+            let mut wire = Vec::new();
+            write_frame(&mut wire, message, &[]).unwrap();
+            String::from_utf8(wire[4..].to_vec()).unwrap()
+        }
+        assert_eq!(
+            header(&Request::Load {
+                id: 1,
+                models_root: PathBuf::from("/m"),
+                intra_threads: 4,
+                inter_threads: 1,
+                directml: true,
+            }),
+            r#"{"directml":true,"id":1,"interThreads":1,"intraThreads":4,"modelsRoot":"/m","type":"load"}"#
+        );
+        assert_eq!(
+            header(&Reply::Loaded {
+                id: 1,
+                provider: EncoderProvider::DirectMl,
+            }),
+            r#"{"id":1,"provider":"directml","type":"loaded"}"#
+        );
+        let old_load: Request = serde_json::from_str(
+            r#"{"id":1,"interThreads":1,"intraThreads":4,"modelsRoot":"/m","type":"load"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            old_load,
+            Request::Load {
+                directml: false,
+                ..
+            }
+        ));
+        let old_loaded: Reply = serde_json::from_str(r#"{"id":1,"type":"loaded"}"#).unwrap();
+        assert_eq!(
+            old_loaded,
+            Reply::Loaded {
+                id: 1,
+                provider: EncoderProvider::Cpu,
+            }
+        );
+
+        // The live provider: by name when known, absent (not null) when
+        // not, and absent reads as unknown.
+        assert_eq!(
+            header(&Reply::Health {
+                id: 2,
+                pid: 42,
+                rss_bytes: 7,
+                loaded: true,
+                provider: Some(EncoderProvider::Cpu),
+            }),
+            r#"{"id":2,"loaded":true,"pid":42,"provider":"cpu","rssBytes":7,"type":"health"}"#
+        );
+        assert_eq!(
+            header(&Reply::Transcript {
+                id: 3,
+                segments: Vec::new(),
+                provider: None,
+            }),
+            r#"{"id":3,"segments":[],"type":"transcript"}"#
+        );
+        let old_health: Reply = serde_json::from_str(
+            r#"{"id":2,"loaded":false,"pid":42,"rssBytes":7,"type":"health"}"#,
+        )
+        .unwrap();
+        assert!(matches!(old_health, Reply::Health { provider: None, .. }));
+        let old_transcript: Reply =
+            serde_json::from_str(r#"{"id":3,"segments":[],"type":"transcript"}"#).unwrap();
+        assert!(matches!(
+            old_transcript,
+            Reply::Transcript { provider: None, .. }
+        ));
+        // A parent from before the field reads a reply that has it.
+        let OldReply::Transcript { id, segments } = serde_json::from_str(
+            r#"{"id":3,"provider":"directml","segments":[],"type":"transcript"}"#,
+        )
+        .unwrap();
+        assert_eq!((id, segments.len()), (3, 0));
     }
 
     #[test]

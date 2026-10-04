@@ -17,10 +17,11 @@ speech on the Neural Engine; Linux and Windows run our fp32 ONNX export of the s
 model. The Swift app keeps shipping until the Rust app reaches parity on the Mac and
 reads the same database, so the cutover is a download, not a migration.
 
-Not in this plan: GPU execution providers (speech-stack WP4, gate G4), the iOS
-recorder (unchanged), and any new product feature. The diarization rebuild
-(speech-stack WP3, gate G3) was outside it at the start and moved in on 2026-10-02 as
-WP4d, so it ships with the Rust pipeline.
+Not in this plan: the rest of speech-stack WP4 (CUDA on Linux, the whisper.cpp
+Vulkan engine), the iOS recorder (unchanged), and any new product feature. DirectML
+on Windows is WP10b; its gate G4 stays open until a Windows machine with a GPU
+measures it. The diarization rebuild (speech-stack WP3, gate G3) was outside it at
+the start and moved in on 2026-10-02 as WP4d, so it ships with the Rust pipeline.
 Feature work continues on the Swift app until cutover; anything merged there after
 this plan starts is a parity item for the Rust side, tracked in the parity list below.
 
@@ -445,13 +446,14 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   entry `handover-identity`, or accepts that phones re-pair and says so in the release
   notes; the cutover plan decides which.
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
-  WP10a: WASAPI capture (#175); DirectML and the installer follow. The shell's exit on
-  a Windows logoff or shutdown (`WM_ENDSESSION`, which reaches the shell as
-  `RunEvent::Exit`) is untested on hardware, and Windows ends a process that has not
-  answered within about five seconds, less than `SHUTDOWN_PATIENCE`, so a long save
-  can be cut off ("Pipeline and services (WP6b)"); the follow-up is
-  `ShutdownBlockReasonCreate` while a recording runs, so the logoff screen waits and
-  says why.
+  WP10a: WASAPI capture (#175); WP10b: DirectML for the speech encoder behind a
+  probe, with the CPU as the fallback (speech-stack decision 4; gate G4 open, no
+  machine); the installer follows. The shell's exit on a Windows logoff or shutdown
+  (`WM_ENDSESSION`, which reaches the shell as `RunEvent::Exit`) is untested on
+  hardware, and Windows ends a process that has not answered within about five
+  seconds, less than `SHUTDOWN_PATIENCE`, so a long save can be cut off ("Pipeline and
+  services (WP6b)"); the follow-up is `ShutdownBlockReasonCreate` while a recording
+  runs, so the logoff screen waits and says why.
 
 ## Risks
 
@@ -558,14 +560,15 @@ still has to draw the window side. `[ ]` is not ported yet.
   download installs Silero VAD with it (the row counts as installed only with both; removing it
   keeps the VAD). A personal account, not an organisation: moving it later means a new
   upload and a new pin.
-- [ ] `SpeechSettings` (`onnxSidecarOnMac`, `modelsMirror`) are Rust-only: Swift has
-  neither. `steno-services` reads them from `speech.json` in the support directory
-  (`steno_services::speech::speech_settings`), not from the `setting` table, which the
-  Swift app rewrites whole on every save; `STENO_MODELS_MIRROR` overrides the mirror
-  (the speech models only: the diarizer's models keep their hosts).
-  Nothing writes the file and the bridge contract has no field for either, so the
-  Settings window shows neither: the macOS fallback waits for a plan that words it for
-  users, and the mirror stays configuration only.
+- [ ] `SpeechSettings` (`onnxSidecarOnMac`, `directmlOnWindows`, `modelsMirror`) are
+  Rust-only: Swift has none of them. `steno-services` reads them from `speech.json` in
+  the support directory (`steno_services::speech::speech_settings`), not from the
+  `setting` table, which the Swift app rewrites whole on every save;
+  `STENO_MODELS_MIRROR` overrides the mirror (the speech models only: the diarizer's
+  models keep their hosts). Nothing writes the file and the bridge contract has no
+  field for any of them, so the Settings window shows none: the macOS fallback and the
+  DirectML switch wait for a plan that words them for users, and the mirror stays
+  configuration only.
 - [ ] Where the speech sidecar runs Parakeet v3, processing a meeting before its models
   are downloaded starts a silent 2.6 GB download inside the pipeline, which the Settings
   row does not show. The same holds for a stored engine other than Parakeet v3:
@@ -1234,6 +1237,7 @@ PR off `main`.
 | WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`) | | | planned |
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
+| WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | open |
 | Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
@@ -1319,3 +1323,82 @@ platform-independent (`tests/split_streams.rs`, `tests/sessions.rs`), the
 zero-allocation proof covers both stream bodies (`tests/realtime.rs`), and
 the hardware checks wait behind `--ignored` in `tests/live_windows.rs`.
 Parity items: the Windows list under Audio.
+
+WP10b puts the speech encoder on DirectML on Windows when the speech setting
+`directmlOnWindows` asks for it (`OnnxOptions::directml`, set from the setting by
+`steno_services::speech::SpeechSetup` and carried to the sidecar in its load
+request, on Windows only; the child answers with the provider it chose). Only the
+encoder moves: the decoder and the joiner run once per token on one frame, and
+Silero on 32 ms frames, where a round trip to the GPU costs more than the step;
+the diarizer stays on the CPU because it runs in the app's process, where
+speech-stack decision 5 keeps no GPU driver. The probe is the session itself:
+DirectML in the ONNX Runtime build, a hardware DirectX 12 adapter (the device
+filter leaves out WARP), the session created, one encoder run on a second of
+silence. Any failure opens the encoder on the CPU, and a later run that fails on
+DirectML reopens it on the CPU for good and runs again, so the job does not fail.
+A child whose CPU reopen fails too exits without answering, which counts as a
+crash on DirectML.
+
+An abort inside the driver still ends the sidecar. A child that crashes, hangs or
+overruns the memory ceiling with DirectML in use switches DirectML off for the rest
+of the app's run: the switch is process-wide, so the engines `steno-services`
+builds on every pipeline reload ask for the CPU too. Inside the probe such an end
+costs no job: no audio was sent yet, so the same call loads again in a new child
+on the CPU. Mid-run it costs that job. The provider is logged at info level, with
+no paths: by the backend when it runs in-process, and by the parent from the
+child's answers, which carry the provider in force, so a fallback after the load
+shows in the parent's log and in `SidecarHealth`. The child has no log
+subscriber; its stderr reaches the parent's log (at debug level, the fallback line
+at info) and the crash tail, so the child writes the reason for a fallback there
+in fixed words. A killed child is logged at warn level with its exit status and
+the kind of failure only; the error with the crash tail goes to debug. What is and
+is not proven:
+
+- **Off by default.** Gate G4 (at least three times the CPU's speed on an
+  integrated GPU) is open with no machine, and so is whether DirectML's
+  transcripts match the CPU's on FLEURS (gate G1 was measured on the CPU). The
+  default flips when a Windows machine with a GPU has measured both. The
+  `DirectMl` label means the provider is registered for the encoder's session;
+  ONNX Runtime may still place nodes DirectML does not support on the CPU, which
+  the measurement checks in ONNX Runtime's verbose session log. A child that
+  hangs is killed at its deadline, but the kill waits for the child's exit
+  without bound, so a child stuck in a driver call could hold the engine's lock;
+  the measurement checks whether a hung DirectML child exits when killed.
+- **The CPU path is unchanged.** With the setting off, and on Linux and macOS
+  where it is ignored, the ten FLEURS German `cat/` files give segments and tokens
+  byte-identical to `main`'s on atlas (`STENO_MODELS_DIR` with the fp32 export).
+- **The fallback runs.** On the `windows-latest` runner (no GPU), the "DirectML
+  probe, with output" step finds DirectML in the build, DirectML refuses to start
+  because no device matches the default filter (`NoDevice`), and the session runs
+  on the CPU; the step fails if the log says otherwise. Under wine 11 with the MSVC
+  build (`cargo xwin`) the probe ends the same way.
+- **After a failure.** A failed run moving to the CPU is tested on a hand-written
+  ONNX model with a CPU session labelled `DirectML`. The switch-off is tested with
+  the fake engine on Windows: an abort on DirectML leaves the next child and every
+  later engine on the CPU, an abort inside the probe loads again on the CPU within
+  the same call, a child that lost its encoder on DirectML exits unanswered and
+  switches DirectML off, and an error, a release or a crash after a fallback to
+  the CPU leaves DirectML on. On every platform, a crash inside a load on the CPU
+  is not retried within the call. No real GPU fault has run.
+- **`DirectML.dll` is a load-time import** of every Windows binary that links
+  ONNX Runtime, with or without this package: pyke publishes only DirectML builds
+  of ONNX Runtime for Windows, and `ort-sys` links `DirectML.lib` for them. ONNX
+  Runtime calls `DMLCreateDevice1(.., DML_FEATURE_LEVEL_5_0, ..)`, which needs
+  DirectML 1.8. The bundles from #184 install `DirectML.dll` beside the binaries,
+  so the app does not depend on the copy in `System32`. A binary without the DLL
+  beside it loads that copy, which is 1.8 only from Windows 11 22H2 (Windows 10
+  2004 has 1.1, Windows 11 21H2 has 1.6): from Windows 10 2004 the process starts
+  but DirectML falls back with `NoDevice`, and on 1903 and 1909 the process does
+  not start at all. The G4 machine needs the DLL beside the binary. Neither case
+  has run on Windows.
+- **Privacy.** ONNX Runtime's telemetry stays off. With DirectML on, `DirectML.dll`
+  and Direct3D 12 may log to Windows' own diagnostic data as for any program that
+  uses them; Steno opens nothing for it, and no audio or text is involved. Before
+  the default flips, the measurement records which event providers a DirectML
+  session uses, and the bundles are to carry the redistributable's licence notice,
+  which they do not yet.
+- **Not done:** CUDA on Linux and the whisper.cpp Vulkan engine (speech-stack
+  WP4), a device choice (the system's default GPU is used), and the setting in
+  the Settings window (the parity item under Speech).
+
+Parity items: the Speech list.
