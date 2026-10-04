@@ -151,24 +151,28 @@ extension HandoverEngine {
   /// the status while chunks are missing or while an earlier `complete` is
   /// still verifying or admitting; 422 on a hash mismatch, after which the
   /// partial is gone and the phone starts over; 401 while a revoke of the
-  /// device is in flight, or when one missed the receipt because the
-  /// receipt was only in the store (after a restart), after which the files
-  /// are gone. A revoke that finds the receipt in memory discards the files
-  /// itself; a verify of them then answers 500, and the phone's next
-  /// request gets 401 at the gate.
+  /// device is in flight or when one landed during the store read of a
+  /// recording not yet admitted. A revoke during the verify discards the
+  /// files itself; the verify then answers 500 and the phone's next request
+  /// 401.
   func complete(_ recordingID: UUID, device: PairedDevice) async -> HandoverResponse {
     guard revoking[device.id] == nil else { return Self.unauthorized }
     let revocation = revocations[device.id, default: 0]
     guard var receipt = await ownedReceipt(recordingID, device: device) else {
       return .problem(.notFound, "no such recording")
     }
-    // A revoke during the store read missed the receipt; refuse before
-    // anything is written for it.
+    if let meetingID = receipt.state.meetingID {
+      // Admitted before, so a revoke during the read admits nothing new.
+      // A 401 would make the phone keep the recording, and its upload after
+      // pairing again would become a second meeting.
+      if revocations[device.id, default: 0] != revocation { forget(recordingID) }
+      return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
+    }
+    // A revoke during the store read missed the receipt. Refuse before the
+    // `.verifying` write, which would put its row back once the phone paired
+    // again.
     if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
       return refused
-    }
-    if let meetingID = receipt.state.meetingID {
-      return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
     }
     // One `complete` per recording at a time: the phone retries after its
     // own timeout, and a second verify or admission of the same file must

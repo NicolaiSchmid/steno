@@ -124,12 +124,14 @@ import Testing
     let paired: PairedDevice
     let bytes: Data
     let metadata: RecordingMetadata
+    /// The meeting, when the phone completed the upload before the restart.
+    let meetingID: UUID?
     let service: HandoverService
     let intake: FakeHandoverIntake
     /// The phone, talking to the restarted engine.
     let phone: EngineDevice
 
-    init() async throws {
+    init(completed: Bool = false) async throws {
       let chunkSize = 64 * 1024
       gate = try StoreGate()
       test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
@@ -138,6 +140,10 @@ import Testing
       bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 99)
       metadata = before.metadata(for: bytes, chunkSize: chunkSize)
       try await before.uploadAll(metadata, bytes)
+      meetingID =
+        completed
+        ? try await before.complete(metadata.recordingID).json(Wire.CompleteResponse.self).meetingID
+        : nil
       intake = FakeHandoverIntake()
       let now = test.now
       service = HandoverService(
@@ -264,6 +270,30 @@ import Testing
     #expect(await restarted.intake.admissions.count == 0, "the intake never sees the file")
     #expect(try await restarted.phone.announce(restarted.metadata).code == 500)
     #expect(await engine.receiptsSnapshot.isEmpty, "a failed announce leaves nothing")
+    #expect(!gate.timedOut, "nothing waited on the held read")
+  }
+
+  /// A recording admitted before the restart answers its meeting also when
+  /// a revoke lands during the read: a 401 would make the phone keep it, and
+  /// its upload after pairing again would become a second meeting.
+  @Test(.timeLimit(.minutes(1)))
+  func aCompletedRecordingAnswersItsMeetingAfterARevokeDuringTheRead() async throws {
+    let restarted = try await Restarted(completed: true)
+    defer { restarted.remove() }
+    let gate = restarted.gate
+
+    gate.receiptRead.arm()
+    let completing = Task { await restarted.phone.complete(restarted.id) }
+    await gate.receiptRead.held()
+    try await restarted.service.revoke(restarted.paired.id)
+    gate.receiptRead.release()
+    let response = await completing.value
+
+    #expect(response.code == 200)
+    let meetingID = try #require(restarted.meetingID)
+    #expect(try response.json(Wire.CompleteResponse.self).meetingID == meetingID)
+    #expect(await restarted.intake.admissions.count == 0, "nothing is admitted again")
+    #expect(await restarted.service.engine.receiptsSnapshot.isEmpty)
     #expect(!gate.timedOut, "nothing waited on the held read")
   }
 
