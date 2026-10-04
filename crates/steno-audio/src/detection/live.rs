@@ -87,8 +87,9 @@ mod wasapi {
     }
 
     /// The session-backed source. Each `changes()` call runs one thread
-    /// that holds the COM registrations for as long as the source lives
-    /// (or until the receiver is dropped).
+    /// that holds the COM registrations for as long as the source lives,
+    /// or, once its receiver is dropped, until the next notification: a
+    /// detector started many times holds that many threads until then.
     #[derive(Default)]
     pub struct LiveProcessAudioActivity {
         registrations: Mutex<Vec<Registration>>,
