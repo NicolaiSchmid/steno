@@ -1594,10 +1594,6 @@ struct GatedStop {
     delivered: Arc<AtomicUsize>,
     at_gate: Mutex<Sender<()>>,
     gate: Mutex<Receiver<()>>,
-    /// The `start()` call (counted from 1) that waits at the start gate;
-    /// 0 for none. See [`GatedStop::gate_start`].
-    gated_start: AtomicUsize,
-    start_gate: Mutex<Option<(Sender<()>, Receiver<()>)>>,
 }
 
 impl GatedStop {
@@ -1621,21 +1617,8 @@ impl GatedStop {
             delivered: Arc::new(AtomicUsize::new(0)),
             at_gate: Mutex::new(at_gate),
             gate: Mutex::new(gate),
-            gated_start: AtomicUsize::new(0),
-            start_gate: Mutex::new(None),
         };
         (Arc::new(backend), reached, open)
-    }
-
-    /// Makes `start()` call number `call` report itself on the returned
-    /// receiver and wait for the returned sender before it starts anything;
-    /// the session holds its lock across that call.
-    fn gate_start(&self, call: usize) -> (Receiver<()>, Sender<()>) {
-        let (at_gate, reached) = channel();
-        let (open, gate) = channel();
-        *self.start_gate.lock().unwrap() = Some((at_gate, gate));
-        self.gated_start.store(call, Ordering::SeqCst);
-        (reached, open)
     }
 
     fn delivered(&self) -> usize {
@@ -1651,12 +1634,6 @@ impl CaptureBackend for GatedStop {
         sink: Arc<LaneFrameSink>,
     ) -> Result<CaptureStream, CaptureError> {
         let call = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
-        if call == self.gated_start.load(Ordering::SeqCst)
-            && let Some((at_gate, gate)) = self.start_gate.lock().unwrap().take()
-        {
-            at_gate.send(()).unwrap();
-            gate.recv().unwrap();
-        }
         let first = call == 1;
         if !first && self.restarts_fail {
             return Err(CaptureError::InputDeviceUnavailable);
@@ -1706,10 +1683,15 @@ impl CaptureBackend for GatedStop {
 }
 
 /// Calls `stop()` on its own thread while another thread (a finalise, or a
-/// rebuild's teardown) waits at `backend`'s gate, gives the call 200 ms to
-/// land in that window (a `stop()` that does not wait returns inside it),
-/// then opens the gate. Returns what `stop()` returned and the producers
-/// alive at that moment.
+/// rebuild's teardown) waits at `backend`'s gate, and opens the gate once
+/// the call has returned (a `stop()` that does not wait returns at once) or
+/// once 200 ms have passed and the state reads `Stopping`. A rebuild's
+/// teardown runs while `Recording`, so the gate stays shut until the
+/// `stop()` has set `Stopping`, which every later rebuild step checks,
+/// however late its thread runs. A finalise holds `Stopping` throughout,
+/// and a `stop()` that arrives after it ends gets the same answer. After
+/// `RECV` the gate opens regardless and the caller's assertions fail.
+/// Returns what `stop()` returned and the producers alive at that moment.
 fn stop_at_the_gate(
     session: &CaptureSession,
     backend: &GatedStop,
@@ -1720,8 +1702,12 @@ fn stop_at_the_gate(
             let result = session.stop();
             (result, backend.alive.load(Ordering::SeqCst))
         });
-        let deadline = Instant::now() + Duration::from_millis(200);
-        while !stopper.is_finished() && Instant::now() < deadline {
+        let started = Instant::now();
+        while !stopper.is_finished()
+            && started.elapsed() < RECV
+            && (started.elapsed() < Duration::from_millis(200)
+                || session.state() != CaptureState::Stopping)
+        {
             std::thread::sleep(Duration::from_millis(5));
         }
         open.send(()).unwrap();
@@ -1783,7 +1769,10 @@ fn stop_during_a_rebuilds_teardown_waits_for_it() {
 /// The disk fills while recording and a user's `stop()` arrives while that
 /// failure is still finalising. It waits for the finalise, as Swift's actor
 /// ordered the two, and returns the recording the failure carries: no
-/// error, and no producer running when it returns.
+/// error, and no producer running when it returns. Whether this `stop()`
+/// waited or arrived after the finalise is not observable here; the unit
+/// tests in `src/capture/session.rs` force the wait's window, and a
+/// `start()` that overtakes it, deterministically.
 #[test]
 fn stop_during_a_writer_failures_finalise_returns_its_recording() {
     let directory = tempfile::tempdir().unwrap();
@@ -2008,76 +1997,6 @@ fn first_writer_fails(
     .unwrap()
 }
 
-/// A `stop()` waits out a writer failure's finalise, and a `start()` takes
-/// the lock between the finalise's `Failed` and that `stop()`: the stop
-/// answers `InvalidState` and leaves the new recording running, instead of
-/// ending a meeting it was never asked to end. The start spins on
-/// `start()` so it takes the lock first nearly every time and then holds
-/// it at the backend's start gate; an attempt where the stop still came
-/// first (it then returns the failed recording) is run again.
-#[test]
-fn a_stop_that_waited_does_not_stop_the_next_recording() {
-    let mut overtaken = 0;
-    for _ in 0..20 {
-        let directory = tempfile::tempdir().unwrap();
-        let (backend, at_gate, open) = GatedStop::new(1, None, false);
-        let (start_reached, open_start) = backend.gate_start(2);
-        let session = first_writer_fails(directory.path(), backend.clone(), CaptureMode::InPerson);
-        let first = Uuid::new_v4();
-        let second = Uuid::new_v4();
-        session.start(first).unwrap();
-        at_gate
-            .recv_timeout(RECV)
-            .expect("the writer failure's finalise is stopping the backend");
-        assert_eq!(session.state(), CaptureState::Stopping);
-
-        let stopped = std::thread::scope(|scope| {
-            let stopper = scope.spawn(|| session.stop());
-            std::thread::sleep(Duration::from_millis(200));
-            let starter = scope.spawn(|| {
-                loop {
-                    match session.start(second) {
-                        Err(CaptureError::InvalidState(_)) => std::hint::spin_loop(),
-                        started => return started,
-                    }
-                }
-            });
-            open.send(()).unwrap();
-            start_reached
-                .recv_timeout(RECV)
-                .expect("the second start reaches the backend");
-            open_start.send(()).unwrap();
-            starter.join().unwrap().unwrap();
-            stopper.join().unwrap()
-        });
-        match stopped {
-            Ok(result) => {
-                assert_eq!(
-                    result.asset.meeting_id, first,
-                    "stop() ended the recording started after it waited"
-                );
-            }
-            Err(error) => {
-                assert!(matches!(error, CaptureError::InvalidState(_)), "{error:?}");
-                assert!(
-                    matches!(session.state(), CaptureState::Recording { .. }),
-                    "{:?}",
-                    session.state()
-                );
-                overtaken += 1;
-            }
-        }
-        std::thread::sleep(Duration::from_millis(30));
-        let result = session.stop().unwrap();
-        assert_eq!(result.asset.meeting_id, second);
-        assert_eq!(session.state(), CaptureState::Idle);
-        if overtaken > 0 {
-            break;
-        }
-    }
-    assert!(overtaken > 0, "the start never took the lock first");
-}
-
 /// Fails every write once `full` is set, as a disk that fills does.
 struct FullFrom(RecordingWriter, Arc<AtomicBool>);
 
@@ -2127,12 +2046,21 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
             .recv_timeout(RECV)
             .expect("stop() is tearing the backend down");
         full.store(true, Ordering::SeqCst);
+        // Asserted once the gate is open: a panic while `stopper` waits at
+        // the gate would leave the scope joining it forever.
         let before = backend.delivered();
-        while backend.delivered() == before {
+        let deadline = Instant::now() + RECV;
+        while backend.delivered() == before && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
+        let delivered_on = backend.delivered() > before;
         open.send(()).unwrap();
-        stopper.join().unwrap()
+        let returned = stopper.join().unwrap();
+        assert!(
+            delivered_on,
+            "the backend delivered nothing during the teardown within {RECV:?}"
+        );
+        returned
     })
     .expect("stop() returns the recording");
     assert!(master_of(&result).frame_count() < backend.delivered());
