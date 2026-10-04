@@ -1650,6 +1650,8 @@ mod tests {
         store.verify(&asset).unwrap();
         // A second ensure is a no-op (the server is gone).
         store.ensure(&asset, &mut |_| {}).unwrap();
+        // Removing the asset takes its lock file with it.
+        assert_eq!(names(&store, &asset), ["model.onnx", "model.onnx.lock"]);
         store.remove(&asset).unwrap();
         assert!(!directory.exists());
     }
