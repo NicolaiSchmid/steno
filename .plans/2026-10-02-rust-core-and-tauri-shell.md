@@ -689,6 +689,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   of its two models is 26 MB, against Parakeet's 2.6 GB export); crash isolation is.
   Moving it needs a request of its own in the sidecar protocol; no work package has it
   yet.
+- Open: a sidecar whose parent is gone exits through `std::process::exit` from its
+  heartbeat thread (`send` in `crates/steno-speech-sidecar/src/lib.rs`) while ONNX
+  Runtime may still be inferring, so atexit handlers and C++ static destructors run
+  beside it; a hang there would keep the 2-3 GB working set alive. `libc::_exit` on
+  that path would avoid it; unverified, and no work package has it yet.
 - The Swift `steno process` stamped `startedAt` from `Date()` minus the duration; the
   Rust CLI does the same to the millisecond, so a `steno export` of a CLI-processed
   meeting differs only in the ids both sides mint at random.
