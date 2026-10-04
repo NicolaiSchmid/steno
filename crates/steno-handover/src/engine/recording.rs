@@ -256,18 +256,17 @@ impl Engine {
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
-        // A `complete` that starts while a revoke's store delete is pending
-        // takes the count the revoke already bumped, and its read may still
-        // be served before the delete, so the checks below would miss the
-        // revoke: refuse before reading. `revoked` holds the device from the
-        // revoke until it pairs again. The receipt's owner is not known yet,
+        // `revoked` holds the device from the revoke until it pairs again. A
+        // `complete` that starts during the revoke's store delete takes the
+        // count already bumped and may still read the row, so the checks
+        // below would miss the revoke. The receipt's owner is not known yet,
         // so nothing is discarded.
         let revocation = {
             let state = self.state();
             if state.revoked.contains(&device.id) {
                 return Self::unauthorized();
             }
-            state.revocations.get(&device.id).copied().unwrap_or(0)
+            state.revocation_count(device.id)
         };
         let mut receipt = match self.owned_receipt(recording_id, device).await {
             Ok(receipt) => receipt,
@@ -282,12 +281,10 @@ impl Engine {
             }
             return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });
         }
-        // The receipt read and the verify yield. A revoke meanwhile discards
-        // files only for receipts it finds in memory, and after a restart
-        // this one may be only in the store: the file of a revoked device
-        // must not reach the intake. Checked here, before the `verifying`
-        // write, which would put the row back once the phone paired again,
-        // and again after the hash (`verified_file`).
+        // A revoke during the read discards the files of receipts in memory
+        // only, and after a restart this one may be only in the store.
+        // Checked before the `verifying` write, which would put the row back
+        // once the phone paired again, and after the hash (`verified_file`).
         if let Some(refused) = self.refusal(recording_id, device, revocation) {
             return refused;
         }
@@ -310,11 +307,10 @@ impl Engine {
         }
     }
 
-    /// 401 when the device was revoked since `complete` took `revocation`.
-    /// The count sees every such revoke, also one followed by a pairing,
-    /// which takes the device out of `revoked`. The revoke may have missed
-    /// the receipt during its read, so its files are discarded and it leaves
-    /// memory here.
+    /// 401 when the device was revoked since `complete` took `revocation`,
+    /// also by a revoke that a pairing has since cleared from `revoked`.
+    /// That revoke may have missed the receipt, so its files are discarded
+    /// and it leaves memory.
     fn refusal(
         &self,
         recording_id: Uuid,
@@ -329,15 +325,9 @@ impl Engine {
         Some(Self::unauthorized())
     }
 
-    /// Whether the device was revoked since its revocation count was
-    /// `revocation`.
+    /// Whether the device's revoke count moved on from `revocation`.
     fn revoked_since(&self, device: &PairedDevice, revocation: u64) -> bool {
-        self.state()
-            .revocations
-            .get(&device.id)
-            .copied()
-            .unwrap_or(0)
-            != revocation
+        self.state().revocation_count(device.id) != revocation
     }
 
     /// The verified file: the one already waiting after an earlier intake
@@ -384,12 +374,11 @@ impl Engine {
             Err(error) => Err(error),
         };
         // The `verifying` write kept the receipt in memory, so a revoke
-        // during the write or the hash found it there and discarded the
-        // files itself. Only a revoke re-creates a partial during a verify
-        // (every other discard needs the `completing` mark or runs at
-        // start), so whatever is at the path now is the upload of a phone
-        // that paired again and announced anew: neither discard it, write
-        // `failed` over its receipt nor promote it.
+        // since then discarded the files itself. Only a revoke lets a partial
+        // be created again during a verify (every other discard needs the
+        // `completing` mark or runs at start), so a partial there now is the
+        // upload of a phone that paired again: leave it and its receipt
+        // alone.
         if self.revoked_since(device, revocation) {
             return Verification::Answered(Self::unauthorized());
         }

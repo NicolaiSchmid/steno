@@ -194,19 +194,23 @@ struct State {
     /// intake's answer. The verify and the admit yield, so a retried
     /// `complete` must not start a second verify or admission.
     completing: BTreeSet<Uuid>,
-    /// Devices revoked since start and not paired again. Their receipts
-    /// stay out of `active_receipts` and the stream. A request that read one
-    /// before the revoke does not write it back. A `complete` of one of
-    /// these devices is refused before it reads.
+    /// Devices revoked since start and not paired again: their receipts
+    /// stay out of `active_receipts` and the stream, also when a request
+    /// that read one before the revoke writes it back, and their `complete`
+    /// is refused before it reads.
     revoked: BTreeSet<Uuid>,
-    /// Revokes per device since start. A `complete` that sees the count
-    /// change across its receipt read or its verify admits nothing. Pairing
-    /// again does not reset it: the phone pairs again under the same device
-    /// id.
+    /// Revokes per device since start, never reset: the phone pairs again
+    /// under the same device id. A `complete` that sees the count change
+    /// across its receipt read or its verify admits nothing.
     revocations: BTreeMap<Uuid, u64>,
 }
 
 impl State {
+    /// The device's entry in `revocations`.
+    fn revocation_count(&self, device_id: Uuid) -> u64 {
+        self.revocations.get(&device_id).copied().unwrap_or(0)
+    }
+
     /// Keeps `receipt` as the live copy, unless its device was revoked.
     fn remember(&mut self, receipt: &HandoverReceipt) {
         if !self.revoked.contains(&receipt.device_id) {
@@ -372,9 +376,8 @@ impl Engine {
     ///
     /// A failed store delete leaves the device paired in the store but
     /// revoked in memory: its `complete` answers 401 until it pairs again or
-    /// a retried revoke finishes. The user asked for the revoke and sees the
-    /// error; a half-revoked phone that cannot hand over is safer than one
-    /// that can.
+    /// a retried revoke finishes. A half-revoked phone that cannot hand over
+    /// is safer than one that can.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
         {
@@ -481,7 +484,7 @@ impl Engine {
             last_seen_at: Some(timestamp),
         };
         let hash = DeviceTokens::hash(&token);
-        let revocation = self.state().revocations.get(&device_id).copied();
+        let revocation = self.state().revocation_count(device_id);
         if let Err(error) = self
             .with_store(move |store| store.save_paired_device(&device, &hash))
             .await
@@ -497,7 +500,7 @@ impl Engine {
         // pairing clears it.
         {
             let mut state = self.state();
-            if state.revocations.get(&device_id).copied() == revocation {
+            if state.revocation_count(device_id) == revocation {
                 state.revoked.remove(&device_id);
             }
         }
