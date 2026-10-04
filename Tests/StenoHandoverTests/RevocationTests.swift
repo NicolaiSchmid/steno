@@ -120,29 +120,30 @@ import Testing
   private struct Restarted {
     let gate: StoreGate
     let test: TestService
-    /// The phone's view before the restart.
-    let phone: EngineDevice
+    /// The phone's pairing, made before the restart.
+    let paired: PairedDevice
     let bytes: Data
     let metadata: RecordingMetadata
     let service: HandoverService
     let intake: FakeHandoverIntake
-    /// The same phone's view of the restarted engine.
-    let device: EngineDevice
+    /// The phone, talking to the restarted engine.
+    let phone: EngineDevice
 
     init() async throws {
       let chunkSize = 64 * 1024
       gate = try StoreGate()
       test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
-      phone = try await EngineClient.paired(test)
+      let before = try await EngineClient.paired(test)
+      paired = before.device
       bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 99)
-      metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
-      try await phone.uploadAll(metadata, bytes)
+      metadata = before.metadata(for: bytes, chunkSize: chunkSize)
+      try await before.uploadAll(metadata, bytes)
       intake = FakeHandoverIntake()
       let now = test.now
       service = HandoverService(
         configuration: test.service.configuration, store: test.store, intake: intake,
         identity: test.service.identity, now: { now })
-      device = EngineDevice(engine: service.engine, device: phone.device)
+      phone = EngineDevice(engine: service.engine, device: paired)
     }
 
     var id: UUID { metadata.recordingID }
@@ -173,10 +174,10 @@ import Testing
     let restarted = try await Restarted()
     defer { restarted.remove() }
     let gate = restarted.gate
-    let phone = restarted.phone.device
+    let phone = restarted.paired
 
     gate.receiptRead.arm()
-    let completing = Task { await restarted.device.complete(restarted.id) }
+    let completing = Task { await restarted.phone.complete(restarted.id) }
     await gate.receiptRead.held()
     try await restarted.service.revoke(phone.id)
     if pairsAgain {
@@ -190,11 +191,11 @@ import Testing
 
     #expect(response.code == 401, "the phone learns it was unpaired")
     try await restarted.expectNothingAdmitted()
-    let paired = try await restarted.test.store.pairedDevice(id: phone.id)
-    #expect((paired != nil) == pairsAgain, "only pairing again brings the device back")
-    if let paired {
+    let stored = try await restarted.test.store.pairedDevice(id: phone.id)
+    #expect((stored != nil) == pairsAgain, "only pairing again brings the device back")
+    if let stored {
       // The new pairing uploads the recording again, and it goes through.
-      let again = EngineDevice(engine: restarted.service.engine, device: paired)
+      let again = EngineDevice(engine: restarted.service.engine, device: stored)
       try await again.uploadAll(restarted.metadata, restarted.bytes)
       #expect(await again.complete(restarted.id).code == 200)
     }
@@ -223,13 +224,13 @@ import Testing
     let gate = restarted.gate
 
     gate.receiptRead.arm()
-    let readBefore = Task { await restarted.device.complete(restarted.id) }
+    let readBefore = Task { await restarted.phone.complete(restarted.id) }
     await gate.receiptRead.held()
     gate.deviceDelete.arm()
-    let revoking = Task { try await restarted.service.revoke(restarted.phone.device.id) }
+    let revoking = Task { try await restarted.service.revoke(restarted.paired.id) }
     await gate.deviceDelete.held()
 
-    let startedDuring = await restarted.device.complete(restarted.id)
+    let startedDuring = await restarted.phone.complete(restarted.id)
     #expect(startedDuring.code == 401, "a complete during the delete is refused")
     gate.receiptRead.release()
     #expect(await readBefore.value.code == 401, "a complete that read before it is refused")
