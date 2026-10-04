@@ -777,7 +777,7 @@ mod tests {
     /// Starts at the same moment begin one recording between them: the
     /// others return without a session, and stopping saves that one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn starts_at_once_begin_one_recording() {
+    async fn concurrent_starts_begin_one_recording() {
         let harness = harness(&[]);
         let all_ready = Arc::new(std::sync::Barrier::new(8));
         let starters: Vec<_> = (0..8)

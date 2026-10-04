@@ -231,6 +231,9 @@ impl PipelineDependencies {
         self
     }
 
+    /// Carries `latch` instead of the fresh one from [`new`](Self::new), so
+    /// every pipeline built over dependencies that carry it quits on one
+    /// [`QuitLatch::set`] (the services' reloads share the app's).
     #[must_use]
     pub fn with_quit_latch(mut self, latch: QuitLatch) -> Self {
         self.quit_latch = latch;

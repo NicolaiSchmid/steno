@@ -73,7 +73,7 @@ impl Smoke {
     /// the run can check the window took it.
     pub fn note_panel_size(&self, panel: Panel, size: (f64, f64)) {
         if self.armed.load(Ordering::SeqCst) {
-            eprintln!(
+            stderr_line!(
                 "[steno-desktop] smoke: the {} panel measures {} by {}",
                 panel.label(),
                 size.0,
@@ -96,7 +96,7 @@ impl Smoke {
     /// run waits for.
     pub fn note_ready(&self, label: &str) {
         if self.armed.load(Ordering::SeqCst) {
-            eprintln!("[steno-desktop] smoke: page.ready from {label}");
+            stderr_line!("[steno-desktop] smoke: page.ready from {label}");
         }
         if label == BridgeWindow::Main.as_str() {
             self.main_ready.store(true, Ordering::SeqCst);
@@ -213,14 +213,14 @@ pub fn arm(app: &AppHandle) {
         Wait::NotASmokeRun => return,
         Wait::Seconds(seconds) => seconds,
         Wait::Invalid(value) => {
-            eprintln!(
+            stderr_line!(
                 "[steno-desktop] smoke: {SECONDS_VARIABLE} must be a positive number, got {value:?}"
             );
             process::exit(2);
         }
     };
     app.state::<Smoke>().armed.store(true, Ordering::SeqCst);
-    eprintln!("[steno-desktop] smoke: waiting {seconds}s for page.ready and a snapshot on main");
+    stderr_line!("[steno-desktop] smoke: waiting {seconds}s for page.ready and a snapshot on main");
     // Side by side on the Xvfb screen so one root capture shows every window.
     let (main_width, main_height) = Spec::of(BridgeWindow::Main).size;
     let opened = windows::open(
@@ -238,7 +238,7 @@ pub fn arm(app: &AppHandle) {
         )
     });
     if let Err(error) = opened {
-        eprintln!("[steno-desktop] smoke: opening the other windows failed: {error}");
+        stderr_line!("[steno-desktop] smoke: opening the other windows failed: {error}");
     }
     // A meeting for main before its page has mounted, as a `steno:` link
     // at a cold launch asks: it must wait for main's `page.ready`.
@@ -248,7 +248,7 @@ pub fn arm(app: &AppHandle) {
         meeting_id: parse_uuid(SMOKE_MEETING),
     };
     if let Err(error) = windows::open_requested(app, &app.state::<Host>(), &meeting) {
-        eprintln!("[steno-desktop] smoke: asking main for a meeting failed: {error}");
+        stderr_line!("[steno-desktop] smoke: asking main for a meeting failed: {error}");
     }
     // Both panels at once, under Settings, which the one rule never does
     // (`FloatingContent::resolve`); the run shows them to screenshot them.
@@ -261,7 +261,7 @@ pub fn arm(app: &AppHandle) {
         (Panel::Bubble, None, PANEL_BUBBLE_Y),
     ] {
         if let Err(error) = panels::show_at(app, panel, query.as_deref(), (PANELS_X, y)) {
-            eprintln!(
+            stderr_line!(
                 "[steno-desktop] smoke: opening the {} panel failed: {error}",
                 panel.label()
             );
@@ -272,7 +272,7 @@ pub fn arm(app: &AppHandle) {
         thread::sleep(Duration::from_secs(seconds));
         let checks = check_panels(&handle).and_then(|()| check_main_hides(&handle));
         let outcome = handle.state::<Smoke>().outcome(checks);
-        eprintln!("[steno-desktop] smoke: {}", outcome.message(seconds));
+        stderr_line!("[steno-desktop] smoke: {}", outcome.message(seconds));
         handle.exit(outcome.exit_code());
     });
 }
@@ -308,9 +308,10 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
                 reported.0, reported.1, window_size.0, window_size.1
             ));
         }
-        eprintln!(
+        stderr_line!(
             "[steno-desktop] smoke: the {label} window is {} by {}",
-            window_size.0, window_size.1
+            window_size.0,
+            window_size.1
         );
         keeps_its_size(&window, label, window_size)?;
         if panel == Panel::Prompt {
@@ -320,7 +321,7 @@ fn check_panels(app: &AppHandle) -> Result<(), String> {
         if window.is_visible().map_err(|error| error.to_string())? {
             return Err(format!("the {label} panel stayed visible after hide"));
         }
-        eprintln!("[steno-desktop] smoke: the {label} panel showed and hid");
+        stderr_line!("[steno-desktop] smoke: the {label} panel showed and hid");
     }
     Ok(())
 }
@@ -344,7 +345,7 @@ fn takes_a_second_prompt(app: &AppHandle, window: &WebviewWindow) -> Result<(), 
             url.fragment()
         ));
     }
-    eprintln!("[steno-desktop] smoke: the prompt's window took a second prompt");
+    stderr_line!("[steno-desktop] smoke: the prompt's window took a second prompt");
     Ok(())
 }
 
@@ -362,7 +363,7 @@ fn check_main_hides(app: &AppHandle) -> Result<(), String> {
     if main.is_visible().map_err(|error| error.to_string())? {
         return Err("the main window stayed visible after a close".into());
     }
-    eprintln!("[steno-desktop] smoke: closing main hid it");
+    stderr_line!("[steno-desktop] smoke: closing main hid it");
     Ok(())
 }
 
@@ -379,7 +380,7 @@ fn keeps_its_size(window: &WebviewWindow, label: &str, size: (f64, f64)) -> Resu
         return Err(format!("the {label} panel is{not} resizable"));
     }
     if !resizable {
-        eprintln!("[steno-desktop] smoke: the {label} panel cannot be resized");
+        stderr_line!("[steno-desktop] smoke: the {label} panel cannot be resized");
         return Ok(());
     }
     window
@@ -393,7 +394,7 @@ fn keeps_its_size(window: &WebviewWindow, label: &str, size: (f64, f64)) -> Resu
             size.0, size.1, after.0, after.1
         ));
     }
-    eprintln!("[steno-desktop] smoke: the {label} panel kept its size");
+    stderr_line!("[steno-desktop] smoke: the {label} panel kept its size");
     Ok(())
 }
 

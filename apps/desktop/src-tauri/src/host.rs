@@ -620,7 +620,7 @@ impl Host {
     /// Quits the pipelines (`steno_services::pipeline::CurrentPipeline::quit`)
     /// ahead of the shutdown, which quits them again: an exit signal calls
     /// it before its request waits for the main thread. A no-op for the
-    /// fixtures.
+    /// fixtures. Rust only: Swift had no signal handler.
     #[cfg(unix)]
     pub fn quit_pipeline(&self) {
         #[cfg(not(feature = "fixture-host"))]

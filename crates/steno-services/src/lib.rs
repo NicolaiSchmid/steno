@@ -117,6 +117,9 @@ pub(crate) fn block_on<T>(
     tokio::task::block_in_place(|| runtime.block_on(future))
 }
 
+// Unix only: there a closed terminal no longer ends the app (the shell's
+// SIGHUP asks for Quit), so its writes to stderr fail; on Windows a closed
+// console ends the process, and a release build has no console.
 #[cfg(all(test, unix))]
 mod tests {
     use std::process::{Command, Stdio};
