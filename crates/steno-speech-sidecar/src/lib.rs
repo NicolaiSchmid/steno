@@ -439,10 +439,21 @@ fn rss_bytes() -> u64 {
 }
 
 /// Writes one reply; a broken stdout means the parent is gone, so the
-/// child exits.
+/// child exits. On unix through `_exit`: the heartbeat thread can get here
+/// while ONNX Runtime still infers on others, and `process::exit` would run
+/// the atexit handlers and C++ static destructors beside them; a hang there
+/// would keep the working set alive past the ignored exit signals. Nothing
+/// needs flushing, stdout is gone.
 fn send(reply: &Reply) {
     let mut out = io::stdout().lock();
     if protocol::write_frame(&mut out, reply, &[]).is_err() {
+        #[cfg(unix)]
+        // SAFETY: `_exit` ends the process at once; it runs no handler and
+        // touches no state the other threads hold.
+        unsafe {
+            libc::_exit(0);
+        }
+        #[cfg(not(unix))]
         std::process::exit(0);
     }
 }

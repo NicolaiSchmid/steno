@@ -19,8 +19,8 @@ memory-stats.workspace = true
 serde.workspace = true
 
 # Unix only: the child ignores SIGINT, SIGTERM and SIGHUP (`serve`), so the
-# signals that end the app do not end its job first. Already in the lock
-# through tokio.
+# signals that end the app do not end its job first, and exits through
+# `_exit` once stdout breaks (`send`). Already in the lock through tokio.
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
