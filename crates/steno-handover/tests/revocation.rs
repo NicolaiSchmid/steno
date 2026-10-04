@@ -17,7 +17,7 @@
 mod common;
 
 use std::future::Future as _;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::task::{Context, Wake, Waker};
 use std::time::Duration;
 
@@ -365,8 +365,23 @@ async fn a_complete_that_read_its_receipt_before_a_revoke_admits_nothing() {
         device: phone.device.clone(),
     };
 
-    // `complete` runs to its store read, the read returns, and only then
-    // does the revoke run, whole, before `complete` goes on.
+    // `complete` runs to its store read and waits there: the store is held,
+    // so the read cannot finish before the first poll returns. Once the
+    // read has returned the row, the revoke runs whole; then `complete`
+    // goes on.
+    let (held, store_is_held) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let store = first.store.clone();
+    let holder = std::thread::spawn(move || {
+        store
+            .write(|_| {
+                held.send(()).unwrap();
+                released.recv().unwrap();
+                Ok(())
+            })
+            .unwrap();
+    });
+    store_is_held.recv().unwrap();
     let woken = Arc::new(Woken::default());
     let mut completing = std::pin::pin!(device.complete(id));
     let waker = Waker::from(woken.clone());
@@ -377,6 +392,8 @@ async fn a_complete_that_read_its_receipt_before_a_revoke_admits_nothing() {
             .is_pending(),
         "complete waits on the store read"
     );
+    release.send(()).unwrap();
+    holder.join().unwrap();
     woken.0.notified().await;
     restarted.revoke(phone.device.id).await.unwrap();
     let response = completing.await;
