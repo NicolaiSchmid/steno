@@ -1683,15 +1683,15 @@ impl CaptureBackend for GatedStop {
 }
 
 /// Calls `stop()` on its own thread while another thread (a finalise, or a
-/// rebuild's teardown) waits at `backend`'s gate, and opens the gate when
-/// the call returns (a `stop()` that does not wait returns at once) or,
-/// once 200 ms have passed, when the state reads `Stopping`. A rebuild's
+/// rebuild's teardown) waits at `backend`'s gate, and opens the gate once
+/// the call has returned (a `stop()` that does not wait returns at once) or
+/// once 200 ms have passed and the state reads `Stopping`. A rebuild's
 /// teardown runs while `Recording`, so the gate stays shut until the
-/// `stop()` has taken the recording, however slowly its thread starts; a
-/// finalise holds `Stopping` already, and a `stop()` that lands after it
-/// returns the same. After `RECV` the gate opens regardless and the
-/// caller's assertions fail. Returns what `stop()` returned and the
-/// producers alive at that moment.
+/// `stop()` has set `Stopping`, which every later rebuild step checks,
+/// however late its thread runs. A finalise holds `Stopping` throughout,
+/// and a `stop()` that arrives after it ends gets the same answer. After
+/// `RECV` the gate opens regardless and the caller's assertions fail.
+/// Returns what `stop()` returned and the producers alive at that moment.
 fn stop_at_the_gate(
     session: &CaptureSession,
     backend: &GatedStop,
