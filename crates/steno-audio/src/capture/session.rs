@@ -888,9 +888,10 @@ impl Core {
                 active.system_peak_so_far = active.system_peak_so_far.max(peak);
             }
         }
-        // The old backend's listeners went with it, so the latch can open
-        // now: a report from the rebuilt backend before the gap is written
-        // reaches `device_changed`, which keeps it for `resume`.
+        // The old backend reports nothing once its `stop()` returned, so
+        // the latch can open now: a report from the rebuilt backend before
+        // the gap is written reaches `device_changed`, which keeps it for
+        // `resume`.
         sink.rearm_device_change();
         let unaccounted = match self.restart_backend(&sink, generation, cancel) {
             Restart::Started(stream, attempt) => {

@@ -144,6 +144,9 @@ struct WatchState {
     /// A stream that stopped on an error, not yet judged.
     failed: Option<StreamSource>,
     stop: bool,
+    /// The watcher thread is past its start-up COM calls and in its loop,
+    /// so `stop()` may join it.
+    ready: bool,
 }
 
 #[derive(Default)]
@@ -176,9 +179,56 @@ impl Watcher {
         self.condvar.notify_all();
     }
 
-    fn stop(&self) {
-        self.lock().stop = true;
+    /// Stops the watcher thread and joins it if it reached its loop. One
+    /// still in its start-up COM calls is left to finish them: it then
+    /// finds `stop` under the same lock and exits without reporting, so
+    /// nothing is reported once this returns.
+    fn stop_and_join(&self, thread: JoinHandle<()>) {
+        let mut state = self.lock();
+        state.stop = true;
+        let ready = state.ready;
+        drop(state);
         self.condvar.notify_all();
+        if ready {
+            let _ = thread.join();
+        }
+    }
+
+    /// The watcher thread's loop once registered: marks it ready, answers
+    /// `start` through `ready`, then hands every settled burst to `judge`
+    /// with the stream that failed meanwhile, if any, outside the lock,
+    /// until stopped.
+    fn watch(&self, ready: &SyncSender<()>, mut judge: impl FnMut(Option<StreamSource>)) {
+        let mut state = self.lock();
+        state.ready = true;
+        let _ = ready.send(());
+        loop {
+            if state.stop {
+                break;
+            }
+            let Some(last) = state.pending else {
+                state = self
+                    .condvar
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            };
+            let due = last + LiveCaptureBackend::COALESCE_DELAY;
+            let now = Instant::now();
+            if now < due {
+                state = self
+                    .condvar
+                    .wait_timeout(state, due - now)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
+                continue;
+            }
+            state.pending = None;
+            let failed = state.failed.take();
+            drop(state);
+            judge(failed);
+            state = self.lock();
+        }
     }
 }
 
@@ -270,14 +320,13 @@ struct Active {
     /// The system stream's staging, for its counts at `stop()`.
     follower: Option<Arc<FollowerLane>>,
     watcher: Arc<Watcher>,
-    /// `None` for a watcher that missed `start`'s deadline
-    /// ([`spawn_watcher`]).
-    watcher_thread: Option<JoinHandle<()>>,
+    watcher_thread: JoinHandle<()>,
 }
 
-/// The WASAPI backend; see the module doc. Restartable: `stop()` joins
-/// every thread it started that answered `start` (one still in a COM call
-/// is left to finish on its own), and `start` opens the streams afresh.
+/// The WASAPI backend; see the module doc. Restartable: `stop()` joins the
+/// stream threads and the watcher, unless the watcher is still in its
+/// start-up COM calls (left to finish on its own), and `start` opens the
+/// streams afresh.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
 }
@@ -438,32 +487,7 @@ fn run_watcher(
             .ok()
     });
     let baseline = enumerator.as_ref().map(|e| probe.baseline(e));
-    let _ = ready.send(());
-    let mut state = watcher.lock();
-    loop {
-        if state.stop {
-            break;
-        }
-        let Some(last) = state.pending else {
-            state = watcher
-                .condvar
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
-            continue;
-        };
-        let due = last + LiveCaptureBackend::COALESCE_DELAY;
-        let now = Instant::now();
-        if now < due {
-            state = watcher
-                .condvar
-                .wait_timeout(state, due - now)
-                .unwrap_or_else(PoisonError::into_inner)
-                .0;
-            continue;
-        }
-        state.pending = None;
-        let failed = state.failed.take();
-        drop(state);
+    watcher.watch(ready, |failed| {
         // The WASAPI reads run outside the lock.
         let difference = match (&enumerator, &baseline) {
             (Some(enumerator), Some(baseline)) => probe.resolve(enumerator).difference(baseline),
@@ -481,9 +505,7 @@ fn run_watcher(
         } else {
             tracing::info!("ignored device notification");
         }
-        state = watcher.lock();
-    }
-    drop(state);
+    });
     drop(registration);
     drop(enumerator);
     drop(apartment);
@@ -578,9 +600,10 @@ fn expect_event(
     deadline: Instant,
 ) -> Result<(), CaptureError> {
     let event = next_event(launched, deadline);
-    // Only this answer counts: the thread is joinable only while it waits
-    // on `start`'s channel; one that missed the deadline may sit in a COM
-    // call (the open or `Start`).
+    // Only this answer counts: a thread that gave it then waits on
+    // `start`'s channel or runs its capture loop, and either way it sees
+    // `stop`. One that missed the deadline may sit in a COM call (the open
+    // or `Start`).
     launched.answered = event.is_ok();
     match event {
         Ok(StreamEvent::Opened(Ok(info))) if opening => {
@@ -653,18 +676,17 @@ fn start_streams(
     Ok(streams)
 }
 
-/// Starts the watcher thread and waits for it to register; its handle
-/// comes back only once it answered. A capture without device
-/// notifications still records, so a slow answer is logged, not fatal,
-/// and that watcher is left unjoined: it may sit in a COM call, and
-/// `stop()` must not wait on it. If `stop()` came first, it finds the
-/// stop flag once the call returns and exits without reporting.
+/// Starts the watcher thread and waits for it to register. A capture
+/// without device notifications still records, so a slow answer is
+/// logged, not fatal: such a watcher may sit in a COM call, which
+/// `stop()` must not wait on, and once it comes alive it watches as an
+/// on-time one does ([`Watcher::stop_and_join`]).
 fn spawn_watcher(
     watcher: &Arc<Watcher>,
     probe: DeviceProbe,
     sink: &Arc<LaneFrameSink>,
     deadline: Instant,
-) -> Result<Option<JoinHandle<()>>, CaptureError> {
+) -> Result<JoinHandle<()>, CaptureError> {
     let (ready, ready_receiver) = sync_channel(1);
     let thread_watcher = Arc::clone(watcher);
     let thread_sink = Arc::clone(sink);
@@ -675,9 +697,8 @@ fn spawn_watcher(
     let limit = deadline.saturating_duration_since(Instant::now());
     if ready_receiver.recv_timeout(limit).is_err() {
         tracing::warn!("device watcher did not start within {START_TIMEOUT:?} of the start");
-        return Ok(None);
     }
-    Ok(Some(thread))
+    Ok(thread)
 }
 
 impl CaptureBackend for LiveCaptureBackend {
@@ -785,10 +806,7 @@ impl CaptureBackend for LiveCaptureBackend {
                 lane.trimmed_frames()
             );
         }
-        active.watcher.stop();
-        if let Some(thread) = active.watcher_thread.take() {
-            let _ = thread.join();
-        }
+        active.watcher.stop_and_join(active.watcher_thread);
     }
 }
 
@@ -879,5 +897,89 @@ impl AudioDevices {
             .into_iter()
             .find(|d| d.is_default_system_output)
             .ok_or(CaptureError::OutputDeviceUnavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// A watcher that is judging a burst when `stop()` comes (a late one
+    /// that came alive behaves the same) is joined: its report lands
+    /// before `stop()` returns, never after.
+    #[test]
+    fn a_watcher_stopped_while_it_judges_is_joined_before_stop_returns() {
+        let watcher = Arc::new(Watcher::default());
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (ready, answered) = sync_channel(1);
+        let (entered, judging) = channel();
+        let (open, gate) = channel::<()>();
+        let (judged, judgements) = channel();
+        let thread = {
+            let watcher = Arc::clone(&watcher);
+            let stopped = Arc::clone(&stopped);
+            std::thread::spawn(move || {
+                watcher.watch(&ready, |_| {
+                    let _ = entered.send(());
+                    let _ = gate.recv_timeout(WAIT);
+                    let _ = judged.send(stopped.load(Ordering::SeqCst));
+                });
+            })
+        };
+        answered
+            .recv_timeout(WAIT)
+            .expect("the watcher reached its loop");
+        watcher.note();
+        judging.recv_timeout(WAIT).expect("the burst settled");
+        // The gate opens once `stop_and_join` returns, or after a moment
+        // while it rightly waits for the judgement.
+        let (returned, returns) = channel::<()>();
+        let opener = std::thread::spawn(move || {
+            let _ = returns.recv_timeout(Duration::from_millis(500));
+            let _ = open.send(());
+        });
+        watcher.stop_and_join(thread);
+        stopped.store(true, Ordering::SeqCst);
+        let _ = returned.send(());
+        opener.join().unwrap();
+        assert_eq!(
+            judgements.recv_timeout(WAIT),
+            Ok(false),
+            "judged before stop_and_join returned"
+        );
+    }
+
+    /// A watcher still in its start-up calls when `stop()` comes is not
+    /// waited for; once they return it exits without judging the burst
+    /// that is pending.
+    #[test]
+    fn a_watcher_stopped_before_its_loop_is_not_joined_and_judges_nothing() {
+        let watcher = Arc::new(Watcher::default());
+        let (ready, _answered) = sync_channel(1);
+        let (open, gate) = channel::<()>();
+        let (done, outcome) = channel();
+        watcher.note();
+        let thread = {
+            let watcher = Arc::clone(&watcher);
+            std::thread::spawn(move || {
+                // Stands in for the apartment, the registration and the
+                // baseline.
+                let opened = gate.recv_timeout(WAIT).is_ok();
+                let mut judged = false;
+                watcher.watch(&ready, |_| judged = true);
+                let _ = done.send((opened, judged));
+            })
+        };
+        watcher.stop_and_join(thread);
+        let _ = open.send(());
+        assert_eq!(
+            outcome.recv_timeout(WAIT),
+            Ok((true, false)),
+            "stop did not wait for the start-up, and nothing was judged"
+        );
     }
 }
