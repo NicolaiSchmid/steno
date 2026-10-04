@@ -575,7 +575,10 @@ fn expect_event(
     deadline: Instant,
 ) -> Result<(), CaptureError> {
     let event = next_event(launched, deadline);
-    launched.answered |= event.is_ok();
+    // Only this answer counts: a thread handed its body calls `Start`
+    // next, which may hang, and until it answers `tear_down` must not
+    // join it.
+    launched.answered = event.is_ok();
     match event {
         Ok(StreamEvent::Opened(Ok(info))) if opening => {
             launched.info = Some(info);
@@ -636,9 +639,6 @@ fn start_streams(
             follower.map(|lane| StreamBody::follower(Arc::clone(lane), buffer_frames))
         };
         // Without a body the thread exits, which `expect_event` reports.
-        // With one it calls `Start` next, which may hang: until it answers,
-        // `tear_down` must not join it.
-        launched.answered = false;
         if let (Some(body), Some(sender)) = (body, launched.body.take()) {
             let _ = sender.send(body);
         }
