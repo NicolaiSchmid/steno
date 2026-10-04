@@ -409,18 +409,23 @@ mod tests {
         }
     }
 
+    /// `encoder` decoded under `config` from frame 0, with its counters.
+    fn decode_with(
+        backend: &mut ScriptedBackend,
+        encoder: &EncoderOutput,
+        config: &DecoderConfig,
+    ) -> Result<(Vec<Token>, DecodeStats), SpeechError> {
+        let mut stats = DecodeStats::default();
+        let tokens = decode_window(backend, encoder, 0, config, &mut stats)?;
+        Ok((tokens, stats))
+    }
+
     /// `encoder` decoded with the default limits from frame 0.
     fn decode(
         backend: &mut ScriptedBackend,
         encoder: &EncoderOutput,
-    ) -> Result<Vec<Token>, SpeechError> {
-        decode_window(
-            backend,
-            encoder,
-            0,
-            &DecoderConfig::default(),
-            &mut DecodeStats::default(),
-        )
+    ) -> Result<(Vec<Token>, DecodeStats), SpeechError> {
+        decode_with(backend, encoder, &DecoderConfig::default())
     }
 
     #[test]
@@ -469,14 +474,7 @@ mod tests {
             max_symbols_per_frame: 3,
             ..DecoderConfig::default()
         };
-        let tokens = decode_window(
-            &mut backend,
-            &encoder(2),
-            0,
-            &config,
-            &mut DecodeStats::default(),
-        )
-        .unwrap();
+        let (tokens, _) = decode_with(&mut backend, &encoder(2), &config).unwrap();
         // Three on frame 0, three on frame 1, then the window ends; each
         // records the predicted duration zero, the forced advance included.
         assert_eq!(
@@ -510,15 +508,7 @@ mod tests {
             len: 5,
             data: vec![0.0; 2],
         };
-        let mut stats = DecodeStats::default();
-        let tokens = decode_window(
-            &mut backend,
-            &short,
-            0,
-            &DecoderConfig::default(),
-            &mut stats,
-        )
-        .unwrap();
+        let (tokens, stats) = decode(&mut backend, &short).unwrap();
         assert_eq!(
             tokens.iter().map(|t| (t.id, t.frame)).collect::<Vec<_>>(),
             vec![(1, 0), (2, 1)]
@@ -529,15 +519,7 @@ mod tests {
     #[test]
     fn an_empty_window_decodes_nothing_and_a_bad_duration_bin_is_a_shape_error() {
         let mut backend = ScriptedBackend::new(&[(1, 7)]);
-        let mut stats = DecodeStats::default();
-        let tokens = decode_window(
-            &mut backend,
-            &encoder(0),
-            0,
-            &DecoderConfig::default(),
-            &mut stats,
-        )
-        .unwrap();
+        let (tokens, stats) = decode(&mut backend, &encoder(0)).unwrap();
         assert!(tokens.is_empty());
         // Counted as a window, with no model call at all.
         assert_eq!(
@@ -572,7 +554,7 @@ mod tests {
     fn a_probability_that_is_not_a_number_is_zero_confidence() {
         let mut backend = ScriptedBackend::new(&[(1, 1)]);
         backend.script[0].probability = f32::NAN;
-        let tokens = decode(&mut backend, &encoder(1)).unwrap();
+        let (tokens, _) = decode(&mut backend, &encoder(1)).unwrap();
         assert_eq!(tokens[0].confidence, 0.0);
     }
 
@@ -585,8 +567,7 @@ mod tests {
             token_budget: TokenBudget::PerSecond(12),
             ..DecoderConfig::default()
         };
-        let mut stats = DecodeStats::default();
-        let tokens = decode_window(&mut backend, &encoder(12), 0, &config, &mut stats).unwrap();
+        let (tokens, stats) = decode_with(&mut backend, &encoder(12), &config).unwrap();
         // The budget is 12 * 12 / 12 + 16; the token that crosses it is kept.
         assert_eq!(tokens.len(), 12 * 12 / 12 + 16 + 1);
         assert_eq!(stats.runaways, 1);

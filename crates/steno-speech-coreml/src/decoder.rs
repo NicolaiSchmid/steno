@@ -178,7 +178,6 @@ mod tests {
     /// A model driven by a script of joint decisions in call order; it
     /// records every call, so two loops over the same script can be
     /// compared call for call.
-    #[derive(Default)]
     struct Scripted {
         script: VecDeque<JointDecision>,
         calls: Vec<(char, usize)>,
