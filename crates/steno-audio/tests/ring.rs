@@ -142,12 +142,15 @@ fn concurrent_producer_and_consumer_account_for_every_sample() {
     let producer_done = Arc::new(AtomicBool::new(false));
     // Sequence numbers stay exact in f32 below 2^24.
     let limit: u32 = 4_000_000;
-    let deadline = Instant::now() + Duration::from_millis(200);
 
     let producer = {
         let ring = Arc::clone(&ring);
         let done = Arc::clone(&producer_done);
         std::thread::spawn(move || {
+            // From the thread's own start: a loaded host may schedule it
+            // late, and a deadline taken before the spawn could pass
+            // before it writes anything.
+            let deadline = Instant::now() + Duration::from_millis(200);
             let mut buffer = vec![0.0f32; 1024];
             let mut next: u32 = 0;
             let mut index = 0usize;
