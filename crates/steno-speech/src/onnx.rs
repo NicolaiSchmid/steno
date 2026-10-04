@@ -40,7 +40,9 @@
 //! CPU. A later run that fails on `DirectML` moves the encoder to the CPU
 //! for good and runs it again there, so a GPU that cannot do the work does
 //! not fail the job. An abort inside the driver still ends the process,
-//! which is why the app runs the engine in the sidecar.
+//! which is why the app runs the engine in the sidecar; there, a child
+//! that ends with `DirectML` in use switches it off for the rest of the
+//! app's run ([`crate::sidecar::directml_switched_off`]).
 //! [`OnnxBackend::provider`] reports the provider in force; it is logged at
 //! info level, without paths.
 //!
