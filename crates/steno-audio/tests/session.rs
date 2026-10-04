@@ -2150,9 +2150,12 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
 
 /// In production the relay holds two seconds; a gap wider than that waits
 /// for the writer in 5 ms steps on the clock, and every frame of silence
-/// still arrives: 1.75 s of gap through a one-second relay.
+/// still arrives: 1.75 s of gap through a one-second relay. The old
+/// device's half second fits the relay however late the writer runs; only
+/// a writer stalled for longer than the relay could refuse the new
+/// device's frames, and those are counted as dropped.
 #[test]
-fn a_gap_wider_than_the_relay_waits_for_the_writer_and_loses_nothing() {
+fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() {
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(ManualClock::new());
     let backend = Arc::new(SyntheticCaptureBackend::new(
@@ -2196,20 +2199,41 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_loses_nothing() {
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.gap_seconds, 1.75);
     assert_eq!(result.statistics.device_changes, 1);
-    assert!(result.statistics.dropped_frames.is_empty());
     assert_eq!(backend.frames_delivered(), 24_000 + 48_000);
+    let master = master_of(&result);
+    let dropped = |lane| {
+        result
+            .statistics
+            .dropped_frames
+            .get(&lane)
+            .copied()
+            .unwrap_or(0)
+    };
+    let refused = dropped(AudioLane::Mic);
+    assert_eq!(dropped(AudioLane::System), refused);
     assert_eq!(
-        master_of(&result).frame_count(),
+        master.frame_count() + 480 * refused,
         backend.frames_delivered() + 84_000
     );
-    assert_eq!(result.statistics.duration, 3.25);
+    for channel in &master.channels {
+        assert!(channel[24_000..108_000].iter().all(|s| *s == 0.0));
+    }
+    assert_eq!(
+        result.statistics.duration,
+        master.frame_count() as f64 / SAMPLE_RATE
+    );
     assert!(clock.wait_for_sleepers(0));
 }
 
 /// `stop()` while the gap waits for room in a 30-frame relay: the silence
 /// already written stays in the master and is reported in `gap_seconds`,
 /// though the rebuild never resumed, so `device_changes` stays 0, and what
-/// the restarted backend delivered meanwhile counts as dropped.
+/// the restarted backend delivered meanwhile counts as dropped. The relay
+/// may still hold the old device's last audio when the gap starts, so the
+/// silence written can be anything from none to a whole relay; a writer
+/// that stalls while the old device delivers fills the relay, and the
+/// frames it refuses are dropped too (see
+/// `a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it`).
 #[test]
 fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
     let directory = tempfile::tempdir().unwrap();
@@ -2243,16 +2267,23 @@ fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
     let result = session.stop().unwrap();
     assert_eq!(session.state(), CaptureState::Idle);
     let master = master_of(&result);
-    let silence = master.frame_count() - 24_000;
-    // The relay may still hold the old device's last audio when the gap
-    // starts waiting, so the silence written is at least one frame, not a
-    // whole relay.
-    assert!(silence >= 480, "some silence: {silence}");
-    assert!(master.channels[0][24_000..].iter().all(|s| *s == 0.0));
-    assert_eq!(result.statistics.gap_seconds, silence as f64 / SAMPLE_RATE);
+    // The master is the old device's audio the relay took, then the
+    // silence `gap_seconds` reports.
+    let silence = (result.statistics.gap_seconds * SAMPLE_RATE).round() as usize;
+    let audio = master
+        .frame_count()
+        .checked_sub(silence)
+        .expect("the master holds the silence reported");
+    assert!(
+        audio <= 24_000 && audio.is_multiple_of(480),
+        "old audio: {audio}"
+    );
+    assert!(master.channels[0][audio..].iter().all(|s| *s == 0.0));
     assert_eq!(result.statistics.device_changes, 0);
-    // What the restarted backend delivered sat in the rings with no
-    // processing thread to drain it: dropped, and counted.
+    // The old device's frames the relay refused, and what the restarted
+    // backend delivered into the rings with no processing thread to drain
+    // it: dropped, and counted.
+    let refused = (24_000 - audio) / 480;
     let undrained = (backend.frames_delivered() - 24_000) / 480;
     assert_eq!(
         result
@@ -2261,7 +2292,7 @@ fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
             .get(&AudioLane::Mixed)
             .copied()
             .unwrap_or(0),
-        undrained
+        undrained + refused
     );
     assert_eq!(
         result.statistics.duration,
