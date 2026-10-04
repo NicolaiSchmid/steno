@@ -246,7 +246,12 @@ extension HandoverEngine {
     // must be of the file `promote` moves. A partial discarded meanwhile
     // and created again (a revoke, then an announce) is another file.
     let partial = inbox.partial(recordingID)
-    let identity = try? ReceivingFile.identity(of: partial)
+    let identity: ReceivingFile.Identity
+    do {
+      identity = try ReceivingFile.identity(of: partial)
+    } catch {
+      return .answered(.internalError("reading the partial", error))
+    }
     try? await transition(&receipt, to: .verifying)
 
     let verified: Bool
@@ -263,8 +268,8 @@ extension HandoverEngine {
       return .answered(Self.unauthorized)
     }
     receipt = activeReceipts[recordingID] ?? receipt
-    guard let identity, (try? ReceivingFile.identity(of: partial)) == identity else {
-      // Whatever the new partial holds, the phone sends every chunk again.
+    guard (try? ReceivingFile.identity(of: partial)) == identity else {
+      // Gone or another file: the phone sends every chunk again.
       try? await transition(&receipt, to: .receiving, receivedChunks: [])
       return .answered(.json(.conflict, Self.status(of: receipt)))
     }
