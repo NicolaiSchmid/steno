@@ -46,11 +46,12 @@
 //! picked up by the next run after its prefix is hashed again. A host
 //! that ignores the range sends the whole file, which is then written from
 //! the start; a resumed file whose checksum fails is downloaded once more
-//! from zero. A second download of the same file while the first holds the
-//! lock, or one on a file system without locks, writes a partial of its
-//! own, `<name>.partial.<pid>.<call>`, which nothing resumes and which is
-//! deleted when the call ends. Once a file is installed, by whatever path,
-//! the next call deletes its `<name>.partial`.
+//! from zero. A second download of the same file, in this process or
+//! another, waits for the lock: it then finds the file installed and
+//! returns, or resumes what the first left. One on a file system without
+//! locks writes a partial of its own, `<name>.partial.<pid>.<call>`, which
+//! nothing resumes and which is deleted when the call ends. Once a file is
+//! installed, by whatever path, the next call deletes its `<name>.partial`.
 
 use std::fs::{self, File, TryLockError};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -486,15 +487,9 @@ impl ModelStore {
         destination: &Path,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
-        let mut partial = Partial::open(destination, file)?;
-        if partial.resumable && is_complete(destination, file) {
-            // Installed by another download between `missing_files` and
-            // the lock; the handle may even be that file, renamed. Nothing
-            // at `<name>.partial` is needed now, so the drop deletes it
-            // under the lock.
-            partial.discard();
+        let Some(mut partial) = Partial::open(destination, file)? else {
             return Ok(());
-        }
+        };
         let mut attempt = 1;
         loop {
             match self.download(url, file, destination, &mut partial, progress) {
@@ -740,9 +735,13 @@ struct Partial {
 }
 
 impl Partial {
-    /// `<name>.partial` beside `destination` with its bytes hashed, when
-    /// this call can take its lock; else a per-call partial of its own.
-    fn open(destination: &Path, file: &ModelFile) -> Result<Self, SpeechError> {
+    /// `<name>.partial` beside `destination` under its lock, with its
+    /// bytes hashed; `None` when `destination` is installed once the lock
+    /// is held. A download of the same file that holds the lock is waited
+    /// for, so its bytes are never fetched twice. Where the file system
+    /// has no locks, a per-call partial of its own. Blocking: the callers
+    /// run on a blocking thread.
+    fn open(destination: &Path, file: &ModelFile) -> Result<Option<Self>, SpeechError> {
         let path = destination.with_file_name(format!("{}.partial", file.name));
         let handle = File::options()
             .read(true)
@@ -751,18 +750,29 @@ impl Partial {
             .truncate(false)
             .open(&path)
             .map_err(|e| SpeechError::io(&path, e))?;
-        match handle.try_lock() {
-            Ok(()) => {
-                let mut partial = Partial::new(path, handle, true);
-                partial.adopt(file.size)?;
-                Ok(partial)
+        let locked = match handle.try_lock() {
+            Ok(()) => Ok(()),
+            Err(TryLockError::WouldBlock) => {
+                tracing::info!(path = %path.display(), "another download of this file is running, waiting for it");
+                handle.lock()
             }
-            Err(TryLockError::WouldBlock) => Self::per_call(destination, &file.name),
-            Err(TryLockError::Error(error)) => {
-                tracing::debug!(%error, path = %path.display(), "no file locks here, the download will not resume");
-                Self::per_call(destination, &file.name)
-            }
+            Err(TryLockError::Error(error)) => Err(error),
+        };
+        if let Err(error) = locked {
+            tracing::debug!(%error, path = %path.display(), "no file locks here, the download will not resume");
+            return Self::per_call(destination, &file.name).map(Some);
         }
+        if is_complete(destination, file) {
+            // Installed by the download this one waited for, or by another
+            // between `missing_files` and the lock; the handle may even be
+            // that file, renamed. Nothing at `<name>.partial` is needed
+            // now, so it goes while the lock is held.
+            let _ = fs::remove_file(&path);
+            return Ok(None);
+        }
+        let mut partial = Partial::new(path, handle, true);
+        partial.adopt(file.size)?;
+        Ok(Some(partial))
     }
 
     fn new(path: PathBuf, file: File, resumable: bool) -> Self {
@@ -1125,47 +1135,52 @@ mod tests {
     }
 
     #[test]
-    fn two_downloads_of_one_file_in_one_process_write_their_own_partials() {
-        // The second download starts while the first is half done; the
-        // first then finishes and must install what it received.
+    fn a_second_download_of_one_file_waits_for_the_first_and_fetches_nothing() {
+        // The second download starts while the first is half done. It
+        // waits for the lock, finds the file installed and returns without
+        // a request: the bytes cross the wire once. The server would hold a
+        // second connection, so a second transfer would show in its
+        // progress.
         const WAIT: Duration = Duration::from_secs(30);
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         // 2 MB, so the body timeout (30 s) is far longer than the hold.
         let body: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8 + 1).collect();
-        let (url, release) = serve_held(&body, vec![50_000, 10_000]);
+        let (url, release) = serve_held(&body, vec![50_000, 0]);
         let asset = asset(Some(url), &body, &digest(&body));
         let (first_started, first_waits) = mpsc::channel();
-        let (second_started, second_waits) = mpsc::channel();
+        let mut first_received = 0;
+        let mut second_reports = 0;
         std::thread::scope(|scope| {
             // Owned here, so a failed assertion drops the senders and frees
             // the held downloads instead of leaving the scope waiting.
             let release = release;
             let first = scope.spawn(|| {
                 store.ensure(&asset, &mut |p| {
+                    first_received = p.received;
                     if p.received >= 50_000 {
                         let _ = first_started.send(());
                     }
                 })
             });
             first_waits.recv_timeout(WAIT).unwrap();
-            let second = scope.spawn(|| {
-                store.ensure(&asset, &mut |p| {
-                    if p.received >= 10_000 {
-                        let _ = second_started.send(());
-                    }
-                })
-            });
-            second_waits.recv_timeout(WAIT).unwrap();
+            let second = scope.spawn(|| store.ensure(&asset, &mut |_| second_reports += 1));
+            // Time to reach the lock; it cannot finish before the first.
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(!second.is_finished());
             release[0].send(()).unwrap();
             let first = first.join().unwrap();
-            let installed = store.verify(&asset);
-            release[1].send(()).unwrap();
+            // Frees a second transfer, should one have started.
+            drop(release);
             let second = second.join().unwrap();
             first.unwrap();
-            installed.unwrap();
             second.unwrap();
         });
+        assert_eq!(first_received, body.len() as u64);
+        assert_eq!(
+            second_reports, 0,
+            "the second download fetched the file again"
+        );
         store.verify(&asset).unwrap();
         let names: Vec<_> = fs::read_dir(store.directory(&asset))
             .unwrap()
@@ -1225,33 +1240,35 @@ mod tests {
 
     #[test]
     fn a_partial_name_a_dead_process_with_this_pid_left_is_passed_over() {
+        // Per-call partials are for file systems without locks, which a
+        // test cannot conjure; the naming is checked on its own.
         let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::new(dir.path());
-        let body = b"not really a model".to_vec();
-        let asset = asset(Some(serve_once(&body)), &body, &digest(&body));
-        let directory = store.directory(&asset);
-        fs::create_dir_all(&directory).unwrap();
-        // Another download holds the resumable partial, so this one takes
-        // a per-call name.
-        let held = File::create(directory.join("model.onnx.partial")).unwrap();
-        held.lock().unwrap();
+        let destination = dir.path().join("model.onnx");
         // The next call numbers, with room for other tests drawing some.
         let next = NEXT_CALL.load(Ordering::Relaxed);
         let own = std::process::id();
         for call in next..next + 64 {
             fs::write(
-                directory.join(format!("model.onnx.partial.{own}.{call}")),
+                dir.path().join(format!("model.onnx.partial.{own}.{call}")),
                 b"old",
             )
             .unwrap();
         }
-        store.ensure(&asset, &mut |_| {}).unwrap();
-        store.verify(&asset).unwrap();
+        let mut partial = Partial::per_call(&destination, "model.onnx").unwrap();
+        assert!(!partial.resumable);
+        partial.append(b"new").unwrap();
+        let path = partial.path.clone();
+        assert!(path.starts_with(dir.path()));
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert_eq!(partial_pid(&name, "model.onnx.partial."), Some(own));
+        assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(
-            fs::read(directory.join(format!("model.onnx.partial.{own}.{next}"))).unwrap(),
+            fs::read(dir.path().join(format!("model.onnx.partial.{own}.{next}"))).unwrap(),
             b"old"
         );
-        drop(held);
+        // Deleted with the call.
+        drop(partial);
+        assert!(!path.exists());
     }
 
     #[test]
