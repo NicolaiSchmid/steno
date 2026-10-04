@@ -135,12 +135,13 @@ cargo build -p steno-desktop -p steno-speech-sidecar && target/debug/steno-deskt
 Parakeet, the speech model, runs in its own process, `steno-speech-sidecar`,
 on Linux and Windows. On the Mac `CoreML` runs it inside the shell, unless
 `speech.json` in the support directory holds `{"onnxSidecarOnMac": true}` or
-the stored engine is not Parakeet v3 (a Swift user who picked Parakeet Ultra,
-Parakeet DE or Whisper); then the sidecar runs it there too. The shell reads
-`speech.json` once, at launch: an edit takes effect at the next start, not at
-a Settings save. The support directory is
-`~/Library/Application Support/Steno` on the Mac, `$XDG_DATA_HOME/Steno`
-(else `~/.local/share/Steno`) on Linux and `%APPDATA%\Steno` on Windows.
+the stored engine is not Parakeet v3 (Whisper, which Settings offers, or
+Parakeet Ultra or Parakeet DE, which the Swift app may have stored); then the
+sidecar runs it there too. The shell reads `speech.json` once, at launch: an
+edit takes effect at the next start, not at a Settings save. The support
+directory is `~/Library/Application Support/Steno` on the Mac,
+`$XDG_DATA_HOME/Steno` (else `~/.local/share/Steno`) on Linux and
+`%APPDATA%\Steno` on Windows.
 
 `steno-services` starts the sidecar from beside the shell's binary
 (`steno_services::speech::sidecar_config`). `cargo build -p steno-desktop` and

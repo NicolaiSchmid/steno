@@ -44,8 +44,9 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
    loop are shared; the backends are CoreML (`objc2-core-ml`) on the Mac and ONNX
    Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
-   one process while `CoreML` runs Parakeet (the default). The diarizer does not yet:
-   the open item under "Pipeline and services (WP6b)".
+   one process while `CoreML` runs Parakeet (the default). The diarizer's ONNX
+   inference does not run in the sidecar yet: see the open item under "Pipeline and
+   services (WP6b)".
 5. **No allocation and no lock on the audio thread**, proven by the counting allocator
    in `crates/steno-audio/src/testing/rt.rs` in a test build.
 6. **Scope stays the scope.** No new features in the port; a Rust behaviour that
@@ -311,10 +312,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     300 s for `load`) and a memory ceiling (6 GiB) against the heartbeat. The client
     starts only an absolute program path, never one looked up on `PATH` or in the
     working directory (`a_program_that_is_not_an_absolute_path_never_starts`): the
-    child is handed the meeting's audio. A child that
-    dies, hangs, overruns or breaks the protocol is killed and reaped, the call fails
-    with `SpeechError::Sidecar`, and the next call spawns and loads again; an error the
-    child reports keeps it (`an_error_the_child_reports_keeps_the_child`). The child
+    child is handed the meeting's audio. A child that dies, hangs, overruns or breaks
+    the protocol is killed and reaped, the call fails with `SpeechError::Sidecar`, and
+    the next call spawns and loads again; an error the child reports keeps it
+    (`an_error_the_child_reports_keeps_the_child`). The child
     exits when stdin ends or stdout breaks, so a dead app leaves no child, idle or busy
     (`the_child_greets_and_exits_when_its_parent_goes_away`,
     `a_busy_child_exits_when_its_parent_goes_away`), and dropping the engine stops it
@@ -335,8 +336,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     `a_session_opens_only_once_telemetry_is_off`,
     `the_workspace_configures_onnx_runtime_in_one_place_with_telemetry_off`).
   - Platform policy (`crates/steno-speech/src/runtime.rs`): on Linux and Windows the
-    sidecar is the only speech engine the app runs; on macOS the in-process CoreML engine is
-    the default and the sidecar a fallback behind `SpeechSettings::onnx_sidecar_on_mac`.
+    sidecar is the only speech engine the app runs; on macOS the in-process CoreML
+    engine is the default and the sidecar a fallback behind
+    `SpeechSettings::onnx_sidecar_on_mac`.
     The in-process `OnnxSpeechEngine` is what the child hosts and what the example and
     the FLEURS test drive. Test: `the_sidecar_is_the_default_off_the_mac_and_the_fallback_on_it`.
   - Crash isolation (`crates/steno-speech-sidecar/tests/isolation.rs`, the real client
@@ -615,8 +617,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   fails with "could not start" and the path. The Settings model rows, the warm-up's
   installed check and `steno dev models` follow the same policy, so with the Mac's
   fallback on, Parakeet v3 is the fp32 export there too
-  (`with_the_sidecar_chosen_parakeet_v3_is_the_onnx_export`); they show the fp32
-  export's size from its manifest there (`SpeechModels::expected_bytes`,
+  (`with_the_sidecar_chosen_parakeet_v3_is_the_onnx_export`), and Settings and
+  `steno dev models list` show its size from the manifest
+  (`SpeechModels::expected_bytes`,
   `the_expected_size_is_that_of_the_model_the_platform_runs`). `build()` reads the
   speech settings and the models directory once, at launch, and hands them to the
   pipeline (and every reload) and the model service, so the two agree
@@ -647,9 +650,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   app saved meanwhile can start the sidecar outside a job's claim
   (`a_recording_start_with_speech_in_the_sidecar_warms_the_diarizer_only`,
   `the_warm_up_follows_the_engine_a_reload_built`,
-  `after_a_failed_reload_the_warm_up_keeps_to_the_pipeline_s_engine`). Rust only:
-  Swift loaded the engine during every recording; with Parakeet in the sidecar, the
-  job after a recording starts the child cold.
+  `after_a_failed_reload_the_warm_up_follows_the_engine_the_pipeline_kept`). Rust
+  only: Swift loaded the engine during every recording; with Parakeet in the
+  sidecar, the job after a recording starts the child cold.
 - Open, against invariant 4: the ONNX diarizer (pyannote segmentation and the
   WeSpeaker embeddings) still runs in the app's process on every platform, so a crash
   in ONNX Runtime there ends the app. Memory is not the reason to move it (the larger
@@ -691,9 +694,11 @@ still has to draw the window side. `[ ]` is not ported yet.
 - Settings > General acknowledges the Parakeet the platform runs: "Parakeet TDT 0.6B v3
   (int8)" from the `CoreML` repository on the Mac, as Swift; "Parakeet TDT 0.6B v3
   (fp32)" from `nvidia/parakeet-tdt-0.6b-v3` elsewhere and with the Mac's sidecar
-  fallback (`SpeechModels::display_name` and `source_repo`). Open: the diarizer's row still names the Swift app's `CoreML`
-  diarizer, while every platform runs the ONNX pyannote 3.0 and WeSpeaker ResNet34-LM
-  models; the same hook fixes it.
+  fallback (`SpeechModels::display_name` and `source_repo`). Open: the diarizer's
+  rows still describe the Swift app's `CoreML` diarizer (its acknowledgement and its
+  size in Settings > Transcription), while every platform runs the ONNX pyannote 3.0
+  and WeSpeaker ResNet34-LM models; the same hooks (`display_name`, `source_repo`,
+  `expected_bytes`) fix them.
 - The phone intake syncs the copy and its folder to the disk before it marks the
   receipt complete (`steno_pipeline::files::copy_durably`); Swift's `copyItem` did
   not, so a power loss after the phone's 200 lost the recording on both devices. The
