@@ -242,7 +242,7 @@ finding.
 
 ### Cutting a release
 
-0. Before the first release, and after a change to the workflow: the six
+0. Before the first release, and after a change to the workflow: the
    secrets in the table below are set, and a manual run on the branch
    passes:
    `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
@@ -326,7 +326,8 @@ version, whose tag moves the lanes as usual.
 built.
 
 Installed apps verify updates only with the `pubkey` they were built with.
-To rotate the updater key, publish one release whose `tauri.conf.json`
+To rotate the updater key, publish one release (no hyphen, and at or
+above what both lanes serve, so both move to it) whose `tauri.conf.json`
 carries the new public key, signed with the old private key. Publish
 checks the signatures against the config's key, so on that release's
 commit the `pubkey=` line of **Verify the updater signatures**
@@ -380,14 +381,15 @@ The release binary is built first with no secret in the environment
 imports the Developer ID certificate into a throwaway keychain
 (`scripts/signing-keychain.sh`, the Swift release's approach) and hands
 its identity to the bundler; at the end it takes only that keychain off
-the search list. Only one job signs on the self-hosted Mac at a time: two
-throwaway keychains would hold the same Developer ID identity, and a
-`codesign` by name (the Swift app's `make-dmg.sh` and Xcode export) then
-fails as ambiguous. The bundler signs the sidecar, the app binary and the bundle under the
-hardened runtime with `Entitlements.plist` (one file for every item, so
-the sidecar carries the two entitlements without using them), then
-notarises and staples the `.app` with the App Store Connect key before it
-builds the image and the updater archive from it, and
+the search list. Run only one signing job on the self-hosted Mac at a
+time (no concurrency group spans the two workflows): two throwaway
+keychains would hold the same Developer ID identity, and a `codesign` by
+name (the Swift app's `make-dmg.sh` and Xcode export) then fails as
+ambiguous. The bundler signs the sidecar, the app binary and the bundle
+under the hardened runtime with `Entitlements.plist` (one file for every
+item, so the sidecar carries the two entitlements without using them),
+then notarises and staples the `.app` with the App Store Connect key
+before it builds the image and the updater archive from it, and
 `scripts/notarize-dmg.sh` notarises and staples the image.
 `check-bundle.sh --signed` checks the Developer ID authority, the runtime
 flag, the timestamp and the team on all three items, the entitlements,
