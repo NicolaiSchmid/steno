@@ -345,7 +345,10 @@ impl Recorder for CaptureRecorder {
     }
 
     fn toggle(&self) {
-        match self.inner().status.state {
+        // Read first: a guard in the scrutinee would be held through the
+        // arms, and `start` and `stop` lock again.
+        let state = self.inner().status.state;
+        match state {
             RecordingState::Idle => self.start(CaptureMode::Call, None),
             RecordingState::Recording => self.stop(),
             _ => {}
@@ -380,7 +383,7 @@ impl Recorder for CaptureRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::{current_pipeline, eventually, fake_dependencies, temp_store};
+    use crate::testing::{PATIENCE, current_pipeline, eventually, fake_dependencies, temp_store};
     use steno_audio::testing::SyntheticCaptureBackend;
     use steno_audio::testing::synthetic::SyntheticOptions;
     use steno_core::paths::file_url;
@@ -504,6 +507,27 @@ mod tests {
             meeting.state.kind(),
             steno_core::MeetingStateKind::Recording
         );
+        assert!(harness.store.asset(meeting_id).unwrap().is_some());
+    }
+
+    /// The tray's Record and its Stop (`recording.toggle`): a toggle
+    /// starts a call recording, the next one stops and saves it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_toggle_starts_a_call_and_the_next_one_stops_it() {
+        let harness = harness(&[]);
+        let toggling = harness.recorder.clone();
+        crate::testing::on_own_thread(PATIENCE, "the first toggle returned", move || {
+            toggling.toggle();
+        });
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Recording);
+        assert_eq!(status.mode, Some(CaptureMode::Call));
+        let meeting_id = status.meeting_id.unwrap();
+        let toggling = harness.recorder.clone();
+        crate::testing::on_own_thread(PATIENCE, "the second toggle returned", move || {
+            toggling.toggle();
+        });
+        assert_eq!(harness.recorder.status().state, RecordingState::Idle);
         assert!(harness.store.asset(meeting_id).unwrap().is_some());
     }
 
