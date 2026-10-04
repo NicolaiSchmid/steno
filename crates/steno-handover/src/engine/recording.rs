@@ -259,11 +259,12 @@ impl Engine {
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
-        // `revoked` holds the device from the revoke until it pairs again. A
-        // `complete` that starts during the revoke's store delete takes the
-        // count already bumped and may still read the row, so the checks
-        // below would miss the revoke. The receipt's owner is not known yet,
-        // so nothing is discarded.
+        // `handle` refused a revoked device already; checked again here
+        // under the guard that takes the count. A `complete` that starts
+        // during the revoke's store delete takes the count already bumped
+        // and may still read the row, so the checks below would miss the
+        // revoke. The receipt's owner is not known yet, so nothing is
+        // discarded.
         let revocation = {
             let state = self.state();
             if state.revoked.contains(&device.id) {

@@ -196,17 +196,19 @@ struct State {
     completing: BTreeSet<Uuid>,
     /// Devices revoked since start and not paired again: their receipts
     /// stay out of `active_receipts` and the stream, also when a request
-    /// that read one before the revoke writes it back, and their `complete`
-    /// is refused before it reads.
+    /// that read one before the revoke writes it back, and their recording
+    /// routes answer 401 before they read, also while the device is still
+    /// in the store (a failed delete, a pairing whose save a revoke
+    /// overtook).
     revoked: BTreeSet<Uuid>,
-    /// Revokes per device since start, never reset: the phone pairs again
-    /// under the same device id. A `complete` that sees the count change
-    /// across its receipt read or its verify admits nothing.
+    /// Revokes per device since start. A pairing never resets the count,
+    /// so a `complete` from before the revoke still sees it after the phone
+    /// pairs again under the same device id.
     revocations: BTreeMap<Uuid, u64>,
 }
 
 impl State {
-    /// The device's entry in `revocations`.
+    /// The device's revoke count, 0 when it was not revoked since start.
     fn revocation_count(&self, device_id: Uuid) -> u64 {
         self.revocations.get(&device_id).copied().unwrap_or(0)
     }
@@ -369,15 +371,18 @@ impl Engine {
     /// Forgets the device and drops what it was uploading: the files of its
     /// receipts in memory. A `complete` in flight that has not reached the
     /// intake answers 401 when it sees the revoke, and discards the files
-    /// when the revoke missed its receipt in the store. An admission
-    /// already under way finishes, and its receipt then stays out of memory
-    /// and out of the store. Files of a receipt only in the store (not read
-    /// since start) wait for the next start's sweep.
+    /// when its receipt was only in the store, where the revoke does not
+    /// look. An admission already under way finishes. Its `complete`
+    /// receipt stays out of memory while the device is revoked and out of
+    /// the store while the device is gone from it; once the phone paired
+    /// again it is written like any other. Files of a receipt only in the store (not
+    /// read since start) wait for the next start's sweep.
     ///
     /// A failed store delete leaves the device paired in the store but
-    /// revoked in memory: its `complete` answers 401 until it pairs again or
-    /// a retried revoke finishes. A half-revoked phone that cannot hand over
-    /// is safer than one that can.
+    /// revoked in memory: its recording routes answer 401 until it pairs
+    /// again or a retried revoke finishes, and the receipts are published
+    /// without its own. A half-revoked phone that cannot hand over is safer
+    /// than one that can.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
         {
@@ -714,6 +719,10 @@ impl RequestHandling for Engine {
             (Route::Pair, _) => self.pair(&request).await,
             (_, None) => Self::unauthorized(),
             (Route::Unpair, Some(device)) => self.unpair(device).await,
+            // A device revoked in memory may still pass the gate: its store
+            // delete failed or has not committed yet, or a pairing whose
+            // save the revoke overtook put it back. Its uploads stop here.
+            (_, Some(device)) if self.state().revoked.contains(&device.id) => Self::unauthorized(),
             (Route::Announce(recording_id), Some(device)) => {
                 self.announce(recording_id, device, &request.body).await
             }

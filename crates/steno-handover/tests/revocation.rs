@@ -6,7 +6,8 @@
 //! `complete` that had not reached the intake yet admits nothing, also when
 //! the phone paired again meanwhile. A recording already admitted answers
 //! its meeting, and a pairing that a revoke overtakes leaves the device
-//! revoked, and a partial created again during a verify is never promoted.
+//! revoked. A revoke whose store delete fails still refuses the device, and
+//! a partial created again during a verify is never promoted.
 
 #![allow(
     clippy::assert_is_empty,
@@ -762,6 +763,53 @@ async fn a_revoked_phones_partial_created_during_the_verify_is_discarded() {
     assert!(!inbox.has_partial(id), "the partial created again is gone");
     assert!(inbox.load_metadata(id).is_none());
     assert_eq!(intake.count(), 0);
+}
+
+#[tokio::test]
+async fn a_failed_revoke_delete_publishes_the_receipts_and_refuses_the_device() {
+    // The store refuses the delete. The device stays in the store, so its
+    // token still passes the gate; in memory it is revoked: its receipt
+    // leaves the stream and every recording route answers 401, until it
+    // pairs again.
+    let (test, phone, metadata, bytes) = uploaded(None, 95).await;
+    let id = metadata.recording_id;
+    let receipts = test.service.receipts();
+    assert_eq!(receipts.borrow().len(), 1);
+    common::execute_batch(
+        &test.store,
+        "CREATE TEMP TRIGGER refuse_revoke BEFORE DELETE ON pairedDevice \
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    );
+
+    assert!(test.service.revoke(phone.device.id).await.is_err());
+    assert!(
+        receipts
+            .borrow()
+            .iter()
+            .all(|receipt| receipt.recording_id != id),
+        "the stream drops the receipt"
+    );
+    assert!(
+        test.store.paired_device(phone.device.id).unwrap().is_some(),
+        "the device is still in the store"
+    );
+    assert_eq!(phone.announce(&metadata).await.status.as_u16(), 401);
+    assert_eq!(phone.status(id).await.status.as_u16(), 401);
+    assert_eq!(
+        phone
+            .upload(id, 0, &chunks(&bytes, DIRECT_CHUNK_SIZE)[0])
+            .await
+            .status
+            .as_u16(),
+        401
+    );
+    assert_eq!(phone.complete(id).await.status.as_u16(), 401);
+    assert_eq!(test.intake.admissions.count(), 0);
+
+    common::execute_batch(&test.store, "DROP TRIGGER temp.refuse_revoke");
+    let again = phone.pair_again().await;
+    again.upload_all(&metadata, &bytes).await;
+    assert_eq!(again.complete(id).await.status.as_u16(), 200);
 }
 
 /// The waker of a future the test polls by hand.
