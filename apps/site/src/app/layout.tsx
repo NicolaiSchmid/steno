@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import type { ReactNode } from "react";
+import { openGraphBase, twitterBase } from "@/lib/share";
 import { site } from "@/lib/site";
 import "./globals.css";
 
@@ -25,15 +26,13 @@ export const metadata: Metadata = {
 	],
 	alternates: { canonical: "/" },
 	openGraph: {
-		type: "website",
+		...openGraphBase,
 		url: site.url,
-		siteName: site.name,
 		title: site.title,
 		description: site.description,
-		locale: "en_US",
 	},
 	twitter: {
-		card: "summary_large_image",
+		...twitterBase,
 		title: site.title,
 		description: site.description,
 	},
