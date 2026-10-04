@@ -82,7 +82,7 @@ mod real {
     /// from the tray joins the recorder's level thread, which publishes),
     /// and the tray's setters wait for the main thread when called from
     /// another. One queue keeps the snapshots in emit order whichever
-    /// thread delivers them, also when an emit on the main thread runs
+    /// thread emits them, also when an emit on the main thread runs
     /// before a task posted earlier, and one drain at a time empties it, so
     /// every window gets them in that order.
     ///
@@ -360,42 +360,63 @@ mod real {
             BridgeEvent::new(topic, Value::Null)
         }
 
-        /// The tray's Stop: the main thread waits for the host's
-        /// `publishing` lock (joining the level thread) while the flush
+        /// Runs a test's `body` on a thread of its own and fails the test
+        /// when it has not ended within five seconds, so a drain that
+        /// deadlocks (or a main thread that never ends) fails rather than
+        /// hangs.
+        fn bounded(body: impl FnOnce() + Send + 'static) {
+            let (done, finished) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                body();
+                let _ = done.send(());
+            });
+            match finished.recv_timeout(std::time::Duration::from_secs(5)) {
+                Ok(()) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("the test hung"),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("the test panicked")
+                }
+            }
+        }
+
+        /// The tray's Stop: the main thread waits for a thread that holds
+        /// the `publishing` lock (it joins the level thread) while the flush
         /// thread emits under it. The emit returns without the main thread,
         /// and the snapshot is delivered there once the lock is free; an
         /// emit that delivered on its own thread would have waited for the
         /// main thread inside the tray's setters, under the lock.
         #[test]
         fn a_snapshot_is_delivered_on_the_main_thread_and_the_emit_never_waits_for_it() {
-            let (main, thread) = test_main();
-            let sink = WindowSink::new(main.clone());
-            let publishing = Arc::new(Mutex::new(()));
-            let held = publishing.lock().unwrap();
-            let (blocked, main_blocked) = std::sync::mpsc::channel();
-            let waiting = publishing.clone();
-            main.tasks
-                .send(Box::new(move || {
-                    blocked.send(()).unwrap();
-                    drop(waiting.lock().unwrap());
-                }))
-                .unwrap();
-            main_blocked
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
-            sink.emit(event(steno_bridge::BridgeTopic::Recording));
-            assert!(
-                main.delivered.lock().unwrap().is_empty(),
-                "nothing is delivered while the main thread is busy"
-            );
-            drop(held);
-            let delivered = main.delivered.clone();
-            drop((sink, main));
-            thread.join().unwrap();
-            assert_eq!(
-                *delivered.lock().unwrap(),
-                [(steno_bridge::BridgeTopic::Recording, true)]
-            );
+            bounded(|| {
+                let (main, thread) = test_main();
+                let sink = WindowSink::new(main.clone());
+                let publishing = Arc::new(Mutex::new(()));
+                let held = publishing.lock().unwrap();
+                let (blocked, main_blocked) = std::sync::mpsc::channel();
+                let waiting = publishing.clone();
+                main.tasks
+                    .send(Box::new(move || {
+                        blocked.send(()).unwrap();
+                        drop(waiting.lock().unwrap());
+                    }))
+                    .unwrap();
+                main_blocked
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                sink.emit(event(steno_bridge::BridgeTopic::Recording));
+                assert!(
+                    main.delivered.lock().unwrap().is_empty(),
+                    "nothing is delivered while the main thread is busy"
+                );
+                drop(held);
+                let delivered = main.delivered.clone();
+                drop((sink, main));
+                thread.join().unwrap();
+                assert_eq!(
+                    *delivered.lock().unwrap(),
+                    [(steno_bridge::BridgeTopic::Recording, true)]
+                );
+            });
         }
 
         /// A snapshot emitted on the main thread is delivered at once, but
@@ -404,25 +425,27 @@ mod real {
         #[test]
         fn snapshots_are_delivered_in_emit_order_from_any_thread() {
             use steno_bridge::BridgeTopic;
-            let (main, thread) = test_main();
-            let sink = Arc::new(WindowSink::new(main.clone()));
-            let (go, released) = std::sync::mpsc::channel::<()>();
-            let on_main = sink.clone();
-            main.tasks
-                .send(Box::new(move || {
-                    released.recv().unwrap();
-                    on_main.emit(event(BridgeTopic::App));
-                }))
-                .unwrap();
-            sink.emit(event(BridgeTopic::Recording));
-            go.send(()).unwrap();
-            let delivered = main.delivered.clone();
-            drop((sink, main));
-            thread.join().unwrap();
-            assert_eq!(
-                *delivered.lock().unwrap(),
-                [(BridgeTopic::Recording, true), (BridgeTopic::App, true)]
-            );
+            bounded(|| {
+                let (main, thread) = test_main();
+                let sink = Arc::new(WindowSink::new(main.clone()));
+                let (go, released) = std::sync::mpsc::channel::<()>();
+                let on_main = sink.clone();
+                main.tasks
+                    .send(Box::new(move || {
+                        released.recv().unwrap();
+                        on_main.emit(event(BridgeTopic::App));
+                    }))
+                    .unwrap();
+                sink.emit(event(BridgeTopic::Recording));
+                go.send(()).unwrap();
+                let delivered = main.delivered.clone();
+                drop((sink, main));
+                thread.join().unwrap();
+                assert_eq!(
+                    *delivered.lock().unwrap(),
+                    [(BridgeTopic::Recording, true), (BridgeTopic::App, true)]
+                );
+            });
         }
 
         /// A main thread that runs every task where it is posted, the
@@ -455,22 +478,28 @@ mod real {
 
         /// A snapshot emitted while one is being delivered reaches every
         /// window after that one: the inner drain leaves it to the outer.
+        /// Once that drain ended, the next emit drains again.
         #[test]
         fn a_snapshot_emitted_during_a_delivery_reaches_every_window_after_it() {
             use steno_bridge::BridgeTopic;
-            let main = NestingMain::default();
-            let sink = Arc::new(WindowSink::new(main.clone()));
-            assert!(main.sink.set(sink.clone()).is_ok());
-            sink.emit(event(BridgeTopic::App));
-            assert_eq!(
-                *main.delivered.lock().unwrap(),
-                [
-                    ("main", BridgeTopic::App),
-                    ("settings", BridgeTopic::App),
-                    ("main", BridgeTopic::Recording),
-                    ("settings", BridgeTopic::Recording),
-                ]
-            );
+            bounded(|| {
+                let main = NestingMain::default();
+                let sink = Arc::new(WindowSink::new(main.clone()));
+                assert!(main.sink.set(sink.clone()).is_ok());
+                sink.emit(event(BridgeTopic::App));
+                sink.emit(event(BridgeTopic::Progress));
+                assert_eq!(
+                    *main.delivered.lock().unwrap(),
+                    [
+                        ("main", BridgeTopic::App),
+                        ("settings", BridgeTopic::App),
+                        ("main", BridgeTopic::Recording),
+                        ("settings", BridgeTopic::Recording),
+                        ("main", BridgeTopic::Progress),
+                        ("settings", BridgeTopic::Progress),
+                    ]
+                );
+            });
         }
 
         #[test]
