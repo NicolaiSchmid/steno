@@ -907,11 +907,15 @@ it:
   over half a second stayed more than one period above it (counted as
   dropped system frames; a master thread that runs late and drains its
   packets back to back raises the queue only for a moment and slips
-  nothing), and zeros with a re-prime after an underrun. What the follower
-  queued before the master's first pull is trimmed to the target, not
-  counted. `underrun_frames` counts the shortfall only, not the re-prime
-  zeros that follow it. Both counts are logged at `info` when the capture
-  stops (the shell's default filter is `warn`: set
+  nothing), an immediate slip once the queue is more than the
+  microphone's buffer above that (no late master explains it), and zeros
+  with a re-prime after an underrun. What the follower queued before the
+  master's first pull is trimmed to the target, not counted: audio from
+  before the recording, or, when the master's first drain is late, up to
+  that lateness of system audio recorded with its first packets.
+  `underrun_frames` counts the shortfall only, not the re-prime zeros that
+  follow it. The underrun, slip and trim counts are logged at `info` when
+  the capture stops (the shell's default filter is `warn`: set
   `RUST_LOG=steno_audio=info`; `tests/live_windows.rs` prints them).
   Measure the slip rate on a USB headset against built-in speakers; a plan
   decides whether to resample instead.
@@ -926,22 +930,28 @@ it:
   the time it ran. Call and in-person captures master on the microphone,
   which delivers continuously.
 - **Far-end latency** is the two streams' `GetStreamLatency` less the jitter
-  buffer's target. Between slips the queue drifts above the target by up
-  to the high-water mark (plus what the clocks drift in half a second), so
-  the echo canceller's alignment error from the buffer is about one period
-  (10 ms) at most. The process-loopback client may not implement
-  `GetStreamLatency` (0 then); a latency above 200 ms is clamped, and a
-  loopback stream's latency is not the render path's; check the echo
-  canceller's alignment on hardware.
+  buffer's target. Between slips the queue sits above the target by up to
+  one period (10 ms), plus the follower's worst lateness in a window, plus
+  up to two windows of drift (a fraction of a millisecond at the drift of
+  real clocks), and never by more than the microphone's buffer above
+  that; that is the echo canceller's alignment error from the buffer. The
+  process-loopback client may not implement `GetStreamLatency`; a failed
+  read or a latency above 200 ms counts as 0, since understating the delay
+  stays inside the canceller's tail and overstating it does not. A
+  staging delay larger than both latencies is logged at `info`. A loopback
+  stream's latency is not the render path's; check the echo canceller's
+  alignment on hardware.
 - **Process loopback scope.** Excluding Steno's process tree records every
   other process; whether that follows the default render endpoint or mixes
   every endpoint is unverified. Microsoft's API page names build 20438 for
   process loopback and its ApplicationLoopback sample build 20348; it is
   reported to work from Windows 10 2004, also unverified. Its client is
   reported to answer `GetBufferSize` with 0 or a huge value, so the buffer
-  is clamped to between one period and one second. The fallback, loopback of the default render endpoint (which
-  records Steno's own output too), runs whenever process loopback fails for
-  any reason, its 5 s activation timeout included. The user gets no notice;
+  is clamped to between one period and one second, and a device period
+  outside 1 to 100 ms is taken for 10 ms (`split_streams::stream_sizes`).
+  The fallback, loopback of the default render endpoint (which records
+  Steno's own output too), runs whenever process loopback fails for any
+  reason, its 5 s activation timeout included. The user gets no notice;
   only the log says which loopback runs.
 - **Default roles.** Windows keeps an `eConsole` and an `eCommunications`
   default per direction; the backend follows `eConsole` only. The
@@ -962,7 +972,8 @@ it:
   file name (`Teams.exe`), so the app's list of call apps needs Windows
   names. A capture session's state change is notified for sessions present
   at registration; later ones are re-registered on `OnSessionCreated` and
-  otherwise caught by the detector's 1 s poll.
+  on an endpoint notification, and otherwise caught by the detector's 1 s
+  poll.
 - **Device list.** `AudioDeviceInfo.id` is the index in the enumeration
   (WASAPI has no numeric ids), `uid` the endpoint id `Settings` stores; the
   transport type and `is_running_somewhere` are not read.
@@ -1210,7 +1221,7 @@ PR off `main`.
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | open |
-| WASAPI capture follow-ups from review (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | open |
+| WASAPI follow-ups: slip window, COM clamps, start deadline, detector serialisation (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
