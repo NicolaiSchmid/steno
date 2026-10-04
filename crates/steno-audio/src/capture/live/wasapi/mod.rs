@@ -3,20 +3,22 @@
 //! of `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS
 //! counterpart is `capture::live::backend`. No Swift counterpart.
 //!
-//! **Compile-tested only.** No Windows machine has run it: this backend is
-//! written against Microsoft's documentation and its samples, compiled,
-//! linted and unit-tested on the `windows-latest` CI runner, which has no
-//! audio device. Nothing here has captured a sample on real hardware;
-//! `tests/live_windows.rs` holds the `--ignored` checks a Windows machine
-//! must run before this ships (the plan's parity list).
+//! **Not run on hardware.** No Windows machine with audio devices has run
+//! it: this backend is written against Microsoft's documentation and its
+//! samples, compiled, linted and tested on the `windows-latest` CI runner.
+//! The runner has no audio endpoint, so no microphone stream ever opens
+//! there; process loopback does run and delivers silence, and
+//! `tests/live_windows.rs` checks that system-lane capture starts,
+//! delivers, stops and restarts. Its `--ignored` tests are the checks a
+//! Windows machine must run before this ships (the plan's parity list).
 //!
 //! # Streams
 //!
 //! - **System lane:** process loopback (`ActivateAudioInterfaceAsync` on
 //!   `VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK`,
 //!   `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`) excluding Steno's own
-//!   process tree (Microsoft documents it from build 20348; reported to
-//!   work from Windows 10 2004, unverified). Where that activation fails
+//!   process tree (Microsoft's API page names build 20438, its sample
+//!   build 20348; reported to work from Windows 10 2004, unverified). Where that activation fails
 //!   for any reason, its timeout included, loopback of the default render
 //!   endpoint, which records Steno's own output too; the switch is only
 //!   logged.
@@ -30,6 +32,11 @@
 //! (the sink's only producer) and [`StreamBody`] is what each thread runs
 //! per packet, with the all-or-nothing reservation across lanes and the
 //! drop accounting of the IOProc path (see `realtime::streams`).
+//!
+//! When the system stream is the only one (a `[System]` lane override),
+//! it is the master, and the timeline advances only as it delivers. Endpoint
+//! loopback delivers no packet while nothing plays, so such a recording is
+//! shorter than the time it ran, its silences left out; nothing pads them.
 //!
 //! # Device changes
 //!
@@ -62,7 +69,9 @@
 //! engine itself lost (a packet flagged as a discontinuity, the first one
 //! aside) is counted and logged at stop, not added to the sink's drop
 //! count: WASAPI does not say how much was lost. The follower's underrun
-//! and slip counts are logged at stop too.
+//! and slip counts are logged at stop too. All of these logs are at
+//! `info`, below the shell's default filter: set
+//! `RUST_LOG=steno_audio=info` to see them.
 
 pub(crate) mod com;
 
@@ -85,8 +94,11 @@ use crate::capture::{
 use crate::detection::EndpointFlow;
 use crate::realtime::{FollowerLane, LaneFrameSink, PacketRouter, StreamBody};
 
-/// How long a stream thread may take to open its stream (process loopback
-/// activation included) before `start` gives up on it.
+/// How long `start` waits, in total, for the stream threads to open and
+/// start their streams (process loopback activation included) and for the
+/// watcher to register, before it gives up on a stream (the watcher is
+/// only logged). One deadline for every wait, so a hanging COM call holds
+/// the session's lock this long at most.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the asynchronous process-loopback activation may take.
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -147,7 +159,11 @@ impl Watcher {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// From a notification callback: something may have changed.
+    /// From a notification callback: something may have changed. Microsoft
+    /// asks `IMMNotificationClient` callbacks never to wait on a
+    /// synchronization object; this lock is held only for a store and the
+    /// watcher's own short sections, never across a WASAPI call, so the
+    /// wait is bounded and cannot deadlock with the audio service.
     fn note(&self) {
         self.lock().pending = Some(Instant::now());
         self.condvar.notify_all();
@@ -197,8 +213,9 @@ impl DeviceProbe {
 
     /// The devices as they are now, in [`DeviceSnapshot`]'s terms: the
     /// default render endpoint (`eConsole`, the one both loopbacks follow),
-    /// the microphone (the explicit one if still active, else the
-    /// `eConsole` default), whether the endpoints the capture started on
+    /// the microphone (the explicit one while it is active, `None` once it
+    /// is not, as on the Mac; without an explicit one, the `eConsole`
+    /// default), whether the endpoints the capture started on
     /// are still active. `default_output_uid` stays empty: no stream opens
     /// the `eCommunications` default, so its changes cost no rebuild. Fields
     /// for a stream the capture does not open stay empty too, so they never
@@ -488,13 +505,14 @@ fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) {
     }
 }
 
-/// The next event from a stream thread within `limit`.
-fn next_event(launched: &Launched, limit: Duration) -> Result<StreamEvent, CaptureError> {
+/// The next event from a stream thread before `deadline`.
+fn next_event(launched: &Launched, deadline: Instant) -> Result<StreamEvent, CaptureError> {
+    let limit = deadline.saturating_duration_since(Instant::now());
     launched.events.recv_timeout(limit).map_err(|error| {
         CaptureError::BackendFailed(match error {
             RecvTimeoutError::Timeout => {
                 format!(
-                    "{} stream did not open within {limit:?}",
+                    "{} stream did not answer within {OPEN_TIMEOUT:?} of the start",
                     launched.source.as_str()
                 )
             }
@@ -552,10 +570,14 @@ fn spawn_streams(
     Ok(streams)
 }
 
-/// The stream thread's next event, which must be `Opened` (`opening`) or
-/// `Started` and a success.
-fn expect_event(launched: &mut Launched, opening: bool) -> Result<(), CaptureError> {
-    let event = next_event(launched, OPEN_TIMEOUT);
+/// The stream thread's next event before `deadline`, which must be
+/// `Opened` (`opening`) or `Started` and a success.
+fn expect_event(
+    launched: &mut Launched,
+    opening: bool,
+    deadline: Instant,
+) -> Result<(), CaptureError> {
+    let event = next_event(launched, deadline);
     launched.answered |= event.is_ok();
     match event {
         Ok(StreamEvent::Opened(Ok(info))) if opening => {
@@ -577,9 +599,10 @@ fn expect_event(launched: &mut Launched, opening: bool) -> Result<(), CaptureErr
 fn open_streams(
     stop: &AtomicBool,
     mut streams: Vec<Launched>,
+    deadline: Instant,
 ) -> Result<Vec<Launched>, CaptureError> {
     for index in 0..streams.len() {
-        if let Err(error) = expect_event(&mut streams[index], true) {
+        if let Err(error) = expect_event(&mut streams[index], true, deadline) {
             tear_down(stop, streams);
             return Err(error);
         }
@@ -597,6 +620,7 @@ fn start_streams(
     plan: &SplitStreamPlan,
     follower: Option<&Arc<FollowerLane>>,
     sink: &Arc<LaneFrameSink>,
+    deadline: Instant,
 ) -> Result<Vec<Launched>, CaptureError> {
     // `spawn_streams` put the master first.
     for index in (0..streams.len()).rev() {
@@ -618,7 +642,7 @@ fn start_streams(
         if let (Some(body), Some(sender)) = (body, launched.body.take()) {
             let _ = sender.send(body);
         }
-        if let Err(error) = expect_event(launched, false) {
+        if let Err(error) = expect_event(launched, false, deadline) {
             tear_down(stop, streams);
             return Err(error);
         }
@@ -633,6 +657,7 @@ fn spawn_watcher(
     watcher: &Arc<Watcher>,
     probe: DeviceProbe,
     sink: &Arc<LaneFrameSink>,
+    deadline: Instant,
 ) -> Result<JoinHandle<()>, CaptureError> {
     let (ready, ready_receiver) = sync_channel(1);
     let thread_watcher = Arc::clone(watcher);
@@ -641,8 +666,9 @@ fn spawn_watcher(
         .name("steno-devices".into())
         .spawn(move || run_watcher(&thread_watcher, &probe, &thread_sink, &ready))
         .map_err(|error| CaptureError::BackendFailed(format!("device watcher: {error}")))?;
-    if ready_receiver.recv_timeout(OPEN_TIMEOUT).is_err() {
-        tracing::warn!("device watcher did not start within {OPEN_TIMEOUT:?}");
+    let limit = deadline.saturating_duration_since(Instant::now());
+    if ready_receiver.recv_timeout(limit).is_err() {
+        tracing::warn!("device watcher did not start within {OPEN_TIMEOUT:?} of the start");
     }
     Ok(thread)
 }
@@ -665,12 +691,13 @@ impl CaptureBackend for LiveCaptureBackend {
             return Err(CaptureError::InvalidState("backend already started".into()));
         }
         let plan = SplitStreamPlan::new(lanes)?;
+        let deadline = Instant::now() + OPEN_TIMEOUT;
         let stop = Arc::new(AtomicBool::new(false));
         let watcher = Arc::new(Watcher::default());
 
         let streams = spawn_streams(&plan, input_device_uid, &stop, &watcher)?;
         // Every stream opened, or none runs.
-        let streams = open_streams(&stop, streams)?;
+        let streams = open_streams(&stop, streams, deadline)?;
         let info = |source: StreamSource| {
             streams
                 .iter()
@@ -682,7 +709,7 @@ impl CaptureBackend for LiveCaptureBackend {
         let follower = plan.follower.and_then(|source| {
             info(source).map(|i| Arc::new(FollowerLane::for_period(i.period_frames)))
         });
-        let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink)?;
+        let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink, deadline)?;
         if let Some(kind) = system.as_ref().and_then(|s| s.loopback) {
             tracing::info!("system lane on {kind:?} loopback");
         }
@@ -694,7 +721,7 @@ impl CaptureBackend for LiveCaptureBackend {
             mic_endpoint_id: mic.as_ref().and_then(|m| m.endpoint_id.clone()),
             render_endpoint_id: system.as_ref().and_then(|s| s.endpoint_id.clone()),
         };
-        let watcher_thread = match spawn_watcher(&watcher, probe, &sink) {
+        let watcher_thread = match spawn_watcher(&watcher, probe, &sink, deadline) {
             Ok(thread) => thread,
             Err(error) => {
                 tear_down(&stop, streams);
@@ -732,9 +759,10 @@ impl CaptureBackend for LiveCaptureBackend {
         if let Some(lane) = &active.follower {
             tracing::info!(
                 "system stream staging: {} frames padded with zeros (underrun), {} skipped \
-                 (slipped)",
+                 (slipped), {} from before the first pull trimmed",
                 lane.underrun_frames(),
-                lane.slipped_frames()
+                lane.slipped_frames(),
+                lane.trimmed_frames()
             );
         }
         active.watcher.stop();
@@ -751,8 +779,10 @@ impl Drop for LiveCaptureBackend {
     }
 }
 
-/// The WASAPI endpoints as the input picker and `steno dev audio-devices`
-/// see them. Every call joins COM on the calling thread for its duration.
+/// The WASAPI endpoints for the input picker, under the same name and
+/// calls as the macOS `capture::live::devices::AudioDevices` (Swift:
+/// `Sources/StenoAudio/Capture/AudioDevices.swift`). Every call joins COM
+/// on the calling thread for its duration.
 pub struct AudioDevices;
 
 impl AudioDevices {
@@ -807,6 +837,11 @@ impl AudioDevices {
             .collect())
     }
 
+    /// The active endpoint with `uid`, or `None` when it is not connected.
+    pub fn device(uid: &str) -> Result<Option<AudioDeviceInfo>, CaptureError> {
+        Ok(Self::all()?.into_iter().find(|d| d.uid == uid))
+    }
+
     /// The default capture endpoint (`eConsole`).
     pub fn default_input() -> Result<AudioDeviceInfo, CaptureError> {
         Self::all()?
@@ -815,8 +850,9 @@ impl AudioDevices {
             .ok_or(CaptureError::InputDeviceUnavailable)
     }
 
-    /// The default render endpoint (`eConsole`).
-    pub fn default_output() -> Result<AudioDeviceInfo, CaptureError> {
+    /// The default render endpoint (`eConsole`), which both loopbacks
+    /// follow.
+    pub fn default_system_output() -> Result<AudioDeviceInfo, CaptureError> {
         Self::all()?
             .into_iter()
             .find(|d| d.is_default_output)
