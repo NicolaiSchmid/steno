@@ -659,6 +659,26 @@ async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
     assert!(error.reason.contains("no LLM endpoint"));
 }
 
+/// The world's dependencies with `engine` as the speech engine.
+fn with_engine(world: &World, engine: Arc<dyn steno_core::SpeechEngine>) -> PipelineDependencies {
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.speech_engine = engine;
+    dependencies
+}
+
+/// Enqueues the two-lane call as a meeting of its own; its id.
+fn enqueue_call(world: &World, pipeline: &ProcessingPipeline) -> Uuid {
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    meeting.id
+}
+
+fn meeting_state(world: &World, id: Uuid) -> MeetingState {
+    world.store.meeting(id).unwrap().unwrap().state
+}
+
 /// The speech engine is released once a job's lanes are transcribed,
 /// before the diarizer runs, so the speech sidecar's working set is back
 /// before the stages after transcription.
@@ -677,18 +697,12 @@ async fn the_engine_is_released_after_the_last_lane_before_diarization() {
             FakeDiarizer::round_robin(audio.duration(), 2, 1.5)
         })
     };
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = engine.clone();
+    let mut dependencies = with_engine(&world, engine.clone());
     dependencies.diarizer = Arc::new(diarizer);
     let pipeline = ProcessingPipeline::new(dependencies);
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
-    assert_eq!(
-        world.store.meeting(meeting.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
     assert_eq!(
         *seen.lock().unwrap(),
         [(2, 1)],
@@ -705,15 +719,11 @@ async fn a_job_whose_transcription_fails_releases_the_engine_too() {
         failure: Some("no model".to_owned()),
         ..FakeSpeechEngine::default()
     });
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = failing.clone();
-    let pipeline = ProcessingPipeline::new(dependencies);
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    let pipeline = ProcessingPipeline::new(with_engine(&world, failing.clone()));
+    let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
     assert_eq!(
-        world.store.meeting(meeting.id).unwrap().unwrap().state,
+        meeting_state(&world, meeting),
         MeetingState::Failed {
             reason: "transcribe: no model".to_owned()
         }
@@ -721,7 +731,7 @@ async fn a_job_whose_transcription_fails_releases_the_engine_too() {
     assert_eq!(failing.releases.count(), 1);
 }
 
-/// Which call of a [`GatedEngine`] waits until its `open` is notified.
+/// Which call of a [`GatedEngine`] is gated.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Gate {
     FirstTranscription,
@@ -729,11 +739,12 @@ enum Gate {
 }
 
 /// A fake engine whose first transcription or first release waits until
-/// `open` is notified, logging each `prepare` and the start and end of
-/// each `release`.
+/// `open` is notified (or panics, with `panics`), logging each `prepare`
+/// and the start and end of each `release`.
 struct GatedEngine {
     inner: FakeSpeechEngine,
     gate: Gate,
+    panics: bool,
     /// Set once the gated call has started.
     entered: std::sync::atomic::AtomicBool,
     open: tokio::sync::Notify,
@@ -745,6 +756,7 @@ impl GatedEngine {
         GatedEngine {
             inner: FakeSpeechEngine::default(),
             gate,
+            panics: false,
             entered: false.into(),
             open: tokio::sync::Notify::new(),
             log: Mutex::new(Vec::new()),
@@ -762,9 +774,10 @@ impl GatedEngine {
         .expect("the gated call started");
     }
 
-    /// Waits for `open` on the first call through `gate`.
+    /// The first call through `gate` panics or waits for `open`.
     async fn pass(&self, gate: Gate) {
         if self.gate == gate && !self.entered.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            assert!(!self.panics, "the engine broke");
             self.open.notified().await;
         }
     }
@@ -813,22 +826,14 @@ impl steno_core::SpeechEngine for GatedEngine {
 async fn a_job_leaves_the_engine_loaded_while_another_still_transcribes() {
     let world = world(false, None, AudioRetention::KeepForever);
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = engine.clone();
-    let pipeline = ProcessingPipeline::new(dependencies);
-    let patience = std::time::Duration::from_secs(5);
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
 
-    let slow = call_meeting(world.now);
-    let slow_asset = call_asset(&world.audio, slow.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&slow, &slow_asset).unwrap();
+    let slow = enqueue_call(&world, &pipeline);
     engine.wait_until_entered().await;
 
-    let mut fast = call_meeting(world.now);
-    fast.id = Uuid::new_v4();
-    let fast_asset = call_asset(&world.audio, fast.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&fast, &fast_asset).unwrap();
-    tokio::time::timeout(patience, async {
-        while world.store.meeting(fast.id).unwrap().unwrap().state != MeetingState::Ready {
+    let fast = enqueue_call(&world, &pipeline);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while meeting_state(&world, fast) != MeetingState::Ready {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     })
@@ -842,10 +847,7 @@ async fn a_job_leaves_the_engine_loaded_while_another_still_transcribes() {
 
     engine.open.notify_one();
     pipeline.wait_until_idle().await;
-    assert_eq!(
-        world.store.meeting(slow.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
+    assert_eq!(meeting_state(&world, slow), MeetingState::Ready);
     assert_eq!(engine.inner.releases.count(), 1);
 }
 
@@ -855,19 +857,12 @@ async fn a_job_leaves_the_engine_loaded_while_another_still_transcribes() {
 async fn a_job_that_starts_during_a_release_prepares_again_after_it() {
     let world = world(false, None, AudioRetention::KeepForever);
     let engine = Arc::new(GatedEngine::new(Gate::FirstRelease));
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = engine.clone();
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
 
-    let first = call_meeting(world.now);
-    let first_asset = call_asset(&world.audio, first.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&first, &first_asset).unwrap();
+    let first = enqueue_call(&world, &pipeline);
     engine.wait_until_entered().await;
 
-    let mut second = call_meeting(world.now);
-    second.id = Uuid::new_v4();
-    let second_asset = call_asset(&world.audio, second.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&second, &second_asset).unwrap();
+    let second = enqueue_call(&world, &pipeline);
     // Time enough for the second job's warm-up, were it not held.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert_eq!(engine.log(), ["prepare", "release"]);
@@ -880,51 +875,8 @@ async fn a_job_that_starts_during_a_release_prepares_again_after_it() {
             "prepare", "release", "released", "prepare", "release", "released"
         ]
     );
-    for meeting in [first.id, second.id] {
-        assert_eq!(
-            world.store.meeting(meeting).unwrap().unwrap().state,
-            MeetingState::Ready
-        );
-    }
-}
-
-/// An engine whose first transcription panics; the later ones are the
-/// fake's.
-struct PanicsOnceEngine {
-    inner: FakeSpeechEngine,
-    panicked: std::sync::atomic::AtomicBool,
-}
-
-#[async_trait]
-impl steno_core::SpeechEngine for PanicsOnceEngine {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
-        self.inner.supported_languages()
-    }
-
-    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
-        self.inner.prepare().await
-    }
-
-    async fn transcribe(
-        &self,
-        audio: &steno_core::AudioBuffer16k,
-        hint: Option<&steno_core::LanguageTag>,
-    ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
-        if !self
-            .panicked
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            panic!("the engine broke");
-        }
-        self.inner.transcribe(audio, hint).await
-    }
-
-    async fn release(&self) -> steno_core::protocols::BoundaryResult<()> {
-        self.inner.release().await
+    for meeting in [first, second] {
+        assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
     }
 }
 
@@ -933,16 +885,12 @@ impl steno_core::SpeechEngine for PanicsOnceEngine {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_job_that_panics_gives_its_claim_on_the_engine_back() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let engine = Arc::new(PanicsOnceEngine {
-        inner: FakeSpeechEngine::default(),
-        panicked: false.into(),
+    let engine = Arc::new(GatedEngine {
+        panics: true,
+        ..GatedEngine::new(Gate::FirstTranscription)
     });
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = engine.clone();
-    let pipeline = ProcessingPipeline::new(dependencies);
-    let panicking = call_meeting(world.now);
-    let asset = call_asset(&world.audio, panicking.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&panicking, &asset).unwrap();
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+    enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
     assert_eq!(
         engine.inner.releases.count(),
@@ -950,15 +898,9 @@ async fn a_job_that_panics_gives_its_claim_on_the_engine_back() {
         "a panic only drops the claim"
     );
 
-    let mut next = call_meeting(world.now);
-    next.id = Uuid::new_v4();
-    let asset = call_asset(&world.audio, next.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&next, &asset).unwrap();
+    let next = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
-    assert_eq!(
-        world.store.meeting(next.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
+    assert_eq!(meeting_state(&world, next), MeetingState::Ready);
     assert_eq!(engine.inner.releases.count(), 1);
 }
 
