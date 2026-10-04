@@ -9,6 +9,7 @@ pub mod live;
 pub mod nominal_rate;
 pub mod session;
 pub mod snapshot;
+pub mod split_streams;
 
 pub use backend::{CaptureBackend, CaptureStream};
 pub use configuration::{
@@ -20,3 +21,4 @@ pub use live::LiveCaptureBackend;
 pub use nominal_rate::NominalSampleRate;
 pub use session::{CaptureSession, RecordingWriterFactory};
 pub use snapshot::DeviceSnapshot;
+pub use split_streams::{SplitStreamPlan, StreamSource};

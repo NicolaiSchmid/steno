@@ -10,13 +10,17 @@ pub mod relay;
 pub mod ring;
 pub mod rings;
 pub mod sink;
+pub mod streams;
 pub mod wake;
 
-pub use io_proc::{BufferView, deliver, interleaved_view};
+pub use io_proc::{
+    BufferView, MAX_SLICE_BUFFERS, SliceView, deliver, deliver_slices, interleaved_view,
+};
 pub use level_meter::{LevelMeter, LevelSlot};
 pub use processing::{ProcessingConfiguration, ProcessingThread};
 pub use relay::FrameRelay;
 pub use ring::LaneRingBuffer;
 pub use rings::LaneRings;
 pub use sink::LaneFrameSink;
+pub use streams::{FollowerLane, PacketRouter, StreamBody};
 pub use wake::Wake;

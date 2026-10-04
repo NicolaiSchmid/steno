@@ -20,11 +20,11 @@
 //! stream runs with `RT_PROCESS`, so its `process` callback runs on
 //! PipeWire's data-loop thread, which is the real-time path here:
 //! `process` dequeues the buffer, turns its chunk into a
-//! [`BufferView`](crate::realtime::BufferView) with [`interleaved_view`]
-//! and, while the gate is open, hands it to [`deliver`], the IOProc body
-//! the macOS backend uses. No allocation, no lock, no log (proven for the
-//! body in `tests/realtime.rs` and on the real data-loop thread in
-//! `tests/pipewire.rs`).
+//! [`SliceView`](crate::realtime::SliceView) with [`interleaved_view`]
+//! and, while the gate is open, hands it to [`deliver_slices`], the safe
+//! form of the IOProc body the macOS backend uses. No allocation, no lock,
+//! no log (proven for the body in `tests/realtime.rs` and on the real
+//! data-loop thread in `tests/pipewire.rs`).
 //!
 //! # Start
 //!
@@ -84,7 +84,7 @@ use steno_core::AudioLane;
 use self::graph::{Graph, Latency, Targets};
 use crate::SAMPLE_RATE;
 use crate::capture::{CaptureBackend, CaptureError, CaptureStream, DeviceSnapshot, LaneSource};
-use crate::realtime::{LaneFrameSink, deliver, interleaved_view};
+use crate::realtime::{LaneFrameSink, deliver_slices, interleaved_view};
 
 /// How long `start` lets PipeWire answer, link and run the first cycle.
 const START_TIMEOUT: Duration = Duration::from_secs(3);
@@ -106,10 +106,11 @@ const STREAM_NODE_NAME: &str = "steno-capture";
 
 /// The capture's way into the sink, closed for good by `stop()` before it
 /// waits for the thread: once [`Gate::close`] returned, neither a cycle's
-/// [`deliver`] nor a device-change report reaches the sink, whatever the
-/// thread does next. Lock-free on the real-time side: an increment, a load
-/// and a decrement, all `SeqCst`, so either a pass sees the gate closed or
-/// `close` sees the pass inside and waits for it to leave.
+/// [`deliver_slices`] nor a device-change report reaches the sink,
+/// whatever the thread does next. Lock-free on the real-time side: an
+/// increment, a load and a decrement, all `SeqCst`, so either a pass sees
+/// the gate closed or `close` sees the pass inside and waits for it to
+/// leave.
 #[derive(Debug)]
 struct Gate {
     open: AtomicBool,
@@ -135,7 +136,7 @@ impl Gate {
     }
 
     /// Closes the gate and waits for whoever is inside: a cycle's
-    /// `deliver` (microseconds), or a report and its handler.
+    /// `deliver_slices` (microseconds), or a report and its handler.
     fn close(&self) {
         self.open.store(false, Ordering::SeqCst);
         while self.inside.load(Ordering::SeqCst) != 0 {
@@ -163,10 +164,10 @@ const _: () = {
 };
 
 /// The stream's `process` callback, on PipeWire's data-loop thread: one
-/// buffer through [`deliver`] while the gate is open, then back to the
-/// stream. Nothing allocates, locks or logs; nothing can panic (the view
-/// and `deliver` index only through checked lookups, `channels` is at
-/// least 1).
+/// buffer through [`deliver_slices`] while the gate is open, then back to
+/// the stream. Nothing allocates, locks or logs; nothing can panic (the
+/// view and `deliver_slices` index only through checked lookups,
+/// `channels` is at least 1).
 fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
@@ -176,18 +177,16 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     };
     let chunk = data.chunk();
     let (offset, size, stride) = (chunk.offset(), chunk.size(), chunk.stride());
-    let view = interleaved_view(data.data().as_deref(), offset, size, stride, rt.channels);
-    // SAFETY: the view points into the buffer's memory, mapped by
-    // `MAP_BUFFERS` and valid for `byte_size` bytes while the buffer stays
-    // dequeued, which it does until `buffer` drops at the end of this call.
+    // The buffer's memory, mapped by `MAP_BUFFERS` and valid while the
+    // buffer stays dequeued, until `buffer` drops at the end of this call;
+    // the view borrows it.
+    let memory = data.data();
+    let view = interleaved_view(memory.as_deref(), offset, size, stride, rt.channels);
     rt.gate
-        .pass(|| unsafe { deliver(&[view], &rt.sources, &rt.sink) });
-    // Release: `start` returns on seeing it, and the frames `deliver`
-    // wrote are then in the rings.
-    rt.cycle_frames.store(
-        view.byte_size / (rt.channels * size_of::<f32>()),
-        Ordering::Release,
-    );
+        .pass(|| deliver_slices(&[view], &rt.sources, &rt.sink));
+    // Release: `start` returns on seeing it, and the frames
+    // `deliver_slices` wrote are then in the rings.
+    rt.cycle_frames.store(view.frames, Ordering::Release);
 }
 
 /// A `pipewire` error as a backend failure naming what failed.

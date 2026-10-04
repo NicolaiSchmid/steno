@@ -6,14 +6,16 @@
 //!   SpeexDSP and a passthrough, with the ERLE metrics.
 //! - [`capture`]: the [`CaptureSession`] state machine over a
 //!   [`CaptureBackend`], the configuration and results, the stream layout,
-//!   and the live backend (Core Audio on macOS, PipeWire on Linux, a stub
-//!   on Windows until WP10).
+//!   and the live backend (Core Audio on macOS, PipeWire on Linux, WASAPI
+//!   on Windows).
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
 //!   files to 16 kHz mono, and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
-//!   microphone, debounced into a call starting and ending.
-//! - [`realtime`]: the rings, the sink, the IOProc body, the processing
-//!   thread and the relay; everything on the real-time path.
+//!   microphone, debounced into a call starting and ending, and the WASAPI
+//!   session mapping.
+//! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
+//!   bodies, the processing thread and the relay; everything on the
+//!   real-time path.
 //! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars),
 //!   its thread and the 3:1 resampler.
 //! - [`clock`]: the injectable [`Clock`] the rebuild and the detector
@@ -51,19 +53,40 @@
 //! On Linux the top of the diagram is PipeWire's data-loop thread running
 //! the capture stream's `process` callback (`capture::live::pipewire`),
 //! which turns its one interleaved buffer into a view
-//! ([`realtime::interleaved_view`]) and calls the same `deliver`.
+//! ([`realtime::interleaved_view`]) and calls `deliver_slices`, the safe
+//! form of the same `deliver`.
+//!
+//! On Windows the top of the diagram is two WASAPI capture threads
+//! (`capture::live::wasapi`): the microphone thread is the first arrow,
+//! routing each packet through `realtime::PacketRouter`, and the system
+//! thread stages its packets into a `realtime::FollowerLane` that router
+//! pulls from.
 //!
 //! The synthetic backend ([`testing::SyntheticCaptureBackend`]) is a
 //! producer thread speaking the `LaneFrameSink` protocol in place of the
 //! IOProc; everything below it is the production path, which is what makes
 //! the pipeline testable on every OS. `unsafe` is confined to the FFI
 //! edges, each with its invariant beside it: the Core Audio binding
-//! (`capture::live::hal`, `capture::live::backend`), the PipeWire
-//! `process` callback's hand-off to `deliver` (`capture::live::pipewire`;
-//! the rest of libpipewire is reached through the safe `pipewire` crate),
-//! the Speex FFI (`aec::speex`), the ring and its raw-pointer callers
-//! (`realtime::ring`, `realtime::sink`, `realtime::io_proc`), and the
-//! counting allocator (`testing::rt`).
+//! (`capture::live::hal`, `capture::live::backend`), the WASAPI binding
+//! (`capture::live::wasapi::com`), the Speex FFI (`aec::speex`), the ring
+//! and its raw-pointer callers (`realtime::ring`, `realtime::sink`,
+//! `realtime::io_proc`, which also reads a mapped PipeWire buffer as
+//! samples; the rest of libpipewire is reached through the safe `pipewire`
+//! crate), and the counting allocator (`testing::rt`).
+//!
+//! # Platforms
+//!
+//! The live backend and the process-activity source are Core Audio on
+//! macOS and WASAPI on Windows; on Linux the live backend is PipeWire
+//! (WP5b) and the process-activity source a stub. **The Windows backend is
+//! compile-tested only:** no Windows machine has run it. It is written
+//! against Microsoft's documentation, built, linted and unit-tested on the
+//! `windows-latest` CI runner, which has no audio device; its per-packet
+//! bodies (`realtime::streams`), the stream plan (`capture::split_streams`)
+//! and the session mapping (`detection::sessions`) are
+//! platform-independent and tested on every OS, the zero-allocation proof
+//! included. The live checks in `tests/live_windows.rs` are `--ignored`
+//! until a Windows machine runs them.
 //!
 //! Swift: `Sources/StenoAudio/StenoAudio.swift`.
 
