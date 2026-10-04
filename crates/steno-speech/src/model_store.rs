@@ -1864,9 +1864,11 @@ mod tests {
     fn a_body_that_stalls_times_out_and_is_tried_again() {
         // The first answer sends half the body and then nothing; the second
         // sends it all. Without the body timeout the first read never ends.
+        // The timeout bounds the second, good answer too, so it is long
+        // enough for a slow machine to read 18 bytes.
         let dir = tempfile::tempdir().unwrap();
         let mut store = ModelStore::new(dir.path());
-        store.min_body_timeout = Duration::from_millis(200);
+        store.min_body_timeout = Duration::from_secs(2);
         let body = b"not really a model".to_vec();
         let (url, release, _) = serve_held(vec![
             (body.clone(), body.len() / 2),
@@ -1876,7 +1878,7 @@ mod tests {
         let result = ensure_within(
             &store,
             &asset,
-            Duration::from_secs(10),
+            Duration::from_secs(30),
             "the stalled body was never given up",
         );
         drop(release);
@@ -2062,7 +2064,7 @@ mod tests {
     }
 
     #[test]
-    fn a_silent_chunk_is_given_up_at_the_longest_timeout_not_at_its_length_s() {
+    fn a_silent_chunk_is_given_up_at_the_longest_timeout_not_its_own() {
         // 1 MiB chunks of a 2 MiB file and a shortest body timeout of an
         // hour: by its length a chunk would have an hour, but none gets
         // more than the longest chunk timeout, here 50 ms. Every answer

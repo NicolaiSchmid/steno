@@ -120,12 +120,12 @@ fn stderr_of(child: &mut Child) -> String {
 }
 
 /// Waits up to ten seconds for `child` to exit; kills it and panics with
-/// `outlived` if it does not.
-fn exit_status(child: &mut Child, outlived: &str) -> ExitStatus {
+/// `message` if it does not.
+fn exit_status(child: &mut Child, message: &str) -> ExitStatus {
     within_ten_seconds(|| child.try_wait().unwrap()).unwrap_or_else(|| {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("{outlived}")
+        panic!("{message}")
     })
 }
 
