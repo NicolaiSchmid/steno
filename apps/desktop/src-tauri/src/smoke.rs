@@ -1,12 +1,13 @@
-//! The headless smoke run CI drives under `xvfb-run`: with
+//! The smoke run CI drives under `xvfb-run` on Linux and in the runner's
+//! session on macOS (`smoke-linux.sh`, `smoke-macos.sh`): with
 //! `STENO_SMOKE_SECONDS=<n>` the shell opens all three windows side by side
 //! and both floating panels under them, asks main for a meeting before its
 //! page has mounted (as a deep link at a cold launch does), waits that
 //! long, then checks the panels and closes main. It exits 0 when the main
 //! window sent `page.ready`, at least one snapshot reached it in reply,
 //! the meeting reached it after its `page.ready`, the tray was built, both
-//! panels were visible at the size their page reported and kept it when
-//! asked for another, a second prompt reached the prompt's window, both
+//! panels were visible at the size their page reported and held it
+//! (`keeps_its_size`), a second prompt reached the prompt's window, both
 //! panels hid, and closing main hid it rather than destroying it; 1
 //! otherwise; a value that is not a positive number ends the run at once
 //! with 2. Screenshots of the Xvfb root during the wait are the review
@@ -289,7 +290,7 @@ pub const PANEL_PROMPT_Y: f64 = 700.0;
 pub const PANEL_BUBBLE_Y: f64 = 800.0;
 
 /// Both panels exist, are visible and have taken the size their page
-/// reported, keep it when asked for another (`keeps_its_size`), the
+/// reported, hold it (`keeps_its_size`), the
 /// prompt's window takes a second prompt (`takes_a_second_prompt`), and
 /// both hide on request and report hidden: the same `show`, `resize` and
 /// `hide` the one rule drives, checked from outside.
@@ -371,10 +372,22 @@ fn check_main_hides(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// A panel's size is the page's alone: a request for another size, as a
-/// drag on the Linux resize border makes, leaves the window as it is
-/// (`panels::pin_size`).
+/// A panel's size is the page's alone, held each platform's way
+/// (`panels::RESIZABLE`). On Linux the window is resizable and pinned
+/// (`panels::pin_size`): a request for another size, as a drag on its
+/// resize border makes, leaves it as it is. Elsewhere it is not
+/// resizable, so no drag can change it, and no request is made: macOS
+/// takes a size set from code whatever the window's minimum and maximum.
 fn keeps_its_size(window: &WebviewWindow, label: &str, size: (f64, f64)) -> Result<(), String> {
+    let resizable = window.is_resizable().map_err(|error| error.to_string())?;
+    if resizable != panels::RESIZABLE {
+        let not = if resizable { "" } else { " not" };
+        return Err(format!("the {label} panel is{not} resizable"));
+    }
+    if !resizable {
+        eprintln!("[steno-desktop] smoke: the {label} panel cannot be resized");
+        return Ok(());
+    }
     window
         .set_size(LogicalSize::new(size.0 + 40.0, size.1 + 40.0))
         .map_err(|error| error.to_string())?;

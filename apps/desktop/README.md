@@ -238,6 +238,13 @@ corners render black there; a desktop shows them rounded. Xvfb has no
 tray host either; a smoke run stands in for one, so the built tray counts
 and the run checks the close rule a desktop with a tray gets.
 
+`apps/desktop/scripts/smoke-macos.sh [binary] [seconds]` runs the smoke on
+a Mac, in the logged-in session (the windows show on its screen for those
+seconds) and with a fresh `HOME`; CI's macOS job runs it. A panel there is
+not resizable at all, so the run checks that instead of asking for 40
+points more: AppKit's minimum and maximum hold only against the user's
+resizing, and a size set from code goes through.
+
 ## Prerequisites
 
 ### Debian and Ubuntu
@@ -293,7 +300,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the shell's own methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
 | `apps/desktop/src-tauri/src/host.rs`, `fixtures.rs` | The fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
-| `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh` | The headless smoke CI runs under Xvfb |
+| `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | Manual trigger: the six bundles on the three platforms as workflow artifacts, unsigned (WP9 signs, notarises and publishes); the `platforms` input is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
 
