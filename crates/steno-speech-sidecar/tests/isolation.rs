@@ -1,17 +1,18 @@
 //! `SidecarSpeechEngine` against the real `steno-speech-sidecar` binary:
 //! the protocol round trip, health and graceful shutdown, installing the
-//! models, and every way the child can fail (killed mid-request or while
-//! idle, aborting the way an uncaught C++ exception does, panicking,
-//! panicking after a flood of stderr, exiting, hanging past the deadline,
-//! allocating past the memory ceiling, writing garbage, reporting an
-//! error, staying silent at start, speaking another protocol version).
-//! Each failure must come back as an error from the engine, never take the
-//! test process down, and leave an engine that works on the next call.
-//! Dropping the engine stops its child, inside a runtime or not. Driven by
-//! hand, without the client, a child must exit when its parent's pipes
-//! close, idle or busy, with status 2 on a request it cannot read, and on
-//! unix answer a request that SIGINT, SIGTERM and SIGHUP reach
-//! mid-request.
+//! models, and every way the child can fail. During a request (killed,
+//! aborting the way an uncaught C++ exception does, panicking, panicking
+//! after a flood of stderr, exiting, failing to send its reply, hanging
+//! past the deadline, allocating past the memory ceiling, writing garbage,
+//! reporting an error) or at start (staying silent, speaking another
+//! protocol version), each failure must come back as an error from the
+//! engine. Between requests (killed, over the ceiling), the next call
+//! replaces the child without an error. None may take the test process
+//! down, and the engine must work on the next call. Dropping the engine
+//! stops its child, inside a runtime or not. Driven by hand, without the
+//! client, a child must greet first, exit when its parent's pipes close,
+//! idle or busy, with status 2 on a request it cannot read, and on unix
+//! answer a request that SIGINT, SIGTERM and SIGHUP reach mid-request.
 //!
 //! Nothing here ends a child with `DirectML` in use: that switches
 //! `DirectML` off for the rest of the process's run, so those tests run
@@ -38,7 +39,7 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use common::{
-    ASKED_FOR_DIRECTML, BINARY, assert_works, config, engine_in, engine_with_fault, provider,
+    ASKED_FOR_DIRECTML, assert_works, binary, config, engine_in, engine_with_fault, provider,
     sidecar_error, tone,
 };
 use steno_core::{AudioBuffer16k, SpeechEngine};
@@ -86,9 +87,31 @@ fn gone_soon(pid: u32) -> bool {
     within_ten_seconds(|| (!alive(pid)).then_some(())).is_some()
 }
 
+/// Whether `pid` has ended: gone, or a zombie its parent has not reaped.
+fn ended(pid: u32) -> bool {
+    if cfg!(windows) {
+        return !alive(pid);
+    }
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+}
+
+/// The pid the `--fault-once` marker in `dir` holds, once the faulting
+/// child has written it.
+fn faulted(dir: &tempfile::TempDir) -> Option<u32> {
+    std::fs::read_to_string(dir.path().join("faulted"))
+        .ok()?
+        .parse()
+        .ok()
+}
+
 /// A child with `args`, started by hand without the client.
 fn spawn_by_hand(args: &[&str]) -> Child {
-    Command::new(BINARY)
+    Command::new(binary())
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -280,7 +303,7 @@ async fn a_crash_inside_a_load_on_the_cpu_is_not_retried_within_the_call() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_child_killed_mid_request_is_an_error_and_the_next_call_recovers() {
-    let (engine, _dir) = engine_with_fault("hang", |_| {});
+    let (engine, dir) = engine_with_fault("hang", |_| {});
     let engine = Arc::new(engine);
     engine.prepare().await.unwrap();
     let pid = engine.pid().unwrap();
@@ -293,9 +316,9 @@ async fn a_child_killed_mid_request_is_an_error_and_the_next_call_recovers() {
                 .map_err(|e| e.to_string())
         })
     };
-    // The request is in flight once the child has read it; give it a
-    // moment (a blocking sleep: the runtime has other workers).
-    std::thread::sleep(Duration::from_millis(300));
+    // The request is in flight once the child has read it and written its
+    // marker (a blocking wait: the runtime has other workers).
+    assert_eq!(within_ten_seconds(|| faulted(&dir)), Some(pid));
     assert!(!running.is_finished());
     assert!(kill(pid));
     let error = running.await.unwrap().unwrap_err();
@@ -439,10 +462,7 @@ async fn a_child_of_another_protocol_version_is_refused() {
         "{error}"
     );
     assert_eq!(engine.pid(), None);
-    let refused: u32 = std::fs::read_to_string(dir.path().join("faulted"))
-        .unwrap()
-        .parse()
-        .unwrap();
+    let refused = faulted(&dir).unwrap();
     assert!(gone_soon(refused), "the refused child {refused} still runs");
     // The next child speaks the protocol.
     assert_works(&engine, &tone(0.5)).await;
@@ -453,19 +473,16 @@ async fn a_child_of_another_protocol_version_is_refused() {
 async fn a_child_that_never_greets_is_killed_when_its_start_times_out() {
     // It reads nothing, so a closed stdin does not end it: only the kill
     // when the client drops the failed start does. The timeout leaves a
-    // slow first start (a busy macOS runner) time to write its marker.
+    // slow start on a busy runner time to write its marker.
     let (engine, dir) = engine_with_fault("silent", |c| {
-        c.startup_timeout = Duration::from_secs(5);
+        c.startup_timeout = Duration::from_secs(20);
     });
     let error = engine.prepare().await.unwrap_err();
     assert!(
         matches!(sidecar_error(error.as_ref()), SidecarError::Timeout { .. }),
         "{error}"
     );
-    let silent: u32 = std::fs::read_to_string(dir.path().join("faulted"))
-        .expect("the silent child started within the timeout")
-        .parse()
-        .unwrap();
+    let silent = faulted(&dir).expect("the silent child started within the timeout");
     if !gone_soon(silent) {
         kill(silent);
         panic!("the silent child {silent} outlived its failed start");
@@ -583,7 +600,7 @@ async fn the_real_engine_reports_missing_models_and_keeps_running() {
     // missing; it downloads nothing (the client installs nothing either,
     // with no assets).
     let dir = tempfile::tempdir().unwrap();
-    let mut config = SidecarConfig::new(BINARY);
+    let mut config = SidecarConfig::new(binary());
     config.heartbeat = Duration::from_millis(20);
     let engine = engine_in(&dir, config);
     let error = engine.prepare().await.unwrap_err();
@@ -605,9 +622,17 @@ async fn the_real_engine_reports_missing_models_and_keeps_running() {
 #[test]
 fn the_child_greets_and_exits_when_its_parent_goes_away() {
     // Driven by hand, without the client: a closed stdin is a dead parent.
-    let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "1000"]);
+    // The ready message comes first, even before a heartbeat 1 ms apart.
+    let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "1"]);
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    assert_eq!(ready(&mut stdout), (PROTOCOL_VERSION, child.id()));
+    let first = protocol::read_header::<_, Reply>(&mut stdout).unwrap();
+    assert_eq!(
+        first,
+        Some(Reply::Ready {
+            protocol: PROTOCOL_VERSION,
+            pid: child.id()
+        })
+    );
     drop(child.stdin.take());
     let status = exit_status(&mut child, "the child outlived its stdin");
     assert!(status.success(), "{status}");
@@ -622,11 +647,53 @@ async fn a_child_that_died_while_idle_is_replaced_without_an_error() {
     engine.prepare().await.unwrap();
     let pid = engine.pid().unwrap();
     assert!(kill(pid));
-    // Time to die; the engine reaps it.
-    std::thread::sleep(Duration::from_millis(300));
+    // Dead, a zombie until the engine reaps it.
+    assert!(within_ten_seconds(|| ended(pid).then_some(())).is_some());
     assert_works(&engine, &tone(0.5)).await;
     assert_ne!(engine.pid(), Some(pid));
     assert_eq!(engine.spawns(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_child_over_the_ceiling_while_idle_is_replaced_without_an_error() {
+    // It answers, then reports a resident set over the ceiling. The next
+    // call starts a new child instead of handing the request to it.
+    let (engine, _dir) = engine_with_fault("swell", |_| {});
+    engine.prepare().await.unwrap();
+    let pid = engine.pid().unwrap();
+    assert_works(&engine, &tone(0.5)).await;
+    // Heartbeats for the reader to queue the report. Should it arrive
+    // only during the next request, that request fails on it instead;
+    // either way the child is replaced, but only the first way tests the
+    // idle check.
+    std::thread::sleep(Duration::from_millis(200));
+    if let Err(error) = engine.transcribe(&tone(0.5), None).await {
+        assert!(
+            matches!(
+                sidecar_error(error.as_ref()),
+                SidecarError::MemoryCeiling { .. }
+            ),
+            "{error}"
+        );
+        assert_works(&engine, &tone(0.5)).await;
+    }
+    assert_ne!(engine.pid(), Some(pid));
+    assert_eq!(engine.spawns(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_the_child_cannot_send_is_a_crash_that_says_why() {
+    // A transcript over the frame limit: the child says so on stderr and
+    // exits with status 2 rather than leave the parent waiting.
+    let (engine, _dir) = engine_with_fault("oversize", |_| {});
+    assert_recovers(&engine, |error| {
+        let SidecarError::Crashed { status, stderr } = error else {
+            panic!("{error}");
+        };
+        assert!(status.contains('2'), "{status}");
+        assert!(stderr.contains("could not send a reply"), "{stderr}");
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -685,17 +752,23 @@ fn a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2() {
 }
 
 /// Serves `body` to every connection; the one numbered `slow` (from 0)
-/// gets its headers at once and the body once the returned sender fires.
-fn serve_model(body: Vec<u8>, slow: usize) -> (String, mpsc::Sender<()>) {
+/// gets its headers at once, says so on the returned receiver, and gets
+/// the body once the returned sender fires.
+fn serve_model(body: Vec<u8>, slow: usize) -> (String, mpsc::Receiver<()>, mpsc::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/model.onnx", listener.local_addr().unwrap());
     let (release, gate) = mpsc::channel::<()>();
+    let (asked, held) = mpsc::channel::<()>();
     std::thread::spawn(move || {
         let mut gate = Some(gate);
         for (k, stream) in listener.incoming().enumerate() {
             let Ok(stream) = stream else { continue };
             let body = body.clone();
-            let wait = if k == slow { gate.take() } else { None };
+            let wait = if k == slow {
+                gate.take().map(|gate| (gate, asked.clone()))
+            } else {
+                None
+            };
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(&stream);
                 let mut line = String::new();
@@ -709,14 +782,15 @@ fn serve_model(body: Vec<u8>, slow: usize) -> (String, mpsc::Sender<()>) {
                 );
                 let _ = out.write_all(status.as_bytes());
                 let _ = out.flush();
-                if let Some(wait) = wait {
-                    let _ = wait.recv();
+                if let Some((gate, asked)) = wait {
+                    let _ = asked.send(());
+                    let _ = gate.recv();
                 }
                 let _ = out.write_all(&body);
             });
         }
     });
-    (url, release)
+    (url, held, release)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -725,7 +799,7 @@ async fn the_engine_installs_its_models_on_first_use_and_outside_its_lock() {
     let dir = tempfile::tempdir().unwrap();
     let digest_of = dir.path().join("digest");
     std::fs::write(&digest_of, &body).unwrap();
-    let (url, release) = serve_model(body.clone(), 1);
+    let (url, asked, release) = serve_model(body.clone(), 1);
     let asset = ModelAsset {
         id: "test-asset".to_owned(),
         display_name: "Test".to_owned(),
@@ -754,14 +828,13 @@ async fn the_engine_installs_its_models_on_first_use_and_outside_its_lock() {
         let engine = Arc::clone(&engine);
         tokio::spawn(async move { engine.prepare().await.map_err(|e| e.to_string()) })
     };
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(!preparing.is_finished(), "prepare did not download");
-    let asked = Instant::now();
+    asked
+        .recv_timeout(Duration::from_secs(30))
+        .expect("prepare did not download");
+    // The download cannot end before the release below, so a health
+    // answer now did not wait for it.
     let health = engine.health().await.unwrap().unwrap();
-    assert!(
-        asked.elapsed() < Duration::from_secs(5),
-        "health waited for the download"
-    );
+    assert!(!preparing.is_finished());
     assert!(health.loaded);
     release.send(()).unwrap();
     preparing.await.unwrap().unwrap();
@@ -785,7 +858,7 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
             store.missing_files(&asset)
         );
     }
-    let mut config = SidecarConfig::new(BINARY);
+    let mut config = SidecarConfig::new(binary());
     config.memory_ceiling_bytes = 8 << 30;
     let engine = SidecarSpeechEngine::new(store.clone(), config);
     engine.prepare().await.unwrap();

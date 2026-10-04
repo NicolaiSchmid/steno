@@ -53,23 +53,25 @@
 //! answers a load that asks for `DirectML` with `DirectML`, and reports no
 //! live provider until `--fault fallback`. Only with it, `--fault <kind>`
 //! ([`Fault`]) makes the next transcription abort, panic, flood stderr and
-//! panic, exit, hang, allocate 4 GiB, write garbage, fail, report a
-//! fallback to the CPU or lose the encoder, the child abort on any load or
-//! on a load that asks for `DirectML`, or stay silent or announce another
-//! protocol version from the start; `--fault-once <path>` limits that to
-//! the first child that creates `<path>`, which holds that child's pid.
-//! The isolation tests and the `DirectML` test binaries drive the real
-//! client against these.
+//! panic, exit, hang, allocate 4 GiB, write garbage, fail, answer with a
+//! reply too large to send, answer and then report a resident set over any
+//! ceiling, report a fallback to the CPU or lose the encoder, the child
+//! abort on any load or on a load that asks for `DirectML`, or stay silent
+//! or announce another protocol version from the start. `--fault-once
+//! <path>` limits that to the first child that creates `<path>`, which
+//! holds that child's pid. The isolation tests and the `DirectML` test
+//! binaries drive the real client against these.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use steno_core::{AudioBuffer16k, LanguageTag, RawSegment};
 use steno_speech::sidecar::FALLBACK_NOTICE;
-use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
+use steno_speech::sidecar::protocol::{self, MAX_HEADER_BYTES, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
     EncoderProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
     Transcriber, VadConfig,
@@ -112,6 +114,12 @@ steno_core::string_enum! {
         /// `std::process::abort` inside a load that asks for `DirectML`,
         /// the way a driver may end the probe; a load on the CPU works.
         AbortOnDirectmlLoad = "abort-on-directml-load",
+        /// Answers with a transcript over the frame limit, which the child
+        /// cannot send.
+        Oversize = "oversize",
+        /// Answers, then reports a resident set over any ceiling from the
+        /// next heartbeat on, while idle.
+        Swell = "swell",
         /// At start: sends nothing, reads nothing, hangs.
         Silent = "silent",
         /// At start: announces protocol version 0 in its ready message.
@@ -391,6 +399,15 @@ impl Engine for FakeEngine {
                 self.lost_encoder = true;
                 Err("simulated loss of the speech encoder".to_owned())
             }
+            Some(Fault::Oversize) => {
+                let mut segments = describe(samples, hint);
+                segments[0].text = "x".repeat(MAX_HEADER_BYTES as usize);
+                Ok(segments)
+            }
+            Some(Fault::Swell) => {
+                SWELL_AFTER_REPLY.store(true, Ordering::Relaxed);
+                Ok(describe(samples, hint))
+            }
             // The start and load faults were committed, if at all, there.
             Some(
                 Fault::Silent
@@ -418,6 +435,12 @@ fn describe(samples: &[f32], hint: Option<&LanguageTag>) -> Vec<RawSegment> {
     }]
 }
 
+/// Set by [`Fault::Swell`]: [`SWOLLEN`] follows once the reply is out.
+static SWELL_AFTER_REPLY: AtomicBool = AtomicBool::new(false);
+
+/// Set after [`Fault::Swell`]'s reply: the resident set reads as `u64::MAX`.
+static SWOLLEN: AtomicBool = AtomicBool::new(false);
+
 fn hang() -> ! {
     loop {
         std::thread::sleep(Duration::from_secs(3600));
@@ -426,6 +449,9 @@ fn hang() -> ! {
 
 /// The resident set of this process; 0 where it cannot be read.
 fn rss_bytes() -> u64 {
+    if SWOLLEN.load(Ordering::Relaxed) {
+        return u64::MAX;
+    }
     memory_stats::memory_stats().map_or(0, |m| m.physical_mem as u64)
 }
 
@@ -546,9 +572,9 @@ fn give_up(why: &str, error: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// Runs the child until a shutdown request, the end of stdin or a broken
-/// stdout (status 0), or an unreadable request (status 2); on unix SIGINT,
-/// SIGTERM and SIGHUP do not end it (see the crate docs).
+/// Runs the child until it exits, with status 0 or 2 as
+/// [`steno_speech::sidecar::protocol`] says; on unix SIGINT, SIGTERM and
+/// SIGHUP do not end it (see the crate docs).
 pub fn serve(options: &Options) -> ExitCode {
     let fake = options.fake_engine.then(|| FakeEngine {
         loaded: false,
@@ -630,6 +656,9 @@ pub fn serve(options: &Options) -> ExitCode {
         };
         tell_fallback(&*engine, &mut fallback_told);
         send(&reply);
+        if SWELL_AFTER_REPLY.load(Ordering::Relaxed) {
+            SWOLLEN.store(true, Ordering::Relaxed);
+        }
     }
 }
 

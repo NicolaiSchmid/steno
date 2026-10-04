@@ -4,6 +4,8 @@
 #![allow(dead_code)]
 
 use std::ffi::OsString;
+use std::process::{Command, Stdio};
+use std::sync::Once;
 use std::time::Duration;
 
 use steno_core::{AudioBuffer16k, LanguageTag, SpeechEngine as _};
@@ -11,7 +13,24 @@ use steno_speech::{
     EncoderProvider, ModelStore, SidecarConfig, SidecarError, SidecarSpeechEngine, SpeechError,
 };
 
+/// Built by cargo for these tests, from this package's `[[bin]]`.
 pub const BINARY: &str = env!("CARGO_BIN_EXE_steno-speech-sidecar");
+
+/// [`BINARY`], after it has once been run to the end by hand, so the start
+/// timeouts measure the child rather than a first start, which a loaded
+/// runner can take seconds over.
+pub fn binary() -> &'static str {
+    static WARM: Once = Once::new();
+    WARM.call_once(|| {
+        let warm = Command::new(BINARY)
+            .arg("--fake-engine")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(warm.status.success(), "{warm:?}");
+    });
+    BINARY
+}
 
 /// The provider the fake engine reports to an engine whose options ask for
 /// `DirectML`: `DirectML` on Windows; elsewhere the client asks for the
@@ -22,9 +41,10 @@ pub const ASKED_FOR_DIRECTML: EncoderProvider = if cfg!(windows) {
     EncoderProvider::Cpu
 };
 
-/// A fake-engine sidecar with `args` and short limits.
+/// A fake-engine sidecar with `args` and short limits. The start timeout
+/// stays generous: only the silent child's test is about it.
 pub fn config(args: &[&str]) -> SidecarConfig {
-    let mut config = SidecarConfig::new(BINARY);
+    let mut config = SidecarConfig::new(binary());
     config.args = std::iter::once("--fake-engine")
         .chain(args.iter().copied())
         .map(OsString::from)
@@ -33,6 +53,7 @@ pub fn config(args: &[&str]) -> SidecarConfig {
     config.transcribe_timeout_floor = Duration::from_secs(30);
     config.transcribe_timeout_ratio = 0.0;
     config.memory_ceiling_bytes = 1 << 30;
+    config.startup_timeout = Duration::from_secs(60);
     config
 }
 
