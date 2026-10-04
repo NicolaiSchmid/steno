@@ -709,7 +709,7 @@ impl ProcessingPipeline {
         })
     }
 
-    /// Counts a job as needing the speech engine until the mark is
+    /// Counts a job as needing the speech engine until the claim is
     /// dropped or handed to [`finish_speech`](Self::finish_speech).
     fn claim_speech(&self) -> SpeechJob {
         self.state().speech_jobs += 1;
@@ -722,7 +722,7 @@ impl ProcessingPipeline {
     /// no other job is between its warm-up and its last lane. Under
     /// `preparing`: a job that claims the engine meanwhile either keeps it
     /// loaded or warms it up again after the release, never before it. A
-    /// job that panics or is cancelled only drops its mark, so the engine
+    /// job that panics or is cancelled only drops its claim, so the engine
     /// stays loaded until the next job ends. A failed release is logged
     /// and never fails the job.
     async fn finish_speech(&self, job: SpeechJob) {

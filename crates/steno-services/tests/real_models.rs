@@ -17,8 +17,8 @@ use steno_adapters::ArtifactRenderer;
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::testing::{FakeDestination, FakeSummarizer, PassthroughCleaner};
 use steno_core::{
-    AudioRetention, Destination, Meeting, MeetingExport, MeetingSource, MeetingState, Settings,
-    StenoPaths, Store, TitleOrigin, paths::file_url,
+    AudioRetention, Destination, Meeting, MeetingExport, MeetingSource, MeetingState, StenoPaths,
+    Store, TitleOrigin, paths::file_url,
 };
 use steno_pipeline::{
     MeetingEventBus, PipelineDependencies, ProcessingPipeline, StoreSpeakerMemory,
@@ -56,10 +56,9 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
             target.join(steno_speech::sidecar::SIDECAR_BINARY),
         ),
     };
-    let runtime = setup.runtime(&Settings::default().speech_engine_id);
+    let runtime = setup.runtime(&settings.speech_engine_id);
     let speech_store = setup.model_store();
-    let engine =
-        steno_services::speech::speech_engine(&Settings::default().speech_engine_id, &setup);
+    let engine = steno_services::speech::speech_engine(&settings.speech_engine_id, &setup);
     let diarizer = steno_services::speech::diarizer(&models);
     let vault = dir.path().join("vault");
     let destination: Arc<dyn Destination> = Arc::new(FakeDestination::new(&vault));

@@ -236,10 +236,11 @@ fn handover_listener(
 
 /// Builds the graph. Real: store, settings, secret store, speech engine
 /// (`CoreML` in this process on the Mac, the ONNX speech sidecar elsewhere
-/// and as the Mac's fallback; [`SpeechSetup::runtime`]), ONNX diarizer, cosine speaker memory over the store,
-/// LLM passes, delivery coordinator, handover listener, capture session,
-/// recorder, the speech models, folder usage, preferences, and the login item
-/// when the shell passes its own ([`AppOptions::login_item`]). Fakes where no
+/// and as the Mac's fallback; [`SpeechSetup::runtime`]), ONNX diarizer,
+/// cosine speaker memory over the store, LLM passes, delivery coordinator,
+/// handover listener, capture session, recorder, the speech models, folder
+/// usage, preferences, and the login item when the shell passes its own
+/// ([`AppOptions::login_item`]). Fakes where no
 /// platform side exists yet (the plan's `WP6b` row says why for each):
 /// permissions (all granted), updater, clip player, QR encoder; the audio
 /// device list is empty off the Mac until the `PipeWire` and WASAPI backends
