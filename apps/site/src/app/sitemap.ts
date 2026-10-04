@@ -7,7 +7,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
 	return [
 		{ url: site.url, changeFrequency: "weekly", priority: 1 },
 		{
-			url: `${site.url}/recording-law`,
+			url: `${site.url}${site.recordingLaw}`,
 			changeFrequency: "monthly",
 			priority: 0.6,
 		},

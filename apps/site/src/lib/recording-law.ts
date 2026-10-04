@@ -5,6 +5,68 @@
 
 export const reviewed = "4 October 2026";
 
+/** A short bold line and the paragraph under it. */
+interface Point {
+	title: string;
+	body: string;
+}
+
+/** The short version under the page head. */
+export const summary: Point[] = [
+	{
+		title: "Steno can't listen in.",
+		body: "There is no Steno server, so the claims now aimed at cloud notetakers have nobody to reach.",
+	},
+	{
+		title: "You still have to ask.",
+		body: "Whether you may record a call depends on where you and the others are. In Germany, Switzerland, France and a dozen US states, everyone must agree.",
+	},
+	{
+		title: "Voices are the sensitive part.",
+		body: "Remembering who spoke is biometric data. For work, get explicit consent before Steno learns someone's voice.",
+	},
+];
+
+/** What to do before recording, in order. */
+export const steps: Point[] = [
+	{
+		title: "Say it at the start.",
+		body: "One sentence before the first agenda item covers most calls. People who stay after hearing it have agreed in most places that allow implied consent.",
+	},
+	{
+		title: "Put it in the invite for outside guests.",
+		body: "Silence on a call is weak consent from someone who doesn't know you. A line in the invite, or a yes in the chat, is better.",
+	},
+	{
+		title: "Ask for a yes where everyone must agree.",
+		body: "Germany, Switzerland, France and the all-party US states. If a participant is in one of them, the strict rule applies to the whole call.",
+	},
+	{
+		title: "If someone says no, stop.",
+		body: "Stop the recording and delete the meeting. Take notes by hand for that call.",
+	},
+	{
+		title: "Keep less.",
+		body: "For work calls, let Steno delete audio after processing, and use a local summary model for anything confidential.",
+	},
+];
+
+/** Notices to copy, beside the steps. */
+export const disclosures = [
+	{
+		label: "On the call",
+		text: "Quick note before we start: I record this call on my computer to take notes. The recording stays on my machine. Tell me now if you'd rather I didn't.",
+	},
+	{
+		label: "Auf Deutsch",
+		text: "Kurz vorab: Ich zeichne das Gespräch auf meinem Rechner auf, um Notizen zu machen. Die Aufnahme bleibt auf meinem Gerät. Sag gern jetzt, wenn du das nicht möchtest.",
+	},
+	{
+		label: "In the invite",
+		text: "I take notes with Steno, which records the call on my computer. The recording stays with me. Reply if you'd rather I didn't record.",
+	},
+];
+
 export type Consent = "one" | "all" | "mixed";
 
 export const consentLabel: Record<Consent, string> = {
@@ -13,7 +75,7 @@ export const consentLabel: Record<Consent, string> = {
 	mixed: "Depends",
 };
 
-export interface Jurisdiction {
+interface Jurisdiction {
 	place: string;
 	consent: Consent;
 	note: string;
@@ -78,7 +140,7 @@ export const jurisdictions: Jurisdiction[] = [
 	},
 ];
 
-export interface RuleSet {
+interface RuleSet {
 	what: string;
 	law: string;
 	detail: string;
@@ -112,12 +174,7 @@ export const ruleSets: RuleSet[] = [
 	},
 ];
 
-export interface Situation {
-	title: string;
-	body: string;
-}
-
-export const situations: Situation[] = [
+export const situations: Point[] = [
 	{
 		title: "Calls with friends and family",
 		body: "Recording law still applies. Recording a friend in Germany or California without asking is unlawful even though nobody else ever hears it. Data protection law does not apply to purely private use in the EU.",
@@ -136,12 +193,18 @@ export const situations: Situation[] = [
 	},
 ];
 
-export interface Case {
+interface Source {
+	label: string;
+	href: string;
+}
+
+interface Case {
 	name: string;
 	when: string;
 	held: string;
 	forSteno: string;
-	href: string;
+	/** The first is linked from the case name; all of them are listed under Sources. */
+	sources: [Source, ...Source[]];
 }
 
 export const cases: Case[] = [
@@ -151,7 +214,17 @@ export const cases: Case[] = [
 		held: "Wiretap, California privacy and BIPA claims go ahead. Otter can be a third-party eavesdropper because it keeps and uses recordings for its own purposes.",
 		forSteno:
 			"There is no Steno server, so no vendor can be the eavesdropper. Your own duty to the people on the call is unchanged.",
-		href: "https://caselaw.findlaw.com/court/us-dis-crt-n-d-cal/322025.html",
+		sources: [
+			{
+				label:
+					"In re Otter.AI Privacy Litigation, order of 13 Aug 2026 (FindLaw)",
+				href: "https://caselaw.findlaw.com/court/us-dis-crt-n-d-cal/322025.html",
+			},
+			{
+				label: "Otter.ai as third-party eavesdropper (National Law Review)",
+				href: "https://natlawreview.com/article/invited-participant-or-third-party-eavesdropper-court-holds-otterai-third-party",
+			},
+		],
 	},
 	{
 		name: "Chamberlain v. Granola",
@@ -159,7 +232,12 @@ export const cases: Case[] = [
 		held: "The first suit against a notetaker without a bot. It argues that recording from the user's computer, invisible to everyone else, was a design choice to avoid disclosure. No ruling yet.",
 		forSteno:
 			"Steno captures audio the same way. Telling people yourself is what closes that gap.",
-		href: "https://btlaw.com/en/insights/alerts/2026/what-the-granola-class-action-means-for-companies-building-and-deploying-conversation-capture-tools",
+		sources: [
+			{
+				label: "The Granola class action (Barnes & Thornburg)",
+				href: "https://btlaw.com/en/insights/alerts/2026/what-the-granola-class-action-means-for-companies-building-and-deploying-conversation-capture-tools",
+			},
+		],
 	},
 	{
 		name: "Cruz and Fricker v. Fireflies.AI",
@@ -167,7 +245,16 @@ export const cases: Case[] = [
 		held: "BIPA claims based on speaker recognition alone: voiceprints of people without an account, no written consent, no published retention policy.",
 		forSteno:
 			"Steno's voice profiles are voiceprints too, kept on your computer. BIPA binds companies, so a company deploying Steno carries this.",
-		href: "https://www.ebglaw.com/insights/publications/ai-meeting-assistants-and-biometric-privacy-lessons-from-the-fireflies-ai-lawsuit",
+		sources: [
+			{
+				label: "Lessons from the Fireflies.AI lawsuit (Epstein Becker Green)",
+				href: "https://www.ebglaw.com/insights/publications/ai-meeting-assistants-and-biometric-privacy-lessons-from-the-fireflies-ai-lawsuit",
+			},
+			{
+				label: "BIPA suits against AI notetakers (Amundsen Davis)",
+				href: "https://www.amundsendavislaw.com/labor-employment-law-update/employers-beware-uptick-in-bipa-lawsuits-targeting-ai-note-taking-software",
+			},
+		],
 	},
 	{
 		name: "United States v. Heppner",
@@ -175,7 +262,12 @@ export const cases: Case[] = [
 		held: "Documents a defendant produced with a consumer AI service were not protected by attorney-client privilege.",
 		forSteno:
 			"Your summary model is the third party here. For privileged conversations, use a local model.",
-		href: "https://www.proskauer.com/alert/sdny-addresses-privilege-and-work-product-implications-of-using-unsecured-public-ai-tools",
+		sources: [
+			{
+				label: "United States v. Heppner (Proskauer)",
+				href: "https://www.proskauer.com/alert/sdny-addresses-privilege-and-work-product-implications-of-using-unsecured-public-ai-tools",
+			},
+		],
 	},
 	{
 		name: "EU AI Act",
@@ -183,17 +275,17 @@ export const cases: Case[] = [
 		held: "The 2026 Digital Omnibus moved the high-risk obligations, which include some biometric identification, to December 2027. Emotion recognition at work has been banned since February 2025.",
 		forSteno:
 			"Steno does no emotion recognition. Whether matching voices of people in a meeting counts as high-risk identification is disputed.",
-		href: "https://www.gibsondunn.com/eu-ai-act-omnibus-agreement-postponed-high-risk-deadlines-and-other-key-changes/",
+		sources: [
+			{
+				label: "EU AI Act omnibus agreement (Gibson Dunn)",
+				href: "https://www.gibsondunn.com/eu-ai-act-omnibus-agreement-postponed-high-risk-deadlines-and-other-key-changes/",
+			},
+		],
 	},
 ];
 
-export interface Gap {
-	title: string;
-	body: string;
-}
-
 /** What Steno does not do for you today. Remove a row when the app does it. */
-export const gaps: Gap[] = [
+export const gaps: Point[] = [
 	{
 		title: "It doesn't tell anyone.",
 		body: "No bot joins, nothing beeps, no notice reaches the other side. Saying it is your job.",
@@ -212,47 +304,9 @@ export const gaps: Gap[] = [
 	},
 ];
 
-export const disclosure = {
-	en: "Quick note before we start: I record this call on my computer to take notes. The recording stays on my machine. Tell me now if you'd rather I didn't.",
-	de: "Kurz vorab: Ich zeichne das Gespräch auf meinem Rechner auf, um Notizen zu machen. Die Aufnahme bleibt auf meinem Gerät. Sag gern jetzt, wenn du das nicht möchtest.",
-	invite:
-		"I take notes with Steno, which records the call on my computer. The recording stays with me. Reply if you'd rather I didn't record.",
-};
-
-export interface Source {
-	label: string;
-	href: string;
-}
-
+/** Every case's sources, then the ones behind the country and German rows. */
 export const sources: Source[] = [
-	{
-		label: "In re Otter.AI Privacy Litigation, order of 13 Aug 2026 (FindLaw)",
-		href: "https://caselaw.findlaw.com/court/us-dis-crt-n-d-cal/322025.html",
-	},
-	{
-		label: "Otter.ai as third-party eavesdropper (National Law Review)",
-		href: "https://natlawreview.com/article/invited-participant-or-third-party-eavesdropper-court-holds-otterai-third-party",
-	},
-	{
-		label: "The Granola class action (Barnes & Thornburg)",
-		href: "https://btlaw.com/en/insights/alerts/2026/what-the-granola-class-action-means-for-companies-building-and-deploying-conversation-capture-tools",
-	},
-	{
-		label: "BIPA suits against AI notetakers (Amundsen Davis)",
-		href: "https://www.amundsendavislaw.com/labor-employment-law-update/employers-beware-uptick-in-bipa-lawsuits-targeting-ai-note-taking-software",
-	},
-	{
-		label: "Lessons from the Fireflies.AI lawsuit (Epstein Becker Green)",
-		href: "https://www.ebglaw.com/insights/publications/ai-meeting-assistants-and-biometric-privacy-lessons-from-the-fireflies-ai-lawsuit",
-	},
-	{
-		label: "United States v. Heppner (Proskauer)",
-		href: "https://www.proskauer.com/alert/sdny-addresses-privilege-and-work-product-implications-of-using-unsecured-public-ai-tools",
-	},
-	{
-		label: "EU AI Act omnibus agreement (Gibson Dunn)",
-		href: "https://www.gibsondunn.com/eu-ai-act-omnibus-agreement-postponed-high-risk-deadlines-and-other-key-changes/",
-	},
+	...cases.flatMap((c) => c.sources),
 	{
 		label: "Speaker identification and data protection (Ailance)",
 		href: "https://2b-advice.com/en/2026/04/17/transcription-and-speaker-identification-data-protection-voice-match/",

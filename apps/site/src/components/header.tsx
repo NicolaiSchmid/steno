@@ -9,7 +9,7 @@ import { site } from "@/lib/site";
 const nav = [
 	{ href: "/#how", label: "How it works" },
 	{ href: "/#privacy", label: "Privacy" },
-	{ href: "/recording-law", label: "Recording law" },
+	{ href: site.recordingLaw, label: "Recording law" },
 	{ href: "/#open", label: "Source" },
 ];
 

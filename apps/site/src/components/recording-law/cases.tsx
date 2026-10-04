@@ -21,7 +21,7 @@ export function Cases() {
 							<div>
 								<a
 									className="inline-flex items-center gap-1.5 font-medium text-[14px] text-fg tracking-[-0.01em] transition-colors duration-[180ms] hover:text-white"
-									href={c.href}
+									href={c.sources[0].href}
 									rel="noreferrer"
 									target="_blank"
 								>

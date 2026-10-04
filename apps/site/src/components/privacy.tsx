@@ -1,6 +1,7 @@
 import { ArrowRight } from "lucide-react";
 import { Checklist } from "@/components/checklist";
 import { SectionHead } from "@/components/section-head";
+import { site } from "@/lib/site";
 
 const rows: Array<[string, string, "local" | "yours"]> = [
 	[
@@ -49,7 +50,7 @@ export function Privacy() {
 					/>
 					<a
 						className="mt-7 inline-flex items-center gap-1.5 font-medium text-[14px] text-fg-muted transition-colors duration-[180ms] hover:text-fg"
-						href="/recording-law"
+						href={site.recordingLaw}
 					>
 						Whether you may record a call is a separate question
 						<ArrowRight className="size-3.5" strokeWidth={1.5} />

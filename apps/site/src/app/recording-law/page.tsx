@@ -9,20 +9,20 @@ import { LawHero } from "@/components/recording-law/law-hero";
 import { RuleSets } from "@/components/recording-law/rule-sets";
 import { Situations } from "@/components/recording-law/situations";
 import { Sources } from "@/components/recording-law/sources";
+import { site } from "@/lib/site";
 
+const title = "Recording and the law";
+// The layout's title template covers <title> only, not the share cards.
+const shareTitle = `${title} · ${site.name}`;
 const description =
 	"Steno keeps meetings on your computer. Whether you may record them is a separate question: consent rules by country, data protection for work notes, voice profiles as biometric data, and what to say before you press Record.";
 
 export const metadata: Metadata = {
-	title: "Recording and the law",
+	title,
 	description,
-	alternates: { canonical: "/recording-law" },
-	openGraph: {
-		url: "/recording-law",
-		title: "Recording and the law · Steno",
-		description,
-	},
-	twitter: { title: "Recording and the law · Steno", description },
+	alternates: { canonical: site.recordingLaw },
+	openGraph: { url: site.recordingLaw, title: shareTitle, description },
+	twitter: { title: shareTitle, description },
 };
 
 export default function RecordingLawPage() {

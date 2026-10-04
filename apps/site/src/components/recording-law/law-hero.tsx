@@ -1,19 +1,4 @@
-import { reviewed } from "@/lib/recording-law";
-
-const short = [
-	[
-		"Steno can't listen in.",
-		"There is no Steno server, so the claims now aimed at cloud notetakers have nobody to reach.",
-	],
-	[
-		"You still have to ask.",
-		"Whether you may record a call depends on where you and the others are. In Germany, Switzerland, France and a dozen US states, everyone must agree.",
-	],
-	[
-		"Voices are the sensitive part.",
-		"Remembering who spoke is biometric data. For work, get explicit consent before Steno learns someone's voice.",
-	],
-];
+import { reviewed, summary } from "@/lib/recording-law";
 
 /** The page head: what this page answers, the short version, the caveat. */
 export function LawHero() {
@@ -46,7 +31,7 @@ export function LawHero() {
 					data-rise
 					style={{ "--d": "220ms" } as React.CSSProperties}
 				>
-					{short.map(([title, body]) => (
+					{summary.map(({ title, body }) => (
 						<div className="bg-bg p-6" key={title}>
 							<div className="mb-2 font-medium text-[15px] tracking-[-0.01em]">
 								{title}
