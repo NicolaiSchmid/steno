@@ -143,8 +143,6 @@ pub fn far_end_latencies(input: usize, output: usize, follower_delay: usize) -> 
     (input.saturating_sub(rest), output_left)
 }
 
-// Durations below are `REFERENCE_TIME`, in 100 ns units.
-
 /// The shared-mode buffer a stream asks for, as a `REFERENCE_TIME` (100 ns
 /// units): 100 ms, so a capture thread that is late by several periods
 /// loses nothing. Microsoft's `Initialize` page asks event-driven
@@ -153,13 +151,16 @@ pub fn far_end_latencies(input: usize, output: usize, follower_delay: usize) -> 
 /// it chose is read back ([`stream_sizes`]).
 pub const BUFFER_DURATION: i64 = 1_000_000;
 
-/// The device periods trusted: 1 ms up to the buffer asked for.
+/// The device periods trusted (`REFERENCE_TIME`, 100 ns units): 1 ms up to
+/// the buffer asked for.
 pub const TRUSTED_PERIODS: RangeInclusive<i64> = 10_000..=BUFFER_DURATION;
 
-/// The period taken when the engine's is not trusted: 10 ms, the usual one.
+/// The period taken when the engine's is not trusted (`REFERENCE_TIME`,
+/// 100 ns units): 10 ms, the usual one.
 pub const DEFAULT_PERIOD: i64 = 100_000;
 
-/// The stream latencies trusted: up to 200 ms.
+/// The stream latencies trusted (`REFERENCE_TIME`, 100 ns units): up to
+/// 200 ms.
 pub const TRUSTED_LATENCIES: RangeInclusive<i64> = 0..=2_000_000;
 
 /// The largest buffer trusted, in frames: one second, so the follower's

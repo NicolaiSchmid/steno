@@ -145,7 +145,7 @@ impl MeetingDetector {
     pub fn start(&self) -> Result<(), ActivityError> {
         // Held to the end, so a `stop()` cannot run between the first
         // snapshot and `running` being set and leave the threads running;
-        // they wait for it before their first evaluation.
+        // the threads block on this lock before their first evaluation.
         let _evaluating = self.core.evaluating();
         if self.is_running() {
             return Ok(());
@@ -199,8 +199,8 @@ impl MeetingDetector {
     /// the holder; a second call does nothing. An evaluation in flight
     /// finishes first; none applies afterwards.
     pub fn stop(&self) {
-        // An evaluation in flight finishes first; one that waits for the
-        // lock finds `running` cancelled and applies nothing.
+        // One that waits for the lock finds `running` cancelled and
+        // applies nothing.
         let evaluating = self.core.evaluating();
         let (running, pending, threads) = {
             let mut inner = self.core.lock();
@@ -247,7 +247,7 @@ impl Core {
     }
 
     /// The listener's and the poller's evaluation; `running` is their flag:
-    /// once `stop` raised it, nothing is applied.
+    /// once `stop` cancelled it, nothing is applied.
     fn evaluate_ignoring_errors(self: &Arc<Self>, running: &Cancel) {
         let _evaluating = self.evaluating();
         if running.is_cancelled() {
