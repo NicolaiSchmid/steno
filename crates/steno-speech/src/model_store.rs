@@ -3,28 +3,60 @@
 //! against it, downloads what is missing into a partial file of its own
 //! while hashing, and renames only a verified, synced file into place. Models are
 //! never committed (`.gitignore` covers `*.onnx`).
+//! Swift: `Sources/StenoSpeech/Models/ModelAsset.swift`,
+//! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
+//! through `FluidAudio` and `WhisperKit` instead.
 //!
 //! A store's root holds one folder per asset id, `<root>/<asset id>/`.
 //! Steno keeps the root in the `onnx/` folder of its models directory
 //! ([`ModelStore::in_models_directory`]); `steno-services` resolves the
 //! models directory, and [`ModelStore::from_environment`] resolves it the
 //! same way for the `transcribe` example and the FLEURS test, which have
-//! no settings (the crate docs say more). Silero VAD
-//! downloads from the sherpa-onnx `asr-models` release.
-//! The fp32 Parakeet export (2.6 GB) is not hosted yet: until the
-//! release plan names a host, its files are produced by
-//! `spikes/onnx-speech/export/` and copied into
-//! `<root>/parakeet-tdt-0.6b-v3-fp32/` by hand; [`ModelStore::ensure`]
-//! reports [`SpeechError::NotHosted`] when they are missing. The checksums
-//! are those of the export `spikes/onnx-speech/export/` produces with torch
-//! 2.14.1 and `NeMo` 3.0.0; a hosted copy must match them or the manifest
-//! changes with it.
-//! Swift: `Sources/StenoSpeech/Models/ModelAsset.swift`,
-//! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
-//! through `FluidAudio` and `WhisperKit` instead.
+//! no settings (the crate docs say more).
+//!
+//! # Hosts
+//!
+//! A file's [`ModelSource`] is a plain URL or a file in a Hugging Face
+//! model repository at a pinned commit,
+//! `https://huggingface.co/<repo>/resolve/<revision>/<path>`. GitHub
+//! release assets cap at 2 GB per file, so the small file stays there
+//! (Silero VAD from the sherpa-onnx `asr-models` release; `steno-diarize`
+//! fetches its own models, `crates/steno-diarize/src/models.rs`) and the
+//! fp32 Parakeet export (2.6 GB, of which `encoder.weights` is 2.4 GB)
+//! goes to Hugging Face, uploaded by `scripts/upload-models.sh` into
+//! `NicolaiSchmid/steno-models` (a placeholder until the plan's parity list settles the account). Until
+//! [`PARAKEET_V3_FP32_REVISION`] names a commit, the export has no source:
+//! its files are produced by `spikes/onnx-speech/export/` and copied into
+//! `<root>/parakeet-tdt-0.6b-v3-fp32/` by hand, or fetched from a mirror,
+//! and [`ModelStore::ensure`] reports [`SpeechError::NotHosted`] when they
+//! are missing. The checksums are those of the export
+//! `spikes/onnx-speech/export/` produces with torch 2.14.1 and `NeMo`
+//! 3.0.0; a hosted copy must match them or the manifest changes with it.
+//!
+//! A mirror ([`ModelStore::with_mirror`], the speech setting
+//! `modelsMirror`) replaces every host: the file is fetched from
+//! `<mirror>/<asset id>/<file name>`, the layout of a store root and of the
+//! Hugging Face repository, so a copy of either served over HTTP is a
+//! mirror.
+//!
+//! # Downloads
+//!
+//! A download writes `<name>.partial` beside the file while holding an
+//! exclusive lock on it, hashes as it goes and renames only a verified,
+//! synced file into place. A dropped connection resumes with a `Range`
+//! request on the next attempt, and a partial left by a killed process is
+//! picked up by the next run after its prefix is hashed again. A host
+//! that ignores the range sends the whole file, which is then written from
+//! the start; a resumed file whose checksum fails is downloaded once more
+//! from zero. A second download of the same file, in this process or
+//! another, waits for the lock: it then finds the file installed and
+//! returns, or resumes what the first left. One on a file system without
+//! locks writes a partial of its own, `<name>.partial.<pid>.<call>`, which
+//! nothing resumes and which is deleted when the call ends. Once a file is
+//! installed, by whatever path, the next call deletes its `<name>.partial`.
 
-use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::fs::{self, File, TryLockError};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -34,16 +66,61 @@ use steno_core::StenoPaths;
 
 use crate::error::SpeechError;
 
+/// Where a file is downloaded from when no mirror is set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelSource {
+    /// A plain HTTPS URL, such as a GitHub release asset (2 GB at most).
+    Url(String),
+    /// A file in a Hugging Face model repository at one commit, so the
+    /// bytes behind the URL never change under the manifest's checksum.
+    HuggingFace {
+        /// `<owner>/<name>`.
+        repo: String,
+        /// A full commit hash, not a branch.
+        revision: String,
+        /// The file's path inside the repository.
+        path: String,
+    },
+}
+
+impl ModelSource {
+    /// Hugging Face's download host.
+    pub const HUGGING_FACE: &'static str = "https://huggingface.co";
+
+    /// The URL a download fetches.
+    #[must_use]
+    pub fn url(&self) -> String {
+        match self {
+            ModelSource::Url(url) => url.clone(),
+            ModelSource::HuggingFace {
+                repo,
+                revision,
+                path,
+            } => format!("{}/{repo}/resolve/{revision}/{path}", Self::HUGGING_FACE),
+        }
+    }
+}
+
 /// One file of an asset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelFile {
     pub name: String,
-    /// `None` until the file is hosted.
-    pub url: Option<String>,
+    /// `None` until the file is hosted; a mirror serves it regardless.
+    pub source: Option<ModelSource>,
     /// Lower-case hex.
     pub sha256: String,
     pub size: u64,
 }
+
+/// The Hugging Face repository the fp32 export is uploaded to by
+/// `scripts/upload-models.sh`. A placeholder: which account hosts the models
+/// is open in the plan's parity list.
+pub const STENO_MODELS_REPO: &str = "NicolaiSchmid/steno-models";
+
+/// The commit of [`STENO_MODELS_REPO`] that holds the export, printed by
+/// `scripts/upload-models.sh`; `None` until it is uploaded, which leaves the
+/// export without a source.
+pub const PARAKEET_V3_FP32_REVISION: Option<&str> = None;
 
 /// One downloadable model bundle; the settings pane shows the display
 /// name, the total size and the licence.
@@ -69,7 +146,7 @@ impl ModelAsset {
             attribution: "Silero VAD (Silero Team), MIT, as packaged by sherpa-onnx".to_owned(),
             files: vec![ModelFile {
                 name: "silero_vad.onnx".to_owned(),
-                url: Some("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx".to_owned()),
+                source: Some(ModelSource::Url("https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx".to_owned())),
                 sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6".to_owned(),
                 size: 643_854,
             }],
@@ -77,17 +154,40 @@ impl ModelAsset {
     }
 
     /// Our fp32 ONNX export of Parakeet TDT 0.6B v3 with the 10000-frame
-    /// position table (decision 3 of the speech-stack plan).
+    /// position table (decision 3 of the speech-stack plan), from
+    /// [`STENO_MODELS_REPO`] at [`PARAKEET_V3_FP32_REVISION`] once that is
+    /// set, without a source until then.
     #[must_use]
     pub fn parakeet_v3_fp32() -> Self {
+        match PARAKEET_V3_FP32_REVISION {
+            Some(revision) => Self::parakeet_v3_fp32_from(STENO_MODELS_REPO, revision),
+            None => Self::parakeet_v3_fp32_manifest(|_, _| None),
+        }
+    }
+
+    /// The export from a Hugging Face repository at `revision`, laid out
+    /// `<asset id>/<file name>` the way `scripts/upload-models.sh` uploads it.
+    #[must_use]
+    pub fn parakeet_v3_fp32_from(repo: &str, revision: &str) -> Self {
+        Self::parakeet_v3_fp32_manifest(|id, name| {
+            Some(ModelSource::HuggingFace {
+                repo: repo.to_owned(),
+                revision: revision.to_owned(),
+                path: format!("{id}/{name}"),
+            })
+        })
+    }
+
+    fn parakeet_v3_fp32_manifest(source: impl Fn(&str, &str) -> Option<ModelSource>) -> Self {
+        const ID: &str = "parakeet-tdt-0.6b-v3-fp32";
         let file = |name: &str, sha256: &str, size: u64| ModelFile {
             name: name.to_owned(),
-            url: None,
+            source: source(ID, name),
             sha256: sha256.to_owned(),
             size,
         };
         ModelAsset {
-            id: "parakeet-tdt-0.6b-v3-fp32".to_owned(),
+            id: ID.to_owned(),
             display_name: "Parakeet TDT 0.6B v3 (fp32, ONNX)".to_owned(),
             licence: "CC-BY-4.0".to_owned(),
             attribution: "Parakeet TDT 0.6B v3 by NVIDIA (https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3), CC-BY-4.0, converted to ONNX".to_owned(),
@@ -170,10 +270,11 @@ fn body_timeout(size: u64) -> Duration {
     MIN_BODY_TIMEOUT.max(Duration::from_secs(size / MIN_BODY_RATE))
 }
 
-/// The models root and the HTTP client.
+/// The models root, the mirror and the HTTP client.
 #[derive(Debug, Clone)]
 pub struct ModelStore {
     root: PathBuf,
+    mirror: Option<String>,
     agent: ureq::Agent,
 }
 
@@ -181,6 +282,9 @@ impl ModelStore {
     /// Names the models directory in place of the default one, for the app
     /// (without one in its settings), the CLI, the example and the tests.
     pub const ENVIRONMENT_VARIABLE: &'static str = "STENO_MODELS_DIR";
+
+    /// Names the mirror [`ModelStore::from_environment`] sets.
+    pub const MIRROR_ENVIRONMENT_VARIABLE: &'static str = "STENO_MODELS_MIRROR";
 
     /// The folder of the models directory the ONNX models live in, beside
     /// the `CoreML` ones the Swift app keeps in `fluidaudio/`.
@@ -190,11 +294,40 @@ impl ModelStore {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         ModelStore {
             root: root.into(),
+            mirror: None,
             agent: ureq::Agent::config_builder()
                 .timeout_connect(Some(CONNECT_TIMEOUT))
                 .timeout_recv_response(Some(RESPONSE_TIMEOUT))
                 .build()
                 .new_agent(),
+        }
+    }
+
+    /// Fetches every file from `<mirror>/<asset id>/<file name>` instead of
+    /// its source, unhosted files included; `None` or an empty string
+    /// restores the sources. Checksums and sizes still come from the
+    /// manifest, so a mirror cannot change what is installed.
+    #[must_use]
+    pub fn with_mirror(mut self, mirror: Option<String>) -> Self {
+        self.mirror = mirror
+            .map(|m| m.trim().trim_end_matches('/').to_owned())
+            .filter(|m| !m.is_empty());
+        self
+    }
+
+    /// The mirror set by [`ModelStore::with_mirror`], trimmed.
+    #[must_use]
+    pub fn mirror(&self) -> Option<&str> {
+        self.mirror.as_deref()
+    }
+
+    /// Where `file` of `asset` is downloaded from: the mirror when one is
+    /// set, else the file's source; `None` when neither exists.
+    #[must_use]
+    pub fn url_for(&self, asset: &ModelAsset, file: &ModelFile) -> Option<String> {
+        match &self.mirror {
+            Some(mirror) => Some(format!("{mirror}/{}/{}", asset.id, file.name)),
+            None => file.source.as_ref().map(ModelSource::url),
         }
     }
 
@@ -208,11 +341,17 @@ impl ModelStore {
     /// For the `transcribe` example and the FLEURS test, which have no
     /// settings: the store in the models directory `STENO_MODELS_DIR`
     /// names, else in the default one, as the app and the CLI resolve it
-    /// without a models directory in the settings.
+    /// without a models directory in the settings, with the mirror
+    /// `STENO_MODELS_MIRROR` names.
     #[must_use]
     pub fn from_environment() -> Self {
         Self::in_models_directory(
             &Self::environment_models_directory().unwrap_or_else(Self::default_models_directory),
+        )
+        .with_mirror(
+            std::env::var(Self::MIRROR_ENVIRONMENT_VARIABLE)
+                .ok()
+                .filter(|v| !v.is_empty()),
         )
     }
 
@@ -262,11 +401,7 @@ impl ModelStore {
         asset
             .files
             .iter()
-            .filter(|file| {
-                invalid
-                    || !fs::metadata(directory.join(&file.name))
-                        .is_ok_and(|m| m.is_file() && m.len() == file.size)
-            })
+            .filter(|file| invalid || !is_complete(&directory.join(&file.name), file))
             .map(|file| file.name.clone())
             .collect()
     }
@@ -278,18 +413,26 @@ impl ModelStore {
         self.missing_files(asset).is_empty()
     }
 
-    /// Hashes every installed file against the manifest.
-    pub fn verify(&self, asset: &ModelAsset) -> Result<(), SpeechError> {
+    /// The asset's directory when [`ModelStore::is_installed`], else
+    /// [`SpeechError::NotInstalled`] naming the missing files.
+    pub(crate) fn installed_directory(&self, asset: &ModelAsset) -> Result<PathBuf, SpeechError> {
         asset.validate()?;
-        let missing = self.missing_files(asset);
         let directory = self.directory(asset);
-        if !missing.is_empty() {
-            return Err(SpeechError::NotInstalled {
+        let missing = self.missing_files(asset);
+        if missing.is_empty() {
+            Ok(directory)
+        } else {
+            Err(SpeechError::NotInstalled {
                 asset: asset.id.clone(),
                 directory,
                 missing,
-            });
+            })
         }
+    }
+
+    /// Hashes every installed file against the manifest.
+    pub fn verify(&self, asset: &ModelAsset) -> Result<(), SpeechError> {
+        let directory = self.installed_directory(asset)?;
         for file in &asset.files {
             let path = directory.join(&file.name);
             check_digest(file, &path, sha256_of(&path)?)?;
@@ -298,11 +441,13 @@ impl ModelStore {
     }
 
     /// Installs the asset if needed and returns its directory. Missing
-    /// files with a URL are downloaded and verified, a file up to
-    /// [`DOWNLOAD_ATTEMPTS`] times when the host answers 5xx, the
-    /// connection drops or the body stalls; a missing file without a URL is
-    /// [`SpeechError::NotHosted`]. Partial downloads a
-    /// killed process left behind are removed first.
+    /// files with a URL ([`ModelStore::url_for`]) are downloaded and
+    /// verified, a file up to [`DOWNLOAD_ATTEMPTS`] times when the host
+    /// answers 5xx, the connection drops or the body stalls, each attempt
+    /// resuming where the last one stopped; a missing file without a URL is
+    /// [`SpeechError::NotHosted`]. Another process's per-call partials that
+    /// have gone stale are removed first; `<name>.partial` stays and is
+    /// resumed, unless its file is installed already, when it is deleted.
     ///
     /// ```no_run
     /// use steno_speech::{ModelAsset, ModelStore};
@@ -323,6 +468,9 @@ impl ModelStore {
         let directory = self.directory(asset);
         for file in &asset.files {
             remove_stale_partials(&directory, &file.name);
+            if is_complete(&directory.join(&file.name), file) {
+                remove_finished_partial(&directory, &file.name);
+            }
         }
         let missing = self.missing_files(asset);
         if missing.is_empty() {
@@ -330,13 +478,13 @@ impl ModelStore {
         }
         fs::create_dir_all(&directory).map_err(|e| SpeechError::io(&directory, e))?;
         for file in asset.files.iter().filter(|f| missing.contains(&f.name)) {
-            let Some(url) = &file.url else {
+            let Some(url) = self.url_for(asset, file) else {
                 return Err(SpeechError::NotHosted {
                     asset: asset.id.clone(),
                     directory,
                 });
             };
-            self.download_with_retries(url, file, &directory.join(&file.name), progress)?;
+            self.download_with_retries(&url, file, &directory.join(&file.name), progress)?;
         }
         Ok(directory)
     }
@@ -351,8 +499,9 @@ impl ModelStore {
         Ok(())
     }
 
-    /// [`ModelStore::download`], tried again after a transient failure;
-    /// `progress` starts from zero on each attempt.
+    /// [`ModelStore::download`], tried again after a transient failure.
+    /// Every attempt continues the one partial file; a resumed file whose
+    /// checksum fails is truncated and fetched once more from zero.
     fn download_with_retries(
         &self,
         url: &str,
@@ -360,109 +509,179 @@ impl ModelStore {
         destination: &Path,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
+        let Some(mut partial) = Partial::open(destination, file)? else {
+            return Ok(());
+        };
         let mut attempt = 1;
         loop {
-            match self.download(url, file, destination, progress) {
+            match self.download(url, file, destination, &mut partial, progress) {
                 Err(error) if attempt < DOWNLOAD_ATTEMPTS && is_transient(&error) => {
-                    tracing::warn!(%error, attempt, "model download failed, trying again");
+                    tracing::warn!(%error, attempt, received = partial.len, "model download failed, resuming");
                     std::thread::sleep(RETRY_DELAY * attempt);
                     attempt += 1;
                 }
-                result => return result,
+                Err(SpeechError::Checksum { .. })
+                    if partial.resumed && attempt < DOWNLOAD_ATTEMPTS =>
+                {
+                    tracing::warn!(file = %file.name, "resumed model download failed its checksum, starting over");
+                    partial.restart()?;
+                    attempt += 1;
+                }
+                Err(error) => {
+                    if matches!(
+                        error,
+                        SpeechError::Size { .. } | SpeechError::Checksum { .. }
+                    ) {
+                        partial.discard();
+                    }
+                    return Err(error);
+                }
+                Ok(()) => return Ok(()),
             }
         }
     }
 
-    /// Downloads into a sibling `<name>.partial.<pid>.<call>` file, one per
-    /// call, so two downloads of one file (two engines, or the app and a
-    /// sidecar) never write one inode; verifies and syncs it and renames it
-    /// into place. Nothing is left behind on failure, nor when `progress`
-    /// panics.
+    /// Streams the rest of `url` into `partial`, verifies and syncs it and
+    /// renames it into place while its lock is still held, so no other
+    /// download can pick the file up between the rename and the unlock.
     fn download(
         &self,
         url: &str,
         file: &ModelFile,
         destination: &Path,
+        partial: &mut Partial,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
-        // `out` is dropped before `partial` on every path, so the file is
-        // closed before the guard deletes it or the rename moves it.
-        let (partial, mut out) = create_partial(destination, &file.name)?;
-        let (received, digest) = self.stream_to(url, file, &partial.0, &mut out, progress)?;
-        drop(out);
-        if received != file.size {
+        self.stream_to(url, file, partial, progress)?;
+        if partial.len != file.size {
             return Err(SpeechError::Size {
                 path: destination.to_path_buf(),
                 expected: file.size,
-                actual: received,
+                actual: partial.len,
             });
         }
-        check_digest(file, destination, digest)?;
-        fs::rename(&partial.0, destination).map_err(|e| SpeechError::io(destination, e))?;
+        check_digest(file, destination, hex(&partial.hasher.clone().finalize()))?;
+        fs::rename(&partial.path, destination).map_err(|e| SpeechError::io(destination, e))?;
+        partial.done = true;
         sync_parent(destination);
         Ok(())
     }
 
-    /// Streams `url` into `out`, the file at `partial`, while hashing and
-    /// syncs it; returns the bytes received and their digest. Stops at the
-    /// first byte over the manifest size, so a misbehaving host cannot fill
-    /// the disk.
+    /// Requests the bytes `partial` lacks: a `Range` request when it holds
+    /// some, honoured only by a `206` that starts at its length; a `200`
+    /// (the host ignored the range) restarts the file. A `206` elsewhere or
+    /// a `416` restarts it and asks again for the whole body.
+    fn request(
+        &self,
+        url: &str,
+        file: &ModelFile,
+        partial: &mut Partial,
+    ) -> Result<ureq::http::Response<ureq::Body>, SpeechError> {
+        let get = |range: Option<u64>| {
+            let remaining = file.size.saturating_sub(range.unwrap_or(0));
+            let request = self.agent.get(url);
+            let request = match range {
+                Some(offset) => request.header("Range", format!("bytes={offset}-")),
+                None => request,
+            };
+            request
+                .config()
+                .timeout_recv_body(Some(body_timeout(remaining)))
+                .build()
+                .call()
+                .map_err(|source| SpeechError::Download {
+                    url: url.to_owned(),
+                    source: Box::new(source),
+                })
+        };
+        partial.resumed = false;
+        if partial.len > 0 {
+            match get(Some(partial.len)) {
+                Ok(response) if response.status().as_u16() == 206 => {
+                    if content_range_start(&response) == Some(partial.len) {
+                        partial.resumed = true;
+                        return Ok(response);
+                    }
+                }
+                Ok(response) => {
+                    partial.restart()?;
+                    return Ok(response);
+                }
+                Err(SpeechError::Download { source, .. })
+                    if matches!(*source, ureq::Error::StatusCode(416)) => {}
+                Err(error) => return Err(error),
+            }
+            partial.restart()?;
+        }
+        get(None)
+    }
+
+    /// Streams the rest of the file into `partial` while hashing and syncs
+    /// it. Stops at the first byte over the manifest size, so a misbehaving
+    /// host cannot fill the disk.
     fn stream_to(
         &self,
         url: &str,
         file: &ModelFile,
-        partial: &Path,
-        out: &mut File,
+        partial: &mut Partial,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
-    ) -> Result<(u64, String), SpeechError> {
-        let response = self
-            .agent
-            .get(url)
-            .config()
-            .timeout_recv_body(Some(body_timeout(file.size)))
-            .build()
-            .call()
-            .map_err(|source| SpeechError::Download {
-                url: url.to_owned(),
-                source: Box::new(source),
-            })?;
-        let total = response.body().content_length().unwrap_or(file.size);
+    ) -> Result<(), SpeechError> {
+        let response = self.request(url, file, partial)?;
+        let offset = partial.len;
+        let total = response
+            .body()
+            .content_length()
+            .map_or(file.size, |rest| offset + rest);
         let mut body = response.into_body();
         // One byte over the manifest size is enough to tell a long body.
-        let mut reader = body.with_config().limit(file.size + 1).reader();
-        let mut hasher = Sha256::new();
-        let mut received = 0u64;
+        let mut reader = body
+            .with_config()
+            .limit(file.size.saturating_sub(offset) + 1)
+            .reader();
         let mut buffer = vec![0u8; 1 << 16];
         progress(DownloadProgress {
             file: &file.name,
-            received,
+            received: partial.len,
             total,
         });
         loop {
             let n = reader
                 .read(&mut buffer)
-                .map_err(|e| SpeechError::io(partial, e))?;
+                .map_err(|e| SpeechError::io(&partial.path, e))?;
             if n == 0 {
                 break;
             }
-            received += n as u64;
-            if received > file.size {
+            if partial.len + n as u64 > file.size {
+                // Counted, not written: the size check names the overrun.
+                partial.len += n as u64;
                 break;
             }
-            out.write_all(&buffer[..n])
-                .map_err(|e| SpeechError::io(partial, e))?;
-            hasher.update(&buffer[..n]);
+            partial.append(&buffer[..n])?;
             progress(DownloadProgress {
                 file: &file.name,
-                received,
+                received: partial.len,
                 total,
             });
         }
         // Without the sync a power loss could leave a file of the right
         // length but lost contents, which `is_installed` (sizes only) takes.
-        out.sync_all().map_err(|e| SpeechError::io(partial, e))?;
-        Ok((received, hex(&hasher.finalize())))
+        partial
+            .file
+            .sync_all()
+            .map_err(|e| SpeechError::io(&partial.path, e))
     }
+}
+
+/// True when `path` is a file of the manifest size.
+fn is_complete(path: &Path, file: &ModelFile) -> bool {
+    fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() == file.size)
+}
+
+/// The first byte of a `Content-Range: bytes <first>-<last>/<total>`.
+fn content_range_start(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
+    let value = response.headers().get("content-range")?.to_str().ok()?;
+    let range = value.trim().strip_prefix("bytes")?.trim_start();
+    range.split_once('-')?.0.trim().parse().ok()
 }
 
 /// Tries per file before a download fails: a 5xx answer or a dropped
@@ -519,22 +738,188 @@ fn partial_prefix(name: &str) -> String {
     format!("{name}.partial.")
 }
 
-/// Creates this call's partial download beside `destination`,
-/// `<name>.partial.<pid>.<call>`. A name that exists already, left by a dead
-/// process that had the same pid, is passed over for the next call number.
-fn create_partial(destination: &Path, name: &str) -> Result<(RemoveOnDrop, File), SpeechError> {
-    loop {
-        let path = destination.with_file_name(format!(
-            "{}{}.{}",
-            partial_prefix(name),
-            std::process::id(),
-            NEXT_CALL.fetch_add(1, Ordering::Relaxed)
-        ));
-        match File::options().write(true).create_new(true).open(&path) {
-            Ok(file) => return Ok((RemoveOnDrop(path), file)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(SpeechError::io(&path, e)),
+/// The file a download writes, with the bytes it holds and their hash.
+/// `<name>.partial`, held under an exclusive lock, survives a failed call
+/// for the next one to resume; a per-call partial is deleted with it. A
+/// partial that ends up wrong is deleted either way.
+struct Partial {
+    path: PathBuf,
+    file: File,
+    /// Bytes in the file, all of them hashed into `hasher`.
+    len: u64,
+    hasher: Sha256,
+    /// `<name>.partial` under this call's lock, rather than a per-call file.
+    resumable: bool,
+    /// The current stream continues bytes written before it.
+    resumed: bool,
+    /// Renamed into place, or left to the download that did.
+    done: bool,
+}
+
+impl Partial {
+    /// `<name>.partial` beside `destination` under its lock, with its
+    /// bytes hashed; `None` when `destination` is installed once the lock
+    /// is held. A download of the same file that holds the lock is waited
+    /// for, so its bytes are never fetched twice. Where the file system
+    /// has no locks, a per-call partial of its own. Blocking: the callers
+    /// run on a blocking thread.
+    fn open(destination: &Path, file: &ModelFile) -> Result<Option<Self>, SpeechError> {
+        let path = destination.with_file_name(format!("{}.partial", file.name));
+        let handle = File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|e| SpeechError::io(&path, e))?;
+        let locked = match handle.try_lock() {
+            Ok(()) => Ok(()),
+            Err(TryLockError::WouldBlock) => {
+                tracing::info!(path = %path.display(), "another download of this file is running, waiting for it");
+                handle.lock()
+            }
+            Err(TryLockError::Error(error)) => Err(error),
+        };
+        if let Err(error) = locked {
+            tracing::debug!(%error, path = %path.display(), "no file locks here, the download will not resume");
+            return Self::per_call(destination, &file.name).map(Some);
         }
+        if is_complete(destination, file) {
+            // Installed by the download this one waited for, or by another
+            // between `missing_files` and the lock; the handle may even be
+            // that file, renamed. Nothing at `<name>.partial` is needed
+            // now, so it goes while the lock is held.
+            let _ = fs::remove_file(&path);
+            return Ok(None);
+        }
+        let mut partial = Partial::new(path, handle, true);
+        partial.adopt(file.size)?;
+        Ok(Some(partial))
+    }
+
+    fn new(path: PathBuf, file: File, resumable: bool) -> Self {
+        Partial {
+            path,
+            file,
+            len: 0,
+            hasher: Sha256::new(),
+            resumable,
+            resumed: false,
+            done: false,
+        }
+    }
+
+    /// Hashes what an earlier call left; a file longer than the manifest
+    /// size cannot be a prefix and is emptied.
+    fn adopt(&mut self, size: u64) -> Result<(), SpeechError> {
+        let len = self
+            .file
+            .metadata()
+            .map_err(|e| SpeechError::io(&self.path, e))?
+            .len();
+        if len > size {
+            return self.restart();
+        }
+        if len > 0 {
+            tracing::info!(path = %self.path.display(), len, "resuming a model download");
+        }
+        self.file
+            .seek(SeekFrom::Start(0))
+            .map_err(|e| SpeechError::io(&self.path, e))?;
+        let mut buffer = vec![0u8; 1 << 16];
+        let mut remaining = len;
+        while remaining > 0 {
+            let want = buffer
+                .len()
+                .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+            let n = self
+                .file
+                .read(&mut buffer[..want])
+                .map_err(|e| SpeechError::io(&self.path, e))?;
+            if n == 0 {
+                break;
+            }
+            self.hasher.update(&buffer[..n]);
+            remaining -= n as u64;
+        }
+        self.len = len - remaining;
+        self.file
+            .seek(SeekFrom::Start(self.len))
+            .map_err(|e| SpeechError::io(&self.path, e))?;
+        Ok(())
+    }
+
+    /// Creates this call's partial download beside `destination`,
+    /// `<name>.partial.<pid>.<call>`. A name that exists already, left by
+    /// a dead process that had the same pid, is passed over for the next
+    /// call number.
+    fn per_call(destination: &Path, name: &str) -> Result<Self, SpeechError> {
+        loop {
+            let path = destination.with_file_name(format!(
+                "{}{}.{}",
+                partial_prefix(name),
+                std::process::id(),
+                NEXT_CALL.fetch_add(1, Ordering::Relaxed)
+            ));
+            match File::options().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok(Partial::new(path, file, false)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(SpeechError::io(&path, e)),
+            }
+        }
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> Result<(), SpeechError> {
+        self.file
+            .write_all(bytes)
+            .map_err(|e| SpeechError::io(&self.path, e))?;
+        self.hasher.update(bytes);
+        self.len += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// Empties the file for a download from zero.
+    fn restart(&mut self) -> Result<(), SpeechError> {
+        self.file
+            .set_len(0)
+            .and_then(|()| self.file.seek(SeekFrom::Start(0)).map(drop))
+            .map_err(|e| SpeechError::io(&self.path, e))?;
+        self.len = 0;
+        self.hasher = Sha256::new();
+        self.resumed = false;
+        Ok(())
+    }
+
+    /// Marks the bytes as unwanted, so the file is deleted even if
+    /// resumable.
+    fn discard(&mut self) {
+        self.resumable = false;
+    }
+}
+
+impl Drop for Partial {
+    /// Deletes a per-call or discarded partial, and an empty one. Runs
+    /// before the handle closes, so `<name>.partial` goes while still
+    /// locked.
+    fn drop(&mut self) {
+        if !self.done && (!self.resumable || self.len == 0) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Deletes `<name>.partial` in `directory` once `<name>` is installed: a
+/// download killed before the file arrived another way (by hand, from a
+/// copy) leaves it behind, up to 2.4 GB. Only under its lock, so a
+/// download still writing it keeps it. Best effort, like
+/// [`remove_stale_partials`].
+fn remove_finished_partial(directory: &Path, name: &str) {
+    let path = directory.join(format!("{name}.partial"));
+    let Ok(handle) = File::options().write(true).open(&path) else {
+        return;
+    };
+    if handle.try_lock().is_ok() {
+        let _ = fs::remove_file(&path);
     }
 }
 
@@ -575,16 +960,6 @@ fn remove_stale_partials(directory: &Path, name: &str) {
         if stale {
             let _ = fs::remove_file(entry.path());
         }
-    }
-}
-
-/// Deletes the file it names when dropped; after the rename into place
-/// there is nothing left to delete.
-struct RemoveOnDrop(PathBuf);
-
-impl Drop for RemoveOnDrop {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -731,7 +1106,7 @@ mod tests {
             attribution: String::new(),
             files: vec![ModelFile {
                 name: "model.onnx".to_owned(),
-                url,
+                source: url.map(ModelSource::Url),
                 sha256: sha256.to_owned(),
                 size: body.len() as u64,
             }],
@@ -762,10 +1137,9 @@ mod tests {
                 );
             })
             .unwrap();
-        // The download writes a file of its own, not the target.
-        let own = format!("model.onnx.partial.{}.", std::process::id());
+        // The download writes the resumable partial, not the target.
         assert!(
-            !partials.is_empty() && partials.iter().all(|name| name.starts_with(&own)),
+            !partials.is_empty() && partials.iter().all(|name| name == "model.onnx.partial"),
             "{partials:?}"
         );
         assert_eq!(directory, dir.path().join("test-asset"));
@@ -783,47 +1157,52 @@ mod tests {
     }
 
     #[test]
-    fn two_downloads_of_one_file_in_one_process_write_their_own_partials() {
-        // The second download starts while the first is half done; the
-        // first then finishes and must install what it received.
+    fn a_second_download_of_one_file_waits_for_the_first_and_fetches_nothing() {
+        // The second download starts while the first is half done. It
+        // waits for the lock, finds the file installed and returns without
+        // a request: the bytes cross the wire once. The server would hold a
+        // second connection, so a second transfer would show in its
+        // progress.
         const WAIT: Duration = Duration::from_secs(30);
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
         // 2 MB, so the body timeout (30 s) is far longer than the hold.
         let body: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8 + 1).collect();
-        let (url, release) = serve_held(&body, vec![50_000, 10_000]);
+        let (url, release) = serve_held(&body, vec![50_000, 0]);
         let asset = asset(Some(url), &body, &digest(&body));
         let (first_started, first_waits) = mpsc::channel();
-        let (second_started, second_waits) = mpsc::channel();
+        let mut first_received = 0;
+        let mut second_reports = 0;
         std::thread::scope(|scope| {
             // Owned here, so a failed assertion drops the senders and frees
             // the held downloads instead of leaving the scope waiting.
             let release = release;
             let first = scope.spawn(|| {
                 store.ensure(&asset, &mut |p| {
+                    first_received = p.received;
                     if p.received >= 50_000 {
                         let _ = first_started.send(());
                     }
                 })
             });
             first_waits.recv_timeout(WAIT).unwrap();
-            let second = scope.spawn(|| {
-                store.ensure(&asset, &mut |p| {
-                    if p.received >= 10_000 {
-                        let _ = second_started.send(());
-                    }
-                })
-            });
-            second_waits.recv_timeout(WAIT).unwrap();
+            let second = scope.spawn(|| store.ensure(&asset, &mut |_| second_reports += 1));
+            // Time to reach the lock; it cannot finish before the first.
+            std::thread::sleep(Duration::from_millis(300));
+            assert!(!second.is_finished());
             release[0].send(()).unwrap();
             let first = first.join().unwrap();
-            let installed = store.verify(&asset);
-            release[1].send(()).unwrap();
+            // Frees a second transfer, should one have started.
+            drop(release);
             let second = second.join().unwrap();
             first.unwrap();
-            installed.unwrap();
             second.unwrap();
         });
+        assert_eq!(first_received, body.len() as u64);
+        assert_eq!(
+            second_reports, 0,
+            "the second download fetched the file again"
+        );
         store.verify(&asset).unwrap();
         let names: Vec<_> = fs::read_dir(store.directory(&asset))
             .unwrap()
@@ -883,28 +1262,35 @@ mod tests {
 
     #[test]
     fn a_partial_name_a_dead_process_with_this_pid_left_is_passed_over() {
+        // Per-call partials are for file systems without locks, which a
+        // test cannot conjure; the naming is checked on its own.
         let dir = tempfile::tempdir().unwrap();
-        let store = ModelStore::new(dir.path());
-        let body = b"not really a model".to_vec();
-        let asset = asset(Some(serve_once(&body)), &body, &digest(&body));
-        let directory = store.directory(&asset);
-        fs::create_dir_all(&directory).unwrap();
+        let destination = dir.path().join("model.onnx");
         // The next call numbers, with room for other tests drawing some.
         let next = NEXT_CALL.load(Ordering::Relaxed);
         let own = std::process::id();
         for call in next..next + 64 {
             fs::write(
-                directory.join(format!("model.onnx.partial.{own}.{call}")),
+                dir.path().join(format!("model.onnx.partial.{own}.{call}")),
                 b"old",
             )
             .unwrap();
         }
-        store.ensure(&asset, &mut |_| {}).unwrap();
-        store.verify(&asset).unwrap();
+        let mut partial = Partial::per_call(&destination, "model.onnx").unwrap();
+        assert!(!partial.resumable);
+        partial.append(b"new").unwrap();
+        let path = partial.path.clone();
+        assert!(path.starts_with(dir.path()));
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert_eq!(partial_pid(&name, "model.onnx.partial."), Some(own));
+        assert_eq!(fs::read(&path).unwrap(), b"new");
         assert_eq!(
-            fs::read(directory.join(format!("model.onnx.partial.{own}.{next}"))).unwrap(),
+            fs::read(dir.path().join(format!("model.onnx.partial.{own}.{next}"))).unwrap(),
             b"old"
         );
+        // Deleted with the call.
+        drop(partial);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -977,6 +1363,59 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_is_deleted_once_its_file_is_installed_another_way() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"local only".to_vec();
+        let asset = asset(None, &body, &digest(&body));
+        let directory = store.directory(&asset);
+        fs::create_dir_all(&directory).unwrap();
+        let partial = directory.join("model.onnx.partial");
+        // Killed half way, then copied in by hand.
+        fs::write(&partial, &body[..4]).unwrap();
+        fs::write(directory.join("model.onnx"), &body).unwrap();
+        // While another download holds it, it stays.
+        let held = File::options().write(true).open(&partial).unwrap();
+        held.lock().unwrap();
+        store.ensure(&asset, &mut |_| {}).unwrap();
+        assert!(partial.exists());
+        drop(held);
+        store.ensure(&asset, &mut |_| {}).unwrap();
+        assert!(!partial.exists());
+        store.verify(&asset).unwrap();
+    }
+
+    #[test]
+    fn a_download_that_finds_its_file_installed_leaves_no_partial() {
+        // Installed by another download between the check and the lock:
+        // this one returns at once (the URL is never fetched) and must not
+        // leave the partial it opened, whatever it held.
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let body = b"not really a model".to_vec();
+        let asset = asset(None, &body, &digest(&body));
+        let directory = store.directory(&asset);
+        fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("model.onnx");
+        fs::write(&destination, &body).unwrap();
+        // Bytes a killed run left, which only this call would delete.
+        fs::write(directory.join("model.onnx.partial"), &body[..4]).unwrap();
+        store
+            .download_with_retries(
+                "http://127.0.0.1:9/never",
+                &asset.files[0],
+                &destination,
+                &mut |_| {},
+            )
+            .unwrap();
+        let names: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["model.onnx"]);
+    }
+
+    #[test]
     fn only_another_process_s_partial_untouched_for_the_stale_age_is_removed() {
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
@@ -984,7 +1423,7 @@ mod tests {
         let mut asset = asset(None, &body, &digest(&body));
         asset.files.push(ModelFile {
             name: "notes.txt".to_owned(),
-            url: None,
+            source: None,
             sha256: digest(b"notes"),
             size: 5,
         });
@@ -1051,6 +1490,63 @@ mod tests {
         assert_eq!(left, expected);
     }
 
+    /// The largest file a GitHub release takes.
+    const GITHUB_RELEASE_ASSET_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+
+    #[test]
+    fn hosts_fit_their_limits_and_hugging_face_urls_pin_a_commit() {
+        // GitHub release assets cap at 2 GB a file, so a file that large
+        // can only come from Hugging Face.
+        let hosted = ModelAsset::parakeet_v3_fp32_from(STENO_MODELS_REPO, "0123abcd");
+        for asset in ModelAsset::all().into_iter().chain([hosted.clone()]) {
+            for file in &asset.files {
+                if let Some(ModelSource::Url(url)) = &file.source {
+                    assert!(url.starts_with("https://"), "{url}");
+                    assert!(file.size < GITHUB_RELEASE_ASSET_LIMIT, "{}", file.name);
+                }
+            }
+        }
+        let weights = hosted
+            .files
+            .iter()
+            .find(|f| f.name == "encoder.weights")
+            .unwrap();
+        assert!(weights.size > GITHUB_RELEASE_ASSET_LIMIT);
+        assert_eq!(
+            weights.source.as_ref().unwrap().url(),
+            "https://huggingface.co/NicolaiSchmid/steno-models/resolve/0123abcd/parakeet-tdt-0.6b-v3-fp32/encoder.weights"
+        );
+        // Same files, sizes and checksums whether hosted or not.
+        let unhosted = ModelAsset::parakeet_v3_fp32();
+        assert_eq!(PARAKEET_V3_FP32_REVISION, None);
+        assert!(unhosted.files.iter().all(|f| f.source.is_none()));
+        let strip = |asset: &ModelAsset| {
+            asset
+                .files
+                .iter()
+                .map(|f| (f.name.clone(), f.sha256.clone(), f.size))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strip(&hosted), strip(&unhosted));
+        // A mirror replaces every host, unhosted files included.
+        let store = ModelStore::new("/models");
+        let weights = &unhosted.files[1];
+        assert_eq!(weights.name, "encoder.weights");
+        assert_eq!(store.url_for(&unhosted, weights), None);
+        let silero = ModelAsset::silero_vad();
+        assert_eq!(
+            store.url_for(&silero, &silero.files[0]).unwrap(),
+            "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx"
+        );
+        let mirrored = store.with_mirror(Some(" http://mirror.local/models/ ".to_owned()));
+        assert_eq!(mirrored.mirror(), Some("http://mirror.local/models"));
+        assert_eq!(
+            mirrored.url_for(&unhosted, weights).unwrap(),
+            "http://mirror.local/models/parakeet-tdt-0.6b-v3-fp32/encoder.weights"
+        );
+        assert_eq!(mirrored.with_mirror(Some(String::new())).mirror(), None);
+    }
+
     #[test]
     fn names_that_could_leave_the_root_are_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -1110,7 +1606,7 @@ mod tests {
             }
         }
         assert!(ModelAsset::parakeet_v3_fp32().total_size() > 2_500_000_000);
-        assert!(ModelAsset::silero_vad().files[0].url.is_some());
+        assert!(ModelAsset::silero_vad().files[0].source.is_some());
         assert_eq!(
             ModelStore::default_models_directory(),
             StenoPaths::default_support_directory().join("Models")

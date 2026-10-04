@@ -13,12 +13,15 @@ publish.workspace = true
 # the target, so one default feature set builds everywhere.
 default = ["onnx", "coreml"]
 # ONNX Runtime backend (pyannote segmentation 3.0 and WeSpeaker ResNet34-LM).
-onnx = ["dep:ort"]
+# `steno-speech` for `onnx::init_environment`, the one place ONNX Runtime is
+# configured (telemetry off).
+onnx = ["dep:ort", "dep:steno-speech"]
 # CoreML backend over FluidAudio's compiled models; macOS only.
 coreml = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-core-ml"]
 
 [dependencies]
 steno-core = { path = "../steno-core" }
+steno-speech = { path = "../steno-speech", optional = true }
 ort = { workspace = true, optional = true }
 rustfft.workspace = true
 sha2.workspace = true

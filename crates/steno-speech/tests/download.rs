@@ -1,0 +1,440 @@
+//! The model store against a local HTTP server that serves a temporary
+//! directory: resumable `.partial` downloads (a cut connection, a partial
+//! a killed run left, a corrupt prefix, a host that ignores `Range`, a
+//! `206` from the wrong offset or without `Content-Range`), the mirror
+//! layout and the checksum gate. No network beyond 127.0.0.1.
+
+#![allow(clippy::cast_possible_truncation)]
+
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use sha2::{Digest, Sha256};
+use steno_speech::{ModelAsset, ModelFile, ModelSource, ModelStore, SpeechError};
+
+/// What the server does besides serving files.
+#[derive(Debug, Clone, Copy, Default)]
+struct Behaviour {
+    /// Closes the first response's connection after this many body bytes.
+    cut_first_after: Option<usize>,
+    /// Answers every request with the whole file, as some hosts do.
+    ignore_range: bool,
+    /// Answers a range request with the whole file under `206`, labelled
+    /// as starting at 0 or, with `false`, without a `Content-Range`.
+    whole_file_as_206: Option<bool>,
+}
+
+/// One request the server saw: the path and the `Range` header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Seen {
+    path: String,
+    range: Option<String>,
+}
+
+/// Serves the files under `root` at `http://127.0.0.1:<port>/<path>` until
+/// the test ends.
+struct FileServer {
+    base: String,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+impl FileServer {
+    fn start(root: &Path, behaviour: Behaviour) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let root = root.to_path_buf();
+        let log = Arc::clone(&seen);
+        let cut_done = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let (root, log, cut_done) = (root.clone(), Arc::clone(&log), Arc::clone(&cut_done));
+                std::thread::spawn(move || {
+                    let _ = answer(&stream, &root, behaviour, &log, &cut_done);
+                });
+            }
+        });
+        FileServer { base, seen }
+    }
+
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+fn answer(
+    stream: &TcpStream,
+    root: &Path,
+    behaviour: Behaviour,
+    log: &Mutex<Vec<Seen>>,
+    cut_done: &AtomicBool,
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let path = line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("/")
+        .trim_start_matches('/')
+        .to_owned();
+    let mut range = None;
+    loop {
+        let mut header = String::new();
+        if reader.read_line(&mut header)? == 0 || header == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':')
+            && name.eq_ignore_ascii_case("range")
+        {
+            range = Some(value.trim().to_owned());
+        }
+    }
+    log.lock().unwrap().push(Seen {
+        path: path.clone(),
+        range: range.clone(),
+    });
+    let mut out = stream;
+    let Ok(body) = fs::read(root.join(&path)) else {
+        return out.write_all(
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    };
+    let start = range.filter(|_| !behaviour.ignore_range).and_then(|r| {
+        r.strip_prefix("bytes=")?
+            .strip_suffix('-')?
+            .parse::<usize>()
+            .ok()
+    });
+    let (head, slice) = match start {
+        Some(_) if behaviour.whole_file_as_206.is_some() => {
+            let range = if behaviour.whole_file_as_206 == Some(true) {
+                format!(
+                    "Content-Range: bytes 0-{}/{}\r\n",
+                    body.len() - 1,
+                    body.len()
+                )
+            } else {
+                String::new()
+            };
+            (
+                format!(
+                    "HTTP/1.1 206 Partial Content\r\n{range}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                ),
+                &body[..],
+            )
+        }
+        Some(start) if start >= body.len() => {
+            let head = format!(
+                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            (head, &body[..0])
+        }
+        Some(start) => (
+            format!(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {start}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len() - 1,
+                body.len(),
+                body.len() - start
+            ),
+            &body[start..],
+        ),
+        None => (
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            ),
+            &body[..],
+        ),
+    };
+    out.write_all(head.as_bytes())?;
+    match behaviour.cut_first_after {
+        Some(cut) if !cut_done.swap(true, Ordering::SeqCst) => {
+            out.write_all(&slice[..cut.min(slice.len())])?;
+            out.flush()?;
+            stream.shutdown(Shutdown::Both)
+        }
+        _ => out.write_all(slice),
+    }
+}
+
+fn digest(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut out, b| {
+            let _ = write!(out, "{b:02x}");
+            out
+        })
+}
+
+/// A body that is not periodic in any short stride, so a misplaced offset
+/// changes the checksum.
+fn body(len: usize) -> Vec<u8> {
+    (0..len).map(|i| ((i * 7919) % 251) as u8).collect()
+}
+
+const ID: &str = "test-asset";
+const NAME: &str = "model.onnx";
+const PARTIAL: &str = "model.onnx.partial";
+
+/// A server over a directory holding a file at `<ID>/<NAME>`, an empty
+/// store and the asset of that one file.
+struct Fixture {
+    server: FileServer,
+    store: ModelStore,
+    asset: ModelAsset,
+    _served: tempfile::TempDir,
+    _root: tempfile::TempDir,
+}
+
+fn fixture(contents: &[u8], behaviour: Behaviour) -> Fixture {
+    let files = tempfile::tempdir().unwrap();
+    fs::create_dir_all(files.path().join(ID)).unwrap();
+    fs::write(files.path().join(ID).join(NAME), contents).unwrap();
+    let server = FileServer::start(files.path(), behaviour);
+    let root = tempfile::tempdir().unwrap();
+    let asset = ModelAsset {
+        id: ID.to_owned(),
+        display_name: "Test".to_owned(),
+        licence: "MIT".to_owned(),
+        attribution: String::new(),
+        files: vec![ModelFile {
+            name: NAME.to_owned(),
+            source: Some(ModelSource::Url(format!("{}/{ID}/{NAME}", server.base))),
+            sha256: digest(contents),
+            size: contents.len() as u64,
+        }],
+    };
+    Fixture {
+        server,
+        store: ModelStore::new(root.path()),
+        asset,
+        _served: files,
+        _root: root,
+    }
+}
+
+impl Fixture {
+    fn directory(&self) -> PathBuf {
+        self.store.directory(&self.asset)
+    }
+
+    /// Leaves `<NAME>.partial` holding `bytes`, as an earlier run would.
+    fn leave_partial(&self, bytes: &[u8]) -> PathBuf {
+        let partial = self.directory().join(PARTIAL);
+        fs::create_dir_all(self.directory()).unwrap();
+        fs::write(&partial, bytes).unwrap();
+        partial
+    }
+
+    /// Installs the asset and checks it.
+    fn install(&self) {
+        self.store.ensure(&self.asset, &mut |_| {}).unwrap();
+        self.store.verify(&self.asset).unwrap();
+    }
+}
+
+fn names(directory: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(directory)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn a_cut_connection_resumes_with_a_range_request() {
+    let contents = body(300_000);
+    let f = fixture(
+        &contents,
+        Behaviour {
+            cut_first_after: Some(100_000),
+            ..Behaviour::default()
+        },
+    );
+    let mut starts = Vec::new();
+    let mut last = 0;
+    f.store
+        .ensure(&f.asset, &mut |p| {
+            if p.received <= last || starts.is_empty() {
+                starts.push(p.received);
+            }
+            last = p.received;
+            assert_eq!(p.total, contents.len() as u64);
+        })
+        .unwrap();
+    f.store.verify(&f.asset).unwrap();
+    let seen = f.server.seen();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0].range, None);
+    // Whatever the first attempt wrote before the cut is kept: the second
+    // asks for the rest, and its progress starts there.
+    let resumed_at: u64 = seen[1]
+        .range
+        .as_deref()
+        .and_then(|r| r.strip_prefix("bytes=")?.strip_suffix('-')?.parse().ok())
+        .expect("a Range request");
+    assert!(resumed_at > 0 && resumed_at <= 100_000, "{resumed_at}");
+    assert_eq!(starts, [0, resumed_at]);
+    assert_eq!(names(&f.directory()), [NAME]);
+}
+
+#[test]
+fn a_partial_a_killed_run_left_is_resumed_not_fetched_again() {
+    let contents = body(200_000);
+    let f = fixture(&contents, Behaviour::default());
+    f.leave_partial(&contents[..123_456]);
+    let mut first = None;
+    f.store
+        .ensure(&f.asset, &mut |p| {
+            first.get_or_insert(p.received);
+        })
+        .unwrap();
+    f.store.verify(&f.asset).unwrap();
+    assert_eq!(first, Some(123_456));
+    assert_eq!(
+        f.server.seen(),
+        [Seen {
+            path: format!("{ID}/{NAME}"),
+            range: Some("bytes=123456-".to_owned()),
+        }]
+    );
+    assert_eq!(names(&f.directory()), [NAME]);
+}
+
+#[test]
+fn a_corrupt_prefix_fails_its_checksum_and_is_fetched_again_from_zero() {
+    let contents = body(50_000);
+    let f = fixture(&contents, Behaviour::default());
+    f.leave_partial(&vec![0xAA; 20_000]);
+    f.install();
+    let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
+    assert_eq!(ranges, [Some("bytes=20000-".to_owned()), None]);
+    assert_eq!(names(&f.directory()), [NAME]);
+}
+
+#[test]
+fn a_host_that_ignores_the_range_gets_the_file_written_from_the_start() {
+    let contents = body(40_000);
+    let f = fixture(
+        &contents,
+        Behaviour {
+            ignore_range: true,
+            ..Behaviour::default()
+        },
+    );
+    f.leave_partial(&contents[..10_000]);
+    f.install();
+    assert_eq!(f.server.seen().len(), 1);
+}
+
+#[test]
+fn a_partial_longer_than_the_file_or_already_complete_is_handled() {
+    let contents = body(10_000);
+    let f = fixture(&contents, Behaviour::default());
+    // Longer than the manifest size: cannot be a prefix, so it is emptied
+    // and the whole file is requested.
+    f.leave_partial(&vec![1; 20_000]);
+    f.install();
+    assert_eq!(f.server.seen()[0].range, None);
+    // Complete but never renamed (killed between the sync and the rename):
+    // the range is past the end, the host answers 416, and the file is
+    // fetched whole once more.
+    f.store.remove(&f.asset).unwrap();
+    f.leave_partial(&contents);
+    f.install();
+    let ranges: Vec<_> = f
+        .server
+        .seen()
+        .into_iter()
+        .skip(1)
+        .map(|s| s.range)
+        .collect();
+    assert_eq!(ranges, [Some("bytes=10000-".to_owned()), None]);
+}
+
+#[test]
+fn a_wrong_checksum_is_rejected_and_nothing_is_kept() {
+    let contents = body(30_000);
+    let mut f = fixture(&contents, Behaviour::default());
+    f.asset.files[0].sha256 = digest(b"something else");
+    let error = f.store.ensure(&f.asset, &mut |_| {}).unwrap_err();
+    assert!(matches!(error, SpeechError::Checksum { .. }), "{error}");
+    assert_eq!(names(&f.directory()), Vec::<String>::new());
+    assert!(!f.store.is_installed(&f.asset));
+}
+
+#[test]
+fn a_mirror_serves_every_file_from_asset_id_and_file_name() {
+    let contents = body(5_000);
+    let mut f = fixture(&contents, Behaviour::default());
+    // The source is unreachable, or absent altogether: the mirror wins.
+    f.asset.files[0].source = Some(ModelSource::Url("http://127.0.0.1:9/never".to_owned()));
+    f.store = f.store.with_mirror(Some(format!("{}/", f.server.base)));
+    f.install();
+    f.store.remove(&f.asset).unwrap();
+    f.asset.files[0].source = None;
+    f.install();
+    assert!(
+        f.server
+            .seen()
+            .iter()
+            .all(|s| s.path == format!("{ID}/{NAME}"))
+    );
+    assert_eq!(f.server.seen().len(), 2);
+}
+
+#[test]
+fn a_download_waits_for_the_one_holding_its_partial_and_resumes_it() {
+    // Another download holds the partial and stops; this one waits for
+    // the lock instead of fetching a copy of its own, then continues the
+    // bytes the other left.
+    let contents = body(20_000);
+    let f = fixture(&contents, Behaviour::default());
+    let partial = f.leave_partial(&contents[..7_000]);
+    let held = File::options().write(true).open(&partial).unwrap();
+    held.lock().unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(held);
+    });
+    f.install();
+    holder.join().unwrap();
+    let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
+    assert_eq!(ranges, [Some("bytes=7000-".to_owned())]);
+    assert_eq!(names(&f.directory()), [NAME]);
+}
+
+#[test]
+fn a_206_from_the_wrong_offset_or_without_a_range_is_not_appended() {
+    // Both answers carry the whole file; appended to the partial they
+    // would overrun the manifest size. The download starts over instead.
+    for labelled in [true, false] {
+        let contents = body(30_000);
+        let f = fixture(
+            &contents,
+            Behaviour {
+                whole_file_as_206: Some(labelled),
+                ..Behaviour::default()
+            },
+        );
+        f.leave_partial(&contents[..12_000]);
+        f.install();
+        let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
+        assert_eq!(
+            ranges,
+            [Some("bytes=12000-".to_owned()), None],
+            "labelled {labelled}"
+        );
+        assert_eq!(names(&f.directory()), [NAME]);
+    }
+}

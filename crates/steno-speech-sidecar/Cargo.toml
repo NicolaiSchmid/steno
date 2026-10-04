@@ -1,0 +1,26 @@
+[package]
+name = "steno-speech-sidecar"
+description = "The child process that runs Steno's ONNX speech engine off the app's process, driven over stdin and stdout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "steno-speech-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+steno-core = { path = "../steno-core" }
+steno-speech = { path = "../steno-speech" }
+memory-stats.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

@@ -94,16 +94,23 @@ impl OnnxSpeechEngine {
         config: PipelineConfig,
         vad: VadConfig,
     ) -> Result<Transcriber<OnnxBackend>, SpeechError> {
-        let mut report = |progress: DownloadProgress<'_>| {
-            tracing::debug!(
-                file = progress.file,
-                received = progress.received,
-                total = progress.total,
-                "model download"
-            );
-        };
-        let vad_directory = store.ensure(&ModelAsset::silero_vad(), &mut report)?;
-        let model_directory = store.ensure(&ModelAsset::parakeet_v3_fp32(), &mut report)?;
+        store.ensure(&ModelAsset::silero_vad(), &mut log_download)?;
+        store.ensure(&ModelAsset::parakeet_v3_fp32(), &mut log_download)?;
+        Self::load_installed(store, options, config, vad)
+    }
+
+    /// [`OnnxSpeechEngine::open_transcriber`] without the downloads: the
+    /// export and Silero must already be in `store`, else
+    /// [`SpeechError::NotInstalled`]. What `steno-speech-sidecar` runs, so
+    /// the child never opens a connection.
+    pub fn load_installed(
+        store: &ModelStore,
+        options: &OnnxOptions,
+        config: PipelineConfig,
+        vad: VadConfig,
+    ) -> Result<Transcriber<OnnxBackend>, SpeechError> {
+        let vad_directory = store.installed_directory(&ModelAsset::silero_vad())?;
+        let model_directory = store.installed_directory(&ModelAsset::parakeet_v3_fp32())?;
         let (backend, vocab) = OnnxBackend::load(&model_directory, options)?;
         let detector = SileroVad::load(&vad_directory.join("silero_vad.onnx"), options, vad)?;
         Ok(Transcriber::new(
@@ -116,9 +123,19 @@ impl OnnxSpeechEngine {
     }
 }
 
+/// Download progress of the model store, to `tracing` at debug level.
+pub(crate) fn log_download(progress: DownloadProgress<'_>) {
+    tracing::debug!(
+        file = progress.file,
+        received = progress.received,
+        total = progress.total,
+        "model download"
+    );
+}
+
 /// Runs `work` off the async executor when one is present, inline
 /// otherwise.
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, SpeechError> {
     match tokio::runtime::Handle::try_current() {
@@ -169,9 +186,9 @@ impl SpeechEngine for OnnxSpeechEngine {
         }
         self.prepare().await?;
         let loaded = Arc::clone(&self.loaded);
-        // One copy of the recording per call; the sidecar boundary of
-        // speech-stack decision 5 will copy again, and this is the place to
-        // remove both.
+        // One copy of the recording per call, for the blocking thread; the
+        // speech sidecar copies again into its payload
+        // (`sidecar::protocol::encode_samples`).
         let samples = audio.samples.clone();
         let hint = hint.cloned();
         let transcript = blocking(move || {
