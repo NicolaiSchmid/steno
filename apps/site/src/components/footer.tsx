@@ -6,6 +6,7 @@ const links = [
 	{ href: site.releases, label: "Download" },
 	{ href: site.issues, label: "Issues" },
 	{ href: site.scope, label: "Scope" },
+	{ href: site.recordingLaw, label: "Recording law" },
 	{ href: site.tap, label: "Homebrew tap" },
 	{ href: site.author.url, label: site.author.name },
 ];
@@ -24,17 +25,21 @@ export function Footer() {
 					aria-label="Footer"
 					className="grid w-full grid-cols-3 gap-x-5 gap-y-3.5 lg:flex lg:w-auto lg:flex-wrap lg:justify-end"
 				>
-					{links.map((l) => (
-						<a
-							className="text-[13px] text-fg-dim transition-colors duration-200 hover:text-fg"
-							href={l.href}
-							key={l.href}
-							rel="noreferrer"
-							target="_blank"
-						>
-							{l.label}
-						</a>
-					))}
+					{links.map((l) => {
+						// Site-relative links stay in the tab; the rest open a new one.
+						const external = !l.href.startsWith("/");
+						return (
+							<a
+								className="text-[13px] text-fg-dim transition-colors duration-200 hover:text-fg"
+								href={l.href}
+								key={l.href}
+								rel={external ? "noreferrer" : undefined}
+								target={external ? "_blank" : undefined}
+							>
+								{l.label}
+							</a>
+						);
+					})}
 				</nav>
 			</div>
 		</footer>

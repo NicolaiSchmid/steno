@@ -1,5 +1,6 @@
 "use client";
 
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { GitHubMark } from "@/components/github-mark";
 import { RecordMark } from "@/components/record-mark";
@@ -7,15 +8,17 @@ import { cn } from "@/lib/cn";
 import { site } from "@/lib/site";
 
 const nav = [
-	{ href: "#how", label: "How it works" },
-	{ href: "#privacy", label: "Privacy" },
-	{ href: "#built", label: "How it's built" },
-	{ href: "#open", label: "Source" },
+	{ href: "/#how", label: "How it works" },
+	{ href: "/#privacy", label: "Privacy" },
+	{ href: "/#built", label: "How it's built" },
+	{ href: site.recordingLaw, label: "Recording law" },
+	{ href: "/#open", label: "Source" },
 ];
 
-/** The sticky nav: wordmark, links from 768 px, Download, the GitHub pill. */
+/** The sticky nav: wordmark, links from 1024 px, Download, the GitHub pill. */
 export function Header() {
 	const [scrolled, setScrolled] = useState(false);
+	const pathname = usePathname();
 
 	useEffect(() => {
 		const onScroll = () => setScrolled(window.scrollY > 12);
@@ -35,15 +38,16 @@ export function Header() {
 				<a
 					aria-label="Steno home"
 					className="inline-flex items-center gap-2.5 font-[650] text-[16px] text-fg leading-none tracking-[-0.025em] transition-colors duration-200 hover:text-white"
-					href="#top"
+					href="/#top"
 				>
 					<RecordMark />
 					Steno
 				</a>
-				<nav aria-label="Primary" className="hidden items-center md:flex">
+				<nav aria-label="Primary" className="hidden items-center lg:flex">
 					{nav.map((item) => (
 						<a
-							className="whitespace-nowrap px-2.5 text-[13px] text-fg-muted tracking-[-0.01em] transition-colors duration-[180ms] hover:text-fg"
+							aria-current={item.href === pathname ? "page" : undefined}
+							className="whitespace-nowrap px-2.5 text-[13px] text-fg-muted tracking-[-0.01em] transition-colors duration-[180ms] hover:text-fg aria-[current=page]:text-fg"
 							href={item.href}
 							key={item.href}
 						>
@@ -54,7 +58,7 @@ export function Header() {
 				<div className="inline-flex items-center gap-2">
 					<a
 						className="px-2.5 text-[13px] text-fg-muted tracking-[-0.01em] transition-colors duration-[180ms] hover:text-fg"
-						href="#download"
+						href="/#download"
 					>
 						Download
 					</a>

@@ -64,9 +64,9 @@ pub const ENGINE_IDS: [&str; 4] = [
 
 /// `--engine <id>`: without it the pipeline runs the fakes; with it
 /// Parakeet v3 where the flag's help says, the ONNX diarizer and cosine
-/// speaker memory over the store. The diarizer's models download on first
-/// use; Parakeet's must be installed or, in the speech sidecar, come from
-/// the mirror.
+/// speaker memory over the store. The diarizer's models, and in the speech
+/// sidecar Parakeet's, download on first use (from their hosts or the
+/// mirror); the `CoreML` Parakeet must be installed.
 #[derive(Debug, Clone, Args)]
 pub struct SpeechOptions {
     #[arg(

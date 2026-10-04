@@ -230,15 +230,4 @@ mod tests {
                 .is_empty()
         );
     }
-
-    #[tokio::test]
-    #[ignore = "downloads Silero VAD from GitHub; run with --ignored when online"]
-    async fn without_the_export_prepare_names_the_missing_asset() {
-        let dir = tempfile::tempdir().unwrap();
-        let engine = OnnxSpeechEngine::new(ModelStore::new(dir.path()), OnnxOptions::default());
-        // Silero downloads; the Parakeet export has no URL, so the error
-        // names the asset to install by hand.
-        let error = engine.prepare().await.unwrap_err().to_string();
-        assert!(error.contains("parakeet-tdt-0.6b-v3-fp32"), "{error}");
-    }
 }
