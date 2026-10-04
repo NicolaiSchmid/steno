@@ -1,5 +1,8 @@
+import Dispatch
 import Foundation
+import GRDB
 import StenoCore
+import Synchronization
 import Testing
 
 @testable import StenoHandover
@@ -298,29 +301,47 @@ import Testing
 
   /// A recording admitted before the restart answers its meeting also when
   /// a revoke lands during the read: a 401 would make the phone keep it, and
-  /// its upload after pairing again would become a second meeting.
-  @Test(.timeLimit(.minutes(1)))
-  func aCompletedRecordingAnswersItsMeetingAfterARevokeDuringTheRead() async throws {
+  /// its upload after pairing again would become a second meeting. With
+  /// `pairsAgain`, the phone pairs again before the read returns, and the
+  /// receipt the revoke deleted does not come back into memory.
+  private func completedRecordingAfterARevokeDuringItsRead(pairsAgain: Bool) async throws {
     let before = try await Gated()
     defer { before.remove() }
     try await before.phone.uploadAll(before.metadata, before.bytes)
     let meetingID = try await before.phone.complete(before.id).json(Wire.CompleteResponse.self)
       .meetingID
     let restarted = before.restarted()
-    let gate = restarted.gate
+    let (gate, engine, device) = (restarted.gate, restarted.engine, restarted.phone.device)
 
     gate.receiptRead.arm()
     let completing = Task { await restarted.phone.complete(restarted.id) }
     await gate.receiptRead.held()
-    try await restarted.service.revoke(restarted.phone.device.id)
+    try await restarted.service.revoke(device.id)
+    if pairsAgain {
+      _ = await engine.beginPairing()
+      let pairing = try await EngineClient(engine: engine).pair(
+        deviceID: device.id, deviceName: device.name)
+      #expect(pairing.code == 200)
+    }
     gate.receiptRead.release()
     let response = await completing.value
 
     #expect(response.code == 200)
     #expect(try response.json(Wire.CompleteResponse.self).meetingID == meetingID)
     #expect(await restarted.intake.admissions.count == 0, "nothing is admitted again")
-    #expect(await restarted.engine.receiptsSnapshot.isEmpty)
+    #expect(try await restarted.test.store.handoverReceipt(recordingID: restarted.id) == nil)
+    #expect(await engine.receiptsSnapshot.isEmpty, "the deleted receipt stays out of memory")
     #expect(!gate.timedOut, "nothing waited on the held read")
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aCompletedRecordingAnswersItsMeetingAfterARevokeDuringTheRead() async throws {
+    try await completedRecordingAfterARevokeDuringItsRead(pairsAgain: false)
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aCompletedRecordingOfAPhoneThatPairedAgainLeavesNoStaleReceipt() async throws {
+    try await completedRecordingAfterARevokeDuringItsRead(pairsAgain: true)
   }
 
   /// A revoke during the `.verifying` save discards the files, but the
@@ -443,6 +464,77 @@ import Testing
     try await phone.uploadAll(gated.metadata, gated.bytes)
     #expect(await phone.complete(id).code == 200)
     #expect(!gate.timedOut, "nothing waited on the held save")
+  }
+
+  /// Of two revokes of one device in flight together, the one whose delete
+  /// fails leaves `revoked` to the other, which deletes the device, so a
+  /// request that read the receipt before them does not bring it back.
+  @Test(.timeLimit(.minutes(1)))
+  func aFailedRevokeBesideASuccessfulOneKeepsTheDeviceRevoked() async throws {
+    let restarted = try await Gated.restartedAfterUpload()
+    defer { restarted.remove() }
+    let (gate, engine, device) = (restarted.gate, restarted.engine, restarted.phone.device)
+    let deletes = HeldDeletes()
+    try await gate.pool.write { db in try deletes.install(db) }
+    defer { deletes.releaseAll() }
+
+    gate.receiptRead.arm()
+    let reading = Task { await restarted.phone.status(restarted.id) }
+    await gate.receiptRead.held()
+    let first = Task { try await restarted.service.revoke(device.id) }
+    try await Self.until { deletes.started == 1 }
+    let second = Task { try await restarted.service.revoke(device.id) }
+    try await Self.until { await engine.revoking[device.id] == 2 }
+    deletes.release(0)
+    await #expect(throws: (any Error).self) { try await first.value }
+    // The first revoke ran its undo while the second's delete is held.
+    #expect(await engine.revoking[device.id] == 1, "the second revoke is still in flight")
+    #expect(await engine.revoked.contains(device.id))
+    deletes.release(1)
+    try await second.value
+
+    #expect(try await restarted.test.store.pairedDevice(id: device.id) == nil)
+    #expect(await engine.revoked.contains(device.id))
+    gate.receiptRead.release()
+    #expect(await reading.value.code == 200, "it read before the revokes")
+    #expect(await engine.receiptsSnapshot.isEmpty, "the deleted device's receipt stays out")
+    #expect(!gate.timedOut, "nothing waited on the held read")
+  }
+
+  /// A trigger on paired device deletes: the first waits for `release(0)`
+  /// and fails, the second waits for `release(1)` and goes on.
+  private final class HeldDeletes: Sendable {
+    private let calls = Mutex(0)
+    private let releases = [DispatchSemaphore(value: 0), DispatchSemaphore(value: 0)]
+
+    /// How many deletes reached the trigger.
+    var started: Int { calls.withLock { $0 } }
+
+    func install(_ db: Database) throws {
+      db.add(
+        function: DatabaseFunction("heldDelete", argumentCount: 0, pure: false) { _ in
+          let call = self.calls.withLock { calls in
+            defer { calls += 1 }
+            return calls
+          }
+          _ = self.releases[min(call, 1)].wait(timeout: .now() + 30)
+          return call == 0
+        })
+      try db.execute(
+        sql: """
+          CREATE TRIGGER heldDelete BEFORE DELETE ON pairedDevice WHEN heldDelete()
+          BEGIN SELECT RAISE(ABORT, 'kept'); END
+          """)
+    }
+
+    func release(_ index: Int) {
+      releases[index].signal()
+    }
+
+    /// Lets every delete go on, for a test that stopped early.
+    func releaseAll() {
+      for release in releases { release.signal() }
+    }
   }
 
   /// A revoke that starts while the phone's new pairing is saved deletes the
