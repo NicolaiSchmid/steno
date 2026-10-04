@@ -2201,6 +2201,75 @@ mod tests {
     }
 
     #[test]
+    fn a_range_follows_a_redirect_to_another_host() {
+        // As at Hugging Face, whose download URL answers `302` with its
+        // CDN: the `Range` reaches the host the redirect names, and the
+        // partial a run left is resumed from there.
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 223) as u8).collect();
+        let shared = Arc::new(body.clone());
+        let (target, served) = serve_each(vec![capping(&shared, usize::MAX)]);
+        let target = target.replace("127.0.0.1", "localhost");
+        let redirect: Handler = Box::new(move |stream, _| {
+            let mut stream = stream;
+            let _ = stream.write_all(
+                format!("HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
+            );
+        });
+        let (url, asked) = serve_each(vec![redirect]);
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModelStore::new(dir.path());
+        let asset = asset(Some(url), &body, &digest(&body));
+        fs::create_dir_all(store.directory(&asset)).unwrap();
+        fs::write(
+            store.directory(&asset).join("model.onnx.partial"),
+            &body[..70_000],
+        )
+        .unwrap();
+        let mut first = None;
+        store
+            .ensure(&asset, &mut |p| {
+                first.get_or_insert(p.received);
+            })
+            .unwrap();
+        store.verify(&asset).unwrap();
+        assert_eq!(first, Some(70_000));
+        assert_eq!(*asked.lock().unwrap(), [Some("bytes=70000-".to_owned())]);
+        assert_eq!(*served.lock().unwrap(), [Some("bytes=70000-".to_owned())]);
+    }
+
+    #[test]
+    #[ignore = "fetches from huggingface.co"]
+    fn a_partial_of_the_hosted_export_resumes_through_its_redirect_in_chunks() {
+        // `tokens.txt` (94 KB) of the pinned export, fetched once, cut back
+        // to a partial of 30,000 bytes and fetched again in 16 KiB chunks:
+        // every range goes through Hugging Face's redirect, and the file
+        // must still match the manifest.
+        let mut asset = ModelAsset::parakeet_v3_fp32();
+        asset.files.retain(|f| f.name == "tokens.txt");
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = ModelStore::new(dir.path());
+        let directory = store.ensure(&asset, &mut |_| {}).unwrap();
+        let installed = directory.join("tokens.txt");
+        let partial = directory.join("tokens.txt.partial");
+        fs::rename(&installed, &partial).unwrap();
+        File::options()
+            .write(true)
+            .open(&partial)
+            .unwrap()
+            .set_len(30_000)
+            .unwrap();
+        store.chunk = 16 << 10;
+        let mut reports = Vec::new();
+        store
+            .ensure(&asset, &mut |p| reports.push(p.received))
+            .unwrap();
+        store.verify(&asset).unwrap();
+        assert_eq!(reports.first(), Some(&30_000));
+        assert_eq!(reports.last(), Some(&asset.files[0].size));
+        assert!(!partial.exists());
+    }
+
+    #[test]
     fn a_partial_name_a_dead_process_with_this_pid_left_is_passed_over() {
         // Per-call partials are for file systems without locks, which a
         // test cannot conjure; the naming is checked on its own.
