@@ -21,8 +21,8 @@ use steno_diarize::{DiarizerConfig, ModelDiarizer};
 use steno_host::services::SpeechModels;
 use steno_host::speech::ModelAsset;
 use steno_speech::{
-    LanguageTagger, ModelStore, OnnxOptions, SidecarConfig, SidecarSpeechEngine, SpeechRuntime,
-    SpeechSettings,
+    LanguageTagger, ModelStore, OnnxSpeechEngine, SidecarConfig, SidecarSpeechEngine,
+    SpeechRuntime, SpeechSettings,
 };
 
 /// Threads for one ONNX operator; the plan measured at four.
@@ -78,15 +78,8 @@ fn speech_settings_with(file: &Path, mirror: Option<String>) -> SpeechSettings {
 pub fn sidecar_config() -> SidecarConfig {
     let mut config = SidecarConfig::beside_current_exe()
         .unwrap_or_else(|_| SidecarConfig::new(steno_speech::sidecar::SIDECAR_BINARY));
-    config.options = onnx_options();
+    config.options.intra_threads = ONNX_THREADS;
     config
-}
-
-fn onnx_options() -> OnnxOptions {
-    OnnxOptions {
-        intra_threads: ONNX_THREADS,
-        ..OnnxOptions::default()
-    }
 }
 
 /// What the speech engine and the model service are built from: the
@@ -124,11 +117,10 @@ impl SpeechSetup {
     /// counterpart yet; the parity list says so) and everywhere else.
     #[must_use]
     pub fn runtime(&self, engine_id: &str) -> SpeechRuntime {
-        match self.settings.runtime() {
-            SpeechRuntime::CoreMlInProcess if is_coreml_engine(engine_id) => {
-                SpeechRuntime::CoreMlInProcess
-            }
-            _ => SpeechRuntime::OnnxSidecar,
+        if engine_id == OnnxSpeechEngine::ID {
+            self.settings.runtime()
+        } else {
+            SpeechRuntime::OnnxSidecar
         }
     }
 
@@ -137,19 +129,6 @@ impl SpeechSetup {
     #[must_use]
     pub fn model_store(&self) -> ModelStore {
         self.settings.model_store(&self.models_directory)
-    }
-}
-
-/// Whether `engine_id` names the engine `steno-speech-coreml` runs.
-fn is_coreml_engine(engine_id: &str) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        engine_id == steno_speech_coreml::ENGINE_ID
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = engine_id;
-        false
     }
 }
 
@@ -411,7 +390,7 @@ impl ModelStoreSpeechModels {
 
     /// Whether Parakeet v3 is the `CoreML` model.
     fn coreml_parakeet(&self) -> bool {
-        self.runs_on_coreml(steno_speech::OnnxSpeechEngine::ID)
+        self.runs_on_coreml(OnnxSpeechEngine::ID)
     }
 
     fn speech_asset(asset: ModelAsset) -> Option<steno_speech::ModelAsset> {
