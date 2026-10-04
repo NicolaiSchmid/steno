@@ -16,7 +16,9 @@
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Manager, Url};
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_dialog::{
+    DialogExt, MessageDialogBuilder, MessageDialogButtons, MessageDialogKind,
+};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::bridge::{BridgeError, failed};
@@ -129,13 +131,13 @@ pub async fn check(app: &AppHandle) -> Result<Option<tauri_plugin_updater::Updat
     outcome
 }
 
-/// A one-button message from the updater.
-fn notify(app: &AppHandle, kind: MessageDialogKind, message: impl Into<String>) {
-    app.dialog()
-        .message(message)
-        .title("Steno")
-        .kind(kind)
-        .show(|_| {});
+/// A message from the updater, one button unless the caller adds more.
+fn dialog(
+    app: &AppHandle,
+    kind: MessageDialogKind,
+    message: impl Into<String>,
+) -> MessageDialogBuilder<tauri::Wry> {
+    app.dialog().message(message).title("Steno").kind(kind)
 }
 
 /// The tray's "Check for Updates…": checks, then asks before installing,
@@ -151,33 +153,35 @@ pub async fn check_and_offer(app: &AppHandle) {
     let update = match check(app).await {
         Ok(Some(update)) => update,
         Ok(None) => {
-            notify(app, MessageDialogKind::Info, "Steno is up to date.");
+            dialog(app, MessageDialogKind::Info, "Steno is up to date.").show(|_| {});
             return;
         }
         Err(error) => {
-            notify(
+            dialog(
                 app,
                 MessageDialogKind::Error,
                 format!("The update check failed: {}", error.message),
-            );
+            )
+            .show(|_| {});
             return;
         }
     };
     let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog()
-        .message(format!(
+    dialog(
+        app,
+        MessageDialogKind::Info,
+        format!(
             "Steno {} is available. Install it and relaunch?",
             update.version
-        ))
-        .title("Steno")
-        .kind(MessageDialogKind::Info)
-        .buttons(MessageDialogButtons::OkCancelCustom(
-            "Install and Relaunch".into(),
-            "Later".into(),
-        ))
-        .show(move |agreed| {
-            let _ = sender.send(agreed);
-        });
+        ),
+    )
+    .buttons(MessageDialogButtons::OkCancelCustom(
+        "Install and Relaunch".into(),
+        "Later".into(),
+    ))
+    .show(move |agreed| {
+        let _ = sender.send(agreed);
+    });
     if receiver.await != Ok(true) {
         return;
     }
@@ -195,15 +199,16 @@ pub async fn check_and_offer(app: &AppHandle) {
                 .record(UpdateOutcome::Failed(error.to_string()));
             let shut_down = app.state::<steno_services::app::ExitGate>().released();
             let handle = app.clone();
-            app.dialog()
-                .message(format!("The update could not be installed: {error}"))
-                .title("Steno")
-                .kind(MessageDialogKind::Error)
-                .show(move |_| {
-                    if shut_down {
-                        handle.exit(0);
-                    }
-                });
+            dialog(
+                app,
+                MessageDialogKind::Error,
+                format!("The update could not be installed: {error}"),
+            )
+            .show(move |_| {
+                if shut_down {
+                    handle.exit(0);
+                }
+            });
         }
     }
 }
