@@ -7,7 +7,7 @@
 //!
 //! On Windows the audio sessions of every active endpoint, mapped by
 //! [`processes_from_sessions`](super::processes_from_sessions), with
-//! endpoint and session notifications (WP10a, compile-tested only; see
+//! endpoint and session notifications (WP10a, not run on hardware; see
 //! `capture::live::wasapi`). No Swift counterpart. On Linux the type exists
 //! so callers compile and reports no processes until the PipeWire backend
 //! fills it in.
@@ -112,7 +112,7 @@ mod wasapi {
     /// What the notification callbacks tell the notification thread.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Notice {
-        /// A device or a session's state changed.
+        /// A session's state changed.
         Changed,
         /// Sessions may have appeared (one was created, or a device
         /// changed): register for every session's state again.
@@ -127,7 +127,8 @@ mod wasapi {
     }
 
     /// The per-endpoint and per-session registrations on every active
-    /// capture endpoint, made afresh after every session creation.
+    /// capture endpoint, made afresh after every session creation and
+    /// every endpoint change.
     struct SessionWatch {
         _sessions: Vec<SessionRegistration>,
         _managers: Vec<SessionManagerRegistration>,

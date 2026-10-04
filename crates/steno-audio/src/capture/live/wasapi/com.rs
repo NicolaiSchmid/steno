@@ -263,7 +263,7 @@ impl Enumerator {
     /// Calls `on_event` for every endpoint notification (a default
     /// changed, a device added, removed or changing state) until the
     /// registration is dropped. Which device and role is not passed on:
-    /// the listener resolves the devices again. `on_event` runs on a
+    /// the caller resolves the devices again. `on_event` runs on a
     /// thread of the audio service and must neither block nor call into
     /// WASAPI.
     pub fn register(

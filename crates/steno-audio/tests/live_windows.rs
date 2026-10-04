@@ -11,10 +11,10 @@
 //! cargo test -p steno-audio --test live_windows -- --ignored --nocapture
 //! ```
 //!
-//! Without `--nocapture` the record they print is swallowed, and so are
-//! the backend's `info` logs (which loopback runs, the follower's underrun
-//! and slip counts at stop), which these tests print to the test output;
-//! `RUST_LOG` overrides their `steno_audio=info` filter. Play audio during
+//! These tests print a record of each run and the backend's `info` logs
+//! (which loopback runs, the follower's underrun, slip and trim counts at
+//! stop); without `--nocapture` the harness swallows both. A non-empty
+//! `RUST_LOG` replaces their `steno_audio=info` filter. Play audio during
 //! `call_capture_records_both_lanes` (any media player) so the loopback has
 //! something to deliver.
 //!
@@ -86,10 +86,10 @@ struct Run {
 /// Starts the backend for `lanes`, captures `duration`, stops, and returns
 /// the callbacks counted in between (each completed callback signals the
 /// sink's wake once), what arrived after the stop and each lane's peak, or
-/// `None` when the start failed, which is printed. With `restart`, the
-/// same backend starts and stops a second time, as the session's rebuild
-/// does, and the run is the second one's.
-fn start_capture_stop(lanes: Vec<AudioLane>, duration: Duration, restart: bool) -> Option<Run> {
+/// `None` when the start failed, which is printed. The same backend first
+/// starts and stops `restarts` times, as the session's rebuild does, and
+/// the run is the last one's.
+fn start_capture_stop(lanes: Vec<AudioLane>, duration: Duration, restarts: usize) -> Option<Run> {
     show_logs();
     within(Duration::from_secs(60), "start, capture, stop", move || {
         let backend = LiveCaptureBackend::new();
@@ -101,7 +101,7 @@ fn start_capture_stop(lanes: Vec<AudioLane>, duration: Duration, restart: bool) 
             seconds,
             Box::new(|_| {}),
         ));
-        if restart {
+        for _ in 0..restarts {
             backend
                 .start(&lanes, None, Arc::clone(&sink))
                 .inspect_err(|error| println!("first start for {lanes:?} failed: {error}"))
@@ -184,10 +184,10 @@ fn a_capture_without_a_device_answers_and_stops() {
         CaptureMode::Call.lanes(),
         vec![AudioLane::System],
     ] {
-        if start_capture_stop(lanes.clone(), Duration::from_millis(200), false).is_none() {
+        if start_capture_stop(lanes.clone(), Duration::from_millis(200), 0).is_none() {
             println!(
-                "SKIPPED live capture for {lanes:?}: no usable audio device here, which is \
-                 expected on the CI runner; run the --ignored tests on a Windows machine"
+                "start for {lanes:?} failed (expected for the microphone lanes on the CI \
+                 runner); run the --ignored tests on a Windows machine"
             );
         }
     }
@@ -200,21 +200,23 @@ fn a_capture_without_a_device_answers_and_stops() {
 /// The CI runner has no endpoint, but process loopback runs there and
 /// delivers a silent 10 ms period per callback, so the system-lane path is
 /// checked for real: it starts, delivers whole periods, delivers nothing
-/// once `stop()` has returned, and the same backend starts again. Only
-/// where `GITHUB_ACTIONS` is set: elsewhere a machine may have no audio
-/// service at all.
+/// once `stop()` has returned, and the same backend starts again, three
+/// times over. Only where `GITHUB_ACTIONS` is set: elsewhere a machine may
+/// have no audio service at all.
 #[test]
 fn on_the_ci_runner_a_system_capture_delivers_stops_and_restarts() {
+    // One engine period, 10 ms at 48 kHz.
+    const PERIOD: usize = 480;
     if std::env::var_os("GITHUB_ACTIONS").is_none() {
         println!("SKIPPED: the system-lane contract is checked on the CI runner only");
         return;
     }
-    let run = start_capture_stop(vec![AudioLane::System], Duration::from_millis(300), true)
+    let run = start_capture_stop(vec![AudioLane::System], Duration::from_millis(300), 3)
         .expect("the system capture starts and restarts on the CI runner");
     assert!(run.callbacks > 0, "the system stream never delivered");
     assert_eq!(
         run.available,
-        run.callbacks * 480,
+        run.callbacks * PERIOD,
         "every callback carries one 10 ms period"
     );
     assert_eq!(run.after_stop, 0, "nothing arrives after stop()");
@@ -246,7 +248,7 @@ fn session_notifications_start_and_stop() {
 #[test]
 #[ignore = "needs a Windows machine with a microphone; run with -- --ignored --nocapture"]
 fn in_person_capture_records_the_microphone() {
-    let run = start_capture_stop(CaptureMode::InPerson.lanes(), Duration::from_secs(1), true)
+    let run = start_capture_stop(CaptureMode::InPerson.lanes(), Duration::from_secs(1), 1)
         .expect("the in-person capture starts and restarts");
     assert!(run.callbacks > 0, "the microphone stream never delivered");
     assert_eq!(run.after_stop, 0, "nothing arrives after stop()");
@@ -255,7 +257,7 @@ fn in_person_capture_records_the_microphone() {
 #[test]
 #[ignore = "needs a Windows machine with a microphone and speakers, audio playing; run with -- --ignored --nocapture"]
 fn call_capture_records_both_lanes() {
-    let run = start_capture_stop(CaptureMode::Call.lanes(), Duration::from_secs(3), false)
+    let run = start_capture_stop(CaptureMode::Call.lanes(), Duration::from_secs(3), 0)
         .expect("the call capture starts");
     assert!(run.callbacks > 0, "the microphone stream never delivered");
     assert_eq!(run.after_stop, 0, "nothing arrives after stop()");
