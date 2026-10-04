@@ -432,10 +432,7 @@ impl Restarted {
         let hold = StoreHold::new(&self.first.store);
         let woken = Woken::new();
         let mut completing = Box::pin(unconstrained(self.phone.complete(self.id())));
-        assert!(
-            woken.poll(completing.as_mut()).is_pending(),
-            "complete waits on the store read"
-        );
+        woken.pending(completing.as_mut(), "complete waits on the store read");
         hold.release();
         woken.wait("the store read returns").await;
         self.service.revoke(self.phone.device.id).await.unwrap();
@@ -519,10 +516,7 @@ async fn a_complete_during_a_revokes_store_delete_admits_nothing() {
     let hold = StoreHold::new(&restarted.first.store);
     let woken = Woken::new();
     let mut revoking = pin!(restarted.service.revoke(restarted.phone.device.id));
-    assert!(
-        woken.poll(revoking.as_mut()).is_pending(),
-        "the revoke waits on its store delete"
-    );
+    woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
     let mut completing = pin!(restarted.phone.complete(restarted.id()));
     let Poll::Ready(response) = woken.poll(completing.as_mut()) else {
         panic!("complete is refused before it reads the store");
@@ -555,15 +549,9 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     let hold = StoreHold::new(&test.store);
     let saved = Woken::new();
     let mut completing = pin!(unconstrained(phone.complete(id)));
-    assert!(
-        saved.poll(completing.as_mut()).is_pending(),
-        "complete waits on its verifying write"
-    );
+    saved.pending(completing.as_mut(), "complete waits on its verifying write");
     let mut revoking = pin!(test.service.revoke(phone.device.id));
-    assert!(
-        Woken::new().poll(revoking.as_mut()).is_pending(),
-        "the revoke waits on its store delete"
-    );
+    Woken::new().pending(revoking.as_mut(), "the revoke waits on its store delete");
     assert!(!inbox.has_partial(id), "the revoke discarded the partial");
     hold.release();
     revoking.await.unwrap();
@@ -578,9 +566,9 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     let announced = Woken::new();
     let mut announcing = pin!(again.announce(&metadata));
     loop {
-        assert!(
-            announced.poll(announcing.as_mut()).is_pending(),
-            "the announce waits for the old complete's turn"
+        announced.pending(
+            announcing.as_mut(),
+            "the announce waits for the old complete's turn",
         );
         if inbox.has_partial(id) {
             break;
@@ -627,15 +615,9 @@ async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
         phone.device.id,
         &phone.device.name,
     ));
-    assert!(
-        woken.poll(pairing.as_mut()).is_pending(),
-        "the pairing waits on its save"
-    );
+    woken.pending(pairing.as_mut(), "the pairing waits on its save");
     let mut revoking = pin!(test.service.revoke(phone.device.id));
-    assert!(
-        woken.poll(revoking.as_mut()).is_pending(),
-        "the revoke waits on its store delete"
-    );
+    woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
     hold.release();
     let (paired, revoked) = tokio::join!(pairing, revoking);
     assert_eq!(paired.status.as_u16(), 200);
@@ -676,9 +658,9 @@ async fn a_partial_created_again_during_the_verify_is_not_promoted() {
 
     let hold = StoreHold::new(&restarted.first.store);
     let mut completing = pin!(unconstrained(again.complete(id)));
-    assert!(
-        Woken::new().poll(completing.as_mut()).is_pending(),
-        "the new complete waits on its verifying write"
+    Woken::new().pending(
+        completing.as_mut(),
+        "the new complete waits on its verifying write",
     );
     assert_eq!(
         restarted.service.engine.receipts_snapshot()[0].state,
@@ -696,16 +678,13 @@ async fn a_partial_created_again_during_the_verify_is_not_promoted() {
     // `complete` holds.
     let announced = Woken::new();
     let mut announcing = pin!(unconstrained(again.announce(&restarted.metadata)));
-    assert!(
-        announced.poll(announcing.as_mut()).is_pending(),
-        "the announce waits on its store read"
-    );
+    announced.pending(announcing.as_mut(), "the announce waits on its store read");
     hold.release();
     while !inbox.has_partial(id) {
         announced.wait("the announce's store read returns").await;
-        assert!(
-            announced.poll(announcing.as_mut()).is_pending(),
-            "the announce waits for the new complete's turn"
+        announced.pending(
+            announcing.as_mut(),
+            "the announce waits for the new complete's turn",
         );
     }
     let (completed, announce) = tokio::join!(completing, announcing);
@@ -744,15 +723,9 @@ async fn a_revoked_phones_partial_created_during_the_verify_is_discarded() {
 
     let hold = StoreHold::new(&test.store);
     let mut completing = pin!(unconstrained(phone.complete(id)));
-    assert!(
-        Woken::new().poll(completing.as_mut()).is_pending(),
-        "complete waits on its verifying write"
-    );
+    Woken::new().pending(completing.as_mut(), "complete waits on its verifying write");
     let mut revoking = pin!(test.service.revoke(phone.device.id));
-    assert!(
-        Woken::new().poll(revoking.as_mut()).is_pending(),
-        "the revoke waits on its store delete"
-    );
+    Woken::new().pending(revoking.as_mut(), "the revoke waits on its store delete");
     assert!(!inbox.has_partial(id), "the revoke discarded the partial");
     inbox.begin(&metadata).unwrap();
     hold.release();
@@ -823,6 +796,13 @@ impl Woken {
     /// Polls `future` once with this waker.
     fn poll<F: Future>(self: &Arc<Self>, future: Pin<&mut F>) -> Poll<F::Output> {
         future.poll(&mut Context::from_waker(&Waker::from(self.clone())))
+    }
+
+    /// Polls `future` once with this waker; it must wait (`what` names on
+    /// what).
+    #[track_caller]
+    fn pending<F: Future>(self: &Arc<Self>, future: Pin<&mut F>, what: &str) {
+        assert!(self.poll(future).is_pending(), "{what}");
     }
 
     /// Returns once a future polled with this waker can go on.
