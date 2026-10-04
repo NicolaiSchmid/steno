@@ -130,40 +130,24 @@ impl ScriptedIntake {
         delay: Duration,
         admit_once: bool,
     ) -> Arc<Self> {
-        Arc::new(Self::scripted(
-            meeting_id, failures, delay, admit_once, false,
-        ))
-    }
-
-    /// Holds each admission open until [`ScriptedIntake::release`].
-    pub fn gated(meeting_id: Uuid, admit_once: bool) -> Arc<Self> {
-        Arc::new(Self::scripted(
-            meeting_id,
-            0,
-            Duration::ZERO,
-            admit_once,
-            true,
-        ))
-    }
-
-    fn scripted(
-        meeting_id: Uuid,
-        failures: u32,
-        delay: Duration,
-        admit_once: bool,
-        gated: bool,
-    ) -> Self {
-        ScriptedIntake {
+        Arc::new(ScriptedIntake {
             meeting_id,
             delay,
             admit_once,
             admissions: Mutex::new(Vec::new()),
             failures_left: Mutex::new(failures),
             admitted: Mutex::new(false),
-            gated,
+            gated: false,
             entered: Notify::new(),
             released: Notify::new(),
-        }
+        })
+    }
+
+    /// Holds each admission open until [`ScriptedIntake::release`].
+    pub fn gated(meeting_id: Uuid, admit_once: bool) -> Arc<Self> {
+        let mut intake = Self::with_delay(meeting_id, 0, Duration::ZERO, admit_once);
+        Arc::get_mut(&mut intake).unwrap().gated = true;
+        intake
     }
 
     /// Returns once an admission of a gated intake is in flight.
