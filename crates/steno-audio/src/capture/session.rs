@@ -168,8 +168,8 @@ struct Inner {
     recordings_started: usize,
     /// Unit tests only: run once by the next `stop()` that finds
     /// `Stopping`, after it has noted `recordings_started` and with the
-    /// lock released. A test finishes the finalise and takes a `start()`
-    /// in there, through the window a wakeup leaves before that `stop()`
+    /// lock released, so a test can finish the finalise and take a
+    /// `start()` inside the window a wakeup leaves before that `stop()`
     /// holds the lock again.
     #[cfg(test)]
     before_stop_waits: Option<Box<dyn FnOnce() + Send>>,
