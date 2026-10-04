@@ -742,6 +742,16 @@ fn a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2() {
         assert_eq!(status.code(), Some(2), "{why}: {status}");
         assert!(stderr.contains(why), "{why}: {stderr}");
     }
+    // With its stderr gone too: still status 2, not a panic's 101.
+    let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "1000"]);
+    drop(child.stderr.take());
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    ready(&mut stdout);
+    let mut stdin = child.stdin.take().unwrap();
+    cases[0].1(&mut stdin);
+    drop(stdin);
+    let status = exit_status(&mut child, "the child outlived a request it could not read");
+    assert_eq!(status.code(), Some(2), "without stderr: {status}");
 }
 
 /// Serves `body` to every connection; the one numbered `slow` (from 0)

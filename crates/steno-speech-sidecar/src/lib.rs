@@ -134,6 +134,14 @@ impl Fault {
     }
 }
 
+/// Writes one line to stderr, dropping it when stderr is gone, where
+/// `eprintln!` would panic.
+macro_rules! stderr_line {
+    ($($line:tt)*) => {{
+        let _ = writeln!(io::stderr(), $($line)*);
+    }};
+}
+
 /// The command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
@@ -476,11 +484,7 @@ fn send(reply: &Reply) {
             #[cfg(not(unix))]
             std::process::exit(0);
         }
-        // Not `eprintln!`, which panics when stderr is gone too.
-        let _ = writeln!(
-            io::stderr(),
-            "steno-speech-sidecar: could not send a reply: {error}"
-        );
+        stderr_line!("steno-speech-sidecar: could not send a reply: {error}");
         std::process::exit(2);
     }
 }
@@ -509,7 +513,7 @@ fn start_heartbeat(interval: Duration) -> io::Result<()> {
             loop {
                 let rss_bytes = rss_bytes();
                 if rss_bytes == 0 && !warned {
-                    eprintln!(
+                    stderr_line!(
                         "steno-speech-sidecar: the resident set cannot be read here, so the parent's memory ceiling cannot act"
                     );
                     warned = true;
@@ -529,7 +533,7 @@ fn tell_fallback(engine: &dyn Engine, told: &mut Option<&'static str>) {
     if let Some(reason) = engine.fallback()
         && *told != Some(reason)
     {
-        eprintln!("{FALLBACK_NOTICE} ({reason}); the speech encoder runs on the CPU");
+        stderr_line!("{FALLBACK_NOTICE} ({reason}); the speech encoder runs on the CPU");
         *told = Some(reason);
     }
 }
@@ -556,7 +560,7 @@ fn transcribe(
             provider: engine.provider(),
         }),
         Err(_) if !engine.usable() => {
-            eprintln!(
+            stderr_line!(
                 "steno-speech-sidecar: the speech encoder lost its session after a failed run on DirectML, and the CPU could not reopen it"
             );
             Err(ExitCode::from(70))
@@ -566,9 +570,9 @@ fn transcribe(
 }
 
 /// Says on stderr why the child stops, for the parent's crash report, and
-/// returns the exit status for it.
+/// returns the exit status for it, 2 even when stderr is gone.
 fn give_up(why: &str, error: impl std::fmt::Display) -> ExitCode {
-    eprintln!("steno-speech-sidecar: {why}: {error}");
+    stderr_line!("steno-speech-sidecar: {why}: {error}");
     ExitCode::from(2)
 }
 
