@@ -9,8 +9,9 @@ cutover paragraph of WP9 in the Rust plan, whose progress table tracks it
 as WP9b.
 This plan is one pull request, opened only once the parity list in the
 Rust plan is empty. That list includes four gaps of the shell's that no
-package owns yet: the tray's badge for pending speaker reviews, the QR
-encoder, the clip player and the update schedule (Swift checks daily).
+package owns yet (the clip player's audio output is WP5's): the tray's
+badge for pending speaker reviews, the QR encoder, the clip player and the
+update schedule (Swift checks daily).
 
 ## Goal
 

@@ -322,7 +322,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     (`the_child_greets_and_exits_when_its_parent_goes_away`,
     `a_busy_child_exits_when_its_parent_goes_away`), and dropping the engine stops it
     without blocking a runtime worker
-    (`dropping_the_engine_stops_its_child_inside_a_runtime_or_not`).
+    (`dropping_the_engine_stops_its_child_inside_a_runtime_or_not`). On Linux and macOS
+    the child ignores SIGINT, SIGTERM and SIGHUP once its heartbeat runs: they reach it
+    with the app (Ctrl-C, a closed terminal, systemd), and a child that died of them
+    would end its job before the app's shutdown quit the pipeline
+    (`the_signals_that_end_the_app_leave_a_request_in_the_child_answered`). The client
+    ends a child only by a shutdown request, its closed stdin or SIGKILL.
     `SpeechEngine::release()` stops it and frees the 2.2 GB working set
     (`requests_round_trip_the_audio_bit_for_bit_in_one_child`); the pipeline calls it
     once a job's lanes are transcribed and no other job needs the engine (see
@@ -436,10 +441,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   (`apps/desktop/scripts/updater-lanes.sh`). No desktop release is GitHub's "latest"
   before the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
   The shell's gaps that must close before the cutover (WP9b) opens; no package owns
-  them yet ("Pipeline and services (WP6b)"): the tray's badge for pending speaker
-  reviews; the QR encoder, a fake until a QR crate draws the pairing code; the clip
-  player, a fake until WP5 adds an audio output; and the update schedule behind the
-  host's `Updater`.
+  them yet (the clip player's audio output is WP5's; "Pipeline and services (WP6b)"):
+  the tray's badge for pending speaker reviews; the QR encoder, a fake until a QR crate
+  draws the pairing code; the clip player, a fake until WP5 adds an audio output; and
+  the update schedule behind the host's `Updater`.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
@@ -597,9 +602,10 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
   the host republishes `progress`; the tray (WP8) shows no badge for it; it must close
   before the cutover (WP9b) opens.
-- [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait is still
-  the services' fake, since WP8's `updater` has no automatic-check or automatic-download
-  flag and no last check time to report (see "Pipeline and services (WP6b)").
+- [ ] Updates: Sparkle today, the Tauri updater after the cutover; must close before the
+  cutover (WP9b) opens: the `Updater` trait is still the services' fake, since WP8's
+  `updater` has no automatic-check or automatic-download flag and no last check time to
+  report (see "Pipeline and services (WP6b)").
 - [x] Login item: registered on the first launch when the setting says so
   (`Host::register_login_item_on_first_launch`), toggled from General, the pane opened;
   the `LoginItem` trait over WP8's `autostart` (`autostart::ShellLoginItem`, WP6b).
@@ -753,42 +759,52 @@ still has to draw the window side. `[ ]` is not ported yet.
   receipt complete (`steno_pipeline::files::copy_durably`); Swift's `copyItem` did
   not, so a power loss after the phone's 200 lost the recording on both devices. The
   receipt and meeting commits still run under `NORMAL` (the Store item below).
-- Every exit runs `App::shutdown` first, once, at most ten seconds (`ExitGate`): a
-  start or a stop in progress settles, a recording in progress stops with `quit` and is
-  saved, the handover listener stops, and no recording starts afterwards; as Swift's
-  `applicationShouldTerminate` awaited `AppController.shutdown()`, which awaited
-  `awaitSettled()` first. Swift waited without a bound. The exit requests go through
-  `exit_request` in the shell and are held until the shutdown ended, a second Quit
-  included: Quit in the tray's menu and in the macOS menu bar (#172's own item, not
-  muda's `terminate:`), a destroyed main window with no tray, the last window closing
-  with no tray, and SIGTERM, SIGINT and SIGHUP on Linux and macOS (a plain `kill`,
-  Ctrl-C, a closed terminal, systemd at a shutdown); a second SIGTERM or a second
-  SIGINT ends the process at once, unsaved, and a SIGHUP never does; a signal the app
-  inherited ignored (`nohup`, a background job's SIGINT) stays ignored. A logout on
-  Linux saves when logind ends the session's processes (with `KillUserProcesses=yes`,
-  systemd stops the scope with SIGTERM, then SIGHUP). Otherwise nothing signals the
-  app, and when the display connection closes first, GDK ends the process unsaved;
-  untested (before the first Linux release; no work package yet). Once the shutdown
-  has begun, the pipeline starts no job and persists no job's failure
-  (`ProcessingPipeline::quit`): a signal that reaches the speech sidecar with the app
-  (Ctrl-C reaches the terminal's whole foreground group, systemd a scope's every
-  process) ends its job, and the meeting stays `processing` for the next launch, as
-  it did when the Swift app died with its job; the recording the shutdown saves stays
-  `queued` until then. The
-  Dock's Quit, a logout and a system shutdown on macOS send `terminate:` directly; tao
-  answers with `applicationWillTerminate` only, which reaches the shell as
-  `RunEvent::Exit` and which AppKit waits for, so the shutdown runs there
-  (`shut_down_before_exit`). A logoff or a shutdown on Windows arrives the same way:
-  tao answers `WM_ENDSESSION` with the run loop's end, `RunEvent::Exit`, and the
-  shutdown runs there until Windows' end-session timeout ends the process: about five
-  seconds, less than `SHUTDOWN_PATIENCE` (WP10). The updater's relaunch bypasses the
-  exit request and runs the shutdown before it relaunches; on Windows the installer's
-  own exit runs it (`on_before_exit`), and an install that fails after it ends the app
-  once its message is closed. The services runtime is never dropped: dropping it
-  waits, without a bound, for a transcription or a model load in progress. Open: the
-  Windows logoff is untested on hardware and can outlast the end-session timeout
-  (WP10), and a Linux logout saves only when logind signals the app, which is
-  untested on GNOME and on KDE (before the first Linux release; no work package yet).
+- Every exit runs `App::shutdown` first, once, at most ten seconds (`ExitGate`): the
+  pipelines quit, a start or a stop in progress settles, a recording in progress stops
+  with `quit` and is saved, the handover listener stops, and no recording starts
+  afterwards; as Swift's `applicationShouldTerminate` awaited
+  `AppController.shutdown()`, which awaited `awaitSettled()` first. Swift waited without
+  a bound.
+  - The exit requests go through `exit_request` in the shell and are held until the
+    shutdown ended, a second Quit included: Quit in the tray's menu and in the macOS
+    menu bar (#172's own item, not muda's `terminate:`), a destroyed main window with no
+    tray, the last window closing with no tray, and SIGTERM, SIGINT and SIGHUP on Linux
+    and macOS (a plain `kill`, Ctrl-C, a closed terminal, systemd at a shutdown). A
+    second SIGTERM or a second SIGINT ends the process at once, unsaved, and a SIGHUP
+    never does; a signal the app inherited ignored (`nohup`, a background job's SIGINT)
+    stays ignored.
+  - A logout on Linux saves when logind ends the session's processes (with
+    `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then SIGHUP).
+    Otherwise nothing signals the app, and when the display connection closes first, GDK
+    ends the process unsaved; untested (before the first Linux release; no work package
+    yet).
+  - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
+    `Host::quit_pipeline` before its request waits for the main thread), the pipeline
+    starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
+    exit ends leaves its meeting `processing` for the next launch, as it did when the
+    Swift app died with its job, and the recording the shutdown saves stays `queued`
+    until then. The speech sidecar ignores SIGINT, SIGTERM and SIGHUP on Linux and
+    macOS, so the signals that reach it with the app (Ctrl-C reaches the terminal's
+    whole foreground group, systemd every process in a scope) do not end its job first;
+    it exits within a heartbeat once the app is gone (see WP4c).
+  - The Dock's Quit, a logout and a system shutdown on macOS send `terminate:` directly;
+    tao answers with `applicationWillTerminate` only, which reaches the shell as
+    `RunEvent::Exit` and which AppKit waits for, so the shutdown runs there
+    (`shut_down_before_exit`).
+  - A logoff or a shutdown on Windows arrives the same way: tao answers `WM_ENDSESSION`
+    with the run loop's end, `RunEvent::Exit`, and the shutdown runs there until
+    Windows' end-session timeout ends the process: about five seconds, less than
+    `SHUTDOWN_PATIENCE` (WP10).
+  - The updater's relaunch bypasses the exit request and runs the shutdown before it
+    relaunches; on Windows the installer's own exit runs it (`on_before_exit`), and an
+    install that fails after it ends the app once its message is closed.
+  - The services runtime is never dropped: dropping it waits, without a bound, for a
+    transcription or a model load in progress.
+  - Open: the Windows logoff is untested on hardware and can outlast the end-session
+    timeout, and whether a logoff ends the speech sidecar before `RunEvent::Exit` quits
+    the pipeline (which would mark its meeting `failed`) is unverified (WP10); a Linux
+    logout saves only when logind signals the app, which is untested on GNOME and on KDE
+    (before the first Linux release; no work package yet).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes), and the tray's setters wait for the main thread when called from
@@ -1237,7 +1253,7 @@ PR off `main`.
 | WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`) | | | planned |
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
-| WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | open |
+| WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | merged |
 | Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,

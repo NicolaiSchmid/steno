@@ -130,15 +130,15 @@ impl MonotonicClock for SystemClock {
 }
 
 /// The app's exit as the pipelines see it ([`ProcessingPipeline::quit`]).
-/// Clones share it, so one latch stops every pipeline built over
+/// Clones share it, so one latch quits every pipeline built over
 /// dependencies that carry it ([`PipelineDependencies::with_quit_latch`]).
 /// Once it is set, no job starts, and a job that fails leaves its meeting
 /// `queued` or `processing` for the next launch's
 /// [`resume_unfinished`](ProcessingPipeline::resume_unfinished) instead of
-/// marking it `failed`: the exit can end a job (the speech sidecar is
-/// signalled with the app, or killed with it), and that is no failure of
-/// the meeting's. Rust only: the Swift pipeline ran in the app's process
-/// and died with it, and the next launch resumed the job.
+/// marking it `failed`: the exit can end a job (a session's end can kill
+/// the speech sidecar before the app), and that is no failure of the
+/// meeting's. Rust only: the Swift pipeline ran in the app's process and
+/// died with it, and the next launch resumed the job.
 #[derive(Debug, Clone, Default)]
 pub struct QuitLatch(Arc<AtomicBool>);
 
@@ -148,6 +148,7 @@ impl QuitLatch {
         self.0.store(true, Ordering::SeqCst);
     }
 
+    /// Whether the latch is set: the app is exiting.
     #[must_use]
     pub fn is_set(&self) -> bool {
         self.0.load(Ordering::SeqCst)
@@ -679,9 +680,9 @@ impl ProcessingPipeline {
     /// meeting `ready` nothing downgrades it: a `retention` error is
     /// returned to the caller and the meeting stays ready and delivered.
     /// Once the pipeline [quits](Self::quit), a failure is returned and
-    /// not persisted, and a call that has not claimed its meeting yet
-    /// fails at once: the meeting stays `queued` or `processing`, which
-    /// the next launch's `resume_unfinished` processes again.
+    /// not persisted, and a call made after it fails at once: the meeting
+    /// stays `queued` or `processing`, which the next launch's
+    /// `resume_unfinished` processes again.
     pub async fn process(&self, asset_id: Uuid) -> Result<()> {
         if self.quitting() {
             return Err(PipelineFailure::new(

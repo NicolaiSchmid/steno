@@ -154,8 +154,8 @@ fn dialog(
 /// `applicationShouldTerminate`; on Windows the installer's own exit runs
 /// it (`check`). An install that fails after that shutdown ran (Windows:
 /// the installer did not launch) ends the app once its message is
-/// closed: the recorder starts nothing after a shutdown, and the next Quit
-/// would run none.
+/// closed: the recorder and the pipeline start nothing after a shutdown,
+/// and the next Quit would run none.
 pub async fn check_and_offer(app: &AppHandle) {
     let update = match check(app).await {
         Ok(Some(update)) => update,

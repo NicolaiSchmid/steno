@@ -35,19 +35,22 @@ Every exit saves first: `App::shutdown` runs once, at most ten seconds,
 and stops and saves a recording in progress (a start or a stop under way
 settles first) and stops the handover listener, as the Swift
 `applicationShouldTerminate` awaited `AppController.shutdown`. It first
-stops the pipeline: no job starts, so the saved recording stays queued
-until the next launch processes it, and a job the exit ends (Ctrl-C and
-systemd signal the speech sidecar with the app) leaves its meeting
-processing for the next launch, not failed. The exits reach it these ways:
+quits the pipeline: no new job starts, so the saved recording stays queued
+until the next launch processes it, and a job the exit ends leaves its
+meeting processing for the next launch, not failed. The speech sidecar
+ignores SIGINT, SIGTERM and SIGHUP on Linux and macOS, so Ctrl-C and
+systemd, which signal it with the app, do not end its job first; it exits
+within a heartbeat once the app is gone. The exits reach it these ways:
 
 - Quit in the tray's menu or the macOS menu bar, the close that ends the
   process because no tray stands, and SIGTERM, SIGINT and SIGHUP (a plain
   `kill`, Ctrl-C, a closed terminal, systemd at a shutdown) are exit
   requests, held until the shutdown ended (`exit_request` in `main.rs`
   over `steno_services::app::ExitGate`); a second Quit meanwhile is
-  held too. A second SIGTERM or a second SIGINT ends the process at once,
-  unsaved; a SIGHUP never does. A signal the app inherited ignored
-  (`nohup`, a background job's SIGINT) stays ignored.
+  held too. A signal quits the pipeline at once, before its request
+  reaches the main thread. A second SIGTERM or a second SIGINT ends the
+  process at once, unsaved; a SIGHUP never does. A signal the app
+  inherited ignored (`nohup`, a background job's SIGINT) stays ignored.
 - A logout on Linux saves when logind ends the session's processes (with
   `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
   SIGHUP). Otherwise nothing signals the app, and when the display
@@ -498,8 +501,9 @@ the `steno:` link grammar and its case rules, the Linux desktop entry,
 the folder choosers' replies and the host's chosen folder, the alert's
 buttons, and the exit rules: an exit request runs the shutdown once and
 exits after it, a second Quit meanwhile is held, a close behind a tray
-runs nothing; the window sink delivers on the main thread, in emit order,
-without the emit waiting. `cargo test -p steno-desktop
+runs nothing, which repeated signal forces the exit, an ignored signal
+reads as ignored; the window sink delivers on the main thread, in emit
+order, without the emit waiting. `cargo test -p steno-desktop
 --features fixture-host` runs the same with the fixture host, plus the
 fixture table against `index.json` and the mock transport; Rust CI runs
 both. In the web
@@ -617,15 +621,14 @@ the services' fake (all granted), because `permissions` answers
 onboarding opener counts as missing, so onboarding would open at every
 launch until the audio probe (WP5) and a rule for `unknown` land; the
 host's `Updater` stays the fake until an update schedule exists (due
-before the cutover), because
-`updater` has no automatic-check or automatic-download flag and keeps no
-last check time, so the General section's Updates row cannot be filled
-from it (`updates.check` stays the shell's, and its `UpdateOutcome`
-stays beside the host's); and the QR encoder and the clip player are
-fakes, which need a QR crate and an audio output (the audio output is
-WP5's; both are due before the cutover). The host
-may treat the main window as always present: a close hides it, or ends
-the process when no tray stands, so publishing to it never fails for
+before the cutover), because `updater` has no automatic-check or
+automatic-download flag and keeps no last check time, so the General
+section's Updates row cannot be filled from it (`updates.check` stays the
+shell's, and its `UpdateOutcome` stays beside the host's); and the QR
+encoder and the clip player are fakes, which need a QR crate and an audio
+output (the audio output is WP5's; both are due before the cutover). The
+host may treat the main window as always present: a close hides it, or
+ends the process when no tray stands, so publishing to it never fails for
 want of a window. Launch at login is a Launch Agent, not `SMAppService`;
 the cutover has to retire the Swift registration so the user does not
 get two login items (the plan's parity list,
@@ -633,9 +636,9 @@ get two login items (the plan's parity list,
 menu yet (`⌘⇧R` and Record In Person are the tray's and the sidebar's),
 and no Find Meetings (`⌘F`). Updates are checked only when asked (the
 tray's item, Settings), where Sparkle checks daily on its own (an update
-schedule, due before the cutover). On macOS the system audio permission has no status
-API; the audio crate's probe (WP5) records it and until then it reads
-`unknown`. The panels are re-tuned on the Mac once they run there beside
+schedule, due before the cutover). On macOS the system audio permission
+has no status API; the audio crate's probe (WP5) records it and until
+then it reads `unknown`. The panels are re-tuned on the Mac once they run there beside
 the Swift ones (the plan's risk list). Linux and Windows keep their
 native title bar; macOS gets the overlay title bar the Swift windows
 have. The page's traffic light inset is a design question for the other
