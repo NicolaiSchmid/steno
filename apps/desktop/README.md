@@ -214,7 +214,8 @@ dropped as above or the feature is on. A plain debug build loads
 
 Panic messages in a release binary would carry the build host's source
 paths until Cargo's `trim-paths` stabilises; the release workflow sets
-`RUSTFLAGS=--remap-path-prefix` so they read `steno/…` instead.
+`RUSTFLAGS=--remap-path-prefix` so the workspace reads `steno/…` and the
+dependency sources in the cargo home `cargo/…` instead.
 
 ## Release
 
