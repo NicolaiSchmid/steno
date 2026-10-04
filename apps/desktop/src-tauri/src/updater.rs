@@ -1,15 +1,21 @@
 //! Updates over `tauri-plugin-updater`: a signed manifest per lane on the
 //! GitHub release, checked on request from the tray or from Settings
-//! (`updates.check`). The lane follows the installed version, as it does
-//! with Sparkle: a pre-release build ("0.11.0-rc.1") reads the `beta`
-//! manifest first and falls back to the stable one; a stable build reads
-//! the stable manifest only. No setting.
+//! (`updates.check`). The lane follows the installed version, as Sparkle's
+//! channel does in the Swift app: a pre-release build ("0.11.0-rc.1") reads
+//! the beta lane's manifest first and falls back to the stable one; a
+//! stable build reads the stable manifest only. No setting.
 //!
-//! The manifests are written by the release job once WP9 signs the
-//! bundles; `tauri.conf.json` carries the public key
-//! (`plugins.updater.pubkey`) and the stable endpoint. The matching private
-//! key is the `TAURI_SIGNING_PRIVATE_KEY` secret and lives nowhere in the
-//! repository.
+//! Each lane is a rolling GitHub release that holds only its `latest.json`,
+//! which `.github/workflows/desktop-release.yml` replaces when it publishes
+//! a `desktop-v*` tag. The stable lane takes releases, the beta lane every
+//! version, and neither moves backwards (`apps/desktop/scripts/updater-lanes.sh`),
+//! so a beta build is offered the stable release that follows it. The
+//! manifest points at the installers on the versioned release. Neither
+//! lane is GitHub's "latest" release, which stays the Swift app's until the
+//! Mac cutover (`.plans/2026-10-04-mac-cutover.md`). `tauri.conf.json`
+//! carries the public key (`plugins.updater.pubkey`) and the stable
+//! endpoint. The matching private key is the `TAURI_SIGNING_PRIVATE_KEY`
+//! secret and lives nowhere in the repository.
 //!
 //! Swift: `UpdaterController.swift`, `UpdateChannels.swift`.
 
@@ -21,13 +27,14 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::bridge::{BridgeError, failed};
 
-/// The stable lane: the latest release's manifest.
+/// The stable lane: the rolling `desktop-stable` release, which carries the
+/// newest release's manifest.
 pub const STABLE_ENDPOINT: &str =
-    "https://github.com/NicolaiSchmid/steno/releases/latest/download/latest.json";
-/// The pre-release lane: a rolling `beta` release that the release job
-/// moves to the newest pre-release.
+    "https://github.com/NicolaiSchmid/steno/releases/download/desktop-stable/latest.json";
+/// The pre-release lane: the rolling `desktop-beta` release, which carries
+/// the manifest of the newest pre-release or release.
 pub const BETA_ENDPOINT: &str =
-    "https://github.com/NicolaiSchmid/steno/releases/download/beta/latest.json";
+    "https://github.com/NicolaiSchmid/steno/releases/download/desktop-beta/latest.json";
 
 /// Whether a marketing version is a pre-release (`UpdateChannels.allowed`:
 /// a hyphen means the beta lane).
@@ -215,6 +222,16 @@ mod tests {
             assert_eq!(url.host_str(), Some("github.com"));
             assert!(url.path().ends_with("/latest.json"));
         }
+    }
+
+    #[test]
+    fn the_configured_endpoint_is_the_stable_lane() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+        assert_eq!(
+            config["plugins"]["updater"]["endpoints"],
+            serde_json::json!([STABLE_ENDPOINT])
+        );
     }
 
     #[test]

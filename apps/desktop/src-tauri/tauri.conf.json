@@ -30,7 +30,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBQkJCRDA2N0IzMjE0QTkKUldTcEZESjdCcjI3K3ZZK0tCTXBKb1pNSGFiYVZzZyt1Z0dXc0QzblVhYjdhN292bzVKQnk1MHUK",
       "endpoints": [
-        "https://github.com/NicolaiSchmid/steno/releases/latest/download/latest.json"
+        "https://github.com/NicolaiSchmid/steno/releases/download/desktop-stable/latest.json"
       ]
     }
   },
@@ -87,6 +87,7 @@
       }
     },
     "windows": {
+      "bundleVCRuntime": true,
       "webviewInstallMode": {
         "type": "downloadBootstrapper",
         "silent": true

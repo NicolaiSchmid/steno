@@ -114,10 +114,11 @@ line here.
 - Cargo workspace at the root, `rust-toolchain.toml` pinned to stable, `rustfmt`,
   `clippy -D warnings` and a `cargo check` on `rust-version` in CI. Shared dependency
   versions live in the root `[workspace.dependencies]`, crates inherit them.
-  `cargo deny` for licences arrives in WP9 with the first signed release, once the
-  dependency tree is complete (the Tauri and `directories` trees bring MPL-2.0 crates
-  that an allow list has to name; CC-BY attribution for Parakeet is a runtime notice,
-  not a crate licence).
+  `cargo deny` (`deny.toml`) arrived in WP9 with the first signed release: a
+  permissive allow list, MPL-2.0 per crate for the Tauri, `directories` and
+  `symphonia` trees, advisories (one unmaintained build-time macro of the GTK 3
+  bindings ignored with its reason), sources from crates.io only. CC-BY attribution
+  for Parakeet is a runtime notice, not a crate licence.
 - `.github/workflows/rust-ci.yml`: `ubuntu-latest`, `windows-latest` and the macOS
   runner (`MACOS_RUNS_ON`, same variable as Swift CI) build and test the workspace;
   Apple-only crates compile on every OS with their backends behind `cfg`. Tauri
@@ -372,7 +373,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     (`a_second_download_of_one_file_waits_for_the_first_and_fetches_nothing`,
     `a_partial_is_deleted_once_its_file_is_installed_another_way`,
     `a_download_that_finds_its_file_installed_leaves_no_partial`).
-  - Left for WP9: ship the binary beside the app, see WP9.
+  - Shipped beside the app by WP9's first half: every bundle carries the binary as a
+    Tauri `externalBin` (`apps/desktop/src-tauri/tauri.release.conf.json`), checked in
+    its installed layout by `apps/desktop/scripts/check-bundle.sh`.
 
   **WP4d diarization.** `steno-diarize`: speech-stack decision 6 and gate G3, moved
   here on 2026-10-02 so it ships with the Rust pipeline. Segmentation and embedding
@@ -415,8 +418,20 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   `SidecarConfig::beside_current_exe` looks: a Tauri `externalBin`, which needs the
   binary built as `steno-speech-sidecar-<target triple>` (Tauri strips the suffix
   when it bundles); on macOS it is signed with the app, with the hardened runtime,
-  and notarised with it. Until then a bundled app's `prepare` fails with "could not
-  start" and the missing binary's path.
+  and notarised with it.
+  In two PRs. WP9a (`feat/rust-release-signing`) did the release half: the
+  sidecar in every bundle (declared in `tauri.release.conf.json`, not
+  `tauri.conf.json`, so a plain `cargo build` does not need it; staged by
+  `apps/desktop/scripts/stage-sidecar.sh`; `check-bundle.sh` unpacks each bundle as
+  its installer would and starts the sidecar from beside the app), `deny.toml` in
+  Rust CI and the release workflow, Developer ID signing and notarisation through a
+  throwaway keychain as in the Swift `release.yml`, unsigned Windows installers (no
+  certificate), and publishing on `desktop-v*` tags (the Swift workflow owns `v*`):
+  one GitHub pre-release per tag with the bundles, the `.sig` files and
+  `latest.json`, copied to the rolling `desktop-beta` and `desktop-stable` releases
+  that `updater.rs` reads, each only moving forward
+  (`apps/desktop/scripts/updater-lanes.sh`). No desktop release is GitHub's "latest"
+  before the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
@@ -1153,6 +1168,8 @@ PR off `main`.
 | WP6b pipeline, CLI, services, the shell on the real host, quitting saves first | `feat/rust-pipeline` | #173 | merged |
 | WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | merged |
 | Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
+| WP9a signed and notarised release bundles with the speech sidecar, `cargo deny`, the `desktop-v*` release and the updater lanes | `feat/rust-release-signing` | #184 | merged |
+| WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`) | | | planned |
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,

@@ -34,9 +34,6 @@ permissions:
 
 env:
   KEYCHAIN_PATH: ${{ github.workspace }}/../steno-release.keychain-db
-  # The runner user's keychain search list as it was before this run, saved
-  # by "Import signing certificate" and put back by the cleanup step.
-  KEYCHAINS_BEFORE: ${{ github.workspace }}/../steno-release.keychains-before
 
 jobs:
   release:
@@ -140,16 +137,19 @@ jobs:
           keychain_password="$(openssl rand -hex 24)"
           cert_path="$RUNNER_TEMP/steno-release.p12"
           echo "$P12" | base64 --decode > "$cert_path"
+          # A runner lost mid-run leaves its keychain file behind.
+          security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
           security create-keychain -p "$keychain_password" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$keychain_password" "$KEYCHAIN_PATH"
           security import "$cert_path" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$KEYCHAIN_PATH" >/dev/null
-          # Remember the search list as it is (on Forge it may hold more than
-          # the login keychain), then put the throwaway keychain in front.
-          security list-keychains -d user | sed 's/^ *"//; s/"$//' > "$KEYCHAINS_BEFORE"
+          # Put the throwaway keychain in front of the search list as it is
+          # (on Forge it may hold more than the login keychain), read first so
+          # a failing `security` stops the step.
+          list="$(security list-keychains -d user | sed 's/^ *"//; s/"$//')"
           before=()
-          while IFS= read -r line; do [ -n "$line" ] && before+=("$line"); done < "$KEYCHAINS_BEFORE"
+          while IFS= read -r line; do [ -n "$line" ] && before+=("$line"); done <<< "$list"
           security list-keychains -d user -s "$KEYCHAIN_PATH" "${before[@]}"
           rm -f "$cert_path"
           security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -q 'Developer ID Application' \
@@ -265,12 +265,17 @@ jobs:
         if: always()
         run: |
           security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
-          # Restore the search list the import step saved, not a guess at
-          # it: on Forge the runner user may keep other keychains there.
-          if [ -s "$KEYCHAINS_BEFORE" ]; then
-            before=()
-            while IFS= read -r line; do [ -n "$line" ] && before+=("$line"); done < "$KEYCHAINS_BEFORE"
-            security list-keychains -d user -s "${before[@]}" 2>/dev/null || true
-            rm -f "$KEYCHAINS_BEFORE"
+          # delete-keychain also takes it off the search list. If an entry is
+          # left, drop only it from the list as it is now: on Forge another
+          # release run's keychain or the user's own may be on it. The list
+          # holds the resolved path (no `..`).
+          keychain="$(cd "$(dirname "$KEYCHAIN_PATH")" && pwd -P)/$(basename "$KEYCHAIN_PATH")"
+          others=()
+          listed=false
+          while IFS= read -r line; do
+            if [ "$line" = "$keychain" ]; then listed=true; elif [ -n "$line" ]; then others+=("$line"); fi
+          done < <(security list-keychains -d user | sed 's/^ *"//; s/"$//')
+          if [ "$listed" = true ]; then
+            security list-keychains -d user -s ${others[@]+"${others[@]}"} 2>/dev/null || true
           fi
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8 "$RUNNER_TEMP"/steno-release.p12

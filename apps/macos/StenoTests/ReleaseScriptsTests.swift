@@ -174,22 +174,27 @@ final class ReleaseScriptsTests: XCTestCase {
     XCTAssertTrue(workflow.contains("if: env.DRY_RUN != 'true'"))
   }
 
-  /// The runner user's keychain search list is saved before the throwaway
-  /// keychain is added and restored from that file, never reset to a guess.
-  func testReleaseWorkflowRestoresTheKeychainSearchList() throws {
+  /// The throwaway keychain goes in front of the runner user's keychain
+  /// search list as it is, and the cleanup takes only that keychain off the
+  /// list as it is then.
+  func testReleaseWorkflowKeepsTheOtherKeychainsOnTheSearchList() throws {
     let workflow = try String(
       contentsOf: TestSupport.repositoryRoot.appendingPathComponent(
         ".github/workflows/release.yml"),
       encoding: .utf8)
     let saved = try XCTUnwrap(
-      workflow.range(of: "security list-keychains -d user | ")?.lowerBound,
-      "the import step reads the current search list")
+      workflow.range(of: "list=\"$(security list-keychains -d user | ")?.lowerBound,
+      "the import step reads the current search list into a variable, so a failure stops it")
     let cleanup = try XCTUnwrap(workflow.range(of: "- name: Remove keychain and keys")?.lowerBound)
     XCTAssertLessThan(saved, cleanup)
     let cleanupBody = workflow[cleanup...]
     XCTAssertTrue(
-      cleanupBody.contains("< \"$KEYCHAINS_BEFORE\""), "the cleanup reads the saved list back")
-    XCTAssertTrue(cleanupBody.contains("security list-keychains -d user -s \"${before[@]}\""))
+      cleanupBody.contains("< <(security list-keychains -d user | "),
+      "the cleanup reads the search list as it is then")
+    XCTAssertTrue(
+      cleanupBody.contains("security list-keychains -d user -s ${others[@]+\"${others[@]}\"}"),
+      "and writes back every other keychain on it")
+    XCTAssertFalse(workflow.contains("KEYCHAINS_BEFORE"), "no saved copy is put back")
     XCTAssertFalse(
       workflow.contains("list-keychain -d user -s login.keychain-db"),
       "no hard-coded reset to the login keychain alone")
