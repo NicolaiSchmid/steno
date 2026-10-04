@@ -348,16 +348,12 @@ pub const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_sec
 
 /// The shell's exits around [`App::shutdown`], which runs once, for at
 /// most `patience` (the shell passes [`SHUTDOWN_PATIENCE`]), before the
-/// process ends. The first exit request is held while the shutdown runs
-/// on a thread of its own and then raises the exit itself; a request
-/// meanwhile is held too, and every request after that goes ahead, the
-/// one the gate raises included. An exit the gate cannot hold (the run
-/// loop's last event after the Dock's Quit or a logout on macOS, an
-/// update's relaunch) calls [`ExitGate::exiting`], which runs or waits for
-/// the same shutdown on the caller's thread. Swift:
-/// `applicationShouldTerminate` answered `.terminateLater`, awaited
-/// `AppController.shutdown()` and then replied; Swift waited for it
-/// without a bound.
+/// process ends: an exit request the gate can hold goes through
+/// [`ExitGate::exit_requested`], an exit it cannot (the run loop's last
+/// event after the Dock's Quit or a logout on macOS, an update's relaunch)
+/// through [`ExitGate::exiting`]. Swift: `applicationShouldTerminate`
+/// answered `.terminateLater`, awaited `AppController.shutdown()` without a
+/// bound and then replied.
 #[derive(Debug, Clone, Default)]
 pub struct ExitGate {
     shared: Arc<(std::sync::Mutex<ExitStage>, std::sync::Condvar)>,
@@ -381,10 +377,11 @@ enum ExitStage {
 
 impl ExitGate {
     /// Whether this exit request may go ahead now. The first one returns
-    /// false, runs `shutdown` for at most `patience` and then calls `exit`,
-    /// which is expected to raise the request again; that one, and every
-    /// one after it, returns true. A request while the shutdown runs
-    /// returns false and is dropped: the exit is coming.
+    /// false, runs `shutdown` on a thread of its own for at most
+    /// `patience` and then calls `exit`, which is expected to raise the
+    /// request again; that one, and every one after it, returns true. A
+    /// request while the shutdown runs returns false and is dropped: the
+    /// exit is coming.
     pub fn exit_requested(
         &self,
         patience: std::time::Duration,
