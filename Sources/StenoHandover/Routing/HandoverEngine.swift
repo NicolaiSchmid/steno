@@ -27,10 +27,14 @@ actor HandoverEngine: RequestHandling {
   /// intake's answer. The verify and the admit suspend the actor, so a
   /// retried `complete` must not start a second verify or admission.
   var completing: Set<UUID> = []
-  /// Revokes per device since start. Pairing again does not reset it, so a
-  /// `complete` that sees it change across its receipt read and verify
-  /// admits nothing.
+  /// Revokes per device since start. A `complete` that sees the count change
+  /// across its receipt read and verify admits nothing. Pairing again does
+  /// not reset it: the phone pairs again under the same device id.
   var revocations: [UUID: Int] = [:]
+  /// Revokes per device that have not returned yet. Until a revoke's store
+  /// delete commits, a store read still returns the device's receipts, so a
+  /// `complete` that starts meanwhile is refused before it reads.
+  var revoking: [UUID: Int] = [:]
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -99,11 +103,18 @@ actor HandoverEngine: RequestHandling {
   var pairingIsOpen: Bool { pairing?.isOpen ?? false }
 
   /// Forgets the device and drops whatever it was uploading: the files of
-  /// its receipts in memory, and what a `complete` in flight verifies (see
-  /// `revocations`). Files of a receipt only in the store wait for the next
-  /// start's sweep.
+  /// its receipts in memory. A `complete` in flight that has not reached the
+  /// intake discards its own files when it sees the revoke (`revocations`).
+  /// Files of a receipt only in the store wait for the next start's sweep.
   func revoke(_ deviceID: UUID) async throws {
+    // Before the first suspension: a `complete` that starts or checks while
+    // the store delete is awaited must already see this revoke.
     revocations[deviceID, default: 0] += 1
+    revoking[deviceID, default: 0] += 1
+    defer {
+      let left = revoking[deviceID, default: 1] - 1
+      revoking[deviceID] = left > 0 ? left : nil
+    }
     for (recordingID, receipt) in activeReceipts where receipt.deviceID == deviceID {
       if receipt.state.kind != .complete {
         inbox.discard(recordingID)

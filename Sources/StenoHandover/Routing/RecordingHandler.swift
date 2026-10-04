@@ -150,10 +150,14 @@ extension HandoverEngine {
   /// is present and the whole file hashes to the announced value; 409 with
   /// the status while chunks are missing or while an earlier `complete` is
   /// still verifying or admitting; 422 on a hash mismatch, after which the
-  /// partial is gone and the phone starts over; 401 when the device was
-  /// revoked while the receipt was read or the file verified, after which
-  /// the files are gone.
+  /// partial is gone and the phone starts over; 401 while a revoke of the
+  /// device is in flight, or when one missed the receipt because the
+  /// receipt was only in the store (after a restart), after which the files
+  /// are gone. A revoke that finds the receipt in memory discards the files
+  /// itself; a verify of them then answers 500, and the phone's next
+  /// request gets 401 at the gate.
   func complete(_ recordingID: UUID, device: PairedDevice) async -> HandoverResponse {
+    guard revoking[device.id] == nil else { return Self.unauthorized }
     let revocation = revocations[device.id, default: 0]
     guard var receipt = await ownedReceipt(recordingID, device: device) else {
       return .problem(.notFound, "no such recording")
