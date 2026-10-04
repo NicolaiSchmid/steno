@@ -321,11 +321,13 @@ mod tests {
     use crate::backend::{DecoderStep, Features, JointDecision, ModelShape};
 
     /// A backend driven by a script of joint decisions, in call order; the
-    /// decoder step records what it was fed.
+    /// decoder step records what it was fed and the state it was fed with,
+    /// and returns that state with every `h` one higher.
     struct ScriptedBackend {
         shape: ModelShape,
         script: std::collections::VecDeque<JointDecision>,
         fed: Vec<u32>,
+        states: Vec<DecoderState>,
     }
 
     impl ScriptedBackend {
@@ -348,6 +350,7 @@ mod tests {
                     })
                     .collect(),
                 fed: Vec::new(),
+                states: Vec::new(),
             }
         }
     }
@@ -376,6 +379,7 @@ mod tests {
             state: &DecoderState,
         ) -> Result<DecoderStep, SpeechError> {
             self.fed.push(token);
+            self.states.push(state.clone());
             Ok(DecoderStep {
                 projection: vec![token as f32],
                 state: DecoderState {
@@ -442,6 +446,16 @@ mod tests {
         );
         // SOS priming, then one feed per token.
         assert_eq!(backend.fed, vec![9, 1, 2, 3]);
+        // Priming starts from zeros of `layers * hidden`; each feed takes
+        // the state the step before it returned.
+        assert_eq!(
+            backend
+                .states
+                .iter()
+                .map(|s| s.h.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![0.0; 2], vec![1.0; 2], vec![2.0; 2], vec![3.0; 2]]
+        );
         assert_eq!(stats.joint_calls, 5);
         assert_eq!(stats.decoder_calls, 4);
         assert_eq!(stats.windows, 1);
@@ -463,17 +477,74 @@ mod tests {
             &mut DecodeStats::default(),
         )
         .unwrap();
-        // Three on frame 0, three on frame 1, then the window ends.
+        // Three on frame 0, three on frame 1, then the window ends; each
+        // records the predicted duration zero, the forced advance included.
         assert_eq!(
-            tokens.iter().map(|t| t.frame).collect::<Vec<_>>(),
-            vec![0, 0, 0, 1, 1, 1]
+            tokens
+                .iter()
+                .map(|t| (t.frame, t.duration))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (0, 0), (0, 0), (1, 0), (1, 0), (1, 0)]
         );
+    }
+
+    #[test]
+    fn the_default_limits_are_nemos() {
+        assert_eq!(
+            DecoderConfig::default(),
+            DecoderConfig {
+                max_symbols_per_frame: 10,
+                token_budget: TokenBudget::PerSecond(40),
+                window_end: WindowEnd::Emit,
+                token_duration: TokenDuration::Predicted,
+            }
+        );
+    }
+
+    #[test]
+    fn frames_past_the_encoder_data_are_not_decoded() {
+        // `len` claims five frames, the data holds two.
+        let mut backend = ScriptedBackend::new(&[(1, 1), (2, 1), (3, 1)]);
+        let short = EncoderOutput {
+            hidden: 1,
+            len: 5,
+            data: vec![0.0; 2],
+        };
+        let mut stats = DecodeStats::default();
+        let tokens = decode_window(
+            &mut backend,
+            &short,
+            0,
+            &DecoderConfig::default(),
+            &mut stats,
+        )
+        .unwrap();
+        assert_eq!(
+            tokens.iter().map(|t| (t.id, t.frame)).collect::<Vec<_>>(),
+            vec![(1, 0), (2, 1)]
+        );
+        assert_eq!(stats.joint_calls, 2);
     }
 
     #[test]
     fn an_empty_window_decodes_nothing_and_a_bad_duration_bin_is_a_shape_error() {
         let mut backend = ScriptedBackend::new(&[(1, 7)]);
-        assert!(decode(&mut backend, &encoder(0)).unwrap().is_empty());
+        let mut stats = DecodeStats::default();
+        let tokens = decode_window(
+            &mut backend,
+            &encoder(0),
+            0,
+            &DecoderConfig::default(),
+            &mut stats,
+        )
+        .unwrap();
+        assert!(tokens.is_empty());
+        // Counted as a window, with no model call at all.
+        assert_eq!(
+            (stats.windows, stats.decoder_calls, stats.joint_calls),
+            (1, 0, 0)
+        );
+        assert!(backend.fed.is_empty());
         assert!(matches!(
             decode(&mut backend, &encoder(1)),
             Err(SpeechError::Shape(_))

@@ -235,7 +235,7 @@ mod tests {
         }
     }
 
-    fn frames(hypothesis: &Hypothesis) -> Vec<(usize, usize, usize)> {
+    fn id_frame_duration(hypothesis: &Hypothesis) -> Vec<(usize, usize, usize)> {
         hypothesis
             .tokens
             .iter()
@@ -251,7 +251,7 @@ mod tests {
         let mut stats = DecodeStats::default();
         let hypothesis = decode_window(&mut model, 4, spec(3, false), &mut stats).unwrap();
         assert_eq!(
-            frames(&hypothesis),
+            id_frame_duration(&hypothesis),
             vec![(1, 100, 0), (2, 100, 1), (3, 101, 0)]
         );
         assert_eq!((stats.decoder_calls, stats.joint_calls), (4, 5));
@@ -262,7 +262,7 @@ mod tests {
         let mut model = Scripted::new(&[(1, 1), (2, 2)]);
         let hypothesis =
             decode_window(&mut model, 3, spec(3, false), &mut DecodeStats::default()).unwrap();
-        assert_eq!(frames(&hypothesis), vec![(1, 100, 1)]);
+        assert_eq!(id_frame_duration(&hypothesis), vec![(1, 100, 1)]);
         assert_eq!(model.calls, vec![('s', 0), ('j', 0), ('f', 1), ('j', 1)]);
     }
 
@@ -296,7 +296,7 @@ mod tests {
         let mut model = Scripted::new(&[(BLANK, 2), (7, 0)]);
         let hypothesis =
             decode_window(&mut model, 2, spec(2, true), &mut DecodeStats::default()).unwrap();
-        assert_eq!(frames(&hypothesis), vec![(7, 101, 0)]);
+        assert_eq!(id_frame_duration(&hypothesis), vec![(7, 101, 0)]);
         assert_eq!(
             model.calls.iter().filter(|(kind, _)| *kind == 'j').count(),
             7
@@ -311,7 +311,7 @@ mod tests {
             ..spec(4, false)
         };
         let hypothesis = decode_window(&mut model, 4, window, &mut DecodeStats::default()).unwrap();
-        assert_eq!(frames(&hypothesis), vec![(3, 102, 1)]);
+        assert_eq!(id_frame_duration(&hypothesis), vec![(3, 102, 1)]);
         assert_eq!(hypothesis.suppressed, 2);
         assert!(model.calls.contains(&('f', 1)));
     }
@@ -409,6 +409,9 @@ mod tests {
                     last_emission_frame = Some(label_frame);
                     emissions_at_frame = 1;
                 }
+                // The forced advance moves a frame's second emission on, so
+                // FLUID_AUDIO's two symbols a frame hold and the branch below never runs.
+                assert!(emissions_at_frame <= 2);
                 if emissions_at_frame >= MAX_SYMBOLS_PER_STEP {
                     t = (t + 1).min(last_timestep);
                     safe_t = t.min(last_timestep);
@@ -471,12 +474,17 @@ mod tests {
     #[test]
     fn the_shared_loop_decodes_as_fluid_audio_does() {
         let mut rng = Rng(0x5eed_07d7);
+        let mut runaways = 0;
         for _ in 0..20_000 {
             // Long token-heavy windows reach the budget; a rare bin 5 is
             // the duration error.
             let long = rng.below(8) == 0;
             let valid = rng.below(if long { 400 } else { 24 });
-            let blank_share = if long { 2 } else { 2 + rng.below(6) };
+            let blank_share = if long {
+                1 + rng.below(4)
+            } else {
+                2 + rng.below(6)
+            };
             let script: Vec<JointDecision> = (0..rng.below(if long { 1200 } else { 80 }))
                 .map(|_| JointDecision {
                     token: if rng.below(10) < blank_share {
@@ -517,7 +525,9 @@ mod tests {
             );
             assert_eq!(ours.calls, theirs.calls, "{spec:?} valid {valid}");
             assert_eq!((stats.decoder_calls, stats.joint_calls), counts);
+            runaways += stats.runaways;
         }
+        assert!(runaways > 0, "no window reached the token budget");
         assert_eq!(usize::try_from(BLANK).unwrap(), BLANK_ID);
     }
 }
