@@ -368,6 +368,12 @@ impl Engine {
     /// already under way finishes, and its receipt then stays out of memory
     /// and out of the store. Files of a receipt only in the store (not read
     /// since start) wait for the next start's sweep.
+    ///
+    /// A failed store delete leaves the device paired in the store but
+    /// revoked in memory: its `complete` answers 401 until it pairs again or
+    /// a retried revoke finishes. The user asked for the revoke and sees the
+    /// error; a half-revoked phone that cannot hand over is safer than one
+    /// that can.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
         {
@@ -387,10 +393,11 @@ impl Engine {
         for recording_id in unfinished {
             self.inbox.discard(recording_id);
         }
-        self.with_store(move |store| store.delete_paired_device(device_id))
-            .await?;
+        let deleted = self
+            .with_store(move |store| store.delete_paired_device(device_id))
+            .await;
         self.publish_receipts();
-        Ok(())
+        deleted
     }
 
     // Auth gate
