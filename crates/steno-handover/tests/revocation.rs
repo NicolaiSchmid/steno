@@ -275,8 +275,7 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
     // shows an upload of a revoked phone until restart.
     let chunk_size: i64 = 64 * 1024;
     let meeting_id = Uuid::new_v4();
-    let intake =
-        common::ScriptedIntake::with_delay(meeting_id, 0, Duration::from_millis(300), false);
+    let intake = common::ScriptedIntake::gated(meeting_id, false);
     let test = TestService::with(common::Options {
         chunk_size,
         intake: Some(intake.clone() as std::sync::Arc<dyn steno_core::HandoverIntake>),
@@ -293,11 +292,12 @@ async fn a_complete_in_flight_does_not_bring_a_revoked_device_back_into_the_stre
 
     let completing = phone.complete(id);
     let revoking = async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(intake.count(), 1, "the intake is admitting");
+        intake.admitting().await;
         test.service.revoke(phone.device.id).await.unwrap();
+        intake.release();
     };
     let (_, ()) = tokio::join!(completing, revoking);
+    assert_eq!(intake.count(), 1, "the revoke landed while the intake ran");
 
     let owned = |receipts: &[steno_core::HandoverReceipt]| {
         receipts

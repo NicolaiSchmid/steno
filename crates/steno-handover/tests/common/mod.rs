@@ -36,6 +36,7 @@ use steno_handover::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
 use uuid::Uuid;
 
@@ -90,7 +91,9 @@ pub fn execute_batch(store: &Store, sql: &str) {
 /// each admission open, the way the real intake's copy of a large file
 /// does; `admit_once` refuses every admission after the first successful
 /// one, the way the real intake fails when a second copy races the first
-/// one's removal of the source.
+/// one's removal of the source. A gated intake holds each admission until
+/// [`ScriptedIntake::release`], so a test acts while one is in flight
+/// without guessing how long the verify before it takes.
 pub struct ScriptedIntake {
     pub meeting_id: Uuid,
     pub delay: Duration,
@@ -98,6 +101,9 @@ pub struct ScriptedIntake {
     pub admissions: Mutex<Vec<PathBuf>>,
     failures_left: Mutex<u32>,
     admitted: Mutex<bool>,
+    gated: bool,
+    entered: Notify,
+    released: Notify,
 }
 
 /// Carries the file path, as an I/O error from the real intake's copy
@@ -124,14 +130,50 @@ impl ScriptedIntake {
         delay: Duration,
         admit_once: bool,
     ) -> Arc<Self> {
-        Arc::new(ScriptedIntake {
+        Arc::new(Self::scripted(
+            meeting_id, failures, delay, admit_once, false,
+        ))
+    }
+
+    /// Holds each admission open until [`ScriptedIntake::release`].
+    pub fn gated(meeting_id: Uuid, admit_once: bool) -> Arc<Self> {
+        Arc::new(Self::scripted(
+            meeting_id,
+            0,
+            Duration::ZERO,
+            admit_once,
+            true,
+        ))
+    }
+
+    fn scripted(
+        meeting_id: Uuid,
+        failures: u32,
+        delay: Duration,
+        admit_once: bool,
+        gated: bool,
+    ) -> Self {
+        ScriptedIntake {
             meeting_id,
             delay,
             admit_once,
             admissions: Mutex::new(Vec::new()),
             failures_left: Mutex::new(failures),
             admitted: Mutex::new(false),
-        })
+            gated,
+            entered: Notify::new(),
+            released: Notify::new(),
+        }
+    }
+
+    /// Returns once an admission of a gated intake is in flight.
+    pub async fn admitting(&self) {
+        self.entered.notified().await;
+    }
+
+    /// Lets the admission in flight answer.
+    pub fn release(&self) {
+        self.released.notify_one();
     }
 
     pub fn entries(&self) -> Vec<PathBuf> {
@@ -152,6 +194,10 @@ impl HandoverIntake for ScriptedIntake {
         _device: &PairedDevice,
     ) -> BoundaryResult<Uuid> {
         self.admissions.lock().unwrap().push(file.to_path_buf());
+        if self.gated {
+            self.entered.notify_one();
+            self.released.notified().await;
+        }
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
