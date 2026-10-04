@@ -129,44 +129,52 @@ import Testing
     Issue.record("the condition never held")
   }
 
-  /// The Mac comes back over the store and inbox of a phone that uploaded
-  /// every chunk: after a restart its receipt is only in the store.
-  private struct Restarted {
+  /// A phone paired over an on-disk `StoreGate` store, with a two-chunk
+  /// recording not yet announced.
+  private struct Gated {
+    static let chunkSize = 64 * 1024
     let gate: StoreGate
     let test: TestService
-    /// The phone's pairing, made before the restart.
-    let paired: PairedDevice
     let bytes: Data
     let metadata: RecordingMetadata
-    /// The meeting, when the phone completed the upload before the restart.
-    let meetingID: UUID?
-    let service: HandoverService
-    let intake: FakeHandoverIntake
-    /// The phone, talking to the restarted engine.
-    let phone: EngineDevice
+    /// `test.service`, or the service after `restarted()`.
+    private(set) var service: HandoverService
+    private(set) var intake: FakeHandoverIntake
+    /// The phone, talking to `service`.
+    private(set) var phone: EngineDevice
 
-    init(completed: Bool = false) async throws {
-      let chunkSize = 64 * 1024
+    init() async throws {
       gate = try StoreGate()
-      test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
-      let before = try await EngineClient.paired(test)
-      paired = before.device
-      bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 99)
-      metadata = before.metadata(for: bytes, chunkSize: chunkSize)
-      try await before.uploadAll(metadata, bytes)
-      meetingID =
-        completed
-        ? try await before.complete(metadata.recordingID).json(Wire.CompleteResponse.self).meetingID
-        : nil
-      intake = FakeHandoverIntake()
+      test = try TestService.prepare(chunkSize: Self.chunkSize, store: gate.store)
+      service = test.service
+      intake = test.intake
+      phone = try await EngineClient.paired(test)
+      bytes = Phone.seededBytes(count: 2 * Self.chunkSize, seed: 99)
+      metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
+    }
+
+    /// The phone uploads every chunk, then the Mac comes back over the store
+    /// and inbox: the receipt is then only in the store.
+    static func restartedAfterUpload() async throws -> Gated {
+      let before = try await Gated()
+      try await before.phone.uploadAll(before.metadata, before.bytes)
+      return before.restarted()
+    }
+
+    /// The Mac comes back over the same store and inbox, with a new intake.
+    func restarted() -> Gated {
+      var after = self
       let now = test.now
-      service = HandoverService(
-        configuration: test.service.configuration, store: test.store, intake: intake,
+      after.intake = FakeHandoverIntake()
+      after.service = HandoverService(
+        configuration: test.service.configuration, store: test.store, intake: after.intake,
         identity: test.service.identity, now: { now })
-      phone = EngineDevice(engine: service.engine, device: paired)
+      after.phone = EngineDevice(engine: after.service.engine, device: phone.device)
+      return after
     }
 
     var id: UUID { metadata.recordingID }
+    var engine: HandoverEngine { service.engine }
 
     func remove() {
       gate.remove()
@@ -176,11 +184,11 @@ import Testing
     /// Nothing reached the intake and nothing of the upload is left.
     func expectNothingAdmitted() async throws {
       #expect(await intake.admissions.count == 0, "the intake never sees the file")
-      let inbox = service.engine.inbox
+      let inbox = engine.inbox
       #expect(
         !inbox.hasPartial(id) && !inbox.hasVerified(id, format: metadata.format)
           && inbox.loadMetadata(id) == nil, "its files are gone")
-      #expect(await service.engine.receiptsSnapshot.isEmpty)
+      #expect(await engine.receiptsSnapshot.isEmpty)
       #expect(try await test.store.handoverReceipt(recordingID: id) == nil)
     }
   }
@@ -191,18 +199,18 @@ import Testing
   /// With `pairsAgain`, the phone pairs again under the same device id
   /// before the read returns.
   private func completeAfterARevokeDuringItsReceiptRead(pairsAgain: Bool) async throws {
-    let restarted = try await Restarted()
+    let restarted = try await Gated.restartedAfterUpload()
     defer { restarted.remove() }
     let gate = restarted.gate
-    let phone = restarted.paired
+    let phone = restarted.phone.device
 
     gate.receiptRead.arm()
     let completing = Task { await restarted.phone.complete(restarted.id) }
     await gate.receiptRead.held()
     try await restarted.service.revoke(phone.id)
     if pairsAgain {
-      _ = await restarted.service.engine.beginPairing()
-      let pairing = try await EngineClient(engine: restarted.service.engine).pair(
+      _ = await restarted.engine.beginPairing()
+      let pairing = try await EngineClient(engine: restarted.engine).pair(
         deviceID: phone.id, deviceName: phone.name)
       #expect(pairing.code == 200)
     }
@@ -215,7 +223,7 @@ import Testing
     #expect((stored != nil) == pairsAgain, "only pairing again brings the device back")
     if let stored {
       // The new pairing uploads the recording again, and it goes through.
-      let again = EngineDevice(engine: restarted.service.engine, device: stored)
+      let again = EngineDevice(engine: restarted.engine, device: stored)
       try await again.uploadAll(restarted.metadata, restarted.bytes)
       #expect(await again.complete(restarted.id).code == 200)
     }
@@ -239,7 +247,7 @@ import Testing
   /// delete.
   @Test(.timeLimit(.minutes(1)))
   func aCompleteDuringARevokesStoreDeleteAdmitsNothing() async throws {
-    let restarted = try await Restarted()
+    let restarted = try await Gated.restartedAfterUpload()
     defer { restarted.remove() }
     let gate = restarted.gate
 
@@ -247,7 +255,7 @@ import Testing
     let readBefore = Task { await restarted.phone.complete(restarted.id) }
     await gate.receiptRead.held()
     gate.deviceDelete.arm()
-    let revoking = Task { try await restarted.service.revoke(restarted.paired.id) }
+    let revoking = Task { try await restarted.service.revoke(restarted.phone.device.id) }
     await gate.deviceDelete.held()
 
     let startedDuring = await restarted.phone.complete(restarted.id)
@@ -268,15 +276,15 @@ import Testing
   /// missed. An announce like that does not put a receipt in memory either.
   @Test(.timeLimit(.minutes(1)))
   func aRequestThatReadItsReceiptBeforeARevokeLeavesItOutOfMemory() async throws {
-    let restarted = try await Restarted()
+    let restarted = try await Gated.restartedAfterUpload()
     defer { restarted.remove() }
     let gate = restarted.gate
-    let engine = restarted.service.engine
+    let engine = restarted.engine
 
     gate.receiptRead.arm()
     let reading = Task { await restarted.phone.status(restarted.id) }
     await gate.receiptRead.held()
-    try await restarted.service.revoke(restarted.paired.id)
+    try await restarted.service.revoke(restarted.phone.device.id)
     gate.receiptRead.release()
 
     #expect(await reading.value.code == 200, "it read before the revoke")
@@ -293,22 +301,25 @@ import Testing
   /// its upload after pairing again would become a second meeting.
   @Test(.timeLimit(.minutes(1)))
   func aCompletedRecordingAnswersItsMeetingAfterARevokeDuringTheRead() async throws {
-    let restarted = try await Restarted(completed: true)
-    defer { restarted.remove() }
+    let before = try await Gated()
+    defer { before.remove() }
+    try await before.phone.uploadAll(before.metadata, before.bytes)
+    let meetingID = try await before.phone.complete(before.id).json(Wire.CompleteResponse.self)
+      .meetingID
+    let restarted = before.restarted()
     let gate = restarted.gate
 
     gate.receiptRead.arm()
     let completing = Task { await restarted.phone.complete(restarted.id) }
     await gate.receiptRead.held()
-    try await restarted.service.revoke(restarted.paired.id)
+    try await restarted.service.revoke(restarted.phone.device.id)
     gate.receiptRead.release()
     let response = await completing.value
 
     #expect(response.code == 200)
-    let meetingID = try #require(restarted.meetingID)
     #expect(try response.json(Wire.CompleteResponse.self).meetingID == meetingID)
     #expect(await restarted.intake.admissions.count == 0, "nothing is admitted again")
-    #expect(await restarted.service.engine.receiptsSnapshot.isEmpty)
+    #expect(await restarted.engine.receiptsSnapshot.isEmpty)
     #expect(!gate.timedOut, "nothing waited on the held read")
   }
 
@@ -320,18 +331,11 @@ import Testing
   /// intake.
   @Test(.timeLimit(.minutes(1)))
   func aRevokeDuringTheVerifyingSaveWhoseFilesCameBackAdmitsNothing() async throws {
-    let gate = try StoreGate()
-    defer { gate.remove() }
-    let chunkSize = 64 * 1024
-    let test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
-    defer { try? FileManager.default.removeItem(at: test.directory) }
-    let engine = test.service.engine
-    let phone = try await EngineClient.paired(test)
-    let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 5)
-    let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
-    let chunks = Phone.chunks(of: bytes, size: chunkSize)
-    let id = metadata.recordingID
-    #expect(try await phone.announce(metadata).code == 201)
+    let gated = try await Gated()
+    defer { gated.remove() }
+    let (gate, engine, phone, id) = (gated.gate, gated.engine, gated.phone, gated.id)
+    let chunks = Phone.chunks(of: gated.bytes, size: Gated.chunkSize)
+    #expect(try await phone.announce(gated.metadata).code == 201)
 
     // The first chunk's save holds the writer; every later write queues.
     gate.receiptWrite.arm()
@@ -341,11 +345,11 @@ import Testing
     try await Self.until { await engine.activeReceipts[id]?.receivedChunks == [0, 1] }
     let completing = Task { await phone.complete(id) }
     try await Self.until { await engine.activeReceipts[id]?.state.kind == .verifying }
-    let revoking = Task { try await test.service.revoke(phone.device.id) }
+    let revoking = Task { try await gated.service.revoke(phone.device.id) }
     try await Self.until { await engine.revoking[phone.device.id] != nil }
     #expect(!engine.inbox.hasPartial(id), "the revoke discarded the partial")
 
-    let announcing = Task { try await phone.announce(metadata) }
+    let announcing = Task { try await phone.announce(gated.metadata) }
     try await Self.until { engine.inbox.loadMetadata(id) != nil }
     for (index, chunk) in chunks.enumerated() {
       // Written, then answered 404: the receipt stays out of memory.
@@ -359,12 +363,7 @@ import Testing
     #expect(try await announcing.value.code == 500, "its save fails on the deleted device")
     #expect(await first.value.code == 204)
     #expect(await second.value.code == 204)
-    #expect(await test.intake.admissions.count == 0, "the intake never sees the file")
-    #expect(
-      !engine.inbox.hasPartial(id) && !engine.inbox.hasVerified(id, format: metadata.format)
-        && engine.inbox.loadMetadata(id) == nil, "its files are gone")
-    #expect(await engine.receiptsSnapshot.isEmpty)
-    #expect(try await test.store.handoverReceipt(recordingID: id) == nil)
+    try await gated.expectNothingAdmitted()
     #expect(!gate.timedOut, "nothing waited on the held save")
   }
 
@@ -373,38 +372,32 @@ import Testing
   /// phone announces again and uploads anew.
   @Test(.timeLimit(.minutes(1)))
   func aFailedRevokeLeavesNoRevokeInFlight() async throws {
-    let gate = try StoreGate()
-    defer { gate.remove() }
-    let chunkSize = 64 * 1024
-    let test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
-    defer { try? FileManager.default.removeItem(at: test.directory) }
-    let engine = test.service.engine
-    let phone = try await EngineClient.paired(test)
+    let gated = try await Gated()
+    defer { gated.remove() }
+    let (engine, phone, id) = (gated.engine, gated.phone, gated.id)
     let deviceID = phone.device.id
-    let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 6)
-    let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
-    let id = metadata.recordingID
-    try await phone.uploadAll(metadata, bytes)
+    try await phone.uploadAll(gated.metadata, gated.bytes)
     let revocations = await engine.revocations[deviceID, default: 0]
 
-    try await gate.pool.write { db in
+    try await gated.gate.pool.write { db in
       try db.execute(
         sql: """
           CREATE TRIGGER keepDevice BEFORE DELETE ON pairedDevice
           BEGIN SELECT RAISE(ABORT, 'kept'); END
           """)
     }
-    await #expect(throws: (any Error).self) { try await test.service.revoke(deviceID) }
-    try await gate.pool.write { db in try db.execute(sql: "DROP TRIGGER keepDevice") }
+    await #expect(throws: (any Error).self) { try await gated.service.revoke(deviceID) }
+    try await gated.gate.pool.write { db in try db.execute(sql: "DROP TRIGGER keepDevice") }
 
-    #expect(try await test.store.pairedDevice(id: deviceID) != nil, "the device is still paired")
+    let stored = try await gated.test.store.pairedDevice(id: deviceID)
+    #expect(stored != nil, "the device is still paired")
     #expect(await engine.revoking.isEmpty, "no revoke is in flight")
     #expect(await !engine.revoked.contains(deviceID))
     #expect(await engine.revocations[deviceID, default: 0] == revocations)
     #expect(await phone.status(id).code == 200)
     #expect(await engine.activeReceipts[id] != nil, "the status read is in memory again")
-    try await phone.uploadAll(metadata, bytes)
+    try await phone.uploadAll(gated.metadata, gated.bytes)
     #expect(await phone.complete(id).code == 200)
-    #expect(await test.intake.admissions.count == 1)
+    #expect(await gated.intake.admissions.count == 1)
   }
 }
