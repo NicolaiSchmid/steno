@@ -2046,12 +2046,21 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
             .recv_timeout(RECV)
             .expect("stop() is tearing the backend down");
         full.store(true, Ordering::SeqCst);
+        // Asserted once the gate is open: a panic while `stopper` waits at
+        // the gate would leave the scope joining it forever.
         let before = backend.delivered();
-        while backend.delivered() == before {
+        let deadline = Instant::now() + RECV;
+        while backend.delivered() == before && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
+        let delivered_on = backend.delivered() > before;
         open.send(()).unwrap();
-        stopper.join().unwrap()
+        let returned = stopper.join().unwrap();
+        assert!(
+            delivered_on,
+            "the backend delivered nothing during the teardown within {RECV:?}"
+        );
+        returned
     })
     .expect("stop() returns the recording");
     assert!(master_of(&result).frame_count() < backend.delivered());
