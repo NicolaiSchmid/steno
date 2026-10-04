@@ -16,12 +16,16 @@ export const site = {
 	brew: "brew tap nicolaischmid/tap && brew install --cask steno",
 } as const;
 
-export type Platform = "mac" | "win" | "linux";
+/** The desktops in display order: macOS, Windows, Linux. */
+export const platformIds = ["mac", "win", "linux"] as const;
+
+export type Platform = (typeof platformIds)[number];
 
 /**
  * One entry per desktop. `released` is true only where a build is on the
- * releases page today; the download button and the closing CTA read it, so
- * flipping Windows or Linux here is the whole change once they ship.
+ * releases page today; the download button, the closing CTA and the "How
+ * it's built" tiles read it, so flipping Windows or Linux here is the whole
+ * change once they ship.
  */
 export const platforms: Record<
 	Platform,
@@ -30,11 +34,8 @@ export const platforms: Record<
 	mac: {
 		name: "macOS",
 		released: true,
-		note: "Apple Silicon · signed and notarised",
+		note: "Apple Silicon · notarised",
 	},
-	win: { name: "Windows", released: false, note: "Preview · not released yet" },
-	linux: { name: "Linux", released: false, note: "Preview · not released yet" },
+	win: { name: "Windows", released: false, note: "Not released yet" },
+	linux: { name: "Linux", released: false, note: "Not released yet" },
 };
-
-/** The desktops in display order: macOS, Windows, Linux. */
-export const platformIds = Object.keys(platforms) as Platform[];

@@ -44,7 +44,7 @@ export function DownloadButton({
 		>
 			<Icon className="size-3.5 shrink-0" />
 			<span>
-				{released ? `Download for ${name}` : `${name} build coming soon`}
+				{released ? `Download for ${name}` : `${name}: not released yet`}
 			</span>
 		</a>
 	);
