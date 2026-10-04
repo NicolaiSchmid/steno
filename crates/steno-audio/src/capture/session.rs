@@ -166,6 +166,13 @@ struct Inner {
     /// and a writer failure that arrives late act on their own recording
     /// only, never on one started meanwhile.
     recordings_started: usize,
+    /// Unit tests only: run once by the next `stop()` that finds
+    /// `Stopping`, after it has noted `recordings_started` and with the
+    /// lock released. A test finishes the finalise and takes a `start()`
+    /// in there, through the window a wakeup leaves before that `stop()`
+    /// holds the lock again.
+    #[cfg(test)]
+    before_stop_waits: Option<Box<dyn FnOnce() + Send>>,
 }
 
 struct Active {
@@ -307,6 +314,8 @@ impl CaptureSession {
                     active: None,
                     rebuild_generation: 0,
                     recordings_started: 0,
+                    #[cfg(test)]
+                    before_stop_waits: None,
                 }),
                 state_changed: Condvar::new(),
             }),
@@ -638,6 +647,14 @@ impl Core {
             // elsewhere does not end the wait early.
             let mut inner = self.lock();
             let recording = inner.recordings_started;
+            #[cfg(test)]
+            if matches!(inner.state, CaptureState::Stopping)
+                && let Some(hook) = inner.before_stop_waits.take()
+            {
+                drop(inner);
+                hook();
+                inner = self.lock();
+            }
             while matches!(inner.state, CaptureState::Stopping) {
                 inner = self
                     .state_changed
@@ -1184,5 +1201,159 @@ impl Drop for Unwinding<'_> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The window between a finalise's wakeup and the waiting `stop()`'s
+    //! next hold of the lock, forced through `before_stop_waits`: the
+    //! public API in `tests/session.rs` can only race for it. Swift's actor
+    //! ran the queued stop right after the finalise, so Swift has no
+    //! counterpart.
+
+    use super::*;
+    use crate::capture::CaptureMode;
+    use crate::testing::SyntheticCaptureBackend;
+    use crate::writer::{LaneFrames, RecordingFiles};
+
+    const RECV: Duration = Duration::from_secs(10);
+
+    /// The production writer, except that every write fails as a full disk
+    /// does and `finish()` waits for `release`, which holds the writer
+    /// failure's finalise in `Stopping`.
+    struct FailsThenHolds {
+        inner: RecordingWriter,
+        release: Receiver<()>,
+    }
+
+    impl RecordingWriting for FailsThenHolds {
+        fn files(&self) -> RecordingFiles {
+            self.inner.files()
+        }
+        fn write(&mut self, _frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+            Err(CaptureError::WriterFailed("DiskFull".into()))
+        }
+        fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+            // Bounded, so a failed test cannot hang its session's drop.
+            let _ = self.release.recv_timeout(RECV);
+            self.inner.finish()
+        }
+    }
+
+    /// Receives from `states` until a state matches `want`.
+    fn wait_for(states: &Receiver<CaptureState>, want: impl Fn(&CaptureState) -> bool) {
+        loop {
+            let state = states.recv_timeout(RECV).expect("the state changes");
+            if want(&state) {
+                return;
+            }
+        }
+    }
+
+    /// The first recording's writer fails and its finalise holds
+    /// `Stopping`; a `stop()` finds it there and pauses in
+    /// `before_stop_waits` while the finalise ends `Failed` and, given a
+    /// `second` meeting, a `start()` for it takes the lock. Returns the
+    /// session, what that `stop()` returned and the first meeting.
+    fn stop_that_waited(
+        directory: &std::path::Path,
+        second: Option<Uuid>,
+    ) -> (CaptureSession, Result<CaptureResult, CaptureError>, Uuid) {
+        let (release, released) = channel();
+        let first_writer = Mutex::new(Some(released));
+        let session = CaptureSession::with_writer_factory(
+            CaptureConfiguration::new(CaptureMode::InPerson, directory),
+            Arc::new(SyntheticCaptureBackend::tones(
+                &[AudioLane::Mixed],
+                &[(AudioLane::Mixed, 440.0)],
+                0.5,
+            )),
+            None,
+            CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+            Arc::new(SystemClock::new()),
+            Arc::new(move |layout, lanes, keep_raw| {
+                let inner = RecordingWriter::new(layout, lanes, keep_raw)?;
+                Ok(match first_writer.lock().unwrap().take() {
+                    Some(release) => Box::new(FailsThenHolds { inner, release }),
+                    None => Box::new(inner) as Box<dyn RecordingWriting>,
+                })
+            }),
+        )
+        .unwrap();
+        let states = session.states();
+        let first = Uuid::new_v4();
+        session.start(first).unwrap();
+        wait_for(&states, |state| matches!(state, CaptureState::Stopping));
+
+        let (paused, pause) = channel();
+        let (resume, resumed) = channel::<()>();
+        session.core.lock().before_stop_waits = Some(Box::new(move || {
+            paused.send(()).unwrap();
+            resumed.recv_timeout(RECV).unwrap();
+        }));
+        let stopped = std::thread::scope(|scope| {
+            let stopper = scope.spawn(|| session.stop());
+            pause
+                .recv_timeout(RECV)
+                .expect("the stop() finds the finalise in Stopping");
+            release.send(()).unwrap();
+            wait_for(&states, |state| {
+                matches!(state, CaptureState::Failed { .. })
+            });
+            if let Some(second) = second {
+                session.start(second).unwrap();
+            }
+            resume.send(()).unwrap();
+            stopper.join().unwrap()
+        });
+        (session, stopped, first)
+    }
+
+    /// A `start()` takes the lock between the finalise's `Failed` and the
+    /// waiting `stop()`: the stop answers `InvalidState` and leaves the new
+    /// recording running, instead of ending a meeting it was never asked
+    /// to end.
+    #[test]
+    fn a_stop_that_waited_does_not_stop_the_next_recording() {
+        let directory = tempfile::tempdir().unwrap();
+        let second = Uuid::new_v4();
+        let (session, stopped, _) = stop_that_waited(directory.path(), Some(second));
+        assert_eq!(
+            stopped.unwrap_err(),
+            CaptureError::InvalidState("stop after another recording started".into())
+        );
+        assert!(
+            matches!(session.state(), CaptureState::Recording { .. }),
+            "{:?}",
+            session.state()
+        );
+        assert_eq!(session.stop().unwrap().asset.meeting_id, second);
+        assert_eq!(session.state(), CaptureState::Idle);
+    }
+
+    /// The waiting `stop()` holds the lock again before any `start()`: it
+    /// returns the recording `Failed` carries, and the next recording
+    /// starts and stops on its own.
+    #[test]
+    fn a_stop_that_waited_returns_the_failed_recording() {
+        let directory = tempfile::tempdir().unwrap();
+        let (session, stopped, first) = stop_that_waited(directory.path(), None);
+        let result = stopped.expect("stop() returns the finalised recording");
+        assert_eq!(result.asset.meeting_id, first);
+        match session.state() {
+            CaptureState::Failed {
+                error: CaptureError::WriterFailed(detail),
+                recording,
+            } => {
+                assert!(detail.contains("DiskFull"), "{detail}");
+                assert_eq!(recording.as_deref(), Some(&result));
+            }
+            other => panic!("expected Failed(WriterFailed), got {other:?}"),
+        }
+        let second = Uuid::new_v4();
+        session.start(second).unwrap();
+        assert_eq!(session.stop().unwrap().asset.meeting_id, second);
+        assert_eq!(session.state(), CaptureState::Idle);
     }
 }
