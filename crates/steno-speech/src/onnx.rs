@@ -14,13 +14,14 @@
 //!
 //! Privacy invariant: ONNX Runtime's telemetry is off in every process
 //! that opens a session, `steno-speech-sidecar` included. Every session
-//! opens through one function here, which configures the process-wide
-//! environment with telemetry disabled before the first one. A
+//! opens after [`init_environment`], which configures the process-wide
+//! environment with telemetry disabled before the first one: here through
+//! `open_session`, in `steno-diarize` through its `session`. A
 //! Microsoft-built ONNX Runtime library would otherwise report model and
 //! usage details to Microsoft.
 
 use std::path::Path;
-use std::sync::Once;
+use std::sync::OnceLock;
 
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::{Session, SessionInputValue};
@@ -58,14 +59,21 @@ impl Default for OnnxOptions {
 
 /// Configures ONNX Runtime's process-wide environment once, before the
 /// first session: telemetry off (the privacy invariant in the module
-/// docs). The first configuration committed wins, so nothing in a Steno
-/// process opens a session any other way.
-pub(crate) fn init_environment() {
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        // `false` when `steno-diarize` committed the same settings first.
-        let _ = ort::init().with_telemetry(false).commit();
-    });
+/// docs). The first configuration committed wins, so every session in a
+/// Steno process opens through here (`open_session`) or through
+/// `steno-diarize`'s `session`, which both call this first. Returns
+/// whether the environment in force is this one; `false` means a session
+/// opened, or another configuration was committed, before the first call,
+/// which is a bug (it is logged once).
+pub fn init_environment() -> bool {
+    static COMMITTED: OnceLock<bool> = OnceLock::new();
+    *COMMITTED.get_or_init(|| {
+        let committed = ort::init().with_telemetry(false).commit();
+        if !committed {
+            tracing::error!("ONNX Runtime was configured before Steno switched its telemetry off");
+        }
+        committed
+    })
 }
 
 /// Opens one model file with the shared options, in the environment
@@ -420,10 +428,96 @@ impl SpeechBackend for OnnxBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::*;
+
     #[test]
     fn telemetry_is_switched_off_before_any_session() {
-        super::init_environment();
-        // Committed already: a later configuration cannot switch it on.
-        assert!(!ort::init().with_telemetry(true).commit());
+        // A missing model still reaches ONNX Runtime, which would set up
+        // its default environment (telemetry on) had nothing come first.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.onnx");
+        assert!(open_session(&missing, &OnnxOptions::default()).is_err());
+        assert!(
+            init_environment(),
+            "a session opened before telemetry was switched off"
+        );
+        assert!(!ort::init().commit(), "nothing can switch it on again");
+    }
+
+    /// The `.rs` files under `directory`, recursively.
+    fn rust_files(directory: &Path, found: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, found);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                found.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn the_workspace_configures_onnx_runtime_in_one_place_with_telemetry_off() {
+        // `ort` keeps the committed settings to itself and ONNX Runtime
+        // has no call that reads telemetry back, so the source is checked:
+        // one environment in the whole workspace, this one, with telemetry
+        // off, and sessions only where `init_environment` comes first.
+        // Unit test modules are left out.
+        let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(crates).unwrap() {
+            let path = entry.unwrap().path();
+            for part in ["src", "tests", "examples", "benches"] {
+                if path.join(part).is_dir() {
+                    rust_files(&path.join(part), &mut files);
+                }
+            }
+        }
+        rust_files(&crates.join("../apps/desktop/src-tauri/src"), &mut files);
+        let name = |path: &Path| {
+            let relative = path.strip_prefix(crates).unwrap_or(path);
+            relative
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        // Split, so this test's own text does not count.
+        let environments = [concat!("ort::", "init("), concat!("ort::", "init_from(")];
+        let sessions = [
+            concat!("Session::", "builder("),
+            concat!("SessionBuilder::", "new("),
+        ];
+        let mut configured = Vec::new();
+        let mut opened = Vec::new();
+        for path in &files {
+            let text = std::fs::read_to_string(path).unwrap().replace("\r\n", "\n");
+            // A unit test module may poke at `ort` itself, as this one does.
+            let text = text
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or_default();
+            let file = name(path);
+            for needle in environments {
+                configured.extend(text.matches(needle).map(|_| file.clone()));
+            }
+            if sessions.iter().any(|needle| text.contains(needle)) {
+                assert!(
+                    text.contains("init_environment()"),
+                    "{file} opens a session without `init_environment`"
+                );
+                opened.push(file);
+            }
+        }
+        opened.sort();
+        assert_eq!(configured, ["steno-speech/src/onnx.rs"]);
+        assert_eq!(
+            opened,
+            ["steno-diarize/src/onnx.rs", "steno-speech/src/onnx.rs"]
+        );
+        let source = std::fs::read_to_string(crates.join("steno-speech/src/onnx.rs")).unwrap();
+        assert!(source.contains(concat!("ort::", "init().with_telemetry(false).commit()")));
     }
 }
