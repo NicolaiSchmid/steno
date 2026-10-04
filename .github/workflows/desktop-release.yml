@@ -149,16 +149,20 @@ jobs:
         with:
           toolchain: stable
 
-      # Keeps the build host's paths out of release panics: the workspace
-      # reads `steno/…`, the cargo home (dependency sources) `cargo/…`. Set
-      # for the job so the sidecar and the app share one dependency build.
+      # Keeps the build host's paths out of release panics. The cargo home
+      # (the dependency sources) is the prefix that matters and reads
+      # `cargo/…`; Cargo already passes the workspace's own paths relative,
+      # and any absolute one left reads `steno/…`. Set for the job so the
+      # sidecar and the app both get it. The encoded form separates flags
+      # with 0x1f, so a path with a space stays one flag.
       - name: Remap source paths
         shell: bash
         run: |
           set -euo pipefail
           cargo_home="${CARGO_HOME:-$HOME/.cargo}"
           if [ "$RUNNER_OS" = Windows ]; then cargo_home="$(cygpath -aw "$cargo_home")"; fi
-          echo "RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=steno --remap-path-prefix=$cargo_home=cargo" >> "$GITHUB_ENV"
+          sep=$'\x1f'
+          echo "CARGO_ENCODED_RUSTFLAGS=--remap-path-prefix=$GITHUB_WORKSPACE=steno$sep--remap-path-prefix=$cargo_home=cargo" >> "$GITHUB_ENV"
 
       - name: Target directory outside the workspace (self-hosted runners only)
         if: runner.environment == 'self-hosted'

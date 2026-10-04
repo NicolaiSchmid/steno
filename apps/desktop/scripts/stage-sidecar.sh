@@ -12,7 +12,8 @@
 #
 #   apps/desktop/scripts/stage-sidecar.sh
 #
-# Honours CARGO_TARGET_DIR and RUSTFLAGS.
+# Honours CARGO_TARGET_DIR and the flags in CARGO_ENCODED_RUSTFLAGS or
+# RUSTFLAGS.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"

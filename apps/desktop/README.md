@@ -214,9 +214,12 @@ dropped as above or the feature is on. A plain debug build loads
 `localhost:5173` either way.
 
 Panic messages in a release binary would carry the build host's source
-paths until Cargo's `trim-paths` stabilises; the release workflow sets
-`RUSTFLAGS=--remap-path-prefix` so the workspace reads `steno/…` and the
-dependency sources in the cargo home `cargo/…` instead.
+paths until Cargo's `trim-paths` stabilises. The release workflow passes
+`--remap-path-prefix` to the sidecar's and the app's builds (through
+`CARGO_ENCODED_RUSTFLAGS`, so a path with a space stays one flag): the
+dependency sources in the cargo home read `cargo/…`. Cargo already gives
+the workspace's own sources relative paths; any absolute one reads
+`steno/…`.
 
 ## Release
 
