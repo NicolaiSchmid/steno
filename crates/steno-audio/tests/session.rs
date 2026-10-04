@@ -2178,7 +2178,9 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() 
     // rings while the gap waits on the clock; the writer drains the relay
     // in real time, so the gap's 5 ms waits are driven as they appear.
     let mut seen = vec![notices.recv_timeout(RECV).unwrap()];
+    let deadline = Instant::now() + RECV;
     while seen.len() < 2 {
+        assert!(Instant::now() < deadline, "no resume within {RECV:?}");
         if let Ok(notice) = notices.recv_timeout(Duration::from_millis(2)) {
             seen.push(notice);
         } else if clock.pending_sleepers() == 1 {
@@ -2210,6 +2212,10 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() 
             .unwrap_or(0)
     };
     let refused = dropped(AudioLane::Mic);
+    assert!(
+        refused < 100,
+        "the writer drained the new device: {refused}"
+    );
     assert_eq!(dropped(AudioLane::System), refused);
     assert_eq!(
         master.frame_count() + 480 * refused,
@@ -2217,6 +2223,10 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() 
     );
     for channel in &master.channels {
         assert!(channel[24_000..108_000].iter().all(|s| *s == 0.0));
+        assert!(
+            channel[108_000..].iter().any(|s| *s != 0.0),
+            "the new device's audio follows the gap"
+        );
     }
     assert_eq!(
         result.statistics.duration,
@@ -2396,7 +2406,12 @@ fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
     release.send(()).unwrap();
     // The writer drains the old audio while the gap's waits are stepped,
     // until it holds the first frame of silence.
+    let deadline = Instant::now() + RECV;
     loop {
+        assert!(
+            Instant::now() < deadline,
+            "no frame of silence within {RECV:?}"
+        );
         match holds.recv_timeout(Duration::from_millis(2)) {
             Ok(held) => {
                 assert_eq!(held, Held::FirstSilence);
