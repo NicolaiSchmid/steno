@@ -194,9 +194,10 @@ pair from `cargo tauri signer generate`. The private half is never in the
 repository; it is the secret `TAURI_SIGNING_PRIVATE_KEY` (see Release).
 With `createUpdaterArtifacts` on, a bundle build without the key fails;
 Rust CI and a local build without the key turn it off through the
-configuration merge. The lane follows the installed version as it did with
-Sparkle: a pre-release reads the beta manifest first, a release the stable
-one only (`updater.rs`; the manifests are under Release).
+configuration merge. The lane follows the installed version, as Sparkle's
+channel does in the Swift app: a pre-release reads the beta manifest first,
+a release the stable one only (`updater.rs`; the manifests are under
+Release).
 
 To run a debug binary against the embedded bundle instead of the dev server
 (what the smoke does), drop the dev URL through Tauri's own configuration
@@ -239,7 +240,11 @@ finding.
 1. On `main`, set `[workspace.package] version` in `Cargo.toml` and merge.
    A hyphen (`0.2.0-rc.1`) means the beta lane only; a pre-release ends in
    a number.
-2. `git tag desktop-v<version> <commit> && git push origin desktop-v<version>`.
+2. Tag the merge commit:
+   `git tag desktop-v<version> <merge commit> && git push origin desktop-v<version>`.
+   Push one tag at a time and wait for its publish: GitHub keeps one
+   waiting job per concurrency group, so a third tag cancels the second's
+   waiting publish.
 3. Watch the Desktop release run. `publish` runs only when all three
    platforms bundled.
 4. Check what the lanes serve:
@@ -248,22 +253,48 @@ finding.
 
 ### When a run fails
 
+Re-run only the failed jobs, never all jobs: a full re-run rebuilds and
+replaces the release's assets while the lanes still serve the old
+`latest.json`, whose signatures do not match the new assets until
+**Update lanes** finishes.
+
 - **plan**: the tag does not name the workspace version, or the MSI
-  cannot carry the version. Delete the tag, fix the version on `main`, tag
-  again.
+  cannot carry the version. Delete the tag
+  (`git push origin :refs/tags/desktop-v<version>` and
+  `git tag -d desktop-v<version>`), fix the version on `main`, tag again.
 - **Check secrets**: add the secret it names (see the table below).
 - **cargo deny**: update the dependency, or name the crate with its reason
   in `deny.toml`.
 - **Build**: a compile error Rust CI would show too; fix it on `main`,
-  then delete the tag and tag again.
+  then delete the tag as above and tag again.
 - **Notarise the disk image**: notarytool's log for the submission is in
   the step output. A notarisation failure in **Bundle** is the bundler's
   error in that step's output.
 - **Check the bundles**: the `::error::` names the file or the check that
   failed.
+- **A job that timed out or lost its runner**: `notarize-dmg.sh` gives up
+  after 45 minutes, but the bundler's own notarisation of the `.app` waits
+  until the job's 90-minute timeout. Check `xcrun notarytool history` with
+  the App Store Connect key, then re-run the failed jobs; `publish` follows
+  once every platform bundled.
 - **publish**: re-run the failed jobs. An existing release is reused and
   its assets replaced; the lanes move as on the first run, never
-  backwards.
+  backwards. A publish cancelled while it waited (a third tag, see
+  Cutting a release) is re-run the same way.
+
+### A bad release
+
+Installed apps only take a higher version, so no lane can take a user
+back. To stop the spread, put the previous manifest on the lane by hand:
+
+```sh
+gh release download desktop-v<previous> -p latest.json
+gh release upload desktop-beta latest.json --clobber
+```
+
+(and `desktop-stable` for a release). Then fix forward with a higher
+version. Its tag moves the lane as usual, because the lane now serves the
+older version.
 
 ### Secrets
 
@@ -278,6 +309,14 @@ finding.
 
 `scripts/require-secrets.sh` names every missing one before anything is
 built.
+
+Installed apps verify updates only with the `pubkey` they were built with.
+To rotate the updater key, publish one release whose `tauri.conf.json`
+carries the new public key, signed with the old private key; publish's
+signature check reads the config's key, so for that run it has to be
+pointed at the old one. After that, replace `TAURI_SIGNING_PRIVATE_KEY`.
+An app that never installed that release needs a manual install, and so
+does every app if the key is lost.
 
 ### The speech sidecar
 
@@ -351,7 +390,7 @@ release (no hyphen), the beta lane every version, each only when the
 version is at or above the one the lane serves (`scripts/updater-lanes.sh`,
 SemVer precedence). A rerun of a tag moves the same lanes again; an older
 tag or a hotfix on an older line leaves a lane where it is. One publish
-runs at a time. Every desktop release is a GitHub pre-release and never
+runs at a time, and one more waits (see Cutting a release). Every desktop release is a GitHub pre-release and never
 "latest": until the Mac cutover (`.plans/2026-10-04-mac-cutover.md`) the
 "latest release" that the repository README, the site and the Homebrew
 cask point at is the Swift app's.

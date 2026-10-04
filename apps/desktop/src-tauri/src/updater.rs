@@ -1,9 +1,9 @@
 //! Updates over `tauri-plugin-updater`: a signed manifest per lane on the
 //! GitHub release, checked on request from the tray or from Settings
-//! (`updates.check`). The lane follows the installed version, as it does
-//! with Sparkle: a pre-release build ("0.11.0-rc.1") reads the `beta`
-//! manifest first and falls back to the stable one; a stable build reads
-//! the stable manifest only. No setting.
+//! (`updates.check`). The lane follows the installed version, as Sparkle's
+//! channel does in the Swift app: a pre-release build ("0.11.0-rc.1") reads
+//! the beta lane's manifest first and falls back to the stable one; a
+//! stable build reads the stable manifest only. No setting.
 //!
 //! Each lane is a rolling GitHub release that holds only its `latest.json`,
 //! which `.github/workflows/desktop-release.yml` replaces when it publishes
