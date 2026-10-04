@@ -2,9 +2,9 @@
 //! fixture through the Parakeet engine the platform runs (the speech
 //! sidecar off the Mac, `CoreML` on it) and the ONNX diarizer, the way
 //! `steno process --engine parakeet-v3` wires them, asserting the shape of
-//! the exported `meeting.json`. Set `STENO_MODEL_TESTS=1`. The models
-//! download on first run, off the Mac about 2.6 GB, nearly all of it the
-//! fp32 Parakeet export; on the Mac the `CoreML` Parakeet must already be
+//! the exported `meeting.json`. Set `STENO_MODEL_TESTS=1`. The ONNX models
+//! download on first run (off the Mac about 2.6 GB, nearly all of it the
+//! fp32 Parakeet export); on the Mac the `CoreML` Parakeet must already be
 //! in `STENO_MODELS_DIR` (`fluidaudio/parakeet-tdt-0.6b-v3/`).
 //! `STENO_MODELS_DIR` keeps the models between runs. Off the Mac the
 //! sidecar binary must be built in the target directory

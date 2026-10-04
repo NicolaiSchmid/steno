@@ -477,13 +477,8 @@ impl SpeechModels for ModelStoreSpeechModels {
     fn is_installed(&self, asset: ModelAsset) -> bool {
         match asset {
             ModelAsset::OfflineDiarizer => self.diarizer_paths().iter().all(|path| path.is_file()),
-            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
-                coreml_parakeet_installed(&self.coreml)
-            }
-            // Every model the ONNX engine loads.
-            ModelAsset::ParakeetV3 => steno_speech::ModelAsset::all()
-                .iter()
-                .all(|asset| self.speech.is_installed(asset)),
+            // The `CoreML` model, or the export with Silero VAD.
+            ModelAsset::ParakeetV3 => self.engine_installed(PARAKEET_V3),
             other => {
                 Self::speech_asset(other).is_some_and(|asset| self.speech.is_installed(&asset))
             }
