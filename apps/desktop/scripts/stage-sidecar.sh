@@ -1,26 +1,18 @@
 #!/usr/bin/env bash
-# Builds `steno-speech-sidecar` in release and puts it where the Tauri
-# bundler looks for the `externalBin` that `tauri.release.conf.json`
-# declares: `apps/desktop/src-tauri/binaries/steno-speech-sidecar-<target
-# triple>` (plus `.exe` on Windows). The bundler strips the triple and
-# installs the binary beside the app's own, where
-# `SidecarConfig::beside_current_exe` (crates/steno-speech) looks for it.
-# The triple is the host's, the one a `tauri build` without `--target`
-# builds for. Run it before `tauri build --config tauri.release.conf.json`;
-# the directory is ignored by git. Prints the staged paths.
+# Builds `steno-speech-sidecar` in release and stages it as the `externalBin`
+# that `tauri.release.conf.json` declares:
+# `apps/desktop/src-tauri/binaries/steno-speech-sidecar-<host triple>[.exe]`
+# (ignored by git). The bundler strips the triple and installs it beside the
+# app's binary. Run it before `tauri build --config tauri.release.conf.json`.
+# Prints the staged paths.
 #
-# ONNX Runtime is linked statically, but its Windows build imports
-# `DirectML.dll` (the app's binary and the sidecar both do), which `ort`
-# copies beside the binaries it builds. The MSI picks up every DLL there on
-# its own and the NSIS installer does not, which would leave the older
-# copy in System32 to load, so on Windows the DLL is staged as well and
-# `tauri.release.windows.conf.json` installs it beside the app for both.
+# On Windows both binaries import `DirectML.dll`, which the NSIS installer
+# would not pick up on its own (leaving the older copy in System32 to load),
+# so it is staged too and `tauri.release.windows.conf.json` installs it.
 #
 #   apps/desktop/scripts/stage-sidecar.sh
 #
-# Honours CARGO_TARGET_DIR (the self-hosted runners keep the target
-# directory outside the workspace) and RUSTFLAGS, which the release job
-# sets for both builds so they share one dependency cache.
+# Honours CARGO_TARGET_DIR and RUSTFLAGS.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -43,6 +35,7 @@ if [[ -n "$exe" ]]; then
   # cache kept its build script from running again.
   dll="$(find "$(dirname "$built")" -name DirectML.dll -print -quit)"
   test -n "$dll" || { echo "::error::no DirectML.dll under $(dirname "$built"); if ONNX Runtime no longer loads it, drop it here and in tauri.release.windows.conf.json" >&2; exit 1; }
-  cp "$dll" "$(dirname "$staged")/DirectML.dll"
-  echo "$(dirname "$staged")/DirectML.dll"
+  staged_dll="$(dirname "$staged")/DirectML.dll"
+  cp "$dll" "$staged_dll"
+  echo "$staged_dll"
 fi

@@ -1,35 +1,27 @@
 #!/usr/bin/env bash
-# Checks that the installer bundles carry `steno-speech-sidecar` where the
-# app looks for it: `SidecarConfig::beside_current_exe` (crates/steno-speech)
-# takes the directory of the running binary, so the sidecar must sit beside
-# `steno-desktop` once installed. Each bundle is unpacked the way its
-# installer lays it out, the two binaries are found side by side, and the
-# sidecar is started from there: it greets with its `ready` frame and exits
-# when its stdin ends, which proves it runs where it was installed (on
-# macOS: under the hardened runtime, with the signature it carries).
+# Checks that the installer bundles carry `steno-speech-sidecar` beside
+# `steno-desktop` once installed, where `SidecarConfig::beside_current_exe`
+# (crates/steno-speech) looks for it. Each bundle is unpacked the way its
+# installer lays it out, and the sidecar is started from there: it greets
+# with its `ready` frame and exits when its stdin ends.
 #
 #   apps/desktop/scripts/check-bundle.sh [--signed] <bundle dir> <types>
 #
-# <bundle dir> is target/release/bundle or wherever the build put it;
-# <types> the comma-separated bundle types the build made, as Tauri's
-# `--bundles` takes them:
+# <types> is the comma-separated list Tauri's `--bundles` takes:
 #
-#   deb       deb/*.deb, unpacked with dpkg-deb -x: usr/bin/ holds both
-#   appimage  appimage/*.AppImage, unpacked with --appimage-extract: the
-#             same under usr/bin/
-#   app       macos/*.app: Contents/MacOS/ holds the bundle's executable
-#             and the sidecar. With --signed, also the Developer ID
-#             signature, the hardened runtime, a secure timestamp and one
-#             team on the app, its executable and the sidecar, the app's two
+#   deb       deb/*.deb, unpacked with dpkg-deb -x, into usr/bin/
+#   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
+#             usr/bin/
+#   app       macos/*.app, into Contents/MacOS/. With --signed, also the
+#             Developer ID signature, hardened runtime, timestamp and team
+#             of the app, its executable and the sidecar, the two
 #             entitlements, the stapled ticket and Gatekeeper's verdict
 #   dmg       nothing of its own: the image holds the .app checked above
-#   msi       msi/*.msi, unpacked by an administrative install, which writes
-#             the files as the installer would: the install directory holds
-#             both and the libraries they load, DirectML.dll and the Visual
-#             C++ runtime (checked by name: the runner has system copies of
-#             both, so starting the sidecar alone would not tell)
-#   nsis      nsis/*-setup.exe, installed silently into a scratch
-#             directory: the same
+#   msi       msi/*.msi, unpacked by an administrative install; the install
+#             directory also holds DirectML.dll and the Visual C++ runtime
+#             (checked by name: the runner has system copies of both)
+#   nsis      nsis/*-setup.exe, installed silently into a scratch directory;
+#             the same as msi
 #
 # Exits 1 with an `::error::` at the first failed check.
 set -euo pipefail
