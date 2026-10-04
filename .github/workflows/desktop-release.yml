@@ -10,26 +10,25 @@ name: Desktop release
 #            (signing-keychain.sh) and notarises the `.app`;
 #            notarize-dmg.sh then notarises the image.
 #   Linux    `.deb` and `.AppImage`, x86_64.
-#   Windows  `.msi` and NSIS `.exe`, x86_64. Not code-signed: there is no
-#            Windows certificate.
+#   Windows  `.msi` and NSIS `-setup.exe`, x86_64. Not code-signed: there
+#            is no Windows certificate. The MSI version comes from
+#            wix-version.sh, since WiX takes numbers only.
 #
 # Every bundle carries `steno-speech-sidecar` beside the app's binary
 # (tauri.release.conf.json, stage-sidecar.sh, checked by check-bundle.sh).
 # Every updater artifact gets a `.sig` from TAURI_SIGNING_PRIVATE_KEY, the
 # private half of `plugins.updater.pubkey` in tauri.conf.json (no password).
 #
-# A pushed `desktop-v<version>` tag builds all three platforms and
-# publishes; the version must be the one under `[workspace.package]` in
-# Cargo.toml. The prefix keeps clear of the Swift release.yml's `v*` and
-# mobile-cd.yml's `ios-fp-*`. A manual run builds the platforms it is given
-# as workflow artifacts and publishes nothing.
+# A `desktop-v<version>` tag (the `[workspace.package]` version) builds all
+# three platforms and publishes; a manual run builds the platforms it is
+# given and publishes nothing.
 #
 # Publishing writes one GitHub release per tag with every bundle, its `.sig`
-# and `latest.json`, then copies the manifest to the rolling `desktop-beta`
-# lane and, for a release without a hyphen, `desktop-stable` (the lanes
-# `updater.rs` reads). Every release here is a pre-release and never
-# "latest": until the Mac cutover (.plans/2026-10-04-mac-cutover.md) the
-# "latest release" belongs to the Swift app.
+# and `latest.json`, then updates the rolling `desktop-beta` and
+# `desktop-stable` lanes that `updater.rs` reads (the Update lanes step says
+# which). Every release here is a pre-release and never "latest": until the
+# Mac cutover (.plans/2026-10-04-mac-cutover.md) the "latest release"
+# belongs to the Swift app.
 #
 # `cargo deny check` (deny.toml) must pass before any bundle builds. The
 # bundles carry the real host; the opt-in `fixture-host` feature stays out.
@@ -53,8 +52,9 @@ permissions:
   contents: read
 
 jobs:
-  # The version and the platforms. A job-level `if` cannot read the matrix,
-  # so release-matrix.sh turns the input into the include list.
+  # The version, its MSI form and the platforms. A job-level `if` cannot
+  # read the matrix, so release-matrix.sh turns the input into the include
+  # list.
   plan:
     name: plan
     runs-on: ubuntu-latest
@@ -62,7 +62,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       version: ${{ steps.version.outputs.version }}
-      prerelease: ${{ steps.version.outputs.prerelease }}
+      wix_version: ${{ steps.version.outputs.wix_version }}
     steps:
       - uses: actions/checkout@v4
       - id: version
@@ -74,11 +74,11 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME does not name the workspace version $version; tag desktop-v$version or bump [workspace.package] first"
             exit 1
           fi
-          prerelease=false
-          case "$version" in *-*) prerelease=true ;; esac
+          # Before any build: a version WiX cannot take fails here.
+          wix_version="$(apps/desktop/scripts/wix-version.sh "$version")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
-          echo "version=$version prerelease=$prerelease"
+          echo "wix_version=$wix_version" >> "$GITHUB_OUTPUT"
+          echo "version=$version wix_version=$wix_version"
       - id: plan
         env:
           PLATFORMS: ${{ inputs.platforms || 'linux,windows,macos' }}
@@ -170,8 +170,8 @@ jobs:
           cache: pnpm
           cache-dependency-path: apps/macos/web/pnpm-lock.yaml
 
-      # The web UI first (beforeBuildCommand would build it again; the
-      # config merge below drops that so the CLI does not run pnpm twice).
+      # The web UI first; Build's config merge drops `beforeBuildCommand` so
+      # it is not built twice.
       - name: Web install and build
         run: pnpm install --frozen-lockfile && pnpm build
         working-directory: apps/macos/web
@@ -180,9 +180,32 @@ jobs:
         shell: bash
         run: apps/desktop/scripts/stage-sidecar.sh
 
+      # The Tauri CLI as the prebuilt npm package, pinned to the `tauri`
+      # crate's version in Cargo.lock. The release binary is built here
+      # without any secret in the environment, so no dependency's build
+      # script or proc macro sees one; Bundle packages it with the same
+      # configuration. tauri.release.conf.json adds the sidecar; on Windows
+      # tauri.release.windows.conf.json adds the DirectML.dll it loads, and
+      # the plan's MSI version goes in as `bundle.windows.wix.version`.
+      - name: Build
+        shell: bash
+        working-directory: apps/desktop/src-tauri
+        env:
+          WIX_VERSION: ${{ needs.plan.outputs.wix_version }}
+        run: |
+          set -euo pipefail
+          configs=(--config tauri.release.conf.json)
+          if [ "${{ matrix.name }}" = windows ]; then
+            configs+=(--config tauri.release.windows.conf.json
+              --config "{\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$WIX_VERSION\"}}}}")
+          fi
+          configs+=(--config '{"build":{"beforeBuildCommand":null}}')
+          printf '%s\n' "${configs[@]}" > "$RUNNER_TEMP/tauri-configs"
+          pnpm dlx @tauri-apps/cli@2.12.1 build --ci --no-bundle "${configs[@]}"
+
       # The bundler signs with the identity this prints. The App Store
       # Connect key serves the bundler and notarize-dmg.sh; the last step
-      # removes it.
+      # removes both.
       - name: Signing keychain and notarisation key
         if: matrix.name == 'macos'
         env:
@@ -200,10 +223,8 @@ jobs:
             echo "ASC_KEY_PATH=$key_path"
           } >> "$GITHUB_ENV"
 
-      # The Tauri CLI as the prebuilt npm package, pinned to the `tauri`
-      # crate's version in Cargo.lock because it sees the signing keys.
-      # tauri.release.conf.json adds the sidecar; on Windows
-      # tauri.release.windows.conf.json adds the DirectML.dll it loads.
+      # The binary Build left, signed and packaged with the keys. The CLI
+      # pin matters most here, since this step sees them.
       - name: Bundle
         shell: bash
         working-directory: apps/desktop/src-tauri
@@ -216,13 +237,9 @@ jobs:
           APPLE_API_KEY_PATH: ${{ env.ASC_KEY_PATH }}
         run: |
           set -euo pipefail
-          configs=(--config tauri.release.conf.json)
-          if [ "${{ matrix.name }}" = windows ]; then
-            configs+=(--config tauri.release.windows.conf.json)
-          fi
-          pnpm dlx @tauri-apps/cli@2.12.1 build --ci \
-            --bundles "${{ matrix.bundles }}" "${configs[@]}" \
-            --config '{"build":{"beforeBuildCommand":null}}'
+          configs=()
+          while IFS= read -r config; do configs+=("$config"); done < "$RUNNER_TEMP/tauri-configs"
+          pnpm dlx @tauri-apps/cli@2.12.1 bundle --ci --bundles "${{ matrix.bundles }}" "${configs[@]}"
 
       - name: Notarise the disk image
         if: matrix.name == 'macos'
@@ -273,10 +290,15 @@ jobs:
           apps/desktop/scripts/signing-keychain.sh remove "$KEYCHAIN_PATH" "$KEYCHAINS_BEFORE"
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
+  # Only a pushed tag publishes, one run at a time, so two tags never write
+  # the lanes at once.
   publish:
     name: publish
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [plan, bundle]
+    concurrency:
+      group: desktop-publish
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -285,7 +307,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.ref_name }}
       VERSION: ${{ needs.plan.outputs.version }}
-      PRERELEASE: ${{ needs.plan.outputs.prerelease }}
     steps:
       - uses: actions/checkout@v4
 
@@ -323,7 +344,9 @@ jobs:
           count=0
           for sig in assets/*.sig; do
             base64 --decode "$sig" > "$RUNNER_TEMP/signature.minisig"
-            minisign -V -q -p "$RUNNER_TEMP/updater.pub" -x "$RUNNER_TEMP/signature.minisig" -m "${sig%.sig}"
+            asset="${sig#assets/}"
+            minisign -V -q -p "$RUNNER_TEMP/updater.pub" -x "$RUNNER_TEMP/signature.minisig" -m "${sig%.sig}" \
+              || { echo "::error::$asset does not verify ${asset%.sig} against plugins.updater.pubkey"; exit 1; }
             count=$((count + 1))
           done
           test "$count" -eq 5 || { echo "::error::expected five updater signatures, found $count"; exit 1; }
@@ -339,7 +362,7 @@ jobs:
       - name: Publish the release
         run: |
           set -euo pipefail
-          notes="Steno desktop $VERSION: macOS (Apple silicon, signed and notarised), Linux (.deb, AppImage) and Windows (.msi, setup .exe; not code-signed, so SmartScreen asks before the first install). The Mac app on the Swift releases stays the one to install on macOS until the cutover."
+          notes="Steno desktop $VERSION: macOS (Apple silicon, signed and notarised), Linux (.deb, AppImage) and Windows (.msi, NSIS -setup.exe; not code-signed, so SmartScreen asks before the first install). The Mac app on the Swift releases stays the one to install on macOS until the cutover."
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG exists; replacing assets"
           else
@@ -351,24 +374,34 @@ jobs:
           gh release view "$TAG" --json url --jq .url
 
       # After the release is public, so the manifest's URLs resolve. Each
-      # lane is a release holding only latest.json, its tag on this commit.
-      # A release moves the beta lane too, unless it serves a pre-release
-      # of a later version (0.3.0-rc.1 stays when 0.2.1 ships).
+      # lane is a release holding only latest.json, its tag on the commit of
+      # the version it serves. Each lane only moves forward: the stable lane
+      # takes a release (no hyphen), the beta lane every version, each only
+      # when the version is at or above the one the lane serves
+      # (updater-lanes.sh). A lane that does not exist yet (404) is created;
+      # any other failure to read one stops the step.
       - name: Update lanes
         run: |
           set -euo pipefail
-          lanes=(desktop-beta)
-          if [ "$PRERELEASE" != true ]; then
-            lanes=(desktop-stable)
-            beta="$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/desktop-beta/latest.json" | jq -r .version || true)"
-            newest="$(printf '%s\n%s\n' "${beta%%-*}" "$VERSION" | sort -V | tail -n 1)"
-            if [ -z "$beta" ] || [ "$newest" = "$VERSION" ]; then
-              lanes+=(desktop-beta)
-            else
-              echo "the beta lane keeps $beta, a later version than $VERSION"
-            fi
-          fi
-          for lane in "${lanes[@]}"; do
+          # serving <lane>: the version its latest.json serves, empty if none.
+          serving() {
+            local code
+            code="$(curl -sSL --retry 3 -o "$RUNNER_TEMP/$1.json" -w '%{http_code}' \
+              "https://github.com/$GITHUB_REPOSITORY/releases/download/$1/latest.json")" \
+              || { echo "::error::could not read the $1 manifest" >&2; return 1; }
+            case "$code" in
+              404) return 0 ;;
+              200) ;;
+              *) echo "::error::reading the $1 manifest gave HTTP $code" >&2; return 1 ;;
+            esac
+            jq -er '.version // empty' "$RUNNER_TEMP/$1.json" \
+              || { echo "::error::the $1 manifest names no version" >&2; return 1; }
+          }
+          beta="$(serving desktop-beta)"
+          stable="$(serving desktop-stable)"
+          moving="$(apps/desktop/scripts/updater-lanes.sh "$VERSION" "$beta" "$stable")"
+          [ -n "$moving" ] || { echo "no lane moves to $VERSION"; exit 0; }
+          while IFS= read -r lane; do
             notes="The update manifest of the ${lane#desktop-} lane: Steno desktop $VERSION ($TAG). Installed desktop apps read latest.json from here; the installers are on $TAG."
             if gh release view "$lane" >/dev/null 2>&1; then
               gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$lane" -f sha="$GITHUB_SHA" -F force=true >/dev/null
@@ -379,4 +412,4 @@ jobs:
             fi
             gh release upload "$lane" assets/latest.json --clobber
             echo "$lane serves $VERSION"
-          done
+          done <<< "$moving"
