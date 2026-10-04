@@ -1,9 +1,9 @@
 //! The COM and WASAPI calls behind the Windows capture backend and the
 //! audio-session enumeration: the Windows backend's only `unsafe` (the
 //! crate-wide list is in the crate doc). Written against Microsoft's
-//! documentation and compile-tested on the `windows-latest` CI runner
-//! only; no Windows machine with audio devices has run it (see the module
-//! doc of `capture::live::wasapi`). WP10a of
+//! documentation and tested on the `windows-latest` CI runner, which has
+//! no audio endpoint; no Windows machine with audio devices has run it
+//! (see the module doc of `capture::live::wasapi`). WP10a of
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS counterpart
 //! is `capture::live::hal`. No Swift counterpart.
 //!
@@ -31,9 +31,10 @@
 //!   escape the closure (its lifetime is the call's).
 //! - **Callbacks.** The notification objects (`#[implement]`) run on
 //!   threads the audio service owns. They only call the boxed closure they
-//!   were given, which sends on a channel or sets a flag; they never call
-//!   back into WASAPI (the documentation forbids it from inside
-//!   `IMMNotificationClient`) and never block. Each registration is undone
+//!   were given, which sends on a channel or records the time under the
+//!   capture watcher's short lock (never held across a WASAPI call); they
+//!   never call back into WASAPI (the documentation forbids it from inside
+//!   `IMMNotificationClient`) and never wait on anything else. Each registration is undone
 //!   in `Drop`. Microsoft does not say whether a callback can still be
 //!   running when the unregister call returns; it does not matter for
 //!   memory safety, because the object is reference counted and its
@@ -87,7 +88,7 @@ use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
 use crate::capture::split_streams::frames_from_hundred_nanoseconds;
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
-use crate::realtime::SliceView;
+use crate::realtime::{FollowerLane, SliceView};
 
 /// A failed COM or WASAPI call: which one, its `HRESULT`, the system's
 /// message for it.
@@ -445,8 +446,25 @@ fn float_format(channels: usize) -> WAVEFORMATEX {
 }
 
 /// The shared-mode buffer asked for: 100 ms, so a capture thread that is
-/// late by several periods loses nothing.
+/// late by several periods loses nothing. Microsoft's `Initialize` page
+/// asks event-driven shared-mode clients for 0 here, while its own loopback
+/// sample passes a duration; the engine treats it as a minimum either way,
+/// and [`CaptureClient::buffer_frames`] reads back what it chose.
 const BUFFER_DURATION: i64 = 1_000_000;
+
+/// The longest device period believed: the buffer asked for. Anything
+/// longer, or not positive, is taken for the usual 10 ms.
+const MAX_PERIOD: i64 = BUFFER_DURATION;
+
+/// The largest stream latency believed, 200 ms; a longer one is clamped.
+const MAX_LATENCY: i64 = 2_000_000;
+
+/// The largest buffer believed, in frames: the follower's one second of
+/// staging. The process-loopback client is reported to answer
+/// `GetBufferSize` with 0 or a huge value and no error, and the buffer
+/// sizes the capture threads' scratch, so it is clamped to between one
+/// period and this; a larger packet is split, never refused.
+const MAX_BUFFER_FRAMES: usize = FollowerLane::CAPACITY;
 
 /// How often a polled stream (no event) is drained: 50 ms, half its buffer.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -480,10 +498,10 @@ impl Drop for Event {
 /// Which loopback a system stream ended up on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopbackKind {
-    /// Process loopback excluding Steno's own process tree. Microsoft
-    /// documents it from build 20348; it is reported to work from Windows 10
-    /// 2004 (build 19041). Unverified here; the endpoint fallback covers
-    /// either.
+    /// Process loopback excluding Steno's own process tree. Microsoft's
+    /// API page names build 20438 and its ApplicationLoopback sample build
+    /// 20348; it is reported to work from Windows 10 2004 (build 19041).
+    /// Unverified here; the endpoint fallback covers either.
     Process,
     /// Loopback of the default render endpoint, Steno's own output
     /// included.
@@ -596,10 +614,12 @@ impl CaptureClient {
             unsafe { client.GetService() },
             "IAudioClient::GetService(IAudioCaptureClient)",
         )?;
-        // The process-loopback client implements neither; 0 and the usual
-        // 10 ms period stand in.
+        // The process-loopback client may implement neither; 0 and the
+        // usual 10 ms period stand in.
         // SAFETY: plain call on the initialised client.
-        let latency = unsafe { client.GetStreamLatency() }.unwrap_or(0);
+        let latency = unsafe { client.GetStreamLatency() }
+            .unwrap_or(0)
+            .clamp(0, MAX_LATENCY);
         let period = if event.is_none() {
             // A polled stream is drained once per poll, so that is its
             // packet rhythm, whatever the engine's period.
@@ -608,26 +628,29 @@ impl CaptureClient {
             let mut period: i64 = 0;
             // SAFETY: `period` is a live i64 for the call to write.
             let read = unsafe { client.GetDevicePeriod(Some(&raw mut period), None) };
-            if read.is_ok() && period > 0 {
+            if read.is_ok() && (1..=MAX_PERIOD).contains(&period) {
                 period
             } else {
                 100_000
             }
         };
+        let period_frames = frames_from_hundred_nanoseconds(period, SAMPLE_RATE).max(1);
         Ok(Self {
             capture,
             client,
             event,
             channels,
-            buffer_frames,
-            period_frames: frames_from_hundred_nanoseconds(period, SAMPLE_RATE),
+            buffer_frames: buffer_frames.clamp(period_frames, MAX_BUFFER_FRAMES),
+            period_frames,
             latency_frames: frames_from_hundred_nanoseconds(latency, SAMPLE_RATE),
             discontinuities: 0,
             first_packet: true,
         })
     }
 
-    /// Frames the stream's buffer holds: the largest packet.
+    /// Frames the stream's buffer holds, the largest packet expected:
+    /// between one period and [`MAX_BUFFER_FRAMES`], whatever the engine
+    /// answered.
     #[must_use]
     pub fn buffer_frames(&self) -> usize {
         self.buffer_frames
@@ -639,7 +662,7 @@ impl CaptureClient {
         self.period_frames
     }
 
-    /// `GetStreamLatency`, in frames at 48 kHz.
+    /// `GetStreamLatency`, in frames at 48 kHz, at most 200 ms.
     #[must_use]
     pub fn latency_frames(&self) -> usize {
         self.latency_frames
@@ -715,21 +738,22 @@ impl CaptureClient {
             }
             self.first_packet = false;
             let count = frames as usize;
-            let samples = if silent || data.is_null() || count == 0 {
+            // Alignment is checked before the slice is made.
+            #[allow(clippy::cast_ptr_alignment)]
+            let floats = data.cast::<f32>();
+            // A buffer not aligned for `f32` is delivered as silence of
+            // its length, as `interleaved_view` does.
+            let samples = if silent || floats.is_null() || !floats.is_aligned() || count == 0 {
                 None
             } else {
                 // SAFETY: `GetBuffer` succeeded, so `data` points at
                 // `frames` frames in the format `initialize` gave the
-                // client: 32-bit floats, `channels` interleaved, block
-                // aligned (so aligned for `f32`). The engine neither
+                // client: 32-bit floats, `channels` interleaved; it is
+                // aligned for `f32` (checked above). The engine neither
                 // frees nor writes them until `ReleaseBuffer` below, and
                 // the slice lives only for the `handle` call.
-                #[allow(clippy::cast_ptr_alignment)]
                 Some(unsafe {
-                    std::slice::from_raw_parts(
-                        data.cast::<f32>().cast_const(),
-                        count * self.channels,
-                    )
+                    std::slice::from_raw_parts(floats.cast_const(), count * self.channels)
                 })
             };
             handle(SliceView {
@@ -759,8 +783,8 @@ struct ActivationParams(NonNull<ActivationBlob>);
 struct ActivationBlob {
     params: AUDIOCLIENT_ACTIVATION_PARAMS,
     /// Never dropped: `PROPVARIANT`'s `Drop` is `PropVariantClear`, which
-    /// would `CoTaskMemFree` the blob, and the blob is `params` beside it.
-    /// (Dropping it was a heap corruption the Windows runner caught.)
+    /// would `CoTaskMemFree` the blob, and the blob is `params` beside it:
+    /// dropping it would free the blob twice.
     variant: ManuallyDrop<PROPVARIANT>,
 }
 
