@@ -274,6 +274,13 @@ pub trait SpeechModels: Send + Sync {
     fn source_repo(&self, asset: ModelAsset) -> &'static str {
         asset.source_repo()
     }
+
+    /// About how many bytes `asset`'s model takes once installed, shown
+    /// before a download and when the installed size cannot be read; the
+    /// default is the Swift app's measure, [`ModelAsset::approximate_bytes`].
+    fn expected_bytes(&self, asset: ModelAsset) -> i64 {
+        asset.approximate_bytes()
+    }
 }
 
 /// One entry of the Codex backend's model list. Swift: `CodexModel` in

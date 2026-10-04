@@ -475,7 +475,7 @@ impl Models {
                         }
                         None => format!(
                             "not installed (~{})",
-                            steno_host::labels::file_size(asset.approximate_bytes())
+                            steno_host::labels::file_size(service.expected_bytes(*asset))
                         ),
                     };
                     println!(

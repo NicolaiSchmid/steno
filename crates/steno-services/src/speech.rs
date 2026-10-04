@@ -570,6 +570,18 @@ impl SpeechModels for ModelStoreSpeechModels {
             other => other.source_repo(),
         }
     }
+
+    /// Where the speech sidecar runs Parakeet v3, the fp32 export's size
+    /// from its manifest, not the `CoreML` build's.
+    fn expected_bytes(&self, asset: ModelAsset) -> i64 {
+        match asset {
+            ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => {
+                let bytes = steno_speech::ModelAsset::parakeet_v3_fp32().total_size();
+                i64::try_from(bytes).unwrap_or(i64::MAX)
+            }
+            other => other.approximate_bytes(),
+        }
+    }
 }
 
 /// Model files on disk for the tests, so no test downloads one.
@@ -920,7 +932,7 @@ mod tests {
     /// With the sidecar chosen on the Mac (and always elsewhere), Parakeet
     /// v3 is the ONNX export: the `CoreML` model on disk does not count, so
     /// a recording's warm-up does not start a download it thinks it skips,
-    /// and Settings acknowledges the fp32 export.
+    /// and Settings acknowledges the fp32 export and shows its size.
     #[test]
     fn with_the_sidecar_chosen_parakeet_v3_is_the_onnx_export() {
         let dir = tempfile::tempdir().unwrap();
@@ -936,6 +948,46 @@ mod tests {
         assert_eq!(
             models.source_repo(ModelAsset::ParakeetV3),
             "nvidia/parakeet-tdt-0.6b-v3"
+        );
+        assert_eq!(parakeet_size_text(&models), fp32_size_text());
+    }
+
+    /// The Parakeet v3 row of Settings > Transcription before a download,
+    /// "Not downloaded" and the size `models` expects.
+    fn parakeet_size_text(models: &ModelStoreSpeechModels) -> String {
+        let speech = steno_host::settings::transcription::SpeechSettingsViewModel::new();
+        let snapshot = steno_host::settings::snapshots::transcription(&speech, models, "");
+        assert_eq!(snapshot.assets[0].id, ModelAsset::ParakeetV3.as_str());
+        snapshot.assets[0].detail.clone()
+    }
+
+    /// "Not downloaded" and the fp32 export's size, from its manifest.
+    fn fp32_size_text() -> String {
+        let bytes = steno_speech::ModelAsset::parakeet_v3_fp32().total_size();
+        format!(
+            "Not downloaded · {}",
+            steno_host::labels::file_size(i64::try_from(bytes).unwrap())
+        )
+    }
+
+    /// Settings shows the size of the model the platform runs: the
+    /// `CoreML` build's on the Mac by default, the fp32 export's (about
+    /// 2.6 GB) elsewhere. The diarizer keeps the Swift app's measure.
+    #[test]
+    fn the_expected_size_is_that_of_the_model_the_platform_runs() {
+        let models = testing::models_in(Path::new("/tmp/steno-models"));
+        let expected = if cfg!(target_os = "macos") {
+            format!(
+                "Not downloaded · {}",
+                steno_host::labels::file_size(ModelAsset::ParakeetV3.approximate_bytes())
+            )
+        } else {
+            fp32_size_text()
+        };
+        assert_eq!(parakeet_size_text(&models), expected);
+        assert_eq!(
+            models.expected_bytes(ModelAsset::OfflineDiarizer),
+            ModelAsset::OfflineDiarizer.approximate_bytes()
         );
     }
 

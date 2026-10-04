@@ -448,59 +448,15 @@ fn the_models_variable_names_the_models_directory() {
     );
 }
 
-// Every usage error of the Swift test in one place.
-#[allow(clippy::too_many_lines)]
+/// `dev models list` and `remove` act on the `--models-dir` they are given,
+/// not on the default models directory.
 #[test]
-fn usage_errors_exit_one_and_name_the_known_values() {
+fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
-    let db = home.join("steno.sqlite");
-    let db = db.to_str().unwrap();
     let models = home.join("models");
 
-    let bad_engine = steno(
-        &[
-            "process",
-            "/nonexistent.wav",
-            "--engine",
-            "parakeet-v9",
-            "--db",
-            db,
-        ],
-        home,
-    );
-    assert_eq!(bad_engine.status, 1);
-    assert!(
-        bad_engine.stderr.contains("parakeet-v9"),
-        "{}",
-        bad_engine.stderr
-    );
-    assert!(
-        bad_engine.stderr.contains("parakeet-v3"),
-        "the known ids are listed: {}",
-        bad_engine.stderr
-    );
-    assert!(bad_engine.stderr.contains("whisperkit-large-v3-turbo"));
-
-    let help = steno(&["process", "--help"], home);
-    assert_eq!(help.status, 0);
-    assert!(help.stdout.contains("--engine <engine>"), "{}", help.stdout);
-
-    let bad_bakeoff = steno(
-        &[
-            "dev",
-            "bakeoff",
-            home.to_str().unwrap(),
-            "--engines",
-            "nope",
-        ],
-        home,
-    );
-    assert_eq!(bad_bakeoff.status, 1);
-    assert!(bad_bakeoff.stderr.contains("nope") && bad_bakeoff.stderr.contains("parakeet-v3"));
-
-    // The diarizer's two files in `--models-dir`, so `list` and `remove`
-    // show that they act there and not on the default directory.
+    // The diarizer's two files in `--models-dir`.
     let diarization = models.join("onnx").join("diarization");
     std::fs::create_dir_all(&diarization).unwrap();
     let diarizer_files = [
@@ -569,6 +525,124 @@ fn usage_errors_exit_one_and_name_the_known_values() {
         home,
     );
     assert_eq!(remove.status, 0, "{}", remove.stderr);
+}
+
+/// `steno dev models list --models-dir <dir>` with `home`'s support
+/// directory, the line of `asset`.
+fn models_list_line(home: &Path, asset: &str) -> String {
+    let models = home.join("models");
+    let list = steno(
+        &[
+            "dev",
+            "models",
+            "list",
+            "--models-dir",
+            models.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert_eq!(list.status, 0, "{}", list.stderr);
+    list.stdout
+        .lines()
+        .find(|line| line.starts_with(&format!("{asset} ")))
+        .unwrap_or_else(|| panic!("{}", list.stdout))
+        .to_owned()
+}
+
+/// Parakeet v3 is listed with the size of the model the platform runs:
+/// the `CoreML` build's on the Mac by default; the fp32 export's (about
+/// 2.6 GB) elsewhere, and on the Mac too once `speech.json` chooses the
+/// speech sidecar.
+#[test]
+fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let not_installed =
+        |bytes: i64| format!("not installed (~{})", steno_host::labels::file_size(bytes));
+    let coreml = not_installed(steno_host::speech::ModelAsset::ParakeetV3.approximate_bytes());
+    let fp32 = not_installed(
+        i64::try_from(steno_speech::ModelAsset::parakeet_v3_fp32().total_size()).unwrap(),
+    );
+    assert_ne!(coreml, fp32);
+
+    let line = models_list_line(home, "parakeetV3");
+    let expected = if cfg!(target_os = "macos") {
+        &coreml
+    } else {
+        &fp32
+    };
+    assert!(line.ends_with(expected.as_str()), "{line}");
+
+    let environment = [
+        ("HOME", home.to_path_buf()),
+        ("XDG_DATA_HOME", home.join("share")),
+        ("APPDATA", home.join("appdata")),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_string_lossy().into_owned()))
+    .collect();
+    let support = steno_core::StenoPaths::support_directory(&environment);
+    std::fs::create_dir_all(&support).unwrap();
+    std::fs::write(
+        support.join("speech.json"),
+        br#"{"onnxSidecarOnMac": true}"#,
+    )
+    .unwrap();
+    let line = models_list_line(home, "parakeetV3");
+    assert!(line.ends_with(fp32.as_str()), "the sidecar chosen: {line}");
+}
+
+// Every usage error of the Swift test in one place.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn usage_errors_exit_one_and_name_the_known_values() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db = db.to_str().unwrap();
+    let models = home.join("models");
+
+    let bad_engine = steno(
+        &[
+            "process",
+            "/nonexistent.wav",
+            "--engine",
+            "parakeet-v9",
+            "--db",
+            db,
+        ],
+        home,
+    );
+    assert_eq!(bad_engine.status, 1);
+    assert!(
+        bad_engine.stderr.contains("parakeet-v9"),
+        "{}",
+        bad_engine.stderr
+    );
+    assert!(
+        bad_engine.stderr.contains("parakeet-v3"),
+        "the known ids are listed: {}",
+        bad_engine.stderr
+    );
+    assert!(bad_engine.stderr.contains("whisperkit-large-v3-turbo"));
+
+    let help = steno(&["process", "--help"], home);
+    assert_eq!(help.status, 0);
+    assert!(help.stdout.contains("--engine <engine>"), "{}", help.stdout);
+
+    let bad_bakeoff = steno(
+        &[
+            "dev",
+            "bakeoff",
+            home.to_str().unwrap(),
+            "--engines",
+            "nope",
+        ],
+        home,
+    );
+    assert_eq!(bad_bakeoff.status, 1);
+    assert!(bad_bakeoff.stderr.contains("nope") && bad_bakeoff.stderr.contains("parakeet-v3"));
+
     let bad_asset = steno(
         &[
             "dev",
