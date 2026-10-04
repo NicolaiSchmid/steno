@@ -1011,6 +1011,7 @@ mod tests {
                 SpeechSettings {
                     onnx_sidecar_on_mac,
                     models_mirror: Some("http://127.0.0.1:9/".to_owned()),
+                    ..SpeechSettings::default()
                 },
             )
         };
