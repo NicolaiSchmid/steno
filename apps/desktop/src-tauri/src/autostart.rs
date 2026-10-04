@@ -1,55 +1,29 @@
 //! Launch at login over `tauri-plugin-autostart`: a Launch Agent on macOS,
 //! the `autostart` desktop entry on Linux, the Run registry key on Windows.
 //! The Swift app registers itself with `SMAppService`, whose
-//! `requiresApproval` state has no Launch Agent counterpart; the enum keeps
-//! the Swift cases so the General section's snapshot can carry them
-//! unchanged once the host reads this module.
+//! `requiresApproval` state has no Launch Agent counterpart and never
+//! occurs here. The status is the host's `LoginItemStatus`, and
+//! `ShellLoginItem` is the host's `LoginItem` over this module (`WP6b`), so
+//! the General section reads and switches the real registration.
 //!
 //! Swift: `LoginItemController.swift`, `LoginItemStatus` in `AppProtocols.swift`.
 
+use steno_core::protocols::BoundaryResult;
+pub use steno_host::services::LoginItemStatus;
 use tauri::AppHandle;
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use crate::bridge::{BridgeError, failed};
 
-/// `GeneralSettingsSnapshot.launchAtLogin` in the contract. The host reads
-/// it for the General section (`WP6b`); the shell reads only `is_on`.
-/// `steno_host::services::LoginItemStatus` is the same set; `WP6b` keeps
-/// that one when it implements the host's `LoginItem` over this module.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub enum LoginItemStatus {
-    NotRegistered,
-    Enabled,
-    /// Never produced here; `SMAppService` only.
-    RequiresApproval,
-    /// The plugin could not read the registration; the message says why.
-    NotFound(String),
-}
-
-impl LoginItemStatus {
-    /// The raw value on the wire.
-    #[allow(dead_code)]
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::NotRegistered => "notRegistered",
-            Self::Enabled => "enabled",
-            Self::RequiresApproval => "requiresApproval",
-            Self::NotFound(_) => "notFound",
-        }
-    }
-
-    /// What the switch shows.
-    pub const fn is_on(&self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-
-    /// From the plugin's answer.
-    pub fn from_plugin(result: Result<bool, impl std::fmt::Display>) -> Self {
-        match result {
-            Ok(true) => Self::Enabled,
-            Ok(false) => Self::NotRegistered,
-            Err(error) => Self::NotFound(error.to_string()),
+/// The status from the plugin's answer; a registration the plugin could
+/// not read is `NotFound`, its reason logged.
+pub fn status_from_plugin(result: Result<bool, impl std::fmt::Display>) -> LoginItemStatus {
+    match result {
+        Ok(true) => LoginItemStatus::Enabled,
+        Ok(false) => LoginItemStatus::NotRegistered,
+        Err(error) => {
+            tracing::debug!(%error, "the login item could not be read");
+            LoginItemStatus::NotFound
         }
     }
 }
@@ -61,7 +35,7 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
 }
 
 pub fn status(app: &AppHandle) -> LoginItemStatus {
-    LoginItemStatus::from_plugin(app.autolaunch().is_enabled())
+    status_from_plugin(app.autolaunch().is_enabled())
 }
 
 /// Registers or removes the login item; a plugin failure is `failed`,
@@ -88,6 +62,32 @@ pub fn system_settings_url() -> Option<&'static str> {
     }
 }
 
+/// The host's login item: the plugin's registration, and the pane where
+/// the user manages login items. Called with the host's lock held, so it
+/// leaves the tray's check mark to its callers (`actions`, and `main.rs`
+/// after the launch sequence), which run on the main thread.
+pub struct ShellLoginItem {
+    pub app: AppHandle,
+}
+
+impl steno_host::services::LoginItem for ShellLoginItem {
+    fn status(&self) -> LoginItemStatus {
+        status(&self.app)
+    }
+
+    fn set_enabled(&self, enabled: bool) -> BoundaryResult<()> {
+        set_enabled(&self.app, enabled).map_err(|error| error.message.into())
+    }
+
+    fn open_system_settings(&self) {
+        if let Some(url) = system_settings_url()
+            && let Err(error) = crate::dialogs::open_url(&self.app, url)
+        {
+            tracing::warn!(%error, "opening the login items pane failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,33 +95,19 @@ mod tests {
     #[test]
     fn the_status_reads_the_plugins_answer() {
         assert_eq!(
-            LoginItemStatus::from_plugin(Ok::<bool, String>(true)),
+            status_from_plugin(Ok::<bool, String>(true)),
             LoginItemStatus::Enabled
         );
         assert_eq!(
-            LoginItemStatus::from_plugin(Ok::<bool, String>(false)),
+            status_from_plugin(Ok::<bool, String>(false)),
             LoginItemStatus::NotRegistered
         );
         assert_eq!(
-            LoginItemStatus::from_plugin(Err::<bool, _>("no desktop entry")),
-            LoginItemStatus::NotFound("no desktop entry".into())
+            status_from_plugin(Err::<bool, _>("no desktop entry")),
+            LoginItemStatus::NotFound
         );
-    }
-
-    #[test]
-    fn the_wire_values_are_the_swift_ones() {
-        assert_eq!(LoginItemStatus::NotRegistered.as_str(), "notRegistered");
-        assert_eq!(LoginItemStatus::Enabled.as_str(), "enabled");
-        assert_eq!(
-            LoginItemStatus::RequiresApproval.as_str(),
-            "requiresApproval"
-        );
-        assert_eq!(
-            LoginItemStatus::NotFound(String::new()).as_str(),
-            "notFound"
-        );
-        assert!(LoginItemStatus::Enabled.is_on());
-        assert!(!LoginItemStatus::RequiresApproval.is_on());
+        assert!(status_from_plugin(Ok::<bool, String>(true)).is_on());
+        assert!(!status_from_plugin(Ok::<bool, String>(false)).is_on());
     }
 
     #[test]

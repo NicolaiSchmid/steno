@@ -37,12 +37,12 @@
 //!
 //! Nothing is committed. [`ModelStore::new`] takes the store root, which
 //! holds one folder per asset: `<root>/parakeet-tdt-0.6b-v3-fp32/` and
-//! `<root>/silero-vad/`. The app's root comes from `steno-services`, which
-//! decides what `STENO_MODELS_DIR` means and where the default sits.
-//! [`ModelStore::from_environment`], [`ModelStore::environment_root`] and
-//! [`ModelStore::default_root`] are conveniences for the `transcribe`
-//! example and the FLEURS test: they read `STENO_MODELS_DIR` as the store
-//! root itself, else `<support directory>/Models`.
+//! `<root>/silero-vad/`. Steno's root is the `onnx/` folder of its models
+//! directory ([`ModelStore::in_models_directory`]). The app and the CLI
+//! take the models directory from the settings, else `STENO_MODELS_DIR`,
+//! else `<support directory>/Models` (`steno-services`);
+//! [`ModelStore::from_environment`], for the `transcribe` example and the
+//! FLEURS test, takes it from the same variable and default.
 //!
 //! Silero VAD downloads from the sherpa-onnx GitHub release with its
 //! checksum verified. The fp32 Parakeet export (2.6 GB, over GitHub's 2 GB

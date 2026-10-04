@@ -515,11 +515,11 @@ fn the_child_greets_and_exits_when_its_parent_goes_away() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the models: STENO_MODELS_DIR, and STENO_FLEURS_DIR for the parity clip; run with -- --ignored"]
 async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
-    let Some(root) = ModelStore::environment_root() else {
+    let Some(models_directory) = ModelStore::environment_models_directory() else {
         eprintln!("skipped: set STENO_MODELS_DIR to run the real sidecar");
         return;
     };
-    let store = ModelStore::new(root);
+    let store = ModelStore::in_models_directory(&models_directory);
     if ![ModelAsset::silero_vad(), ModelAsset::parakeet_v3_fp32()]
         .iter()
         .all(|asset| store.is_installed(asset))

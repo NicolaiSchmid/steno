@@ -341,6 +341,13 @@ public final class MeetingStore: Sendable {
     try await writer.write { db in try ParticipantRow(participant).save(db) }
   }
 
+  /// Removes one participant; a missing id is not an error.
+  public func deleteParticipant(id: UUID) async throws {
+    _ = try await writer.write { db in
+      try ParticipantRow.filter(ParticipantRow.Columns.id == id.uuidString).deleteAll(db)
+    }
+  }
+
   public func participants(meetingID: UUID) async throws -> [Participant] {
     try await writer.read { db in
       try ParticipantRow

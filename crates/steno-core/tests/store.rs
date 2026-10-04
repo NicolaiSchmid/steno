@@ -152,6 +152,22 @@ fn interrupted_recordings_fail_at_launch() {
     );
 }
 
+/// The reason is Swift's default, read from the Swift source so the two
+/// cannot drift apart.
+#[test]
+fn the_interrupted_recording_reason_is_the_swift_default() {
+    let swift = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Sources/StenoCore/Storage/MeetingStore.swift"),
+    )
+    .unwrap();
+    let declaration = format!(
+        "reason: String = \"{}\"",
+        Store::INTERRUPTED_RECORDING_REASON
+    );
+    assert!(swift.contains(&declaration), "{declaration}");
+}
+
 #[test]
 fn deleting_a_meeting_cascades_and_keeps_persons() {
     let (store, meeting) = populated();
@@ -395,4 +411,54 @@ fn a_read_sees_one_snapshot_while_another_store_writes() {
         usize::try_from(before).unwrap() + 1,
         "the next read sees the write"
     );
+}
+
+/// A second sample replaces the stored rate, not only its count: the fold
+/// sees the first row and the upsert keeps what the fold returned.
+#[test]
+fn a_stage_rate_folds_every_sample_into_one_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+    let first = store
+        .update_stage_rate(
+            PipelineStage::Transcribe,
+            "engine",
+            date("2026-10-01T10:00:00.000Z"),
+            |stored| {
+                assert_eq!(stored, None);
+                StageRate {
+                    seconds_per_unit: 0.5,
+                    samples: 1,
+                }
+            },
+        )
+        .unwrap();
+    assert_eq!(first.seconds_per_unit, 0.5);
+    store
+        .update_stage_rate(
+            PipelineStage::Transcribe,
+            "engine",
+            date("2026-10-01T10:01:00.000Z"),
+            |stored| {
+                assert_eq!(stored, Some(first));
+                StageRate {
+                    seconds_per_unit: 0.25,
+                    samples: 2,
+                }
+            },
+        )
+        .unwrap();
+    let row = store
+        .stage_rate(PipelineStage::Transcribe, "engine")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.rate,
+        StageRate {
+            seconds_per_unit: 0.25,
+            samples: 2
+        }
+    );
+    assert_eq!(row.updated_at, date("2026-10-01T10:01:00.000Z"));
+    assert_eq!(count(&store, "stageRate"), 1);
 }

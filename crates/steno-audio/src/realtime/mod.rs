@@ -12,7 +12,7 @@ pub mod rings;
 pub mod sink;
 pub mod wake;
 
-pub use io_proc::{BufferView, deliver};
+pub use io_proc::{BufferView, deliver, interleaved_view};
 pub use level_meter::{LevelMeter, LevelSlot};
 pub use processing::{ProcessingConfiguration, ProcessingThread};
 pub use relay::FrameRelay;

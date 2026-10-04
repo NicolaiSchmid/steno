@@ -27,10 +27,14 @@ host in `NEXT_DEV_ALLOWED_ORIGINS`, comma-separated, or nothing hydrates.
 
 ## Hosting
 
-`vercel.json` holds the install and build commands for a Vercel project whose
-Root Directory is `apps/site`; install runs from the workspace root with
-`--filter @steno/site...`. Point the `steno.nicolaischmid.com` CNAME at the
-project. On Cloudflare Pages or a plain web server, upload `out/`.
+The Vercel project (team wasc, `steno`) has the repository root as its Root
+Directory, and the root `vercel.json` carries the install command (filtered
+to `@steno/site...`), `pnpm build:site`, the output directory `apps/site/out`
+and an ignore command that skips every commit without `apps/site` or without
+changes to it. The root directory has to be the repository root: Vercel
+rejects a commit whose configured root directory does not exist before it
+runs any ignore step, and the Rust branches have no `apps/site`. On
+Cloudflare Pages or a plain web server, upload `out/`.
 
 URLs, install commands and the platform labels live in `src/lib/site.ts`.
 Change them there, nowhere else.
@@ -38,7 +42,7 @@ Change them there, nowhere else.
 ## Design
 
 The page follows t3.codes: dark only on `#09090b`, DM Sans and JetBrains Mono
-(self-hosted by `next/font`), a five-step neutral text ladder, hairline
+(self-hosted from `public/fonts`, OFL), a five-step neutral text ladder, hairline
 borders at 8 and 14 % white, white primary buttons, a `[data-rise]` entrance.
 Tokens and the few shared classes (`.btn`, `.tile`, `.eyebrow`, `.display`)
 are in `src/app/globals.css`. Red, the app's live colour, is the only hue.

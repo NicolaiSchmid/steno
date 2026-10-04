@@ -765,6 +765,18 @@ impl Host {
             let now = self.now();
             inner.progress.apply(event, now);
             inner.publisher.schedule(BridgeTopic::Progress);
+            if let MeetingEvent::OperationFailed {
+                meeting_id,
+                operation,
+                failure,
+                ..
+            } = event
+                && let Some(detail) = inner.detail.as_mut()
+                && detail.id == *meeting_id
+            {
+                detail.operation_failed(*operation, failure);
+                inner.publisher.schedule(BridgeTopic::MeetingDetail);
+            }
         }
         self.publish();
     }
@@ -1816,11 +1828,26 @@ impl BridgeHost for Host {
         Ok(())
     }
 
+    /// The confirmation is saved under the lock, the model list fetched
+    /// with it released, then the pick saved and probed.
     fn settings_summaries_confirm_codex(&self) -> Outcome<()> {
-        let now = self.now();
-        self.summaries_command(BridgeWindow::Settings, |llm| {
-            llm.confirm_codex(&self.shared.store, &self.shared.services, now);
-        });
+        let (store, services) = (&self.shared.store, &self.shared.services);
+        self.outside_lock(
+            BridgeTopic::SettingsSummaries,
+            |inner| {
+                let fetch = inner.llm.begin_confirm_codex(store, services, self.now());
+                self.follow_settings(inner, false);
+                fetch.then_some(())
+            },
+            |()| (services.llm.codex_account(), services.llm.codex_models()),
+            |inner, (account, models)| {
+                inner
+                    .llm
+                    .finish_confirm_codex(account, models, store, services, self.now());
+                self.follow_settings(inner, false);
+            },
+        );
+        self.run_pending_probe(BridgeWindow::Settings);
         Ok(())
     }
 
@@ -1988,15 +2015,34 @@ impl BridgeHost for Host {
         Ok(())
     }
 
+    /// As [`Self::settings_summaries_confirm_codex`], on the onboarding
+    /// page's Summaries row.
     fn onboarding_confirm_summaries_with_codex(&self) -> Outcome<()> {
-        let now = self.now();
-        self.onboarding_command(|inner| {
-            inner.onboarding.confirm_summaries_with_codex(
-                &self.shared.store,
-                &self.shared.services,
-                now,
-            );
-        });
+        let (store, services) = (&self.shared.store, &self.shared.services);
+        self.outside_lock(
+            BridgeTopic::Onboarding,
+            |inner| {
+                let fetch = inner.onboarding.begin_confirm_summaries_with_codex(
+                    store,
+                    services,
+                    self.now(),
+                );
+                self.follow_settings(inner, true);
+                fetch.then_some(())
+            },
+            |()| (services.llm.codex_account(), services.llm.codex_models()),
+            |inner, (account, models)| {
+                inner.onboarding.finish_confirm_summaries_with_codex(
+                    account,
+                    models,
+                    store,
+                    services,
+                    self.now(),
+                );
+                self.follow_settings(inner, true);
+            },
+        );
+        self.run_pending_probe(BridgeWindow::Onboarding);
         Ok(())
     }
 

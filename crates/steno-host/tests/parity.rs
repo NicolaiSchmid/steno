@@ -259,6 +259,8 @@ fn progress() {
             next_fraction: 0.1,
             estimated_remaining_seconds: 180.0,
             is_estimate_seeded: false,
+            lane: 0,
+            lane_count: 1,
         },
     });
     harness.host.apply_meeting_event(&MeetingEvent::Progress {
@@ -269,6 +271,8 @@ fn progress() {
             next_fraction: 0.8,
             estimated_remaining_seconds: 95.0,
             is_estimate_seeded: false,
+            lane: 0,
+            lane_count: 1,
         },
     });
     assert_parity(
