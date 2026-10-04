@@ -135,11 +135,10 @@ impl CaptureRecorder {
     /// only when the models of the engine `settings` name and the
     /// diarizer's are installed, so it never starts a download. Swift:
     /// `AppEnvironment.warmUpPipelineIfModelsInstalled`, called when a
-    /// recording starts. The speech engine is loaded only where it runs
-    /// in this process (`CoreML` on the Mac, [`SpeechRuntime`]); the speech
-    /// sidecar's child would hold its 2.2 GB through the whole recording,
-    /// and with no job after it (a save that fails) until the next one, so
-    /// there only the diarizer is loaded and the job starts the child.
+    /// recording starts. Where the speech sidecar runs the engine
+    /// ([`SpeechRuntime`]), only the diarizer is loaded: the child would
+    /// hold its 2.2 GB through the whole recording, and after a failed
+    /// save until the next job, so the job starts it instead.
     fn warm_up_if_installed(&self, settings: &Settings) {
         if !(self
             .speech_models
@@ -489,25 +488,25 @@ mod tests {
             .unwrap();
     }
 
+    /// Starts a recording and waits until its warm-up has loaded the
+    /// diarizer, which `warm_up` loads after the speech engine; whether
+    /// the speech engine was loaded too.
+    async fn warmed_the_engine(harness: &Harness) -> bool {
+        start(&harness.recorder).await;
+        eventually("the diarizer was loaded while recording", || {
+            harness.diarizer.preparations.count() > 0
+        })
+        .await;
+        harness.engine.preparations.count() > 0
+    }
+
     /// With the defaults, the Mac's `CoreML` engine and the diarizer are
     /// both loaded, as Swift did; off the Mac the speech sidecar runs
     /// Parakeet, so only the diarizer is.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_recording_start_warms_the_pipeline_up_when_the_models_are_installed() {
         let harness = harness(&[ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer]);
-        start(&harness.recorder).await;
-        eventually("the diarizer was loaded while recording", || {
-            harness.diarizer.preparations.count() > 0
-        })
-        .await;
-        if cfg!(target_os = "macos") {
-            eventually("the CoreML engine was loaded while recording", || {
-                harness.engine.preparations.count() > 0
-            })
-            .await;
-        } else {
-            assert_eq!(harness.engine.preparations.count(), 0);
-        }
+        assert_eq!(warmed_the_engine(&harness).await, cfg!(target_os = "macos"));
         stop(&harness.recorder).await;
     }
 
@@ -522,17 +521,9 @@ mod tests {
         let harness = harness_over(
             models,
             "parakeet-v3",
-            SpeechSettings {
-                onnx_sidecar_on_mac: true,
-                ..SpeechSettings::default()
-            },
+            crate::speech::testing::sidecar_chosen(),
         );
-        start(&harness.recorder).await;
-        eventually("the diarizer was loaded while recording", || {
-            harness.diarizer.preparations.count() > 0
-        })
-        .await;
-        assert_eq!(harness.engine.preparations.count(), 0);
+        assert!(!warmed_the_engine(&harness).await);
         stop(&harness.recorder).await;
     }
 
@@ -563,12 +554,7 @@ mod tests {
         "parakeet-ultra".clone_into(&mut settings.speech_engine_id);
         harness.store.save_settings(&settings).unwrap();
         harness.recorder.pipeline.reload().unwrap();
-        start(&harness.recorder).await;
-        eventually("the diarizer was loaded while recording", || {
-            harness.diarizer.preparations.count() > 0
-        })
-        .await;
-        assert_eq!(harness.engine.preparations.count(), 0);
+        assert!(!warmed_the_engine(&harness).await);
         stop(&harness.recorder).await;
     }
 

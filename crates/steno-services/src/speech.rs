@@ -592,6 +592,14 @@ pub(crate) mod testing {
         }
     }
 
+    /// The speech settings with the Mac's sidecar fallback chosen.
+    pub fn sidecar_chosen() -> SpeechSettings {
+        SpeechSettings {
+            onnx_sidecar_on_mac: true,
+            ..SpeechSettings::default()
+        }
+    }
+
     /// The model service over `models_directory` with the default speech
     /// settings.
     pub fn models_in(models_directory: &Path) -> ModelStoreSpeechModels {
@@ -807,13 +815,7 @@ mod tests {
     #[test]
     fn parakeet_runs_in_the_sidecar_except_on_the_mac_by_default() {
         let default = testing::setup(Path::new("/tmp/steno-models"), SpeechSettings::default());
-        let fallback = testing::setup(
-            Path::new("/tmp/steno-models"),
-            SpeechSettings {
-                onnx_sidecar_on_mac: true,
-                ..SpeechSettings::default()
-            },
-        );
+        let fallback = testing::setup(Path::new("/tmp/steno-models"), testing::sidecar_chosen());
         let parakeet = if cfg!(target_os = "macos") {
             SpeechRuntime::CoreMlInProcess
         } else {
@@ -922,13 +924,8 @@ mod tests {
     #[test]
     fn with_the_sidecar_chosen_parakeet_v3_is_the_onnx_export() {
         let dir = tempfile::tempdir().unwrap();
-        let models = ModelStoreSpeechModels::new(&testing::setup(
-            dir.path(),
-            SpeechSettings {
-                onnx_sidecar_on_mac: true,
-                ..SpeechSettings::default()
-            },
-        ));
+        let models =
+            ModelStoreSpeechModels::new(&testing::setup(dir.path(), testing::sidecar_chosen()));
         testing::install_coreml_parakeet(&models.coreml);
         assert!(!models.is_installed(ModelAsset::ParakeetV3));
         assert!(!models.engine_installed("parakeet-v3"));
