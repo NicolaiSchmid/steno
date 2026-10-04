@@ -50,6 +50,23 @@ enum ReceivingFile {
     }
   }
 
+  /// What names one file on disk whatever its path, so a partial discarded
+  /// and created again is another file, also with the same bytes.
+  struct Identity: Equatable, Sendable {
+    let device: UInt64
+    let file: UInt64
+  }
+
+  static func identity(of url: URL) throws -> Identity {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    guard let device = attributes[.systemNumber] as? NSNumber,
+      let file = attributes[.systemFileNumber] as? NSNumber
+    else {
+      throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: url.path])
+    }
+    return Identity(device: device.uint64Value, file: file.uint64Value)
+  }
+
   static func size(of url: URL) throws -> Int64 {
     let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
     return (attributes[.size] as? NSNumber)?.int64Value ?? 0

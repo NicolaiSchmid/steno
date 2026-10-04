@@ -326,11 +326,11 @@ import Testing
   /// A revoke during the `.verifying` save discards the files, but the
   /// phone, still passing the gate before the delete commits, announces and
   /// sends the chunks again. The first chunk's save is still held, so the
-  /// store lists no chunk and both are written: a complete partial is back
-  /// for the verify. Only the check after the verify keeps it from the
-  /// intake.
+  /// store lists no chunk and both are written: a complete partial with the
+  /// same bytes is back for the verify. The verify finds another file, and
+  /// the check after it discards that one.
   @Test(.timeLimit(.minutes(1)))
-  func aRevokeDuringTheVerifyingSaveWhoseFilesCameBackAdmitsNothing() async throws {
+  func aCompleteWhoseFilesCameBackDuringItsVerifyAdmitsNothing() async throws {
     let gated = try await Gated()
     defer { gated.remove() }
     let (gate, engine, phone, id) = (gated.gate, gated.engine, gated.phone, gated.id)
@@ -364,6 +364,41 @@ import Testing
     #expect(await first.value.code == 204)
     #expect(await second.value.code == 204)
     try await gated.expectNothingAdmitted()
+    #expect(!gate.timedOut, "nothing waited on the held save")
+  }
+
+  /// A partial replaced while `complete` saves `.verifying`, here by a copy
+  /// with the same bytes, is not the file the verify started on: nothing is
+  /// admitted, the answer lists no chunk, and the phone's upload of every
+  /// chunk again completes.
+  @Test(.timeLimit(.minutes(1)))
+  func aPartialReplacedDuringItsVerifyIsNotAdmitted() async throws {
+    let gated = try await Gated()
+    defer { gated.remove() }
+    let (gate, engine, phone, id) = (gated.gate, gated.engine, gated.phone, gated.id)
+    try await phone.uploadAll(gated.metadata, gated.bytes)
+
+    gate.receiptWrite.arm()
+    let completing = Task { await phone.complete(id) }
+    await gate.receiptWrite.held()
+    let partial = engine.inbox.partial(id)
+    let copy = partial.appendingPathExtension("copy")
+    try FileManager.default.copyItem(at: partial, to: copy)
+    try FileManager.default.removeItem(at: partial)
+    try FileManager.default.moveItem(at: copy, to: partial)
+    gate.receiptWrite.release()
+
+    let response = await completing.value
+    #expect(response.code == 409)
+    #expect(try response.json(Wire.RecordingStatus.self).receivedChunks == [])
+    #expect(await gated.intake.admissions.count == 0, "the intake never sees the file")
+    #expect(!engine.inbox.hasVerified(id, format: gated.metadata.format), "nothing was promoted")
+    for (index, chunk) in Phone.chunks(of: gated.bytes, size: Gated.chunkSize).enumerated() {
+      #expect(await phone.upload(id, chunk: index, chunk).code == 204)
+    }
+    #expect(await phone.complete(id).code == 200)
+    let admissions = await gated.intake.admissions.entries
+    #expect(try Data(contentsOf: try #require(admissions.first?.file)) == gated.bytes)
     #expect(!gate.timedOut, "nothing waited on the held save")
   }
 

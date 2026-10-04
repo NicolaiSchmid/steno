@@ -149,12 +149,11 @@ extension HandoverEngine {
   /// `POST /v1/recordings/{id}/complete`: 200 `{meetingID}` once every chunk
   /// is present and the whole file hashes to the announced value; 409 with
   /// the status while chunks are missing or while an earlier `complete` is
-  /// still verifying or admitting; 422 on a hash mismatch, after which the
+  /// still verifying or admitting, and with no chunk listed when the partial
+  /// was replaced during the verify; 422 on a hash mismatch, after which the
   /// partial is gone and the phone starts over; 401 while a revoke of the
-  /// device is in flight or when one landed during the store read of a
-  /// recording not yet admitted. A revoke during the verify discards the
-  /// files itself; the verify then answers 500 and the phone's next request
-  /// 401.
+  /// device is in flight, or when one landed during the store read or the
+  /// verify of a recording not yet admitted, after which its files are gone.
   func complete(_ recordingID: UUID, device: PairedDevice) async -> HandoverResponse {
     guard revoking[device.id] == nil else { return Self.unauthorized }
     let revocation = revocations[device.id, default: 0]
@@ -186,20 +185,20 @@ extension HandoverEngine {
     guard let metadata = inbox.loadMetadata(recordingID) else {
       return .problem(.notFound, "no metadata; announce again")
     }
-    switch await verifiedFile(for: &receipt, metadata: metadata) {
+    let verification = await verifiedFile(for: &receipt, metadata: metadata)
+    // Again after the verify, which suspends. A revoke then discards the
+    // files itself, but a phone that still passes the gate (before the
+    // delete commits, or paired again) can announce and send the chunks
+    // again: the verify answers 409 for the new partial, and this check
+    // discards it and answers 401. Nothing suspends between it and the
+    // intake call.
+    if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
+      return refused
+    }
+    switch verification {
     case .answered(let response):
       return response
     case .file(let file):
-      // Again after the verify, which suspends. A revoke then finds the
-      // receipt in memory and discards the files itself, but the phone,
-      // still passing the gate before the delete commits or after pairing
-      // again, can announce and send the chunks again, so a partial is back.
-      // The hash (of the old file it still read, or of the same bytes sent
-      // again) matches and `promote` moves the new partial: only this check
-      // stops the admit. Nothing suspends between it and the intake call.
-      if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
-        return refused
-      }
       return await admit(file, metadata: metadata, device: device, receipt: &receipt)
     }
   }
@@ -240,9 +239,13 @@ extension HandoverEngine {
       }
       return .answered(.json(.conflict, Self.status(of: receipt)))
     }
+    // Taken before the `.verifying` write, the first suspension: the hash
+    // must be of the file `promote` moves. A partial discarded meanwhile
+    // and created again (a revoke, then an announce) is another file.
+    let partial = inbox.partial(recordingID)
+    let identity = try? ReceivingFile.identity(of: partial)
     try? await transition(&receipt, to: .verifying)
 
-    let partial = inbox.partial(recordingID)
     let verified: Bool
     do {
       verified =
@@ -252,6 +255,11 @@ extension HandoverEngine {
       return .answered(.internalError("verifying the file", error))
     }
     receipt = activeReceipts[recordingID] ?? receipt
+    guard let identity, (try? ReceivingFile.identity(of: partial)) == identity else {
+      // Whatever the new partial holds, the phone sends every chunk again.
+      try? await transition(&receipt, to: .receiving, receivedChunks: [])
+      return .answered(.json(.conflict, Self.status(of: receipt)))
+    }
     guard verified else {
       inbox.discard(recordingID)
       try? await transition(&receipt, to: .failed("sha256 mismatch"), receivedChunks: [])
