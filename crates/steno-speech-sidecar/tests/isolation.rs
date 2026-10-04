@@ -365,6 +365,23 @@ async fn a_panic_or_an_exit_is_a_crash_with_the_child_s_last_words() {
     .await;
 }
 
+/// A crash report waits for the end of stderr, not only for the exit: a
+/// process the child left behind holds stderr and writes a line 300 ms
+/// after the child exited, and the report still holds it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crash_report_waits_for_stderr_a_process_left_behind_still_holds() {
+    let (engine, _dir) = engine_with_fault("late-stderr", |_| {});
+    assert_recovers(&engine, |error| {
+        let SidecarError::Crashed { status, stderr } = error else {
+            panic!("{error}");
+        };
+        assert!(status.contains('3'), "{status}");
+        assert!(stderr.contains("a line after the exit"), "{stderr}");
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flood_of_stderr_leaves_a_crash_report_of_bounded_size() {
     // 1 MiB without a newline, then the panic: the report keeps the panic
@@ -631,20 +648,26 @@ async fn the_real_engine_reports_missing_models_and_keeps_running() {
 #[test]
 fn the_child_greets_and_exits_when_its_parent_goes_away() {
     // Driven by hand, without the client: a closed stdin is a dead parent.
-    // The ready message comes first, even before a heartbeat 1 ms apart.
-    let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "1"]);
-    let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let first = protocol::read_header::<_, Reply>(&mut stdout).unwrap();
-    assert_eq!(
-        first,
-        Some(Reply::Ready {
-            protocol: PROTOCOL_VERSION,
-            pid: child.id()
-        })
-    );
-    drop(child.stdin.take());
-    let status = exit_status(&mut child, "the child outlived its stdin");
-    assert!(status.success(), "{status}");
+    // The ready message comes first, even before a heartbeat 1 ms apart,
+    // and from a child that waits 200 ms before it greets.
+    let faults: [&[&str]; 2] = [&[], &["--fault", "slow-start"]];
+    for fault in faults {
+        let args = [&["--fake-engine", "--heartbeat-ms", "1"][..], fault].concat();
+        let mut child = spawn_by_hand(&args);
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        let first = protocol::read_header::<_, Reply>(&mut stdout).unwrap();
+        assert_eq!(
+            first,
+            Some(Reply::Ready {
+                protocol: PROTOCOL_VERSION,
+                pid: child.id()
+            }),
+            "{fault:?}"
+        );
+        drop(child.stdin.take());
+        let status = exit_status(&mut child, "the child outlived its stdin");
+        assert!(status.success(), "{fault:?}: {status}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

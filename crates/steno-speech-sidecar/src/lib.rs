@@ -53,11 +53,12 @@
 //! answers a load that asks for `DirectML` with `DirectML`, and reports no
 //! live provider until `--fault fallback`. Only with it, `--fault <kind>`
 //! ([`Fault`]) makes the next transcription abort, panic, flood stderr and
-//! panic, exit, hang, allocate 4 GiB, write garbage, fail, answer with a
-//! reply too large to send, answer and then report a resident set over any
-//! ceiling, report a fallback to the CPU or lose the encoder, the child
-//! abort on any load or on a load that asks for `DirectML`, or stay silent
-//! or announce another protocol version from the start. `--fault-once
+//! panic, exit, exit leaving a process that writes to its stderr later,
+//! hang, allocate 4 GiB, write garbage, fail, answer with a reply too large
+//! to send, answer and then report a resident set over any ceiling, report
+//! a fallback to the CPU or lose the encoder, the child abort on any load
+//! or on a load that asks for `DirectML`, or stay silent, greet late or
+//! announce another protocol version from the start. `--fault-once
 //! <path>` limits that to the first child that creates `<path>`, which
 //! holds that child's pid. The isolation tests and the `DirectML` test
 //! binaries drive the real client against these.
@@ -101,6 +102,11 @@ steno_core::string_enum! {
         Garbage = "garbage",
         /// Answers with an error and keeps running.
         Error = "error",
+        /// On unix, leaves a process behind that holds the child's stderr
+        /// and writes a line to it 300 ms after the child exits with
+        /// status 3; elsewhere only exits. The crash report must still hold
+        /// that line.
+        LateStderr = "late-stderr",
         /// Answers, and from then on reports the CPU as the encoder's
         /// provider and writes why to stderr, as a child does after a run
         /// that failed on `DirectML`.
@@ -124,13 +130,19 @@ steno_core::string_enum! {
         Silent = "silent",
         /// At start: announces protocol version 0 in its ready message.
         WrongProtocol = "wrong-protocol",
+        /// At start: waits 200 ms before its ready message, so a heartbeat
+        /// started before it would come first.
+        SlowStart = "slow-start",
     }
 }
 
 impl Fault {
     /// Committed when the child starts, not at the next transcription.
     fn at_start(self) -> bool {
-        matches!(self, Fault::Silent | Fault::WrongProtocol)
+        matches!(
+            self,
+            Fault::Silent | Fault::WrongProtocol | Fault::SlowStart
+        )
     }
 }
 
@@ -378,6 +390,17 @@ impl Engine for FakeEngine {
                 panic!("simulated panic after a flood of stderr")
             }
             Some(Fault::Exit) => std::process::exit(3),
+            Some(Fault::LateStderr) => {
+                // Only stderr is inherited: stdout closes with the child,
+                // so the parent sees it die at once.
+                #[cfg(unix)]
+                let _ = std::process::Command::new("sh")
+                    .args(["-c", "sleep 0.3; echo 'a line after the exit' >&2"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .spawn();
+                std::process::exit(3)
+            }
             Some(Fault::Hang) => hang(),
             Some(Fault::Allocate) => {
                 let mut hoard: Vec<Vec<u8>> = Vec::new();
@@ -420,6 +443,7 @@ impl Engine for FakeEngine {
             Some(
                 Fault::Silent
                 | Fault::WrongProtocol
+                | Fault::SlowStart
                 | Fault::AbortOnLoad
                 | Fault::AbortOnDirectmlLoad,
             )
@@ -598,6 +622,9 @@ pub fn serve(options: &Options) -> ExitCode {
         Some(fake) => Box::new(fake),
         None => Box::new(OnnxEngine::default()),
     };
+    if start_fault == Some(Fault::SlowStart) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
     // Before the heartbeat starts, so `Ready` is always the first frame.
     send(&Reply::Ready {
         protocol: if start_fault == Some(Fault::WrongProtocol) {
