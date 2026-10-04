@@ -25,7 +25,7 @@ name: Desktop release
 #
 # Publishing writes one GitHub release per tag with every bundle, its `.sig`
 # and `latest.json`, then updates the rolling `desktop-beta` and
-# `desktop-stable` lanes that `updater.rs` reads (the Update lanes step says
+# `desktop-stable` lanes that `updater.rs` reads (updater-lanes.sh decides
 # which). Every release here is a pre-release and never "latest": until the
 # Mac cutover (.plans/2026-10-04-mac-cutover.md) the "latest release"
 # belongs to the Swift app.
@@ -375,11 +375,9 @@ jobs:
 
       # After the release is public, so the manifest's URLs resolve. Each
       # lane is a release holding only latest.json, its tag on the commit of
-      # the version it serves. Each lane only moves forward: the stable lane
-      # takes a release (no hyphen), the beta lane every version, each only
-      # when the version is at or above the one the lane serves
-      # (updater-lanes.sh). A lane that does not exist yet (404) is created;
-      # any other failure to read one stops the step.
+      # the version it serves; updater-lanes.sh decides which lanes move. A
+      # lane that does not exist yet (404) is created; any other failure to
+      # read one stops the step.
       - name: Update lanes
         run: |
           set -euo pipefail
