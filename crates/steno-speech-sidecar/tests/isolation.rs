@@ -6,12 +6,14 @@
 //! allocating past the memory ceiling, writing garbage, reporting an
 //! error, staying silent at start, speaking another protocol version).
 //! Each failure must come back as an error from the engine, never take the
-//! test process down, and leave an engine that works on the next call; a
-//! child that dies with `DirectML` in use leaves the rest of the run on the
-//! CPU.
+//! test process down, and leave an engine that works on the next call.
 //! Dropping the engine stops its child, inside a runtime or not. Driven by
 //! hand, without the client, a child must exit when its parent's pipes
 //! close, idle or busy.
+//!
+//! Nothing here ends a child with `DirectML` in use: that switches
+//! `DirectML` off for the rest of the process's run, so those tests run in
+//! binaries of their own (`directml_switch_off.rs`, `directml_probe_crash.rs`).
 //!
 //! The fake engine needs no models; the last test, ignored by default,
 //! runs the real one when `STENO_MODELS_DIR` holds them
@@ -24,52 +26,24 @@
     clippy::assert_is_empty
 )]
 
-use std::ffi::OsString;
+mod common;
+
 use std::io::BufReader;
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use steno_core::{AudioBuffer16k, LanguageTag, SpeechEngine};
+use common::{
+    ASKED_FOR_DIRECTML, BINARY, assert_works, config, engine_in, engine_with_fault, provider,
+    sidecar_error, tone,
+};
+use steno_core::{AudioBuffer16k, SpeechEngine};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
+use steno_speech::sidecar::{FALLBACK_NOTICE, directml_switched_off};
 use steno_speech::{
     EncoderProvider, ModelAsset, ModelStore, OnnxOptions, OnnxSpeechEngine, SidecarConfig,
-    SidecarError, SidecarSpeechEngine, SpeechError,
+    SidecarError, SidecarSpeechEngine,
 };
-
-const BINARY: &str = env!("CARGO_BIN_EXE_steno-speech-sidecar");
-
-/// A fake-engine sidecar with `args` and short limits.
-fn config(args: &[&str]) -> SidecarConfig {
-    let mut config = SidecarConfig::new(BINARY);
-    config.args = std::iter::once("--fake-engine")
-        .chain(args.iter().copied())
-        .map(OsString::from)
-        .collect();
-    config.heartbeat = Duration::from_millis(20);
-    config.transcribe_timeout_floor = Duration::from_secs(30);
-    config.transcribe_timeout_ratio = 0.0;
-    config.memory_ceiling_bytes = 1 << 30;
-    config
-}
-
-/// An engine over an empty store in `dir` that installs nothing.
-fn engine_in(dir: &tempfile::TempDir, config: SidecarConfig) -> SidecarSpeechEngine {
-    SidecarSpeechEngine::with_assets(ModelStore::new(dir.path()), config, Vec::new())
-}
-
-/// An engine with `fault` committed by the first child only, so the next
-/// one is healthy.
-fn engine_with_fault(
-    fault: &str,
-    adjust: impl FnOnce(&mut SidecarConfig),
-) -> (SidecarSpeechEngine, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let marker = dir.path().join("faulted");
-    let mut config = config(&["--fault", fault, "--fault-once", marker.to_str().unwrap()]);
-    adjust(&mut config);
-    (engine_in(&dir, config), dir)
-}
 
 /// Whether a process with `pid` exists (a zombie counts).
 fn alive(pid: u32) -> bool {
@@ -157,37 +131,6 @@ fn kill(pid: u32) -> bool {
     status.unwrap().success()
 }
 
-fn tone(seconds: f64) -> AudioBuffer16k {
-    let n = (seconds * 16_000.0) as usize;
-    AudioBuffer16k::new((0..n).map(|i| (i as f32 * 0.05).sin() * 0.5).collect())
-}
-
-/// The sidecar error inside a boundary error.
-fn sidecar_error<'a>(
-    error: &'a (dyn std::error::Error + Send + Sync + 'static),
-) -> &'a SidecarError {
-    match error.downcast_ref::<SpeechError>() {
-        Some(SpeechError::Sidecar(inner)) => inner,
-        _ => panic!("not a sidecar error: {error}"),
-    }
-}
-
-/// Transcribes `audio` and checks the fake engine's answer.
-async fn assert_works(engine: &SidecarSpeechEngine, audio: &AudioBuffer16k) {
-    let segments = engine
-        .transcribe(audio, Some(&LanguageTag::from("de")))
-        .await
-        .unwrap();
-    assert_eq!(segments.len(), 1);
-    let peak = audio.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-    assert_eq!(
-        segments[0].text,
-        format!("{} samples, peak {peak}", audio.samples.len())
-    );
-    assert_eq!(segments[0].language, Some(LanguageTag::from("de")));
-    assert_eq!(segments[0].end, audio.duration());
-}
-
 /// The fault fires on the first transcription; it must fail with an error
 /// `check` accepts, and the next call must work in a new child.
 async fn assert_recovers(engine: &SidecarSpeechEngine, check: impl FnOnce(&SidecarError)) {
@@ -237,22 +180,19 @@ async fn requests_round_trip_the_audio_bit_for_bit_in_one_child() {
     assert_eq!(engine.health().await.unwrap(), None);
 }
 
-/// The `DirectML` request crosses to the child with the load, and the
-/// provider it answers with comes back in the health report; the fake
-/// engine answers `DirectML` whenever it is asked, as if the probe passed.
+/// The `DirectML` request crosses to the child with the load on Windows,
+/// and the provider it answers with comes back in the health report; the
+/// fake engine answers `DirectML` whenever it is asked, as if the probe
+/// passed. Elsewhere the client asks for the CPU whatever the options say.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_directml_request_reaches_the_child_and_its_provider_comes_back() {
-    for (directml, expected) in [
-        (false, EncoderProvider::Cpu),
-        (true, EncoderProvider::DirectMl),
-    ] {
+async fn the_directml_request_reaches_the_child_on_windows_and_its_provider_comes_back() {
+    for (directml, expected) in [(false, EncoderProvider::Cpu), (true, ASKED_FOR_DIRECTML)] {
         let dir = tempfile::tempdir().unwrap();
         let mut config = config(&[]);
         config.options.directml = directml;
         let engine = engine_in(&dir, config);
         engine.prepare().await.unwrap();
-        let health = engine.health().await.unwrap().unwrap();
-        assert_eq!(health.provider, Some(expected));
+        assert_eq!(provider(&engine).await, Some(expected));
         engine.shut_down().await.unwrap();
     }
 }
@@ -263,30 +203,36 @@ async fn the_directml_request_reaches_the_child_and_its_provider_comes_back() {
 async fn the_provider_follows_a_fallback_after_the_load() {
     let (engine, _dir) = engine_with_fault("fallback", |c| c.options.directml = true);
     engine.prepare().await.unwrap();
-    let provider = async || engine.health().await.unwrap().unwrap().provider;
-    assert_eq!(provider().await, Some(EncoderProvider::DirectMl));
+    assert_eq!(provider(&engine).await, Some(ASKED_FOR_DIRECTML));
     assert_works(&engine, &tone(0.5)).await;
-    assert_eq!(provider().await, Some(EncoderProvider::Cpu));
+    assert_eq!(provider(&engine).await, Some(EncoderProvider::Cpu));
     assert_eq!(engine.spawns(), 1);
 }
 
-/// A child that aborts with its encoder on `DirectML` turns `DirectML` off
-/// for the engine's life: the next child is asked for the CPU.
+/// The transcript carries the provider too: a child that fell back to
+/// the CPU mid-job and then dies, before any health request, ended on the
+/// CPU, so the next child is asked for `DirectML` again. The crash report
+/// holds the child's line about the fallback.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_child_that_dies_on_directml_leaves_the_rest_of_the_run_on_the_cpu() {
-    let (engine, _dir) = engine_with_fault("abort", |c| c.options.directml = true);
-    engine.prepare().await.unwrap();
-    let provider = async || engine.health().await.unwrap().unwrap().provider;
-    assert_eq!(provider().await, Some(EncoderProvider::DirectMl));
-    let error = engine.transcribe(&tone(0.5), None).await.unwrap_err();
-    assert!(
-        matches!(sidecar_error(error.as_ref()), SidecarError::Crashed { .. }),
-        "{error}"
-    );
+async fn a_child_that_dies_after_falling_back_to_the_cpu_leaves_directml_on() {
+    let (engine, _dir) = engine_with_fault("fallback", |c| c.options.directml = true);
     assert_works(&engine, &tone(0.5)).await;
+    let pid = engine.pid().unwrap();
+    assert!(kill(pid));
+    // Not `gone_soon`: the client has not reaped the child, and a zombie
+    // counts as alive.
+    std::thread::sleep(Duration::from_millis(200));
+    let error = engine.transcribe(&tone(0.1), None).await.unwrap_err();
+    match sidecar_error(error.as_ref()) {
+        SidecarError::Crashed { stderr, .. } => {
+            assert!(stderr.contains(FALLBACK_NOTICE), "{stderr}");
+        }
+        other => panic!("{other}"),
+    }
+    engine.prepare().await.unwrap();
     assert_eq!(engine.spawns(), 2);
-    assert_eq!(provider().await, Some(EncoderProvider::Cpu));
-    assert!(engine.config().options.directml, "the setting is untouched");
+    assert_eq!(provider(&engine).await, Some(ASKED_FOR_DIRECTML));
+    assert!(!directml_switched_off());
 }
 
 /// An error the child reports and a release are no reason to give up on
@@ -304,8 +250,8 @@ async fn an_error_or_a_release_leaves_directml_on() {
     engine.release().await.unwrap();
     engine.prepare().await.unwrap();
     assert_eq!(engine.spawns(), 2);
-    let health = engine.health().await.unwrap().unwrap();
-    assert_eq!(health.provider, Some(EncoderProvider::DirectMl));
+    assert_eq!(provider(&engine).await, Some(ASKED_FOR_DIRECTML));
+    assert!(!directml_switched_off());
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -35,8 +35,11 @@
 //! set from a heartbeat thread so the parent can kill it at the memory
 //! ceiling. It exits on a shutdown request and as soon as stdin ends or
 //! stdout breaks, so a dead parent leaves no child behind. Its log goes to
-//! stderr, which the parent keeps the tail of for crash reports. Its
-//! sessions open through `steno_speech::onnx`, which switches ONNX
+//! stderr, which the parent logs and keeps the tail of for crash reports.
+//!
+//! # Privacy
+//!
+//! Its sessions open through `steno_speech::onnx`, which switches ONNX
 //! Runtime's telemetry off first, so ONNX Runtime sends nothing. With
 //! `DirectML` on, `DirectML.dll` and Direct3D 12 may still log to Windows'
 //! own diagnostic data, as for any program that uses them; the child opens
@@ -47,10 +50,12 @@
 //! `--fake-engine` replaces Parakeet with an engine that needs no models
 //! and answers with the sample count and peak of the audio it received; it
 //! answers a load that asks for `DirectML` with `DirectML`, and reports no
-//! live provider. Only with it, `--fault <kind>` ([`Fault`]) makes the next
-//! transcription abort, panic, flood stderr and panic, exit, hang, allocate
-//! 4 GiB, write garbage, fail or report a fallback to the CPU, or the child
-//! stay silent or announce another protocol version from the start;
+//! live provider until `--fault fallback`. Only with it, `--fault <kind>`
+//! ([`Fault`]) makes the next transcription abort, panic, flood stderr and
+//! panic, exit, hang, allocate 4 GiB, write garbage, fail or report a
+//! fallback to the CPU, the child abort on a load that asks for
+//! `DirectML`, or stay silent or announce another protocol version from
+//! the start;
 //! `--fault-once <path>` limits that to the first child that creates
 //! `<path>`, which holds that child's pid. The isolation tests drive the
 //! real client against these.
@@ -62,6 +67,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use steno_core::{AudioBuffer16k, LanguageTag, RawSegment};
+use steno_speech::sidecar::FALLBACK_NOTICE;
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
     EncoderProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
@@ -93,8 +99,12 @@ steno_core::string_enum! {
         /// Answers with an error and keeps running.
         Error = "error",
         /// Answers, and from then on reports the CPU as the encoder's
-        /// provider, as a child does after a run that failed on `DirectML`.
+        /// provider and writes why to stderr, as a child does after a run
+        /// that failed on `DirectML`.
         Fallback = "fallback",
+        /// `std::process::abort` inside a load that asks for `DirectML`,
+        /// the way a driver may end the probe; a load on the CPU works.
+        AbortOnDirectmlLoad = "abort-on-directml-load",
         /// At start: sends nothing, reads nothing, hangs.
         Silent = "silent",
         /// At start: announces protocol version 0 in its ready message.
@@ -106,6 +116,11 @@ impl Fault {
     /// Committed when the child starts, not at the next transcription.
     fn at_start(self) -> bool {
         matches!(self, Fault::Silent | Fault::WrongProtocol)
+    }
+
+    /// Committed at a load, not at the next transcription.
+    fn at_load(self) -> bool {
+        self == Fault::AbortOnDirectmlLoad
     }
 }
 
@@ -273,8 +288,13 @@ impl FakeEngine {
 
 impl Engine for FakeEngine {
     /// Reports `DirectML` when asked for it, as if the probe had passed, so
-    /// the tests see the setting reach the child and the answer come back.
+    /// the tests see the setting reach the child and the answer come back;
+    /// with [`Fault::AbortOnDirectmlLoad`], aborts there instead.
     fn load(&mut self, _: &Path, options: &OnnxOptions) -> Result<EncoderProvider, String> {
+        if options.directml && self.fault.is_some_and(Fault::at_load) && self.fault_now().is_some()
+        {
+            std::process::abort();
+        }
         self.loaded = true;
         Ok(if options.directml {
             EncoderProvider::DirectMl
@@ -291,6 +311,11 @@ impl Engine for FakeEngine {
     /// [`Fault::Fallback`].
     fn provider(&self) -> Option<EncoderProvider> {
         self.fell_back.then_some(EncoderProvider::Cpu)
+    }
+
+    /// Fixed words of its own after [`Fault::Fallback`].
+    fn fallback(&self) -> Option<&'static str> {
+        self.fell_back.then_some("the fake engine fell back")
     }
 
     fn transcribe(
@@ -336,8 +361,10 @@ impl Engine for FakeEngine {
                 self.fell_back = true;
                 Ok(describe(samples, hint))
             }
-            // The start faults were committed, if at all, at start.
-            Some(Fault::Silent | Fault::WrongProtocol) | None => Ok(describe(samples, hint)),
+            // The start and load faults were committed, if at all, there.
+            Some(Fault::Silent | Fault::WrongProtocol | Fault::AbortOnDirectmlLoad) | None => {
+                Ok(describe(samples, hint))
+            }
         }
     }
 }
@@ -399,15 +426,15 @@ fn start_heartbeat(interval: Duration) -> io::Result<()> {
         .map(drop)
 }
 
-/// Writes why the encoder left `DirectML` to stderr, once per reason: the
-/// child has no log subscriber, and the parent logs its stderr.
+/// Writes to stderr why the encoder is on the CPU though the load asked
+/// for `DirectML`, once per reason: the child has no log subscriber, and
+/// the parent logs its stderr, a line that starts with
+/// [`FALLBACK_NOTICE`] at info level.
 fn tell_fallback(engine: &dyn Engine, told: &mut Option<&'static str>) {
     if let Some(reason) = engine.fallback()
         && *told != Some(reason)
     {
-        eprintln!(
-            "steno-speech-sidecar: DirectML is not usable ({reason}); the speech encoder runs on the CPU"
-        );
+        eprintln!("{FALLBACK_NOTICE} ({reason}); the speech encoder runs on the CPU");
         *told = Some(reason);
     }
 }

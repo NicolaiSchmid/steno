@@ -8,6 +8,10 @@
 //! loads the models again. Nothing here can take the app down with the
 //! child.
 //!
+//! After a child that crashed, hung or overran the memory ceiling with
+//! `DirectML` in use, every later child in this process loads on the CPU
+//! ([`directml_switched_off`]). `DirectML` is asked for on Windows only.
+//!
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
 use std::collections::{BTreeSet, VecDeque};
@@ -47,9 +51,9 @@ pub struct SidecarConfig {
     /// app passes none, the tests choose the fake engine and a fault.
     pub args: Vec<OsString>,
     /// Session options the child opens the models with, `DirectML` for
-    /// the encoder included ([`OnnxOptions::directml`]). Once a child has
-    /// crashed or hung with `DirectML` in use, the engine asks every later
-    /// child for the CPU instead.
+    /// the encoder included ([`OnnxOptions::directml`]). The load asks for
+    /// `DirectML` on Windows only, whatever `directml` holds elsewhere,
+    /// and asks for the CPU once [`directml_switched_off`] is true.
     pub options: OnnxOptions,
     /// The child is killed once its resident set passes this many bytes.
     /// The fp32 export works in 2 to 3 GB; a 2 h recording adds about
@@ -122,6 +126,25 @@ pub struct SidecarHealth {
     pub provider: Option<EncoderProvider>,
 }
 
+/// Set once a child crashed, hung or overran the memory ceiling with
+/// `DirectML` in use. Process-wide, so it holds for the rest of the app's
+/// run: `steno-services` builds a new engine on every pipeline reload, and
+/// none of them asks for `DirectML` again. Nothing clears it.
+static DIRECTML_OFF: AtomicBool = AtomicBool::new(false);
+
+/// Whether a child in this process crashed, hung or overran the memory
+/// ceiling with `DirectML` in use; every engine's later loads then ask for
+/// the CPU, for the rest of the app's run.
+#[must_use]
+pub fn directml_switched_off() -> bool {
+    DIRECTML_OFF.load(Ordering::SeqCst)
+}
+
+/// The start of the child's stderr line that says why its encoder is on
+/// the CPU though the load asked for `DirectML`, in fixed words; the
+/// parent logs such a line at info level, every other line at debug.
+pub const FALLBACK_NOTICE: &str = "steno-speech-sidecar: DirectML is not usable";
+
 /// What the reader threads hand the waiting request. Heartbeats are not
 /// queued, so an idle child cannot grow the queue: the reader keeps the
 /// latest resident set and queues [`Event::OverCeiling`] once it is over.
@@ -149,9 +172,9 @@ struct SidecarProcess {
     next_id: u64,
     /// Where the child's encoder runs; `Some` once its models are loaded.
     provider: Option<EncoderProvider>,
-    /// Whether the load in flight asked for `DirectML`, whose probe runs
-    /// inside it.
-    directml_load: bool,
+    /// Whether the last load asked for `DirectML`; until it is answered, a
+    /// crash counts as the probe's.
+    load_asked_directml: bool,
     ceiling: u64,
 }
 
@@ -185,8 +208,9 @@ fn command(config: &SidecarConfig) -> Command {
     command
 }
 
-/// Reads the child's stderr on a thread of its own, logging each line and
-/// keeping the last [`STDERR_LINES`] for a crash report.
+/// Reads the child's stderr on a thread of its own, logging each line (a
+/// [`FALLBACK_NOTICE`] at info level, any other at debug, as it may hold
+/// a path) and keeping the last [`STDERR_LINES`] for a crash report.
 fn keep_stderr_tail(
     pid: u32,
     stderr: ChildStderr,
@@ -212,7 +236,11 @@ fn keep_stderr_tail(
                 let line = String::from_utf8_lossy(&bytes)
                     .trim_end_matches(['\r', '\n'])
                     .to_owned();
-                tracing::debug!(target: "steno_speech::sidecar", pid, "{line}");
+                if line.starts_with(FALLBACK_NOTICE) {
+                    tracing::info!(target: "steno_speech::sidecar", pid, "{line}");
+                } else {
+                    tracing::debug!(target: "steno_speech::sidecar", pid, "{line}");
+                }
                 let mut tail = lines.lock().unwrap_or_else(PoisonError::into_inner);
                 if tail.len() == STDERR_LINES {
                     tail.pop_front();
@@ -289,7 +317,7 @@ impl SidecarProcess {
             pid,
             next_id: 1,
             provider: None,
-            directml_load: false,
+            load_asked_directml: false,
             ceiling,
         };
         match process.wait_for(None, config.startup_timeout)? {
@@ -445,19 +473,23 @@ impl SidecarProcess {
     }
 }
 
-/// Whether a child's end counts against `DirectML`: it crashed or hung
-/// with its encoder on `DirectML`, or inside a load that asked for it,
-/// where the probe runs. A child on the CPU, an error it reported, a
-/// memory overrun or a protocol violation does not count.
+/// Whether a child's end counts against `DirectML`: it crashed, hung or
+/// overran the memory ceiling with its encoder on `DirectML`, or inside a
+/// load that asked for it, where the probe runs. The memory ceiling
+/// counts because a child that passes it on `DirectML` would pass it on
+/// every job; on the CPU the fp32 export stays well under it. A child on
+/// the CPU, an error it reported or a protocol violation does not count.
 fn ended_on_directml(
     error: &SidecarError,
     provider: Option<EncoderProvider>,
-    directml_load: bool,
+    load_asked_directml: bool,
 ) -> bool {
     matches!(
         error,
-        SidecarError::Crashed { .. } | SidecarError::Timeout { .. }
-    ) && provider.map_or(directml_load, |p| p == EncoderProvider::DirectMl)
+        SidecarError::Crashed { .. }
+            | SidecarError::Timeout { .. }
+            | SidecarError::MemoryCeiling { .. }
+    ) && provider.map_or(load_asked_directml, |p| p == EncoderProvider::DirectMl)
 }
 
 impl Drop for SidecarProcess {
@@ -479,9 +511,6 @@ struct Shared {
     /// The running child's pid, 0 for none; readable while a request runs.
     pid: AtomicU32,
     spawns: AtomicU64,
-    /// Set once a child crashed or hung with `DirectML` in use; every later
-    /// load asks for the CPU.
-    directml_off: AtomicBool,
 }
 
 impl Shared {
@@ -506,22 +535,40 @@ impl Shared {
         Ok(())
     }
 
+    /// Whether the next load asks for `DirectML`: on Windows, when the
+    /// options ask for it and no child has ended on it in this process.
+    fn wants_directml(&self) -> bool {
+        cfg!(windows) && self.config.options.directml && !directml_switched_off()
+    }
+
     /// Makes sure a child runs with its models loaded, installing them
-    /// first if need be. Blocking; the caller holds the lock.
+    /// first if need be. A child that crashed, hung or overran the memory
+    /// ceiling inside a load that asked for `DirectML` (the probe) switched
+    /// `DirectML` off; no audio was sent yet, so a new child loads on the
+    /// CPU within the same call. Blocking; the caller holds the lock.
     fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
         if slot.as_ref().is_some_and(|p| p.provider.is_some()) {
             return Ok(());
         }
         self.install()?;
-        if slot.is_none() {
+        Ok(self.load(slot, self.wants_directml())?)
+    }
+
+    /// Starts a child unless one runs and has it load the models, asking
+    /// for `DirectML` when `directml`; a child that fails is killed unless
+    /// the error is its own, and one the probe ended is replaced by a child
+    /// that loads on the CPU.
+    fn load(&self, slot: &mut Option<SidecarProcess>, directml: bool) -> Result<(), SidecarError> {
+        let process = if let Some(process) = slot.take() {
+            process
+        } else {
             let process = SidecarProcess::spawn(&self.config)?;
             self.spawns.fetch_add(1, Ordering::SeqCst);
             self.pid.store(process.pid, Ordering::SeqCst);
-            *slot = Some(process);
-        }
-        let process = slot.as_mut().ok_or(SpeechError::NotPrepared)?;
-        let directml = self.config.options.directml && !self.directml_off.load(Ordering::SeqCst);
-        process.directml_load = directml;
+            process
+        };
+        let process = slot.insert(process);
+        process.load_asked_directml = directml;
         let reply = process.request(
             |id| Request::Load {
                 id,
@@ -551,8 +598,15 @@ impl Shared {
             }
             Err(error) => {
                 // The child answered, so the probe did not end it.
-                process.directml_load &= !matches!(error, SidecarError::Remote(_));
-                Err(self.kill_unless_remote(slot, error).into())
+                process.load_asked_directml &= !matches!(error, SidecarError::Remote(_));
+                let probe_ended = ended_on_directml(&error, None, process.load_asked_directml);
+                let error = self.kill_unless_remote(slot, error);
+                if probe_ended {
+                    // `DirectML` is off now, so this load asks for the CPU
+                    // and cannot come back here.
+                    return self.load(slot, false);
+                }
+                Err(error)
             }
         }
     }
@@ -568,11 +622,11 @@ impl Shared {
             if let Some(mut process) = slot.take() {
                 let status = process.kill();
                 tracing::warn!(pid = process.pid, ?status, %error, "speech sidecar killed");
-                if ended_on_directml(&error, process.provider, process.directml_load)
-                    && !self.directml_off.swap(true, Ordering::SeqCst)
+                if ended_on_directml(&error, process.provider, process.load_asked_directml)
+                    && !DIRECTML_OFF.swap(true, Ordering::SeqCst)
                 {
                     tracing::info!(
-                        "the speech sidecar ended while DirectML was in use; DirectML is off for the rest of this run"
+                        "the speech sidecar ended while DirectML was in use; the speech encoder runs on the CPU for the rest of the app's run"
                     );
                 }
             }
@@ -640,7 +694,6 @@ impl SidecarSpeechEngine {
                 process: Mutex::new(None),
                 pid: AtomicU32::new(0),
                 spawns: AtomicU64::new(0),
-                directml_off: AtomicBool::new(false),
             }),
             languages: OnnxSpeechEngine::LANGUAGES
                 .into_iter()
@@ -905,7 +958,7 @@ mod tests {
     }
 
     #[test]
-    fn only_a_crash_or_a_hang_with_directml_in_use_turns_it_off() {
+    fn only_a_crash_a_hang_or_an_overrun_with_directml_in_use_turns_it_off() {
         use EncoderProvider::{Cpu, DirectMl};
         let crashed = SidecarError::Crashed {
             status: "signal: 6".to_owned(),
@@ -914,7 +967,11 @@ mod tests {
         let hung = SidecarError::Timeout {
             after: Duration::from_secs(1),
         };
-        for error in [&crashed, &hung] {
+        let over = SidecarError::MemoryCeiling {
+            rss_bytes: 2,
+            ceiling_bytes: 1,
+        };
+        for error in [&crashed, &hung, &over] {
             assert!(ended_on_directml(error, Some(DirectMl), false));
             // Inside the load that asked for it: the probe.
             assert!(ended_on_directml(error, None, true));
@@ -925,10 +982,6 @@ mod tests {
         for error in [
             SidecarError::Remote("no".to_owned()),
             SidecarError::Protocol("garbage".to_owned()),
-            SidecarError::MemoryCeiling {
-                rss_bytes: 2,
-                ceiling_bytes: 1,
-            },
         ] {
             assert!(!ended_on_directml(&error, Some(DirectMl), true));
         }
