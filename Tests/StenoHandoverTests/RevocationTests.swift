@@ -368,17 +368,16 @@ import Testing
   }
 
   /// A revoke whose store delete throws leaves the device paired and no
-  /// trace of the revoke; only the files of its upload are gone, so the
-  /// phone announces again and uploads anew.
+  /// revoke in flight. With nothing in memory to discard, nothing of it is
+  /// left; once it discarded the files of an upload, its count stays, and
+  /// the phone announces again and uploads anew.
   @Test(.timeLimit(.minutes(1)))
-  func aFailedRevokeLeavesNoRevokeInFlight() async throws {
+  func aFailedRevokeLeavesTheDeviceWorking() async throws {
     let gated = try await Gated()
     defer { gated.remove() }
     let (engine, phone, id) = (gated.engine, gated.phone, gated.id)
     let deviceID = phone.device.id
-    try await phone.uploadAll(gated.metadata, gated.bytes)
     let revocations = await engine.revocations[deviceID, default: 0]
-
     try await gated.gate.pool.write { db in
       try db.execute(
         sql: """
@@ -386,14 +385,19 @@ import Testing
           BEGIN SELECT RAISE(ABORT, 'kept'); END
           """)
     }
+
     await #expect(throws: (any Error).self) { try await gated.service.revoke(deviceID) }
+    #expect(await engine.revocations[deviceID, default: 0] == revocations, "nothing discarded")
+    try await phone.uploadAll(gated.metadata, gated.bytes)
+    await #expect(throws: (any Error).self) { try await gated.service.revoke(deviceID) }
+    #expect(
+      await engine.revocations[deviceID, default: 0] == revocations + 1, "the upload's files went")
     try await gated.gate.pool.write { db in try db.execute(sql: "DROP TRIGGER keepDevice") }
 
     let stored = try await gated.test.store.pairedDevice(id: deviceID)
     #expect(stored != nil, "the device is still paired")
     #expect(await engine.revoking.isEmpty, "no revoke is in flight")
     #expect(await !engine.revoked.contains(deviceID))
-    #expect(await engine.revocations[deviceID, default: 0] == revocations)
     #expect(await phone.status(id).code == 200)
     #expect(await engine.activeReceipts[id] != nil, "the status read is in memory again")
     try await phone.uploadAll(gated.metadata, gated.bytes)

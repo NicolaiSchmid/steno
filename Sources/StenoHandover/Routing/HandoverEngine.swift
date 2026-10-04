@@ -113,7 +113,8 @@ actor HandoverEngine: RequestHandling {
   /// for the next start's sweep. A `complete` that starts before this
   /// returns is refused (`revoking`), and until the device pairs again its
   /// receipts stay out of memory (`revoked`). A failed delete leaves the
-  /// device paired, though the files of its uploads in memory are gone.
+  /// device paired, though the files of its uploads in memory are gone and
+  /// a `complete` verifying one of them is refused.
   func revoke(_ deviceID: UUID) async throws {
     // Before the first suspension: a request that starts or checks while
     // the store delete is awaited must already see this revoke.
@@ -124,9 +125,11 @@ actor HandoverEngine: RequestHandling {
       let left = revoking[deviceID, default: 1] - 1
       revoking[deviceID] = left > 0 ? left : nil
     }
+    var discarded = false
     for (recordingID, receipt) in activeReceipts where receipt.deviceID == deviceID {
       if receipt.state.kind != .complete {
         inbox.discard(recordingID)
+        discarded = true
       }
       activeReceipts.removeValue(forKey: recordingID)
     }
@@ -134,8 +137,10 @@ actor HandoverEngine: RequestHandling {
       try await store.delete(deviceID: deviceID)
     } catch {
       // The delete rolled back, so the device is still paired and no read
-      // since the bump was stale. Another revoke in flight keeps `revoked`.
-      revocations[deviceID, default: 1] -= 1
+      // since the bump was stale. The files discarded above stay gone, so
+      // the count stays then: a `complete` verifying one must still refuse.
+      // Another revoke in flight keeps `revoked`.
+      if !discarded { revocations[deviceID, default: 1] -= 1 }
       if revoking[deviceID] == 1 { revoked.remove(deviceID) }
       throw error
     }
