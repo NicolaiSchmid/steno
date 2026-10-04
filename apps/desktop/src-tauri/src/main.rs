@@ -192,24 +192,17 @@ impl ExitSignal {
     const ALL: [Self; 3] = [Self::TERMINATE, Self::INTERRUPT, Self::HANGUP];
 }
 
-/// Whether the app listens for a signal whose disposition at launch was
-/// `inherited` (`None` when it could not be read): not when it was
-/// ignored, as `nohup` and a shell's background job (SIGINT) ask, so that
-/// signal stays ignored. Installing a handler would undo it.
+/// Whether the signal `number` is ignored now, as `nohup` and a shell's
+/// background job (SIGINT) leave it at launch; false when its disposition
+/// cannot be read. The app does not listen for such a signal, so it stays
+/// ignored: installing a handler would undo it.
 #[cfg(unix)]
-fn listens(inherited: Option<libc::sighandler_t>) -> bool {
-    inherited != Some(libc::SIG_IGN)
-}
-
-/// The disposition of the signal `number` now; `None` when it cannot be
-/// read.
-#[cfg(unix)]
-fn disposition(number: libc::c_int) -> Option<libc::sighandler_t> {
+fn ignored(number: libc::c_int) -> bool {
     // SAFETY: an all-zero `sigaction` is a valid value, and a null new
     // action makes the call read the disposition without changing it.
     let mut current: libc::sigaction = unsafe { std::mem::zeroed() };
     let read = unsafe { libc::sigaction(number, std::ptr::null(), &raw mut current) };
-    (read == 0).then_some(current.sa_sigaction)
+    read == 0 && current.sa_sigaction == libc::SIG_IGN
 }
 
 /// What `signal` does after the exit signals already `seen`, which it
@@ -236,13 +229,13 @@ fn forced_exit(signal: ExitSignal, seen: &mut Vec<ExitSignal>) -> Option<i32> {
 /// process at once, unsaved (`forced_exit`), so a run loop that no longer
 /// answers still ends with a plain `kill` or Ctrl-C twice; a SIGHUP never
 /// does, so the one that follows a session scope's SIGTERM still saves.
-/// A signal the app inherited ignored stays ignored (`listens`). Swift had
+/// A signal the app inherited ignored stays ignored (`ignored`). Swift had
 /// no handler; each of them ended the app unsaved.
 #[cfg(unix)]
 fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     for signal in ExitSignal::ALL {
-        if !listens(disposition(signal.kind.as_raw_value())) {
+        if ignored(signal.kind.as_raw_value()) {
             tracing::debug!(
                 signal = signal.name,
                 "ignored at launch, so it stays ignored"
@@ -716,22 +709,22 @@ mod tests {
     }
 
     /// A signal inherited ignored (`nohup`, a background job's SIGINT) gets
-    /// no listener; a default or handled one does, and so does one whose
-    /// disposition could not be read. The disposition is read as it is:
+    /// no listener; a default one does, and so does one whose disposition
+    /// cannot be read (no such signal). The disposition is read as it is:
     /// SIGUSR2, which nothing here uses, ignored for the test.
     #[cfg(unix)]
     #[test]
     fn a_signal_inherited_ignored_stays_ignored() {
-        assert!(!listens(Some(libc::SIG_IGN)));
-        assert!(listens(Some(libc::SIG_DFL)));
-        assert!(listens(None));
+        assert!(!ignored(-1));
 
         // SAFETY: SIGUSR2 has no handler in this binary; it is set back.
         let before = unsafe { libc::signal(libc::SIGUSR2, libc::SIG_IGN) };
-        let ignored = disposition(libc::SIGUSR2);
+        let when_ignored = ignored(libc::SIGUSR2);
+        unsafe { libc::signal(libc::SIGUSR2, libc::SIG_DFL) };
+        let when_default = ignored(libc::SIGUSR2);
         unsafe { libc::signal(libc::SIGUSR2, before) };
-        assert_eq!(ignored, Some(libc::SIG_IGN));
-        assert_eq!(disposition(libc::SIGUSR2), Some(before));
+        assert!(when_ignored);
+        assert!(!when_default);
     }
 
     #[test]
