@@ -142,6 +142,7 @@ actor HandoverEngine: RequestHandling {
       // Another revoke in flight keeps `revoked`.
       if !discarded { revocations[deviceID, default: 1] -= 1 }
       if revoking[deviceID] == 1 { revoked.remove(deviceID) }
+      receiptUpdates.send(receiptsSnapshot)
       throw error
     }
     receiptUpdates.send(receiptsSnapshot)

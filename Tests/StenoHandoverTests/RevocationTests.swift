@@ -392,6 +392,8 @@ import Testing
     await #expect(throws: (any Error).self) { try await gated.service.revoke(deviceID) }
     #expect(
       await engine.revocations[deviceID, default: 0] == revocations + 1, "the upload's files went")
+    let shown = await gated.service.receipts.first { _ in true }
+    #expect(shown?.isEmpty == true, "the receipt stream no longer shows the upload")
     try await gated.gate.pool.write { db in try db.execute(sql: "DROP TRIGGER keepDevice") }
 
     let stored = try await gated.test.store.pairedDevice(id: deviceID)
