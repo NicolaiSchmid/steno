@@ -4,7 +4,8 @@
 # before anything is built, instead of a cryptic signing or notarisation
 # error later. The workflow maps each secret onto a variable of its name.
 #
-#   MACOS_CERTIFICATE_PASSWORD=… require-secrets.sh MACOS_CERTIFICATE_PASSWORD ASC_KEY_ID
+#   MACOS_CERTIFICATE_PASSWORD=… ASC_KEY_ID=… \
+#     apps/desktop/scripts/require-secrets.sh MACOS_CERTIFICATE_PASSWORD ASC_KEY_ID
 set -euo pipefail
 
 missing=()

@@ -5,7 +5,8 @@
 # the .app inside and signed the image itself; notarising the image too
 # lets Gatekeeper pass it offline on first open, before the app is copied.
 #
-#   ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=<AuthKey_….p8> notarize-dmg.sh <dmg>
+#   ASC_KEY_ID=… ASC_ISSUER_ID=… ASC_KEY_PATH=<AuthKey_….p8> \
+#     apps/desktop/scripts/notarize-dmg.sh <dmg>
 #
 # Writes notarization.json beside the image; on a status other than
 # Accepted prints notarytool's log for the submission and exits 1.

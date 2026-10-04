@@ -23,7 +23,8 @@
 #   nsis      nsis/*-setup.exe, installed silently into a scratch directory;
 #             the same as msi
 #
-# Exits 1 with an `::error::` at the first failed check.
+# Exits non-zero at the first failed check (with an `::error::` for the
+# script's own checks).
 set -euo pipefail
 
 signed=false
@@ -151,7 +152,7 @@ check_msi() {
   msi="$(one "$bundle/msi/*.msi")"
   # An administrative install unpacks the files into the directory tree the
   # installer would create, without registering anything.
-  windows_wait msiexec.exe /a "\"$(cygpath -w "$msi")\"" /qn "TARGETDIR=\"$(cygpath -w "$scratch/msi")\""
+  windows_wait msiexec.exe /a "\"$(cygpath -aw "$msi")\"" /qn "TARGETDIR=\"$(cygpath -aw "$scratch/msi")\""
   windows_install "$scratch/msi" "$msi"
 }
 
@@ -160,7 +161,7 @@ check_nsis() {
   exe="$(one "$bundle/nsis/*-setup.exe")"
   # A silent install for the current user into a scratch directory (`/D`
   # takes the rest of the command line, unquoted, so it comes last).
-  windows_wait "$(cygpath -w "$exe")" /S "/D=$(cygpath -w "$scratch/nsis")"
+  windows_wait "$(cygpath -aw "$exe")" /S "/D=$(cygpath -aw "$scratch/nsis")"
   windows_install "$scratch/nsis" "$exe"
 }
 
