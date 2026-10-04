@@ -255,15 +255,6 @@ struct DecodedLane {
     buffer: AudioBuffer16k,
 }
 
-/// A job once its lanes are transcribed: the meeting as it stands, the
-/// settings the run read, the transcription and the last decoded lane.
-struct Transcribed {
-    meeting: Meeting,
-    settings: Settings,
-    transcription: Transcription,
-    last: Option<DecodedLane>,
-}
-
 /// What the diarize stage hands on. Swift: `Diarization` in
 /// `Pipeline/Stages/Diarize.swift`.
 struct Diarization {
@@ -655,18 +646,35 @@ impl ProcessingPipeline {
         meeting: Meeting,
     ) -> Result<AudioAsset> {
         let claim = self.claim_speech();
-        let transcribed = self.prepare_and_transcribe(asset, meeting).await;
+        let transcribed: Result<_> = async {
+            self.warm_up().await?;
+            attributing(
+                PipelineStage::Decode,
+                self.store()
+                    .set_state(meeting.id, MeetingState::Processing, self.now()),
+            )?;
+            let settings = attributing(PipelineStage::Decode, self.store().settings())?;
+            self.begin_run(
+                &meeting,
+                &asset.lanes,
+                None,
+                PipelineStage::ALL.to_vec(),
+                &settings,
+            )?;
+            let mut current = meeting;
+            current.state = MeetingState::Processing;
+            let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
+            Ok((current, settings, transcription, last))
+        }
+        .await;
         self.finish_speech(claim).await;
-        let Transcribed {
-            meeting: mut current,
-            settings,
-            transcription,
-            last,
-        } = transcribed?;
-        // The lane to diarize is decided from the transcription (a call
-        // whose tap carried nothing falls back to its mic lane); a handed
-        // buffer of another lane is dropped before `diarize` decodes the
-        // right one, so one buffer is alive at a time.
+        let (mut current, settings, transcription, last) = transcribed?;
+        // The last decoded lane is handed to `diarize` and dropped there, so
+        // no buffer is alive from `match_speakers` on. The lane to diarize
+        // is decided from the transcription (a call whose tap carried
+        // nothing falls back to its mic lane); a handed buffer of another
+        // lane is dropped before `diarize` decodes the right one, so one
+        // buffer is alive at a time.
         let lane =
             diarized_lane_after_transcription(current.source, &asset.lanes, &transcription.lanes);
         let handed = last.filter(|decoded| Some(decoded.lane) == lane);
@@ -688,40 +696,6 @@ impl ProcessingPipeline {
             .summarize(current, &cleaned.segments, &merged.speakers)
             .await?;
         self.persist(&current, asset).await
-    }
-
-    /// The stages up to the last lane's transcription: warm-up, the
-    /// `processing` state, the run's estimate, decode and transcribe.
-    async fn prepare_and_transcribe(
-        &self,
-        asset: &AudioAsset,
-        meeting: Meeting,
-    ) -> Result<Transcribed> {
-        self.warm_up().await?;
-        attributing(
-            PipelineStage::Decode,
-            self.store()
-                .set_state(meeting.id, MeetingState::Processing, self.now()),
-        )?;
-        let settings = attributing(PipelineStage::Decode, self.store().settings())?;
-        self.begin_run(
-            &meeting,
-            &asset.lanes,
-            None,
-            PipelineStage::ALL.to_vec(),
-            &settings,
-        )?;
-        let mut current = meeting;
-        current.state = MeetingState::Processing;
-        // The last decoded lane is handed to `diarize` and dropped there, so
-        // no buffer is alive from `match_speakers` on.
-        let (transcription, last) = self.decode_and_transcribe(asset, current.id).await?;
-        Ok(Transcribed {
-            meeting: current,
-            settings,
-            transcription,
-            last,
-        })
     }
 
     /// Counts a job as needing the speech engine until the claim is
