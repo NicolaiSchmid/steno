@@ -102,6 +102,8 @@ let package = Package(
         .product(name: "X509", package: "swift-certificates"),
         .product(name: "Crypto", package: "swift-crypto"),
         .product(name: "NIOCore", package: "swift-nio"),
+        // GRDB only to hold a receipt read open in the revocation tests.
+        .product(name: "GRDB", package: "GRDB.swift"),
         // The read-timeout tests drive `HTTPHandler` on an embedded channel.
         .product(name: "NIOEmbedded", package: "swift-nio"),
         .product(name: "NIOPosix", package: "swift-nio"),

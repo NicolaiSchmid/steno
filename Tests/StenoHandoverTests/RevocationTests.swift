@@ -7,7 +7,9 @@ import Testing
 /// Revoking a phone mid-upload: its partial and receipt are gone, every
 /// bearer route answers 401 at the gate (the phone's "unpaired" signal), and
 /// another phone's upload is untouched. Both ways in: `revoke(_:)` from the
-/// Mac and `DELETE /v1/pairing` from the phone.
+/// Mac and `DELETE /v1/pairing` from the phone. A `complete` that read its
+/// receipt before the revoke admits nothing, also when the phone paired again
+/// meanwhile.
 @Suite struct RevocationTests {
   static let chunkSize = 256 * 1024
 
@@ -111,5 +113,62 @@ import Testing
       #expect(try await upload.phone.upload(upload.id, chunk: 1, upload.chunks[1]).status == 401)
       #expect(await test.intake.admissions.count == 0)
     }
+  }
+
+  /// After a restart a receipt is only in the store. A revoke that lands
+  /// while `complete` reads it finds nothing in memory to discard, so the
+  /// files are still there for the verify; the engine itself must keep a
+  /// revoked device's recording from the intake. With `repair`, the phone
+  /// pairs again under the same device id before the read returns.
+  private func completeAfterARevokeDuringItsReceiptRead(repair: Bool) async throws {
+    let gate = try ReceiptReadGate()
+    defer { gate.remove() }
+    let chunkSize = 64 * 1024
+    let test = try TestService.prepare(chunkSize: chunkSize, store: gate.store)
+    defer { try? FileManager.default.removeItem(at: test.directory) }
+    let phone = try await EngineClient.paired(test)
+    let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 99)
+    let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+    try await phone.uploadAll(metadata, bytes)
+    let id = metadata.recordingID
+
+    // The Mac comes back over the same store and inbox.
+    let intake = FakeHandoverIntake()
+    let now = test.now
+    let restarted = HandoverService(
+      configuration: test.service.configuration, store: test.store, intake: intake,
+      identity: test.service.identity, now: { now })
+    let device = EngineDevice(engine: restarted.engine, device: phone.device)
+
+    gate.arm()
+    let completing = Task { await device.complete(id) }
+    await gate.reading()
+    try await restarted.revoke(phone.device.id)
+    if repair {
+      _ = await restarted.engine.beginPairing()
+      let paired = try await EngineClient(engine: restarted.engine).pair(
+        deviceID: phone.device.id, deviceName: phone.device.name)
+      #expect(paired.code == 200)
+    }
+    gate.release()
+    let response = await completing.value
+
+    #expect(response.code == 401, "the phone learns it was unpaired")
+    #expect(await intake.admissions.count == 0, "the intake never sees the file")
+    let inbox = restarted.engine.inbox
+    #expect(!inbox.hasPartial(id) && !inbox.hasVerified(id, format: metadata.format))
+    #expect(inbox.loadMetadata(id) == nil, "its files are gone")
+    #expect(await restarted.engine.receiptsSnapshot.isEmpty)
+    if !repair {
+      #expect(try await test.store.handoverReceipt(recordingID: id) == nil)
+    }
+  }
+
+  @Test func aCompleteThatReadItsReceiptBeforeARevokeAdmitsNothing() async throws {
+    try await completeAfterARevokeDuringItsReceiptRead(repair: false)
+  }
+
+  @Test func aPhoneThatPairedAgainDoesNotLetTheOldCompleteThrough() async throws {
+    try await completeAfterARevokeDuringItsReceiptRead(repair: true)
   }
 }
