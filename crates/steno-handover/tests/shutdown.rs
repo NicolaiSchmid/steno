@@ -150,7 +150,6 @@ async fn stop_ends_the_linger_after_a_close() {
     .await;
     assert!(closed, "the server half-closed after the response");
     assert_eq!(parse_response(&received).and_then(|r| r.status), Some(200));
-    let started = tokio::time::Instant::now();
 
     // Well-formed records: the linger reads through TLS and would stop at
     // the first garbage byte on its own.
@@ -168,13 +167,17 @@ async fn stop_ends_the_linger_after_a_close() {
         true
     };
     assert!(writes_land(12).await, "the socket lingers after the close");
+    // A stop that waited the linger out would return about CLOSE_GRACE
+    // after the close, less the probes' 300 ms. Only the stop is timed:
+    // the probes before it stretch on a loaded machine.
+    let stopping = tokio::time::Instant::now();
     test.stop().await;
+    assert!(
+        stopping.elapsed() < steno_handover::server::connection::CLOSE_GRACE / 2,
+        "stop ends the linger instead of waiting it out"
+    );
     assert!(
         !writes_land(20).await,
         "the lingering socket was closed by stop"
-    );
-    assert!(
-        started.elapsed() < steno_handover::server::connection::CLOSE_GRACE,
-        "probed inside the linger's own grace"
     );
 }
