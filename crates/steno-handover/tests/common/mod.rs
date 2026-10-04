@@ -42,6 +42,18 @@ use uuid::Uuid;
 
 pub const START: i64 = 1_790_000_000;
 
+/// How long a test waits for a signal it is sure to get (an intake
+/// entered, a held future woken) before it fails instead of hanging the
+/// suite. A bound on a signal, not a guess at how long the work takes.
+pub const SIGNAL_BOUND: Duration = Duration::from_secs(30);
+
+/// Waits for `signal`; panics with `what` after [`SIGNAL_BOUND`].
+pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
+    tokio::time::timeout(SIGNAL_BOUND, signal)
+        .await
+        .unwrap_or_else(|_| panic!("{what} within {SIGNAL_BOUND:?}"))
+}
+
 /// The one time source the service reads; tests move it to expire a
 /// pairing window or age a receipt.
 #[derive(Clone)]
@@ -152,7 +164,7 @@ impl ScriptedIntake {
 
     /// Returns once an admission of a gated intake is in flight.
     pub async fn admitting(&self) {
-        self.entered.notified().await;
+        signalled("the intake is entered", self.entered.notified()).await;
     }
 
     /// Lets the admission in flight answer.
