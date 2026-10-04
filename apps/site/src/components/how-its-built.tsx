@@ -1,40 +1,26 @@
 import { Checklist } from "@/components/checklist";
-import { AppleIcon, LinuxIcon, WindowsIcon } from "@/components/platform-icons";
+import { platformIcon } from "@/components/platform-icons";
 import { SectionHead } from "@/components/section-head";
-import { platforms } from "@/lib/site";
+import { type Platform, platformIds, platforms } from "@/lib/site";
 
-const desktops = [
-	{
-		Icon: AppleIcon,
-		name: platforms.mac.name,
-		rows: [
-			["Call audio", "Core Audio process tap"],
-			["Speech", "Parakeet v3 on the Neural Engine, through CoreML"],
-			["Speakers", "Diarisation on device, through CoreML"],
-			["Builds", platforms.mac.note],
-		],
+const onnx = {
+	speech: "Parakeet v3 on ONNX Runtime, in its own process",
+	speakers: "Diarisation on device, through ONNX Runtime",
+};
+
+/** The native layer per desktop; everything above it is shared. */
+const native: Record<
+	Platform,
+	{ audio: string; speech: string; speakers: string }
+> = {
+	mac: {
+		audio: "Core Audio process tap",
+		speech: "Parakeet v3 on the Neural Engine, through CoreML",
+		speakers: "Diarisation on device, through CoreML",
 	},
-	{
-		Icon: WindowsIcon,
-		name: platforms.win.name,
-		rows: [
-			["Call audio", "WASAPI process loopback"],
-			["Speech", "Parakeet v3 on ONNX Runtime, in its own process"],
-			["Speakers", "Diarisation on device, through ONNX Runtime"],
-			["Builds", platforms.win.note],
-		],
-	},
-	{
-		Icon: LinuxIcon,
-		name: platforms.linux.name,
-		rows: [
-			["Call audio", "PipeWire, from the output's monitor"],
-			["Speech", "Parakeet v3 on ONNX Runtime, in its own process"],
-			["Speakers", "Diarisation on device, through ONNX Runtime"],
-			["Builds", platforms.linux.note],
-		],
-	},
-];
+	win: { audio: "WASAPI process loopback", ...onnx },
+	linux: { audio: "PipeWire, from the output's monitor", ...onnx },
+};
 
 const shared = [
 	"One Rust core and the same web UI, in a Tauri shell",
@@ -53,31 +39,42 @@ export function HowItsBuilt() {
 					the native one.
 				</SectionHead>
 				<ul className="grid gap-5 lg:grid-cols-3">
-					{desktops.map(({ Icon, name, rows }) => (
-						<li className="tile p-0" key={name}>
-							<div className="flex items-center gap-2.5 border-border border-b px-4 py-3">
-								<Icon className="size-4 shrink-0 text-fg-muted" />
-								<h3 className="flex-1 font-medium text-[15px] tracking-[-0.01em]">
-									{name}
-								</h3>
-							</div>
-							<dl>
-								{rows.map(([k, v]) => (
-									<div
-										className="grid grid-cols-[96px_1fr] gap-4 border-border border-t px-4 py-3 first:border-t-0"
-										key={k}
-									>
-										<dt className="font-mono text-[11px] text-fg-dim leading-[1.8]">
-											{k}
-										</dt>
-										<dd className="text-[13px] text-fg-muted leading-[1.5]">
-											{v}
-										</dd>
-									</div>
-								))}
-							</dl>
-						</li>
-					))}
+					{platformIds.map((id) => {
+						const Icon = platformIcon[id];
+						const { name, note } = platforms[id];
+						const { audio, speech, speakers } = native[id];
+						const rows = [
+							["Call audio", audio],
+							["Speech", speech],
+							["Speakers", speakers],
+							["Builds", note],
+						];
+						return (
+							<li className="tile p-0" key={id}>
+								<div className="flex items-center gap-2.5 border-border border-b px-4 py-3">
+									<Icon className="size-4 shrink-0 text-fg-muted" />
+									<h3 className="flex-1 font-medium text-[15px] tracking-[-0.01em]">
+										{name}
+									</h3>
+								</div>
+								<dl>
+									{rows.map(([k, v]) => (
+										<div
+											className="grid grid-cols-[96px_1fr] gap-4 border-border border-t px-4 py-3 first:border-t-0"
+											key={k}
+										>
+											<dt className="font-mono text-[11px] text-fg-dim leading-[1.8]">
+												{k}
+											</dt>
+											<dd className="text-[13px] text-fg-muted leading-[1.5]">
+												{v}
+											</dd>
+										</div>
+									))}
+								</dl>
+							</li>
+						);
+					})}
 				</ul>
 				<div className="mt-7 border-border border-t border-dashed pt-6">
 					<Checklist className="lg:grid lg:grid-cols-2" items={shared} />
