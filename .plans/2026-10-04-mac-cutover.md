@@ -104,9 +104,10 @@ Each row is something the cutover has to carry over, retire or decide.
    login item. When the status is not `enabled` but
    `steno.loginItemRegistered` (step 4) is set, the user turned the item
    off after the Swift app registered it, so the Rust app registers
-   nothing. This needs a small `objc2` call in the shell (`autostart.rs`).
-   Keeping `SMAppService.mainApp` instead of the Launch Agent on macOS is
-   the alternative, decided by test 1. The `requiresApproval` copy in the
+   nothing. With neither, it does what a fresh install does. This needs
+   a small `objc2` call in the shell (`autostart.rs`). Keeping
+   `SMAppService.mainApp` instead of the Launch Agent on macOS is the
+   alternative, decided by test 1. The `requiresApproval` copy in the
    General section becomes unreachable and goes.
 6. **Handover identity.** Phones pin the Mac's certificate, so a new
    identity forces every phone to pair again. The cutover imports the Swift
