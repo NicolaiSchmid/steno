@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<!-- The entitlements the signed bundle carries (WP9 signs; the file is
-     referenced from tauri.conf.json now so an unsigned local build and the
-     signed release agree): the two the Swift app's project.yml declares. -->
+<!-- The entitlements the signed bundle carries, the two the Swift app's
+     project.yml declares. The Tauri bundler signs every item with this one
+     file, so steno-speech-sidecar carries them too; it opens no device
+     and reads no calendar, so they grant it nothing it uses. -->
 <dict>
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
