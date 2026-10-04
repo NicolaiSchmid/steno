@@ -372,17 +372,18 @@ impl Engine {
     /// receipts in memory. A `complete` in flight that has not reached the
     /// intake answers 401 when it sees the revoke, and discards the files
     /// when its receipt was only in the store, where the revoke does not
-    /// look. An admission already under way finishes. Its `complete`
-    /// receipt stays out of memory while the device is revoked and out of
-    /// the store while the device is gone from it; once the phone paired
-    /// again it is written like any other. Files of a receipt only in the store (not
-    /// read since start) wait for the next start's sweep.
+    /// look. An admission past that check may still finish; the revoke's
+    /// discard can also make it fail. Its `complete` receipt stays out of
+    /// memory while the device is revoked and out of the store while the
+    /// device is gone from it; once the phone paired again it is written
+    /// like any other. Files of a receipt only in the store (not read since
+    /// start) wait for the next start's sweep.
     ///
     /// A failed store delete leaves the device paired in the store but
     /// revoked in memory: its recording routes answer 401 until it pairs
-    /// again or a retried revoke finishes, and the receipts are published
-    /// without its own. A half-revoked phone that cannot hand over is safer
-    /// than one that can.
+    /// again, a retried revoke finishes or the app restarts, and the
+    /// receipts are published without its own. A half-revoked phone that
+    /// cannot hand over is safer than one that can.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
         {
@@ -721,7 +722,8 @@ impl RequestHandling for Engine {
             (Route::Unpair, Some(device)) => self.unpair(device).await,
             // A device revoked in memory may still pass the gate: its store
             // delete failed or has not committed yet, or a pairing whose
-            // save the revoke overtook put it back. Its uploads stop here.
+            // save the revoke overtook put it back. Its recording routes stop
+            // here; unpair stays open so the phone can still drop its pairing.
             (_, Some(device)) if self.state().revoked.contains(&device.id) => Self::unauthorized(),
             (Route::Announce(recording_id), Some(device)) => {
                 self.announce(recording_id, device, &request.body).await

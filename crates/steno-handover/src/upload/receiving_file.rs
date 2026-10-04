@@ -3,10 +3,13 @@
 //! send chunks in any order or twice. Whole-file hashing streams in 1 MiB
 //! reads.
 //!
-//! Every read and write runs on the blocking pool, never on the engine's
-//! task: a chunk's fsync or the hash of a 4 GiB file would otherwise hold
-//! every other request, including the auth gate of unrelated connections
-//! and `/v1/hello`. Swift: `Upload/ReceivingFile.swift`.
+//! Every chunk write and the hash run on the blocking pool, never on the
+//! engine's task: a chunk's fsync or the hash of a 4 GiB file would
+//! otherwise hold every other request, including the auth gate of
+//! unrelated connections and `/v1/hello`. Opening the partial and reading
+//! its `Identity` are single metadata calls and stay on the task.
+//! `Identity` tells the file a verify hashed from one created again at its
+//! path. Swift: `Upload/ReceivingFile.swift`.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
@@ -140,8 +143,11 @@ impl Identity {
     }
 
     /// The identity of the file at `path` now, through a handle open for
-    /// the call. std opens with delete sharing, so the handle keeps no
-    /// rename or delete of the file from going through.
+    /// the call. std opens with delete sharing, so this short-lived handle
+    /// blocks no rename or delete of the file. A delete while the verify
+    /// holds the partial open may only be marked pending until it closes:
+    /// an announce in between gets a 500 and this call fails, so the verify
+    /// answers 409; no file is lost.
     pub fn at(path: &Path) -> std::io::Result<Identity> {
         Self::of(&File::open(path)?)
     }

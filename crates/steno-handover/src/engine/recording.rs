@@ -19,7 +19,7 @@ use uuid::Uuid;
 use super::{Engine, HandoverRequest, HandoverResponse};
 use crate::pinning::constant_time_equals;
 use crate::upload::MetadataValidation;
-use crate::upload::receiving_file::{self, Identity};
+use crate::upload::receiving_file;
 use crate::wire;
 
 enum Verification {
@@ -249,22 +249,22 @@ impl Engine {
     /// chunk is present and the whole file hashes to the announced value;
     /// 409 with the status while chunks are missing or while an earlier
     /// `complete` is still verifying or admitting, and with no chunk listed
-    /// when the partial was replaced during the verify; 422 on a hash
-    /// mismatch, after which the partial is gone and the phone starts over;
-    /// 401 from the revoke of the device until it pairs again, and when a
-    /// revoke landed during the receipt read or the verify of a recording
-    /// not yet admitted.
+    /// when the partial went or was created again during the verify; 422 on
+    /// a hash mismatch, after which the partial is gone and the phone starts
+    /// over; 401 from the revoke of the device until it pairs again, and
+    /// when a revoke landed during the receipt read or the verify of a
+    /// recording not yet admitted.
     pub(super) async fn complete(
         &self,
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
-        // `handle` refused a revoked device already; checked again here
-        // under the guard that takes the count. A `complete` that starts
-        // during the revoke's store delete takes the count already bumped
-        // and may still read the row, so the checks below would miss the
-        // revoke. The receipt's owner is not known yet, so nothing is
-        // discarded.
+        // `handle` refused a revoked device already; a revoke from another
+        // thread may land in between, so this checks again under the lock
+        // that takes the count. A `complete` that starts during the revoke's
+        // store delete takes the count already bumped and may still read the
+        // row, so the checks below would miss the revoke. The receipt's owner
+        // is not known yet, so nothing is discarded.
         let revocation = {
             let state = self.state();
             if state.revoked.contains(&device.id) {
@@ -341,9 +341,10 @@ impl Engine {
     /// name. The partial stays open from before the `verifying` write to
     /// the promote, and a partial gone or replaced meanwhile answers 409
     /// with no chunk listed: the hash must be of the file the intake gets.
-    /// 401 when the device was revoked since `complete` took `revocation`;
-    /// that check is the decision point, and a revoke after it finds the
-    /// admission under way.
+    /// 401 when the device was revoked since `complete` took `revocation`.
+    /// Nothing yields between that check and the intake call: an admission
+    /// past this check may still finish; the revoke's discard can also make
+    /// it fail.
     async fn verified_file(
         &self,
         receipt: &mut HandoverReceipt,
@@ -370,10 +371,11 @@ impl Engine {
         }
         // Opened before the `verifying` write, the first yield. A partial
         // discarded and created again meanwhile (a stale `complete`'s
-        // refusal, then the phone's announce) is another file: `Identity`.
+        // refusal, then the phone's announce) is another file, which
+        // `Identity` tells apart.
         let partial = self.inbox.partial(recording_id);
         let opened = std::fs::File::open(&partial)
-            .and_then(|file| Ok((Identity::of(&file)?, Arc::new(file))));
+            .and_then(|file| Ok((receiving_file::Identity::of(&file)?, Arc::new(file))));
         let (identity, file) = match opened {
             Ok(opened) => opened,
             Err(error) => {
@@ -407,7 +409,7 @@ impl Engine {
             }
         };
         self.refresh(receipt);
-        if Identity::at(&partial).ok() != Some(identity) {
+        if receiving_file::Identity::at(&partial).ok() != Some(identity) {
             return Verification::Answered(self.replaced_during_the_verify(receipt).await);
         }
         if !verified {
@@ -436,7 +438,7 @@ impl Engine {
         // Another thread may have replaced the partial between the check
         // above and the rename: the file moved must still be the one hashed.
         // A file moved in its place is not this upload's; it goes.
-        if Identity::at(&promoted).ok() != Some(identity) {
+        if receiving_file::Identity::at(&promoted).ok() != Some(identity) {
             let _ = std::fs::remove_file(&promoted);
             return Verification::Answered(self.replaced_during_the_verify(receipt).await);
         }
