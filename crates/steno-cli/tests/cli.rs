@@ -448,6 +448,18 @@ fn the_models_variable_names_the_models_directory() {
     );
 }
 
+/// `steno dev models <args> --models-dir <home>/models` with `home`'s
+/// support directory, which must succeed.
+fn dev_models(home: &Path, args: &[&str]) -> Run {
+    let models = home.join("models");
+    let mut command = vec!["dev", "models"];
+    command.extend_from_slice(args);
+    command.extend(["--models-dir", models.to_str().unwrap()]);
+    let run = steno(&command, home);
+    assert_eq!(run.status, 0, "{args:?}: {}", run.stderr);
+    run
+}
+
 /// `dev models list` and `remove` act on the `--models-dir` they are given,
 /// not on the default models directory.
 #[test]
@@ -466,17 +478,7 @@ fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
     for file in &diarizer_files {
         std::fs::write(file, b"onnx").unwrap();
     }
-    let list = steno(
-        &[
-            "dev",
-            "models",
-            "list",
-            "--models-dir",
-            models.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert_eq!(list.status, 0, "{}", list.stderr);
+    let list = dev_models(home, &["list"]);
     assert!(
         list.stdout
             .contains(&format!("models: {}", models.display())),
@@ -496,52 +498,17 @@ fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
         "the diarizer in --models-dir: {}",
         list.stdout
     );
-    let remove_diarizer = steno(
-        &[
-            "dev",
-            "models",
-            "remove",
-            "offlineDiarizer",
-            "--models-dir",
-            models.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert_eq!(remove_diarizer.status, 0, "{}", remove_diarizer.stderr);
+    dev_models(home, &["remove", "offlineDiarizer"]);
     assert!(
         diarizer_files.iter().all(|file| !file.exists()),
         "removed from --models-dir"
     );
-
-    let remove = steno(
-        &[
-            "dev",
-            "models",
-            "remove",
-            "parakeetV3",
-            "--models-dir",
-            models.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert_eq!(remove.status, 0, "{}", remove.stderr);
+    dev_models(home, &["remove", "parakeetV3"]);
 }
 
-/// `steno dev models list --models-dir <dir>` with `home`'s support
-/// directory, the line of `asset`.
+/// The line of `asset` in `steno dev models list` over [`dev_models`].
 fn models_list_line(home: &Path, asset: &str) -> String {
-    let models = home.join("models");
-    let list = steno(
-        &[
-            "dev",
-            "models",
-            "list",
-            "--models-dir",
-            models.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert_eq!(list.status, 0, "{}", list.stderr);
+    let list = dev_models(home, &["list"]);
     list.stdout
         .lines()
         .find(|line| line.starts_with(&format!("{asset} ")))
