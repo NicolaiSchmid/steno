@@ -546,13 +546,18 @@ impl App {
         )
     }
 
-    /// What every exit does first ([`ExitGate`]), in order: a start or a
-    /// stop in progress settles, a recording in progress is stopped with
-    /// the `quit` end reason and saved (its asset written, the meeting
-    /// queued, so the next launch processes it), and the handover listener
-    /// stops. Every write is a committed transaction by then, so the store
-    /// has nothing left to flush. Swift: `AppController.shutdown`.
+    /// What every exit does first ([`ExitGate`]), in order: the pipelines
+    /// quit ([`CurrentPipeline::quit`]), so no job starts and a job the
+    /// exit ends stays `processing` for the next launch rather than
+    /// `failed`; a start or a stop in progress settles; a recording in
+    /// progress is stopped with the `quit` end reason and saved (its asset
+    /// written, the meeting enqueued, where it stays `queued` until the
+    /// next launch processes it); and the handover listener stops. Every
+    /// write is a committed transaction by then, so the store has nothing
+    /// left to flush. Swift: `AppController.shutdown`, whose pipeline died
+    /// with the app, so the next launch resumed its job.
     pub fn shutdown(&self) {
+        self.pipeline.quit();
         self.recorder.stop_for_quit();
         if let Some(handover) = &self.handover {
             block_on(&self.runtime, handover.stop());
@@ -987,7 +992,9 @@ mod tests {
     }
 
     /// What every exit runs first: a recording in progress is stopped with
-    /// `quit` and saved by the time the shutdown returns.
+    /// `quit` and saved by the time the shutdown returns. The pipelines
+    /// quit before the stop, so the saved meeting stays `queued` for the
+    /// next launch, through a reload too, and no job starts in the exit.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn shutting_down_stops_and_saves_a_recording_in_progress() {
         use steno_host::services::Recorder as _;
@@ -1016,6 +1023,18 @@ mod tests {
             Some(steno_core::RecordingEndReason::Quit)
         );
         assert!(store.asset(meeting_id).unwrap().is_some(), "the asset");
+        app.pipeline.current().wait_until_idle().await;
+        assert_eq!(
+            store.meeting(meeting_id).unwrap().unwrap().state,
+            steno_core::MeetingState::Queued,
+            "no job ran in the exit"
+        );
+        app.pipeline.reload().unwrap();
+        assert_eq!(
+            app.pipeline.current().resume_unfinished().unwrap(),
+            [],
+            "a reload's pipeline has quit too"
+        );
     }
 
     /// An idle exit runs the same shutdown, which saves nothing and

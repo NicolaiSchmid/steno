@@ -23,7 +23,7 @@ use steno_core::{
 use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no_conversation};
 use steno_pipeline::{
     LaneMerger, MeetingEventBus, MonotonicClock, PipelineDependencies, ProcessingPipeline,
-    RetentionSweep, StageRates,
+    QuitLatch, RetentionSweep, StageRates,
 };
 use uuid::Uuid;
 
@@ -963,6 +963,82 @@ async fn a_job_that_panics_gives_its_claim_on_the_engine_back() {
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, next), MeetingState::Ready);
     assert_eq!(engine.inner.releases.count(), 1);
+}
+
+/// A job that fails once the pipeline has quit (the exit signalled the
+/// speech sidecar with the app) leaves its meeting `processing`, warns
+/// nothing, and the next launch processes it again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch() {
+    let log = steno_pipeline::fixtures::CapturedLog::warnings();
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine {
+        inner: FakeSpeechEngine {
+            failure: Some("the sidecar died mid-request".to_owned()),
+            ..FakeSpeechEngine::default()
+        },
+        ..GatedEngine::new(Gate::FirstTranscription)
+    });
+    let dependencies = with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default());
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    let mut asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    // An id of its own picks this run's log lines out.
+    asset.id = Uuid::new_v4();
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    engine.wait_until_entered().await;
+
+    pipeline.quit();
+    engine.open.notify_one();
+    pipeline.wait_until_idle().await;
+    assert_eq!(engine.inner.transcriptions.count(), 1, "the job failed");
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Processing);
+    assert!(
+        !log.text().contains(&asset.id.to_string()),
+        "debug only: {}",
+        log.text()
+    );
+
+    let next_launch = ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_quit_latch(QuitLatch::default()),
+    );
+    assert_eq!(next_launch.resume_unfinished().unwrap(), [meeting.id]);
+    next_launch.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+}
+
+/// Once the pipeline has quit, no job starts: `enqueue` saves the meeting
+/// `queued` with its asset, launch recovery starts nothing, and a direct
+/// `process` is refused before it claims the meeting.
+#[tokio::test(flavor = "multi_thread")]
+async fn no_job_starts_once_the_pipeline_quits() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(FakeSpeechEngine::default());
+    let dependencies = with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default());
+    let pipeline = ProcessingPipeline::new(dependencies);
+    pipeline.quit();
+
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    assert_eq!(pipeline.resume_unfinished().unwrap(), Vec::<Uuid>::new());
+    let refused = pipeline.process(asset.id).await.unwrap_err();
+    assert_eq!(refused.reason, "the app is quitting");
+    pipeline.wait_until_idle().await;
+
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Queued);
+    assert!(
+        world.store.asset(meeting.id).unwrap().is_some(),
+        "the asset"
+    );
+    assert_eq!(engine.preparations.count(), 0, "nothing ran");
+    assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
 #[tokio::test(flavor = "multi_thread")]
