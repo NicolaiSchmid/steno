@@ -177,10 +177,8 @@ extension HandoverEngine {
     case .answered(let response):
       return response
     case .file(let file):
-      // The receipt read and the verify suspended the actor. A revoke that
-      // landed meanwhile discarded the files only if it found the receipt in
-      // memory, which after a restart it may not have: the file of a revoked
-      // device never reaches the intake.
+      // A revoke during the receipt read or the verify may have missed the
+      // receipt (after a restart it was only in the store).
       guard revocations[device.id, default: 0] == revocation else {
         inbox.discard(recordingID)
         forget(recordingID)

@@ -27,10 +27,9 @@ actor HandoverEngine: RequestHandling {
   /// intake's answer. The verify and the admit suspend the actor, so a
   /// retried `complete` must not start a second verify or admission.
   var completing: Set<UUID> = []
-  /// How often each device was revoked since start. Pairing again does not
-  /// reset it: `complete` compares the count from before its receipt read
-  /// with the count after its verify, so a revoke in between admits nothing,
-  /// also when the phone paired again under the same device id meanwhile.
+  /// Revokes per device since start. Pairing again does not reset it, so a
+  /// `complete` that sees it change across its receipt read and verify
+  /// admits nothing.
   var revocations: [UUID: Int] = [:]
 
   /// `lastSeenAt` is written at most this often per device.
@@ -100,9 +99,9 @@ actor HandoverEngine: RequestHandling {
   var pairingIsOpen: Bool { pairing?.isOpen ?? false }
 
   /// Forgets the device and drops whatever it was uploading: the files of
-  /// its receipts in memory here, and whatever a `complete` in flight
-  /// verifies, before the intake sees it. Files of a receipt only in the
-  /// store (not read since start) wait for the next start's sweep.
+  /// its receipts in memory, and what a `complete` in flight verifies (see
+  /// `revocations`). Files of a receipt only in the store wait for the next
+  /// start's sweep.
   func revoke(_ deviceID: UUID) async throws {
     revocations[deviceID, default: 0] += 1
     for (recordingID, receipt) in activeReceipts where receipt.deviceID == deviceID {
