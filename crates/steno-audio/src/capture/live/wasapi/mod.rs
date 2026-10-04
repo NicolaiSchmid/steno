@@ -96,10 +96,10 @@ use crate::realtime::{FollowerLane, LaneFrameSink, PacketRouter, StreamBody};
 
 /// How long `start` waits, in total, for the stream threads to open and
 /// start their streams (process loopback activation included) and for the
-/// watcher to register, before it gives up on a stream (the watcher is
-/// only logged). One deadline for every wait, so a hanging COM call holds
-/// the session's lock this long at most.
-const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+/// watcher to register, before it gives up on a stream; a watcher that
+/// misses it is logged, not a failure. One deadline for every wait, so a
+/// hanging COM call holds the session's lock this long at most.
+const START_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the asynchronous process-loopback activation may take.
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The longest a capture thread waits for the engine's event; also how
@@ -132,8 +132,8 @@ struct Launched {
     /// Dropped to make a thread that waits for its body exit.
     body: Option<SyncSender<StreamBody>>,
     info: Option<StreamInfo>,
-    /// The thread answered `start` at least once, so it is not stuck in a
-    /// COM call and may be joined.
+    /// The thread answered `start`'s last request, so it is not stuck in
+    /// a COM call and may be joined.
     answered: bool,
 }
 
@@ -490,9 +490,10 @@ fn run_watcher(
     drop(apartment);
 }
 
-/// Stops and joins the stream threads that answered; a thread that never
-/// answered `start` is left to finish on its own (it holds no body, so it
-/// never writes to the sink).
+/// Stops and joins the stream threads that answered; a thread still in a
+/// COM call is left to finish on its own. It never writes to the sink: it
+/// holds no body, or it is starting its stream and finds `stop` set before
+/// its first drain.
 fn tear_down(stop: &AtomicBool, streams: Vec<Launched>) {
     stop.store(true, Ordering::Release);
     for mut launched in streams {
@@ -512,7 +513,7 @@ fn next_event(launched: &Launched, deadline: Instant) -> Result<StreamEvent, Cap
         CaptureError::BackendFailed(match error {
             RecvTimeoutError::Timeout => {
                 format!(
-                    "{} stream did not answer within {OPEN_TIMEOUT:?} of the start",
+                    "{} stream did not answer within {START_TIMEOUT:?} of the start",
                     launched.source.as_str()
                 )
             }
@@ -639,6 +640,9 @@ fn start_streams(
             follower.map(|lane| StreamBody::follower(Arc::clone(lane), buffer_frames))
         };
         // Without a body the thread exits, which `expect_event` reports.
+        // With one it calls `Start` next, which may hang: until it answers,
+        // `tear_down` must not join it.
+        launched.answered = false;
         if let (Some(body), Some(sender)) = (body, launched.body.take()) {
             let _ = sender.send(body);
         }
@@ -668,7 +672,7 @@ fn spawn_watcher(
         .map_err(|error| CaptureError::BackendFailed(format!("device watcher: {error}")))?;
     let limit = deadline.saturating_duration_since(Instant::now());
     if ready_receiver.recv_timeout(limit).is_err() {
-        tracing::warn!("device watcher did not start within {OPEN_TIMEOUT:?} of the start");
+        tracing::warn!("device watcher did not start within {START_TIMEOUT:?} of the start");
     }
     Ok(thread)
 }
@@ -691,7 +695,7 @@ impl CaptureBackend for LiveCaptureBackend {
             return Err(CaptureError::InvalidState("backend already started".into()));
         }
         let plan = SplitStreamPlan::new(lanes)?;
-        let deadline = Instant::now() + OPEN_TIMEOUT;
+        let deadline = Instant::now() + START_TIMEOUT;
         let stop = Arc::new(AtomicBool::new(false));
         let watcher = Arc::new(Watcher::default());
 
@@ -779,10 +783,12 @@ impl Drop for LiveCaptureBackend {
     }
 }
 
-/// The WASAPI endpoints for the input picker, under the same name and
-/// calls as the macOS `capture::live::devices::AudioDevices` (Swift:
-/// `Sources/StenoAudio/Capture/AudioDevices.swift`). Every call joins COM
-/// on the calling thread for its duration.
+/// The WASAPI endpoints for the input picker, under the macOS
+/// `capture::live::devices::AudioDevices` names for the calls both have
+/// (`all`, `inputs`, `device`, `default_input`, `default_system_output`;
+/// Swift: `Sources/StenoAudio/Capture/AudioDevices.swift`); errors are
+/// [`CaptureError`]. Every call joins COM on the calling thread for its
+/// duration.
 pub struct AudioDevices;
 
 impl AudioDevices {
@@ -855,7 +861,7 @@ impl AudioDevices {
     pub fn default_system_output() -> Result<AudioDeviceInfo, CaptureError> {
         Self::all()?
             .into_iter()
-            .find(|d| d.is_default_output)
+            .find(|d| d.is_default_system_output)
             .ok_or(CaptureError::OutputDeviceUnavailable)
     }
 }
