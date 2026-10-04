@@ -1,9 +1,9 @@
 //! The COM and WASAPI calls behind the Windows capture backend and the
 //! audio-session enumeration: the Windows backend's only `unsafe` (the
 //! crate-wide list is in the crate doc). Written against Microsoft's
-//! documentation and compile-tested on the `windows-latest` CI runner
-//! only; no Windows machine with audio devices has run it (see the module
-//! doc of `capture::live::wasapi`). WP10a of
+//! documentation and tested on the `windows-latest` CI runner, which has
+//! no audio endpoint; no Windows machine with audio devices has run it
+//! (see the module doc of `capture::live::wasapi`). WP10a of
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md`; the macOS counterpart
 //! is `capture::live::hal`. No Swift counterpart.
 //!
@@ -31,13 +31,15 @@
 //!   escape the closure (its lifetime is the call's).
 //! - **Callbacks.** The notification objects (`#[implement]`) run on
 //!   threads the audio service owns. They only call the boxed closure they
-//!   were given, which sends on a channel or sets a flag; they never call
-//!   back into WASAPI (the documentation forbids it from inside
-//!   `IMMNotificationClient`) and never block. Each registration is undone
-//!   in `Drop`. Microsoft does not say whether a callback can still be
-//!   running when the unregister call returns; it does not matter for
-//!   memory safety, because the object is reference counted and its
-//!   closure owns everything it touches (an `Arc` or a `Sender`).
+//!   were given, which sends on a channel or records the time under the
+//!   capture watcher's short lock (never held across a WASAPI call); they
+//!   never call back into WASAPI (the documentation forbids it from inside
+//!   `IMMNotificationClient`) and never wait on anything else. Each
+//!   registration is undone in `Drop`. Microsoft does not say whether a
+//!   callback can still be running when the unregister call returns; it
+//!   does not matter for memory safety, because the object is reference
+//!   counted and its closure owns everything it touches (an `Arc` or a
+//!   `Sender`).
 
 // `#[implement]` expands to `&T as *const T` casts.
 #![allow(clippy::ref_as_ptr)]
@@ -50,9 +52,7 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::Duration;
 
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE, S_OK, WAIT_OBJECT_0,
-};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, PROPERTYKEY, RPC_E_CHANGED_MODE, S_OK};
 use windows::Win32::Media::Audio::{
     AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY, AUDCLNT_BUFFERFLAGS_SILENT,
     AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
@@ -87,7 +87,7 @@ use windows_core::implement;
 
 use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
-use crate::capture::split_streams::frames_from_hundred_nanoseconds;
+use crate::capture::split_streams::{BUFFER_DURATION, StreamSizes, stream_sizes};
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
 use crate::realtime::SliceView;
 
@@ -260,12 +260,15 @@ impl Enumerator {
             .collect())
     }
 
-    /// Calls `on_event` for every endpoint notification until the
-    /// registration is dropped. `on_event` runs on a thread of the audio
-    /// service and must neither block nor call into WASAPI.
+    /// Calls `on_event` for every endpoint notification (a default
+    /// changed, a device added, removed or changing state) until the
+    /// registration is dropped. Which device and role is not passed on:
+    /// the caller resolves the devices again. `on_event` runs on a
+    /// thread of the audio service and must neither block nor call into
+    /// WASAPI.
     pub fn register(
         &self,
-        on_event: Box<dyn Fn(EndpointEvent) + Send + Sync>,
+        on_event: Box<dyn Fn() + Send + Sync>,
     ) -> Result<EndpointRegistration, ComError> {
         let client: IMMNotificationClient = EndpointNotifications { on_event }.into();
         check(
@@ -282,19 +285,9 @@ impl Enumerator {
     }
 }
 
-/// What an endpoint notification was about. The payload (which device,
-/// which role) is not carried: the listener resolves the devices again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndpointEvent {
-    /// `OnDefaultDeviceChanged`.
-    DefaultChanged,
-    /// `OnDeviceStateChanged`, `OnDeviceAdded`, `OnDeviceRemoved`.
-    DeviceChanged,
-}
-
 #[implement(IMMNotificationClient)]
 struct EndpointNotifications {
-    on_event: Box<dyn Fn(EndpointEvent) + Send + Sync>,
+    on_event: Box<dyn Fn() + Send + Sync>,
 }
 
 impl IMMNotificationClient_Impl for EndpointNotifications_Impl {
@@ -303,17 +296,17 @@ impl IMMNotificationClient_Impl for EndpointNotifications_Impl {
         _id: &PCWSTR,
         _state: DEVICE_STATE,
     ) -> windows::core::Result<()> {
-        (self.on_event)(EndpointEvent::DeviceChanged);
+        (self.on_event)();
         Ok(())
     }
 
     fn OnDeviceAdded(&self, _id: &PCWSTR) -> windows::core::Result<()> {
-        (self.on_event)(EndpointEvent::DeviceChanged);
+        (self.on_event)();
         Ok(())
     }
 
     fn OnDeviceRemoved(&self, _id: &PCWSTR) -> windows::core::Result<()> {
-        (self.on_event)(EndpointEvent::DeviceChanged);
+        (self.on_event)();
         Ok(())
     }
 
@@ -323,7 +316,7 @@ impl IMMNotificationClient_Impl for EndpointNotifications_Impl {
         _role: ERole,
         _id: &PCWSTR,
     ) -> windows::core::Result<()> {
-        (self.on_event)(EndpointEvent::DefaultChanged);
+        (self.on_event)();
         Ok(())
     }
 
@@ -453,10 +446,6 @@ fn float_format(channels: usize) -> WAVEFORMATEX {
     }
 }
 
-/// The shared-mode buffer asked for: 100 ms, so a capture thread that is
-/// late by several periods loses nothing.
-const BUFFER_DURATION: i64 = 1_000_000;
-
 /// How often a polled stream (no event) is drained: 50 ms, half its buffer.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// [`POLL_INTERVAL`] as a `REFERENCE_TIME`.
@@ -489,10 +478,10 @@ impl Drop for Event {
 /// Which loopback a system stream ended up on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopbackKind {
-    /// Process loopback excluding Steno's own process tree. Microsoft
-    /// documents it from build 20348; it is reported to work from Windows 10
-    /// 2004 (build 19041). Unverified here; the endpoint fallback covers
-    /// either.
+    /// Process loopback excluding Steno's own process tree. Microsoft's
+    /// API page names build 20438 and its ApplicationLoopback sample build
+    /// 20348; it is reported to work from Windows 10 2004 (build 19041).
+    /// Unverified here; the endpoint fallback covers either.
     Process,
     /// Loopback of the default render endpoint, Steno's own output
     /// included.
@@ -508,9 +497,7 @@ pub struct CaptureClient {
     /// refused event callbacks).
     event: Option<Event>,
     channels: usize,
-    buffer_frames: usize,
-    period_frames: usize,
-    latency_frames: usize,
+    sizes: StreamSizes,
     discontinuities: u64,
     /// No packet drained yet: loopback streams commonly flag their first
     /// packet as a discontinuity, which is not a late thread.
@@ -605,52 +592,34 @@ impl CaptureClient {
             unsafe { client.GetService() },
             "IAudioClient::GetService(IAudioCaptureClient)",
         )?;
-        // The process-loopback client implements neither; 0 and the usual
-        // 10 ms period stand in.
         // SAFETY: plain call on the initialised client.
-        let latency = unsafe { client.GetStreamLatency() }.unwrap_or(0);
-        let mut period: i64 = 0;
-        // SAFETY: `period` is a live i64 for the call to write.
+        let latency = unsafe { client.GetStreamLatency() }.ok();
         let period = if event.is_none() {
             // A polled stream is drained once per poll, so that is its
             // packet rhythm, whatever the engine's period.
-            POLL_INTERVAL_HUNDRED_NANOSECONDS
-        } else if unsafe { client.GetDevicePeriod(Some(&raw mut period), None) }.is_ok()
-            && period > 0
-        {
-            period
+            Some(POLL_INTERVAL_HUNDRED_NANOSECONDS)
         } else {
-            100_000
+            let mut period: i64 = 0;
+            // SAFETY: `period` is a live i64 for the call to write.
+            let read = unsafe { client.GetDevicePeriod(Some(&raw mut period), None) };
+            read.is_ok().then_some(period)
         };
         Ok(Self {
             capture,
             client,
             event,
             channels,
-            buffer_frames,
-            period_frames: frames_from_hundred_nanoseconds(period, SAMPLE_RATE),
-            latency_frames: frames_from_hundred_nanoseconds(latency, SAMPLE_RATE),
+            sizes: stream_sizes(buffer_frames, period, latency),
             discontinuities: 0,
             first_packet: true,
         })
     }
 
-    /// Frames the stream's buffer holds: the largest packet.
+    /// The buffer, period and latency the stream runs with: what the
+    /// engine answered, where [`stream_sizes`] trusts it.
     #[must_use]
-    pub fn buffer_frames(&self) -> usize {
-        self.buffer_frames
-    }
-
-    /// Frames per engine period; for a polled stream, frames per poll.
-    #[must_use]
-    pub fn period_frames(&self) -> usize {
-        self.period_frames
-    }
-
-    /// `GetStreamLatency`, in frames at 48 kHz.
-    #[must_use]
-    pub fn latency_frames(&self) -> usize {
-        self.latency_frames
+    pub fn sizes(&self) -> StreamSizes {
+        self.sizes
     }
 
     /// Packets flagged `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` so far, the
@@ -674,16 +643,16 @@ impl CaptureClient {
     }
 
     /// Waits for the engine's signal, at most `timeout` (a polled stream
-    /// sleeps [`POLL_INTERVAL`] instead). `false` on timeout; the caller
-    /// drains anyway.
-    pub fn wait(&self, timeout: Duration) -> bool {
+    /// sleeps [`POLL_INTERVAL`] instead). The caller drains either way, so
+    /// a timeout is not reported.
+    pub fn wait(&self, timeout: Duration) {
         let Some(event) = &self.event else {
             std::thread::sleep(POLL_INTERVAL);
-            return false;
+            return;
         };
         let milliseconds = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
         // SAFETY: the handle is a live event owned by `self`.
-        unsafe { WaitForSingleObject(event.0, milliseconds) == WAIT_OBJECT_0 }
+        let _ = unsafe { WaitForSingleObject(event.0, milliseconds) };
     }
 
     /// Hands every queued packet to `handle`, then returns. The real-time
@@ -723,21 +692,22 @@ impl CaptureClient {
             }
             self.first_packet = false;
             let count = frames as usize;
-            let samples = if silent || data.is_null() || count == 0 {
+            // Alignment is checked before the slice is made.
+            #[allow(clippy::cast_ptr_alignment)]
+            let floats = data.cast::<f32>();
+            // A buffer not aligned for `f32` is delivered as silence of
+            // its length, as `interleaved_view` does.
+            let samples = if silent || floats.is_null() || !floats.is_aligned() || count == 0 {
                 None
             } else {
                 // SAFETY: `GetBuffer` succeeded, so `data` points at
                 // `frames` frames in the format `initialize` gave the
-                // client: 32-bit floats, `channels` interleaved, block
-                // aligned (so aligned for `f32`). The engine neither
+                // client: 32-bit floats, `channels` interleaved; it is
+                // aligned for `f32` (checked above). The engine neither
                 // frees nor writes them until `ReleaseBuffer` below, and
                 // the slice lives only for the `handle` call.
-                #[allow(clippy::cast_ptr_alignment)]
                 Some(unsafe {
-                    std::slice::from_raw_parts(
-                        data.cast::<f32>().cast_const(),
-                        count * self.channels,
-                    )
+                    std::slice::from_raw_parts(floats.cast_const(), count * self.channels)
                 })
             };
             handle(SliceView {
@@ -767,8 +737,8 @@ struct ActivationParams(NonNull<ActivationBlob>);
 struct ActivationBlob {
     params: AUDIOCLIENT_ACTIVATION_PARAMS,
     /// Never dropped: `PROPVARIANT`'s `Drop` is `PropVariantClear`, which
-    /// would `CoTaskMemFree` the blob, and the blob is `params` beside it.
-    /// (Dropping it was a heap corruption the Windows runner caught.)
+    /// would `CoTaskMemFree` the blob, and the blob is `params` beside it:
+    /// dropping it would free the blob twice.
     variant: ManuallyDrop<PROPVARIANT>,
 }
 

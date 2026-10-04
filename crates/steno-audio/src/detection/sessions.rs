@@ -1,7 +1,7 @@
 //! Audio sessions to process activity: the mapping under the Windows
 //! [`LiveProcessAudioActivity`](super::LiveProcessAudioActivity) (WP10a),
 //! pure so it is tested on every OS over synthetic sessions. No Swift
-//! equivalent; the Core Audio HAL reports per-process input and output
+//! counterpart; the Core Audio HAL reports per-process input and output
 //! flags directly.
 //!
 //! WASAPI has no per-process "is running input" flag. It has audio sessions
@@ -55,6 +55,23 @@ pub struct AudioSessionRecord {
 
 /// Every process with a live session, in pid order, with its input and
 /// output state and its executable's file name as the bundle id.
+///
+/// ```
+/// use steno_audio::detection::{
+///     AudioSessionRecord, EndpointFlow, SessionState, processes_from_sessions,
+/// };
+///
+/// let capture = AudioSessionRecord {
+///     pid: 4_200,
+///     flow: EndpointFlow::Capture,
+///     state: SessionState::Active,
+///     system_sounds: false,
+///     image_path: Some(r"C:\Program Files\Example\App.exe".into()),
+/// };
+/// let processes = processes_from_sessions(&[capture]);
+/// assert_eq!(processes[0].bundle_id.as_deref(), Some("App.exe"));
+/// assert!(processes[0].is_running_input);
+/// ```
 #[must_use]
 pub fn processes_from_sessions(records: &[AudioSessionRecord]) -> Vec<ProcessAudioActivity> {
     let mut processes: BTreeMap<i32, ProcessAudioActivity> = BTreeMap::new();

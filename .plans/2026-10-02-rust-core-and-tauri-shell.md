@@ -770,7 +770,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - On the Mac, Parakeet v3 is the `CoreML` model the Swift app installs; Settings and
   `steno dev models` report its directory, and this build cannot download it.
 - The audio device list is empty off the Mac, so Settings > Recording offers only the
-  default input until the PipeWire (WP5b) and WASAPI (WP10) backends enumerate.
+  default input: WASAPI enumerates (WP10a) but the services do not read it yet, and
+  PipeWire has no list.
 - The pipeline's `decode` reads a whole lane through symphonia (see Audio); the one
   buffer alive at a time rule holds, the buffer is the full lane.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
@@ -891,34 +892,70 @@ it:
   `--ignored` tests in `crates/steno-audio/tests/live_windows.rs`, a real
   call recorded through process loopback, a default-device switch while
   recording, and meeting detection with Teams and Zoom. No Windows machine
-  has run it; the backend is compile-tested on the `windows-latest` CI
-  runner only (it has no audio device), and its device-free tests ran there
-  and under wine.
+  has run it. The `windows-latest` CI runner has no audio endpoint, but
+  process loopback runs there and delivers silence, so CI checks that a
+  system-lane capture starts, delivers whole periods, stops dead and
+  restarts; the microphone path never opens there. Under wine with a
+  headless PipeWire server the whole backend runs (endpoint loopback, as
+  wine has no process loopback), the `--ignored` tests included.
 - **Two clocks, no drift compensation.** The microphone and the system audio
   are two WASAPI streams on their endpoints' clocks; the Core Audio
-  aggregate drift-compensates, the Windows backend does not. The system
-  lane sits in a jitter buffer behind the microphone (`realtime::streams`)
-  sized from the system stream's period: a target of two periods (20 ms at
-  the usual 10 ms period), a slip back to the target once more than one
-  period above it (counted as dropped system frames), and zeros with a
-  re-prime after an underrun. `underrun_frames` counts the shortfall only,
-  not the re-prime zeros that follow it. Both counts are logged when the
-  capture stops. Measure the slip rate on a USB headset against built-in
-  speakers; a plan decides whether to resample instead.
+  aggregate drift-compensates, the Windows backend does not. The system lane
+  sits in a jitter buffer behind the microphone (`realtime::streams`) sized
+  from the system stream's period: a target of two periods (20 ms at the
+  usual 10 ms period), a slip back to the target once the lowest queue over
+  half a second stayed more than one period above it (counted as dropped
+  system frames; a master thread that runs late and drains its packets back
+  to back raises the queue only for a moment and slips nothing), an
+  immediate slip once the queue is more than the microphone's buffer above
+  the high-water mark (no late master explains it), and zeros with a
+  re-prime after an underrun. What the follower queued before the master's
+  first pull is trimmed to the target, not counted: audio from before the
+  recording, or, when the master's first drain is late, the system audio
+  recorded during that lateness. The full staging refuses the newest
+  packets, so when it refused one before that pull (a microphone that starts
+  more than 1.37 s after the system stream), the first pull drops everything
+  queued and the refused packets, uncounted too, and the lane primes on the
+  audio that follows. `underrun_frames` counts the shortfall and the
+  re-prime zeros that follow it, not the zeros before the lane first primes.
+  The underrun, slip and trim counts are logged at `info` when the capture
+  stops (the shell's default filter is `warn`: set
+  `RUST_LOG=steno_audio=info`; `tests/live_windows.rs` prints them). Measure
+  the slip rate on a USB headset against built-in speakers; a plan decides
+  whether to resample instead.
+- **Engine data loss is not a drop.** A packet the engine flags as a
+  discontinuity (the capture thread was late and the engine lost data) is
+  counted and logged at stop, never added to `CaptureStatistics`' drops:
+  WASAPI does not say how much was lost. A Windows recording's drop count
+  can under-report where the Mac's does not.
+- **A system-only capture skips silence.** With the `[System]` lane
+  override the system stream is the master, and endpoint loopback
+  delivers no packet while nothing plays, so the recording is shorter than
+  the time it ran. Call and in-person captures master on the microphone,
+  which delivers continuously.
 - **Far-end latency** is the two streams' `GetStreamLatency` less the jitter
-  buffer's target. Between slips the queue drifts above the target by up
-  to the high-water mark, so the echo canceller's alignment error from the
-  buffer is at most high-water minus target: one period (10 ms). The
-  process-loopback client may not implement `GetStreamLatency` (0 then),
-  and a loopback stream's latency is not the render path's; check the
-  echo canceller's alignment on hardware.
+  buffer's target. Between slips the queue sits above the target by up to
+  one period (10 ms), plus the follower's worst lateness in a window, plus
+  up to two windows of drift (a fraction of a millisecond at the drift of
+  real clocks), and never more than one period plus the microphone's buffer
+  (the immediate slip); that is the echo canceller's alignment error from
+  the buffer. The process-loopback client may not implement
+  `GetStreamLatency`; a failed read or a latency above 200 ms counts as 0,
+  since understating the delay stays inside the canceller's tail and
+  overstating it does not. A staging delay larger than both latencies is
+  logged at `info`. A loopback stream's latency is not the render path's;
+  check the echo canceller's alignment on hardware.
 - **Process loopback scope.** Excluding Steno's process tree records every
   other process; whether that follows the default render endpoint or mixes
-  every endpoint is unverified. Microsoft documents process loopback from
-  build 20348; it is reported to work from Windows 10 2004, also
-  unverified. The fallback, loopback of the default render endpoint (which
-  records Steno's own output too), runs whenever process loopback fails for
-  any reason, its 5 s activation timeout included. The user gets no notice;
+  every endpoint is unverified. Microsoft's API page names build 20438 for
+  process loopback and its ApplicationLoopback sample build 20348; it is
+  reported to work from Windows 10 2004, also unverified. Its client is
+  reported to answer `GetBufferSize` with 0 or a huge value, so the buffer
+  is clamped to between one period and one second, and a device period
+  outside 1 to 100 ms is taken for 10 ms (`split_streams::stream_sizes`).
+  The fallback, loopback of the default render endpoint (which records
+  Steno's own output too), runs whenever process loopback fails for any
+  reason, its 5 s activation timeout included. The user gets no notice;
   only the log says which loopback runs.
 - **Default roles.** Windows keeps an `eConsole` and an `eCommunications`
   default per direction; the backend follows `eConsole` only. The
@@ -926,8 +963,8 @@ it:
   loopback's device), `default_output_uid` stays empty, the microphone
   default is the `eConsole` capture default, and `AudioDevices` marks the
   `eConsole` render endpoint as both the default output and the default
-  system output. A change of the communications default alone costs no
-  rebuild.
+  system output (`AudioDevices::default_system_output`, as on the Mac). A
+  change of the communications default alone costs no rebuild.
 - **No `SampleRateChanged`.** The engine converts every stream to 48 kHz,
   so the rate never changes; a device format change invalidates the stream
   (`AUDCLNT_E_DEVICE_INVALIDATED`) and is reported as `InputDeviceGone` or
@@ -939,10 +976,24 @@ it:
   file name (`Teams.exe`), so the app's list of call apps needs Windows
   names. A capture session's state change is notified for sessions present
   at registration; later ones are re-registered on `OnSessionCreated` and
-  otherwise caught by the detector's 1 s poll.
+  on an endpoint notification, and otherwise caught by the detector's 1 s
+  poll.
 - **Device list.** `AudioDeviceInfo.id` is the index in the enumeration
   (WASAPI has no numeric ids), `uid` the endpoint id `Settings` stores; the
   transport type and `is_running_somewhere` are not read.
+- **A hanging start.** `start` waits at most 10 s in all for both streams
+  to open and start and for the watcher to register, holding the session's
+  lock meanwhile (the long hold in `capture::session`'s doc). A stream
+  thread still in a COM call at the deadline is left running unjoined
+  until the call returns. A watcher that missed it but comes alive later
+  watches as an on-time one does; `stop()` joins a watcher once it has
+  reached its loop, and one still in its start-up calls finds the stop
+  flag when they return and exits without reporting.
+- **One notification thread per detector start.** Each `start()` of the
+  meeting detector calls the session source's `changes()`, which runs a
+  thread holding its COM registrations until the source is dropped or,
+  after the detector stopped, the next notification arrives. A detector
+  started and stopped many times holds that many idle threads until then.
 
 Six Swift defects the port does not share; fix them in Swift if it ships
 another release, otherwise the cutover closes them:
@@ -1184,6 +1235,7 @@ PR off `main`.
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | open |
+| WASAPI follow-ups: slip window and immediate slip, trusted stream sizes, start deadline, detector start and stop serialised (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -1261,8 +1313,9 @@ WP10a is the Windows half of `crates/steno-audio`: the WASAPI live backend
 (process loopback excluding Steno's process tree, endpoint loopback as the
 fallback, the capture endpoint, one thread per stream, endpoint
 notifications and the rebuild report) and the session-based
-`LiveProcessAudioActivity`. Compile-tested only: built, linted and
-unit-tested on the `windows-latest` runner, no live capture on hardware.
+`LiveProcessAudioActivity`. Not run on hardware: built, linted and
+tested on the `windows-latest` runner, where only process loopback (and
+no microphone) can run.
 The per-packet bodies, the stream plan and the session mapping are
 platform-independent (`tests/split_streams.rs`, `tests/sessions.rs`), the
 zero-allocation proof covers both stream bodies (`tests/realtime.rs`), and

@@ -2,10 +2,10 @@
 //! starting) and when it lets go.
 //! Swift: `Sources/StenoAudio/Detection/MeetingDetector.swift`.
 //!
-//! Reads [`ProcessAudioActivitySource::snapshot`] on every HAL change
+//! Reads [`ProcessAudioActivitySource::snapshot`] on every change
 //! notification and on a 1 s poll (the listener behaviour is undocumented,
-//! so the poll is the safety net; a snapshot is a handful of property
-//! reads), ignores its own PID, and debounces both edges by 2 s so a
+//! so the poll is the safety net; on macOS a snapshot is a handful of
+//! property reads), ignores its own PID, and debounces both edges by 2 s so a
 //! flapping input yields one `MicrophoneOpened` and one
 //! `MicrophoneReleased`. Worst case without a listener event: 3 s from the
 //! microphone opening to the event. Every timer runs on the injected
@@ -51,6 +51,13 @@ struct Core {
     ignoring_pids: BTreeSet<i32>,
     debounce: Duration,
     poll_interval: Duration,
+    /// Held across a whole evaluation, snapshot included, so the listener
+    /// and the poller apply their snapshots in the order they read them:
+    /// a poll snapshot read before a change and applied after it would
+    /// otherwise cancel the debounce the change armed. The Swift detector
+    /// is an actor, which serialises the same way. `start` and `stop` hold
+    /// it too, so no evaluation runs across either. Taken before `inner`.
+    evaluating: Mutex<()>,
     inner: Mutex<Inner>,
 }
 
@@ -94,6 +101,7 @@ impl MeetingDetector {
                 ignoring_pids: ignoring_pids.unwrap_or_else(|| BTreeSet::from([own])),
                 debounce,
                 poll_interval,
+                evaluating: Mutex::new(()),
                 inner: Mutex::new(Inner::default()),
             }),
         }
@@ -132,12 +140,17 @@ impl MeetingDetector {
     }
 
     /// Reads a first snapshot (an already-open microphone is reported after
-    /// the debounce like any other), then listens and polls.
+    /// the debounce like any other), then listens and polls. A `stop()` or
+    /// a second `start()` meanwhile waits for it to finish.
     pub fn start(&self) -> Result<(), ActivityError> {
+        // Held to the end, so a `stop()` cannot run between the first
+        // snapshot and `running` being set and leave the threads running;
+        // the threads block on this lock before their first evaluation.
+        let _evaluating = self.core.evaluating();
         if self.is_running() {
             return Ok(());
         }
-        self.core.evaluate()?;
+        self.core.apply_snapshot()?;
         let running = Cancel::new();
         let changes = self.core.source.changes();
         let listener = {
@@ -150,7 +163,7 @@ impl MeetingDetector {
                         match changes.recv_timeout(Duration::from_millis(100)) {
                             Ok(()) => {
                                 if let Some(core) = core.upgrade() {
-                                    core.evaluate_ignoring_errors();
+                                    core.evaluate_ignoring_errors(&running);
                                 }
                             }
                             Err(RecvTimeoutError::Timeout) => {}
@@ -170,7 +183,7 @@ impl MeetingDetector {
                 .spawn(move || {
                     while clock.sleep(interval, &running) {
                         let Some(core) = core.upgrade() else { return };
-                        core.evaluate_ignoring_errors();
+                        core.evaluate_ignoring_errors(&running);
                     }
                 })
                 .expect("spawn detector poll")
@@ -183,8 +196,12 @@ impl MeetingDetector {
     }
 
     /// Stops the poll and listen threads, drops a pending debounce and forgets
-    /// the holder; a second call does nothing.
+    /// the holder; a second call does nothing. An evaluation in flight
+    /// finishes first; none applies afterwards.
     pub fn stop(&self) {
+        // One that waits for the lock finds `running` cancelled and
+        // applies nothing.
+        let evaluating = self.core.evaluating();
         let (running, pending, threads) = {
             let mut inner = self.core.lock();
             inner.pending_generation += 1;
@@ -200,6 +217,7 @@ impl MeetingDetector {
         if let Some(running) = running {
             running.cancel();
         }
+        drop(evaluating);
         if let Some(pending) = pending {
             pending.cancel();
         }
@@ -222,13 +240,25 @@ impl Core {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn evaluate_ignoring_errors(self: &Arc<Self>) {
-        let _ = self.evaluate();
+    fn evaluating(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.evaluating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The listener's and the poller's evaluation; `running` is their flag:
+    /// once `stop` cancelled it, nothing is applied.
+    fn evaluate_ignoring_errors(self: &Arc<Self>, running: &Cancel) {
+        let _evaluating = self.evaluating();
+        if running.is_cancelled() {
+            return;
+        }
+        let _ = self.apply_snapshot();
     }
 
     /// Compares the snapshot with what was reported and arms or disarms
-    /// the debounce timer.
-    fn evaluate(self: &Arc<Self>) -> Result<(), ActivityError> {
+    /// the debounce timer. The caller holds `evaluating`.
+    fn apply_snapshot(self: &Arc<Self>) -> Result<(), ActivityError> {
         let mut active: Vec<ProcessAudioActivity> = self
             .source
             .snapshot()?

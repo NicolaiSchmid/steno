@@ -1,6 +1,7 @@
 //! Capture: the backend seam, the session state machine over it, the
-//! stream layout and the device-change comparison, and the macOS live
-//! backend. Swift: `Sources/StenoAudio/Capture/`.
+//! stream layout, the device-change comparison, the two-stream plan
+//! (`split_streams`) and the live backends (Core Audio, PipeWire,
+//! WASAPI). Swift: `Sources/StenoAudio/Capture/`.
 
 pub mod backend;
 pub mod configuration;

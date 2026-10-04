@@ -2,7 +2,7 @@
 //! `LiveProcessAudioActivity` (WP10a), over synthetic sessions: which
 //! process counts as holding the microphone, what its "bundle id" is, and
 //! that the result drives `MeetingDetector` as the macOS HAL's does. Runs
-//! on every OS. No Swift equivalent.
+//! on every OS. No Swift counterpart.
 
 // Plan package names (WP10a) are not code.
 #![allow(clippy::doc_markdown)]

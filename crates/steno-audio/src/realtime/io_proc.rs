@@ -181,20 +181,16 @@ pub fn interleaved_view(
     stride: i32,
     channels: usize,
 ) -> SliceView<'_> {
-    let frame_bytes = channels * size_of::<f32>();
-    if frame_bytes == 0 {
-        return SliceView {
-            channels,
-            frames: 0,
-            samples: None,
-        };
-    }
-    let size = size as usize;
     let without_samples = |frames| SliceView {
         channels,
         frames,
         samples: None,
     };
+    let frame_bytes = channels * size_of::<f32>();
+    if frame_bytes == 0 {
+        return without_samples(0);
+    }
+    let size = size as usize;
     let Some(memory) = memory.filter(|m| !m.is_empty()) else {
         return without_samples(size / frame_bytes);
     };

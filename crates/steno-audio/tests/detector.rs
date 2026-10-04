@@ -17,11 +17,14 @@
 )]
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
-use std::sync::mpsc::Receiver;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use steno_audio::detection::{MeetingDetector, MeetingEvent, ProcessAudioActivity};
+use steno_audio::detection::{
+    ActivityError, MeetingDetector, MeetingEvent, ProcessAudioActivity, ProcessAudioActivitySource,
+};
 use steno_audio::testing::{FakeProcessAudioActivity, ManualClock};
 
 fn face_time() -> ProcessAudioActivity {
@@ -209,4 +212,268 @@ fn a_failing_snapshot_fails_start_and_is_tolerated_later() {
     );
     assert_eq!(detector.holder(), Some(zoom()));
     detector.stop();
+}
+
+/// A source whose poll thread, once armed, stops right after it read its
+/// snapshot and waits to be let go before the detector applies it.
+struct HeldPoll {
+    inner: FakeProcessAudioActivity,
+    armed: AtomicBool,
+    entered: Sender<()>,
+    release: Mutex<Receiver<()>>,
+}
+
+impl ProcessAudioActivitySource for HeldPoll {
+    fn snapshot(&self) -> Result<Vec<ProcessAudioActivity>, ActivityError> {
+        let snapshot = self.inner.snapshot();
+        if std::thread::current().name() == Some("steno-det-poll")
+            && self.armed.swap(false, Ordering::SeqCst)
+        {
+            let _ = self.entered.send(());
+            let _ = self.release.lock().unwrap().recv();
+        }
+        snapshot
+    }
+
+    fn changes(&self) -> Receiver<()> {
+        self.inner.changes()
+    }
+}
+
+/// A poll snapshot read while the call was still on, applied after the
+/// listener saw it end, must not cancel the release debounce the listener
+/// armed: the release fires one debounce later all the same.
+#[test]
+fn a_stale_poll_snapshot_does_not_cancel_a_pending_release() {
+    let clock = Arc::new(ManualClock::new());
+    let fake = FakeProcessAudioActivity::new(vec![idle_zoom()]);
+    let (entered, entered_receiver) = channel();
+    let (release, release_receiver) = channel();
+    let source = Arc::new(HeldPoll {
+        inner: fake.clone(),
+        armed: AtomicBool::new(false),
+        entered,
+        release: Mutex::new(release_receiver),
+    });
+    let detector = MeetingDetector::new(
+        Arc::clone(&source) as Arc<dyn ProcessAudioActivitySource>,
+        Arc::clone(&clock) as Arc<dyn steno_audio::Clock>,
+        Some(BTreeSet::from([1])),
+        MeetingDetector::DEFAULT_DEBOUNCE,
+        MeetingDetector::DEFAULT_POLL_INTERVAL,
+    );
+    let events = detector.events();
+    detector.start().unwrap();
+    assert!(clock.wait_for_sleepers(1), "the poll timer is armed");
+    fake.set(vec![zoom()]);
+    assert!(clock.wait_for_sleepers(2), "the open debounce is armed");
+    source.armed.store(true, Ordering::SeqCst);
+    clock.advance(Duration::from_secs(2));
+    // The poller has read "Zoom is recording" and is held there.
+    entered_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the poll reads its snapshot");
+    assert!(matches!(
+        next(&events),
+        MeetingEvent::MicrophoneOpened { pid: 5_151, .. }
+    ));
+    // The call ends; the listener evaluates now or right after the poll.
+    fake.set(vec![idle_zoom()]);
+    std::thread::sleep(Duration::from_millis(200));
+    release.send(()).unwrap();
+    assert!(
+        clock.wait_for_sleepers(2),
+        "the poll timer and the release debounce are armed"
+    );
+    clock.advance(Duration::from_secs(2));
+    assert_eq!(next(&events), MeetingEvent::MicrophoneReleased);
+    detector.stop();
+}
+
+/// A poll in flight while `stop()` runs finishes before the stop resets the
+/// state, and a poll that waits for it applies nothing: no debounce
+/// outlives the stop, and a stopped detector reports no holder.
+#[test]
+fn a_poll_in_flight_during_stop_leaves_no_holder() {
+    let clock = Arc::new(ManualClock::new());
+    let fake = FakeProcessAudioActivity::new(vec![idle_zoom()]);
+    let (entered, entered_receiver) = channel();
+    let (release, release_receiver) = channel();
+    let source = Arc::new(HeldPoll {
+        inner: fake.clone(),
+        armed: AtomicBool::new(false),
+        entered,
+        release: Mutex::new(release_receiver),
+    });
+    let detector = Arc::new(MeetingDetector::new(
+        Arc::clone(&source) as Arc<dyn ProcessAudioActivitySource>,
+        Arc::clone(&clock) as Arc<dyn steno_audio::Clock>,
+        Some(BTreeSet::from([1])),
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+    ));
+    detector.start().unwrap();
+    assert!(clock.wait_for_sleepers(1), "the poll timer is armed");
+    fake.set(vec![zoom()]);
+    assert!(clock.wait_for_sleepers(2), "the open debounce is armed");
+    source.armed.store(true, Ordering::SeqCst);
+    clock.advance(Duration::from_secs(1));
+    entered_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the poll reads its snapshot");
+    let stopper = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || detector.stop())
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    release.send(()).unwrap();
+    stopper.join().unwrap();
+    assert!(!detector.is_running());
+    // Give a thread the late poll might have spawned time to reach its
+    // timer, then run the clock past any debounce.
+    std::thread::sleep(Duration::from_millis(300));
+    let sleepers_after_stop = clock.pending_sleepers();
+    clock.advance(Duration::from_secs(10));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        (sleepers_after_stop, detector.holder()),
+        (0, None),
+        "a stopped detector has no timer and no holder"
+    );
+}
+
+/// A source whose first `changes()`, which `start()` calls after its
+/// first snapshot, waits to be let go; later calls do not.
+struct HeldStart {
+    inner: FakeProcessAudioActivity,
+    entered: Sender<()>,
+    release: Mutex<Option<Receiver<()>>>,
+}
+
+impl HeldStart {
+    fn new(entered: Sender<()>, release: Receiver<()>) -> Self {
+        Self {
+            inner: FakeProcessAudioActivity::new(vec![]),
+            entered,
+            release: Mutex::new(Some(release)),
+        }
+    }
+}
+
+impl ProcessAudioActivitySource for HeldStart {
+    fn snapshot(&self) -> Result<Vec<ProcessAudioActivity>, ActivityError> {
+        self.inner.snapshot()
+    }
+
+    fn changes(&self) -> Receiver<()> {
+        let release = self.release.lock().unwrap().take();
+        if let Some(release) = release {
+            let _ = self.entered.send(());
+            let _ = release.recv_timeout(Duration::from_secs(5));
+        }
+        self.inner.changes()
+    }
+}
+
+fn held_detector(source: HeldStart, clock: &Arc<ManualClock>) -> Arc<MeetingDetector> {
+    Arc::new(MeetingDetector::new(
+        Arc::new(source) as Arc<dyn ProcessAudioActivitySource>,
+        Arc::clone(clock) as Arc<dyn steno_audio::Clock>,
+        Some(BTreeSet::from([1])),
+        MeetingDetector::DEFAULT_DEBOUNCE,
+        MeetingDetector::DEFAULT_POLL_INTERVAL,
+    ))
+}
+
+/// A `stop()` while `start()` is between its first snapshot and its
+/// threads waits for the start, then stops what it started: the detector
+/// is not left running with no `stop()` to come.
+#[test]
+fn a_stop_during_start_waits_for_it_and_stops_it() {
+    let clock = Arc::new(ManualClock::new());
+    let (entered, entered_receiver) = channel();
+    let (release, release_receiver) = channel();
+    let detector = held_detector(HeldStart::new(entered, release_receiver), &clock);
+    // `stop()` drops the subscribers, which closes this channel.
+    let events = detector.events();
+    let starter = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || detector.start())
+    };
+    entered_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("start read its first snapshot");
+    let stopper = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || detector.stop())
+    };
+    assert_eq!(
+        events.recv_timeout(Duration::from_millis(200)),
+        Err(RecvTimeoutError::Timeout),
+        "the stop waits for the start"
+    );
+    release.send(()).unwrap();
+    assert_eq!(
+        events.recv_timeout(Duration::from_secs(5)),
+        Err(RecvTimeoutError::Disconnected),
+        "the stop ran once the start was done"
+    );
+    starter.join().unwrap().unwrap();
+    stopper.join().unwrap();
+    assert!(!detector.is_running());
+    assert!(
+        clock.wait_for_sleepers(0),
+        "no poll timer outlives the stop"
+    );
+}
+
+/// A second `start()` while the first is between its first snapshot and
+/// its threads waits for it, then finds the detector running and starts
+/// nothing: one poll timer, which `stop()` takes down.
+#[test]
+fn a_second_start_during_start_waits_for_it_and_starts_nothing() {
+    let clock = Arc::new(ManualClock::new());
+    let (entered, entered_receiver) = channel();
+    let (release, release_receiver) = channel();
+    let detector = held_detector(HeldStart::new(entered, release_receiver), &clock);
+    // Never dropped: a poller no `stop()` reaches would hang `Drop`, which
+    // joins it, instead of failing the test.
+    std::mem::forget(Arc::clone(&detector));
+    let first = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || detector.start())
+    };
+    entered_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("start read its first snapshot");
+    let second = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || detector.start())
+    };
+    // Time for the second start to reach the lock the first holds.
+    std::thread::sleep(Duration::from_millis(200));
+    release.send(()).unwrap();
+    first.join().unwrap().unwrap();
+    second.join().unwrap().unwrap();
+    assert!(clock.wait_for_sleepers(1), "one poll timer");
+    // Time for a second poller to reach its timer.
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(clock.pending_sleepers(), 1, "one poll timer, not two");
+    let (done, returned) = channel();
+    let stopper = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || {
+            detector.stop();
+            let _ = done.send(());
+        })
+    };
+    assert!(
+        returned.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "stop() returned"
+    );
+    stopper.join().unwrap();
+    assert!(
+        clock.wait_for_sleepers(0),
+        "no poll timer outlives the stop"
+    );
 }

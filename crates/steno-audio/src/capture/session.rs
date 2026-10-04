@@ -74,7 +74,9 @@
 //! to 200 ms while
 //! [`NominalSampleRate::settle`](super::NominalSampleRate::settle) waits
 //! for the aggregate, on Linux until PipeWire runs the first cycle (1 to
-//! 2 s for a Bluetooth sink; none within 3 s fails the start). A
+//! 2 s for a Bluetooth sink; none within 3 s fails the start), on Windows
+//! until both streams have opened and started (process loopback's
+//! activation included; 10 s in all at most, then the start fails). A
 //! `stop()` arriving meanwhile queues behind it
 //! and then finds a started backend to tear down, instead of racing a
 //! half-built one; a backend never calls back into the session from
@@ -886,9 +888,10 @@ impl Core {
                 active.system_peak_so_far = active.system_peak_so_far.max(peak);
             }
         }
-        // The old backend's listeners went with it, so the latch can open
-        // now: a report from the rebuilt backend before the gap is written
-        // reaches `device_changed`, which keeps it for `resume`.
+        // The old backend reports nothing once its `stop()` returned, so
+        // the latch can open now: a report from the rebuilt backend before
+        // the gap is written reaches `device_changed`, which keeps it for
+        // `resume`.
         sink.rearm_device_change();
         let unaccounted = match self.restart_backend(&sink, generation, cancel) {
             Restart::Started(stream, attempt) => {

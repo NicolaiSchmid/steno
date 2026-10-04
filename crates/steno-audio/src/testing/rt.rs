@@ -1,13 +1,14 @@
 //! Real-time safety evidence: a counting global allocator. No Swift
-//! equivalent (the Swift tests hook libmalloc's `malloc_logger`, Darwin
+//! counterpart (the Swift tests hook libmalloc's `malloc_logger`, Darwin
 //! only).
 //!
 //! While counting is on for the current thread, every allocation,
 //! reallocation and deallocation that thread makes is counted. An
 //! integration test installs it as `#[global_allocator]` (each test binary
-//! has its own), runs the IOProc body, the processing loop with the real
-//! Speex canceller and the relay hand-off on its own thread, and asserts
-//! the count is zero. The report prints the count; anything above zero
+//! has its own), runs the IOProc body, the WASAPI two-stream bodies, the
+//! PipeWire process body, the processing loop with the real Speex
+//! canceller and the relay hand-off on its own thread, and asserts the
+//! count is zero. The report prints the count; anything above zero
 //! means the callback path allocated.
 //!
 //! The current thread is identified by the OS (`gettid` on Linux,
