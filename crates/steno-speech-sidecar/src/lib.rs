@@ -117,11 +117,6 @@ impl Fault {
     fn at_start(self) -> bool {
         matches!(self, Fault::Silent | Fault::WrongProtocol)
     }
-
-    /// Committed at a load, not at the next transcription.
-    fn at_load(self) -> bool {
-        self == Fault::AbortOnDirectmlLoad
-    }
 }
 
 /// The command line.
@@ -291,7 +286,9 @@ impl Engine for FakeEngine {
     /// the tests see the setting reach the child and the answer come back;
     /// with [`Fault::AbortOnDirectmlLoad`], aborts there instead.
     fn load(&mut self, _: &Path, options: &OnnxOptions) -> Result<EncoderProvider, String> {
-        if options.directml && self.fault.is_some_and(Fault::at_load) && self.fault_now().is_some()
+        if options.directml
+            && self.fault == Some(Fault::AbortOnDirectmlLoad)
+            && self.fault_now().is_some()
         {
             std::process::abort();
         }
