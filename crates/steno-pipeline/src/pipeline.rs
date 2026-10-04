@@ -12,7 +12,7 @@
 //! Once a job's lanes are transcribed and no other job is between its
 //! warm-up and its last lane, the speech engine is released
 //! ([`SpeechEngine::release`]): the speech sidecar's child exits and its
-//! working set goes back before the diarizer loads.
+//! working set goes back before the diarizer runs.
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -213,16 +213,18 @@ struct State {
     /// The background runs started by `enqueue` and `resume_unfinished`,
     /// by asset id.
     running: HashMap<Uuid, JoinHandle<()>>,
-    /// Jobs between their warm-up and their last lane ([`SpeechJob`]).
-    speech_jobs: usize,
+    /// Claims on the speech engine: jobs between their warm-up and their
+    /// last lane ([`SpeechClaim`]).
+    speech_claims: usize,
 }
 
 struct Inner {
     dependencies: PipelineDependencies,
     state: Mutex<State>,
-    /// Serialises `warm_up` and the release after a job's lanes: one
-    /// preparation at a time, so two runs that start together load each
-    /// engine once, and a warm-up never overlaps a release.
+    /// Serialises the warm-ups (`warm_up`, `warm_up_diarizer`) and the
+    /// release after a job's lanes: one preparation at a time, so two runs
+    /// that start together load each engine once, and a warm-up never
+    /// overlaps a release.
     preparing: AsyncMutex<()>,
 }
 
@@ -598,6 +600,19 @@ impl ProcessingPipeline {
         Ok(())
     }
 
+    /// [`warm_up`](Self::warm_up) for the diarizer alone, for a speech
+    /// engine that frees its models after each job (the speech sidecar):
+    /// loading that one ahead of a job would keep its working set resident
+    /// until the job is done, outside any claim. Rust only: Swift's
+    /// `warmUp` loads both.
+    pub async fn warm_up_diarizer(&self) -> Result<()> {
+        let _guard = self.inner.preparing.lock().await;
+        attributing(
+            PipelineStage::Diarize,
+            self.inner.dependencies.diarizer.prepare().await,
+        )
+    }
+
     /// Runs every stage: `queued → processing → ready`, or `failed(reason)`
     /// with whatever was persisted so far. Once `persist` has marked the
     /// meeting `ready` nothing downgrades it: a `retention` error is
@@ -639,9 +654,9 @@ impl ProcessingPipeline {
         asset: &AudioAsset,
         meeting: Meeting,
     ) -> Result<AudioAsset> {
-        let speech = self.claim_speech();
+        let claim = self.claim_speech();
         let transcribed = self.prepare_and_transcribe(asset, meeting).await;
-        self.finish_speech(speech).await;
+        self.finish_speech(claim).await;
         let Transcribed {
             meeting: mut current,
             settings,
@@ -711,24 +726,29 @@ impl ProcessingPipeline {
 
     /// Counts a job as needing the speech engine until the claim is
     /// dropped or handed to [`finish_speech`](Self::finish_speech).
-    fn claim_speech(&self) -> SpeechJob {
-        self.state().speech_jobs += 1;
-        SpeechJob {
+    fn claim_speech(&self) -> SpeechClaim {
+        self.state().speech_claims += 1;
+        SpeechClaim {
             pipeline: self.clone(),
         }
     }
 
-    /// Ends `job`'s use of the speech engine and releases the engine when
-    /// no other job is between its warm-up and its last lane. Under
-    /// `preparing`: a job that claims the engine meanwhile either keeps it
-    /// loaded or warms it up again after the release, never before it. A
-    /// job that panics or is cancelled only drops its claim, so the engine
-    /// stays loaded until the next job ends. A failed release is logged
-    /// and never fails the job.
-    async fn finish_speech(&self, job: SpeechJob) {
-        drop(job);
+    /// Ends `claim` and releases the speech engine when no other job is
+    /// between its warm-up and its last lane. Another claim seen before
+    /// the lock ends the call at once, so a finisher never waits on a
+    /// warm-up only to leave the engine loaded. Under `preparing`, the
+    /// count is checked again: a job that claims the engine meanwhile
+    /// either keeps it loaded or warms it up again after the release,
+    /// never before it. A job that panics or is cancelled only drops its
+    /// claim, so the engine stays loaded until the next job ends. A failed
+    /// release is logged and never fails the job.
+    async fn finish_speech(&self, claim: SpeechClaim) {
+        drop(claim);
+        if self.state().speech_claims > 0 {
+            return;
+        }
         let _guard = self.inner.preparing.lock().await;
-        if self.state().speech_jobs > 0 {
+        if self.state().speech_claims > 0 {
             return;
         }
         if let Err(error) = self.inner.dependencies.speech_engine.release().await {
@@ -1518,15 +1538,15 @@ impl Drop for Admitted {
     }
 }
 
-/// A job's claim on the speech engine, counted in `speech_jobs`;
+/// A job's claim on the speech engine, counted in `speech_claims`;
 /// dropping it ends the claim.
-struct SpeechJob {
+struct SpeechClaim {
     pipeline: ProcessingPipeline,
 }
 
-impl Drop for SpeechJob {
+impl Drop for SpeechClaim {
     fn drop(&mut self) {
-        self.pipeline.state().speech_jobs -= 1;
+        self.pipeline.state().speech_claims -= 1;
     }
 }
 
