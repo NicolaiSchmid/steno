@@ -24,19 +24,20 @@
 //!
 //! Most services are called with the host's view-model lock held: the
 //! pipeline from the detail commands and every Save, the recorder's
-//! `status` for each `recording` snapshot and its `refresh_permissions`
-//! after a failed start, the clip player's `playing` while the detail is
-//! built, the handover, devices, folder usage, updater and login item
-//! from the Settings commands, and the secret store when the Settings
-//! sections reload. An implementation therefore must not call
-//! back into the host (`store_changed`, `recorder_changed`,
+//! `status` for each `recording` snapshot, the clip player's `playing`
+//! while the detail is built, the handover, devices, folder usage, updater
+//! and login item from the Settings commands, and the secret store when
+//! the Settings sections reload. An implementation therefore must not
+//! call back into the host (`store_changed`, `recorder_changed`,
 //! `apply_meeting_event`, `phones_changed`, any command) from inside one of
 //! its methods on the calling thread, and must not hold a lock of its own
 //! while notifying the host if one of its methods takes that lock: the
 //! first deadlocks on the host's mutex, the second in a lock-order cycle.
 //! Notify from the service's own thread, after the method returned. The
-//! permission prompts, the LLM probe, the Codex calls and the model
-//! download run with the lock released and may block as long as they need.
+//! recorder's commands, the permission prompts, the LLM probe, the Codex
+//! calls and the model download run with the lock released and may block
+//! as long as they need; the recorder's commands may also report their
+//! change from inside (see [`Recorder`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -195,13 +196,15 @@ impl RecorderStatus {
     }
 }
 
-/// The one recorder (WP5 wires the capture session behind it). Called
-/// with the host's lock held (see the module doc): a change reaches the
-/// host through [`Host::recorder_changed`](crate::Host::recorder_changed)
-/// from the recorder's own thread, never from inside these methods, and
-/// never while holding a lock `status` takes. The fake runs the state
-/// machine without a session and records every start, stop and keep.
-/// Swift: `RecordingController`.
+/// The one recorder (WP5 wires the capture session behind it). A change
+/// reaches the host through
+/// [`Host::recorder_changed`](crate::Host::recorder_changed), never while
+/// holding a lock `status` takes, since `status` is called with the host's
+/// lock held (see the module doc). The commands are called with no host
+/// lock held, so they may report their change from inside, on the calling
+/// thread, as `steno_services`' capture recorder does. The fake runs the
+/// state machine without a session and records every start, stop and
+/// keep. Swift: `RecordingController`.
 pub trait Recorder: Send + Sync {
     fn status(&self) -> RecorderStatus;
     /// Starts a recording; `call_app` is the app the detection prompt named.

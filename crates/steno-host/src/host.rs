@@ -57,9 +57,10 @@
 //! held, on the command's thread. The services are called with the
 //! view-model lock held, so they must not call back into the host (the
 //! `services` module doc has the rule), except for the calls that run with
-//! it released: the permission prompts, the LLM probe, the Codex calls and
-//! the model download, the prompts and the probe with their busy flag
-//! published first. `settings.transcription.download` replies after its
+//! it released: the recorder's commands, whose changes re-enter the host
+//! (`Host::recorder_changed`), the permission prompts, the LLM probe, the
+//! Codex calls and the model download, the prompts and the probe with
+//! their busy flag published first. `settings.transcription.download` replies after its
 //! first publish and keeps publishing from its own thread until the
 //! download ends; a second download of the asset reattaches to that thread
 //! instead of starting one. The flush thread starts in [`Host::new`] and
@@ -1570,17 +1571,19 @@ impl BridgeHost for Host {
     fn recording_start(&self, params: StartRecordingParams) -> Outcome<()> {
         // The sidebar control's start: the recorder starts, then the live
         // row is requested so the window selects it. A start that fails
-        // re-reads the permissions.
-        self.shared.services.recorder.start(params.mode, None);
-        let status = self.shared.services.recorder.status();
-        self.command(
-            &[BridgeTopic::Recording, BridgeTopic::App],
-            |inner| match status.state {
-                RecordingState::Recording => inner.app.requested_meeting_id = status.meeting_id,
-                RecordingState::Idle => self.shared.services.recorder.refresh_permissions(),
-                RecordingState::Starting | RecordingState::Stopping => {}
-            },
-        );
+        // re-reads the permissions, with no lock held: the recorder reports
+        // the change through `recorder_changed`, which locks.
+        let recorder = &self.shared.services.recorder;
+        recorder.start(params.mode, None);
+        let status = recorder.status();
+        if status.state == RecordingState::Idle {
+            recorder.refresh_permissions();
+        }
+        self.command(&[BridgeTopic::Recording, BridgeTopic::App], |inner| {
+            if status.state == RecordingState::Recording {
+                inner.app.requested_meeting_id = status.meeting_id;
+            }
+        });
         Ok(())
     }
 
