@@ -7,12 +7,8 @@
 //! `ModelStore.swift` and `ModelDownloading.swift`, whose downloads go
 //! through `FluidAudio` and `WhisperKit` instead.
 //!
-//! A store's root holds one folder per asset id, `<root>/<asset id>/`.
-//! Steno keeps the root in the `onnx/` folder of its models directory
-//! ([`ModelStore::in_models_directory`]); `steno-services` resolves the
-//! models directory, and [`ModelStore::from_environment`] resolves it the
-//! same way for the `transcribe` example and the FLEURS test, which have
-//! no settings (the crate docs say more).
+//! A store's root holds one folder per asset id, `<root>/<asset id>/`;
+//! where Steno keeps it: the crate docs' Models section.
 //!
 //! # Hosts
 //!
@@ -302,13 +298,14 @@ const MAX_CHUNK_TIMEOUT: Duration = Duration::from_secs(128);
 /// with a plain request; a larger one with `Range` requests, one chunk
 /// after another. Each request costs a round trip through the host's
 /// redirect (about 0.4 s to Hugging Face), so chunks are large: the 2.6 GB
-/// export takes about 40.
+/// export takes about 40 requests.
 const CHUNK: u64 = 64 << 20;
 
 /// The read buffer of a download and of a hash.
 const READ_BUFFER: usize = 1 << 16;
 
-/// The models root, the mirror and the HTTP client.
+/// The store root, the mirror, the HTTP client, and the chunk size, body
+/// timeouts and clock the tests change.
 #[derive(Debug, Clone)]
 pub struct ModelStore {
     root: PathBuf,
@@ -316,9 +313,9 @@ pub struct ModelStore {
     agent: ureq::Agent,
     /// [`CHUNK`], smaller in tests.
     chunk: u64,
-    /// [`MIN_BODY_TIMEOUT`] and [`MAX_CHUNK_TIMEOUT`], shorter in the tests
-    /// of a stalled body.
+    /// [`MIN_BODY_TIMEOUT`], changed only by the tests of a stalled body.
     min_body_timeout: Duration,
+    /// [`MAX_CHUNK_TIMEOUT`], likewise.
     max_chunk_timeout: Duration,
     /// What a download waiting for another one's lock goes by.
     clock: Clock,
@@ -883,8 +880,8 @@ const RETRY_DELAY: Duration = Duration::from_millis(if cfg!(test) { 10 } else { 
 
 /// Whether a failed download may succeed when tried again: a 5xx answer, a
 /// connection that could not be made, dropped or timed out, or a body that
-/// stalled past [`ModelStore::body_timeout`]. A wrong size or checksum, a 4xx answer and
-/// a disk error fail at once.
+/// stalled past [`ModelStore::body_timeout`]. A wrong size or checksum, a
+/// 4xx answer and a disk error fail at once.
 fn is_transient(error: &SpeechError) -> bool {
     let dropped = |error: &std::io::Error| {
         use std::io::ErrorKind::{
