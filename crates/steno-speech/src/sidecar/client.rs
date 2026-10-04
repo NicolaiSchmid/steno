@@ -22,6 +22,7 @@ use std::process::{Child, ChildStderr, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use steno_core::protocols::{BoundaryResult, async_trait};
@@ -167,7 +168,7 @@ struct SidecarProcess {
     stdin: Arc<Mutex<ChildStdin>>,
     events: Receiver<Event>,
     sender: Sender<Event>,
-    stderr: Arc<Mutex<VecDeque<String>>>,
+    stderr: StderrTail,
     pid: u32,
     next_id: u64,
     /// Where the child's encoder runs; `Some` once its models are loaded.
@@ -219,16 +220,38 @@ fn stderr_level(line: &str) -> tracing::Level {
     }
 }
 
+/// How long a crash report waits for the stderr reader to reach the end
+/// of a dead child's stderr, which a loaded machine may take a while to
+/// schedule.
+const STDERR_DRAIN: Duration = Duration::from_secs(1);
+
+/// The last lines of the child's stderr and the thread that reads them.
+struct StderrTail {
+    lines: Arc<Mutex<VecDeque<String>>>,
+    reader: JoinHandle<()>,
+}
+
+impl StderrTail {
+    /// The lines kept, once the reader has reached the end of stderr or
+    /// [`STDERR_DRAIN`] has passed, joined with newlines.
+    fn after_exit(&self) -> String {
+        let deadline = Instant::now() + STDERR_DRAIN;
+        while !self.reader.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut lines = self.lines.lock().unwrap_or_else(PoisonError::into_inner);
+        lines.make_contiguous().join("\n")
+    }
+}
+
 /// Reads the child's stderr on a thread of its own, logging each line at
 /// its [`stderr_level`] and keeping the last [`STDERR_LINES`] for a crash
-/// report.
-fn keep_stderr_tail(
-    pid: u32,
-    stderr: ChildStderr,
-) -> std::io::Result<Arc<Mutex<VecDeque<String>>>> {
+/// report. The thread ends at the end of stderr, which is how a crash
+/// report knows it has the child's last words.
+fn keep_stderr_tail(pid: u32, stderr: ChildStderr) -> std::io::Result<StderrTail> {
     let tail = Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_LINES)));
     let lines = Arc::clone(&tail);
-    std::thread::Builder::new()
+    let reader = std::thread::Builder::new()
         .name(format!("sidecar-{pid}-stderr"))
         .spawn(move || {
             let mut stderr = BufReader::new(stderr);
@@ -259,7 +282,10 @@ fn keep_stderr_tail(
                 tail.push_back(line);
             }
         })?;
-    Ok(tail)
+    Ok(StderrTail {
+        lines: tail,
+        reader,
+    })
 }
 
 impl SidecarProcess {
@@ -334,7 +360,7 @@ impl SidecarProcess {
         match process.wait_for(None, config.startup_timeout)? {
             Reply::Ready { protocol, .. } if protocol == PROTOCOL_VERSION => Ok(process),
             Reply::Ready { protocol, .. } => Err(SidecarError::Protocol(format!(
-                "the child speaks protocol {protocol}, this client {PROTOCOL_VERSION}"
+                "the child speaks protocol {protocol}, the parent {PROTOCOL_VERSION}"
             ))),
             other => Err(SidecarError::Protocol(format!(
                 "expected ready, got {other:?}"
@@ -417,17 +443,34 @@ impl SidecarProcess {
             return SidecarError::Pipe(write.unwrap_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
-                    "the sidecar closed its stdout but kept running",
+                    "the child closed its stdout but kept running",
                 )
             }));
         };
-        // The stderr reader may still be draining the last lines.
-        std::thread::sleep(Duration::from_millis(50));
-        let mut tail = self.stderr.lock().unwrap_or_else(PoisonError::into_inner);
         SidecarError::Crashed {
             status: status.to_string(),
-            stderr: tail.make_contiguous().join("\n"),
+            stderr: self.stderr.after_exit(),
         }
+    }
+
+    /// Why this child, idle since its last request, cannot take the next
+    /// one: it has exited (killed for memory by the system, say), or the
+    /// reader queued the end of its stdout, garbage or a heartbeat over the
+    /// ceiling. Between requests nothing else is queued.
+    fn failed_while_idle(&mut self) -> Option<SidecarError> {
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return Some(self.crashed(None));
+        }
+        Some(match self.events.try_recv().ok()? {
+            Event::OverCeiling(rss_bytes) => SidecarError::MemoryCeiling {
+                rss_bytes,
+                ceiling_bytes: self.ceiling,
+            },
+            Event::Closed => self.crashed(None),
+            Event::Garbage(detail) => SidecarError::Protocol(detail),
+            Event::WriteFailed(error) => self.crashed(Some(error)),
+            Event::Reply(reply) => SidecarError::Protocol(format!("unasked {reply:?}")),
+        })
     }
 
     /// The exit status, waiting up to `grace` for one.
@@ -543,8 +586,10 @@ impl Shared {
     }
 
     /// Installs the assets in this process; a no-op once they are.
-    /// Blocking, and without the lock, so a download does not hold up
-    /// `health`, `release` or a transcription in a running child.
+    /// Blocking. `prepare` calls it before it takes the lock, so a
+    /// download does not hold up `health`, `release` or a transcription in
+    /// a running child; [`Shared::ensure_loaded`] calls it again under the
+    /// lock, where it is a no-op after `prepare`.
     fn install(&self) -> Result<(), SpeechError> {
         // The `load` request carries the root as a JSON string.
         if self.store.root().to_str().is_none() {
@@ -571,6 +616,11 @@ impl Shared {
     /// `DirectML` off; no audio was sent yet, so a new child loads on the
     /// CPU within the same call. Blocking; the caller holds the lock.
     fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
+        if let Some(error) = slot.as_mut().and_then(SidecarProcess::failed_while_idle) {
+            // Replaced without an error; the end still counts against
+            // `DirectML` like one during a request.
+            self.kill_unless_remote(slot, error);
+        }
         if slot.as_ref().is_some_and(|p| p.provider.is_some()) {
             return Ok(());
         }
@@ -940,6 +990,16 @@ mod tests {
             beside.program.parent(),
             std::env::current_exe().unwrap().parent()
         );
+    }
+
+    #[test]
+    fn the_child_is_started_with_the_configured_heartbeat() {
+        let mut config = SidecarConfig::new("steno-speech-sidecar");
+        config.args = vec!["--fake-engine".into()];
+        config.heartbeat = Duration::from_millis(20);
+        let command = command(&config);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, ["--fake-engine", "--heartbeat-ms", "20"]);
     }
 
     #[tokio::test]

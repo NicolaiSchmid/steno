@@ -30,9 +30,10 @@
 
 mod common;
 
-use std::io::BufReader;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use common::{
@@ -43,8 +44,8 @@ use steno_core::{AudioBuffer16k, SpeechEngine};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::sidecar::{FALLBACK_NOTICE, directml_switched_off};
 use steno_speech::{
-    EncoderProvider, ModelAsset, ModelStore, OnnxOptions, OnnxSpeechEngine, SidecarConfig,
-    SidecarError, SidecarSpeechEngine,
+    EncoderProvider, ModelAsset, ModelFile, ModelSource, ModelStore, OnnxOptions, OnnxSpeechEngine,
+    SidecarConfig, SidecarError, SidecarSpeechEngine,
 };
 
 /// Whether a process with `pid` exists (a zombie counts).
@@ -90,7 +91,7 @@ fn spawn_by_hand(args: &[&str]) -> Child {
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap()
 }
@@ -297,7 +298,7 @@ async fn a_child_killed_mid_request_is_an_error_and_the_next_call_recovers() {
     assert!(!running.is_finished());
     assert!(kill(pid));
     let error = running.await.unwrap().unwrap_err();
-    assert!(error.contains("died mid-request"), "{error}");
+    assert!(error.contains("died before answering"), "{error}");
     assert_eq!(engine.pid(), None);
     assert_works(&engine, &tone(0.5)).await;
     assert_ne!(engine.pid(), Some(pid));
@@ -612,19 +613,176 @@ fn the_child_greets_and_exits_when_its_parent_goes_away() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_child_that_died_while_idle_is_replaced_without_an_error() {
+    // Killed between jobs (by the system for memory, say): the next call
+    // starts a new child instead of failing on the dead one.
+    let dir = tempfile::tempdir().unwrap();
+    let engine = engine_in(&dir, config(&[]));
+    engine.prepare().await.unwrap();
+    let pid = engine.pid().unwrap();
+    assert!(kill(pid));
+    // Time to die; the engine reaps it.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_works(&engine, &tone(0.5)).await;
+    assert_ne!(engine.pid(), Some(pid));
+    assert_eq!(engine.spawns(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_heartbeat_does_not_hold_back_the_answers() {
+    // Every frame is flushed as it is written: with a heartbeat a minute
+    // apart, nothing else would push the ready message and the replies
+    // out of the child's stdout buffer before the deadlines.
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = config(&[]);
+    config.heartbeat = Duration::from_secs(60);
+    config.control_timeout = Duration::from_secs(5);
+    let engine = engine_in(&dir, config);
+    engine.prepare().await.unwrap();
+    assert!(engine.health().await.unwrap().unwrap().loaded);
+    assert_works(&engine, &tone(0.5)).await;
+}
+
+#[test]
+fn a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2() {
+    // A header that is no frame, then audio cut short by a closed stdin.
+    // stdout stays open, so a heartbeat cannot end the child first.
+    type Write = fn(&mut std::process::ChildStdin);
+    let cases: [(&str, Write); 2] = [
+        ("unreadable request", |stdin| {
+            stdin.write_all(&3u32.to_le_bytes()).unwrap();
+            stdin.write_all(b"abc").unwrap();
+        }),
+        ("unreadable audio", |stdin| {
+            let request = Request::Transcribe {
+                id: 1,
+                sample_count: 1000,
+                hint: None,
+            };
+            let payload = protocol::encode_samples(&[0.25; 100]);
+            protocol::write_frame(stdin, &request, &payload).unwrap();
+        }),
+    ];
+    for (why, write) in cases {
+        let mut child = spawn_by_hand(&["--fake-engine", "--heartbeat-ms", "1000"]);
+        let mut stdout = BufReader::new(child.stdout.take().unwrap());
+        ready(&mut stdout);
+        let mut stdin = child.stdin.take().unwrap();
+        write(&mut stdin);
+        drop(stdin);
+        let status = exit_status(&mut child, "the child outlived a request it could not read");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert_eq!(status.code(), Some(2), "{why}: {status}");
+        assert!(stderr.contains(why), "{why}: {stderr}");
+    }
+}
+
+/// Serves `body` to every connection; the one numbered `slow` (from 0)
+/// gets its headers at once and the body once the returned sender fires.
+fn serve_model(body: Vec<u8>, slow: usize) -> (String, mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/model.onnx", listener.local_addr().unwrap());
+    let (release, gate) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let mut gate = Some(gate);
+        for (k, stream) in listener.incoming().enumerate() {
+            let Ok(stream) = stream else { continue };
+            let body = body.clone();
+            let wait = if k == slow { gate.take() } else { None };
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                    line.clear();
+                }
+                let mut out = &stream;
+                let status = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = out.write_all(status.as_bytes());
+                let _ = out.flush();
+                if let Some(wait) = wait {
+                    let _ = wait.recv();
+                }
+                let _ = out.write_all(&body);
+            });
+        }
+    });
+    (url, release)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_installs_its_models_on_first_use_and_outside_its_lock() {
+    let body = b"a model the fake engine never reads".to_vec();
+    let dir = tempfile::tempdir().unwrap();
+    let digest_of = dir.path().join("digest");
+    std::fs::write(&digest_of, &body).unwrap();
+    let (url, release) = serve_model(body.clone(), 1);
+    let asset = ModelAsset {
+        id: "test-asset".to_owned(),
+        display_name: "Test".to_owned(),
+        licence: "MIT".to_owned(),
+        attribution: String::new(),
+        files: vec![ModelFile {
+            name: "model.onnx".to_owned(),
+            source: Some(ModelSource::Url(url)),
+            sha256: steno_speech::model_store::sha256_of(&digest_of).unwrap(),
+            size: body.len() as u64,
+        }],
+    };
+    let store = ModelStore::new(dir.path().join("models"));
+    let engine = Arc::new(SidecarSpeechEngine::with_assets(
+        store.clone(),
+        config(&[]),
+        vec![asset.clone()],
+    ));
+    // A transcription without `prepare` installs them too.
+    assert_works(&engine, &tone(0.2)).await;
+    assert!(store.is_installed(&asset));
+    // Gone while the child runs: `prepare` fetches the file again, and
+    // the running child answers while that download is held.
+    std::fs::remove_file(store.directory(&asset).join("model.onnx")).unwrap();
+    let preparing = {
+        let engine = Arc::clone(&engine);
+        tokio::spawn(async move { engine.prepare().await.map_err(|e| e.to_string()) })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!preparing.is_finished(), "prepare did not download");
+    let asked = Instant::now();
+    let health = engine.health().await.unwrap().unwrap();
+    assert!(
+        asked.elapsed() < Duration::from_secs(5),
+        "health waited for the download"
+    );
+    assert!(health.loaded);
+    release.send(()).unwrap();
+    preparing.await.unwrap().unwrap();
+    assert!(store.is_installed(&asset));
+    assert_eq!(engine.spawns(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the models: STENO_MODELS_DIR, and STENO_FLEURS_DIR for the parity clip; run with -- --ignored"]
 async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
-    let Some(models_directory) = ModelStore::environment_models_directory() else {
-        eprintln!("skipped: set STENO_MODELS_DIR to run the real sidecar");
-        return;
-    };
+    // Run on purpose, so missing models fail it rather than pass it.
+    let models_directory = ModelStore::environment_models_directory()
+        .expect("set STENO_MODELS_DIR to the models directory to run the real sidecar");
     let store = ModelStore::in_models_directory(&models_directory);
-    if ![ModelAsset::silero_vad(), ModelAsset::parakeet_v3_fp32()]
-        .iter()
-        .all(|asset| store.is_installed(asset))
-    {
-        eprintln!("skipped: the models are not installed under STENO_MODELS_DIR");
-        return;
+    for asset in [ModelAsset::silero_vad(), ModelAsset::parakeet_v3_fp32()] {
+        assert!(
+            store.is_installed(&asset),
+            "{} is not installed in {}: missing {:?}",
+            asset.id,
+            store.root().display(),
+            store.missing_files(&asset)
+        );
     }
     let mut config = SidecarConfig::new(BINARY);
     config.memory_ceiling_bytes = 8 << 30;
@@ -647,9 +805,9 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
     // With FLEURS at hand: the sidecar's transcript of a clip is the
     // in-process engine's, segment for segment.
     let clip = std::env::var_os("STENO_FLEURS_DIR")
-        .map(|dir| std::path::PathBuf::from(dir).join("cat/fleurs-de-cat-01.wav"))
-        .filter(|path| path.is_file());
+        .map(|dir| std::path::PathBuf::from(dir).join("cat/fleurs-de-cat-01.wav"));
     if let Some(clip) = clip {
+        assert!(clip.is_file(), "STENO_FLEURS_DIR has no {}", clip.display());
         let audio = AudioBuffer16k::new(steno_speech::wav::read_pcm16(&clip).unwrap());
         let started = Instant::now();
         let sidecar = engine.transcribe(&audio, None).await.unwrap();

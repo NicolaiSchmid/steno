@@ -107,22 +107,23 @@ pub enum SidecarError {
     },
     /// A pipe to or from the child failed, or a thread that supervises it
     /// could not start.
-    #[error("pipe to the sidecar: {0}")]
+    #[error("a pipe to or from the child: {0}")]
     Pipe(#[source] std::io::Error),
     /// The child sent bytes the protocol does not define, answered with
     /// the wrong message or spoke another protocol version; it was killed.
-    #[error("protocol violation, the sidecar was killed: {0}")]
+    #[error("protocol violation, the child was killed: {0}")]
     Protocol(String),
-    /// The child died before answering: an abort out of ONNX Runtime, a
-    /// panic, a signal, an exit. `stderr` is the last lines it wrote.
-    #[error("the sidecar died mid-request ({status}){}", if stderr.is_empty() { String::new() } else { format!(": {stderr}") })]
+    /// The child died before answering, at start or mid-request: an abort
+    /// out of ONNX Runtime, a panic, a signal, an exit, a library it could
+    /// not load. `stderr` is the last lines it wrote.
+    #[error("the child died before answering ({status}){}", if stderr.is_empty() { String::new() } else { format!(": {stderr}") })]
     Crashed { status: String, stderr: String },
     /// The child did not answer within the request's limit and was killed.
-    #[error("the sidecar did not answer within {:.1} s and was killed", after.as_secs_f64())]
+    #[error("the child did not answer within {:.1} s and was killed", after.as_secs_f64())]
     Timeout { after: Duration },
     /// The child's resident set passed the ceiling and it was killed.
     #[error(
-        "the sidecar used {rss_bytes} bytes, over the {ceiling_bytes} byte ceiling, and was killed"
+        "the child used {rss_bytes} bytes, over the {ceiling_bytes} byte ceiling, and was killed"
     )]
     MemoryCeiling { rss_bytes: u64, ceiling_bytes: u64 },
     /// The child reported an error of its own (models that failed to load,
@@ -131,7 +132,7 @@ pub enum SidecarError {
     Remote(String),
     /// The models root is not valid UTF-8, which the protocol's JSON cannot
     /// carry; no child was started.
-    #[error("the models root {} is not valid UTF-8, which the sidecar protocol cannot carry", path.display())]
+    #[error("the models root {} is not valid UTF-8, which the protocol cannot carry", path.display())]
     NotUtf8 { path: PathBuf },
 }
 
