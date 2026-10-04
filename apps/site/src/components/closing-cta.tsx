@@ -45,7 +45,7 @@ export function ClosingCta() {
 									<span className="block font-medium text-[14px] tracking-[-0.01em]">
 										{name}
 									</span>
-									<span className="block font-mono text-[11px] text-fg-dim">
+									<span className="block font-mono text-[11px] text-fg-muted">
 										{note}
 									</span>
 								</span>
