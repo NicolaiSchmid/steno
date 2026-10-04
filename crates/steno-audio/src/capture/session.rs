@@ -166,11 +166,11 @@ struct Inner {
     /// and a writer failure that arrives late act on their own recording
     /// only, never on one started meanwhile.
     recordings_started: usize,
-    /// Unit tests only: run once by the next `stop()` that finds
-    /// `Stopping`, after it has noted `recordings_started` and with the
-    /// lock released, so a test can finish the finalise and take a
-    /// `start()` inside the window a wakeup leaves before that `stop()`
-    /// holds the lock again.
+    /// Unit tests only: taken by the next `stop()` that finds `Stopping`
+    /// and run once it has noted `recordings_started`, with the lock
+    /// released, so a test can end the finalise and run a `start()` before
+    /// that `stop()` takes the lock back. The tests built on it prove the
+    /// guard after the wait, not the condition-variable wait itself.
     #[cfg(test)]
     before_stop_waits: Option<Box<dyn FnOnce() + Send>>,
 }
