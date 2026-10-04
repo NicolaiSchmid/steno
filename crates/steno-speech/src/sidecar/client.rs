@@ -86,8 +86,8 @@ impl SidecarConfig {
         }
     }
 
-    /// The binary beside the running executable, where the installers put
-    /// it (Tauri's `externalBin`, WP8 of
+    /// The binary beside the running executable, where the installers are
+    /// to put it (Tauri's `externalBin`, WP9 of
     /// `.plans/2026-10-02-rust-core-and-tauri-shell.md`).
     pub fn beside_current_exe() -> std::io::Result<Self> {
         let exe = std::env::current_exe()?;

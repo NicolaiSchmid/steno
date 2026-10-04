@@ -309,6 +309,7 @@ impl ModelStore {
         self
     }
 
+    /// The mirror set by [`ModelStore::with_mirror`], trimmed.
     #[must_use]
     pub fn mirror(&self) -> Option<&str> {
         self.mirror.as_deref()

@@ -1,7 +1,8 @@
 //! The model store against a local HTTP server that serves a temporary
 //! directory: resumable `.partial` downloads (a cut connection, a partial
-//! a killed run left, a corrupt prefix, a host that ignores `Range`), the
-//! mirror layout and the checksum gate. No network beyond 127.0.0.1.
+//! a killed run left, a corrupt prefix, a host that ignores `Range`, a
+//! `206` from the wrong offset or without `Content-Range`), the mirror
+//! layout and the checksum gate. No network beyond 127.0.0.1.
 
 #![allow(clippy::cast_possible_truncation)]
 

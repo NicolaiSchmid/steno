@@ -87,8 +87,8 @@ pub enum SpeechError {
     /// A WAV file is not 16 kHz PCM-16.
     #[error("{}: {detail}", path.display())]
     Wav { path: PathBuf, detail: String },
-    /// The speech sidecar failed; unless the child itself reported the
-    /// error ([`SidecarError::Remote`]) the parent has killed it, and the
+    /// The speech sidecar failed: unless the child reported the error
+    /// itself ([`SidecarError::Remote`]), no child is left running, and the
     /// next call starts a fresh one.
     #[error("speech sidecar: {0}")]
     Sidecar(#[from] SidecarError),

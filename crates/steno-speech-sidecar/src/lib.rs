@@ -39,9 +39,9 @@
 //! `--fake-engine` replaces Parakeet with an engine that needs no models
 //! and answers with the sample count and peak of the audio it received.
 //! Only with it, `--fault <kind>` ([`Fault`]) makes the next transcription
-//! abort, panic, exit, hang, allocate without bound, write garbage or fail,
-//! or the child stay silent or announce another protocol version from the
-//! start; `--fault-once <path>` limits that to the first child that creates
+//! abort, panic, flood stderr and panic, exit, hang, allocate 4 GiB,
+//! write garbage or fail, or the child stay silent or announce another
+//! protocol version from the start; `--fault-once <path>` limits that to the first child that creates
 //! `<path>`, which holds that child's pid. The isolation tests drive the
 //! real client against these.
 
@@ -337,7 +337,8 @@ fn start_heartbeat(interval: Duration) -> io::Result<()> {
         .map(drop)
 }
 
-/// Runs the child until shutdown or until stdin ends.
+/// Runs the child until a shutdown request, the end of stdin, a broken
+/// stdout or an unreadable request.
 pub fn serve(options: &Options) -> ExitCode {
     let fake = options.fake_engine.then(|| FakeEngine {
         loaded: false,

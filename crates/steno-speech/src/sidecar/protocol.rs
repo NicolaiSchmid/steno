@@ -30,8 +30,8 @@ use thiserror::Error;
 pub const PROTOCOL_VERSION: u32 = 1;
 
 /// The longest header either side accepts. A transcript of a long meeting
-/// is a few megabytes of JSON, of 24 hours (see [`MAX_SAMPLES`]) under
-/// 20 MB with every word timed.
+/// is a few megabytes of JSON; one of 24 hours (see [`MAX_SAMPLES`]) stays
+/// under 20 MB with every word timed.
 pub const MAX_HEADER_BYTES: u32 = 64 << 20;
 
 /// The most samples one request may carry: 24 hours of 16 kHz audio. A

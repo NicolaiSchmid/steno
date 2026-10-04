@@ -30,11 +30,14 @@ pub trait SpeechEngine: Send + Sync {
         hint: Option<&LanguageTag>,
     ) -> BoundaryResult<Vec<RawSegment>>;
 
-    /// Frees what `prepare` loaded, so the working set goes back between
-    /// jobs; the next `prepare` or `transcribe` loads again. For the
-    /// pipeline to call after each job (WP6b). The default does nothing,
-    /// for engines with nothing worth freeing. Rust only: Swift's protocol
-    /// has no counterpart.
+    /// Frees what `prepare` loaded; the next `prepare` or `transcribe` loads
+    /// again. The pipeline is to call it once a job's lanes are transcribed
+    /// (WP6b; nothing calls it yet). Only `SidecarSpeechEngine` overrides it,
+    /// by stopping its child, and a call there waits for a running request
+    /// (not for a model download).
+    /// The in-process engines (`OnnxSpeechEngine`, `CoreMlParakeetEngine`)
+    /// keep this default and their models stay loaded, so the Mac's next job
+    /// starts warm. Rust only: Swift's protocol has no counterpart.
     async fn release(&self) -> BoundaryResult<()> {
         Ok(())
     }
