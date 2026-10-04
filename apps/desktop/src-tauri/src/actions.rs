@@ -94,7 +94,7 @@ pub fn record(app: &AppHandle, mode: Option<CaptureMode>) -> Result<(), BridgeEr
 /// to report them to.
 pub fn open(app: &AppHandle, window: BridgeWindow) {
     if let Err(error) = windows::open(app, window, None, None) {
-        eprintln!("[steno-desktop] opening the {window} window failed: {error}");
+        stderr_line!("[steno-desktop] opening the {window} window failed: {error}");
     }
 }
 
@@ -129,7 +129,7 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
 
 fn report(result: Result<(), BridgeError>) {
     if let Err(error) = result {
-        eprintln!("[steno-desktop] menu: {error}");
+        stderr_line!("[steno-desktop] menu: {error}");
     }
 }
 

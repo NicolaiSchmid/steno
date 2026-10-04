@@ -158,12 +158,12 @@ pub fn handle(app: &AppHandle, urls: &[Url]) {
                 Some(request) => {
                     let host = app.state::<Host>();
                     if let Err(error) = windows::open_requested(app, &host, &request) {
-                        eprintln!("[steno-desktop] {}", not_followed(url, &error));
+                        stderr_line!("[steno-desktop] {}", not_followed(url, &error));
                     }
                 }
-                None => eprintln!("[steno-desktop] {}", pairing_notice(url)),
+                None => stderr_line!("[steno-desktop] {}", pairing_notice(url)),
             },
-            Err(error) => eprintln!("[steno-desktop] deep link ignored: {error}"),
+            Err(error) => stderr_line!("[steno-desktop] deep link ignored: {error}"),
         }
     }
 }
@@ -207,7 +207,7 @@ pub fn install(app: &AppHandle) {
         if registers_itself(cfg!(debug_assertions), appimage)
             && let Err(error) = app.deep_link().register_all()
         {
-            eprintln!("[steno-desktop] registering {SCHEME}: failed: {error}");
+            stderr_line!("[steno-desktop] registering {SCHEME}: failed: {error}");
         }
     }
     let listener = app.clone();
@@ -216,7 +216,7 @@ pub fn install(app: &AppHandle) {
     match app.deep_link().get_current() {
         Ok(Some(urls)) => handle(app, &urls),
         Ok(None) => {}
-        Err(error) => eprintln!("[steno-desktop] reading the launch link failed: {error}"),
+        Err(error) => stderr_line!("[steno-desktop] reading the launch link failed: {error}"),
     }
 }
 

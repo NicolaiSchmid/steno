@@ -624,7 +624,7 @@ fn show_window(
         let converted = window.clone();
         app.run_on_main_thread(move || {
             if let Err(error) = macos::make_panel(&converted) {
-                eprintln!("[steno-desktop] panel {}: {error}", converted.label());
+                stderr_line!("[steno-desktop] panel {}: {error}", converted.label());
             }
         })?;
     }
@@ -651,7 +651,7 @@ fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
         if Some(panel) != shown
             && let Err(error) = hide(app, panel)
         {
-            eprintln!(
+            stderr_line!(
                 "[steno-desktop] hiding the {} panel failed: {error}",
                 panel.label()
             );
@@ -665,7 +665,7 @@ fn apply(app: &AppHandle, content: Option<&FloatingContent>) {
         FloatingContent::Bubble => None,
     };
     if let Err(error) = show(app, content.panel(), query.as_deref()) {
-        eprintln!(
+        stderr_line!(
             "[steno-desktop] showing the {} panel failed: {error}",
             content.panel().label()
         );
@@ -683,7 +683,7 @@ fn refresh(app: &AppHandle) {
         apply(&handle, content.as_ref());
     });
     if let Err(error) = queued {
-        eprintln!("[steno-desktop] updating the panels failed: {error}");
+        stderr_line!("[steno-desktop] updating the panels failed: {error}");
     }
 }
 
@@ -842,7 +842,7 @@ mod macos {
         let panel = FloatingPanel::from_window(window)?;
         panel.set_level(PanelLevel::Floating.value());
         if let Err(error) = panel.set_style_mask(style_mask()) {
-            eprintln!("[steno-desktop] panel style mask: {error}");
+            stderr_line!("[steno-desktop] panel style mask: {error}");
         }
         panel.set_collection_behavior(
             CollectionBehavior::new()

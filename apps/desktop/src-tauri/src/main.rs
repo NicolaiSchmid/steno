@@ -47,6 +47,21 @@
 // opener, the alert) unused.
 #![cfg_attr(feature = "fixture-host", allow(dead_code))]
 
+/// `eprintln!` for the shell's own lines, minus its panic: once the
+/// terminal the app started from has closed, every write to stderr fails,
+/// and the line is dropped instead.
+macro_rules! stderr_line {
+    ($($line:tt)*) => {
+        $crate::write_stderr_line(format_args!($($line)*))
+    };
+}
+
+/// What `stderr_line!` writes.
+fn write_stderr_line(line: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
 mod actions;
 mod autostart;
 mod bridge;
@@ -332,7 +347,7 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 if let Some(main) = app.get_webview_window(&label)
                     && let Err(error) = main.hide()
                 {
-                    eprintln!("[steno-desktop] hiding the main window failed: {error}");
+                    stderr_line!("[steno-desktop] hiding the main window failed: {error}");
                 }
             }
         }
@@ -385,15 +400,17 @@ fn build_tray(app: &tauri::AppHandle) {
         Ok(Ok(())) => {
             app.state::<smoke::Smoke>().note_tray();
             if !tray::has_host() {
-                eprintln!(
+                stderr_line!(
                     "[steno-desktop] no tray host shows the tray icon; \
                      closing the main window ends the app"
                 );
             }
         }
-        Ok(Err(error)) => eprintln!("[steno-desktop] the tray could not be built: {error}"),
+        Ok(Err(error)) => stderr_line!("[steno-desktop] the tray could not be built: {error}"),
         Err(_) => {
-            eprintln!("[steno-desktop] the tray could not be built: the tray library is missing");
+            stderr_line!(
+                "[steno-desktop] the tray could not be built: the tray library is missing"
+            );
         }
     }
 }
