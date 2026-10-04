@@ -316,7 +316,7 @@ fn the_two_stream_bodies_allocate_nothing() {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     let sink = Arc::new(LaneFrameSink::new(&lanes));
-    let follower = Arc::new(FollowerLane::for_period(PERIOD));
+    let follower = Arc::new(FollowerLane::for_streams(PERIOD, 4_800));
     let mut master = StreamBody::Master {
         router: PacketRouter::new(
             plan.layout.sources.clone(),
@@ -335,8 +335,9 @@ fn the_two_stream_bodies_allocate_nothing() {
         let tap = &material.tap[2 * offset..2 * (offset + PERIOD)];
         // Periods 40 to 44 deliver no loopback packets (an underrun and a
         // re-prime); period 60 delivers a burst of six, which stays queued
-        // and slips at the end of the first window that holds only the
-        // raised queue (period 146); period 30 is flagged silent.
+        // and slips at the end of the second window after the re-prime,
+        // the first that holds only the raised queue; period 30 is flagged
+        // silent.
         let loopback_packets = match period {
             40..45 => 0,
             60 => 6,

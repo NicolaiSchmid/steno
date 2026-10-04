@@ -706,8 +706,14 @@ impl CaptureBackend for LiveCaptureBackend {
         };
         let mic = info(StreamSource::Microphone);
         let system = info(StreamSource::System);
+        let master_buffer = info(plan.master).map_or(0, |i| i.sizes.buffer_frames);
         let follower = plan.follower.and_then(|source| {
-            info(source).map(|i| Arc::new(FollowerLane::for_period(i.sizes.period_frames)))
+            info(source).map(|i| {
+                Arc::new(FollowerLane::for_streams(
+                    i.sizes.period_frames,
+                    master_buffer,
+                ))
+            })
         });
         let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink, deadline)?;
         if let Some(kind) = system.as_ref().and_then(|s| s.loopback) {

@@ -281,9 +281,93 @@ fn a_fast_follower_slips_back_to_the_target_once_a_window_stays_above_high_water
     assert_eq!(follower.trimmed_frames(), 0);
 }
 
+/// The slip takes the window's lowest queue, not the last pull's: a burst
+/// that lands just before the window closes stays queued.
+#[test]
+fn a_burst_before_the_window_closes_survives_the_slip() {
+    let follower = FollowerLane::new(480, 960, 1_920, 48_000);
+    let mut scratch = vec![0.0f32; 4_096];
+    let mut out = vec![0.0f32; 480];
+    follower.push(packet(&ramp(0, 960), 1), &mut scratch);
+    assert_eq!(follower.pull(&mut out), 0);
+    follower.push(packet(&ramp(960, 1_440), 1), &mut scratch);
+    let mut pushed = 2_400;
+    for _ in 0..6 {
+        follower.pull(&mut out);
+        follower.push(packet(&ramp(pushed, 480), 1), &mut scratch);
+        pushed += 480;
+    }
+    follower.push(packet(&ramp(pushed, 960), 1), &mut scratch);
+    assert_eq!(
+        follower.pull(&mut out),
+        960,
+        "the window's lowest queue, 1 440, slips to 480"
+    );
+    assert_eq!(follower.queued(), 1_440, "the burst stays queued");
+}
+
+/// A re-prime after an underrun starts a fresh window, so a sustained
+/// excess after it slips one window later.
+#[test]
+fn a_reprime_starts_a_fresh_slip_window() {
+    let follower = FollowerLane::new(480, 960, 1_920, 48_000);
+    let mut scratch = vec![0.0f32; 4_096];
+    let mut out = vec![0.0f32; 480];
+    follower.push(packet(&ramp(0, 960), 1), &mut scratch);
+    follower.pull(&mut out);
+    for start in [960, 1_440] {
+        follower.push(packet(&ramp(start, 480), 1), &mut scratch);
+        follower.pull(&mut out);
+    }
+    // Three pulls into the window, an underrun.
+    follower.pull(&mut vec![0.0f32; 600]);
+    assert!(follower.underrun_frames() > 0);
+    follower.push(packet(&ramp(10_000, 2_400), 1), &mut scratch);
+    let mut pushed = 12_400;
+    let mut losses = Vec::new();
+    for _ in 0..4 {
+        losses.push(follower.pull(&mut out));
+        follower.push(packet(&ramp(pushed, 480), 1), &mut scratch);
+        pushed += 480;
+    }
+    assert_eq!(
+        losses,
+        vec![0, 0, 0, 1_440],
+        "one window after the re-prime"
+    );
+}
+
+/// A queue more than the master's buffer above the high-water mark cannot
+/// be a late master, so it slips on the pull that sees it.
+#[test]
+fn a_queue_beyond_the_masters_buffer_slips_at_once() {
+    // Ceiling: high water 960 plus a 960-frame master buffer.
+    let follower = FollowerLane::new(480, 960, 24_000, 48_000).with_max_lateness(960);
+    let mut scratch = vec![0.0f32; 4_096];
+    let mut out = vec![0.0f32; 480];
+    follower.push(packet(&ramp(0, 960), 1), &mut scratch);
+    assert_eq!(follower.pull(&mut out), 0);
+    follower.push(packet(&ramp(960, 1_920), 1), &mut scratch);
+    assert_eq!(
+        follower.pull(&mut out),
+        0,
+        "at the ceiling: the window judges"
+    );
+    assert_eq!(follower.queued(), 1_920);
+    follower.push(packet(&ramp(2_880, 960), 1), &mut scratch);
+    assert_eq!(
+        follower.pull(&mut out),
+        1_920,
+        "above the ceiling: back to the target at once"
+    );
+    assert_eq!(follower.queued(), 480);
+    follower.pull(&mut out);
+    assert_eq!(out, ramp(3_360, 480), "the newest frames survive the slip");
+}
+
 #[test]
 fn a_period_policy_keeps_two_periods_and_slips_one_period_above() {
-    let follower = FollowerLane::for_period(480);
+    let follower = FollowerLane::for_streams(480, 4_800);
     assert_eq!(follower.target(), 960, "two periods");
     let mut scratch = vec![0.0f32; 4_096];
     let mut out = vec![0.0f32; 480];
@@ -318,12 +402,12 @@ fn a_period_policy_keeps_two_periods_and_slips_one_period_above() {
 /// Equal clocks, and the master's thread misses two periods and then
 /// drains its three packets back to back. The queue rises for a moment
 /// and falls back on its own: nothing slips and nothing underruns, and the
-/// system lane keeps its lag. The one-pull judgement this replaced
-/// discarded 960 frames here and padded the next jitter with zeros.
+/// system lane keeps its lag. Judging each pull alone would discard 960
+/// frames here and pad the next jitter with zeros.
 #[test]
 fn a_late_master_with_equal_clocks_slips_nothing() {
     let period = 480;
-    let follower = FollowerLane::for_period(period);
+    let follower = FollowerLane::for_streams(period, 4_800);
     let mut scratch = vec![0.0f32; period];
     let mut out = vec![0.0f32; period];
     let mut pushed = 0;
@@ -368,7 +452,7 @@ fn a_late_master_with_equal_clocks_slips_nothing() {
 #[test]
 fn a_drifting_follower_slips_repeatedly_and_stays_bounded() {
     let period = 480;
-    let follower = FollowerLane::for_period(period);
+    let follower = FollowerLane::for_streams(period, 4_800);
     let mut scratch = vec![0.0f32; 1_024];
     let mut out = vec![0.0f32; period];
     let mut pushed = 0usize;
@@ -419,6 +503,22 @@ fn audio_queued_before_the_first_pull_is_trimmed_uncounted() {
     follower.pull(&mut out);
     assert_eq!(out, ramp(10_000, 480));
     assert_eq!(follower.trimmed_frames(), 3_840);
+}
+
+/// The trim is decided at the master's first pull: a follower that starts
+/// after the master delivers recorded audio, which is never trimmed.
+#[test]
+fn audio_queued_after_the_masters_first_pull_is_not_trimmed() {
+    let follower = FollowerLane::new(480, 960, 4_800, 48_000);
+    let mut scratch = vec![0.0f32; 4_096];
+    let mut out = vec![1.0f32; 480];
+    assert_eq!(follower.pull(&mut out), 0);
+    assert!(out.iter().all(|s| *s == 0.0), "nothing queued yet: zeros");
+    follower.push(packet(&ramp(0, 2_400), 1), &mut scratch);
+    follower.pull(&mut out);
+    assert_eq!(out, ramp(0, 480), "the oldest frame first");
+    assert_eq!(follower.trimmed_frames(), 0);
+    assert_eq!(follower.queued(), 1_920);
 }
 
 #[test]
@@ -583,7 +683,7 @@ fn a_follower_and_a_master_on_two_threads_account_for_every_frame() {
     let plan = SplitStreamPlan::new(&lanes).unwrap();
     // Two seconds per lane hold all 150 periods, so nothing drains early.
     let sink = Arc::new(LaneFrameSink::new(&lanes));
-    let follower = Arc::new(FollowerLane::for_period(PERIOD));
+    let follower = Arc::new(FollowerLane::for_streams(PERIOD, 4_800));
     let mut master = master_body(&plan, &follower, PERIOD, &sink);
     let mut staging = StreamBody::follower(Arc::clone(&follower), PERIOD);
 
