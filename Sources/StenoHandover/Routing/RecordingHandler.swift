@@ -161,9 +161,10 @@ extension HandoverEngine {
       return .problem(.notFound, "no such recording")
     }
     if let meetingID = receipt.state.meetingID {
-      // Admitted before, so a revoke during the read admits nothing new.
-      // A 401 would make the phone keep the recording, and its upload after
-      // pairing again would become a second meeting.
+      // Admitted before, so a revoke during the read admits nothing new:
+      // answer the meeting and drop the stale copy from memory. A 401 would
+      // make the phone keep the recording, and its upload after pairing
+      // again would become a second meeting.
       if revocations[device.id, default: 0] != revocation { forget(recordingID) }
       return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
     }
@@ -313,8 +314,9 @@ extension HandoverEngine {
     return Wire.RecordingStatus(state: receipt.state.kind, receivedChunks: receipt.receivedChunks)
   }
 
-  /// The receipt from memory or the store. Another request may have loaded
-  /// and advanced it while the store read was awaited; memory wins then.
+  /// The receipt from memory or the store, kept in memory (`remember`).
+  /// Another request may have loaded and advanced it while the store read
+  /// was awaited; memory wins then.
   func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
     if let active = activeReceipts[recordingID] { return active }
     guard let stored = try? await store.handoverReceipt(recordingID: recordingID) else {

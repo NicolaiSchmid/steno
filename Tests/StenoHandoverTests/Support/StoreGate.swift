@@ -89,7 +89,8 @@ final class StoreGate: Sendable {
       for await _ in heldSignal { return }
     }
 
-    /// Lets the held statement's transaction end. A second call is harmless.
+    /// Lets the held statement's transaction end. Holds are single use, so a
+    /// second call (from `remove()`) is harmless.
     func release() {
       released.signal()
     }

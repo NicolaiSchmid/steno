@@ -13,10 +13,13 @@ import Testing
 /// Mac and `DELETE /v1/pairing` from the phone. A `complete` racing a revoke
 /// admits nothing: one that read its receipt before the revoke, also when
 /// the phone paired again meanwhile, one that starts before the revoke's
-/// store delete commits, and one whose files came back during its verify.
-/// A recording admitted before still answers its meeting, a request that
-/// read a receipt before the revoke leaves it out of memory, and a failed
-/// revoke leaves the device working.
+/// store delete commits, one whose files came back during its verify, and
+/// one verifying files a failed revoke discarded. A partial replaced during
+/// the verify is not admitted either. A recording admitted before still
+/// answers its meeting, a request that read a receipt before the revoke
+/// does not bring it back into memory (also past a pairing during or after
+/// the revoke, or a second revoke that fails), and a failed revoke leaves
+/// the device working.
 @Suite struct RevocationTests {
   static let chunkSize = 256 * 1024
 
@@ -147,6 +150,7 @@ import Testing
     let metadata: RecordingMetadata
     /// `test.service`, or the service after `restarted()`.
     private(set) var service: HandoverService
+    /// `test.intake`, or the restarted service's.
     private(set) var intake: FakeHandoverIntake
     /// The phone, talking to `service`.
     private(set) var phone: EngineDevice
@@ -161,8 +165,8 @@ import Testing
       metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
     }
 
-    /// The phone uploads every chunk, then the Mac comes back over the store
-    /// and inbox: the receipt is then only in the store.
+    /// The phone uploads every chunk and the Mac restarts, so the receipt is
+    /// only in the store.
     static func restartedAfterUpload() async throws -> Gated {
       let before = try await Gated()
       try await before.phone.uploadAll(before.metadata, before.bytes)
@@ -184,6 +188,7 @@ import Testing
     var id: UUID { metadata.recordingID }
     var engine: HandoverEngine { service.engine }
 
+    /// Releases the gate's holds and deletes both directories.
     func remove() {
       gate.remove()
       try? FileManager.default.removeItem(at: test.directory)
@@ -210,16 +215,16 @@ import Testing
     let restarted = try await Gated.restartedAfterUpload()
     defer { restarted.remove() }
     let gate = restarted.gate
-    let phone = restarted.phone.device
+    let device = restarted.phone.device
 
     gate.receiptRead.arm()
     let completing = Task { await restarted.phone.complete(restarted.id) }
     await gate.receiptRead.held()
-    try await restarted.service.revoke(phone.id)
+    try await restarted.service.revoke(device.id)
     if pairsAgain {
       _ = await restarted.engine.beginPairing()
       let pairing = try await EngineClient(engine: restarted.engine).pair(
-        deviceID: phone.id, deviceName: phone.name)
+        deviceID: device.id, deviceName: device.name)
       #expect(pairing.code == 200)
     }
     gate.receiptRead.release()
@@ -227,7 +232,7 @@ import Testing
 
     #expect(response.code == 401, "the phone learns it was unpaired")
     try await restarted.expectNothingAdmitted()
-    let stored = try await restarted.test.store.pairedDevice(id: phone.id)
+    let stored = try await restarted.test.store.pairedDevice(id: device.id)
     #expect((stored != nil) == pairsAgain, "only pairing again brings the device back")
     if let stored {
       // The new pairing uploads the recording again, and it goes through.
@@ -283,7 +288,7 @@ import Testing
   /// committed does not find it there and verify the files the revoke
   /// missed. An announce like that does not put a receipt in memory either.
   @Test(.timeLimit(.minutes(1)))
-  func aRequestThatReadItsReceiptBeforeARevokeLeavesItOutOfMemory() async throws {
+  func aRequestThatReadItsReceiptBeforeARevokeDoesNotBringItBack() async throws {
     let restarted = try await Gated.restartedAfterUpload()
     defer { restarted.remove() }
     let gate = restarted.gate
