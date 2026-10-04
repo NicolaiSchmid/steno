@@ -186,13 +186,13 @@ extension HandoverEngine {
     guard let metadata = inbox.loadMetadata(recordingID) else {
       return .problem(.notFound, "no metadata; announce again")
     }
-    let verification = await verifiedFile(for: &receipt, metadata: metadata)
-    // Again after the verify, which suspends. A revoke then discards the
-    // files itself, but a phone that still passes the gate (before the
-    // delete commits, or paired again) can announce and send the chunks
-    // again: the verify answers 409 for the new partial, and this check
-    // discards it and answers 401. Nothing suspends between it and the
-    // intake call.
+    let verification = await verifiedFile(
+      for: &receipt, metadata: metadata, revokedSince: revocation)
+    // Again after the verify, which suspends, whatever it answered. A
+    // revoke then discards the files itself, but a phone that still passes
+    // the gate (before the delete commits, or paired again) can announce
+    // and send the chunks again: this check discards the new partial and
+    // answers 401. Nothing suspends between it and the intake call.
     if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
       return refused
     }
@@ -224,10 +224,12 @@ extension HandoverEngine {
   /// The verified file: the one already waiting after an earlier intake
   /// failure, else the partial once every chunk is present (409 with the
   /// status otherwise) and the whole file hashes to the announced value (422
-  /// and the partial is discarded otherwise), promoted to its final name.
-  private func verifiedFile(for receipt: inout HandoverReceipt, metadata: RecordingMetadata)
-    async -> Verification
-  {
+  /// and the partial is discarded otherwise), promoted to its final name. A
+  /// partial gone or replaced during the hash answers 409 with no chunk
+  /// listed, and a revoke since `complete` took `revocation` answers 401.
+  private func verifiedFile(
+    for receipt: inout HandoverReceipt, metadata: RecordingMetadata, revokedSince revocation: Int
+  ) async -> Verification {
     let recordingID = receipt.recordingID
     if inbox.hasVerified(recordingID, format: metadata.format) {
       return .file(inbox.verified(recordingID, format: metadata.format))
@@ -254,6 +256,11 @@ extension HandoverEngine {
         ? try await ReceivingFile.hashMatches(partial, expected: receipt.sha256) : false
     } catch {
       return .answered(.internalError("verifying the file", error))
+    }
+    // Before any write: once the phone paired again, one would put back
+    // the row the revoke deleted. `complete` discards the files.
+    guard revocations[receipt.deviceID, default: 0] == revocation else {
+      return .answered(Self.unauthorized)
     }
     receipt = activeReceipts[recordingID] ?? receipt
     guard let identity, (try? ReceivingFile.identity(of: partial)) == identity else {

@@ -476,6 +476,44 @@ import Testing
     #expect(!gate.timedOut, "nothing waited on the held save")
   }
 
+  /// A revoke during the verify, then a pairing again under the same device
+  /// id, both commit before the verify answers; the phone announced again,
+  /// so the verify finds another file. Its answer writes nothing, or the
+  /// receipt's row would be back for the device the phone was just told to
+  /// forget.
+  @Test(.timeLimit(.minutes(1)))
+  func aCompleteOfAPhoneThatPairedAgainDuringItsVerifyWritesNoReceipt() async throws {
+    let gated = try await Gated()
+    defer { gated.remove() }
+    let (gate, engine, phone, id) = (gated.gate, gated.engine, gated.phone, gated.id)
+    let device = phone.device
+    try await phone.uploadAll(gated.metadata, gated.bytes)
+
+    // The `.verifying` save holds the writer; the delete, the announce's
+    // save and the pairing's save queue behind it in that order.
+    gate.receiptWrite.arm()
+    let completing = Task { await phone.complete(id) }
+    await gate.receiptWrite.held()
+    let revoking = Task { try await gated.service.revoke(device.id) }
+    try await Self.until { await engine.revoking[device.id] != nil }
+    let announcing = Task { try await phone.announce(gated.metadata) }
+    try await Self.until { engine.inbox.hasPartial(id) }
+    _ = await engine.beginPairing()
+    let pairing = Task {
+      try await EngineClient(engine: engine).pair(deviceID: device.id, deviceName: device.name)
+    }
+    try await Self.until { await !engine.pairingIsOpen }
+    gate.receiptWrite.release()
+
+    #expect(await completing.value.code == 401, "the phone learns it was unpaired")
+    try await revoking.value
+    #expect(try await announcing.value.code == 500, "its save fails on the deleted device")
+    #expect(try await pairing.value.code == 200)
+    #expect(try await gated.test.store.pairedDevice(id: device.id) != nil, "paired again")
+    try await gated.expectNothingAdmitted()
+    #expect(!gate.timedOut, "nothing waited on the held save")
+  }
+
   /// Of two revokes of one device in flight together, the one whose delete
   /// fails leaves `revoked` to the other, which deletes the device, so a
   /// request that read the receipt before them does not bring it back.
