@@ -2301,6 +2301,151 @@ fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
     assert!(clock.wait_for_sleepers(0));
 }
 
+/// Where [`HeldWrites`] holds the writer.
+#[derive(Debug, PartialEq)]
+enum Held {
+    FirstWrite,
+    FirstSilence,
+}
+
+/// The production writer, held on its first write and on the first frame
+/// of silence after it until the test lets each go, as a stalled disk
+/// holds it.
+struct HeldWrites {
+    inner: RecordingWriter,
+    next: Option<Held>,
+    at_hold: Sender<Held>,
+    release: Receiver<()>,
+}
+
+impl RecordingWriting for HeldWrites {
+    fn files(&self) -> RecordingFiles {
+        self.inner.files()
+    }
+    fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+        let silent = frames
+            .lanes
+            .iter()
+            .all(|lane| lane.iter().all(|s| *s == 0.0));
+        let hold = match self.next {
+            Some(Held::FirstWrite) => self.next.replace(Held::FirstSilence),
+            Some(Held::FirstSilence) if silent => self.next.take(),
+            _ => None,
+        };
+        if let Some(hold) = hold {
+            let _ = self.at_hold.send(hold);
+            // Bounded, so a failed test cannot hang its session's drop.
+            let _ = self.release.recv_timeout(RECV);
+        }
+        self.inner.write(frames)
+    }
+    fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+        self.inner.finish()
+    }
+}
+
+/// A writer stalled while the old device delivers: the 30-frame relay
+/// (34 frames once rounded) fills, and the old device's last frames are
+/// refused and counted as dropped. The gap then starts behind a full relay
+/// and waits on the clock; once the writer reaches its first frame of
+/// silence and stalls again, the gap fills the relay with silence and
+/// waits again, where `stop()` finds it. The master holds what the relay
+/// took: the old audio less what it refused, then 35 frames of silence.
+#[test]
+fn a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&[AudioLane::Mixed], 1.0)
+            .change_device_after(0.5)
+            .restarts_that_fail(3)
+            .real_time(true),
+    ));
+    let (at_hold, holds) = channel();
+    let (release, released) = channel();
+    let parts = Mutex::new(Some((at_hold, released)));
+    let session = CaptureSession::with_writer_factory(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        30,
+        clock.clone(),
+        Arc::new(move |layout, lanes, keep_raw| {
+            let (at_hold, release) = parts.lock().unwrap().take().expect("one writer");
+            Ok(Box::new(HeldWrites {
+                inner: RecordingWriter::new(layout, lanes, keep_raw)?,
+                next: Some(Held::FirstWrite),
+                at_hold,
+                release,
+            }) as Box<dyn RecordingWriting>)
+        }),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(holds.recv_timeout(RECV).unwrap(), Held::FirstWrite);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, 3);
+    assert!(
+        clock.wait_for_sleepers(1),
+        "the gap waits behind the old device's audio"
+    );
+    release.send(()).unwrap();
+    // The writer drains the old audio while the gap's waits are stepped,
+    // until it holds the first frame of silence.
+    loop {
+        match holds.recv_timeout(Duration::from_millis(2)) {
+            Ok(held) => {
+                assert_eq!(held, Held::FirstSilence);
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if clock.pending_sleepers() == 1 {
+                    clock.advance(Duration::from_millis(5));
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => panic!("the writer is gone"),
+        }
+    }
+    // One more step: the gap fills the relay behind the held frame and
+    // waits again.
+    assert!(clock.wait_for_sleepers(1));
+    clock.advance(Duration::from_millis(5));
+    assert!(clock.wait_for_sleepers(1), "the relay is full of silence");
+    release.send(()).unwrap();
+    let result = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+    assert_eq!(result.statistics.device_changes, 0);
+
+    let master = master_of(&result);
+    let silence = (result.statistics.gap_seconds * SAMPLE_RATE).round() as usize;
+    assert_eq!(silence, 35 * 480, "the held frame and a full relay");
+    let audio = master.frame_count() - silence;
+    assert!(master.channels[0][audio..].iter().all(|s| *s == 0.0));
+    // Normally the held frame and a full relay: 35 frames, 15 refused. A
+    // writer thread that first runs after the whole half second takes 34.
+    let refused = (24_000 - audio) / 480;
+    assert!(
+        audio.is_multiple_of(480) && (15..=16).contains(&refused),
+        "old audio: {audio}"
+    );
+    assert_eq!(master.frame_count() + 480 * refused, 24_000 + silence);
+    let undrained = (backend.frames_delivered() - 24_000) / 480;
+    assert_eq!(
+        result
+            .statistics
+            .dropped_frames
+            .get(&AudioLane::Mixed)
+            .copied()
+            .unwrap_or(0),
+        undrained + refused
+    );
+    assert!(clock.wait_for_sleepers(0));
+}
+
 /// `MAXIMUM_GAP`: an outage of 30 s on the clock fills 10 s of silence, and
 /// `gap_seconds` reports the capped value the master actually holds.
 #[test]
