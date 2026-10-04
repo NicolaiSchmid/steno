@@ -350,8 +350,9 @@ pub const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_sec
 /// most `patience` (the shell passes [`SHUTDOWN_PATIENCE`]), before the
 /// process ends: an exit request the gate can hold goes through
 /// [`ExitGate::exit_requested`], an exit it cannot (the run loop's last
-/// event after the Dock's Quit or a logout on macOS, an update's relaunch)
-/// through [`ExitGate::exiting`]. Clones share one gate. Swift:
+/// event after the Dock's Quit or a logout on macOS and a logoff on
+/// Windows, an update's relaunch, the Windows installer's exit) through
+/// [`ExitGate::exiting`]. Clones share one gate. Swift:
 /// `applicationShouldTerminate` answered `.terminateLater`, awaited
 /// `AppController.shutdown()` without a bound and then replied.
 ///
@@ -432,16 +433,16 @@ impl ExitGate {
 
     /// The process is about to end without an exit request the gate
     /// holds: runs `shutdown` on this thread's behalf, or waits for the
-    /// one a held request started, and returns once it ended, at most
-    /// `patience` later; at once when it already ran. Every exit request
-    /// goes ahead afterwards.
+    /// one already running (a held request's, or an earlier `exiting`'s),
+    /// and returns once it ended, at most `patience` later; at once when it
+    /// already ran. Every exit request goes ahead afterwards.
     pub fn exiting(&self, patience: std::time::Duration, shutdown: impl FnOnce() + Send + 'static) {
         match self.advance(ExitStage::Ending) {
             ExitStage::Open => {
                 run_for_at_most(patience, shutdown);
                 self.release();
             }
-            ExitStage::ShuttingDown => {
+            ExitStage::ShuttingDown | ExitStage::Ending => {
                 let (stage, released) = &*self.shared;
                 let _ = released
                     .wait_timeout_while(lock_stage(stage), patience, |stage| {
@@ -449,7 +450,7 @@ impl ExitGate {
                     })
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
             }
-            ExitStage::Ending | ExitStage::Released => {}
+            ExitStage::Released => {}
         }
     }
 
@@ -1064,6 +1065,42 @@ mod tests {
                 .is_err(),
             "no exit of the gate's after the process took the exit over"
         );
+    }
+
+    /// Two exits no request held (an update's relaunch, then the Dock's
+    /// Quit or a logout): the second waits for the first's shutdown instead
+    /// of running another, or returning while it still runs.
+    #[test]
+    fn a_second_exit_without_a_request_waits_for_the_first_ones_shutdown() {
+        use std::sync::atomic::AtomicBool;
+        use std::time::Duration;
+        let gate = ExitGate::default();
+        let saved = Arc::new(AtomicBool::new(false));
+        let (begun, shutdown_begun) = std::sync::mpsc::channel();
+        let first = {
+            let (gate, saved) = (gate.clone(), saved.clone());
+            std::thread::spawn(move || {
+                gate.exiting(PATIENCE, move || {
+                    begun.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(200));
+                    saved.store(true, Ordering::SeqCst);
+                });
+            })
+        };
+        shutdown_begun
+            .recv_timeout(PATIENCE)
+            .expect("the first shutdown began");
+        let second = gate.clone();
+        on_own_thread(PATIENCE, "the second exit returned", move || {
+            second.exiting(PATIENCE, || panic!("a second shutdown"));
+        });
+        assert!(
+            saved.load(Ordering::SeqCst),
+            "waited for the first shutdown"
+        );
+        on_own_thread(PATIENCE, "the first exit returned", move || {
+            first.join().unwrap();
+        });
     }
 
     #[test]
