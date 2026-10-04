@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use common::{Phone, TestService, chunks, seeded_bytes};
 use steno_core::{RecordingMetadata, Store};
+use steno_handover::engine::HandoverResponse;
 use steno_handover::pairing::DeviceTokens;
 use steno_handover::{HandoverService, wire};
 use uuid::Uuid;
@@ -393,40 +394,46 @@ impl Restarted {
             && !inbox.has_verified(id, self.metadata.format)
             && inbox.load_metadata(id).is_none()
     }
+
+    /// `complete` on the restarted engine with a revoke that lands while it
+    /// reads the receipt from the store. With `pairs_again`, the phone pairs
+    /// again under the same device id before `complete` goes on; the new
+    /// pairing's view comes back with the answer.
+    async fn complete_with_a_revoke_during_the_read(
+        &self,
+        pairs_again: bool,
+    ) -> (HandoverResponse, Option<common::EngineDevice>) {
+        // `complete` runs to its store read and waits there: the store is
+        // held, so the read cannot finish before the first poll returns.
+        // Once the read has returned the row, the revoke runs to completion;
+        // then `complete` goes on.
+        let hold = StoreHold::new(&self.first.store);
+        let woken = Woken::new();
+        let mut completing = std::pin::pin!(self.phone.complete(self.id()));
+        assert!(
+            woken.poll(completing.as_mut()).is_pending(),
+            "complete waits on the store read"
+        );
+        hold.release();
+        woken.wait("the store read returns").await;
+        self.service.revoke(self.phone.device.id).await.unwrap();
+        let again = if pairs_again {
+            Some(self.phone.pair_again().await)
+        } else {
+            None
+        };
+        (completing.await, again)
+    }
 }
 
 /// A revoke that lands while `complete` reads the store finds nothing in
 /// memory to discard, so the files are still there for the verify; the
 /// engine itself must keep a revoked device's recording from the intake.
-/// With `pairs_again`, the phone pairs again under the same device id
-/// before `complete` goes on.
 async fn complete_after_a_revoke_during_its_receipt_read(pairs_again: bool) {
     let restarted = Restarted::new().await;
-
-    // `complete` runs to its store read and waits there: the store is held,
-    // so the read cannot finish before the first poll returns. Once the
-    // read has returned the row, the revoke runs to completion; then
-    // `complete` goes on.
-    let hold = StoreHold::new(&restarted.first.store);
-    let woken = Woken::new();
-    let mut completing = std::pin::pin!(restarted.phone.complete(restarted.id()));
-    assert!(
-        woken.poll(completing.as_mut()).is_pending(),
-        "complete waits on the store read"
-    );
-    hold.release();
-    woken.wait("the store read returns").await;
-    restarted
-        .service
-        .revoke(restarted.phone.device.id)
-        .await
-        .unwrap();
-    let again = if pairs_again {
-        Some(restarted.phone.pair_again().await)
-    } else {
-        None
-    };
-    let response = completing.await;
+    let (response, again) = restarted
+        .complete_with_a_revoke_during_the_read(pairs_again)
+        .await;
 
     assert_eq!(
         response.status.as_u16(),
@@ -456,12 +463,36 @@ async fn a_phone_that_paired_again_does_not_let_the_old_complete_through() {
 }
 
 #[tokio::test]
+async fn an_admitted_recording_answers_its_meeting_after_a_revoke_during_the_read() {
+    // The recording was admitted before the restart; the phone lost the
+    // answer and asks again. A 401 would make it keep the recording, and
+    // its upload after pairing again would become a second meeting. The
+    // phone pairs again before `complete` goes on, so the read puts the
+    // receipt back into memory; the receipt is gone from the store, so it
+    // must not stay in the stream either.
+    let restarted = Restarted::new().await;
+    let before = common::EngineDevice {
+        service: restarted.first.service.clone(),
+        device: restarted.phone.device.clone(),
+    };
+    let admitted = before.complete(restarted.id()).await;
+    assert_eq!(admitted.status.as_u16(), 200);
+    let meeting: wire::CompleteResponse = admitted.decode().unwrap();
+
+    let (response, _) = restarted.complete_with_a_revoke_during_the_read(true).await;
+
+    assert_eq!(response.status.as_u16(), 200, "the phone keeps its meeting");
+    let answered: wire::CompleteResponse = response.decode().unwrap();
+    assert_eq!(answered.meeting_id, meeting.meeting_id);
+    restarted.assert_nothing_admitted();
+}
+
+#[tokio::test]
 async fn a_complete_during_a_revokes_store_delete_admits_nothing() {
-    // Until the revoke's store delete commits, a store read still returns
-    // the device's receipt, and a pairing after the revoke would let a
-    // check of the revoked set pass. A `complete` that starts meanwhile is
-    // refused before it reads: with the store held, any answer on the
-    // first poll comes from the entry check.
+    // A `complete` that starts while the revoke's store delete is pending
+    // takes the count the revoke already bumped, and its read may still be
+    // served before the delete. It is refused before it reads: with the
+    // store held, any answer on the first poll comes from the entry check.
     let restarted = Restarted::new().await;
     let hold = StoreHold::new(&restarted.first.store);
     let woken = Woken::new();

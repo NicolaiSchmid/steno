@@ -249,18 +249,19 @@ impl Engine {
     /// `complete` is still verifying or admitting; 422 on a hash mismatch,
     /// after which the partial is gone and the phone starts over; 401 from
     /// the revoke of the device until it pairs again, or when a revoke landed
-    /// during the receipt read or the verify, after which the files are gone.
+    /// during the receipt read or the verify of a recording not yet
+    /// admitted, after which the files are gone.
     pub(super) async fn complete(
         &self,
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
-        // Until a revoke's store delete commits, a store read still returns
-        // the device's receipts, and a `complete` that starts meanwhile
-        // takes the count the revoke already bumped, so the checks below
-        // would miss it: refuse before reading. `revoked` holds the device
-        // from the revoke until it pairs again. The receipt's owner is not
-        // known yet, so nothing is discarded.
+        // A `complete` that starts while a revoke's store delete is pending
+        // takes the count the revoke already bumped, and its read may still
+        // be served before the delete, so the checks below would miss the
+        // revoke: refuse before reading. `revoked` holds the device from the
+        // revoke until it pairs again. The receipt's owner is not known yet,
+        // so nothing is discarded.
         let revocation = {
             let state = self.state();
             if state.revoked.contains(&device.id) {
@@ -272,16 +273,23 @@ impl Engine {
             Ok(receipt) => receipt,
             Err(response) => return response,
         };
+        if let Some(meeting_id) = receipt.state.meeting_id() {
+            // Admitted before, so a revoke during the read admits nothing
+            // new. A 401 would make the phone keep the recording, and its
+            // upload after pairing again would become a second meeting.
+            if self.revoked_since(device, revocation) {
+                self.forget(recording_id);
+            }
+            return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });
+        }
         // The receipt read and the verify yield. A revoke meanwhile discards
         // files only for receipts it finds in memory, and after a restart
         // this one may be only in the store: the file of a revoked device
-        // must not reach the intake. Checked here, before anything is
-        // written for the receipt, and again after the verify.
+        // must not reach the intake. Checked here, before the `verifying`
+        // write, which would put the row back once the phone paired again,
+        // and again after the verify.
         if let Some(refused) = self.refusal(recording_id, device, revocation) {
             return refused;
-        }
-        if let Some(meeting_id) = receipt.state.meeting_id() {
-            return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });
         }
         // One `complete` per recording at a time: the phone retries after
         // its own timeout, and a second verify or admission of the same file
@@ -295,7 +303,14 @@ impl Engine {
         };
         match self.verified_file(&mut receipt, &metadata).await {
             Verification::Answered(response) => response,
-            // Nothing yields between this check and the intake call.
+            // A revoke during the verify finds the receipt in memory and
+            // discards the files itself, but the phone, still passing the
+            // gate before the delete commits or after pairing again, can
+            // announce and send the chunks again, so a partial is back. The
+            // hash (of the old file it still reads, or of the same bytes
+            // sent again) matches and the promote moves the new partial:
+            // only this check stops the admit. Nothing yields between it
+            // and the intake call.
             Verification::File(file) => match self.refusal(recording_id, device, revocation) {
                 Some(refused) => refused,
                 None => self.admit(&file, &metadata, device, &mut receipt).await,
@@ -313,13 +328,23 @@ impl Engine {
         device: &PairedDevice,
         revocation: u64,
     ) -> Option<HandoverResponse> {
-        let revocations = self.state().revocations.get(&device.id).copied();
-        if revocations.unwrap_or(0) == revocation {
+        if !self.revoked_since(device, revocation) {
             return None;
         }
         self.inbox.discard(recording_id);
         self.forget(recording_id);
         Some(Self::unauthorized())
+    }
+
+    /// Whether the device was revoked since its revocation count was
+    /// `revocation`.
+    fn revoked_since(&self, device: &PairedDevice, revocation: u64) -> bool {
+        self.state()
+            .revocations
+            .get(&device.id)
+            .copied()
+            .unwrap_or(0)
+            != revocation
     }
 
     /// The verified file: the one already waiting after an earlier intake
