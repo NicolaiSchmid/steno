@@ -386,11 +386,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   them: the destructive alert, the folder choices, the reveal methods (the `Opener` over
   `dialogs` and `windows`) and the login item (`autostart::ShellLoginItem`) are wired;
   the prompt and its dismissal, the permissions and the update outcomes are not, for the
-  reasons under "Pipeline and services (WP6b)". `[x]` Shutdown: Quit from the tray or
-  the macOS menu bar, and a close that ends the process because no tray stands, stop and
-  save a recording in progress first (`exit_request` in `apps/desktop/src-tauri/src/main.rs`
-  over `ExitGate` and `App::shutdown`), as `applicationShouldTerminate` in
-  `apps/macos/Steno/StenoApp.swift` does (it awaits `AppController.shutdown`). The
+  reasons under "Pipeline and services (WP6b)". `[x]` Shutdown: every exit runs
+  `App::shutdown` first, which stops and saves a recording in progress (`exit_request`
+  and `shut_down_before_exit` in `apps/desktop/src-tauri/src/main.rs` over `ExitGate`),
+  as `applicationShouldTerminate` in `apps/macos/Steno/StenoApp.swift` does (it awaits
+  `AppController.shutdown`); the exits and the one still open are listed under
+  "Pipeline and services (WP6b)". The
   keyring `SecretStore` is not the shell's: it lives in `steno-services` (#173, WP6b).
 - **WP7 LLM, adapters, handover.** Ports of `StenoLLM` (Codex and OpenAI-compatible),
   `StenoAdapters`, `StenoHandover` (rustls, the pinned trust evaluation, the shared
@@ -410,6 +411,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   when it bundles); on macOS it is signed with the app, with the hardened runtime,
   and notarised with it. Until then a bundled app's `prepare` fails with "could not
   start" and the missing binary's path.
+  The shell's gaps the cutover closes ("Pipeline and services (WP6b)"): the tray's badge
+  for pending speaker reviews, which no package owns yet; the QR encoder, a fake until a
+  QR crate draws the pairing code; the clip player, a fake until WP5 adds an audio
+  output; and the update schedule behind the host's `Updater`.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
@@ -542,7 +547,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   marked failed at launch, unfinished processing resumed at launch
   (`steno_services::App::launch`).
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
-  the host republishes `progress`; the tray (WP8) shows no badge for it yet.
+  the host republishes `progress`; the tray (WP8) shows no badge for it; WP9's cutover
+  list names it.
 - [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait is still
   the services' fake, since WP8's `updater` has no automatic-check or automatic-download
   flag and no last check time to report (see "Pipeline and services (WP6b)").
@@ -553,7 +559,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   recording start: the recorder, WP5.
 - [x] Phone pairing: the QR code, a phone's arrival closing the code, a code running
   out, revoke, the listener stopping when no phone is left; the `Handover` trait, WP7
-  implements.
+  implements (the app's QR encoder is still a fake, see "Pipeline and services (WP6b)").
 - [x] Onboarding opener rule (`Host::should_open_onboarding`): a missing required
   permission, or the flag unset; an install already configured writes the flag and
   stays closed.
@@ -638,32 +644,43 @@ still has to draw the window side. `[ ]` is not ported yet.
   receipt complete (`steno_pipeline::files::copy_durably`); Swift's `copyItem` did
   not, so a power loss after the phone's 200 lost the recording on both devices. The
   receipt and meeting commits still run under `NORMAL` (the Store item below).
-- Quitting while recording stops the recording with `quit` and saves it before the
-  process exits (`App::shutdown` behind `ExitGate`, at most ten seconds), as Swift's
-  `applicationShouldTerminate` awaited `AppController.shutdown()`. Every exit request
-  goes through `exit_request` in the shell: Quit in the tray's menu and in the macOS
-  menu bar (#172's own item, not muda's `terminate:`), a destroyed main window with no
-  tray, and the last window closing with no tray. Open on macOS: the Dock's Quit, a
-  logout and a system shutdown send `terminate:` to the application directly, and tao
-  answers with `applicationWillTerminate` only, no `ExitRequested`; a recording is not
-  saved there and the next launch marks it failed with the interrupted reason. Closing
-  it needs `applicationShouldTerminate` from tao or a delegate of the shell's own
-  (WP9, with the cutover).
-- The shell's seams WP6b leaves open, each waiting on work outside the shell: (1) the
+- Every exit runs `App::shutdown` first, once, at most ten seconds (`ExitGate`): a
+  start or a stop in progress settles, a recording in progress stops with `quit` and is
+  saved, the phone listener stops; as Swift's `applicationShouldTerminate` awaited
+  `AppController.shutdown()`, which awaited `awaitSettled()` first. Swift waited
+  without a bound. The exit requests go through `exit_request` in the shell and are
+  held until the shutdown ended, a second Quit included: Quit in the tray's menu and
+  in the macOS menu bar (#172's own item, not muda's `terminate:`), a destroyed main
+  window with no tray, the last window closing with no tray, and SIGTERM on Linux and
+  macOS (a logout or a shutdown on Linux, `kill`). The Dock's Quit, a logout and a
+  system shutdown on macOS send `terminate:` directly; tao answers with
+  `applicationWillTerminate` only, which reaches the shell as `RunEvent::Exit` and
+  which AppKit waits for, so the shutdown runs there (`shut_down_before_exit`). The
+  updater's relaunch bypasses the exit request and runs the shutdown before it
+  relaunches; on Windows the installer's own exit runs it (`on_before_exit`). Open: a
+  Windows logoff or shutdown (`WM_ENDSESSION`) saves nothing and the next launch marks
+  the recording failed with the interrupted reason (WP10).
+- The host publishes under its `publishing` lock, and the tray's and the windows'
+  setters wait for the main thread when called from another, while the main thread
+  takes that lock too (a Stop from the tray joins the recorder's level thread, which
+  publishes). So the shell's window sink queues every snapshot and delivers it on the
+  main thread, in emit order (`WindowSink` in `apps/desktop/src-tauri/src/host.rs`);
+  before, a Stop from the tray froze the app.
+- The shell's seams WP6b leaves open, each with the package that closes it: (1) the
   detection prompt: no `DetectionController` is ported (WP5), so nothing calls
   `panels::set_prompt` and `panels::dismiss_prompt` tells no one; (2) the host's
   `Permissions` stay the services' fake (all granted): WP8's `permissions` answers
   `unknown` off the Mac and for the Mac's system audio, and the host's onboarding
   opener counts anything but `granted` as missing, so wiring it would open onboarding
   at every launch on Linux and Windows; it waits for the audio crate's tap probe (WP5)
-  and a rule for what `unknown` means; (3) the host's `Updater` stays the fake: WP8's
+  and a rule for what `unknown` means, which WP5 sets with the probe; (3) the host's `Updater` stays the fake: WP8's
   `updater` checks only when asked, keeps no automatic-check or automatic-download flag
   and no last check time, so the General section's Updates row has nothing real to
   show, and `updates.check` stays the shell's; filling it is the update schedule WP9
   decides, and the shell's `UpdateOutcome` stays beside the host's until then; (4) the
   QR encoder and the clip player are fakes, so the pairing code shows no QR image and a
   speaker's sample clip does not play: each needs new code (a QR crate, an audio
-  output), not wiring.
+  output), not wiring; the audio output is WP5's, and WP9's cutover list names both.
 - The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
   `App::launch` and runs whether or not a code is shown, where Swift ran it only while
   the Phones pane showed one.
@@ -1157,8 +1174,8 @@ in-process until `WP4c`; the `CoreML` engine leaves `language` unset (#163), and
 `LanguageTaggingEngine` in the services crate runs `steno_speech`'s tagger after it,
 as `ParakeetMapping` did in Swift. Secrets: the platform keyring on macOS and
 Windows, the 0600 `secrets.json` on Linux (the kernel keyring does not survive a
-reboot; the Secret Service, which needs D-Bus, has no work package yet). Parity items: the Pipeline and services list
-above.
+reboot; the Secret Service, which needs D-Bus, has no work package yet).
+Parity items: the Pipeline and services list above.
 
 WP10a is the Windows half of `crates/steno-audio`: the WASAPI live backend
 (process loopback excluding Steno's process tree, endpoint loopback as the
