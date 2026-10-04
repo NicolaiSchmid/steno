@@ -603,20 +603,22 @@ The Mac cutover (the bundle id, the Sparkle handoff, the Swift app's
 removal) is planned in `.plans/2026-10-04-mac-cutover.md`; until it
 lands the desktop app installs beside the Swift app on the Mac. WP6b
 filled the host's half of the WP8 seams except four (the plan's
-"Pipeline and services (WP6b)" list gives each one's reason and the work
-package that closes it): the detection controller (WP5) is not ported,
+"Pipeline and services (WP6b)" list gives each one's reason and what
+closes it): the detection controller (WP5) is not ported,
 so nothing raises the prompt (`panels::set_prompt`) and its X
 (`panels::dismiss_prompt`) tells no one; the host's `Permissions` stay
 the services' fake (all granted), because `permissions` answers
 `unknown` off the Mac and for the Mac's system audio, which the host's
 onboarding opener counts as missing, so onboarding would open at every
 launch until the audio probe (WP5) and a rule for `unknown` land; the
-host's `Updater` stays the fake until WP9's update schedule, because
+host's `Updater` stays the fake until an update schedule exists (due
+before the cutover), because
 `updater` has no automatic-check or automatic-download flag and keeps no
 last check time, so the General section's Updates row cannot be filled
 from it (`updates.check` stays the shell's, and its `UpdateOutcome`
 stays beside the host's); and the QR encoder and the clip player are
-fakes, which need a QR crate and an audio output (WP5 and WP9). The host
+fakes, which need a QR crate and an audio output (the audio output is
+WP5's; both are due before the cutover). The host
 may treat the main window as always present: a close hides it, or ends
 the process when no tray stands, so publishing to it never fails for
 want of a window. Launch at login is a Launch Agent, not `SMAppService`;
@@ -625,8 +627,8 @@ get two login items (the plan's parity list,
 `.plans/2026-10-04-mac-cutover.md`). The macOS menu bar has no Record
 menu yet (`⌘⇧R` and Record In Person are the tray's and the sidebar's),
 and no Find Meetings (`⌘F`). Updates are checked only when asked (the
-tray's item, Settings), where Sparkle checks daily on its own (WP9's
-update schedule). On macOS the system audio permission has no status
+tray's item, Settings), where Sparkle checks daily on its own (an update
+schedule, due before the cutover). On macOS the system audio permission has no status
 API; the audio crate's probe (WP5) records it and until then it reads
 `unknown`. The panels are re-tuned on the Mac once they run there beside
 the Swift ones (the plan's risk list). Linux and Windows keep their

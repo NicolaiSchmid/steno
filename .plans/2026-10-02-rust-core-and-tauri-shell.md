@@ -433,19 +433,16 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   that `updater.rs` reads, each only moving forward
   (`apps/desktop/scripts/updater-lanes.sh`). No desktop release is GitHub's "latest"
   before the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
-  The shell's gaps the cutover (WP9b) closes ("Pipeline and services (WP6b)"): the
-  tray's badge for pending speaker reviews; the QR encoder, a fake until a QR crate
-  draws the pairing code; the clip player, a fake until WP5 adds an audio output; and
-  the update schedule behind the host's `Updater`.
+  The shell's gaps that must close before the cutover (WP9b) opens; no package owns
+  them yet ("Pipeline and services (WP6b)"): the tray's badge for pending speaker
+  reviews; the QR encoder, a fake until a QR crate draws the pairing code; the clip
+  player, a fake until WP5 adds an audio output; and the update schedule behind the
+  host's `Updater`.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
   entry `handover-identity`, or accepts that phones re-pair and says so in the release
   notes; the cutover plan decides which.
-  Before the first Linux release (no package of its own yet, so WP9's): a logout on
-  GNOME and on KDE while recording is tested. The shell saves when the session manager
-  signals it, but when the display connection closes first, GDK ends the process
-  unsaved ("Pipeline and services (WP6b)").
 - **WP10 Windows.** WASAPI capture, DirectML provider (speech-stack G4), installer.
   WP10a: WASAPI capture (#175); DirectML and the installer follow. The shell's exit on
   a Windows logoff or shutdown (`WM_ENDSESSION`, which reaches the shell as
@@ -583,8 +580,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   marked failed at launch, unfinished processing resumed at launch
   (`steno_services::App::launch`).
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
-  the host republishes `progress`; the tray (WP8) shows no badge for it; WP9's cutover
-  list names it.
+  the host republishes `progress`; the tray (WP8) shows no badge for it; it must close
+  before the cutover (WP9b) opens.
 - [ ] Updates: Sparkle today, the Tauri updater at cutover; the `Updater` trait is still
   the services' fake, since WP8's `updater` has no automatic-check or automatic-download
   flag and no last check time to report (see "Pipeline and services (WP6b)").
@@ -593,9 +590,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   the `LoginItem` trait over WP8's `autostart` (`autostart::ShellLoginItem`, WP6b).
 - [ ] Calendar: the event that names a recording and its attendees, looked up at
   recording start: the recorder, WP5.
-- [x] Phone pairing: the QR code, a phone's arrival closing the code, a code running
-  out, revoke, the listener stopping when no phone is left; the `Handover` trait, WP7
-  implements (the app's QR encoder is still a fake, see "Pipeline and services (WP6b)").
+- [x] Phone pairing: a phone's arrival closing the code, a code running out, revoke,
+  the listener stopping when no phone is left; the `Handover` trait, WP7 implements.
+- [ ] QR encoder and clip player: fakes in the app, so the pairing code shows no QR
+  image and a speaker's sample clip does not play (see "Pipeline and services
+  (WP6b)").
 - [x] Onboarding opener rule (`Host::should_open_onboarding`): a missing required
   permission, or the flag unset; an install already configured writes the flag and
   stays closed.
@@ -760,7 +759,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   once its message is closed. The services runtime is never dropped: dropping it
   waits, without a bound, for a transcription or a model load in progress. Open: the
   Windows logoff is untested on hardware and can outlast the end-session timeout
-  (WP10), and a Linux logout that closes the display first ends the app unsaved (WP9).
+  (WP10), and a Linux logout saves only when logind signals the app, which is
+  untested on GNOME and on KDE (before the first Linux release; no work package yet).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes), and the tray's setters wait for the main thread when called from
@@ -781,11 +781,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   `Updater` stays the fake: WP8's `updater` checks only when asked, keeps no
   automatic-check or automatic-download flag and no last check time, so the General
   section's Updates row has nothing real to show, and `updates.check` stays the
-  shell's; filling it is the update schedule WP9 decides, and the shell's
-  `UpdateOutcome` stays beside the host's until then; (4) the QR encoder and the clip
-  player are fakes, so the pairing code shows no QR image and a speaker's sample clip
-  does not play: each needs new code (a QR crate, an audio output), not wiring; the
-  audio output is WP5's, and WP9's cutover list names both.
+  shell's; filling it is the update schedule due before the cutover (WP9b), and the
+  shell's `UpdateOutcome` stays beside the host's until then; (4) the QR encoder and
+  the clip player are fakes, so the pairing code shows no QR image and a speaker's
+  sample clip does not play: each needs new code (a QR crate, an audio output), not
+  wiring; the audio output is WP5's; both must close before the cutover (WP9b) opens.
 - The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
   `App::launch` and runs whether or not a code is shown, where Swift ran it only while
   the Phones pane showed one.
