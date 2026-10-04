@@ -537,6 +537,14 @@ impl OnnxBackend {
     pub fn fallback(&self) -> Option<&'static str> {
         self.encoder.fallback.map(Fallback::describe)
     }
+
+    /// Whether the encoder still has a session: `false` only after a run
+    /// failed on `DirectML` and the CPU could not reopen the model, after
+    /// which every run fails.
+    #[must_use]
+    pub fn usable(&self) -> bool {
+        self.encoder.session.is_some()
+    }
 }
 
 /// One encoder run over a window of at least one frame, its output
@@ -896,6 +904,10 @@ mod tests {
         };
         assert!(matches!(session.run(fail), Err(SpeechError::Runtime(_))));
         assert_eq!(session.provider, EncoderProvider::Cpu);
+        assert!(
+            session.session.is_none(),
+            "what `OnnxBackend::usable` reads"
+        );
         assert!(matches!(
             session.run(run_affine),
             Err(SpeechError::NotPrepared)

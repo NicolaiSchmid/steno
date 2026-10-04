@@ -52,13 +52,13 @@
 //! answers a load that asks for `DirectML` with `DirectML`, and reports no
 //! live provider until `--fault fallback`. Only with it, `--fault <kind>`
 //! ([`Fault`]) makes the next transcription abort, panic, flood stderr and
-//! panic, exit, hang, allocate 4 GiB, write garbage, fail or report a
-//! fallback to the CPU, the child abort on a load that asks for
-//! `DirectML`, or stay silent or announce another protocol version from
-//! the start;
-//! `--fault-once <path>` limits that to the first child that creates
-//! `<path>`, which holds that child's pid. The isolation tests drive the
-//! real client against these.
+//! panic, exit, hang, allocate 4 GiB, write garbage, fail, report a
+//! fallback to the CPU or lose the encoder, the child abort on any load or
+//! on a load that asks for `DirectML`, or stay silent or announce another
+//! protocol version from the start; `--fault-once <path>` limits that to
+//! the first child that creates `<path>`, which holds that child's pid.
+//! The isolation tests and the `DirectML` test binaries drive the real
+//! client against these.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
@@ -102,6 +102,12 @@ steno_core::string_enum! {
         /// provider and writes why to stderr, as a child does after a run
         /// that failed on `DirectML`.
         Fallback = "fallback",
+        /// Fails and leaves the engine without an encoder, as a run that
+        /// failed on `DirectML` does when the CPU cannot reopen the model;
+        /// the child then exits without answering.
+        LoseEncoder = "lose-encoder",
+        /// `std::process::abort` inside any load.
+        AbortOnLoad = "abort-on-load",
         /// `std::process::abort` inside a load that asks for `DirectML`,
         /// the way a driver may end the probe; a load on the CPU works.
         AbortOnDirectmlLoad = "abort-on-directml-load",
@@ -190,6 +196,12 @@ trait Engine {
     fn fallback(&self) -> Option<&'static str> {
         None
     }
+    /// Whether the engine can still run: `false` once a loaded encoder
+    /// lost its session ([`OnnxBackend::usable`]), after which the child
+    /// exits rather than answer every request with an error.
+    fn usable(&self) -> bool {
+        true
+    }
     fn transcribe(
         &mut self,
         samples: &[f32],
@@ -236,6 +248,12 @@ impl Engine for OnnxEngine {
         self.transcriber.as_ref()?.backend().fallback()
     }
 
+    fn usable(&self) -> bool {
+        self.transcriber
+            .as_ref()
+            .is_none_or(|transcriber| transcriber.backend().usable())
+    }
+
     fn transcribe(
         &mut self,
         samples: &[f32],
@@ -259,6 +277,8 @@ struct FakeEngine {
     fault_once: Option<PathBuf>,
     /// Set by [`Fault::Fallback`].
     fell_back: bool,
+    /// Set by [`Fault::LoseEncoder`].
+    lost_encoder: bool,
 }
 
 impl FakeEngine {
@@ -284,12 +304,15 @@ impl FakeEngine {
 impl Engine for FakeEngine {
     /// Reports `DirectML` when asked for it, as if the probe had passed, so
     /// the tests see the setting reach the child and the answer come back;
-    /// with [`Fault::AbortOnDirectmlLoad`], aborts there instead.
+    /// with [`Fault::AbortOnLoad`], or [`Fault::AbortOnDirectmlLoad`] when
+    /// asked for `DirectML`, aborts there instead.
     fn load(&mut self, _: &Path, options: &OnnxOptions) -> Result<EncoderProvider, String> {
-        if options.directml
-            && self.fault == Some(Fault::AbortOnDirectmlLoad)
-            && self.fault_now().is_some()
-        {
+        let aborts = match self.fault {
+            Some(Fault::AbortOnLoad) => true,
+            Some(Fault::AbortOnDirectmlLoad) => options.directml,
+            _ => false,
+        };
+        if aborts && self.fault_now().is_some() {
             std::process::abort();
         }
         self.loaded = true;
@@ -313,6 +336,11 @@ impl Engine for FakeEngine {
     /// Fixed words of its own after [`Fault::Fallback`].
     fn fallback(&self) -> Option<&'static str> {
         self.fell_back.then_some("the fake engine fell back")
+    }
+
+    /// `false` after [`Fault::LoseEncoder`].
+    fn usable(&self) -> bool {
+        !self.lost_encoder
     }
 
     fn transcribe(
@@ -358,10 +386,18 @@ impl Engine for FakeEngine {
                 self.fell_back = true;
                 Ok(describe(samples, hint))
             }
-            // The start and load faults were committed, if at all, there.
-            Some(Fault::Silent | Fault::WrongProtocol | Fault::AbortOnDirectmlLoad) | None => {
-                Ok(describe(samples, hint))
+            Some(Fault::LoseEncoder) => {
+                self.lost_encoder = true;
+                Err("simulated loss of the speech encoder".to_owned())
             }
+            // The start and load faults were committed, if at all, there.
+            Some(
+                Fault::Silent
+                | Fault::WrongProtocol
+                | Fault::AbortOnLoad
+                | Fault::AbortOnDirectmlLoad,
+            )
+            | None => Ok(describe(samples, hint)),
         }
     }
 }
@@ -444,6 +480,7 @@ pub fn serve(options: &Options) -> ExitCode {
         fault: options.fault,
         fault_once: options.fault_once.clone(),
         fell_back: false,
+        lost_encoder: false,
     });
     let start_fault = fake
         .as_ref()
@@ -522,6 +559,16 @@ pub fn serve(options: &Options) -> ExitCode {
                         segments,
                         provider: engine.provider(),
                     },
+                    // No reply: the parent sees a crash with the encoder
+                    // still on `DirectML`, switches `DirectML` off and
+                    // starts a child that loads on the CPU, where an error
+                    // reply would leave this child failing every request.
+                    Err(_) if !engine.usable() => {
+                        eprintln!(
+                            "steno-speech-sidecar: the speech encoder lost its session after a failed run on DirectML, and the CPU could not reopen it"
+                        );
+                        return ExitCode::from(70);
+                    }
                     Err(error) => Reply::Failed { id, error },
                 }
             }
@@ -567,6 +614,7 @@ mod tests {
             fault: Some(Fault::Error),
             fault_once: Some(dir.path().join("marker")),
             fell_back: false,
+            lost_encoder: false,
         };
         assert_eq!(engine.fault_now(), Some(Fault::Error));
         assert_eq!(engine.fault_now(), None);
