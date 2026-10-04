@@ -18,7 +18,7 @@ use steno_core::{
 use steno_diarize::{DiarizerConfig, ModelDiarizer};
 use steno_host::speech::ModelAsset;
 use steno_llm::{LlmClient, LlmEndpoint, LlmMeetingSummarizer, LlmTranscriptCleaner, RetryPolicy};
-use steno_services::speech::ModelStoreSpeechModels;
+use steno_services::speech::{ModelStoreSpeechModels, SpeechSetup};
 use steno_speech_coreml::wer;
 
 use crate::wiring::{DatabaseOptions, Failure, Outcome, sha256_hex};
@@ -397,7 +397,12 @@ pub struct ModelsOptions {
 
 impl ModelsOptions {
     fn service(&self) -> Result<ModelStoreSpeechModels, Failure> {
-        Ok(ModelStoreSpeechModels::new(&self.directory()?))
+        Ok(ModelStoreSpeechModels::new(&self.setup()?))
+    }
+
+    /// The speech setup over [`Self::directory`].
+    fn setup(&self) -> Result<SpeechSetup, Failure> {
+        Ok(crate::wiring::speech_setup(self.directory()?))
     }
 
     /// The models directory; `dev models list` prints it.
@@ -470,7 +475,7 @@ impl Models {
                         }
                         None => format!(
                             "not installed (~{})",
-                            steno_host::labels::file_size(asset.approximate_bytes())
+                            steno_host::labels::file_size(service.expected_bytes(*asset))
                         ),
                     };
                     println!(
@@ -605,9 +610,7 @@ impl Bakeoff {
                     ..steno_core::testing::FakeSpeechEngine::default()
                 })
             } else {
-                let mut settings = steno_core::Settings::default();
-                settings.speech_engine_id.clone_from(engine_id);
-                steno_services::speech::speech_engine(&settings, &self.models.directory()?)
+                steno_services::speech::speech_engine(engine_id, &self.models.setup()?)
             };
             engine.prepare().await.map_err(Failure::runtime)?;
             for file in &files {

@@ -180,9 +180,12 @@ pub fn recording(audio: &AudioSettingsViewModel, subtitle: &str) -> RecordingSet
     }
 }
 
+/// The Transcription section; `models` says what size each asset is
+/// expected to have.
 #[must_use]
 pub fn transcription(
     speech: &SpeechSettingsViewModel,
+    models: &dyn SpeechModels,
     subtitle: &str,
 ) -> TranscriptionSettingsSnapshot {
     TranscriptionSettingsSnapshot {
@@ -203,7 +206,7 @@ pub fn transcription(
                 let mut row = TranscriptionAsset {
                     id: asset.as_str().to_owned(),
                     name: SpeechSettingsViewModel::component_title(*asset).to_owned(),
-                    detail: speech.status_text(*asset),
+                    detail: speech.status_text(*asset, models),
                     state: TranscriptionAssetState::Absent,
                     download_fraction: None,
                     download_phase: None,
@@ -220,7 +223,7 @@ pub fn transcription(
                     AssetState::Installed { bytes } => {
                         row.state = TranscriptionAssetState::Installed;
                         row.installed_bytes =
-                            Some(bytes.unwrap_or_else(|| asset.approximate_bytes()));
+                            Some(bytes.unwrap_or_else(|| models.expected_bytes(*asset)));
                     }
                     AssetState::Failed(message) => {
                         row.state = TranscriptionAssetState::Failed;

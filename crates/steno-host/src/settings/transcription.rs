@@ -9,7 +9,7 @@ use steno_core::protocols::BoxError;
 
 use super::{SectionError, update_settings};
 use crate::labels::file_size;
-use crate::services::Services;
+use crate::services::{Services, SpeechModels};
 use crate::speech::{ModelAsset, SpeechEngineId};
 
 /// Swift: `SpeechSettingsViewModel.AssetState`.
@@ -143,12 +143,18 @@ impl SpeechSettingsViewModel {
             .join(" · ")
     }
 
-    /// "Installed · 485 MB", "Downloading… 40%", "Not downloaded · 485 MB".
+    /// "Installed · 485 MB", "Downloading… 40%" or "Not downloaded · 485 MB".
+    /// A size not read from disk (before a download, or of an installed
+    /// asset whose size could not be read) is the one `models` expects
+    /// ([`SpeechModels::expected_bytes`]).
     #[must_use]
-    pub fn status_text(&self, asset: ModelAsset) -> String {
+    pub fn status_text(&self, asset: ModelAsset, models: &dyn SpeechModels) -> String {
         match self.state_of(asset) {
             AssetState::Absent | AssetState::Failed(_) => {
-                format!("Not downloaded · {}", file_size(asset.approximate_bytes()))
+                format!(
+                    "Not downloaded · {}",
+                    file_size(models.expected_bytes(asset))
+                )
             }
             AssetState::Downloading { fraction, .. } => {
                 if fraction > 0.0 {
@@ -162,7 +168,7 @@ impl SpeechSettingsViewModel {
             }
             AssetState::Installed { bytes } => format!(
                 "Installed · {}",
-                file_size(bytes.unwrap_or_else(|| asset.approximate_bytes()))
+                file_size(bytes.unwrap_or_else(|| models.expected_bytes(asset)))
             ),
         }
     }

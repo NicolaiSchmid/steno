@@ -9,9 +9,10 @@ use steno_adapters::DeliveryCoordinator;
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::Store;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, InMemorySpeakerMemory};
-use steno_pipeline::{MeetingEventBus, PipelineDependencies, ProcessingPipeline};
+use steno_pipeline::{MeetingEventBus, PipelineDependencies};
+use steno_speech::SpeechRuntime;
 
-use crate::pipeline::{CurrentPipeline, MakeDependencies};
+use crate::pipeline::{BuiltEngine, BuiltPipeline, CurrentPipeline, MakeDependencies};
 
 /// How long a test waits for background work before it fails.
 pub const PATIENCE: Duration = Duration::from_secs(5);
@@ -40,15 +41,28 @@ pub fn fake_dependencies(store: &Arc<Store>, engine_id: &str) -> PipelineDepende
     )
 }
 
+/// `dependencies` as a build of `parakeet-v3` in the speech sidecar; only
+/// the recorder's warm-up reads the engine, and its tests build their own
+/// (`recorder::tests::harness_over`).
+pub fn built(dependencies: PipelineDependencies) -> BuiltPipeline {
+    BuiltPipeline {
+        dependencies,
+        engine: BuiltEngine {
+            engine_id: "parakeet-v3".to_owned(),
+            runtime: SpeechRuntime::OnnxSidecar,
+        },
+    }
+}
+
 /// A pipeline on the current runtime whose reload builds `dependencies`
 /// again.
 pub fn current_pipeline(dependencies: PipelineDependencies) -> Arc<CurrentPipeline> {
     let make: MakeDependencies = {
         let dependencies = dependencies.clone();
-        Arc::new(move || Ok(dependencies.clone()))
+        Arc::new(move || Ok(built(dependencies.clone())))
     };
     Arc::new(CurrentPipeline::new(
-        ProcessingPipeline::new(dependencies),
+        built(dependencies),
         make,
         tokio::runtime::Handle::current(),
     ))

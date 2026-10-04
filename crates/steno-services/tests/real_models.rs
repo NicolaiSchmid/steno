@@ -1,9 +1,17 @@
 //! The opt-in acceptance over the real engines: the synthetic two-lane
-//! fixture through the ONNX Parakeet engine and the ONNX diarizer, the way
+//! fixture through the Parakeet engine the platform runs (the speech
+//! sidecar off the Mac, `CoreML` on it) and the ONNX diarizer, the way
 //! `steno process --engine parakeet-v3` wires them, asserting the shape of
-//! the exported `meeting.json`. Set `STENO_MODEL_TESTS=1` (about 0.7 GB of
-//! downloads on first run); `STENO_MODELS_DIR` keeps the models between
-//! runs. Swift: `Tests/StenoEndToEndTests/RealModelsEndToEndTests.swift`.
+//! the exported `meeting.json`. Set `STENO_MODEL_TESTS=1`. The diarizer's
+//! models (and, off the Mac, Silero VAD) download on first run; the
+//! Parakeet the platform runs must already be in `STENO_MODELS_DIR`
+//! (`onnx/parakeet-tdt-0.6b-v3-fp32/` off the Mac,
+//! `fluidaudio/parakeet-tdt-0.6b-v3/` on it) or, off the Mac, come from the
+//! mirror `STENO_MODELS_MIRROR` names. `STENO_MODELS_DIR` keeps the models
+//! between runs. Off the Mac the sidecar binary must be built in the target
+//! directory (`cargo test --workspace` builds it, as does
+//! `cargo build -p steno-speech-sidecar`).
+//! Swift: `Tests/StenoEndToEndTests/RealModelsEndToEndTests.swift`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,12 +21,15 @@ use steno_adapters::ArtifactRenderer;
 use steno_audio::SymphoniaAudioCodec;
 use steno_core::testing::{FakeDestination, FakeSummarizer, PassthroughCleaner};
 use steno_core::{
-    AudioRetention, Destination, Meeting, MeetingExport, MeetingSource, MeetingState, Settings,
+    AudioRetention, Destination, Meeting, MeetingExport, MeetingSource, MeetingState, StenoPaths,
     Store, TitleOrigin, paths::file_url,
 };
 use steno_pipeline::{
     MeetingEventBus, PipelineDependencies, ProcessingPipeline, StoreSpeakerMemory,
 };
+use steno_services::speech::SpeechSetup;
+
+mod common;
 
 // One flow: the setup is most of it.
 #[allow(clippy::too_many_lines)]
@@ -26,7 +37,7 @@ use steno_pipeline::{
 async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_export() {
     if std::env::var("STENO_MODEL_TESTS").as_deref() != Ok("1") {
         eprintln!(
-            "set STENO_MODEL_TESTS=1 to run the pipeline over the fixture recording with the ONNX engines"
+            "set STENO_MODEL_TESTS=1 to run the pipeline over the fixture recording with the real engines"
         );
         return;
     }
@@ -40,8 +51,16 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     "parakeet-v3".clone_into(&mut settings.speech_engine_id);
     store.save_settings(&settings).unwrap();
 
-    let speech_store = steno_speech::ModelStore::in_models_directory(&models);
-    let engine = steno_services::speech::speech_engine(&Settings::default(), &models);
+    // The app's setup, over a support directory without `speech.json`
+    // (so `STENO_MODELS_MIRROR` still applies), with the sidecar binary
+    // from the target directory.
+    let mut setup = SpeechSetup::in_models_directory(models.clone(), &StenoPaths::new(dir.path()));
+    let runtime = setup.runtime(&settings.speech_engine_id);
+    if runtime == steno_speech::SpeechRuntime::OnnxSidecar {
+        setup.sidecar.program = common::sidecar_binary();
+    }
+    let speech_store = setup.model_store();
+    let engine = steno_services::speech::speech_engine(&settings.speech_engine_id, &setup);
     let diarizer = steno_services::speech::diarizer(&models);
     let vault = dir.path().join("vault");
     let destination: Arc<dyn Destination> = Arc::new(FakeDestination::new(&vault));
@@ -135,5 +154,7 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
             .map(|s| &s.cluster_label)
             .collect::<Vec<_>>()
     );
-    assert!(speech_store.is_installed(&steno_speech::ModelAsset::parakeet_v3_fp32()));
+    if runtime == steno_speech::SpeechRuntime::OnnxSidecar {
+        assert!(speech_store.is_installed(&steno_speech::ModelAsset::parakeet_v3_fp32()));
+    }
 }

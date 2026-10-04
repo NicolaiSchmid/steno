@@ -21,7 +21,8 @@ pub struct TranscribeCall {
 
 /// A `SpeechEngine` that emits one segment per `segment_seconds` of audio,
 /// tagged with `language`, text `"<prefix> segment <n>"`. Deterministic and
-/// configurable; records every hint it was given.
+/// configurable; records every hint it was given, every `prepare` and
+/// every `release`.
 #[derive(Debug)]
 pub struct FakeSpeechEngine {
     pub id: String,
@@ -37,6 +38,7 @@ pub struct FakeSpeechEngine {
     pub silent_below_peak: Option<f32>,
     pub transcriptions: CallLog<TranscribeCall>,
     pub preparations: CallLog<()>,
+    pub releases: CallLog<()>,
 }
 
 impl Default for FakeSpeechEngine {
@@ -52,6 +54,7 @@ impl Default for FakeSpeechEngine {
             silent_below_peak: None,
             transcriptions: CallLog::new(),
             preparations: CallLog::new(),
+            releases: CallLog::new(),
         }
     }
 }
@@ -160,6 +163,11 @@ impl SpeechEngine for FakeSpeechEngine {
             &self.text_prefix,
             self.word_timings,
         ))
+    }
+
+    async fn release(&self) -> BoundaryResult<()> {
+        self.releases.record(());
+        Ok(())
     }
 }
 
@@ -315,6 +323,8 @@ mod tests {
         assert_eq!(timings[2].word, "1");
         assert_eq!(timings[2].end, 1.0);
         assert_eq!(engine.preparations.count(), 1);
+        shared.release().await.unwrap();
+        assert_eq!(engine.releases.count(), 1);
         assert_eq!(
             engine.transcriptions.entries(),
             vec![TranscribeCall {
