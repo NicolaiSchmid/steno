@@ -323,9 +323,8 @@ pub struct ModelStore {
     agent: ureq::Agent,
     /// [`CHUNK`], smaller in tests.
     chunk: u64,
-    /// [`STALE_PARTIAL`], shorter in tests: how long a download waits for
-    /// another one's lock while that one writes nothing.
-    stalled_holder: Duration,
+    /// What a download waiting for another one's lock goes by.
+    clock: Clock,
 }
 
 impl ModelStore {
@@ -351,7 +350,7 @@ impl ModelStore {
                 .build()
                 .new_agent(),
             chunk: CHUNK,
-            stalled_holder: STALE_PARTIAL,
+            clock: Clock::System,
         }
     }
 
@@ -569,8 +568,7 @@ impl ModelStore {
         destination: &Path,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
-        let Some(mut partial) = Partial::open(destination, file, self.stalled_holder, progress)?
-        else {
+        let Some(mut partial) = Partial::open(destination, file, &self.clock, progress)? else {
             return Ok(());
         };
         let mut failures = 0;
@@ -892,6 +890,35 @@ fn partial_prefix(name: &str) -> String {
 /// and reports the other one's progress.
 const LOCK_POLL: Duration = Duration::from_millis(200);
 
+/// The time a download that waits for another one's lock goes by: the
+/// system's, or under test one the test moves on, so that a wait of
+/// [`STALE_PARTIAL`] takes no time and no wait depends on how fast the
+/// machine runs the test.
+#[derive(Debug, Clone)]
+enum Clock {
+    System,
+    #[cfg(test)]
+    Manual(std::sync::Arc<tests::ManualClock>),
+}
+
+impl Clock {
+    fn now(&self) -> Instant {
+        match self {
+            Clock::System => Instant::now(),
+            #[cfg(test)]
+            Clock::Manual(clock) => clock.now(),
+        }
+    }
+
+    fn sleep(&self, duration: Duration) {
+        match self {
+            Clock::System => std::thread::sleep(duration),
+            #[cfg(test)]
+            Clock::Manual(clock) => clock.sleep(),
+        }
+    }
+}
+
 /// The file a download writes, with the bytes it holds and their hash.
 /// `<name>.partial`, opened under the lock on `<name>.lock`, survives a
 /// failed call for the next one to resume; a per-call partial is deleted
@@ -918,18 +945,19 @@ impl Partial {
     /// `<name>.partial` beside `destination` with its bytes hashed, opened
     /// once the lock on `<name>.lock` is held; `None` when `destination`
     /// is installed by then. A download of the same file that holds the
-    /// lock is waited for, `progress` reporting the bytes its partial has,
-    /// so its bytes are never fetched twice, until it has written nothing
-    /// for `stalled`. Where the file system has no locks, a per-call
-    /// partial of its own. Blocking: the callers run on a blocking thread.
+    /// lock is waited for on `clock`, `progress` reporting the bytes its
+    /// partial has, so its bytes are never fetched twice, until it has
+    /// written nothing for [`STALE_PARTIAL`]. Where the file system has no
+    /// locks, a per-call partial of its own. Blocking: the callers run on a
+    /// blocking thread.
     fn open(
         destination: &Path,
         file: &ModelFile,
-        stalled: Duration,
+        clock: &Clock,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<Option<Self>, SpeechError> {
         let path = destination.with_file_name(format!("{}.partial", file.name));
-        let Some(lock) = lock_download(destination, file, &path, stalled, progress)? else {
+        let Some(lock) = lock_download(destination, file, &path, clock, progress)? else {
             return Self::per_call(destination, &file.name).map(Some);
         };
         if is_complete(destination, file) {
@@ -1109,15 +1137,16 @@ fn try_lock_download(path: &Path) -> Result<DownloadLock, NotLocked> {
 /// `partial`. The lock file stays when the download ends: were it deleted,
 /// a download waiting on it would wake holding a lock on a file no longer
 /// at the path, beside a third that locked a new one. A lock held by
-/// another download is tried again every [`LOCK_POLL`], `progress`
-/// reporting the length of `partial` meanwhile, until `partial` has not
-/// changed for `stalled` (the holder was stopped, say), which is an error
-/// naming the lock. `None` where the file system has no locks.
+/// another download is tried again every [`LOCK_POLL`] of `clock`,
+/// `progress` reporting the length of `partial` meanwhile, until `partial`
+/// has not changed for [`STALE_PARTIAL`] (the holder was stopped, say),
+/// which is an error naming the lock. `None` where the file system has no
+/// locks.
 fn lock_download(
     destination: &Path,
     file: &ModelFile,
     partial: &Path,
-    stalled: Duration,
+    clock: &Clock,
     progress: &mut dyn FnMut(DownloadProgress<'_>),
 ) -> Result<Option<DownloadLock>, SpeechError> {
     let path = destination.with_file_name(format!("{}.lock", file.name));
@@ -1134,27 +1163,27 @@ fn lock_download(
                 let len = fs::metadata(partial).map_or(0, |m| m.len());
                 match seen {
                     Some((last, since)) if last == len => {
-                        if since.elapsed() >= stalled {
+                        if clock.now().duration_since(since) >= STALE_PARTIAL {
                             return Err(SpeechError::io(
                                 &path,
                                 std::io::Error::new(
                                     std::io::ErrorKind::TimedOut,
                                     format!(
                                         "another download of this file holds the lock and has written nothing for {} s",
-                                        stalled.as_secs()
+                                        STALE_PARTIAL.as_secs()
                                     ),
                                 ),
                             ));
                         }
                     }
-                    _ => seen = Some((len, Instant::now())),
+                    _ => seen = Some((len, clock.now())),
                 }
                 progress(DownloadProgress {
                     file: &file.name,
                     received: len.min(file.size),
                     total: file.size,
                 });
-                std::thread::sleep(LOCK_POLL);
+                clock.sleep(LOCK_POLL);
             }
             Err(NotLocked::Open(error)) => return Err(SpeechError::io(&path, error)),
             Err(NotLocked::Lock(error)) if error.kind() == std::io::ErrorKind::Interrupted => {}
@@ -1447,6 +1476,118 @@ mod tests {
         format!("{:x}", Sha256::digest(body))
     }
 
+    /// What a download on a [`ManualClock`] tells its test.
+    #[derive(Debug)]
+    enum Step {
+        /// It waits for a lock, asleep until the test moves the clock on.
+        Asleep,
+        /// `ensure` returned.
+        Done(Result<PathBuf, SpeechError>),
+    }
+
+    /// The clock of [`Clock::Manual`]. `sleep` tells the test and blocks
+    /// until the test says how far the clock moves on.
+    #[derive(Debug)]
+    pub(super) struct ManualClock {
+        start: Instant,
+        elapsed: Mutex<Duration>,
+        steps: Mutex<mpsc::Sender<Step>>,
+        moves: Mutex<mpsc::Receiver<Duration>>,
+    }
+
+    impl ManualClock {
+        pub(super) fn now(&self) -> Instant {
+            self.start + *self.elapsed.lock().unwrap()
+        }
+
+        /// Panics once the test has gone, which ends the download's thread
+        /// rather than leave it polling.
+        pub(super) fn sleep(&self) {
+            let gone = "the test stopped driving the clock";
+            self.steps.lock().unwrap().send(Step::Asleep).expect(gone);
+            let by = self.moves.lock().unwrap().recv().expect(gone);
+            *self.elapsed.lock().unwrap() += by;
+        }
+    }
+
+    /// A download of [`drive`], seen from its test.
+    struct Driven {
+        steps: mpsc::Receiver<Step>,
+        moves: mpsc::Sender<Duration>,
+        progress: mpsc::Receiver<u64>,
+    }
+
+    /// Runs `ensure` of `asset` on a thread of its own, on a copy of
+    /// `store` whose clock the test moves.
+    fn drive(store: &ModelStore, asset: &ModelAsset) -> Driven {
+        let (step, steps) = mpsc::channel();
+        let (move_on, moves) = mpsc::channel();
+        let (report, progress) = mpsc::channel();
+        let mut store = store.clone();
+        store.clock = Clock::Manual(Arc::new(ManualClock {
+            start: Instant::now(),
+            elapsed: Mutex::new(Duration::ZERO),
+            steps: Mutex::new(step.clone()),
+            moves: Mutex::new(moves),
+        }));
+        let asset = asset.clone();
+        std::thread::spawn(move || {
+            let result = store.ensure(&asset, &mut |p| {
+                let _ = report.send(p.received);
+            });
+            let _ = step.send(Step::Done(result));
+        });
+        Driven {
+            steps,
+            moves: move_on,
+            progress,
+        }
+    }
+
+    impl Driven {
+        /// The next step. A minute without one fails the test instead of
+        /// hanging it; no step takes more than a moment.
+        fn next(&self) -> Step {
+            self.steps
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the download neither waited nor returned")
+        }
+
+        /// Expects the download to wait for its lock.
+        fn asleep(&self) {
+            if let Step::Done(result) = self.next() {
+                panic!("the download returned instead of waiting: {result:?}");
+            }
+        }
+
+        fn move_on(&self, by: Duration) {
+            self.moves.send(by).unwrap();
+        }
+
+        /// Expects `ensure` to return, without waiting again.
+        fn done(&self) -> Result<PathBuf, SpeechError> {
+            match self.next() {
+                Step::Done(result) => result,
+                Step::Asleep => panic!("the download waited again"),
+            }
+        }
+
+        /// The progress reported since the last call.
+        fn reported(&self) -> Vec<u64> {
+            self.progress.try_iter().collect()
+        }
+
+        /// Waits for a report of at least `bytes`.
+        fn received(&self, bytes: u64) {
+            while self
+                .progress
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the download stopped reporting")
+                < bytes
+            {}
+        }
+    }
+
     #[test]
     fn a_download_is_verified_and_moved_into_place() {
         let dir = tempfile::tempdir().unwrap();
@@ -1508,14 +1649,11 @@ mod tests {
         const WAIT: Duration = Duration::from_secs(30);
         let dir = tempfile::tempdir().unwrap();
         let store = ModelStore::new(dir.path());
-        // 2 MB, one chunk, so its body timeout (30 s) is far longer than
-        // the hold.
         let body: Vec<u8> = (0..2_000_000u32).map(|i| (i % 251) as u8 + 1).collect();
         let (url, release, requests) = serve_held(vec![(body.clone(), 50_000), (body.clone(), 0)]);
         let asset = asset(Some(url), &body, &digest(&body));
         let (first_started, first_waits) = mpsc::channel();
         let mut first_received = 0;
-        let mut second_seen = Vec::new();
         std::thread::scope(|scope| {
             // Owned here, so a failed assertion drops the senders and frees
             // the held downloads instead of leaving the scope waiting.
@@ -1529,18 +1667,17 @@ mod tests {
                 })
             });
             first_waits.recv_timeout(WAIT).unwrap();
-            let second =
-                scope.spawn(|| store.ensure(&asset, &mut |p| second_seen.push(p.received)));
-            // Time to reach the lock; it cannot finish before the first.
-            std::thread::sleep(Duration::from_millis(500));
-            assert!(!second.is_finished());
+            let second = drive(&store, &asset);
+            second.asleep();
+            // While it waits, the second shows what the first has.
+            let seen = second.reported();
+            assert!(seen.iter().any(|&r| r >= 50_000), "{seen:?}");
             release[0].send(()).unwrap();
-            let first = first.join().unwrap();
+            first.join().unwrap().unwrap();
             // Frees a second transfer, should one have started.
             drop(release);
-            let second = second.join().unwrap();
-            first.unwrap();
-            second.unwrap();
+            second.move_on(Duration::ZERO);
+            second.done().unwrap();
         });
         assert_eq!(first_received, body.len() as u64);
         assert_eq!(
@@ -1548,8 +1685,6 @@ mod tests {
             1,
             "the second download fetched the file again"
         );
-        // While it waited, the second showed what the first had.
-        assert!(second_seen.iter().any(|&r| r >= 50_000), "{second_seen:?}");
         store.verify(&asset).unwrap();
         assert_eq!(names(&store, &asset), ["model.onnx", "model.onnx.lock"]);
     }
@@ -1563,7 +1698,6 @@ mod tests {
         // waits for the second and fetches nothing (its connection would
         // carry wrong bytes).
         const WAIT: Duration = Duration::from_secs(30);
-        // 1 MB, one chunk, so its body timeout (15 s) outlasts the holds.
         let good: Vec<u8> = (0..1_000_000u32).map(|i| (i % 251) as u8).collect();
         let wrong: Vec<u8> = good.iter().map(|b| b ^ 0xff).collect();
         let dir = tempfile::tempdir().unwrap();
@@ -1585,28 +1719,26 @@ mod tests {
                 })
             });
             first_waits.recv_timeout(WAIT).unwrap();
-            let second = scope.spawn(|| store.ensure(&asset, &mut |_| {}));
-            std::thread::sleep(Duration::from_millis(500));
-            assert!(!second.is_finished());
+            let second = drive(&store, &asset);
+            second.asleep();
+            // What it showed of the first's partial while waiting.
+            second.reported();
             release[0].send(()).unwrap();
             let first = first.join().unwrap();
             assert!(
                 matches!(first, Err(SpeechError::Checksum { .. })),
                 "{first:?}"
             );
+            second.move_on(Duration::ZERO);
             // The second has the lock and its own request.
-            let deadline = std::time::Instant::now() + WAIT;
-            while requests.lock().unwrap().len() < 2 {
-                assert!(std::time::Instant::now() < deadline);
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            let third = scope.spawn(|| store.ensure(&asset, &mut |_| {}));
-            std::thread::sleep(Duration::from_millis(500));
-            assert!(!third.is_finished());
+            second.received(10_000);
+            let third = drive(&store, &asset);
+            third.asleep();
             release[1].send(()).unwrap();
-            second.join().unwrap().unwrap();
+            second.done().unwrap();
             drop(release);
-            third.join().unwrap().unwrap();
+            third.move_on(Duration::ZERO);
+            third.done().unwrap();
         });
         assert_eq!(requests.lock().unwrap().len(), 2);
         store.verify(&asset).unwrap();
@@ -1920,15 +2052,16 @@ mod tests {
 
     #[test]
     fn a_download_waits_while_the_holder_writes_and_gives_up_once_it_stops() {
-        // A holder that keeps writing is waited for, longer than the
-        // patience, and its bytes are resumed; one that writes nothing (a
-        // stopped process) fails the waiter with an error naming the lock.
+        // A holder that keeps writing is waited for however long it takes,
+        // here 30 polls five minutes apart, and its bytes are resumed; one
+        // that writes nothing (a stopped process) fails the waiter after
+        // `STALE_PARTIAL`, with an error naming the lock. The test writes
+        // the holder's bytes and moves the waiter's clock.
         let body: Vec<u8> = (0..60_000u32).map(|i| (i % 227) as u8).collect();
         let shared = Arc::new(body.clone());
         let (url, ranges) = serve_each(vec![capping(&shared, usize::MAX)]);
         let dir = tempfile::tempdir().unwrap();
-        let mut store = ModelStore::new(dir.path());
-        store.stalled_holder = Duration::from_secs(1);
+        let store = ModelStore::new(dir.path());
         let asset = asset(Some(url), &body, &digest(&body));
         let directory = store.directory(&asset);
         fs::create_dir_all(&directory).unwrap();
@@ -1936,32 +2069,46 @@ mod tests {
         let partial = directory.join("model.onnx.partial");
         let held = open_lock(&lock).unwrap();
         held.lock().unwrap();
-        let holder = {
-            let (partial, body) = (partial.clone(), body.clone());
-            std::thread::spawn(move || {
-                for k in 1..=30 {
-                    fs::write(&partial, &body[..k * 1000]).unwrap();
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                drop(held);
-            })
-        };
-        store.ensure(&asset, &mut |_| {}).unwrap();
-        holder.join().unwrap();
+        let mut holder = File::create(&partial).unwrap();
+        holder.write_all(&body[..1000]).unwrap();
+        let waiter = drive(&store, &asset);
+        for k in 1..30 {
+            waiter.asleep();
+            holder.write_all(&body[k * 1000..(k + 1) * 1000]).unwrap();
+            waiter.move_on(Duration::from_secs(300));
+        }
+        waiter.asleep();
+        drop(holder);
+        drop(held);
+        waiter.move_on(Duration::ZERO);
+        waiter.done().unwrap();
         store.verify(&asset).unwrap();
         assert_eq!(*ranges.lock().unwrap(), [Some("bytes=30000-".to_owned())]);
+        // The holder's progress while waiting, then its own from there.
+        let reported = waiter.reported();
+        let holders: Vec<u64> = (1..=30).map(|k| k * 1000).collect();
+        assert_eq!(reported[..31], [&holders[..], &[30_000]].concat()[..]);
+        assert_eq!(reported.last(), Some(&60_000));
+        // Stopped: 1000 bytes and then nothing.
         fs::remove_file(directory.join("model.onnx")).unwrap();
         fs::write(&partial, &body[..1000]).unwrap();
         let held = open_lock(&lock).unwrap();
         held.lock().unwrap();
-        let started = std::time::Instant::now();
-        let error = store.ensure(&asset, &mut |_| {}).unwrap_err();
+        let waiter = drive(&store, &asset);
+        waiter.asleep();
+        waiter.move_on(STALE_PARTIAL.checked_sub(Duration::from_secs(1)).unwrap());
+        waiter.asleep();
+        waiter.move_on(Duration::from_secs(1));
+        let error = waiter.done().unwrap_err();
         assert!(
             matches!(&error, SpeechError::Io { path, .. } if *path == lock),
             "{error}"
         );
-        assert!(error.to_string().contains("written nothing"), "{error}");
-        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            error.to_string().contains("written nothing for 600 s"),
+            "{error}"
+        );
+        assert_eq!(waiter.reported(), [1000, 1000]);
         assert_eq!(fs::metadata(&partial).unwrap().len(), 1000);
         drop(held);
     }
