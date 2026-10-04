@@ -58,7 +58,7 @@ use std::time::Duration;
 use steno_core::{AudioBuffer16k, LanguageTag, RawSegment};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
-    ExecutionProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
+    EncoderProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
     Transcriber, VadConfig,
 };
 
@@ -161,7 +161,7 @@ trait Engine {
         &mut self,
         models_root: &Path,
         options: &OnnxOptions,
-    ) -> Result<ExecutionProvider, String>;
+    ) -> Result<EncoderProvider, String>;
     fn loaded(&self) -> bool;
     fn transcribe(
         &mut self,
@@ -181,7 +181,7 @@ impl Engine for OnnxEngine {
         &mut self,
         models_root: &Path,
         options: &OnnxOptions,
-    ) -> Result<ExecutionProvider, String> {
+    ) -> Result<EncoderProvider, String> {
         let transcriber = match &mut self.transcriber {
             Some(transcriber) => transcriber,
             None => self.transcriber.insert(
@@ -247,12 +247,12 @@ impl FakeEngine {
 impl Engine for FakeEngine {
     /// Reports `DirectML` when asked for it, as if the probe had passed, so
     /// the tests see the setting reach the child and the answer come back.
-    fn load(&mut self, _: &Path, options: &OnnxOptions) -> Result<ExecutionProvider, String> {
+    fn load(&mut self, _: &Path, options: &OnnxOptions) -> Result<EncoderProvider, String> {
         self.loaded = true;
         Ok(if options.directml {
-            ExecutionProvider::DirectMl
+            EncoderProvider::DirectMl
         } else {
-            ExecutionProvider::Cpu
+            EncoderProvider::Cpu
         })
     }
 

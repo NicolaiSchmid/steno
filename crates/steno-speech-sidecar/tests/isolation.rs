@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use steno_core::{AudioBuffer16k, LanguageTag, SpeechEngine};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
-    ExecutionProvider, ModelAsset, ModelStore, OnnxOptions, OnnxSpeechEngine, SidecarConfig,
+    EncoderProvider, ModelAsset, ModelStore, OnnxOptions, OnnxSpeechEngine, SidecarConfig,
     SidecarError, SidecarSpeechEngine, SpeechError,
 };
 
@@ -241,8 +241,8 @@ async fn requests_round_trip_the_audio_bit_for_bit_in_one_child() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_directml_request_reaches_the_child_and_its_provider_comes_back() {
     for (directml, expected) in [
-        (false, ExecutionProvider::Cpu),
-        (true, ExecutionProvider::DirectMl),
+        (false, EncoderProvider::Cpu),
+        (true, EncoderProvider::DirectMl),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let mut config = config(&[]);
@@ -554,7 +554,7 @@ async fn the_real_models_load_and_transcribe_in_the_sidecar_when_installed() {
     engine.prepare().await.unwrap();
     let health = engine.health().await.unwrap().unwrap();
     assert!(health.loaded);
-    assert_eq!(health.provider, Some(ExecutionProvider::Cpu));
+    assert_eq!(health.provider, Some(EncoderProvider::Cpu));
     eprintln!(
         "sidecar with models loaded: {} MB resident",
         health.rss_bytes >> 20

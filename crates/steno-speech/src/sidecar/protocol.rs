@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use steno_core::{LanguageTag, RawSegment};
 use thiserror::Error;
 
-use crate::onnx::ExecutionProvider;
+use crate::onnx::EncoderProvider;
 
 /// Bumped on any change a peer of the old version would misread; the
 /// client refuses a child whose [`Reply::Ready`] names another.
@@ -114,7 +114,7 @@ pub enum Reply {
     Loaded {
         id: u64,
         #[serde(default)]
-        provider: ExecutionProvider,
+        provider: EncoderProvider,
     },
     /// The answer to [`Request::Health`]; `loaded` once a load succeeded.
     Health {
@@ -322,7 +322,7 @@ mod tests {
             Reply::Memory { rss_bytes: 1 << 30 },
             Reply::Loaded {
                 id: 1,
-                provider: ExecutionProvider::DirectMl,
+                provider: EncoderProvider::DirectMl,
             },
             Reply::Health {
                 id: 2,
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(
             header(&Reply::Loaded {
                 id: 1,
-                provider: ExecutionProvider::DirectMl,
+                provider: EncoderProvider::DirectMl,
             }),
             r#"{"id":1,"provider":"directml","type":"loaded"}"#
         );
@@ -451,7 +451,7 @@ mod tests {
             old_loaded,
             Reply::Loaded {
                 id: 1,
-                provider: ExecutionProvider::Cpu,
+                provider: EncoderProvider::Cpu,
             }
         );
     }

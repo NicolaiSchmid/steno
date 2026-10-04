@@ -84,7 +84,7 @@ impl Default for OnnxOptions {
 steno_core::string_enum! {
     /// Where ONNX Runtime runs the encoder.
     #[derive(Default)]
-    pub enum ExecutionProvider {
+    pub enum EncoderProvider {
         /// ONNX Runtime's CPU provider; every platform, and every model
         /// but the encoder.
         #[default]
@@ -187,7 +187,7 @@ struct AcceleratedSession {
     /// `None` only between dropping a failed `DirectML` session and the CPU
     /// session that replaces it, or when that replacement failed to open.
     session: Option<Session>,
-    provider: ExecutionProvider,
+    provider: EncoderProvider,
     /// Kept to reopen the model on the CPU after a failed run.
     path: PathBuf,
     options: OnnxOptions,
@@ -206,11 +206,11 @@ impl AcceleratedSession {
         #[cfg(windows)]
         if options.directml {
             match open_directml(path, options) {
-                Ok(session) => return Ok(opened(session, ExecutionProvider::DirectMl)),
+                Ok(session) => return Ok(opened(session, EncoderProvider::DirectMl)),
                 Err((fallback, error)) => log_fallback(fallback, &error),
             }
         }
-        Ok(opened(open_session(path, options)?, ExecutionProvider::Cpu))
+        Ok(opened(open_session(path, options)?, EncoderProvider::Cpu))
     }
 
     fn session(&self) -> Result<&Session, SpeechError> {
@@ -226,12 +226,12 @@ impl AcceleratedSession {
     ) -> Result<T, SpeechError> {
         let session = self.session.as_mut().ok_or(SpeechError::NotPrepared)?;
         match work(session) {
-            Err(error) if self.provider == ExecutionProvider::DirectMl => {
+            Err(error) if self.provider == EncoderProvider::DirectMl => {
                 log_fallback(Fallback::Run, &error.to_string());
                 // The DirectML session goes first, so the two never hold
                 // the weights at the same time.
                 self.session = None;
-                self.provider = ExecutionProvider::Cpu;
+                self.provider = EncoderProvider::Cpu;
                 let session = self
                     .session
                     .insert(open_session(&self.path, &self.options)?);
@@ -254,7 +254,7 @@ fn log_fallback(fallback: Fallback, error: &str) {
 }
 
 /// The encoder's provider, at info level.
-fn log_provider(provider: ExecutionProvider) {
+fn log_provider(provider: EncoderProvider) {
     tracing::info!(provider = provider.as_str(), "speech encoder provider");
 }
 
@@ -454,7 +454,7 @@ impl OnnxBackend {
             encoder_hidden,
         };
         let mut mel = MelExtractor::new();
-        if encoder.provider == ExecutionProvider::DirectMl {
+        if encoder.provider == EncoderProvider::DirectMl {
             // The probe's last step: one run on a second of silence, so a
             // GPU that takes the session but cannot run it falls back here
             // rather than in the first meeting.
@@ -477,11 +477,11 @@ impl OnnxBackend {
         ))
     }
 
-    /// Where the encoder runs: [`ExecutionProvider::DirectMl`] only when
+    /// Where the encoder runs: [`EncoderProvider::DirectMl`] only when
     /// [`OnnxOptions::directml`] asked for it on Windows and the probe
     /// passed; a failed run on `DirectML` moves it to the CPU.
     #[must_use]
-    pub fn provider(&self) -> ExecutionProvider {
+    pub fn provider(&self) -> EncoderProvider {
         self.encoder.provider
     }
 }
@@ -759,14 +759,14 @@ mod tests {
         let mut accelerated = AcceleratedSession::open(&path, &directml_options()).unwrap();
         println!("provider chosen: {}", accelerated.provider);
         if !cfg!(windows) {
-            assert_eq!(accelerated.provider, ExecutionProvider::Cpu);
+            assert_eq!(accelerated.provider, EncoderProvider::Cpu);
         }
         assert_eq!(accelerated.run(run_affine).unwrap(), AFFINE_Y);
         assert_eq!(
             AcceleratedSession::open(&path, &OnnxOptions::default())
                 .unwrap()
                 .provider,
-            ExecutionProvider::Cpu,
+            EncoderProvider::Cpu,
             "without the request the CPU is the provider everywhere"
         );
     }
@@ -785,7 +785,7 @@ mod tests {
     /// a CPU session labelled `DirectML`, so the fallback can be driven.
     fn as_if_on_directml(path: &Path) -> AcceleratedSession {
         let mut session = AcceleratedSession::open(path, &directml_options()).unwrap();
-        session.provider = ExecutionProvider::DirectMl;
+        session.provider = EncoderProvider::DirectMl;
         session
     }
 
@@ -805,7 +805,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!((y.as_slice(), calls), (AFFINE_Y.as_slice(), 2));
-        assert_eq!(session.provider, ExecutionProvider::Cpu);
+        assert_eq!(session.provider, EncoderProvider::Cpu);
 
         // On the CPU a failure is the caller's, with no second try.
         let mut calls = 0;
@@ -829,7 +829,7 @@ mod tests {
             Err(SpeechError::Shape("device removed".into()))
         };
         assert!(matches!(session.run(fail), Err(SpeechError::Runtime(_))));
-        assert_eq!(session.provider, ExecutionProvider::Cpu);
+        assert_eq!(session.provider, EncoderProvider::Cpu);
         assert!(matches!(
             session.run(run_affine),
             Err(SpeechError::NotPrepared)

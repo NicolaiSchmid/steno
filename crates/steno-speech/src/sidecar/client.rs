@@ -27,7 +27,7 @@ use super::protocol::{self, FrameError, PROTOCOL_VERSION, Reply, Request};
 use crate::engine::{OnnxSpeechEngine, blocking, log_download};
 use crate::error::{SidecarError, SpeechError};
 use crate::model_store::{ModelAsset, ModelStore};
-use crate::onnx::{ExecutionProvider, OnnxOptions};
+use crate::onnx::{EncoderProvider, OnnxOptions};
 
 /// The binary's file name, `steno-speech-sidecar` plus `.exe` on Windows.
 pub const SIDECAR_BINARY: &str = if cfg!(windows) {
@@ -116,7 +116,7 @@ pub struct SidecarHealth {
     pub loaded: bool,
     /// Where its encoder runs, as it reported when it loaded; `None`
     /// before then.
-    pub provider: Option<ExecutionProvider>,
+    pub provider: Option<EncoderProvider>,
 }
 
 /// What the reader threads hand the waiting request. Heartbeats are not
@@ -145,7 +145,7 @@ struct SidecarProcess {
     pid: u32,
     next_id: u64,
     /// Where the child's encoder runs, once its models are loaded.
-    loaded: Option<ExecutionProvider>,
+    loaded: Option<EncoderProvider>,
     ceiling: u64,
 }
 
