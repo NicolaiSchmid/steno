@@ -1013,8 +1013,9 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
 }
 
 /// Once the pipeline has quit, no job starts: `enqueue` saves the meeting
-/// `queued` with its asset, launch recovery starts nothing, and a direct
-/// `process` is refused before it claims the meeting.
+/// `queued` with its asset and spawns no task (its debug line says so),
+/// launch recovery starts nothing, and a direct `process` is refused
+/// before it claims the meeting.
 #[tokio::test(flavor = "multi_thread")]
 async fn no_job_starts_once_the_pipeline_quits() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -1026,7 +1027,23 @@ async fn no_job_starts_once_the_pipeline_quits() {
     let mut meeting = call_meeting(world.now);
     meeting.id = Uuid::new_v4();
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    // `enqueue` decides on this thread; a spawned task would log elsewhere.
+    let log = steno_pipeline::fixtures::CapturedLog::default();
+    let on_this_thread = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(log.clone())
+            .with_max_level(tracing::Level::DEBUG)
+            .finish(),
+    );
     pipeline.enqueue(&meeting, &asset).unwrap();
+    drop(on_this_thread);
+    let text = log.text();
+    assert!(
+        text.lines()
+            .any(|line| line.contains("not started: the app is quitting")
+                && line.contains(&asset.id.to_string())),
+        "{text}"
+    );
     assert_eq!(pipeline.resume_unfinished().unwrap(), Vec::<Uuid>::new());
     let refused = pipeline.process(asset.id).await.unwrap_err();
     assert_eq!(refused.reason, "the app is quitting");
