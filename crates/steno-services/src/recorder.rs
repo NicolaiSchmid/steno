@@ -251,9 +251,7 @@ impl CaptureRecorder {
             Self::begin_stop(&mut inner)
         };
         if let Some(active) = active {
-            self.notify();
             self.finish_stop(active, RecordingEndReason::Quit);
-            self.notify();
         }
     }
 
@@ -265,17 +263,11 @@ impl CaptureRecorder {
         Some(active)
     }
 
-    fn stop_inner(&self, reason: RecordingEndReason) {
-        let Some(active) = Self::begin_stop(&mut self.inner()) else {
-            return;
-        };
-        self.notify();
-        self.finish_stop(active, reason);
-    }
-
     /// Stops the session `begin_stop` took and saves the recording, then
-    /// leaves the recorder `Idle` with the outcome's message.
+    /// leaves the recorder `Idle` with the outcome's message; the host
+    /// hears of `Stopping` and of `Idle`.
     fn finish_stop(&self, active: Active, reason: RecordingEndReason) {
+        self.notify();
         let intake = self.intake();
         let outcome = match active.session.stop() {
             Ok(result) => {
@@ -335,6 +327,8 @@ impl CaptureRecorder {
             Ok(warning) => inner.status.warning = warning,
             Err(error) => inner.status.error = Some(error),
         }
+        drop(inner);
+        self.notify();
     }
 }
 
@@ -378,11 +372,10 @@ impl Recorder for CaptureRecorder {
     }
 
     fn stop(&self) {
-        if self.inner().status.state != RecordingState::Recording {
-            return;
+        let active = Self::begin_stop(&mut self.inner());
+        if let Some(active) = active {
+            self.finish_stop(active, RecordingEndReason::Manual);
         }
-        self.stop_inner(RecordingEndReason::Manual);
-        self.notify();
     }
 
     fn toggle(&self) {
