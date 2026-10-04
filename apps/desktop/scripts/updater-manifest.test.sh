@@ -73,24 +73,26 @@ refuse() {
   fi
 }
 
+# variant <name>: a copy of the release directory to break.
+variant() {
+  cp -R "$release" "$scratch/$1"
+  echo "$scratch/$1"
+}
+
 refuse 'an unknown platform' 0.2.0 "$base" "$release" freebsd
-missing_sig="$scratch/missing-sig"
-cp -R "$release" "$missing_sig"
-rm "$missing_sig/steno-desktop_0.2.0_amd64.deb.sig"
-refuse 'a missing signature' 0.2.0 "$base" "$missing_sig"
-empty_sig="$scratch/empty-sig"
-cp -R "$release" "$empty_sig"
-: > "$empty_sig/Steno_0.2.0_x64_en-US.msi.sig"
-refuse 'an empty signature' 0.2.0 "$base" "$empty_sig"
-missing="$scratch/missing"
-cp -R "$release" "$missing"
-rm "$missing/Steno_0.2.0_aarch64.app.tar.gz"
-refuse 'a missing artifact' 0.2.0 "$base" "$missing" macos
-two="$scratch/two"
-cp -R "$release" "$two"
-cp "$two/steno-desktop_0.2.0_amd64.deb" "$two/steno-desktop_0.1.0_amd64.deb"
-cp "$two/steno-desktop_0.2.0_amd64.deb.sig" "$two/steno-desktop_0.1.0_amd64.deb.sig"
-refuse 'two candidates for one key' 0.2.0 "$base" "$two" linux
+dir="$(variant missing-sig)"
+rm "$dir/steno-desktop_0.2.0_amd64.deb.sig"
+refuse 'a missing signature' 0.2.0 "$base" "$dir"
+dir="$(variant empty-sig)"
+: > "$dir/Steno_0.2.0_x64_en-US.msi.sig"
+refuse 'an empty signature' 0.2.0 "$base" "$dir"
+dir="$(variant missing)"
+rm "$dir/Steno_0.2.0_aarch64.app.tar.gz"
+refuse 'a missing artifact' 0.2.0 "$base" "$dir" macos
+dir="$(variant two)"
+cp "$dir/steno-desktop_0.2.0_amd64.deb" "$dir/steno-desktop_0.1.0_amd64.deb"
+cp "$dir/steno-desktop_0.2.0_amd64.deb.sig" "$dir/steno-desktop_0.1.0_amd64.deb.sig"
+refuse 'two candidates for one key' 0.2.0 "$base" "$dir" linux
 
 if ((failures > 0)); then
   echo "updater-manifest: $failures failed"

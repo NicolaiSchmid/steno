@@ -14,15 +14,7 @@
 # signature, or the script fails naming the missing file, so a manifest
 # never offers a platform half its installers. Prints the manifest on
 # stdout. PUB_DATE overrides the publication time (RFC 3339, for tests).
-#
-# The artifacts, as the desktop release workflow names them:
-#   macos    *.app.tar.gz            darwin-aarch64-app, darwin-aarch64
-#   linux    *.AppImage              linux-x86_64-appimage, linux-x86_64
-#            *.deb                   linux-x86_64-deb
-#   windows  *-setup.exe (NSIS)      windows-x86_64-nsis, windows-x86_64
-#            *.msi                   windows-x86_64-msi
-#
-# apps/desktop/scripts/updater-manifest.test.sh checks it; Rust CI runs that.
+# Tested by updater-manifest.test.sh in Rust CI.
 set -euo pipefail
 
 version="${1:?version, e.g. 0.11.0}"
@@ -51,23 +43,31 @@ artifact() {
   printf '%s\t%s\n' "${matches[0]##*/}" "$(tr -d '\r\n' < "${matches[0]}.sig")"
 }
 
-# key<TAB>pattern rows per platform.
-rows=""
+# entry <key> <pattern>: one "<key>\t<file name>\t<signature>" line.
+entries=""
+entry() {
+  entries+="$1"$'\t'"$(artifact "$2")"$'\n'
+}
+
 for platform in "${platforms[@]}"; do
   case "$platform" in
-    macos) rows+=$'darwin-aarch64-app\t*.app.tar.gz\ndarwin-aarch64\t*.app.tar.gz\n' ;;
-    linux) rows+=$'linux-x86_64-appimage\t*.AppImage\nlinux-x86_64\t*.AppImage\nlinux-x86_64-deb\t*.deb\n' ;;
-    windows) rows+=$'windows-x86_64-nsis\t*-setup.exe\nwindows-x86_64\t*-setup.exe\nwindows-x86_64-msi\t*.msi\n' ;;
+    macos)
+      entry darwin-aarch64-app '*.app.tar.gz'
+      entry darwin-aarch64 '*.app.tar.gz'
+      ;;
+    linux)
+      entry linux-x86_64-appimage '*.AppImage'
+      entry linux-x86_64 '*.AppImage'
+      entry linux-x86_64-deb '*.deb'
+      ;;
+    windows)
+      entry windows-x86_64-nsis '*-setup.exe'
+      entry windows-x86_64 '*-setup.exe'
+      entry windows-x86_64-msi '*.msi'
+      ;;
     *) echo "::error::unknown platform \"$platform\" (known: linux, windows, macos)" >&2; exit 1 ;;
   esac
 done
-
-entries=""
-while IFS=$'\t' read -r key pattern; do
-  [[ -n "$key" ]] || continue
-  found="$(artifact "$pattern")"
-  entries+="$key"$'\t'"$found"$'\n'
-done <<< "$rows"
 
 jq -n \
   --arg version "$version" \
