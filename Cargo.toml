@@ -50,6 +50,8 @@ block2 = "0.6"
 # the lock through GTK, which the shell links anyway.
 gdk = "0.18"
 gio = "0.18"
+# Unix only: the desktop shell's signal dispositions (`sigaction`).
+libc = "0.2"
 thiserror = "2"
 tracing = "0.1"
 # The `steno` CLI's and the desktop shell's log output
