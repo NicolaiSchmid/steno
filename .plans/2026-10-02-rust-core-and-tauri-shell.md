@@ -156,9 +156,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   German (closes the open item from the speech-stack plan); sidecar process; model
   manifest and download. Gate: FLEURS numbers within 0.5 points of the spike F table.
   Integration notes (WP4a `crates/steno-speech`, #171, against `crates/steno-speech-coreml`
-  of #163): the checklist for moving the CoreML pipeline onto the shared one. Invariant 4 makes the two
-  pipelines one; each item is a place where they differ today. "Measure" means: run
-  FLEURS German `cat/` with both choices and keep the better mean.
+  of #163): the checklist for moving the CoreML pipeline onto the shared one. Invariant 4
+  makes the two pipelines one; each item is a place where they differ today. "Measure"
+  means: run FLEURS German `cat/` with both choices and keep the better mean.
   The decode loop is one loop: `decode_frames` in `crates/steno-speech/src/decoder.rs`
   over the `TdtModel` trait, which `decode_window` in the same file builds over a
   `SpeechBackend` and `WindowModel` in `crates/steno-speech-coreml/src/backend.rs` over
@@ -277,7 +277,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
       `crates/steno-speech-coreml/src/chunking.rs`, `crates/steno-speech-coreml/src/segments.rs`. Resolve: one pair of names.
     - [ ] Decoder limits. Both: the `DecoderConfig` fields in `crates/steno-speech/src/decoder.rs`
       (`max_symbols_per_frame`, `token_budget`, `window_end`, `token_duration`), which tests vary;
-      `FLUID_AUDIO` in `crates/steno-speech-coreml/src/decoder.rs` sets them from
+      `FLUID_AUDIO` in `crates/steno-speech-coreml/src/decoder.rs` sets them, the budget from
       `MAX_TOKENS_PER_CHUNK`. The fields are in place; the values follow the decode-loop
       items above.
     - [ ] Engine id. Here: `crates/steno-speech/src/engine.rs` (`OnnxSpeechEngine::ID`). There:
