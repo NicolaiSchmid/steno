@@ -270,11 +270,14 @@ struct Active {
     /// The system stream's staging, for its counts at `stop()`.
     follower: Option<Arc<FollowerLane>>,
     watcher: Arc<Watcher>,
+    /// `None` for a watcher that missed `start`'s deadline
+    /// ([`spawn_watcher`]).
     watcher_thread: Option<JoinHandle<()>>,
 }
 
 /// The WASAPI backend; see the module doc. Restartable: `stop()` joins
-/// every thread it started, and `start` opens the streams afresh.
+/// every thread it started that answered `start` (one still in a COM call
+/// is left to finish on its own), and `start` opens the streams afresh.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
 }
@@ -650,15 +653,18 @@ fn start_streams(
     Ok(streams)
 }
 
-/// Starts the watcher thread and waits for it to register. A capture
-/// without device notifications still records, so a slow answer is
-/// logged, not fatal.
+/// Starts the watcher thread and waits for it to register; its handle
+/// comes back only once it answered. A capture without device
+/// notifications still records, so a slow answer is logged, not fatal,
+/// and that watcher is left unjoined: it may sit in a COM call, and
+/// `stop()` must not wait on it. If `stop()` came first, it finds the
+/// stop flag once the call returns and exits without reporting.
 fn spawn_watcher(
     watcher: &Arc<Watcher>,
     probe: DeviceProbe,
     sink: &Arc<LaneFrameSink>,
     deadline: Instant,
-) -> Result<JoinHandle<()>, CaptureError> {
+) -> Result<Option<JoinHandle<()>>, CaptureError> {
     let (ready, ready_receiver) = sync_channel(1);
     let thread_watcher = Arc::clone(watcher);
     let thread_sink = Arc::clone(sink);
@@ -669,8 +675,9 @@ fn spawn_watcher(
     let limit = deadline.saturating_duration_since(Instant::now());
     if ready_receiver.recv_timeout(limit).is_err() {
         tracing::warn!("device watcher did not start within {START_TIMEOUT:?} of the start");
+        return Ok(None);
     }
-    Ok(thread)
+    Ok(Some(thread))
 }
 
 impl CaptureBackend for LiveCaptureBackend {
@@ -752,7 +759,7 @@ impl CaptureBackend for LiveCaptureBackend {
             streams,
             follower,
             watcher,
-            watcher_thread: Some(watcher_thread),
+            watcher_thread,
         });
         Ok(CaptureStream {
             sample_rate: SAMPLE_RATE,
