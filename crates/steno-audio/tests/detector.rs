@@ -289,3 +289,55 @@ fn a_stale_poll_snapshot_does_not_cancel_a_pending_release() {
     assert_eq!(next(&events), MeetingEvent::MicrophoneReleased);
     detector.stop();
 }
+
+/// A poll in flight while `stop()` runs finishes before the stop resets the
+/// state, and a poll that waits for it applies nothing: no debounce
+/// outlives the stop, and a stopped detector reports no holder.
+#[test]
+fn a_poll_in_flight_during_stop_leaves_no_holder() {
+    let clock = Arc::new(ManualClock::new());
+    let fake = FakeProcessAudioActivity::new(vec![idle_zoom()]);
+    let (entered, entered_receiver) = channel();
+    let (release, release_receiver) = channel();
+    let source = Arc::new(HeldPoll {
+        inner: fake.clone(),
+        armed: AtomicBool::new(false),
+        entered,
+        release: Mutex::new(release_receiver),
+    });
+    let detector = Arc::new(MeetingDetector::new(
+        Arc::clone(&source) as Arc<dyn ProcessAudioActivitySource>,
+        Arc::clone(&clock) as Arc<dyn steno_audio::Clock>,
+        Some(BTreeSet::from([1])),
+        Duration::from_secs(10),
+        Duration::from_secs(1),
+    ));
+    detector.start().unwrap();
+    assert!(clock.wait_for_sleepers(1), "the poll timer is armed");
+    fake.set(vec![zoom()]);
+    assert!(clock.wait_for_sleepers(2), "the open debounce is armed");
+    source.armed.store(true, Ordering::SeqCst);
+    clock.advance(Duration::from_secs(1));
+    entered_receiver
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the poll reads its snapshot");
+    let stopper = {
+        let detector = Arc::clone(&detector);
+        std::thread::spawn(move || detector.stop())
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    release.send(()).unwrap();
+    stopper.join().unwrap();
+    assert!(!detector.is_running());
+    // Give a thread the late poll might have spawned time to reach its
+    // timer, then run the clock past any debounce.
+    std::thread::sleep(Duration::from_millis(300));
+    let sleepers_after_stop = clock.pending_sleepers();
+    clock.advance(Duration::from_secs(10));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        (sleepers_after_stop, detector.holder()),
+        (0, None),
+        "a stopped detector has no timer and no holder"
+    );
+}
