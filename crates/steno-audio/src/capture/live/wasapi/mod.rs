@@ -86,7 +86,7 @@ use steno_core::AudioLane;
 use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThread};
 use super::AudioDeviceInfo;
 use crate::SAMPLE_RATE;
-use crate::capture::split_streams::far_end_latencies;
+use crate::capture::split_streams::{StreamSizes, far_end_latencies};
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     SplitStreamPlan, StreamSource,
@@ -109,9 +109,7 @@ const WAIT: Duration = Duration::from_millis(50);
 /// What one stream thread found when it opened its stream.
 #[derive(Debug, Clone)]
 struct StreamInfo {
-    buffer_frames: usize,
-    period_frames: usize,
-    latency_frames: usize,
+    sizes: StreamSizes,
     /// The endpoint the stream runs on: the microphone's, or for the
     /// system stream the default render endpoint at start.
     endpoint_id: Option<String>,
@@ -350,9 +348,7 @@ fn open(
         }
     };
     let info = StreamInfo {
-        buffer_frames: client.buffer_frames(),
-        period_frames: client.period_frames(),
-        latency_frames: client.latency_frames(),
+        sizes: client.sizes(),
         endpoint_id,
         loopback,
     };
@@ -626,7 +622,7 @@ fn start_streams(
     // `spawn_streams` put the master first.
     for index in (0..streams.len()).rev() {
         let launched = &mut streams[index];
-        let buffer_frames = launched.info.as_ref().map_or(0, |i| i.buffer_frames);
+        let buffer_frames = launched.info.as_ref().map_or(0, |i| i.sizes.buffer_frames);
         let body = if launched.source == plan.master {
             Some(StreamBody::Master {
                 router: PacketRouter::new(
@@ -711,7 +707,7 @@ impl CaptureBackend for LiveCaptureBackend {
         let mic = info(StreamSource::Microphone);
         let system = info(StreamSource::System);
         let follower = plan.follower.and_then(|source| {
-            info(source).map(|i| Arc::new(FollowerLane::for_period(i.period_frames)))
+            info(source).map(|i| Arc::new(FollowerLane::for_period(i.sizes.period_frames)))
         });
         let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink, deadline)?;
         if let Some(kind) = system.as_ref().and_then(|s| s.loopback) {
@@ -733,11 +729,18 @@ impl CaptureBackend for LiveCaptureBackend {
             }
         };
 
-        let (input_latency_frames, output_latency_frames) = far_end_latencies(
-            mic.as_ref().map_or(0, |m| m.latency_frames),
-            system.as_ref().map_or(0, |s| s.latency_frames),
-            follower.as_ref().map_or(0, |f| f.target()),
-        );
+        let input_latency = mic.as_ref().map_or(0, |m| m.sizes.latency_frames);
+        let output_latency = system.as_ref().map_or(0, |s| s.sizes.latency_frames);
+        let follower_delay = follower.as_ref().map_or(0, |f| f.target());
+        if follower_delay > input_latency + output_latency {
+            tracing::info!(
+                "the system lane's staging ({follower_delay} frames) exceeds both streams' \
+                 latency ({input_latency} + {output_latency} frames): the far end runs \
+                 that much later than the echo canceller expects"
+            );
+        }
+        let (input_latency_frames, output_latency_frames) =
+            far_end_latencies(input_latency, output_latency, follower_delay);
         *active = Some(Active {
             stop,
             streams,

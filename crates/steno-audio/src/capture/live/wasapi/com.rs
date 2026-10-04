@@ -87,9 +87,9 @@ use windows_core::implement;
 
 use crate::SAMPLE_RATE;
 use crate::capture::CaptureError;
-use crate::capture::split_streams::frames_from_hundred_nanoseconds;
+use crate::capture::split_streams::{BUFFER_DURATION, StreamSizes, stream_sizes};
 use crate::detection::{AudioSessionRecord, EndpointFlow, SessionState};
-use crate::realtime::{FollowerLane, SliceView};
+use crate::realtime::SliceView;
 
 /// A failed COM or WASAPI call: which one, its `HRESULT`, the system's
 /// message for it.
@@ -446,27 +446,6 @@ fn float_format(channels: usize) -> WAVEFORMATEX {
     }
 }
 
-/// The shared-mode buffer asked for: 100 ms, so a capture thread that is
-/// late by several periods loses nothing. Microsoft's `Initialize` page
-/// asks event-driven shared-mode clients for 0 here, while its own loopback
-/// sample passes a duration; the engine treats it as a minimum either way,
-/// and [`CaptureClient::buffer_frames`] reads back what it chose.
-const BUFFER_DURATION: i64 = 1_000_000;
-
-/// The longest device period believed: the buffer asked for. Anything
-/// longer, or not positive, is taken for the usual 10 ms.
-const MAX_PERIOD: i64 = BUFFER_DURATION;
-
-/// The largest stream latency believed, 200 ms; a longer one is clamped.
-const MAX_LATENCY: i64 = 2_000_000;
-
-/// The largest buffer believed, in frames: the follower's one second of
-/// staging. The process-loopback client is reported to answer
-/// `GetBufferSize` with 0 or a huge value and no error, and the buffer
-/// sizes the capture threads' scratch, so it is clamped to between one
-/// period and this; a larger packet is split, never refused.
-const MAX_BUFFER_FRAMES: usize = FollowerLane::CAPACITY;
-
 /// How often a polled stream (no event) is drained: 50 ms, half its buffer.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// [`POLL_INTERVAL`] as a `REFERENCE_TIME`.
@@ -518,9 +497,7 @@ pub struct CaptureClient {
     /// refused event callbacks).
     event: Option<Event>,
     channels: usize,
-    buffer_frames: usize,
-    period_frames: usize,
-    latency_frames: usize,
+    sizes: StreamSizes,
     discontinuities: u64,
     /// No packet drained yet: loopback streams commonly flag their first
     /// packet as a discontinuity, which is not a late thread.
@@ -615,58 +592,34 @@ impl CaptureClient {
             unsafe { client.GetService() },
             "IAudioClient::GetService(IAudioCaptureClient)",
         )?;
-        // The process-loopback client may implement neither; 0 and the
-        // usual 10 ms period stand in.
         // SAFETY: plain call on the initialised client.
-        let latency = unsafe { client.GetStreamLatency() }
-            .unwrap_or(0)
-            .clamp(0, MAX_LATENCY);
+        let latency = unsafe { client.GetStreamLatency() }.ok();
         let period = if event.is_none() {
             // A polled stream is drained once per poll, so that is its
             // packet rhythm, whatever the engine's period.
-            POLL_INTERVAL_HUNDRED_NANOSECONDS
+            Some(POLL_INTERVAL_HUNDRED_NANOSECONDS)
         } else {
             let mut period: i64 = 0;
             // SAFETY: `period` is a live i64 for the call to write.
             let read = unsafe { client.GetDevicePeriod(Some(&raw mut period), None) };
-            if read.is_ok() && (1..=MAX_PERIOD).contains(&period) {
-                period
-            } else {
-                100_000
-            }
+            read.is_ok().then_some(period)
         };
-        let period_frames = frames_from_hundred_nanoseconds(period, SAMPLE_RATE).max(1);
         Ok(Self {
             capture,
             client,
             event,
             channels,
-            buffer_frames: buffer_frames.clamp(period_frames, MAX_BUFFER_FRAMES),
-            period_frames,
-            latency_frames: frames_from_hundred_nanoseconds(latency, SAMPLE_RATE),
+            sizes: stream_sizes(buffer_frames, period, latency),
             discontinuities: 0,
             first_packet: true,
         })
     }
 
-    /// Frames the stream's buffer holds, the largest packet expected:
-    /// between one period and [`MAX_BUFFER_FRAMES`], whatever the engine
-    /// answered.
+    /// The buffer, period and latency the stream runs with: what the
+    /// engine answered, where [`stream_sizes`] trusts it.
     #[must_use]
-    pub fn buffer_frames(&self) -> usize {
-        self.buffer_frames
-    }
-
-    /// Frames per engine period; for a polled stream, frames per poll.
-    #[must_use]
-    pub fn period_frames(&self) -> usize {
-        self.period_frames
-    }
-
-    /// `GetStreamLatency`, in frames at 48 kHz, at most 200 ms.
-    #[must_use]
-    pub fn latency_frames(&self) -> usize {
-        self.latency_frames
+    pub fn sizes(&self) -> StreamSizes {
+        self.sizes
     }
 
     /// Packets flagged `AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY` so far, the

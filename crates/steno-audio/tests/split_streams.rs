@@ -1,5 +1,6 @@
 //! The two-stream capture path the WASAPI backend runs (WP10a), without
-//! WASAPI: the stream plan, the latency arithmetic, the follower's
+//! WASAPI: the stream plan, the latency arithmetic, which engine answers
+//! are trusted, the follower's
 //! jitter-buffer policy and the master's routing into the sink, over
 //! synthetic packets. Runs on every OS; on the Windows runner these are the
 //! backend's unit tests, since the runner has no audio device. No Swift
@@ -16,7 +17,10 @@
 
 use std::sync::Arc;
 
-use steno_audio::capture::split_streams::{far_end_latencies, frames_from_hundred_nanoseconds};
+use steno_audio::capture::split_streams::{
+    MAX_BUFFER_FRAMES, StreamSizes, far_end_latencies, frames_from_hundred_nanoseconds,
+    stream_sizes,
+};
 use steno_audio::capture::{ChannelRef, SplitStreamPlan, StreamSource};
 use steno_audio::realtime::{
     FollowerLane, LaneFrameSink, PacketRouter, SliceView, StreamBody, deliver_slices,
@@ -139,6 +143,54 @@ fn the_follower_delay_comes_off_the_output_latency_first() {
     assert_eq!(far_end_latencies(500, 400, 960), (0, 0));
     assert_eq!(far_end_latencies(1_000, 400, 960), (440, 0));
     assert_eq!(far_end_latencies(500, 2_000, 0), (500, 2_000));
+}
+
+#[test]
+fn plausible_engine_answers_are_taken_as_they_are() {
+    let sizes = |buffer, period, latency| stream_sizes(buffer, Some(period), Some(latency));
+    assert_eq!(
+        sizes(4_800, 100_000, 300_000),
+        StreamSizes {
+            buffer_frames: 4_800,
+            period_frames: 480,
+            latency_frames: 1_440,
+        }
+    );
+    // The bounds themselves: a 1 ms and a 100 ms period, 200 ms of latency.
+    assert_eq!(sizes(4_800, 10_000, 2_000_000).period_frames, 48);
+    assert_eq!(sizes(4_800, 10_000, 2_000_000).latency_frames, 9_600);
+    assert_eq!(sizes(4_800, 1_000_000, 0).period_frames, 4_800);
+    // A polled stream's 50 ms poll.
+    assert_eq!(sizes(4_800, 500_000, 0).period_frames, 2_400);
+}
+
+#[test]
+fn implausible_engine_answers_fall_back() {
+    let period = |period| stream_sizes(4_800, period, None).period_frames;
+    for untrusted in [
+        None,
+        Some(0),
+        Some(-1),
+        Some(1),
+        Some(9_999),
+        Some(1_000_001),
+    ] {
+        assert_eq!(period(untrusted), 480, "{untrusted:?} is taken for 10 ms");
+    }
+    let latency = |latency| stream_sizes(4_800, Some(100_000), latency).latency_frames;
+    for untrusted in [None, Some(-1), Some(2_000_001), Some(i64::MAX)] {
+        assert_eq!(
+            latency(untrusted),
+            0,
+            "{untrusted:?} counts as no latency, not as the most"
+        );
+    }
+    // A buffer of 0 or a huge one: between one period and one second.
+    assert_eq!(stream_sizes(0, Some(100_000), None).buffer_frames, 480);
+    assert_eq!(
+        stream_sizes(usize::MAX, Some(100_000), None).buffer_frames,
+        MAX_BUFFER_FRAMES
+    );
 }
 
 #[test]
