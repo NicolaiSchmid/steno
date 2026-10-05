@@ -62,9 +62,10 @@
 //! change, and at most `COALESCE_LIMIT` (2 s) after the first, the graph
 //! is compared with the devices the targets resolved to
 //! ([`DeviceSnapshot::difference`]), and a difference goes to the sink as
-//! a [`DeviceChangeReason`], from this thread, never during `start`. A change during `start` is judged once
-//! the capture runs. The session then rebuilds through `stop()` and
-//! `start`, as on the Mac. The capture never follows a default on its own.
+//! a [`DeviceChangeReason`], from this thread, never during `start`. A
+//! change during `start` is judged once the capture runs. The session then
+//! rebuilds through `stop()` and `start`, as on the Mac. The capture never
+//! follows a default on its own.
 //! A lost connection, stream or link reads as the output gone (the input
 //! for an in-person capture), and so does a microphone that vanishes
 //! during a call: the server removes Steno's link to it, and a lost link
