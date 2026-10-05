@@ -323,8 +323,7 @@ jobs:
       # copies dist/ into the bundle (scripts/build-web.sh).
       - uses: pnpm/action-setup@v4
         with:
-          # Per runner: the self-hosted Macs share one home, and two jobs
-          # unpacking pnpm into the default ~/setup-pnpm at once fail (ENOTEMPTY).
+          # Per runner: two jobs on the shared-home Macs collide in ~/setup-pnpm (ENOTEMPTY).
           dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: apps/macos/web/package.json
 
@@ -448,8 +447,7 @@ jobs:
       # copies dist/ into the bundle (scripts/build-web.sh).
       - uses: pnpm/action-setup@v4
         with:
-          # Per runner: the self-hosted Macs share one home, and two jobs
-          # unpacking pnpm into the default ~/setup-pnpm at once fail (ENOTEMPTY).
+          # Per runner: two jobs on the shared-home Macs collide in ~/setup-pnpm (ENOTEMPTY).
           dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: apps/macos/web/package.json
 
