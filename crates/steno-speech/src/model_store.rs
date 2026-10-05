@@ -565,11 +565,9 @@ impl ModelStore {
         destination: &Path,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<(), SpeechError> {
-        let wait = LockWait {
-            clock: &self.clock,
-            limit: self.lock_wait_limit(file.size),
-        };
-        let Some(mut partial) = Partial::open(destination, file, &wait, progress)? else {
+        let limit = self.lock_wait_limit(file.size);
+        let Some(mut partial) = Partial::open(destination, file, &self.clock, limit, progress)?
+        else {
             return Ok(());
         };
         let mut failures = 0;
@@ -941,13 +939,6 @@ enum Clock {
     Manual(std::sync::Arc<tests::ManualClock>),
 }
 
-/// How a download waits for another one's lock: on `clock`, until the
-/// holder's partial has not changed for `limit`.
-struct LockWait<'a> {
-    clock: &'a Clock,
-    limit: Duration,
-}
-
 impl Clock {
     fn now(&self) -> Instant {
         match self {
@@ -992,18 +983,20 @@ impl Partial {
     /// `<name>.partial` beside `destination` with its bytes hashed, opened
     /// once the lock on `<name>.lock` is held; `None` when `destination`
     /// is installed by then. A download of the same file that holds the
-    /// lock is waited for as `wait` says, `progress` reporting the bytes
-    /// its partial has, so its bytes are never fetched twice. Where the
+    /// lock is waited for on `clock`, `progress` reporting the bytes its
+    /// partial has, so its bytes are never fetched twice, until it has
+    /// written nothing for `limit`. Where the
     /// file system has no locks, a per-call partial of its own. Blocking:
     /// the callers run on a blocking thread.
     fn open(
         destination: &Path,
         file: &ModelFile,
-        wait: &LockWait<'_>,
+        clock: &Clock,
+        limit: Duration,
         progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<Option<Self>, SpeechError> {
         let path = destination.with_file_name(format!("{}.partial", file.name));
-        let Some(lock) = lock_download(destination, file, &path, wait, progress)? else {
+        let Some(lock) = lock_download(destination, file, &path, clock, limit, progress)? else {
             return Self::per_call(destination, &file.name).map(Some);
         };
         if is_complete(destination, file) {
@@ -1177,18 +1170,18 @@ fn try_lock_download(path: &Path) -> Result<DownloadLock, NotLocked> {
 /// `partial`. The lock file stays when the download ends: were it deleted,
 /// a download waiting on it would wake holding a lock on a file no longer
 /// at the path, beside a third that locked a new one. A lock held by
-/// another download is tried again every [`LOCK_POLL`] of `wait`'s clock,
+/// another download is tried again every [`LOCK_POLL`] of `clock`,
 /// `progress` reporting the length of `partial` meanwhile, until `partial`
-/// has not changed for `wait`'s limit (the holder was stopped, say), which
-/// is an error naming the lock. `None` where the file system has no locks.
+/// has not changed for `limit` (the holder was stopped, say), which is an
+/// error naming the lock. `None` where the file system has no locks.
 fn lock_download(
     destination: &Path,
     file: &ModelFile,
     partial: &Path,
-    wait: &LockWait<'_>,
+    clock: &Clock,
+    limit: Duration,
     progress: &mut dyn FnMut(DownloadProgress<'_>),
 ) -> Result<Option<DownloadLock>, SpeechError> {
-    let clock = wait.clock;
     let path = destination.with_file_name(format!("{}.lock", file.name));
     let mut waiting = false;
     let mut seen: Option<(u64, Instant)> = None;
@@ -1203,14 +1196,14 @@ fn lock_download(
                 let len = fs::metadata(partial).map_or(0, |m| m.len());
                 match seen {
                     Some((last, since)) if last == len => {
-                        if clock.now().duration_since(since) >= wait.limit {
+                        if clock.now().duration_since(since) >= limit {
                             return Err(SpeechError::io(
                                 &path,
                                 std::io::Error::new(
                                     std::io::ErrorKind::TimedOut,
                                     format!(
                                         "another download of this file holds the lock and has written nothing for {} s",
-                                        wait.limit.as_secs()
+                                        limit.as_secs()
                                     ),
                                 ),
                             ));
