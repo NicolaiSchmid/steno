@@ -333,11 +333,8 @@ jobs:
           apps/desktop/scripts/signing-keychain.sh remove "$KEYCHAIN_PATH"
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
-  # The release as it will be published, on every run: every bundle in one
-  # flat directory, the updater signatures checked, `latest.json`, then
-  # `SHA256SUMS` and the OpenPGP signatures (the only job with that key).
-  # A manual run keeps it as the `desktop-release-assets` artifact, which
-  # proves the signing without publishing; on a tag, publish uploads it.
+  # The release as publish uploads it, on every run (see the top of this
+  # file); the only job with the OpenPGP key.
   assets:
     name: assets
     needs: [plan, bundle]
