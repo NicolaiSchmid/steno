@@ -17,16 +17,17 @@
 #     -- --ignored --test-threads=1 --nocapture
 #
 # Needs `pipewire`, `wireplumber`, `pw-cli`, `pw-dump`, `pw-link`,
-# `pw-metadata` and `pw-play` on PATH, and `dbus-daemon` for WirePlumber
-# 0.4 (Ubuntu: pipewire, pipewire-bin, wireplumber, dbus; Nix: pipewire,
-# wireplumber, dbus). Used by rust-ci.yml on ubuntu-latest.
+# `pw-metadata` and `pw-play` on PATH, `stdbuf` and `timeout` (coreutils),
+# and `dbus-daemon` for WirePlumber 0.4 (Ubuntu: pipewire, pipewire-bin,
+# wireplumber, dbus; Nix: pipewire, wireplumber, dbus). Used by rust-ci.yml
+# on ubuntu-latest.
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
   echo "usage: $0 <command> [args...]" >&2
   exit 2
 fi
-for tool in pipewire wireplumber pw-cli pw-dump pw-link pw-metadata pw-play; do
+for tool in pipewire wireplumber pw-cli pw-dump pw-link pw-metadata pw-play stdbuf timeout; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "pipewire-headless: $tool not found" >&2
     exit 1
@@ -36,12 +37,36 @@ done
 # Keep TMPDIR short: the bus socket lives under it, and a Unix socket path
 # holds at most 107 bytes.
 root="$(mktemp -d "${TMPDIR:-/tmp}/steno-pipewire.XXXXXX")"
-pids=()
-cleanup() {
-  for pid in "${pids[@]}"; do
-    kill "$pid" 2>/dev/null || true
+# The processes this script started, and only those, are the ones it ends.
+dbus_pid=""
+daemon_pids=()
+# Ends the given processes: a TERM, 2 s to go, then a KILL.
+terminate() {
+  local pid alive
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+  kill "$@" 2>/dev/null || true
+  for _ in $(seq 1 20); do
+    alive=""
+    for pid in "$@"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        alive=1
+      fi
+    done
+    if [[ -z "$alive" ]]; then
+      break
+    fi
+    sleep 0.1
   done
-  wait 2>/dev/null || true
+  kill -9 "$@" 2>/dev/null || true
+  wait "$@" 2>/dev/null || true
+}
+cleanup() {
+  terminate "${daemon_pids[@]}"
+  if [[ -n "$dbus_pid" ]]; then
+    terminate "$dbus_pid"
+  fi
   command rm -rf "$root"
 }
 trap cleanup EXIT
@@ -57,7 +82,7 @@ chmod 700 "$XDG_RUNTIME_DIR"
 if command -v dbus-daemon >/dev/null 2>&1; then
   dbus-daemon --session --fork --nopidfile \
     --address="unix:path=$XDG_RUNTIME_DIR/bus" --print-pid=3 3>"$root/dbus.pid"
-  pids+=("$(cat "$root/dbus.pid")")
+  dbus_pid="$(cat "$root/dbus.pid")"
   export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
 else
   export DBUS_SESSION_BUS_ADDRESS="disabled:"
@@ -104,38 +129,86 @@ context.objects = [
 ]
 EOF
 
-pipewire >"$root/pipewire.log" 2>&1 &
-pids+=("$!")
-for _ in $(seq 1 100); do
-  [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]] && break
-  sleep 0.05
-done
-if [[ ! -S "$XDG_RUNTIME_DIR/pipewire-0" ]]; then
-  echo "pipewire-headless: the daemon did not start" >&2
-  cat "$root/pipewire.log" >&2
-  exit 1
-fi
-
-wireplumber >"$root/wireplumber.log" 2>&1 &
-wireplumber_pid=$!
-pids+=("$wireplumber_pid")
-# WirePlumber publishes the defaults once it has looked at the devices.
-ready=""
-for _ in $(seq 1 100); do
-  # Not `grep -q`: it stops reading at the first match, pw-dump dies of
-  # SIGPIPE, and pipefail fails the test.
-  if pw-dump 2>/dev/null | grep '"default.audio.sink"' >/dev/null; then
-    ready=1
-    break
+# Starts the daemon and WirePlumber and waits until WirePlumber published
+# the defaults; false when either did not come up.
+start_daemons() {
+  pipewire >"$root/pipewire.log" 2>&1 &
+  daemon_pids=("$!")
+  for _ in $(seq 1 100); do
+    [[ -S "$XDG_RUNTIME_DIR/pipewire-0" ]] && break
+    sleep 0.05
+  done
+  if [[ ! -S "$XDG_RUNTIME_DIR/pipewire-0" ]]; then
+    echo "pipewire-headless: the daemon did not start" >&2
+    cat "$root/pipewire.log" >&2
+    return 1
   fi
-  kill -0 "$wireplumber_pid" 2>/dev/null || break
-  sleep 0.1
-done
-if [[ -z "$ready" ]]; then
+
+  wireplumber >"$root/wireplumber.log" 2>&1 &
+  local wireplumber_pid=$!
+  daemon_pids+=("$wireplumber_pid")
+  # WirePlumber publishes the defaults once it has looked at the devices.
+  for _ in $(seq 1 100); do
+    # Not `grep -q`: it stops reading at the first match, pw-dump dies of
+    # SIGPIPE, and pipefail fails the test. The time limit: a daemon that
+    # hangs must not hold the run.
+    if timeout 2 pw-dump 2>/dev/null | grep '"default.audio.sink"' >/dev/null; then
+      return 0
+    fi
+    kill -0 "$wireplumber_pid" 2>/dev/null || break
+    sleep 0.1
+  done
   echo "pipewire-headless: WirePlumber did not publish the default devices" >&2
   tail -n 40 "$root/pipewire.log" "$root/wireplumber.log" >&2 || true
-  exit 1
-fi
+  return 1
+}
+
+# Whether a change to the `default` metadata reaches a client that bound
+# it before: a daemon can come up that never sends one (about one start in
+# thirty, with or without Steno), and every device-change test then fails.
+# A watcher binds, a probe key is written, and the watcher must print it
+# within 2 s.
+broadcasts_metadata() {
+  local log="$root/probe.log" watcher seen=""
+  stdbuf -oL pw-metadata -m -n default >"$log" 2>&1 &
+  watcher=$!
+  # Bound once it printed the defaults the daemon already holds.
+  for _ in $(seq 1 50); do
+    if grep "key:'default.audio.sink'" "$log" >/dev/null; then
+      break
+    fi
+    sleep 0.1
+  done
+  if pw-metadata -n default 0 steno.probe "$$" >/dev/null 2>&1; then
+    for _ in $(seq 1 20); do
+      if grep "key:'steno.probe'" "$log" >/dev/null; then
+        seen=1
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+  terminate "$watcher"
+  pw-metadata -n default -d 0 steno.probe >/dev/null 2>&1 || true
+  [[ -n "$seen" ]]
+}
+
+for try in 1 2 3; do
+  if ! start_daemons; then
+    exit 1
+  fi
+  broadcasts_metadata && break
+  if [[ $try -eq 3 ]]; then
+    echo "pipewire-headless: the daemon sends no metadata changes after 3 starts" >&2
+    tail -n 40 "$root/pipewire.log" "$root/wireplumber.log" >&2 || true
+    exit 1
+  fi
+  echo "pipewire-headless: the daemon sends no metadata changes; restarting it (start $try)" >&2
+  terminate "${daemon_pids[@]}"
+  daemon_pids=()
+  command rm -f "$XDG_RUNTIME_DIR/pipewire-0" "$XDG_RUNTIME_DIR/pipewire-0.lock" \
+    "$XDG_RUNTIME_DIR/pipewire-0-manager" "$XDG_RUNTIME_DIR/pipewire-0-manager.lock"
+done
 
 set +e
 "$@"
