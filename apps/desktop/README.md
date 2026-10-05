@@ -306,10 +306,14 @@ publishes; the version must be the one under `[workspace.package]` in
 `Cargo.toml`, which Tauri stamps into the bundles, or the run fails before
 it builds. So does a version the MSI cannot carry: WiX takes numbers only,
 so `scripts/wix-version.sh` accepts `X.Y.Z` and `X.Y.Z-<label>.<N>` alone.
-A manual run builds, signs and notarises the platforms it is given
-and keeps the bundles as workflow artifacts; it publishes nothing. The
-`desktop-v` prefix keeps these tags apart from the Swift app's `v*`
-(`release.yml`) and the mobile build tags `ios-fp-*` (`mobile-cd.yml`).
+A manual run builds, signs and notarises the platforms it is given and
+keeps the bundles as workflow artifacts. It checksums and OpenPGP-signs
+them as a tag would, but keeps none of the `.asc` files, only
+`SHA256SUMS` and the log of what verified (see Checksums and OpenPGP
+signatures). It publishes nothing.
+The `desktop-v` prefix keeps these tags apart from the Swift
+app's `v*` (`release.yml`) and the mobile build tags `ios-fp-*`
+(`mobile-cd.yml`).
 `cargo deny check` (`deny.toml`: the licence allow list, the MPL-2.0
 crates by name, advisories, sources) runs first and stops the run on any
 finding.
@@ -320,6 +324,9 @@ finding.
    secrets in the table below are set, and a manual run on the branch
    passes:
    `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
+   Its `desktop-release-checksums` artifact proves the checksums and
+   signatures (see Checksums and OpenPGP signatures), and the run's
+   summary holds the notes.
 1. On `main`, set `[workspace.package] version` in `Cargo.toml`, run
    `cargo check` so `Cargo.lock` follows (CI builds with `--locked`), and
    merge both. A hyphen (`0.2.0-rc.1`) means the beta lane only.
@@ -359,13 +366,42 @@ new assets until **Update lanes** finishes.
   error in that step's output.
 - **Check the bundles**: the `::error::` names the file or the check that
   failed.
+- **Gather the assets** (in `assets`): an artifact holds a file its
+  platform does not build or whose name has a character other than
+  A-Z a-z 0-9 . _ + -, two files share a name, or a platform's artifact is
+  missing; the `::error::` names it
+  (`scripts/release-assets.sh`). Fix the bundle job, delete the tag and
+  tag again.
+- **Verify the updater signatures** (in `assets`):
+  `TAURI_SIGNING_PRIVATE_KEY` is not the secret half of
+  `plugins.updater.pubkey`, or a platform lacks a `.sig`; fix the secret,
+  delete the tag and tag again (re-running only `assets` reuses the same
+  bundles).
+- **Checksums and signatures** (in `assets`): `LINUX_GPG_PRIVATE_KEY` is
+  not the secret half of `release-signing-key.asc`, `LINUX_GPG_PASSPHRASE`
+  is not its passphrase, or the key has expired; the `::error::` says
+  which file did not sign or verify, or when the key expired. Fix the
+  secret and re-run the failed jobs. An expired key needs a new commit,
+  since a re-run checks out the tag's public key: extend the key (see
+  Checksums and OpenPGP signatures), merge the new public key, then delete
+  the tag and tag the new commit.
 - **A job that timed out or lost its runner**: `notarize-dmg.sh` gives up
   after 45 minutes, but the bundler's own notarisation of the `.app` waits
   until the job's 90-minute timeout. Check `xcrun notarytool history` with
   the App Store Connect key, then re-run the failed jobs.
 - **publish**, also one cancelled while it waited (a third tag): re-run it.
+  It uploads what `assets` left in the run's `desktop-release-assets`
+  artifact, which is kept 5 days; after that, re-run the `assets` job
+  instead, which signs the same bundles again and runs publish after it:
+
+  ```sh
+  gh run view <run id> --json jobs --jq '.jobs[] | select(.name == "assets") | .databaseId'
+  gh run rerun --job <that job id>
+  ```
+
   An existing release is reused and its assets replaced; the lanes move as
-  on the first run.
+  on the first run. GitHub allows re-runs for 30 days; after that, delete
+  the tag and tag again.
 
 ### A bad release
 
@@ -395,15 +431,18 @@ version, whose tag moves the lanes as usual.
 | `ASC_KEY_ID` | macOS Bundle, `notarize-dmg.sh` | The App Store Connect API key's id |
 | `ASC_ISSUER_ID` | macOS Bundle, `notarize-dmg.sh` | The key's issuer id |
 | `ASC_PRIVATE_KEY` | macOS Bundle, `notarize-dmg.sh` | The key itself, the `.p8` contents |
+| `LINUX_GPG_PRIVATE_KEY` | `plan`'s Check secrets, `assets`' Checksums and signatures | The armored OpenPGP secret key of `release-signing-key.asc`, passphrase-protected |
+| `LINUX_GPG_PASSPHRASE` | `plan`'s Check secrets, `assets`' Checksums and signatures | Its passphrase |
 
 `scripts/require-secrets.sh` names every missing one before anything is
-built.
+built: the `plan` job checks the two OpenPGP secrets, each bundle job its
+own.
 
 Installed apps verify updates only with the `pubkey` they were built with.
 To rotate the updater key, publish one release (no hyphen, and at or
 above what both lanes serve, so both move to it) whose `tauri.conf.json`
-carries the new public key, signed with the old private key. Publish
-checks the signatures against the config's key, so on that release's
+carries the new public key, signed with the old private key. The `assets`
+job checks the signatures against the config's key, so on that release's
 commit the `pubkey=` line of **Verify the updater signatures**
 (`desktop-release.yml`) is set to the old key,
 `pubkey="$(base64 --decode <<< '<the old plugins.updater.pubkey value>')"`,
@@ -467,19 +506,104 @@ before it builds the image and the updater archive from it, and
 `scripts/notarize-dmg.sh` notarises and staples the image.
 `check-bundle.sh --signed` checks the Developer ID authority, the runtime
 flag, the timestamp and the team on all three items, the entitlements,
-the ticket and Gatekeeper's verdict. Linux packages are not signed beyond
-the updater signature. Windows installers are not code-signed, since there
-is no Windows certificate: SmartScreen asks before the first install, and
-updates install without asking again.
+the ticket and Gatekeeper's verdict. The Linux bundles have no signature
+of their own format (no signed apt repository, no AppImage-embedded
+signature); a detached OpenPGP signature beside each covers them instead
+(below). Windows installers are not code-signed yet, since there is no
+Windows certificate: SmartScreen warns before the first install, which the
+release notes say, and updates install without asking again.
+
+### Checksums and OpenPGP signatures
+
+Every release also carries `SHA256SUMS`, the SHA-256 of every other file
+in it but the OpenPGP signatures (`.asc`): all three platforms, the
+updater `.sig` files and `latest.json`. `SHA256SUMS` and each Linux `.deb`
+and `.AppImage` have a detached armored OpenPGP signature (`<file>.asc`).
+The key is the
+Steno release signing key, an ed25519 key whose public half is
+[`apps/desktop/release-signing-key.asc`](release-signing-key.asc):
+
+```text
+Steno release signing (github.com/NicolaiSchmid/steno)
+048B 5279 50E4 F609 B90E  6349 5F88 10A6 E6D4 DB46
+expires 2029-10-04
+```
+
+To check a download, put `SHA256SUMS`, `SHA256SUMS.asc` and the files in
+one directory and run these commands there. The release notes give the
+`gpg --verify` line for each Linux bundle, and `wget` fetches the key
+where `curl` is missing:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/desktop-v<version>/apps/desktop/release-signing-key.asc
+gpg --import release-signing-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+gpg --verify steno-desktop_<version>_amd64.deb.asc steno-desktop_<version>_amd64.deb
+```
+
+Each `gpg --verify` must report "Good signature" from the fingerprint
+above, and `sha256sum` must print OK for every file you downloaded; the
+warning that the key is not certified by a trusted signature is expected.
+On Windows, in PowerShell,
+`(Get-FileHash .\<installer>).Hash -eq '<its hash in SHA256SUMS>'` must
+print `True`.
+
+Only the `assets` job holds the secret key (`LINUX_GPG_PRIVATE_KEY`,
+`LINUX_GPG_PASSPHRASE`): `plan` learns only whether the two secrets are
+set, and the bundle jobs and `publish` never see them.
+`scripts/release-assets.sh` first gathers each platform's files from its
+own artifact only, so no other bundle job can put a `.deb` or `.AppImage`
+up for signing. `scripts/release-signatures.sh` imports the key into a
+throwaway `GNUPGHOME` under `$RUNNER_TEMP`, passes the passphrase through
+a file there (loopback pinentry), signs with the committed key's
+fingerprint only, and removes the directory and its agent on exit. It then
+verifies every signature with `gpgv` against a keyring holding only the
+committed public key; a signature that does not verify fails the run
+before anything is published. An expired key fails the run before
+anything is signed, and the script warns 90 days before.
+`scripts/release-notes.sh` writes the release notes with the fingerprint
+and the commands above.
+
+On a tag the signed set is the `desktop-release-assets` artifact (kept 5
+days) that `publish` uploads. A manual run signs and verifies the same
+way, but its `desktop-release-checksums` artifact (kept 3 days) holds only
+`SHA256SUMS` and `signatures.txt`, the script's log of what it signed and
+verified: a signature on a build that is never published stays on the
+runner.
+
+Before the key expires, extend it where the secret key is kept, then
+commit the new public key and the new date in the block above, and
+replace the secret:
+
+```sh
+gpg --quick-set-expire 048B527950E4F609B90E63495F8810A6E6D4DB46 3y
+gpg --armor --export 048B527950E4F609B90E63495F8810A6E6D4DB46 > apps/desktop/release-signing-key.asc
+gpg --armor --export-secret-keys 048B527950E4F609B90E63495F8810A6E6D4DB46 | gh secret set LINUX_GPG_PRIVATE_KEY
+```
+
+The fingerprint stays, so old releases still verify. To replace the key
+(lost or compromised), generate a new one
+(`gpg --quick-generate-key 'Steno release signing (github.com/NicolaiSchmid/steno)' ed25519 sign 3y`),
+commit its public half and the new fingerprint here and in
+`scripts/release-notes.test.sh`, replace both secrets, and say in the
+next release's notes that the key changed; for a compromised key, also
+publish its revocation certificate. Releases signed with the old key keep
+verifying against its public half in the history at their tag.
 
 ### Publishing, on a tag
 
 One GitHub release per tag carries every bundle, the `.sig` of each
 updater artifact (`.app.tar.gz`, `.AppImage`, `.deb`, `.msi`,
-`-setup.exe`) and `latest.json` (`scripts/updater-manifest.sh`). Each
-signature is checked against `plugins.updater.pubkey` first, so a signing
-key that is not the config key's other half fails the release instead of
-every user's next update. The manifest then goes to the rolling release of
+`-setup.exe`), `latest.json` (`scripts/updater-manifest.sh`),
+`SHA256SUMS` and the `.asc` signatures. The `assets` job assembles them on
+every run, a manual one included: it gathers each platform's artifact
+(`scripts/release-assets.sh`) and checks each `.sig` against
+`plugins.updater.pubkey`, so a signing key that is not the config key's
+other half fails the release instead of every user's next update. It
+then writes the manifest, the checksums and the OpenPGP signatures (see
+above). `publish` uploads that set with the notes from
+`scripts/release-notes.sh`. The manifest then goes to the rolling release of
 each lane, `desktop-stable` and `desktop-beta`, and the lane's tag moves to
 the release commit. Each lane only moves forward: the stable lane takes a
 release (no hyphen), the beta lane every version, each only when the
@@ -608,9 +732,10 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
-| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
+| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
 | `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check |
-| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json` and the lanes a release moves (each `.sh` with a `.test.sh` is tested in Rust CI) |
+| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh`, `release-assets.sh`, `release-signatures.sh`, `release-notes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json`, the lanes a release moves, the assets gathered from each platform's artifact, `SHA256SUMS` and the OpenPGP signatures, and the release notes (each `.sh` with a `.test.sh` is tested in Rust CI) |
+| `apps/desktop/release-signing-key.asc` | The public half of the release signing key that signs `SHA256SUMS` and the Linux bundles (see Checksums and OpenPGP signatures) |
 
 ## Not here yet
 

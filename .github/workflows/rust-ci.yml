@@ -246,7 +246,8 @@ jobs:
             || { echo "::error::expected $expected PipeWire live tests to pass"; exit 1; }
 
       # The desktop release workflow's platform filter, MSI version, updater
-      # manifest and lanes.
+      # manifest and lanes, asset gathering, checksums and signatures, and
+      # release notes.
       - name: Desktop release scripts
         if: matrix.name == 'linux'
         run: |
@@ -254,6 +255,9 @@ jobs:
           apps/desktop/scripts/wix-version.test.sh
           apps/desktop/scripts/updater-manifest.test.sh
           apps/desktop/scripts/updater-lanes.test.sh
+          apps/desktop/scripts/release-assets.test.sh
+          apps/desktop/scripts/release-signatures.test.sh
+          apps/desktop/scripts/release-notes.test.sh
 
       # The WASAPI smoke tests again with their output, so the log shows what
       # COM answered on the runner (endpoints, sessions, why a capture

@@ -532,7 +532,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   `latest.json`, copied to the rolling `desktop-beta` and `desktop-stable` releases
   that `updater.rs` reads, each only moving forward
   (`apps/desktop/scripts/updater-lanes.sh`). No desktop release is GitHub's "latest"
-  before the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
+  before the cutover. Before the first desktop release, `feat/desktop-linux-signing`
+  added `SHA256SUMS` over every asset and detached OpenPGP signatures for it and the
+  Linux bundles, from a key whose public half is `apps/desktop/release-signing-key.asc`
+  (`apps/desktop/README.md`, "Checksums and OpenPGP signatures"); the Windows
+  installers stay unsigned and the release notes say so. WP9b is the cutover:
+  `.plans/2026-10-04-mac-cutover.md`.
   The shell's gaps that must close before the cutover (WP9b) opens ("Open after the
   port"): the tray's badge for pending speaker reviews; the QR encoder, a fake until a
   QR crate draws the pairing code; the clip player, a fake with no audio output; and
