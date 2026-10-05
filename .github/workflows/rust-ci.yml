@@ -162,6 +162,9 @@ jobs:
       - uses: pnpm/action-setup@v4
         if: matrix.name != 'windows'
         with:
+          # Per runner: the self-hosted Macs share one home, and two jobs
+          # unpacking pnpm into the default ~/setup-pnpm at once fail (ENOTEMPTY).
+          dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: apps/macos/web/package.json
       - uses: actions/setup-node@v4
         if: matrix.name != 'windows'
