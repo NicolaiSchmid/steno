@@ -42,8 +42,8 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use common::{
-    ASKED_FOR_DIRECTML, alive, assert_works, binary, config, engine_in, engine_with_fault, kill,
-    kill_idle_child, provider, sidecar_error, tone, within_ten_seconds,
+    ASKED_FOR_DIRECTML, alive, assert_works, binary, config, engine_in, engine_with_fault,
+    fault_queued_soon, kill, kill_idle_child, provider, sidecar_error, tone, within_ten_seconds,
 };
 use steno_core::{AudioBuffer16k, SpeechEngine};
 use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
@@ -694,7 +694,7 @@ async fn a_child_over_the_ceiling_while_idle_is_replaced_without_an_error() {
     // The report is queued while no request runs, so the next call finds
     // it before it sends one.
     assert!(
-        within_ten_seconds(|| engine.fault_queued().then_some(())).is_some(),
+        fault_queued_soon(&engine),
         "the reader never queued the report over the ceiling"
     );
     assert_works(&engine, &tone(0.5)).await;

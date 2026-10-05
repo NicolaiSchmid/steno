@@ -10,7 +10,7 @@
 
 mod common;
 
-use common::{assert_works, engine_with_fault, provider, tone, within_ten_seconds};
+use common::{assert_works, engine_with_fault, fault_queued_soon, provider, tone};
 use steno_core::SpeechEngine as _;
 use steno_speech::EncoderProvider;
 use steno_speech::sidecar::directml_switched_off;
@@ -23,7 +23,7 @@ async fn a_child_over_the_ceiling_while_idle_on_directml_switches_it_off() {
     assert_eq!(provider(&engine).await, Some(EncoderProvider::DirectMl));
     assert_works(&engine, &tone(0.5)).await;
     assert!(
-        within_ten_seconds(|| engine.fault_queued().then_some(())).is_some(),
+        fault_queued_soon(&engine),
         "the reader never queued the report over the ceiling"
     );
     assert_works(&engine, &tone(0.5)).await;

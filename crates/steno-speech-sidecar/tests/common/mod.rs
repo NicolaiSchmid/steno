@@ -182,6 +182,12 @@ pub fn within_ten_seconds<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> 
     }
 }
 
+/// Waits up to ten seconds for the engine's reader to queue a fault of
+/// the running child ([`SidecarSpeechEngine::fault_queued`]).
+pub fn fault_queued_soon(engine: &SidecarSpeechEngine) -> bool {
+    within_ten_seconds(|| engine.fault_queued().then_some(())).is_some()
+}
+
 /// Kills the engine's idle child and waits until its reader has queued
 /// the end of its stdout, so the next call finds the child dead rather
 /// than send it a request. Not until the pid is a zombie: the main thread
@@ -191,7 +197,7 @@ pub fn kill_idle_child(engine: &SidecarSpeechEngine) -> u32 {
     let pid = engine.pid().unwrap();
     assert!(kill(pid));
     assert!(
-        within_ten_seconds(|| engine.fault_queued().then_some(())).is_some(),
+        fault_queued_soon(engine),
         "the reader never queued the end of the killed child's stdout"
     );
     pid
