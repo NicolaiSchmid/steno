@@ -229,7 +229,9 @@ jobs:
 
       # The step fails unless as many tests passed as the file has live
       # tests: a `cfg` or a filter that left none to run would pass with
-      # "0 passed". Bash runs with `pipefail`, so `tee` keeps the exit code.
+      # "0 passed". A live test is one whose `#[ignore]` reason starts
+      # "needs a PipeWire daemon"; give new ones the same reason. Bash runs
+      # with `pipefail`, so `tee` keeps the exit code.
       - name: PipeWire live tests
         if: matrix.name == 'linux'
         timeout-minutes: 10
