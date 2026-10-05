@@ -385,6 +385,15 @@ fn collect(sink: &LaneFrameSink, frames: usize) -> Vec<Vec<f32>> {
 /// A device-change report and when the handler got it.
 type Report = (DeviceChangeReason, Instant);
 
+/// The next device-change report, which must come within 3 s after the
+/// coalescing delay.
+fn next_report(reasons: &Receiver<Report>) -> DeviceChangeReason {
+    reasons
+        .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
+        .expect("a device-change report")
+        .0
+}
+
 /// A sink whose device-change reports arrive on the returned channel.
 fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<Report>) {
     let (sender, receiver) = channel();
@@ -839,9 +848,7 @@ fn assert_link_from_reported(from: &str, gone: DeviceChangeReason) {
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, None, &sink).expect("start");
     destroy_capture_link_from(from);
-    let (reason, _) = reasons
-        .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
-        .expect("a device-change report");
+    let reason = next_report(&reasons);
     assert_eq!(reason, gone, "the link from {from}");
     stop_and_check_teardown(&backend, &sink);
 }
@@ -908,9 +915,7 @@ fn a_microphone_that_goes_away_is_reported_gone() {
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, Some(mic.name), &sink).expect("start");
     mic.destroy();
-    let (reason, _) = reasons
-        .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
-        .expect("a device-change report");
+    let reason = next_report(&reasons);
     assert_eq!(reason, DeviceChangeReason::InputDeviceGone);
     stop(&backend);
     assert_eq!(
@@ -930,9 +935,7 @@ fn a_microphone_that_goes_away_during_a_call_is_reported_as_the_input_gone() {
     start(&backend, &lanes, Some(mic.name), &sink).expect("start");
     // The server removes Steno's link to it too; the output stays.
     mic.destroy();
-    let (reason, _) = reasons
-        .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
-        .expect("a device-change report");
+    let reason = next_report(&reasons);
     assert_eq!(
         reason,
         DeviceChangeReason::InputDeviceGone,
