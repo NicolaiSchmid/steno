@@ -26,10 +26,10 @@
 //!
 //! A round the machine stretched past the coalescing delay is not held to
 //! the one-burst checks (the timing of its one report, or no report for a
-//! default that came back), and the test prints that. A missing report says whether the session
-//! manager never moved the default or the capture missed the move. The
-//! backend's logs go to the test output, at `info` unless a non-empty
-//! `RUST_LOG` says otherwise.
+//! default that came back), and the test prints that. A missing report
+//! says whether the session manager never moved the default or the
+//! capture missed the move. The backend's logs go to the test output, at
+//! `info` unless a non-empty `RUST_LOG` says otherwise.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -517,14 +517,14 @@ fn moving_the_default_output_is_reported_once() {
 /// the last switch; when `timed`, the report must come no sooner than the
 /// coalescing delay after it.
 ///
-/// WirePlumber moves `default.audio.sink` after the configured one, so the
-/// report gets time, and a failure says which side missed: WirePlumber, which did
-/// not move the default, or the capture, which did not report the move.
-/// The metadata is read only once the report is late: a client binding it
-/// while WirePlumber moves the default can keep that move from every
-/// client already bound (seen with WirePlumber 0.5.14 and PipeWire 1.6.5),
-/// so polling it here would make the miss it looks for. `context`
-/// prefixes the failure messages.
+/// WirePlumber moves `default.audio.sink` after the configured one, so
+/// the report gets time, and a failure says which side missed:
+/// WirePlumber, which did not move the default, or the capture, which did
+/// not report the move. The metadata is read only once the report is
+/// late: a client binding it while WirePlumber moves the default can keep
+/// that move from every client already bound (seen with WirePlumber
+/// 0.5.14 and PipeWire 1.6.5), so polling it here would make the miss it
+/// looks for. `context` prefixes the failure messages.
 fn assert_output_moved_once(
     reasons: &Receiver<Report>,
     to: &str,
