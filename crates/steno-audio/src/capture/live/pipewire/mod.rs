@@ -212,16 +212,15 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
 
 /// The capture and playback latencies in frames at [`SAMPLE_RATE`], for a
 /// first cycle of `cycle` frames on a graph whose clock ticks `clock` (the
-/// stream's `1/48000` at 48 kHz; a zero denominator reads as 48 kHz).
+/// stream's `1/48000` at 48 kHz; none or a zero denominator reads as 48
+/// kHz).
 fn latency_frames(
     (input, output): (Latency, Latency),
     cycle: usize,
-    clock: spa::utils::Fraction,
+    clock: Option<spa::utils::Fraction>,
 ) -> (usize, usize) {
-    (
-        input.frames(cycle, clock.denom),
-        output.frames(cycle, clock.denom),
-    )
+    let rate = clock.map_or(0, |clock| clock.denom);
+    (input.frames(cycle, rate), output.frames(cycle, rate))
 }
 
 /// A `pipewire` error as a backend failure naming what failed.
@@ -777,12 +776,7 @@ impl Capture {
             return Err(connection.stalled("run the capture"));
         }
         let cycle = self.cycle_frames.load(Ordering::Relaxed);
-        let clock = self
-            .stream
-            .time()
-            .map_or(spa::utils::Fraction { num: 0, denom: 0 }, |time| {
-                time.rate()
-            });
+        let clock = self.stream.time().ok().map(|time| time.rate());
         // Its own deadline: a first cycle late in the start's must not cut
         // the read short and leave the far-end delay at zero.
         let latencies = self.latencies(Instant::now() + LATENCY_TIMEOUT);
@@ -1432,12 +1426,11 @@ mod tests {
             num: 1,
             denom: 44_100,
         };
-        assert_eq!(latency_frames((input, output), 1_024, clock), (480, 1_024));
-        let unknown = spa::utils::Fraction { num: 0, denom: 0 };
         assert_eq!(
-            latency_frames((input, output), 1_024, unknown),
-            (441, 1_024)
+            latency_frames((input, output), 1_024, Some(clock)),
+            (480, 1_024)
         );
+        assert_eq!(latency_frames((input, output), 1_024, None), (441, 1_024));
     }
 
     #[test]
