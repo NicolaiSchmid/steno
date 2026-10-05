@@ -165,19 +165,28 @@ start_daemons() {
 # it before: a daemon can come up that never sends one (about one start in
 # thirty, with or without Steno), and every device-change test then fails.
 # A watcher binds, a probe key is written, and the watcher must print it
-# within 2 s.
+# within 2 s. Every pw-metadata call has a time limit, so a daemon that
+# hangs fails the probe instead of holding the run.
 broadcasts_metadata() {
-  local log="$root/probe.log" watcher seen=""
+  local log="$root/probe.log" watcher seen="" bound=""
+  # Emptied here: the watcher's own redirect may come after the first grep,
+  # which would then read the last start's log.
+  : >"$log"
   stdbuf -oL pw-metadata -m -n default >"$log" 2>&1 &
   watcher=$!
   # Bound once it printed the defaults the daemon already holds.
   for _ in $(seq 1 50); do
     if grep "key:'default.audio.sink'" "$log" >/dev/null; then
+      bound=1
       break
     fi
     sleep 0.1
   done
-  if pw-metadata -n default 0 steno.probe "$$" >/dev/null 2>&1; then
+  if [[ -z "$bound" ]]; then
+    terminate "$watcher"
+    return 1
+  fi
+  if timeout 2 pw-metadata -n default 0 steno.probe "$$" >/dev/null 2>&1; then
     for _ in $(seq 1 20); do
       if grep "key:'steno.probe'" "$log" >/dev/null; then
         seen=1
@@ -187,7 +196,7 @@ broadcasts_metadata() {
     done
   fi
   terminate "$watcher"
-  pw-metadata -n default -d 0 steno.probe >/dev/null 2>&1 || true
+  timeout 2 pw-metadata -n default -d 0 steno.probe >/dev/null 2>&1 || true
   [[ -n "$seen" ]]
 }
 
