@@ -11,7 +11,12 @@ const native: Record<Platform, { audio: string; speech: string }> = {
 		audio: "Core Audio process tap",
 		speech: "Parakeet TDT v3 on the Neural Engine (CoreML)",
 	},
-	win: { audio: "WASAPI process loopback", speech: onnxSpeech },
+	win: {
+		audio: "WASAPI process loopback",
+		// DirectML is built in but off by default and has no Settings toggle
+		// until gate G4 is measured (rust-core plan, WP10b).
+		speech: `${onnxSpeech}, on the CPU for now; GPU acceleration through DirectML is being measured`,
+	},
 	linux: {
 		audio: "PipeWire monitor of the default output",
 		speech: onnxSpeech,
