@@ -131,9 +131,7 @@ pub struct SidecarHealth {
     pub provider: Option<EncoderProvider>,
 }
 
-/// Set once a child crashed, hung or overran the memory ceiling during a
-/// load or a request with `DirectML` in use, or overran it between requests
-/// after one (see the module docs). Process-wide, so it holds for the rest
+/// Backs [`directml_switched_off`]. Process-wide, so it holds for the rest
 /// of the app's run: `steno-services` builds a new engine on every pipeline
 /// reload, and none of them asks for `DirectML` again. Nothing clears it.
 static DIRECTML_SWITCHED_OFF: AtomicBool = AtomicBool::new(false);
@@ -642,13 +640,13 @@ impl Shared {
     /// no audio was sent yet, so a new child loads on the CPU within the
     /// same call. Blocking; the caller holds the lock.
     fn ensure_loaded(&self, slot: &mut Option<SidecarProcess>) -> Result<(), SpeechError> {
-        if let Some(error) = slot.as_mut().and_then(SidecarProcess::failed_while_idle) {
+        if let Some(process) = slot.as_mut()
+            && let Some(error) = process.failed_while_idle()
+        {
             // Replaced without an error, and on `DirectML` still: no load
             // or request ran on it. Not after an overrun: what the child
             // holds then is what its last request left, on the GPU too.
-            if !matches!(error, SidecarError::MemoryCeiling { .. })
-                && let Some(process) = slot.as_mut()
-            {
+            if !matches!(error, SidecarError::MemoryCeiling { .. }) {
                 process.provider = None;
                 process.load_asked_directml = false;
             }
