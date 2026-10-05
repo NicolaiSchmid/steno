@@ -259,4 +259,34 @@ describe("usePlatform and useShortcut", () => {
 		expect(action).toHaveBeenCalledTimes(1);
 	});
 
+	it("leave a press alone that a handler took or that lands in a popup", () => {
+		const action = vi.fn();
+		function Probe() {
+			useShortcut(SHORTCUTS.findMeetings, action);
+			return (
+				<>
+					<input data-testid="taken" onKeyDown={(e) => e.preventDefault()} />
+					<div role="dialog">
+						<input data-testid="in-dialog" />
+					</div>
+					<div role="menu">
+						<button data-testid="in-menu" type="button" />
+					</div>
+					<input data-testid="page" />
+				</>
+			);
+		}
+		const { getByTestId } = render(
+			<PlatformProvider platform={platformFor("linux")}>
+				<Probe />
+			</PlatformProvider>,
+		);
+		for (const id of ["taken", "in-dialog", "in-menu"]) {
+			fireEvent.keyDown(getByTestId(id), { key: "f", ctrlKey: true });
+		}
+		expect(action).not.toHaveBeenCalled();
+		fireEvent.keyDown(getByTestId("page"), { key: "f", ctrlKey: true });
+		expect(action).toHaveBeenCalledTimes(1);
+	});
+
 });

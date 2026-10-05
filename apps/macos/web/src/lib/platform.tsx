@@ -333,9 +333,23 @@ export function usePlatform(): Platform {
 }
 
 /**
+ * The open popups Base UI renders: dialogs and popovers ("dialog"),
+ * alert dialogs, menus and select lists.
+ */
+const POPUP =
+	'[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]';
+
+/** Whether a key event's target sits inside an open popup (`POPUP`). */
+function inPopup(target: EventTarget | null): boolean {
+	return target instanceof Element && target.closest(POPUP) !== null;
+}
+
+/**
  * Runs `action` when `shortcut` is pressed anywhere in the window, while
- * `enabled`; the key press goes no further. The latest `action` runs, so
- * a caller may pass a fresh closure on every render.
+ * `enabled`; the key press goes no further. A press another handler
+ * already took, or one inside an open dialog, popover or menu, is left
+ * alone. The latest `action` runs, so a caller may pass a fresh closure
+ * on every render.
  */
 export function useShortcut(
 	shortcut: Shortcut,
@@ -350,7 +364,12 @@ export function useShortcut(
 			return;
 		}
 		const onKeyDown = (event: KeyboardEvent) => {
-			if (!event.repeat && platform.matches(event, shortcut)) {
+			if (
+				!event.repeat &&
+				!event.defaultPrevented &&
+				!inPopup(event.target) &&
+				platform.matches(event, shortcut)
+			) {
 				event.preventDefault();
 				latest.current();
 			}

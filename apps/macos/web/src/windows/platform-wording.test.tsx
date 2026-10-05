@@ -1,4 +1,4 @@
-import { act, fireEvent, screen } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type {
@@ -12,12 +12,15 @@ import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingDetail } from "./main/meeting-detail";
 import { MeetingList } from "./main/meeting-list";
 import { Sidebar } from "./main/sidebar";
+import { TranscriptTab } from "./main/transcript-tab";
 import { OnboardingWindow } from "./onboarding/onboarding-window";
 import { GeneralSection } from "./settings/general-section";
 import { RecordingSection } from "./settings/recording-section";
 import { SettingsWindow } from "./settings/settings-window";
 import { SummariesSection } from "./settings/summaries-section";
 import { TranscriptionSection } from "./settings/transcription-section";
+
+const NICOLAI = "00000000-0000-0000-0000-000000000014";
 
 /**
  * Each platform's words and keys in the windows that name the machine, the
@@ -77,6 +80,28 @@ describe("the meeting list", () => {
 		fireEvent.keyDown(window, { key: "f", metaKey: true });
 		expect(screen.getByTestId("search-meetings")).toHaveFocus();
 	});
+
+	it("leaves Ctrl+F to the speaker picker while it has focus", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness();
+		const detail = (await loadFixtureSnapshots())[
+			"meeting.detail"
+		] as MeetingDetailSnapshot;
+		renderWithBridge(
+			<>
+				<MeetingList />
+				<TranscriptTab detail={detail} />
+			</>,
+			harness,
+			platformFor("linux"),
+		);
+		await user.click(screen.getByTestId(`speaker-picker-${NICOLAI}`));
+		const field = await screen.findByTestId(`speaker-field-${NICOLAI}`);
+		expect(field).toHaveFocus();
+		fireEvent.keyDown(field, { key: "f", ctrlKey: true });
+		expect(field).toHaveFocus();
+		expect(screen.getByTestId("search-meetings")).not.toHaveFocus();
+	});
 });
 
 describe("the meeting detail", () => {
@@ -134,6 +159,25 @@ describe("the meeting detail", () => {
 		});
 		fireEvent.keyDown(window, { key: "E", ctrlKey: true, shiftKey: true });
 		expect(callsTo(harness.transport, "meeting.reexport")).toHaveLength(1);
+	});
+
+	it("does not export again while the actions menu is open", async () => {
+		const user = userEvent.setup();
+		const harness = await createBridgeHarness("", {
+			"meeting.detail": await delivered(),
+		});
+		renderWithBridge(<MeetingDetail />, harness, platformFor("windows"));
+		await user.click(screen.getByRole("button", { name: "More actions" }));
+		const menu = await screen.findByRole("menu");
+		await waitFor(() =>
+			expect(menu).toContainElement(document.activeElement as HTMLElement),
+		);
+		fireEvent.keyDown(document.activeElement as Element, {
+			key: "E",
+			ctrlKey: true,
+			shiftKey: true,
+		});
+		expect(callsTo(harness.transport, "meeting.reexport")).toHaveLength(0);
 	});
 
 	it("says where the audio stays while processing", async () => {
