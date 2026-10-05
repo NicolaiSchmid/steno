@@ -1518,6 +1518,19 @@ request that fixes it.
   about 20 s at exit to release its bus name (measured with #172; upstream behaviour),
   and WebKitGTK leaks a file descriptor per destroyed webview (issue #160). Where:
   `apps/desktop/src-tauri/src/main.rs`, `apps/desktop/README.md`. Found: #172.
+- **first Linux release.** The web UI speaks Mac on every platform: "Reveal in
+  Finder", "on this Mac" and ⌘ shortcuts show on Linux (and on Windows), seen in the
+  Linux smoke under Xvfb. The platform's wording has to come from the shell (the
+  host's platform in a snapshot), not from the web app. Where: `apps/macos/web/src`
+  (`windows/main/meeting-detail.tsx`, `windows/main/processing-card.tsx`,
+  `windows/onboarding/setup-page.tsx`, `windows/settings/`, `components/ui/menu.tsx`).
+  Found: the whole-app smoke of #195.
+- **first Linux release.** After a delivery to a vault the CLI named
+  (`steno deliver --vault`), the meeting footer shows the raw destination id
+  `obsidian-folder@<path>`: `destination_display_name` names only the stored Obsidian
+  destination's id and shows any other id as it is. Where:
+  `crates/steno-host/src/labels.rs`, `crates/steno-cli/src/commands/deliver.rs`.
+  Found: the whole-app smoke of #195.
 - **first Linux release.** The first `desktop-v*` tag is the first run of the
   `publish` job against GitHub and the first MSI built for an `-rc.N` version. Where:
   `.github/workflows/desktop-release.yml`. Found: #184.
@@ -1572,6 +1585,14 @@ request that fixes it.
 - **unowned.** CI: the self-hosted macOS runner's shared pnpm setup directory lets
   `pnpm/action-setup` on one runner break another's install (a rerun passes); it needs
   a per-runner `PNPM_HOME` or a runner-local pnpm across the workflows. Found: #184.
+- **unowned.** `steno process --title` stores the title with `TitleOrigin::Default`
+  (`crates/steno-cli/src/commands/process.rs`), so the app shows the default date
+  title while the export uses the given one. Swift's CLI does the same, so a fix
+  changes both or neither. Found: the whole-app smoke of #195.
+- **unowned.** `scripts/pipewire-headless.sh` fails when `TMPDIR` is long: its
+  socket path under the `mktemp` directory passes the 108-byte limit of a Unix socket
+  path ("File name too long"). A short base directory for the socket fixes it. Found:
+  the whole-app smoke of #195.
 - **unowned.** The Windows GNU cross toolchain used for local Windows checks is no
   longer available on the Linux build host, so Windows-only code is checked by the
   `windows-latest` CI job alone until it is restored. Found after #187.
