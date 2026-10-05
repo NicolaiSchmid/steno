@@ -1320,8 +1320,8 @@ item to settle before the Linux release:
 
 ### Handover
 
-Rust fixes the Swift behaviours below except the network and service name lines; each
-fix is ported to Swift before cutover.
+Rust fixes the Swift behaviours below except the network, service name, write order and
+touch lines; each fix is ported to Swift before cutover.
 
 - Network, same as Swift: Rust refuses tunnels. On Linux and macOS that is every
   point-to-point interface, which most tunnels there are (`wg0`, `tun0`, `utun3`); on
@@ -1340,13 +1340,14 @@ fix is ported to Swift before cutover.
   moved there is unreachable.
 - Write order: both apps commit every store write of the engine (receipt saves, the
   revoke's delete, the pairing's save, the touch) in the order it was asked for: each
-  waits until the one asked before it has returned, also when the request that asked
-  for it is gone (Swift #205 `HandoverEngine.inOrder`, Rust #207 `Engine::in_order`).
-  So a revoke during a pairing's save deletes after it and the phone stays revoked
-  after a restart, and a pairing during a revoke's delete saves after it and stays.
-  Rust takes the place in line under the state lock together with the memory the
-  write stands for (the revoke count, the pairing's read of it, the receipt); the
-  actor gives Swift the same.
+  waits until the one asked for before it has returned, also when the request that
+  asked for it is gone (Swift #205 `HandoverEngine.inOrder`, `Engine::in_order`). So a
+  revoke during a pairing's save deletes after it and the phone stays revoked after a
+  restart, and a pairing during a revoke's delete saves after it and stays. Rust takes
+  the place in line under the state lock together with the memory the write stands
+  for (the revoke count, the pairing's read of it, the receipt); in Swift the actor
+  makes the two one step. The intake's own receipt saves (`RecordingIntake::admit`,
+  `RecordingIntake.admit`) run outside the line in both apps.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
@@ -1709,6 +1710,15 @@ request that fixes an item deletes it.
   re-pairing. Where: `onUnauthorized` is `clearPairing` in
   `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
   `mobile/src/features/sync/recording-client.ts`. Found: #191.
+- **Unowned.** Rust only: the chunk route reads the live receipt after its file write
+  and saves it back with the chunk added in a second lock section, so two chunks of
+  one recording that land at once on the multi-thread runtime can both start from the
+  same copy, and the later save drops the earlier one's chunk, in memory and in the
+  store. `reannounce` saves the copy it read before its inbox checks the same way.
+  The upload heals: `complete` answers 409 with the chunk missing and the phone sends
+  it again. Swift's actor makes the read and the save one step. Where:
+  `receive_chunk` and `reannounce` in `crates/steno-handover/src/engine/recording.rs`.
+  Found: #207.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
