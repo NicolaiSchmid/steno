@@ -326,13 +326,14 @@ impl Engine {
 
     /// Runs `write` on the blocking pool once the write asked for before it
     /// (`place`) has returned. The pool runs its calls in any order, so
-    /// without the line an older receipt could commit over a newer one, a
-    /// revoke's delete could remove the pairing asked for after it, and a
-    /// revoke's delete could commit before the pairing's save asked for
-    /// before it, which leaves the revoked phone in the store. The write runs in a task of its own, so it keeps its
-    /// place, and the writes behind it wait for it, also when the request
-    /// that asked for it is dropped. A failed write does not hold up the
-    /// next; reads do not wait. Swift: `HandoverEngine.inOrder`.
+    /// without the line an older receipt could commit over a newer one, and
+    /// a revoke's delete could remove the pairing asked for after it or
+    /// commit before the pairing's save asked for before it, which leaves
+    /// the revoked phone in the store. The write runs in a task of its own,
+    /// so it keeps its place, and the writes behind it wait for it, also
+    /// when the request that asked for it is dropped. A failed write does
+    /// not hold up the next; reads do not wait. Swift:
+    /// `HandoverEngine.inOrder`.
     async fn in_order<T: Send + 'static>(
         &self,
         place: InOrder,
