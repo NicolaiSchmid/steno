@@ -78,18 +78,14 @@ for file in "${assets[@]}"; do
 done
 [[ ${#signed[@]} -gt 1 ]] || echo "::warning::no .deb or .AppImage in $dir; only SHA256SUMS is signed" >&2
 
+# Each file signed, then checked with gpgv, which trusts exactly the keys
+# in --keyring: the committed one.
 for file in "${signed[@]}"; do
   gpg_sign --quiet --local-user "$fingerprint!" --armor --detach-sign --output "$file.asc" -- "$file" \
     || { echo "::error::could not sign $file with $fingerprint; is GPG_PRIVATE_KEY the secret half of $public_key, and GPG_PASSPHRASE its passphrase?" >&2; exit 1; }
-done
-
-# gpgv trusts exactly the keys in --keyring: the committed one.
-for file in "${signed[@]}"; do
   status="$(GNUPGHOME="$verifying" gpgv --keyring "$keyring" --status-fd 1 -- "$file.asc" "$file" || true)"
-  if ! grep -q "^\[GNUPG:\] VALIDSIG $fingerprint " <<< "$status"; then
-    echo "::error::$file.asc does not verify against $public_key" >&2
-    exit 1
-  fi
+  grep -q "^\[GNUPG:\] VALIDSIG $fingerprint " <<< "$status" \
+    || { echo "::error::$file.asc does not verify against $public_key" >&2; exit 1; }
   echo "verified $file.asc" >&2
 done
 
