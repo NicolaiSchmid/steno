@@ -1,21 +1,23 @@
-//! Linux: a logout and a shutdown, which reach the app as no exit request
-//! of their own. Two D-Bus clients run the shutdown Quit runs before the
-//! app goes (`Ending`), each on a thread of its own:
+//! Linux: a logout and a system shutdown or reboot, which reach the app as
+//! no exit request of their own. Two D-Bus clients run the shutdown Quit
+//! runs before the app goes (`SaveAndQuit`), each on a thread of its own:
 //!
-//! - **A logout** on GNOME, and on every desktop whose session manager
-//!   serves GNOME's client API (`org.gnome.SessionManager` on the session
-//!   bus): the app registers as a session client (`RegisterClient`),
+//! - **A logout** on GNOME or Xfce: the app registers as a client of the
+//!   session manager on the session bus (`RegisterClient`; GNOME's
+//!   `org.gnome.SessionManager` first, then Xfce's `org.xfce.SessionManager`,
+//!   which serves the same protocol under names of its own, `SessionApi`),
 //!   answers `QueryEndSession` at once, and on `EndSession` saves first and
-//!   answers `EndSessionResponse` after, so the session ends, and the
-//!   display closes, only once the recording is saved (the session manager
-//!   waits a bounded time for every client's answer). A `GtkApplication`
-//!   that sets `register-session` does the same; tao's does not.
-//! - **A shutdown or a reboot**: the app holds logind's `shutdown` delay
-//!   lock (`Inhibit` on the system bus), and on `PrepareForShutdown(true)`
-//!   it saves and then releases the lock. logind waits for the lock at most
-//!   its `InhibitDelayMaxSec`, five seconds by default, and then goes
-//!   ahead; the SIGTERM that follows finds the save running and waits for
-//!   it (`exit_on_signals` in `main.rs`).
+//!   answers `EndSessionResponse` after, then quits. gnome-session waits
+//!   about ten seconds for that answer (older releases ninety), as long as
+//!   `SHUTDOWN_PATIENCE`, so a save that needs all of its patience can be
+//!   cut off when the session ends. A `GtkApplication` that sets
+//!   `register-session` does the same; tao's does not.
+//! - **A system shutdown or reboot**: the app holds logind's `shutdown`
+//!   delay lock (`Inhibit` on the system bus), and on
+//!   `PrepareForShutdown(true)` it saves and then releases the lock. logind
+//!   waits for the lock at most its `InhibitDelayMaxSec`, five seconds by
+//!   default, and then goes ahead; the SIGTERM that follows finds the save
+//!   running and waits for it (`exit_on_signals` in `main.rs`).
 //!
 //! Neither follows sleep or the screen lock: a recording goes on through
 //! both, as it does on the Mac. A bus that is missing or refuses, a session
@@ -23,9 +25,11 @@
 //! it was before: it saves when a signal reaches it. A slow or frozen bus
 //! holds only its client's thread, never the launch or an exit.
 //!
-//! Open: KDE Plasma and Xfce serve neither API (Plasma's portal has no
-//! session monitor; both speak XSMP to X11 clients, which GTK 3 dropped),
-//! so a logout there saves only when systemd signals the app.
+//! Open: KDE Plasma serves no session-manager client API on D-Bus
+//! (Plasma's portal has no session monitor; its session manager speaks
+//! XSMP to X11 clients, which GTK 3 dropped), so a logout there saves only
+//! when systemd signals the app. logind runs there too, so the shutdown
+//! lock works there.
 //!
 //! Swift: none; `AppKit` sends a logout and a shutdown to
 //! `applicationShouldTerminate`, which Quit goes through too.
@@ -36,16 +40,42 @@ use std::time::Duration;
 use zbus::blocking::connection::Builder;
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::message::Type;
+use zbus::names::{BusName, OwnedUniqueName};
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::{OwnedFd, OwnedObjectPath};
 
-/// GNOME's session manager, its object and the interface a client
-/// registers through.
-const SESSION_MANAGER: &str = "org.gnome.SessionManager";
-const SESSION_MANAGER_PATH: &str = "/org/gnome/SessionManager";
-/// The interface of a registered client's object: the manager's signals to
-/// it and its answer.
-const CLIENT_PRIVATE: &str = "org.gnome.SessionManager.ClientPrivate";
+/// A session manager's client protocol: GNOME's, which Xfce serves under
+/// names of its own (GTK 3.24 falls back to them too).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionApi {
+    /// The manager's name on the session bus.
+    name: &'static str,
+    /// Its object.
+    path: &'static str,
+    /// The interface a client registers through (`RegisterClient`).
+    manager: &'static str,
+    /// The interface of a registered client's object: the manager's
+    /// signals to it and its answer (`EndSessionResponse`).
+    client: &'static str,
+}
+
+impl SessionApi {
+    const GNOME: Self = Self {
+        name: "org.gnome.SessionManager",
+        path: "/org/gnome/SessionManager",
+        manager: "org.gnome.SessionManager",
+        client: "org.gnome.SessionManager.ClientPrivate",
+    };
+    const XFCE: Self = Self {
+        name: "org.xfce.SessionManager",
+        path: "/org/xfce/SessionManager",
+        manager: "org.xfce.Session.Manager",
+        client: "org.xfce.Session.Client",
+    };
+    /// In the order the app looks for them on the bus.
+    const ALL: [Self; 2] = [Self::GNOME, Self::XFCE];
+}
+
 /// The id the session manager knows the app by: its desktop entry's name
 /// (`linux/steno-desktop.desktop`) without the suffix.
 const APP_ID: &str = "steno-desktop";
@@ -64,12 +94,12 @@ const CALL_PATIENCE: Duration = Duration::from_secs(5);
 /// `SHUTDOWN_PATIENCE` later (at once when it already ran); `quit` asks
 /// for the exit, which then goes through at once.
 #[derive(Clone)]
-pub struct Ending {
+pub struct SaveAndQuit {
     save: Arc<dyn Fn() + Send + Sync>,
     quit: Arc<dyn Fn() + Send + Sync>,
 }
 
-impl Ending {
+impl SaveAndQuit {
     /// The app's: the pipeline quits first, as for an exit signal, then
     /// the shutdown runs on the calling thread's behalf
     /// (`shut_down_before_exit`), then Quit.
@@ -85,22 +115,31 @@ impl Ending {
     }
 }
 
+/// The startup id the session manager gave the app when it started it (an
+/// autostart at login), so it knows the client; empty otherwise. Read
+/// before Tauri builds the app: GTK unsets `DESKTOP_AUTOSTART_ID` when it
+/// starts.
+pub fn startup_id() -> String {
+    std::env::var("DESKTOP_AUTOSTART_ID").unwrap_or_default()
+}
+
 /// Starts both clients, the session's only with a session bus (the
-/// definition the single instance uses, `session_bus_named`).
-pub fn watch(app: &tauri::AppHandle) {
-    let ending = Ending::of(app);
+/// definition the single instance uses, `session_bus_named`); `startup_id`
+/// is what `startup_id` read at launch.
+pub fn watch(app: &tauri::AppHandle, startup_id: String) {
+    let on_end = SaveAndQuit::of(app);
     if crate::session_bus_named() {
-        let ending = ending.clone();
-        run(
+        let on_end = on_end.clone();
+        spawn_client(
             "steno-session-client",
             "a logout saves only when a signal reaches the app",
-            move || follow_session(&patient(Builder::session()?)?, &startup_id(), &ending),
+            move || follow_session(&patient(Builder::session()?)?, &startup_id, &on_end),
         );
     }
-    run(
+    spawn_client(
         "steno-shutdown-lock",
-        "a shutdown saves only when a signal reaches the app",
-        move || hold_shutdown_lock(&patient(Builder::system()?)?, &ending),
+        "a system shutdown or reboot saves only when a signal reaches the app",
+        move || hold_shutdown_lock(&patient(Builder::system()?)?, &on_end),
     );
 }
 
@@ -112,7 +151,7 @@ fn patient(builder: Builder<'_>) -> zbus::Result<Connection> {
 
 /// Runs `client` on a thread named `name`; an error ends it with `gap`,
 /// what the app is left without, in the log.
-fn run(
+fn spawn_client(
     name: &'static str,
     gap: &'static str,
     client: impl FnOnce() -> zbus::Result<()> + Send + 'static,
@@ -127,12 +166,6 @@ fn run(
     if let Err(error) = spawned {
         tracing::warn!(%error, client = name, "{gap}");
     }
-}
-
-/// The startup id the session manager gave the app when it started it
-/// (an autostart at login), so it knows the client; empty otherwise.
-fn startup_id() -> String {
-    std::env::var("DESKTOP_AUTOSTART_ID").unwrap_or_default()
 }
 
 /// A proxy that caches no property: neither client reads one, and the
@@ -174,30 +207,52 @@ fn client_step(member: &str) -> ClientStep {
     }
 }
 
+/// The first session manager of `SessionApi::ALL` on `session`, with the
+/// unique name that owns it. Asked of the bus (`GetNameOwner`), so asking
+/// starts none.
+fn session_manager(session: &Connection) -> zbus::Result<(SessionApi, OwnedUniqueName)> {
+    let bus = zbus::blocking::fdo::DBusProxy::builder(session)
+        .cache_properties(CacheProperties::No)
+        .build()?;
+    for api in SessionApi::ALL {
+        match bus.get_name_owner(BusName::try_from(api.name)?) {
+            Ok(owner) => return Ok((api, owner)),
+            Err(zbus::fdo::Error::NameHasNoOwner(_)) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(zbus::Error::Failure(
+        "no session manager on the bus".to_owned(),
+    ))
+}
+
 /// Registers the app with the session manager on `session` and follows
-/// its signals to this client until the session ends; an error when the
-/// manager is not there or the bus goes away.
-fn follow_session(session: &Connection, startup_id: &str, ending: &Ending) -> zbus::Result<()> {
-    // Subscribed before the app registers, so no signal falls between.
+/// its signals to this client until the session ends; an error when no
+/// manager is there or the bus goes away before the app quit.
+fn follow_session(
+    session: &Connection,
+    startup_id: &str,
+    on_end: &SaveAndQuit,
+) -> zbus::Result<()> {
+    let (api, owner) = session_manager(session)?;
+    // Subscribed before the app registers, so no signal falls between. The
+    // rule names the manager's unique name, which zbus also checks on
+    // every message it delivers, so a signal another peer sends straight
+    // to the app, past the bus's rules, is dropped too.
     let rule = zbus::MatchRule::builder()
         .msg_type(Type::Signal)
-        .sender(SESSION_MANAGER)?
-        .interface(CLIENT_PRIVATE)?
+        .sender(owner.as_str())?
+        .interface(api.client)?
         .build();
     let signals = MessageIterator::for_match_rule(rule, session, None)?;
-    let manager = proxy(
-        session,
-        SESSION_MANAGER,
-        SESSION_MANAGER_PATH,
-        SESSION_MANAGER,
-    )?;
+    let manager = proxy(session, owner.as_str(), api.path, api.manager)?;
     let client: OwnedObjectPath = manager.call("RegisterClient", &(APP_ID, startup_id))?;
     let answer = || {
         session
             .call_method(
-                Some(SESSION_MANAGER),
+                Some(owner.as_str()),
                 client.as_str(),
-                Some(CLIENT_PRIVATE),
+                Some(api.client),
                 "EndSessionResponse",
                 &(true, ""),
             )
@@ -222,25 +277,26 @@ fn follow_session(session: &Connection, startup_id: &str, ending: &Ending) -> zb
                 }
             }
             ClientStep::SaveAnswerQuit => {
-                (ending.save)();
+                (on_end.save)();
                 let answered = answer();
-                (ending.quit)();
+                (on_end.quit)();
                 return answered;
             }
             ClientStep::Quit => {
-                (ending.quit)();
+                (on_end.quit)();
                 return Ok(());
             }
             ClientStep::Wait => {}
         }
     }
-    Ok(())
+    Err(zbus::Error::Failure("the session bus closed".to_owned()))
 }
 
-/// Holds logind's `shutdown` delay lock on `system` until a shutdown
-/// begins, then saves, releases it and quits; an error when logind is not
-/// there or denies the lock.
-fn hold_shutdown_lock(system: &Connection, ending: &Ending) -> zbus::Result<()> {
+/// Holds logind's `shutdown` delay lock on `system` until a system
+/// shutdown or reboot begins, then saves, releases it and quits; an error
+/// when logind is not there, denies the lock, or the bus goes away before
+/// the app quit.
+fn hold_shutdown_lock(system: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()> {
     let manager = proxy(system, LOGIND, LOGIND_PATH, LOGIND_MANAGER)?;
     // Subscribed before the lock is taken, so no shutdown falls between.
     let shutdowns = manager.receive_signal("PrepareForShutdown")?;
@@ -256,13 +312,13 @@ fn hold_shutdown_lock(system: &Connection, ending: &Ending) -> zbus::Result<()> 
     for signal in shutdowns {
         // `false` reports a shutdown called off, which no lock needs.
         if signal.body().deserialize::<bool>()? {
-            (ending.save)();
+            (on_end.save)();
             drop(lock);
-            (ending.quit)();
+            (on_end.quit)();
             return Ok(());
         }
     }
-    Ok(())
+    Err(zbus::Error::Failure("the system bus closed".to_owned()))
 }
 
 #[cfg(test)]
@@ -337,18 +393,24 @@ mod tests {
         }
     }
 
-    /// An `Ending` that notes its steps; `save` takes a moment, so a lock
-    /// released or an answer sent before it ended would be noted first.
-    fn noting(steps: &Arc<Mutex<Vec<String>>>) -> Ending {
+    type Steps = Arc<Mutex<Vec<String>>>;
+
+    /// A `SaveAndQuit` that notes its steps; `save` takes a moment, so a
+    /// lock released or an answer sent before it ended would be noted
+    /// first.
+    fn noting(steps: &Steps) -> SaveAndQuit {
         let (saving, quitting) = (steps.clone(), steps.clone());
-        Ending {
+        SaveAndQuit {
             save: Arc::new(move || {
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(SAVE);
                 saving.lock().unwrap().push("saved".to_owned());
             }),
             quit: Arc::new(move || quitting.lock().unwrap().push("quit".to_owned())),
         }
     }
+
+    /// How long `noting`'s save takes.
+    const SAVE: Duration = Duration::from_millis(200);
 
     /// Runs `client` on a thread; its result arrives on the receiver.
     fn spawn(
@@ -387,9 +449,9 @@ mod tests {
         }
     }
 
-    /// The client takes the `shutdown` delay lock, ignores a shutdown
-    /// called off, and on a shutdown saves, releases the lock after the
-    /// save, and quits.
+    /// The client takes the `shutdown` delay lock, does nothing on a
+    /// shutdown called off, and on a shutdown saves, releases the lock
+    /// after the save, and quits.
     #[test]
     fn a_shutdown_saves_before_the_lock_is_released_and_then_quits() {
         let Some(daemon) = Daemon::start() else {
@@ -404,9 +466,9 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let steps = Arc::new(Mutex::new(Vec::new()));
-        let (client, ending) = (daemon.connect(), noting(&steps));
-        let result = spawn(move || hold_shutdown_lock(&client, &ending));
+        let steps = Steps::default();
+        let (client, on_end) = (daemon.connect(), noting(&steps));
+        let result = spawn(move || hold_shutdown_lock(&client, &on_end));
 
         let (arguments, mut lock) = inhibits.recv_timeout(WAIT).expect("the lock was taken");
         assert_eq!(
@@ -438,6 +500,10 @@ mod tests {
                 .unwrap();
         };
         emit(false);
+        // Longer than a save, so a client that acted on it would be seen.
+        std::thread::sleep(SAVE * 2);
+        assert!(steps.lock().unwrap().is_empty(), "{steps:?}");
+        assert!(result.try_recv().is_err(), "the client ended");
         emit(true);
         result
             .recv_timeout(WAIT)
@@ -451,103 +517,236 @@ mod tests {
         assert!(at("saved") < at("quit"), "{steps:?}");
     }
 
-    /// GNOME's session manager as far as one client goes: it registers it
-    /// at `CLIENT` and notes its answers.
-    struct FakeSessionManager {
-        registered: mpsc::Sender<(String, String)>,
+    /// A session manager's two objects as far as one client goes, under
+    /// one API's interface names: the manager registers the client at
+    /// `client` and the client's object notes its answers.
+    macro_rules! fake_session_manager {
+        ($module:ident, $manager:tt, $client:tt) => {
+            mod $module {
+                use super::*;
+
+                struct Manager {
+                    client: OwnedObjectPath,
+                    registered: mpsc::Sender<(String, String)>,
+                }
+
+                #[zbus::interface(name = $manager)]
+                impl Manager {
+                    fn register_client(
+                        &self,
+                        app_id: String,
+                        startup_id: String,
+                    ) -> OwnedObjectPath {
+                        let _ = self.registered.send((app_id, startup_id));
+                        self.client.clone()
+                    }
+                }
+
+                struct Client {
+                    steps: Steps,
+                    answered: mpsc::Sender<()>,
+                }
+
+                #[zbus::interface(name = $client)]
+                impl Client {
+                    fn end_session_response(&self, is_ok: bool, reason: String) {
+                        // "answered true" for the yes without a reason the
+                        // client gives.
+                        let step = [format!("answered {is_ok}"), reason].concat();
+                        self.steps.lock().unwrap().push(step);
+                        let _ = self.answered.send(());
+                    }
+                }
+
+                pub fn serve<'a>(
+                    builder: Builder<'a>,
+                    path: &'a str,
+                    client: &'a str,
+                    registered: mpsc::Sender<(String, String)>,
+                    steps: Steps,
+                    answered: mpsc::Sender<()>,
+                ) -> Builder<'a> {
+                    builder
+                        .serve_at(
+                            path,
+                            Manager {
+                                client: OwnedObjectPath::try_from(client).unwrap(),
+                                registered,
+                            },
+                        )
+                        .unwrap()
+                        .serve_at(client, Client { steps, answered })
+                        .unwrap()
+                }
+            }
+        };
     }
 
-    const CLIENT: &str = "/org/gnome/SessionManager/Client1";
+    fake_session_manager!(
+        gnome,
+        "org.gnome.SessionManager",
+        "org.gnome.SessionManager.ClientPrivate"
+    );
+    fake_session_manager!(xfce, "org.xfce.Session.Manager", "org.xfce.Session.Client");
 
-    #[zbus::interface(name = "org.gnome.SessionManager")]
-    impl FakeSessionManager {
-        fn register_client(&self, app_id: String, startup_id: String) -> OwnedObjectPath {
-            let _ = self.registered.send((app_id, startup_id));
-            OwnedObjectPath::try_from(CLIENT).unwrap()
+    /// A fake session manager under `api`'s names on a private bus, with a
+    /// client following it that has registered.
+    struct Session {
+        api: SessionApi,
+        /// The client's object.
+        client: String,
+        /// The client's unique name on the bus.
+        client_name: String,
+        manager: Connection,
+        steps: Steps,
+        answers: mpsc::Receiver<()>,
+        result: mpsc::Receiver<zbus::Result<()>>,
+    }
+
+    impl Session {
+        fn follow(daemon: &Daemon, api: SessionApi) -> Self {
+            let steps = Steps::default();
+            let (registered, registrations) = mpsc::channel();
+            let (answered, answers) = mpsc::channel();
+            let client = format!("{}/Client1", api.path);
+            let serve = if api == SessionApi::GNOME {
+                gnome::serve
+            } else {
+                xfce::serve
+            };
+            let builder = daemon.builder().name(api.name).unwrap();
+            let manager = serve(
+                builder,
+                api.path,
+                &client,
+                registered,
+                steps.clone(),
+                answered,
+            )
+            .build()
+            .unwrap();
+            let (connection, on_end) = (daemon.connect(), noting(&steps));
+            let client_name = connection.unique_name().unwrap().to_string();
+            let result = spawn(move || follow_session(&connection, "a-startup-id", &on_end));
+            assert_eq!(
+                registrations.recv_timeout(WAIT).expect("registered"),
+                (APP_ID.to_owned(), "a-startup-id".to_owned())
+            );
+            Self {
+                api,
+                client,
+                client_name,
+                manager,
+                steps,
+                answers,
+                result,
+            }
         }
-    }
 
-    struct FakeClient {
-        steps: Arc<Mutex<Vec<String>>>,
-        answered: mpsc::Sender<()>,
-    }
+        /// The manager's signal `member` to every client on `path`.
+        fn emit(&self, path: &str, member: &str) {
+            self.manager
+                .emit_signal(None::<&str>, path, self.api.client, member, &(0_u32,))
+                .unwrap();
+        }
 
-    #[zbus::interface(name = "org.gnome.SessionManager.ClientPrivate")]
-    impl FakeClient {
-        fn end_session_response(&self, is_ok: bool, reason: String) {
-            // "answered true" for the yes without a reason the client gives.
-            let step = [format!("answered {is_ok}"), reason].concat();
-            self.steps.lock().unwrap().push(step);
-            let _ = self.answered.send(());
+        fn steps(&self) -> Vec<String> {
+            self.steps.lock().unwrap().clone()
+        }
+
+        /// Asks the client whether the session may end and waits for its
+        /// yes, which it gives without saving.
+        fn query(&self) {
+            self.emit(&self.client, "QueryEndSession");
+            self.answers
+                .recv_timeout(WAIT)
+                .expect("the query was answered");
+            assert_eq!(self.steps(), ["answered true"]);
+        }
+
+        /// Ends the session: the client saves, answers and quits, in that
+        /// order, after the one query.
+        fn end(&self) {
+            self.emit(&self.client, "EndSession");
+            self.result
+                .recv_timeout(WAIT)
+                .expect("the client ended")
+                .unwrap();
+            assert_eq!(
+                self.steps(),
+                ["answered true", "saved", "answered true", "quit"]
+            );
         }
     }
 
     /// The client registers with the app's id and its startup id, answers
     /// a query at once without saving, ignores another client's signals,
     /// and on the session's end saves, answers and quits, in that order.
-    #[test]
-    fn a_logout_saves_before_the_session_manager_is_answered() {
+    fn a_logout_saves_before_the_session_manager_is_answered(api: SessionApi) {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let steps = Arc::new(Mutex::new(Vec::new()));
-        let (registered, registrations) = mpsc::channel();
-        let (answered, answers) = mpsc::channel();
-        let manager = daemon
-            .builder()
-            .name(SESSION_MANAGER)
-            .unwrap()
-            .serve_at(SESSION_MANAGER_PATH, FakeSessionManager { registered })
-            .unwrap()
-            .serve_at(
-                CLIENT,
-                FakeClient {
-                    steps: steps.clone(),
-                    answered,
-                },
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-        let (client, ending) = (daemon.connect(), noting(&steps));
-        let result = spawn(move || follow_session(&client, "a-startup-id", &ending));
+        let session = Session::follow(&daemon, api);
+        session.emit(&format!("{}/Client2", api.path), "EndSession");
+        session.query();
+        session.end();
+    }
 
-        assert_eq!(
-            registrations.recv_timeout(WAIT).expect("registered"),
-            (APP_ID.to_owned(), "a-startup-id".to_owned())
-        );
-        let emit = |path: &str, member: &str| {
-            manager
-                .emit_signal(None::<&str>, path, CLIENT_PRIVATE, member, &(0_u32,))
-                .unwrap();
+    #[test]
+    fn a_gnome_logout_saves_before_the_session_manager_is_answered() {
+        a_logout_saves_before_the_session_manager_is_answered(SessionApi::GNOME);
+    }
+
+    #[test]
+    fn an_xfce_logout_saves_before_the_session_manager_is_answered() {
+        a_logout_saves_before_the_session_manager_is_answered(SessionApi::XFCE);
+    }
+
+    /// A peer other than the session manager that sends the client's
+    /// signals, to every client or straight to the app, is ignored.
+    #[test]
+    fn a_session_signal_from_another_peer_is_ignored() {
+        let Some(daemon) = Daemon::start() else {
+            return;
         };
-        emit("/org/gnome/SessionManager/Client2", "EndSession");
-        emit(CLIENT, "QueryEndSession");
-        answers.recv_timeout(WAIT).expect("the query was answered");
-        assert_eq!(*steps.lock().unwrap(), ["answered true"]);
-        emit(CLIENT, "EndSession");
-        result
-            .recv_timeout(WAIT)
-            .expect("the client ended")
+        let session = Session::follow(&daemon, SessionApi::GNOME);
+        let peer = daemon.connect();
+        for destination in [None, Some(session.client_name.as_str())] {
+            peer.emit_signal(
+                destination,
+                session.client.as_str(),
+                session.api.client,
+                "EndSession",
+                &(0_u32,),
+            )
             .unwrap();
-        assert_eq!(
-            *steps.lock().unwrap(),
-            ["answered true", "saved", "answered true", "quit"]
-        );
+        }
+        // The bus routes the peer's messages in order, so once it answered
+        // this call it has passed both signals on, ahead of the query.
+        peer.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "GetId",
+            &(),
+        )
+        .unwrap();
+        session.query();
+        session.end();
     }
 
     /// No session manager and no logind on the bus: both clients end with
     /// an error, and neither saves nor quits.
     #[test]
-    fn without_the_services_neither_client_saves_or_quits() {
+    fn without_the_services_neither_client_saves_nor_quits() {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let ending = Ending {
+        let on_end = SaveAndQuit {
             save: Arc::new(|| panic!("saved")),
             quit: Arc::new(|| panic!("quit")),
         };
-        assert!(follow_session(&daemon.connect(), "", &ending).is_err());
-        assert!(hold_shutdown_lock(&daemon.connect(), &ending).is_err());
+        assert!(follow_session(&daemon.connect(), "", &on_end).is_err());
+        assert!(hold_shutdown_lock(&daemon.connect(), &on_end).is_err());
     }
 }

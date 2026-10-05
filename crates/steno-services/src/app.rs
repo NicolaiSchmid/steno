@@ -358,8 +358,9 @@ pub const SHUTDOWN_PATIENCE: std::time::Duration = std::time::Duration::from_sec
 /// process ends: an exit request the gate can hold goes through
 /// [`ExitGate::exit_requested`], an exit it cannot (the run loop's last
 /// event after the Dock's Quit or a logout on macOS and a logoff on
-/// Windows, an update's relaunch, the Windows installer's exit) through
-/// [`ExitGate::exiting`]. Clones share one gate. Swift:
+/// Windows, an update's relaunch, the Windows installer's exit, a logout
+/// or a system shutdown on Linux, from the shell's `session_end`)
+/// through [`ExitGate::exiting`]. Clones share one gate. Swift:
 /// `applicationShouldTerminate` answered `.terminateLater`, awaited
 /// `AppController.shutdown()` without a bound and then replied.
 ///

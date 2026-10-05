@@ -14,8 +14,9 @@
 //! close and exit rules are in this file), launch at login (`autostart`),
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
-//! instance, and on a Wayland session the `XWayland` backend the panels
-//! need (`display`). Every one is a thin module over a Tauri plugin or an
+//! instance, on Linux the logout and shutdown clients (`session_end`), and
+//! on a Wayland session the `XWayland` backend the panels need
+//! (`display`). Every one is a thin module over a Tauri plugin or an
 //! OS API with its rules in plain functions the tests cover. Everything
 //! that is on the wire (errors, topics, windows, sections, params) is the
 //! `steno-bridge` crate's type; the shell adds only what it needs on top
@@ -37,14 +38,15 @@
 //! relaunch bypasses the request, so both run the same shutdown first
 //! (`shut_down_before_exit`). The one exception: a second SIGTERM or a
 //! second SIGINT ends the process at once, unsaved (`forced_exit`). On
-//! Linux a logout on GNOME and a shutdown run the same shutdown before
-//! they let the app go, over D-Bus (`session_end`), and an exit that went
-//! through ends the process `EXIT_GRACE` later at the latest
-//! (`end_within`). Open: the Windows logoff is untested on hardware, and
-//! Windows' end-session timeout (about five seconds) is shorter than
-//! `SHUTDOWN_PATIENCE` (WP10); a logout on KDE Plasma or Xfce saves only
-//! when systemd signals the app (`session_end`), and none is tested on a
-//! real desktop (before the first Linux release).
+//! Linux a logout on GNOME or Xfce and a system shutdown or reboot run the
+//! same shutdown before they let the app go, over D-Bus (`session_end`),
+//! and an exit that went through ends the process `EXIT_GRACE` later at
+//! the latest (`end_within`). Open: the Windows logoff is untested on
+//! hardware, and Windows' end-session timeout (about five seconds) is
+//! shorter than `SHUTDOWN_PATIENCE` (WP10); a logout on KDE Plasma saves
+//! only when systemd signals the app (`session_end`), and none of the
+//! Linux paths is tested on a real desktop (before the first Linux
+//! release).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The fixture host leaves the real host's seams (the login item, the
@@ -98,6 +100,9 @@ fn main() {
     steno_services::log_to_stderr(steno_services::LOG_FILTER);
     #[cfg(target_os = "linux")]
     display::choose();
+    // Before the app is built: GTK unsets it when it starts.
+    #[cfg(target_os = "linux")]
+    let startup_id = session_end::startup_id();
     // The runtime the services graph runs on, beside Tauri's own: the
     // pipeline, the recorder's saves, the handover listener and the signal
     // listeners. Leaked, so it is never dropped: dropping a runtime waits,
@@ -149,7 +154,12 @@ fn main() {
             bridge::bridge_call,
             bridge::panel_call
         ])
-        .setup(move |app| setup(app.handle(), runtime))
+        .setup(move |app| {
+            setup(app.handle(), runtime)?;
+            #[cfg(target_os = "linux")]
+            session_end::watch(app.handle(), startup_id);
+            Ok(())
+        })
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
     app.run(on_event);
@@ -180,8 +190,6 @@ fn setup(
     tray::note_login_item(handle);
     #[cfg(unix)]
     exit_on_signals(handle, runtime);
-    #[cfg(target_os = "linux")]
-    session_end::watch(handle);
     Ok(())
 }
 
@@ -271,8 +279,8 @@ fn on_exit_signal(
 /// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
 /// terminal, systemd at a shutdown. A logout on Linux saves here when
 /// logind ends the session's processes (with `KillUserProcesses=yes`,
-/// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME the session
-/// manager's `EndSession` saves first (`session_end`). Otherwise nothing
+/// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME and Xfce
+/// the session manager's `EndSession` saves first (`session_end`). Otherwise nothing
 /// signals the app, and when the display connection closes first, GDK
 /// ends the process unsaved. On macOS a logout goes through
 /// `RunEvent::Exit` instead.
@@ -326,8 +334,9 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
 /// Runs the shutdown for an exit no request held, on this thread's behalf,
 /// and returns once it ended (at most `SHUTDOWN_PATIENCE`), waiting for
 /// the one already running (a held request's, an earlier exit's) instead
-/// of starting one; at once when it already ran. `RunEvent::Exit` and the
-/// updater's relaunch call it.
+/// of starting one; at once when it already ran. `RunEvent::Exit`, the
+/// updater's relaunch and the Linux logout and shutdown clients
+/// (`session_end`) call it.
 ///
 /// Swift: the Dock's Quit and a logout reached `applicationShouldTerminate`
 /// as Quit did.
