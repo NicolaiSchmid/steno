@@ -7,9 +7,9 @@
 //!   stdout, with the samples as a binary payload. No socket, no file.
 //! - [`client`]: [`SidecarSpeechEngine`], the `SpeechEngine` that spawns,
 //!   limits (per-request deadline, memory ceiling) and replaces the child;
-//!   [`directml_switched_off`], whether a child crashed, hung or overran
-//!   the memory ceiling during a load or a request on `DirectML` (an
-//!   overrun between requests counts too, a death then does not); and
+//!   [`directml_switched_off`], whether a child's end switched `DirectML`
+//!   off for the rest of the app's run (which ends count: the [`client`]
+//!   docs); and
 //!   [`FALLBACK_NOTICE`], the start of the child's stderr line about a
 //!   fallback.
 //!

@@ -989,9 +989,9 @@ impl Partial {
     /// is installed by then. A download of the same file that holds the
     /// lock is waited for on `clock`, `progress` reporting the bytes its
     /// partial has, so its bytes are never fetched twice, until it has
-    /// written nothing for `limit`. Where the
-    /// file system has no locks, a per-call partial of its own. Blocking:
-    /// the callers run on a blocking thread.
+    /// written nothing for `limit`. Where the file system has no locks, a
+    /// per-call partial of its own. Blocking: the callers run on a blocking
+    /// thread.
     fn open(
         destination: &Path,
         file: &ModelFile,

@@ -12,9 +12,11 @@
 //! load or a request with `DirectML` in use, every later child in this
 //! process loads on the CPU ([`directml_switched_off`]). One that dies
 //! between requests is replaced on `DirectML`: nothing ran on it since its
-//! last answer. One that overruns the ceiling between requests still
+//! last answer; one whose end the next call does not see yet counts as
+//! during that call. One that overruns the ceiling between requests still
 //! counts, as what it holds then is what its last request left, on the GPU
-//! too. `DirectML` is asked for on Windows only.
+//! too. `health`, which only the tests call, counts a death it finds like
+//! one during a request. `DirectML` is asked for on Windows only.
 //!
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
@@ -136,10 +138,9 @@ pub struct SidecarHealth {
 /// reload, and none of them asks for `DirectML` again. Nothing clears it.
 static DIRECTML_SWITCHED_OFF: AtomicBool = AtomicBool::new(false);
 
-/// Whether a child in this process crashed, hung or overran the memory
-/// ceiling during a load or a request with `DirectML` in use, or overran it
-/// between requests after one (see the module docs); every engine's later
-/// loads then ask for the CPU, for the rest of the app's run.
+/// Whether `DirectML` is off for the rest of the app's run: a child in
+/// this process ended with `DirectML` in use in a way the module docs count
+/// against it. Every engine's later loads then ask for the CPU.
 #[must_use]
 pub fn directml_switched_off() -> bool {
     DIRECTML_SWITCHED_OFF.load(Ordering::SeqCst)
@@ -645,9 +646,9 @@ impl Shared {
         if let Some(process) = slot.as_mut()
             && let Some(error) = process.failed_while_idle()
         {
-            // Replaced without an error, and on `DirectML` still: no load
-            // or request ran on it. Not after an overrun: what the child
-            // holds then is what its last request left, on the GPU too.
+            // A death between requests does not count against `DirectML`,
+            // an overrun does (see the module docs); with no provider,
+            // `kill_unless_remote` does not count it.
             if !matches!(error, SidecarError::MemoryCeiling { .. }) {
                 process.provider = None;
                 process.load_asked_directml = false;
