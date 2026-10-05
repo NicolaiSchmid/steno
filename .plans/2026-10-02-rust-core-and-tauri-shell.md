@@ -532,7 +532,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   `latest.json`, copied to the rolling `desktop-beta` and `desktop-stable` releases
   that `updater.rs` reads, each only moving forward
   (`apps/desktop/scripts/updater-lanes.sh`). No desktop release is GitHub's "latest"
-  before the cutover. Before the first Linux release, `feat/desktop-linux-signing`
+  before the cutover. Before the first desktop release, `feat/desktop-linux-signing`
   added `SHA256SUMS` over every asset and detached OpenPGP signatures for it and the
   Linux bundles, from a key whose public half is `apps/desktop/release-signing-key.asc`
   (`apps/desktop/README.md`, "Checksums and OpenPGP signatures"); the Windows

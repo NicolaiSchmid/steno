@@ -30,12 +30,13 @@ name: Desktop release
 # a detached OpenPGP signature (`.asc`) for it and for each Linux bundle
 # with the release signing key (LINUX_GPG_PRIVATE_KEY), verified against
 # the committed apps/desktop/release-signing-key.asc. On a tag the result
-# is the `desktop-release-assets` artifact publish uploads. A manual run
-# signs and verifies too, which proves the key and its passphrase, but
-# keeps only `SHA256SUMS` and what was verified (`desktop-release-checksums`),
-# so no signature for an unpublished build leaves the runner. Only assets
-# signs; plan learns only whether the two secrets are set, and neither the
-# bundle jobs nor publish sees them.
+# is the `desktop-release-assets` artifact, which `publish` uploads. A
+# manual run signs and verifies too, which proves the key and its
+# passphrase, but keeps only `SHA256SUMS` and what was verified
+# (`desktop-release-checksums`), so no signature for an unpublished build
+# leaves the runner. Only `assets`
+# signs; `plan` learns only whether the two secrets are set, and neither the
+# bundle jobs nor `publish` sees them.
 #
 # Publishing writes one GitHub release per tag with those assets, then
 # updates the rolling `desktop-beta` and `desktop-stable` lanes that
@@ -341,8 +342,8 @@ jobs:
           apps/desktop/scripts/signing-keychain.sh remove "$KEYCHAIN_PATH"
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
-  # The release as publish uploads it, on every run (see the top of this
-  # file); the only job that signs with the release signing key.
+  # Runs on every run: the release as `publish` would upload it (see the
+  # top of this file). The only job that signs with the release signing key.
   assets:
     name: assets
     needs: [plan, bundle]
