@@ -419,7 +419,11 @@ impl Recorder for CaptureRecorder {
     }
 
     fn refresh_permissions(&self) {
-        let denied: Vec<PermissionKind> = PermissionKind::ALL
+        // Only the OS's own permissions: off the Mac, system audio has no
+        // switch of its own (Windows' is the microphone's), so it is never
+        // reported denied there.
+        let denied: Vec<PermissionKind> = steno_bridge::Platform::CURRENT
+            .permissions()
             .iter()
             .copied()
             .filter(|kind| steno_host::services::permission_is_required(*kind))

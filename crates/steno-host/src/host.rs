@@ -119,7 +119,7 @@ pub struct HostConfig {
     pub version: String,
     /// The viewer's zone, for day groups and derived titles.
     pub zone: FixedOffset,
-    /// The OS the page runs on: which permissions onboarding and Settings
+    /// The OS the host runs on: which permissions onboarding and Settings
     /// list, and whether the host's sentences say "this Mac" or "this
     /// computer". The shell passes `Platform::CURRENT`; the parity tests
     /// pass the Mac, whose words are Swift's.

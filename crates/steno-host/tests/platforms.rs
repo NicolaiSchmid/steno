@@ -167,3 +167,14 @@ fn a_recording_that_is_gone_is_no_longer_on_this_computer() {
     assert_eq!(gone.code, BridgeErrorCode::NotFound);
     assert_eq!(gone.message, "The recording is no longer on this computer.");
 }
+
+/// Linux's one step is current while it is open and stays current once
+/// granted: the last step, never a step the platform does not have.
+#[test]
+fn the_current_step_on_linux_is_always_the_microphone() {
+    let mut model = OnboardingViewModel::new(Platform::Linux);
+    assert_eq!(model.current(), PermissionKind::Microphone);
+    model.finish_request(PermissionKind::Microphone, PermissionState::Granted);
+    assert!(model.permissions_handled());
+    assert_eq!(model.current(), PermissionKind::Microphone);
+}

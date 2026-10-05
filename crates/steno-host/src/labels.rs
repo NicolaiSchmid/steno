@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn destinations_are_named_never_shown_by_their_storage_id() {
+    fn obsidian_ids_read_as_names_and_other_ids_as_they_are() {
         let named = |id: &str| {
             destination_display_name(&Delivery {
                 id: uuid::Uuid::nil(),
