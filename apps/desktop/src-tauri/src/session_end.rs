@@ -395,10 +395,17 @@ mod tests {
         }
     }
 
-    impl Drop for Daemon {
-        fn drop(&mut self) {
+    impl Daemon {
+        /// Ends the bus, and with it every connection to it.
+        fn end(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+        }
+    }
+
+    impl Drop for Daemon {
+        fn drop(&mut self) {
+            self.end();
         }
     }
 
@@ -442,6 +449,26 @@ mod tests {
         inhibited: mpsc::Sender<([String; 4], std::io::PipeReader)>,
     }
 
+    /// The lock's arguments and its read end, as `Inhibit` hands it out.
+    type Inhibits = mpsc::Receiver<([String; 4], std::io::PipeReader)>;
+
+    impl FakeLogind {
+        /// Serves logind's names on `daemon`, its locks arriving on the
+        /// receiver.
+        fn serve(daemon: &Daemon) -> (Connection, Inhibits) {
+            let (inhibited, inhibits) = mpsc::channel();
+            let logind = daemon
+                .builder()
+                .name(LOGIND)
+                .unwrap()
+                .serve_at(LOGIND_PATH, Self { inhibited })
+                .unwrap()
+                .build()
+                .unwrap();
+            (logind, inhibits)
+        }
+    }
+
     #[zbus::interface(name = "org.freedesktop.login1.Manager")]
     impl FakeLogind {
         fn inhibit(
@@ -466,15 +493,7 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let (inhibited, inhibits) = mpsc::channel();
-        let logind = daemon
-            .builder()
-            .name(LOGIND)
-            .unwrap()
-            .serve_at(LOGIND_PATH, FakeLogind { inhibited })
-            .unwrap()
-            .build()
-            .unwrap();
+        let (logind, inhibits) = FakeLogind::serve(&daemon);
         let steps = Steps::default();
         let (client, on_end) = (daemon.connect(), noting(&steps));
         let result = spawn(move || hold_shutdown_lock(&client, &on_end));
@@ -524,6 +543,43 @@ mod tests {
         let at = |step: &str| steps.iter().position(|noted| noted == step).unwrap();
         assert!(at("saved") < at("released"), "{steps:?}");
         assert!(at("saved") < at("quit"), "{steps:?}");
+    }
+
+    /// The system bus going away while the client holds the lock ends it
+    /// with an error, and it neither saves nor quits.
+    #[test]
+    fn a_shutdown_client_whose_bus_goes_away_ends_with_an_error() {
+        let Some(mut daemon) = Daemon::start() else {
+            return;
+        };
+        let (logind, inhibits) = FakeLogind::serve(&daemon);
+        let logind = logind.unique_name().unwrap().to_string();
+        let steps = Steps::default();
+        let (client, on_end) = (daemon.connect(), noting(&steps));
+        // Every message the client receives, logind's answer among them.
+        let received = MessageIterator::from(&client);
+        let result = spawn(move || hold_shutdown_lock(&client, &on_end));
+        inhibits.recv_timeout(WAIT).expect("the lock was taken");
+        // Once the answer reached the client, it holds the lock and waits
+        // for a shutdown, so the bus ends under that wait.
+        received
+            .into_iter()
+            .find(|message| {
+                message.as_ref().is_ok_and(|message| {
+                    message.message_type() == Type::MethodReturn
+                        && message
+                            .header()
+                            .sender()
+                            .map(zbus::names::UniqueName::as_str)
+                            == Some(logind.as_str())
+                })
+            })
+            .expect("logind answered")
+            .unwrap();
+        daemon.end();
+        let ended = result.recv_timeout(WAIT).expect("the client ended");
+        assert!(ended.is_err(), "{ended:?}");
+        assert!(steps.lock().unwrap().is_empty(), "{steps:?}");
     }
 
     /// The names gnome-session and xfce4-session serve, written out apart
@@ -723,6 +779,55 @@ mod tests {
         .unwrap();
         session.query();
         session.end();
+    }
+
+    /// With GNOME's and Xfce's names both on the bus, the client registers
+    /// with GNOME's only.
+    #[test]
+    fn a_client_registers_with_gnomes_session_manager_before_xfces() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let (xfce_registered, xfce_registrations) = mpsc::channel();
+        let (xfce_answered, _xfce_answers) = mpsc::channel();
+        let xfce = daemon
+            .builder()
+            .name(XFCE4_SESSION.name)
+            .unwrap()
+            .build()
+            .unwrap();
+        serve_session_manager(
+            &xfce,
+            XFCE4_SESSION,
+            OwnedObjectPath::try_from("/org/xfce/SessionManager/Client1").unwrap(),
+            xfce_registered,
+            Steps::default(),
+            xfce_answered,
+        );
+        let session = Session::follow(&daemon, GNOME_SESSION);
+        session.query();
+        session.end();
+        assert!(
+            xfce_registrations.try_recv().is_err(),
+            "registered with Xfce's"
+        );
+    }
+
+    /// The session bus going away while the client follows the session
+    /// manager ends it with an error, and it neither saves nor quits.
+    #[test]
+    fn a_session_client_whose_bus_goes_away_ends_with_an_error() {
+        let Some(mut daemon) = Daemon::start() else {
+            return;
+        };
+        let session = Session::follow(&daemon, GNOME_SESSION);
+        // Answered, so the client follows the signals and the bus ends
+        // under that wait.
+        session.query();
+        daemon.end();
+        let ended = session.result.recv_timeout(WAIT).expect("the client ended");
+        assert!(ended.is_err(), "{ended:?}");
+        assert_eq!(session.steps(), ["answered true"]);
     }
 
     /// No session manager and no logind on the bus: both clients end with
