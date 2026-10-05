@@ -310,6 +310,15 @@ struct Connection {
     main_loop: pw::main_loop::MainLoopRc,
 }
 
+impl Drop for Connection {
+    fn drop(&mut self) {
+        // A teardown step marker: in a `Capture` this runs after the
+        // stream and the links are destroyed, before the connection's own
+        // fields go.
+        tracing::debug!("closing the PipeWire connection");
+    }
+}
+
 impl Connection {
     fn open() -> Result<Self, CaptureError> {
         pw::init();
