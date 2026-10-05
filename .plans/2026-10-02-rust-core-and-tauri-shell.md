@@ -1236,8 +1236,8 @@ fix is ported to Swift before cutover.
   Windows every adapter but hardware Ethernet and Wi-Fi that is up
   (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters.
 - Network, Rust differs (open: "Open after the port"): the record is not re-published
-  after a network change (restart on network change, or re-register). Layer-2 tunnels (a TAP device,
-  `feth`) and bridges (`docker0`, `bridge100`) are not point-to-point, and are served;
+  after a network change (restart on network change, or re-register). Layer-2 tunnels
+  (a TAP device, `feth`) and bridges (`docker0`, `bridge100`) are not point-to-point, and are served;
   Swift classes bridges `.other`. A LAN numbered in `100.64.0.0/10` is refused, on
   every platform. Rust judges a connection by its local address where Swift judges the
   interface it arrives on, so on Linux and macOS (weak host model) a packet addressed
@@ -1409,18 +1409,17 @@ Rust fixes these Swift behaviours; each is ported to Swift or accepted before cu
 
 ## Open after the port
 
-Everything the merged packages left open, one line each, with its owner: `WP9b` (the
-Mac cutover, `.plans/2026-10-04-mac-cutover.md`), `WP10` (Windows), `first Linux
-release`, or `unowned` (no package or release has it yet). Each line names where the
-gap lives and the pull request that found it; where this plan already describes the
-item at length, the line points there. Close an item by deleting its line in the pull
-request that fixes it.
+What the merged packages left open. Each item starts with its owner: `WP9b` (the Mac
+cutover, `.plans/2026-10-04-mac-cutover.md`), `WP10` (Windows), `first Linux release`,
+or `unowned` (no package or release has it yet). Then it says what is open, where it
+lives (pointing to this plan where the plan already covers it) and which pull request
+found it. The pull request that fixes an item deletes it.
 
 - **WP9b.** The unticked lines of the parity list (the menu bar's queue and recent
   meetings, the detection prompt, the auto-stop after a call, the calendar lookup,
-  the permissions probe, the macOS menu bar's Record and Find Meetings items) must be
-  empty before the cutover opens. Several name WP5 or WP8 as their package; both
-  merged without them. Where: "Beyond the bridge", "Pipeline and services (WP6b)" and
+  the permissions probe, the macOS menu bar's Record and Find Meetings items) must all
+  be ticked before the cutover opens. Several name WP5 or WP8, which merged without
+  them. Where: "Beyond the bridge", "Pipeline and services (WP6b)" and
   "Shell" in the parity list. Found: #170, #172, #173.
 - **WP9b.** The shell's four gaps: no tray badge for pending speaker reviews, a fake
   QR encoder (the pairing code shows no QR image), a fake clip player (a speaker's
@@ -1448,29 +1447,30 @@ request that fixes it.
   back. The Rust store runs an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`). Needed only if the Swift app ships another release.
   Where: the "Touch" line under "Handover". Found: #169, again in the review of #191.
-- **WP9b.** The other Swift fixes and cutover decisions the parity notes list: the
-  Swift defects under "Store", "Adapters", "Handover", "LLM" and "Audio" (each ported
-  to Swift if it ships another release, otherwise closed by the cutover), the fixtures
-  "Bridge" asks of the Swift side, and the audio choices to settle at cutover (the WAV
-  mixdown, the resampler, the sidecar's 2 ms lag, AAC priming, call mode without an
-  output client). Found: #155, #165, #166, #167, #169, #190.
+- **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
+  Swift defects (each ported to Swift if it ships another release, otherwise closed by
+  the cutover), the fixtures the Swift side owes, and the audio choices to settle at
+  cutover (the WAV mixdown, the resampler, the sidecar's 2 ms lag, AAC priming, call
+  mode without an output client). Where: "Store", "Adapters", "Handover", "LLM",
+  "Audio" and "Bridge" in the parity list. Found: #155, #165, #166, #167, #169, #190.
 - **WP9b.** On the Mac the Bonjour record is not published again after a network
   change, where Swift's `NWListener` follows it, and the shell passes no computer name,
   so the Mac advertises `HOSTNAME`, `/etc/hostname` or "Steno". Where:
   `crates/steno-handover/src/server/advertise.rs`,
   `HandoverConfiguration::default_service_name`; the "Network" and "Service name"
   lines under "Handover". Found: #169.
-- **WP9b.** No concurrency group spans `release.yml` and `desktop-release.yml`, so two
-  macOS signing jobs can run at once; the rule "one at a time" lives only in both
-  READMEs, until `release.yml` retires at the cutover. Found: #184.
+- **WP9b.** No concurrency group spans the two release workflows, so two macOS signing
+  jobs can run at once; only both READMEs state the one-at-a-time rule, until
+  `release.yml` retires at the cutover. Where: `.github/workflows/release.yml`,
+  `.github/workflows/desktop-release.yml`. Found: #184.
 - **WP10.** Gate G4 is open: no Windows machine with a GPU has measured DirectML's
   speed (at least three times the CPU's on an integrated GPU), so `directmlOnWindows`
   stays off by default (`SpeechSettings` in `crates/steno-speech/src/runtime.rs`). The
   same machine checks that DirectML's FLEURS transcripts match the CPU's, which nodes
-  ONNX Runtime leaves on the CPU, and which event providers a session uses; before the
-  default flips, the Windows bundles, which ship `DirectML.dll`
-  (`apps/desktop/src-tauri/tauri.release.windows.conf.json`), must also carry its
-  licence notice. Where: the WP10b paragraph, "Off by default" and "Privacy". Found:
+  ONNX Runtime leaves on the CPU, and which event providers a session uses. Before the
+  default flips, the Windows bundles must also carry the licence notice of the
+  `DirectML.dll` they ship (`apps/desktop/src-tauri/tauri.release.windows.conf.json`).
+  Where: the WP10b paragraph, "Off by default" and "Privacy". Found:
   #188.
 - **WP10.** A sidecar killed at its deadline is then waited for without a bound
   (`kill` in `crates/steno-speech/src/sidecar/client.rs`), so a child stuck in a GPU
@@ -1501,12 +1501,12 @@ request that fixes it.
   threads alive, the node and its links left in the graph) and was never reproduced;
   the root cause is unknown. `stop()` now gives the thread `STOP_TIMEOUT` (2 s) and
   then leaves it behind the closed gate, and `Gate::close` itself waits without a
-  bound for a pass to leave. Where: `crates/steno-audio/src/capture/live/pipewire/mod.rs`.
-  Found: #176.
-- **first Linux release.** The Linux items under "Audio": no input device list and no
-  meeting detection on Linux, the latencies unmeasured on real hardware, and the
-  decoder reading a whole lane into memory (1.4 GB for a two-hour 48 kHz lane). Found:
-  #166, #176.
+  bound for a pass to leave. Where:
+  `crates/steno-audio/src/capture/live/pipewire/mod.rs`. Found: #176.
+- **first Linux release.** No input device list and no meeting detection on Linux,
+  the latencies unmeasured on real hardware, and the decoder reading a whole lane into
+  memory (1.4 GB for a two-hour 48 kHz lane). Where: the Linux items under "Audio".
+  Found: #166, #176.
 - **first Linux release.** Settings still describes the diarizer as the Swift app's
   `CoreML` model (its acknowledgement and its size), while every platform runs the
   ONNX pyannote segmentation and WeSpeaker embedding models, whose licence notices the
@@ -1550,51 +1550,50 @@ request that fixes it.
   own. Where: `CurrentPipeline::reload` in `crates/steno-services/src/pipeline.rs`.
   Found: #183.
 - **unowned.** `build()` panics when any environment variable's name or value is not
-  valid Unicode: `std::env::vars()` in `codex_store` (`crates/steno-services/src/llm.rs`,
-  every platform), in `FileSecretStore::in_support_directory`
-  (`crates/steno-services/src/secrets.rs`) and in
-  `StenoPaths::default_support_directory` (`crates/steno-core/src/paths.rs`), so the
-  app and the CLI do not start. Reading the few variables each needs with
-  `std::env::var_os` avoids it. Found on `main` on 2026-10-04; no pull request names
-  it.
-- **unowned.** The phone clears its pairing on any 401: `onUnauthorized` is
-  `clearPairing` (`mobile/src/features/sync/use-upload-coordinator.ts`), also for a 401
-  that answers a request sent under a pairing since replaced, so an old request that
-  races a re-pairing unpairs the new one. Only the chunk uploads are cancelled before a
-  re-pairing (`cancelAllUploads` in `mobile/src/features/sync/recording-client.ts`).
-  Found: the review of #191.
+  valid Unicode, so the app and the CLI do not start; reading the few variables each
+  caller needs with `std::env::var_os` avoids it. Where: `std::env::vars()` in
+  `codex_store` (`crates/steno-services/src/llm.rs`, every platform), in
+  `FileSecretStore::in_support_directory` (`crates/steno-services/src/secrets.rs`) and
+  in `StenoPaths::default_support_directory` (`crates/steno-core/src/paths.rs`).
+  Found: on `main` on 2026-10-04 (no pull request names it).
+- **unowned.** The phone clears its pairing on any 401, also one that answers a
+  request sent under a pairing since replaced, so an old request that races a
+  re-pairing unpairs the new one; only the chunk uploads are cancelled before a
+  re-pairing. Where: `onUnauthorized` is `clearPairing` in
+  `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
+  `mobile/src/features/sync/recording-client.ts`. Found: the review of #191.
 - **unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
-  can roll them back; the copied file itself is synced. Both apps; where: the
+  can roll them back; the copied file itself is synced. Both apps. Where: the
   `RecordingIntake.admit` item under "Store". Found: #169, #173.
 - **unowned.** Linux keeps secrets in the 0600 `secrets.json` under the support
-  directory, not in the Secret Service (`crates/steno-services/src/secrets.rs`). Found:
-  #173.
+  directory, not in the Secret Service. Where: `crates/steno-services/src/secrets.rs`.
+  Found: #173.
 - **unowned.** The speech settings (`onnxSidecarOnMac`, `directmlOnWindows`,
   `modelsMirror`) live only in `speech.json`, which nothing writes, and the bridge has
   no field for them; the macOS fallback and the DirectML switch wait for a plan that
   words them for users. The diarizer keeps its own model store (no resume, no lock, no
   mirror). Where: the first and last items under "Speech" in the parity list. Found:
   #177, #183, #187.
-- **unowned.** Untested paths with no seam to test them: the phone intake's fsync calls
-  (`crates/steno-pipeline/src/files.rs`), and in `steno-llm` the cleanup after a failed
-  `auth.json` write and the detail that names a temporary file that could not be
-  removed. Found: #167, #185.
+- **unowned.** Untested paths with no seam to test them: the phone intake's fsync
+  calls, and in `steno-llm` the cleanup after a failed `auth.json` write and the detail
+  that names a temporary file that could not be removed. Where:
+  `crates/steno-pipeline/src/files.rs`, `crates/steno-llm`. Found: #167, #185.
 - **unowned.** CI: the self-hosted macOS runner's shared pnpm setup directory lets
   `pnpm/action-setup` on one runner break another's install (a rerun passes); it needs
   a per-runner `PNPM_HOME` or a runner-local pnpm across the workflows. Found: #184.
-- **unowned.** `steno process --title` stores the title with `TitleOrigin::Default`
-  (`crates/steno-cli/src/commands/process.rs`), so the app shows the default date
-  title while the export uses the given one. Swift's CLI does the same, so a fix
-  changes both or neither. Found: the whole-app smoke of #195.
-- **unowned.** `scripts/pipewire-headless.sh` fails when `TMPDIR` is long: its
-  socket path under the `mktemp` directory passes the 108-byte limit of a Unix socket
-  path ("File name too long"). A short base directory for the socket fixes it. Found:
-  the whole-app smoke of #195.
-- **unowned.** The Windows GNU cross toolchain used for local Windows checks is no
-  longer available on the Linux build host, so Windows-only code is checked by the
-  `windows-latest` CI job alone until it is restored. Found after #187.
+- **unowned.** `steno process --title` stores the title with `TitleOrigin::Default`,
+  so the app shows the default date title while the export uses the given one. Swift's
+  CLI does the same, so a fix changes both or neither. Where:
+  `crates/steno-cli/src/commands/process.rs`. Found: the whole-app smoke of #195.
+- **unowned.** The headless PipeWire script fails when `TMPDIR` is long: its socket
+  path under the `mktemp` directory passes the 108-byte limit of a Unix socket path
+  ("File name too long"). A short base directory for the socket fixes it. Where:
+  `scripts/pipewire-headless.sh`. Found: the whole-app smoke of #195.
+- **unowned.** The Linux build host no longer has the Windows GNU cross toolchain used
+  for local Windows checks, so only the `windows-latest` CI job checks Windows-only
+  code until it is restored. Found: after #187.
 
 ## Progress
 
@@ -1671,8 +1670,8 @@ folder, enqueue) arrived with WP6b as `RecordingIntake` in
 (`receiving_file::write`) and writes its own `complete` receipt only after
 `HandoverIntake::admit` returns. The intake syncs the copy and its folder first
 (`steno_pipeline::files::copy_durably`); its commits still run under `NORMAL` (the
-`RecordingIntake.admit` line under Store). Pairing and revoke commits stay `NORMAL`, as in Swift: a power loss
-right after one can forget a pairing (the phone gets 401 and unpairs, and the user
+`RecordingIntake.admit` line under Store). Pairing and revoke commits stay `NORMAL`,
+as in Swift: a power loss right after one can forget a pairing (the phone gets 401 and unpairs, and the user
 pairs it again) or bring a revoked device back.
 
 WP5b is the Linux `LiveCaptureBackend`, `crates/steno-audio/src/capture/live/pipewire/`:
