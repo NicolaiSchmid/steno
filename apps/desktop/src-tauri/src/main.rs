@@ -280,10 +280,10 @@ fn on_exit_signal(
 /// terminal, systemd at a shutdown. A logout on Linux saves here when
 /// logind ends the session's processes (with `KillUserProcesses=yes`,
 /// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME and Xfce
-/// the session manager's `EndSession` saves first (`session_end`). Otherwise nothing
-/// signals the app, and when the display connection closes first, GDK
-/// ends the process unsaved. On macOS a logout goes through
-/// `RunEvent::Exit` instead.
+/// the session manager's `EndSession` saves first (`session_end`).
+/// Otherwise nothing signals the app, and when the display connection
+/// closes first, GDK ends the process unsaved. On macOS a logout goes
+/// through `RunEvent::Exit` instead.
 /// Each signal quits the pipeline here, off the main thread, before it asks
 /// for the exit (`Host::quit_pipeline`), so a job a busy main thread would
 /// let fail first stays resumable. A second SIGTERM or a second SIGINT
