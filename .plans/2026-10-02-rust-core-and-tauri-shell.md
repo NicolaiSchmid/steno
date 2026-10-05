@@ -877,11 +877,21 @@ still has to draw the window side. `[ ]` is not ported yet.
     second SIGTERM or a second SIGINT ends the process at once, unsaved, and a SIGHUP
     never does; a signal the app inherited ignored (`nohup`, a background job's SIGINT)
     stays ignored.
-  - A logout on Linux saves when logind ends the session's processes (with
-    `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then SIGHUP).
-    Otherwise nothing signals the app, and when the display connection closes first, GDK
-    ends the process unsaved; untested (before the first Linux release; no work package
-    yet).
+  - A logout on GNOME runs the shutdown before the session ends: the shell registers
+    with `org.gnome.SessionManager` on the session bus (other desktops' session managers
+    serve the same client API), answers `QueryEndSession` at once and `EndSession` only
+    once the shutdown has ended, then quits (`apps/desktop/src-tauri/src/session_end.rs`).
+    A shutdown or a reboot runs it while logind waits: the shell holds logind's
+    `shutdown` delay lock and releases it after the shutdown on `PrepareForShutdown`;
+    logind waits `InhibitDelayMaxSec` (five seconds by default) and then goes ahead, and
+    the SIGTERM that follows waits for the shutdown in progress. logind has no logout
+    signal, and its session `Lock` is the screen lock, which, like sleep, does not stop a
+    recording. A logout on KDE Plasma or Xfce saves only when systemd signals the app
+    (with `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then SIGHUP):
+    neither serves a session-manager API on D-Bus (Plasma's portal has no session
+    monitor), and when the display connection closes first, GDK ends the process
+    unsaved. Without a session bus, or without logind, the shell behaves as before. The
+    tests run both clients against fakes on a private `dbus-daemon`.
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -902,13 +912,20 @@ still has to draw the window side. `[ ]` is not ported yet.
   - The updater's relaunch bypasses the exit request and runs the shutdown before it
     relaunches; on Windows the installer's own exit runs it (`on_before_exit`), and an
     install that fails after it ends the app once its message is closed.
+  - On Linux an exit that went through ends the process two seconds later at the latest
+    (`end_within` in the shell's `main.rs`), with its code; an update's relaunch is left to
+    the teardown. `tauri-plugin-single-instance` 2.5 releases its bus name in its
+    `RunEvent::Exit` handler, which Tauri runs before the shell's, with zbus's
+    `release_name` on a connection without a method timeout, so a frozen session bus held
+    the exit about 20 s (measured with #172). The bus drops the name with the connection
+    anyway, and the shutdown has ended before an exit goes through.
   - The services runtime is never dropped: dropping it waits, without a bound, for a
     transcription or a model load in progress.
   - Open: the Windows logoff is untested on hardware and can outlast the end-session
     timeout, and whether a logoff ends the speech sidecar before `RunEvent::Exit` quits
-    the pipeline (which would mark its meeting `failed`) is unverified (WP10); a Linux
-    logout saves only when logind signals the app, which is untested on GNOME and on KDE
-    (before the first Linux release; no work package yet).
+    the pipeline (which would mark its meeting `failed`) is unverified (WP10); the Linux
+    logout and shutdown are untested on a real GNOME or KDE desktop, and a KDE or Xfce
+    logout saves only when systemd signals the app (before the first Linux release).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes), and the tray's setters wait for the main thread when called from
@@ -1518,10 +1535,14 @@ request that fixes an item deletes it.
   Linux or Windows release, is the first run of the `publish` job against GitHub and
   the first MSI built for an `-rc.N` version. Where:
   `.github/workflows/desktop-release.yml`. Found: #184.
-- **First Linux release.** A Linux logout saves the recording only when logind ends
-  the session's processes with a signal; when nothing signals the app, or the display
-  connection closes first, GDK ends the process unsaved. Untested on GNOME and KDE.
-  Where: `apps/desktop/src-tauri/src/main.rs`; the shutdown items under "Pipeline and
+- **First Linux release.** A logout on KDE Plasma or Xfce saves the recording only
+  when systemd ends the session's processes with a signal; when nothing signals the
+  app, or the display connection closes first, GDK ends the process unsaved. Neither
+  desktop serves a session-manager API on D-Bus: closing it needs XSMP, which GTK 3
+  dropped, or a handler for the lost X connection that saves before GDK's ends the
+  process. The GNOME logout and the logind shutdown lock (`session_end.rs`) ran only
+  against fakes on a private bus, not on a real desktop. Where:
+  `apps/desktop/src-tauri/src/session_end.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185.
 - **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
   threads alive, the node and its links left in the graph) and was never reproduced;
@@ -1538,10 +1559,8 @@ request that fixes an item deletes it.
   the same moment, and the decoder reads a whole lane into memory (1.4 GB for a
   two-hour 48 kHz lane). Where: the Linux items under "Audio". Found: #166, #176,
   #197.
-- **First Linux release.** With a frozen session bus the single-instance plugin waits
-  about 20 s at exit to release its bus name (measured with #172; upstream behaviour),
-  and WebKitGTK leaks a file descriptor per destroyed webview (issue #160). Where:
-  `apps/desktop/src-tauri/src/main.rs`, `apps/desktop/README.md`. Found: #172.
+- **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
+  (issue #160). Where: `apps/desktop/README.md`. Found: #172.
 - **First Linux release.** The web UI speaks Mac on every platform: "Reveal in
   Finder", "on this Mac", "menu bar item" and ⌘ shortcuts show on Linux (and on
   Windows), seen in the Linux smoke under Xvfb. The platform's wording has to come

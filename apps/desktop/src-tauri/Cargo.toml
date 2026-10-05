@@ -46,6 +46,8 @@ libc.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 gdk.workspace = true
 gio.workspace = true
+# The logout and shutdown clients (`session_end`).
+zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel.workspace = true

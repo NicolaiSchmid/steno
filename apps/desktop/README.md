@@ -49,11 +49,26 @@ exits reach the shutdown these ways:
   ends the process at once, unsaved; a SIGHUP never does. A signal the
   app inherited ignored (`nohup`, a background job's SIGINT) stays
   ignored.
-- A logout on Linux saves when logind ends the session's processes (with
-  `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
-  SIGHUP). Otherwise nothing signals the app, and when the display
-  connection closes first, GDK ends the process unsaved; untested (before
-  the first Linux release; no work package yet).
+- A logout on GNOME saves before the session ends: the app registers
+  with GNOME's session manager (`org.gnome.SessionManager` on the session
+  bus, which other desktops' session managers serve too) and answers its
+  `EndSession` only once the shutdown has ended (`session_end.rs`).
+- A shutdown or a reboot on Linux saves while logind waits: the app holds
+  logind's `shutdown` delay lock and releases it once the shutdown has
+  ended. logind waits for the lock five seconds by default
+  (`InhibitDelayMaxSec`), then goes ahead, and the SIGTERM that follows
+  waits for the shutdown in progress. Sleep and the screen lock do not
+  stop a recording.
+- A logout on KDE Plasma or Xfce saves only when systemd signals the app
+  (with `KillUserProcesses=yes`, systemd stops the scope with SIGTERM,
+  then SIGHUP). Neither serves a session-manager API on D-Bus, and when
+  the display connection closes first, GDK ends the process unsaved.
+  None of these desktops has been tested (before the first Linux
+  release).
+- On Linux an exit that went through ends the process two seconds later
+  at the latest (`end_within` in `main.rs`): the single-instance plugin
+  releases its bus name at the run loop's end and waits for the bus
+  without a bound, so a frozen session bus held the exit about 20 s.
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
@@ -721,7 +736,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session) |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME session client and logind's shutdown lock |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |

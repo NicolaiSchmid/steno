@@ -53,6 +53,9 @@ gio = "0.18"
 # Unix only: the desktop shell's signal dispositions (`sigaction`) and the
 # speech sidecar's (`signal`).
 libc = "0.2"
+# Linux only: the desktop shell's session and shutdown clients on D-Bus
+# (`session_end`). Already in the lock through the single-instance plugin.
+zbus = "5.19"
 thiserror = "2"
 tracing = "0.1"
 # The `steno` CLI's and the desktop shell's log output
