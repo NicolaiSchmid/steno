@@ -112,8 +112,9 @@ The tray menu is the Swift menu bar popover's controls: Record (Stop
 recording while recording, with the recorder's words between), Record in
 person, Open Steno, Settings, Launch at login, Check for Updates, Quit.
 Each platform names them its own way (`MenuAction::label_on`): the Mac's
-"Settings…" and "Quit Steno", "Settings" on Windows and Linux, "Exit
-Steno" on Windows; only the Mac's menu shows shortcut hints.
+"Settings…", "Check for Updates…" and "Quit Steno", the first two
+without the ellipsis on Windows and Linux, "Exit Steno" on Windows; only
+the Mac's menu shows shortcut hints.
 Recorder commands are bridge methods sent through the main window
 (`actions.rs`), so the shell has no recorder logic of its own; it follows
 the recorder off the `recording` snapshots the host publishes to that
