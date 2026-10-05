@@ -10,10 +10,19 @@
 //! Tones go in with `pw-play`: into `steno-test-sink` through the session
 //! manager's own linking, into the virtual microphone `steno-test-mic` by a
 //! stream the session manager leaves alone and `pw-link` (`wireplumber`
-//! links playback only into sinks). Each start runs on its own thread
-//! joined with a deadline, so a hang fails instead of stalling the suite.
-//! The tests share one daemon, so they run one at a time and put back what
-//! they move.
+//! links playback only into sinks). Each `start` and `stop()` runs on its
+//! own thread with a deadline, so a hang fails the test instead of
+//! stalling the suite. The tests share one daemon, so they run one at a
+//! time and put back what they move.
+//!
+//! The tests cover: each lane carries its own tone in the layout `start`
+//! answers; a refused second start and a start after a failed one; one
+//! report per default move or burst of moves, not before the coalescing
+//! delay after the last, and the rebuild's restart on the new default; a
+//! report on time while other apps' streams come and go; no report for a
+//! default that comes back or for an unrelated node; and a removed
+//! microphone, or one of Steno's links removed from outside, reported
+//! gone.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -32,8 +41,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use steno_audio::capture::{ChannelRef, DeviceChangeReason};
@@ -191,8 +202,7 @@ fn threads() -> Vec<(usize, String)> {
 }
 
 /// Whether a thread of this process has `part` in its name: PipeWire's
-/// data loop (`data-loop.0` since PipeWire 0.3.x) or the capture's own
-/// `steno-pipewire`.
+/// data loop (`data-loop.0`) or the capture's own `steno-pipewire`.
 fn thread_named(part: &str) -> Option<usize> {
     threads()
         .into_iter()
@@ -206,14 +216,41 @@ fn data_loop_thread() -> usize {
         .unwrap_or_else(|| panic!("no PipeWire data-loop thread among {:?}", threads()))
 }
 
+/// The daemon's objects, from `pw-dump`; none when it fails.
+fn dump() -> Vec<serde_json::Value> {
+    Command::new("pw-dump")
+        .output()
+        .ok()
+        .and_then(|output| serde_json::from_slice(&output.stdout).ok())
+        .and_then(|objects: serde_json::Value| objects.as_array().cloned())
+        .unwrap_or_default()
+}
+
 /// The daemon's global id of the node named `name`, from `pw-dump`.
 fn node_id(name: &str) -> Option<u64> {
-    let output = Command::new("pw-dump").output().ok()?;
-    let objects: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    objects.as_array()?.iter().find_map(|object| {
+    dump().iter().find_map(|object| {
         let found = object.pointer("/info/props/node.name")?.as_str()?;
         (found == name).then(|| object.get("id")?.as_u64())?
     })
+}
+
+/// The global ids of the links into the capture's node, from `pw-dump`.
+fn capture_links() -> Vec<u64> {
+    let Some(capture) = node_id(CAPTURE_NODE) else {
+        return Vec::new();
+    };
+    dump()
+        .iter()
+        .filter(|object| {
+            object.get("type").and_then(serde_json::Value::as_str)
+                == Some("PipeWire:Interface:Link")
+                && object
+                    .pointer("/info/input-node-id")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(capture)
+        })
+        .filter_map(|object| object.get("id")?.as_u64())
+        .collect()
 }
 
 /// Polls `done` for up to `limit`; whether it held.
@@ -443,18 +480,26 @@ fn moving_the_default_output_is_reported_once() {
     start(&backend, &lanes, None, &sink).expect("start");
     let _restore = DefaultSink;
     DefaultSink::set(SECOND_SINK);
-    assert_output_moved_once(&reasons, "");
+    assert_output_moved_once(&reasons, Instant::now(), "");
     stop(&backend);
 }
 
-/// Expects one `DefaultOutputChanged` report and no second. WirePlumber
-/// moves `default.audio.sink` after the configured one, so the report gets
-/// time, and a missing one says what the metadata held. `context`
-/// prefixes the failure messages.
-fn assert_output_moved_once(reasons: &Receiver<DeviceChangeReason>, context: &str) {
+/// Expects one `DefaultOutputChanged` report and no second, and the one
+/// no sooner than the coalescing delay after `since`, the last switch.
+/// WirePlumber moves `default.audio.sink` after the configured one, so the
+/// report gets time, and a missing one says what the metadata held.
+/// `context` prefixes the failure messages.
+fn assert_output_moved_once(reasons: &Receiver<DeviceChangeReason>, since: Instant, context: &str) {
     let reason = reasons
         .recv_timeout(COALESCE_DELAY + Duration::from_secs(8))
         .unwrap_or_else(|_| panic!("{context}no device-change report; {}", default_metadata()));
+    let after = since.elapsed();
+    // A fifth of the delay off: WirePlumber may move the default a few
+    // milliseconds before `pw-metadata` has exited.
+    assert!(
+        after >= COALESCE_DELAY * 4 / 5,
+        "{context}reported {after:?} after the last switch, inside the coalescing delay"
+    );
     assert_eq!(reason, DeviceChangeReason::DefaultOutputChanged);
     assert!(
         reasons.recv_timeout(QUIET).is_err(),
@@ -509,10 +554,14 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
             "round {round}: the default is not {from}; {}",
             default_metadata()
         );
+        // Within the coalescing delay of each other: one report, timed
+        // from the last.
         DefaultSink::set(to);
+        std::thread::sleep(COALESCE_DELAY / 2);
         DefaultSink::set(from);
+        std::thread::sleep(COALESCE_DELAY * 2 / 5);
         DefaultSink::set(to);
-        assert_output_moved_once(&reasons, &format!("round {round}: "));
+        assert_output_moved_once(&reasons, Instant::now(), &format!("round {round}: "));
         // The session's rebuild: stop, open the latch, start again.
         stop_and_check_teardown(&backend, &sink);
         sink.rearm_device_change();
@@ -559,6 +608,101 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
         "an unrelated node is no change"
     );
     stop(&backend);
+}
+
+/// Short playback streams into the default sink, one after another on a
+/// thread, as other apps' notification sounds come and go; stopped when
+/// dropped.
+struct Churn {
+    done: Arc<AtomicBool>,
+    streams: Arc<AtomicUsize>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Churn {
+    fn start() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("blip.wav");
+        write_tone(&path, SINK_TONE, 0.1);
+        let done = Arc::new(AtomicBool::new(false));
+        let streams = Arc::new(AtomicUsize::new(0));
+        let thread = std::thread::spawn({
+            let (done, streams) = (Arc::clone(&done), Arc::clone(&streams));
+            move || {
+                let _dir = dir;
+                while !done.load(Ordering::Relaxed) {
+                    let _ = Command::new("pw-play")
+                        .arg(&path)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
+                    streams.fetch_add(1, Ordering::Relaxed);
+                    std::thread::sleep(Duration::from_millis(150));
+                }
+            }
+        });
+        Self {
+            done,
+            streams,
+            thread: Some(thread),
+        }
+    }
+
+    /// Streams played to the end so far.
+    fn streams(&self) -> usize {
+        self.streams.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Churn {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn other_apps_streams_coming_and_going_do_not_hold_back_a_report() {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    let _restore = DefaultSink;
+    start(&backend, &lanes, None, &sink).expect("start");
+    let churn = Churn::start();
+    assert!(
+        eventually(Duration::from_secs(5), || churn.streams() >= 2),
+        "the other streams did not play"
+    );
+    let before = churn.streams();
+    DefaultSink::set(SECOND_SINK);
+    assert_output_moved_once(&reasons, Instant::now(), "under churn: ");
+    assert!(
+        churn.streams() >= before + 2,
+        "the other streams kept coming while the report was due"
+    );
+    drop(churn);
+    stop_and_check_teardown(&backend, &sink);
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_link_removed_from_outside_is_reported_as_the_output_gone() {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    start(&backend, &lanes, None, &sink).expect("start");
+    let links = capture_links();
+    assert_eq!(links.len(), 3, "one link per channel: {links:?}");
+    // A patchbay or a policy removing one of them.
+    assert!(tool("pw-cli", &["destroy", &links[2].to_string()]));
+    let reason = reasons
+        .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
+        .expect("a device-change report");
+    assert_eq!(reason, DeviceChangeReason::OutputDeviceGone);
+    stop_and_check_teardown(&backend, &sink);
 }
 
 /// A lingering virtual microphone, created by `pw-cli`; destroyed when
