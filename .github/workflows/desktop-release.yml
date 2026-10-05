@@ -349,26 +349,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Each artifact in its own directory, dist/steno-desktop-<platform>.
       - uses: actions/download-artifact@v4
         with:
           pattern: steno-desktop-*
           path: dist
-          merge-multiple: true
 
-      # The macOS updater archive is `Steno.app.tar.gz` on every version;
-      # it gets the version and the architecture the other assets carry
-      # (its signature covers the bytes, not the name).
-      - name: Assets
+      # Each platform's files from its own artifact only, so no other
+      # bundle job can put a `.deb` or `.AppImage` up for signing; the
+      # macOS archive gets the version in its name.
+      - name: Gather the assets
         run: |
           set -euo pipefail
-          mkdir -p assets
-          find dist -type f -exec mv -t assets {} +
-          if [ -f assets/Steno.app.tar.gz ]; then
-            mv assets/Steno.app.tar.gz "assets/Steno_${VERSION}_aarch64.app.tar.gz"
-            [ -f assets/Steno.app.tar.gz.sig ] \
-              || { echo "::error::Steno.app.tar.gz came without Steno.app.tar.gz.sig"; exit 1; }
-            mv assets/Steno.app.tar.gz.sig "assets/Steno_${VERSION}_aarch64.app.tar.gz.sig"
-          fi
+          # shellcheck disable=SC2086 # one argument per platform
+          apps/desktop/scripts/release-assets.sh "$VERSION" dist assets $PLATFORMS
           ls -l assets
 
       # Every signature against the public key the installed apps verify
