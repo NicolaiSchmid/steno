@@ -24,7 +24,7 @@ pub fn process_environment<C: FromIterator<(String, String)>>() -> C {
 }
 
 /// The pairs of `variables` whose name and value are both valid Unicode.
-pub fn unicode_pairs(
+fn unicode_pairs(
     variables: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> impl Iterator<Item = (String, String)> {
     variables
