@@ -309,9 +309,9 @@ so `scripts/wix-version.sh` accepts `X.Y.Z` and `X.Y.Z-<label>.<N>` alone.
 A manual run builds, signs and notarises the platforms it is given,
 checksums and signs them as a tag would (see Checksums and OpenPGP
 signatures) and keeps the result as workflow artifacts; it publishes
-nothing. The
-`desktop-v` prefix keeps these tags apart from the Swift app's `v*`
-(`release.yml`) and the mobile build tags `ios-fp-*` (`mobile-cd.yml`).
+nothing. The `desktop-v` prefix keeps these tags apart from the Swift
+app's `v*` (`release.yml`) and the mobile build tags `ios-fp-*`
+(`mobile-cd.yml`).
 `cargo deny check` (`deny.toml`: the licence allow list, the MPL-2.0
 crates by name, advisories, sources) runs first and stops the run on any
 finding.
@@ -511,8 +511,9 @@ a file there (loopback pinentry), signs with the committed key's
 fingerprint only, and removes the directory and its agent on exit. It then
 verifies every signature with `gpgv` against a keyring holding only the
 committed public key; a signature that does not verify fails the run
-before anything is published. It warns 90 days before the key expires. `scripts/release-notes.sh` writes the release
-notes with the fingerprint and the commands below.
+before anything is published. It warns 90 days before the key expires.
+`scripts/release-notes.sh` writes the release notes with the fingerprint
+and the commands below.
 
 To check a download (the notes name the release's files):
 
