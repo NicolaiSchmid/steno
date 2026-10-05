@@ -42,21 +42,13 @@ dbus_pid=""
 daemon_pids=()
 # Ends the given processes: a TERM, 2 s to go, then a KILL.
 terminate() {
-  local pid alive
   if [[ $# -eq 0 ]]; then
     return 0
   fi
   kill "$@" 2>/dev/null || true
+  # `kill -0` succeeds while any of them is alive.
   for _ in $(seq 1 20); do
-    alive=""
-    for pid in "$@"; do
-      if kill -0 "$pid" 2>/dev/null; then
-        alive=1
-      fi
-    done
-    if [[ -z "$alive" ]]; then
-      break
-    fi
+    kill -0 "$@" 2>/dev/null || break
     sleep 0.1
   done
   kill -9 "$@" 2>/dev/null || true
@@ -194,9 +186,7 @@ broadcasts_metadata() {
 }
 
 for try in 1 2 3; do
-  if ! start_daemons; then
-    exit 1
-  fi
+  start_daemons || exit 1
   broadcasts_metadata && break
   if [[ $try -eq 3 ]]; then
     echo "pipewire-headless: the daemon sends no metadata changes after 3 starts" >&2
