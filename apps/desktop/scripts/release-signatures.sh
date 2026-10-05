@@ -13,8 +13,10 @@
 # The secret key goes into a throwaway GNUPGHOME under $RUNNER_TEMP (or
 # $TMPDIR), read from the environment and never printed; the passphrase
 # reaches gpg through a file in that directory (loopback pinentry). The
-# directory and its agent are removed on exit, failed or not. Prints the
-# signing key's fingerprint as the last line on stdout.
+# directory and its agent are removed on exit, failed or not. A committed
+# key that has expired is an `::error::` before anything is signed, one
+# that expires within 90 days a `::warning::`. Prints the signing key's
+# fingerprint as the only line on stdout; everything else goes to stderr.
 # apps/desktop/scripts/release-signatures.test.sh checks it with a test
 # key; rust-ci.yml runs that.
 set -euo pipefail
@@ -54,6 +56,17 @@ fingerprint="$(key_field fpr 10)"
 keyring="$verifying/release-signing-key.gpg"
 GNUPGHOME="$verifying" gpg --batch --dearmor < "$public_key" > "$keyring"
 
+# Its expiry, field 7 of `pub` (empty when it never expires).
+expires="$(key_field pub 7)"
+now="$(date +%s)"
+upkeep='extend it and commit the new public key (apps/desktop/README.md, Checksums and OpenPGP signatures)'
+if [[ -n "$expires" ]] && ((expires <= now)); then
+  echo "::error::the release signing key $fingerprint expired on $(date -u -d "@$expires" +%F); $upkeep" >&2
+  exit 1
+elif [[ -n "$expires" ]] && ((expires - now < 90 * 86400)); then
+  echo "::warning::the release signing key $fingerprint expires on $(date -u -d "@$expires" +%F); $upkeep" >&2
+fi
+
 (umask 077 && printf '%s' "$GPG_PASSPHRASE" > "$signing/passphrase")
 gpg_sign() {
   GNUPGHOME="$signing" gpg --batch --no-tty --pinentry-mode loopback \
@@ -88,13 +101,6 @@ for file in "${signed[@]}"; do
     || { echo "::error::$file.asc does not verify against $public_key" >&2; exit 1; }
   echo "verified $file.asc" >&2
 done
-
-# A warning a quarter before the key expires (field 7 of `pub`, empty
-# when it never does).
-expires="$(key_field pub 7)"
-if [[ -n "$expires" ]] && ((expires - $(date +%s) < 90 * 86400)); then
-  echo "::warning::the release signing key $fingerprint expires on $(date -u -d "@$expires" +%F); extend it (apps/desktop/README.md, Release)" >&2
-fi
 
 echo "signed ${signed[*]} with $fingerprint; SHA256SUMS covers ${#assets[@]} assets" >&2
 echo "$fingerprint"

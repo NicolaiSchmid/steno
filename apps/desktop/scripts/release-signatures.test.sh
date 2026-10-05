@@ -24,8 +24,9 @@ fail() {
 # as the workflow's secrets hold them.
 (umask 077 && mkdir "$keys")
 passphrase='correct horse battery staple'
+# make_key <uid> <passphrase> [gpg option...]
 make_key() {
-  GNUPGHOME="$keys" gpg --batch --quiet --pinentry-mode loopback --passphrase "$2" \
+  GNUPGHOME="$keys" gpg --batch --quiet --pinentry-mode loopback --passphrase "$2" "${@:3}" \
     --quick-generate-key "$1" ed25519 sign 1y
   GNUPGHOME="$keys" gpg --batch --with-colons --list-keys "$1" 2>/dev/null | awk -F: '$1 == "fpr" { print $10; exit }'
 }
@@ -38,6 +39,10 @@ GNUPGHOME="$keys" gpg --batch --armor --export "$release" > "$scratch/release.as
 GNUPGHOME="$keys" gpg --batch --armor --export "$impostor" > "$scratch/impostor.asc"
 release_secret="$(export_secret "$release" "$passphrase")"
 impostor_secret="$(export_secret "$impostor" other)"
+# A key made in 2020 that expired a year later.
+expired="$(make_key 'Expired test <expired@example.invalid>' "$passphrase" --faked-system-time 20200101T000000 2>/dev/null)"
+GNUPGHOME="$keys" gpg --batch --armor --export "$expired" > "$scratch/expired.asc"
+expired_secret="$(export_secret "$expired" "$passphrase")"
 
 # assets <name>: a release directory as the publish job assembles it.
 assets() {
@@ -100,21 +105,25 @@ GNUPGHOME="$user" gpg --batch --verify "$dir/steno-desktop_0.2.0_amd64.deb.asc" 
 (cd "$dir" && sha256sum --check --quiet --strict SHA256SUMS >/dev/null 2>&1) && fail "a tampered .deb checked"
 GNUPGHOME="$user" gpgconf --kill all 2>/dev/null || true
 
-# A second run replaces the first's files instead of listing them.
+# A second run replaces the first's files instead of listing them, and
+# prints only the fingerprint on stdout.
 dir="$(assets rerun)"
 sign "$dir" "$release_secret" "$passphrase" "$scratch/release.asc" >/dev/null || fail "the first of two runs failed"
-sign "$dir" "$release_secret" "$passphrase" "$scratch/release.asc" >/dev/null || fail "the second of two runs failed"
+stdout="$(GPG_PRIVATE_KEY="$release_secret" GPG_PASSPHRASE="$passphrase" RUNNER_TEMP="$scratch/tmp" \
+  "$script" "$dir" "$scratch/release.asc" 2>/dev/null)" || fail "the second of two runs failed"
+[[ "$stdout" == "$release" ]] || fail "stdout is not the fingerprint alone: $stdout"
 grep -qE ' (SHA256SUMS|.*\.asc)$' "$dir/SHA256SUMS" && fail "a rerun listed its own files"
 
-# refuse <why> <secret> <passphrase> <public key>: exit non-zero with an
-# ::error::, leaving no GNUPGHOME and no secret in the output.
+# refuse <why> <secret> <passphrase> <public key> [text]: exit non-zero with
+# an ::error:: (holding the text, if given), leaving no GNUPGHOME and no
+# secret in the output.
 refuse() {
   local why="$1" dir output
   dir="$(assets "refuse-$(tr -c '[:lower:]' - <<< "$why")")"
   if output="$(sign "$dir" "$2" "$3" "$4")"; then
     fail "$why was accepted: $output"
-  elif [[ "$output" != *"::error::"* ]]; then
-    fail "$why did not fail with an ::error::: $output"
+  elif [[ "$output" != *"::error::${5:-}"* ]]; then
+    fail "$why did not fail with an ::error::${5:-}: $output"
   fi
   [[ -z "$(ls -A "$scratch/tmp")" ]] || fail "$why left a GNUPGHOME behind"
   [[ "$output" != *"PRIVATE KEY BLOCK"* && "$output" != *"$passphrase"* ]] || fail "$why printed a secret"
@@ -127,6 +136,15 @@ refuse 'a secret that is no key' 'not a key' "$passphrase" "$scratch/release.asc
 printf 'not a key\n' > "$scratch/garbage.asc"
 refuse 'a public key file that is no key' "$release_secret" "$passphrase" "$scratch/garbage.asc"
 refuse 'a missing public key' "$release_secret" "$passphrase" "$scratch/missing.asc"
+refuse 'an expired key' "$expired_secret" "$passphrase" "$scratch/expired.asc" \
+  "the release signing key $expired expired on "
+# The check after signing on its own: a gpgv that reports nothing.
+stub="$scratch/stub"
+mkdir -p "$stub"
+printf '#!/bin/sh\nexit 0\n' > "$stub/gpgv"
+chmod +x "$stub/gpgv"
+PATH="$stub:$PATH" refuse 'a signature gpgv does not report valid' "$release_secret" "$passphrase" \
+  "$scratch/release.asc" 'SHA256SUMS.asc does not verify'
 empty="$scratch/empty"
 mkdir -p "$empty"
 if output="$(sign "$empty" "$release_secret" "$passphrase" "$scratch/release.asc")"; then
