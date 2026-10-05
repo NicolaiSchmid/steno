@@ -307,9 +307,10 @@ publishes; the version must be the one under `[workspace.package]` in
 it builds. So does a version the MSI cannot carry: WiX takes numbers only,
 so `scripts/wix-version.sh` accepts `X.Y.Z` and `X.Y.Z-<label>.<N>` alone.
 A manual run builds, signs and notarises the platforms it is given and
-keeps the bundles as workflow artifacts; it checksums and signs them as a
-tag would, but keeps only `SHA256SUMS` and the list of verified
-signatures (see Checksums and OpenPGP signatures); it publishes nothing.
+keeps the bundles as workflow artifacts. It checksums and OpenPGP-signs
+them as a tag would, but keeps none of the `.asc` files, only
+`SHA256SUMS` and the log of what verified (see Checksums and OpenPGP
+signatures). It publishes nothing.
 The `desktop-v` prefix keeps these tags apart from the Swift
 app's `v*` (`release.yml`) and the mobile build tags `ios-fp-*`
 (`mobile-cd.yml`).
@@ -366,8 +367,9 @@ new assets until **Update lanes** finishes.
 - **Check the bundles**: the `::error::` names the file or the check that
   failed.
 - **Gather the assets** (in `assets`): an artifact holds a file its
-  platform does not build, two files share a name, or a platform's
-  artifact is missing; the `::error::` names it
+  platform does not build or whose name has a character other than
+  A-Z a-z 0-9 . _ + -, two files share a name, or a platform's artifact is
+  missing; the `::error::` names it
   (`scripts/release-assets.sh`). Fix the bundle job, delete the tag and
   tag again.
 - **Verify the updater signatures** (in `assets`):
@@ -379,8 +381,10 @@ new assets until **Update lanes** finishes.
   not the secret half of `release-signing-key.asc`, `LINUX_GPG_PASSPHRASE`
   is not its passphrase, or the key has expired; the `::error::` says
   which file did not sign or verify, or when the key expired. Fix the
-  secret (or extend the key, see Checksums and OpenPGP signatures) and
-  re-run the failed jobs.
+  secret and re-run the failed jobs. An expired key needs a new commit,
+  since a re-run checks out the tag's public key: extend the key (see
+  Checksums and OpenPGP signatures), merge the new public key, then delete
+  the tag and tag the new commit.
 - **A job that timed out or lost its runner**: `notarize-dmg.sh` gives up
   after 45 minutes, but the bundler's own notarisation of the `.app` waits
   until the job's 90-minute timeout. Check `xcrun notarytool history` with
@@ -388,10 +392,16 @@ new assets until **Update lanes** finishes.
 - **publish**, also one cancelled while it waited (a third tag): re-run it.
   It uploads what `assets` left in the run's `desktop-release-assets`
   artifact, which is kept 5 days; after that, re-run the `assets` job
-  instead (`gh run rerun --job <its job id>`), which signs the same
-  bundles again and runs publish after it.
+  instead, which signs the same bundles again and runs publish after it:
+
+  ```sh
+  gh run view <run id> --json jobs --jq '.jobs[] | select(.name == "assets") | .databaseId'
+  gh run rerun --job <that job id>
+  ```
+
   An existing release is reused and its assets replaced; the lanes move as
-  on the first run.
+  on the first run. GitHub allows re-runs for 30 days; after that, delete
+  the tag and tag again.
 
 ### A bad release
 
@@ -505,10 +515,11 @@ release notes say, and updates install without asking again.
 
 ### Checksums and OpenPGP signatures
 
-Every release also carries `SHA256SUMS`, the SHA-256 of every file in it
-but the signatures (all three platforms, the updater `.sig` files and
-`latest.json`), and a detached armored OpenPGP signature for `SHA256SUMS`
-and for each Linux `.deb` and `.AppImage` (`<file>.asc`). The key is the
+Every release also carries `SHA256SUMS`, the SHA-256 of every other file
+in it but the OpenPGP signatures (`.asc`): all three platforms, the
+updater `.sig` files and `latest.json`. `SHA256SUMS` and each Linux `.deb`
+and `.AppImage` have a detached armored OpenPGP signature (`<file>.asc`).
+The key is the
 Steno release signing key, an ed25519 key whose public half is
 [`apps/desktop/release-signing-key.asc`](release-signing-key.asc):
 
@@ -519,8 +530,9 @@ expires 2029-10-04
 ```
 
 To check a download, put `SHA256SUMS`, `SHA256SUMS.asc` and the files in
-one directory and run these there (the notes name the release's files;
-`wget` fetches the key where `curl` is missing):
+one directory and run these commands there. The release notes give the
+`gpg --verify` line for each Linux bundle, and `wget` fetches the key
+where `curl` is missing:
 
 ```sh
 curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/desktop-v<version>/apps/desktop/release-signing-key.asc
@@ -531,8 +543,9 @@ gpg --verify steno-desktop_<version>_amd64.deb.asc steno-desktop_<version>_amd64
 ```
 
 Each `gpg --verify` must report "Good signature" from the fingerprint
-above; the warning that the key is not certified by a trusted signature
-is expected. On Windows, in PowerShell,
+above, and `sha256sum` must print OK for every file you downloaded; the
+warning that the key is not certified by a trusted signature is expected.
+On Windows, in PowerShell,
 `(Get-FileHash .\<installer>).Hash -eq '<its hash in SHA256SUMS>'` must
 print `True`.
 
@@ -587,8 +600,8 @@ updater artifact (`.app.tar.gz`, `.AppImage`, `.deb`, `.msi`,
 every run, a manual one included: it gathers each platform's artifact
 (`scripts/release-assets.sh`) and checks each `.sig` against
 `plugins.updater.pubkey`, so a signing key that is not the config key's
-other half fails the release instead of every user's next update, then
-writes the manifest, the checksums and the OpenPGP signatures (see
+other half fails the release instead of every user's next update. It
+then writes the manifest, the checksums and the OpenPGP signatures (see
 above). `publish` uploads that set with the notes from
 `scripts/release-notes.sh`. The manifest then goes to the rolling release of
 each lane, `desktop-stable` and `desktop-beta`, and the lane's tag moves to
