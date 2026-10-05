@@ -469,15 +469,15 @@ fn parse_latency(pod: &spa::pod::Pod, direction: u32) -> Option<Latency> {
     })
 }
 
-/// One started capture on its PipeWire thread. `Drop` tears it down in
-/// order: the stream disconnected (PipeWire removes its node from the data
-/// loop before that returns, so no `process` runs after it), the listeners
-/// removed while the stream still exists, the stream destroyed, the links
-/// destroyed, then the connection.
+/// One started capture on its PipeWire thread. `Drop` disconnects the
+/// stream (PipeWire removes its node from the data loop before that
+/// returns, so no `process` runs after it); the fields then drop in
+/// declaration order: the listeners removed while the stream still exists,
+/// the stream destroyed, the links destroyed, then the connection.
 struct Capture {
-    stream: Option<pw::stream::StreamRc>,
-    rt_listener: Option<pw::stream::StreamListener<RealTime>>,
-    state_listener: Option<pw::stream::StreamListener<()>>,
+    _rt_listener: pw::stream::StreamListener<RealTime>,
+    _state_listener: pw::stream::StreamListener<()>,
+    stream: pw::stream::StreamRc,
     links: Vec<WatchedLink>,
     connection: Connection,
     targets: Targets,
@@ -504,19 +504,12 @@ struct WatchedLink {
 impl Drop for Capture {
     fn drop(&mut self) {
         // `pw_stream_disconnect` returns 0 whatever happens; if it ever
-        // failed, the rt listener below would still be freed while
-        // `process` might run.
-        if let Some(stream) = &self.stream
-            && let Err(error) = stream.disconnect()
-        {
+        // failed, the rt listener would still be freed right after this
+        // while `process` might run.
+        if let Err(error) = self.stream.disconnect() {
             tracing::warn!("disconnecting the PipeWire capture stream failed: {error}");
         }
         tracing::debug!("the PipeWire capture stream is disconnected");
-        drop(self.rt_listener.take());
-        drop(self.state_listener.take());
-        drop(self.stream.take());
-        self.links.clear();
-        tracing::debug!("the PipeWire capture stream and links are destroyed");
     }
 }
 
@@ -600,9 +593,9 @@ impl Capture {
             .borrow()
             .snapshot(&targets, input_device_uid, false);
         Ok(Capture {
-            stream: Some(stream),
-            rt_listener: Some(rt_listener),
-            state_listener: Some(state_listener),
+            _rt_listener: rt_listener,
+            _state_listener: state_listener,
+            stream,
             links: Vec::new(),
             connection,
             // `measure` fills in the latencies.
@@ -621,11 +614,6 @@ impl Capture {
         })
     }
 
-    /// The stream as `new` made it, until `Drop` takes it.
-    fn stream(&self) -> &pw::stream::StreamRc {
-        self.stream.as_ref().expect("taken only by Drop")
-    }
-
     /// Connects the stream, waits for its ports, and links one port of the
     /// targets to each.
     fn link(&mut self, deadline: Instant) -> Result<(), CaptureError> {
@@ -633,7 +621,7 @@ impl Capture {
         let format = format_pod(channels)?;
         let pod = spa::pod::Pod::from_bytes(&format)
             .ok_or_else(|| CaptureError::BackendFailed("the capture format is not a pod".into()))?;
-        let stream = self.stream();
+        let stream = &self.stream;
         stream
             .connect(
                 spa::utils::Direction::Input,
@@ -727,12 +715,12 @@ impl Capture {
             return Err(connection.stalled("run the capture"));
         }
         let cycle = self.cycle_frames.load(Ordering::Relaxed);
-        let graph_rate = self.stream().time().map_or(0, |time| time.rate().denom);
+        let graph_rate = self.stream.time().map_or(0, |time| time.rate().denom);
         // Its own deadline: a first cycle late in the start's must not cut
         // the read short and leave the far-end delay at zero.
         let (input, output) = self.latencies(Instant::now() + LATENCY_TIMEOUT);
-        if self.connection.shared.lost.get() {
-            return Err(self.connection.stalled("run the capture"));
+        if connection.shared.lost.get() {
+            return Err(connection.stalled("run the capture"));
         }
         self.info.input_latency_frames = input.frames(cycle, graph_rate);
         self.info.output_latency_frames = output.frames(cycle, graph_rate);
