@@ -1598,14 +1598,13 @@ request that fixes an item deletes it.
   or Linux a "Mac call" (`FolderNoteRenderer.sourceLabel`, Swift's word); the app
   says "Call". The golden notes in `Tests/Fixtures/snapshots/` are shared with the
   Swift renderer, so a platform's own word needs a fixture per platform. Where:
-  `crates/steno-adapters/src/rendering/folder_note.rs`. Found: the platform wording
-  pull request.
+  `crates/steno-adapters/src/rendering/folder_note.rs`. Found: #204.
 - **First Linux release.** The pages keep the Mac's inset for the traffic lights (the
   sidebar's header-high spacer, onboarding's 52 px top) where Windows and Linux draw
   their own title bar above the page, so the top of each window has an empty band
   there. Where: `apps/macos/web/src/components/ui/sidebar-column.tsx`,
   `apps/macos/web/src/windows/onboarding/onboarding-page.tsx`,
-  `apps/desktop/src-tauri/src/windows.rs`. Found: the platform wording pull request.
+  `apps/desktop/src-tauri/src/windows.rs`. Found: #204.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
   `directmlOnWindows` stays off by default (`SpeechSettings` in
@@ -1751,6 +1750,7 @@ PR off `main`.
 | #154 ported: the room fallback for a call whose tap carried nothing (`steno-pipeline`) | `fix/rust-port-154-room-fallback` | #181 | merged |
 | A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
+| Each platform's own wording and shortcuts: the platform from the shell, the page's words and keys, the host's permissions and sentences, the vault the CLI named | `fix/desktop-platform-wording` | #204 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
