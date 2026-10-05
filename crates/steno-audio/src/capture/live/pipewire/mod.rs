@@ -69,7 +69,7 @@ mod graph;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
@@ -944,6 +944,37 @@ struct Active {
     /// Disconnected once the thread is done, its teardown included.
     ended: Receiver<()>,
     thread: JoinHandle<()>,
+    /// The thread's kernel id once it runs, 0 before or when unreadable:
+    /// where a hung teardown waits is read from `/proc` by it.
+    thread_id: Arc<AtomicU32>,
+}
+
+/// The calling thread's kernel id, from `/proc/thread-self`; 0 when that
+/// is unreadable.
+fn kernel_thread_id() -> u32 {
+    std::fs::read_link("/proc/thread-self")
+        .ok()
+        .and_then(|path| path.file_name()?.to_str()?.parse().ok())
+        .unwrap_or(0)
+}
+
+/// Where thread `id` of this process waits, for the log of a teardown
+/// that hung: its system call and kernel wait channel from `/proc`.
+fn where_it_waits(id: u32) -> String {
+    if id == 0 {
+        return "its kernel id is unknown".into();
+    }
+    let read = |file: &str| {
+        std::fs::read_to_string(format!("/proc/self/task/{id}/{file}")).map_or_else(
+            |error| format!("unreadable ({error})"),
+            |text| text.trim().to_owned(),
+        )
+    };
+    format!(
+        "thread {id} in system call {}, waiting in {}",
+        read("syscall"),
+        read("wchan")
+    )
 }
 
 /// The Linux capture backend; see the module doc.
@@ -983,15 +1014,17 @@ impl LiveCaptureBackend {
     /// Closes the gate, asks the thread to quit and joins it: the stream,
     /// the links and the connection are gone when this returns, unless
     /// the thread hangs past [`STOP_TIMEOUT`]; it is then left behind,
-    /// logged, behind the closed gate.
+    /// logged with where it waits, behind the closed gate.
     fn end(active: Active) {
         active.gate.close();
         let _ = active.quit.send(());
         match active.ended.recv_timeout(STOP_TIMEOUT) {
             Err(RecvTimeoutError::Timeout) => tracing::error!(
-                "the PipeWire capture thread did not end within {} s; it is left behind, \
-                 cut off from the recording",
-                STOP_TIMEOUT.as_secs()
+                "the PipeWire capture thread did not end within {} s ({}); it is left \
+                 behind, cut off from the recording, and the devices may stay open \
+                 until Steno quits",
+                STOP_TIMEOUT.as_secs(),
+                where_it_waits(active.thread_id.load(Ordering::Relaxed))
             ),
             Ok(()) | Err(RecvTimeoutError::Disconnected) => {
                 if active.thread.join().is_err() {
@@ -1023,9 +1056,12 @@ impl CaptureBackend for LiveCaptureBackend {
         let lanes = lanes.to_vec();
         let input_device_uid = input_device_uid.map(str::to_owned);
         let thread_gate = Arc::clone(&gate);
+        let thread_id = Arc::new(AtomicU32::new(0));
+        let id_slot = Arc::clone(&thread_id);
         let thread = std::thread::Builder::new()
             .name("steno-pipewire".into())
             .spawn(move || {
+                id_slot.store(kernel_thread_id(), Ordering::Relaxed);
                 // Dropped last, when the teardown is done.
                 let _ending = ending;
                 run(
@@ -1049,6 +1085,7 @@ impl CaptureBackend for LiveCaptureBackend {
             gate,
             ended,
             thread,
+            thread_id,
         };
         match outcome {
             Ok(_) => *active = Some(started),
@@ -1220,12 +1257,20 @@ mod tests {
             gate: Arc::clone(&gate),
             ended,
             thread,
+            thread_id: Arc::new(AtomicU32::new(0)),
         });
         assert!(!gate.open.load(Ordering::SeqCst));
         assert!(
             started.elapsed() < STOP_TIMEOUT,
             "the thread ended and was joined"
         );
+    }
+
+    #[test]
+    fn a_thread_reads_its_kernel_id_for_the_hang_log() {
+        let id = kernel_thread_id();
+        assert_ne!(id, 0);
+        assert!(where_it_waits(id).starts_with(&format!("thread {id} in system call ")));
     }
 
     #[test]
