@@ -20,12 +20,11 @@
 //! report per default move or burst of moves, not before the coalescing
 //! delay after the last, and the rebuild's restart on the new default; a
 //! report while other apps' streams keep coming and going; no report for a
-//! default that comes back or for an unrelated node; each lane reported
-//! gone on its own: a removed microphone, in person or during a call, and
-//! Steno's microphone link removed from outside as the input, a monitor
-//! link removed from outside as the output, and both removed, the
-//! monitor's first, as the output; and Steno's connection closed from
-//! outside as the output gone (the input in person).
+//! default that comes back or for an unrelated node; a lost microphone or
+//! its link reported as the input gone (in person or during a call), a lost
+//! monitor link as the output gone, both links lost (the monitor's first)
+//! as the output gone, and the capture's connection closed from outside as
+//! the output gone (the input in person).
 //!
 //! A round the machine stretched past the coalescing delay is not held to
 //! the one-burst checks (the timing of its one report, or no report for a
@@ -174,7 +173,7 @@ impl Tone {
     fn file(frequency: f64) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("tone.wav");
-        write_tone(&path, frequency, 30.0);
+        write_tone(&path, frequency, 60.0);
         (dir, path)
     }
 
@@ -455,7 +454,7 @@ fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<Report>)
 fn a_call_records_the_microphone_and_the_monitor_aligned_without_allocating() {
     let _sink_tone = Tone::into_sink(SINK, SINK_TONE);
     let _mic_tone = Tone::into_source(MIC, MIC_TONE);
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let backend = Arc::new(LiveCaptureBackend::new());
     let stream = start(&backend, &lanes, None, &sink).expect("start");
@@ -566,7 +565,7 @@ impl Drop for DefaultSink {
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn moving_the_default_output_is_reported_once() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, None, &sink).expect("start");
@@ -674,7 +673,7 @@ fn default_sink() -> Option<String> {
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     let _restore = DefaultSink;
@@ -727,7 +726,7 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     let _restore = DefaultSink;
@@ -830,7 +829,7 @@ impl Drop for Churn {
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn other_apps_streams_coming_and_going_do_not_hold_back_a_report() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     let _restore = DefaultSink;
@@ -863,18 +862,15 @@ fn assert_reported_after(lanes: &[AudioLane], outside: impl FnOnce(), gone: Devi
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// Destroys this process's own client in the daemon (the capture's
-/// connection, found by `pipewire.sec.pid`), so the server drops the
-/// connection.
+/// Destroys the capture's client in the daemon (the `client.id` of its
+/// node), so the server drops the capture's connection.
 fn destroy_own_client() {
-    let pid = u64::from(std::process::id());
     let client = dump()
         .iter()
         .find_map(|object| {
             let props = object.pointer("/info/props")?;
-            let client = object.get("type")?.as_str()? == "PipeWire:Interface:Client";
-            let ours = props.get("pipewire.sec.pid")?.as_u64() == Some(pid);
-            (client && ours).then(|| object.get("id")?.as_u64())?
+            let ours = props.get("node.name")?.as_str()? == CAPTURE_NODE;
+            ours.then(|| props.get("client.id")?.as_u64())?
         })
         .expect("the capture's client in the daemon");
     assert!(tool("pw-cli", &["destroy", &client.to_string()]));
@@ -974,7 +970,7 @@ impl Drop for TemporaryMic {
 
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_microphone_that_goes_away_is_reported_gone() {
+fn a_microphone_that_goes_away_in_person_is_reported_as_the_input_gone() {
     let mic = TemporaryMic::create("steno-test-mic-gone");
     let lanes = [AudioLane::Mixed];
     let (sink, reasons) = reporting_sink(&lanes);
@@ -995,7 +991,7 @@ fn a_microphone_that_goes_away_is_reported_gone() {
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_microphone_that_goes_away_during_a_call_is_reported_as_the_input_gone() {
     let mic = TemporaryMic::create("steno-test-mic-call");
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, Some(mic.name), &sink).expect("start");
