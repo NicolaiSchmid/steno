@@ -268,6 +268,48 @@ fn contract_ts_shared_vocabulary_matches() {
     assert_eq!(top_level("platform"), raw(Platform::ALL));
 }
 
+/// `READS_CALENDAR` in `src/lib/platform.tsx`, one `os: true|false,` line
+/// per platform, against whether `Platform::permissions` lists the
+/// calendar: the page shows General's calendar row by it.
+#[test]
+fn platform_tsx_reads_the_calendar_where_the_platform_lists_it() {
+    let path = repository_root().join("apps/macos/web/src/lib/platform.tsx");
+    let source = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let anchor = "const READS_CALENDAR: Record<PlatformOS, boolean> = {";
+    let at = source
+        .find(anchor)
+        .unwrap_or_else(|| panic!("platform.tsx has no `{anchor}`"));
+    let rest = &source[at + anchor.len()..];
+    let body = &rest[..rest.find('}').expect("the record closes")];
+    let page: Vec<(String, bool)> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (os, value) = line
+                .trim_end_matches(',')
+                .split_once(':')
+                .unwrap_or_else(|| panic!("not `os: value,`: {line}"));
+            let value = match value.trim() {
+                "true" => true,
+                "false" => false,
+                other => panic!("not a boolean: {other}"),
+            };
+            (os.trim().to_owned(), value)
+        })
+        .collect();
+    let host: Vec<(String, bool)> = Platform::ALL
+        .iter()
+        .map(|platform| {
+            (
+                platform.to_string(),
+                platform.permissions().contains(&PermissionKind::Calendar),
+            )
+        })
+        .collect();
+    assert_eq!(page, host);
+}
+
 /// The `z.enum` lists nested in a snapshot or params schema, against the
 /// Rust enum the matching field uses; a new case on either side fails here.
 #[test]

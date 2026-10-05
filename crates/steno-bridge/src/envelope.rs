@@ -382,9 +382,17 @@ impl Platform {
         Platform::Linux
     };
 
-    /// `mac` on the Mac, `elsewhere` on Windows and Linux: the host's
-    /// sentences that name the machine ("on this Mac", "on this
-    /// computer"), kept whole so each reads as one string.
+    /// `mac` on the Mac, `elsewhere` on Windows and Linux: a label or
+    /// sentence that differs, kept whole so each reads as one string.
+    ///
+    /// ```
+    /// use steno_bridge::Platform;
+    ///
+    /// let machine = |platform: Platform| platform.mac_or("this Mac", "this computer");
+    /// assert_eq!(machine(Platform::Macos), "this Mac");
+    /// assert_eq!(machine(Platform::Windows), "this computer");
+    /// assert_eq!(machine(Platform::Linux), "this computer");
+    /// ```
     #[must_use]
     pub const fn mac_or(self, mac: &'static str, elsewhere: &'static str) -> &'static str {
         match self {
@@ -398,8 +406,9 @@ impl Platform {
     /// prompt for the phone's connection; it records system audio without
     /// a permission and Steno reads no calendar there. Linux has the
     /// microphone (the portal asks inside a sandbox) and nothing else.
-    /// `PERMISSIONS` in `apps/macos/web/src/lib/platform.tsx` says the
-    /// same for the General section's calendar row.
+    /// `READS_CALENDAR` in `apps/macos/web/src/lib/platform.tsx` says
+    /// whether the list has the calendar, for the General section's
+    /// calendar row; `tests/fixtures.rs` compares the two.
     #[must_use]
     pub const fn permissions(self) -> &'static [PermissionKind] {
         match self {
@@ -580,13 +589,5 @@ mod tests {
             assert!(kinds.is_sorted(), "{platform}: {kinds:?}");
         }
         assert_eq!(Platform::Macos.permissions(), PermissionKind::ALL);
-        assert_eq!(
-            Platform::Linux.mac_or("this Mac", "this computer"),
-            "this computer"
-        );
-        assert_eq!(
-            Platform::Macos.mac_or("this Mac", "this computer"),
-            "this Mac"
-        );
     }
 }
