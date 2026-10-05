@@ -22,9 +22,10 @@ extension MeetingStore {
   /// suspension, and a revoke or a new pairing in between must stand.
   public func touchPairedDevice(id: UUID, tokenHash: Data, seenAt: Date) async throws {
     try await writer.write { db in
-      let held = PairedDeviceRow.Columns.tokenHash == tokenHash
-      let row = PairedDeviceRow.filter(PairedDeviceRow.Columns.id == id.uuidString && held)
-      _ = try row.updateAll(db, PairedDeviceRow.Columns.lastSeenAt.set(to: seenAt))
+      try PairedDeviceRow
+        .filter(PairedDeviceRow.Columns.id == id.uuidString)
+        .filter(PairedDeviceRow.Columns.tokenHash == tokenHash)
+        .updateAll(db, PairedDeviceRow.Columns.lastSeenAt.set(to: seenAt))
     }
   }
 
