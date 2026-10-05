@@ -1264,13 +1264,38 @@ item to settle before the Linux release:
 - **A default move can go unreported.** With WirePlumber 0.5.14 and
   PipeWire 1.6.5, a client binding the `default` metadata holds its
   events back from every client bound before it until WirePlumber answers
-  the bind, and for good when it disconnects first, so a move made
-  meanwhile never reaches Steno's capture (seen when the live tests
-  polled the metadata with `pw-metadata`). The metadata proxy keeps no
-  copy to read again, and a fresh bind to re-read it causes the same miss
-  for the other clients (tried and dropped in #201). The mechanism and a
-  reproduction are in the PipeWire backend's **First Linux release.** item
-  under "Open after the port". Check it on the release's versions.
+  the bind, so a move made meanwhile never reaches Steno's capture (seen
+  when the live tests polled the metadata with `pw-metadata`). In
+  `src/modules/module-metadata/metadata.c`, `global_bind` pings
+  WirePlumber and raises `pending` (lines 189 and 190), and
+  `metadata_property` forwards an event only while `pending` is 0 or to a
+  binder still waiting for its pong (line 53). `global_unbind` (line 106)
+  never calls `remove_pending` (line 122), so after a binder leaves before
+  its pong, `default` events stop for every client, later binders
+  included once their own pong is answered, until WirePlumber restarts;
+  restarting Steno does not help. Steno's own start can leave a bind
+  unanswered: if WirePlumber stalls past `START_TIMEOUT` (3 s),
+  `Capture::open` drops the connection with the pong outstanding, and
+  each retry of the rebuild adds another. The metadata proxy keeps no
+  copy to read again. #201 tried a periodic re-read (a fresh bind every
+  3 s) and dropped it: its own binds caused the same miss for the other
+  clients (pipewire-pulse, the desktop's sound settings) and could stop
+  their events for good. Reproduced on the private daemon, in a shell
+  under `scripts/pipewire-headless.sh bash`, with `$wp` set to
+  WirePlumber's `application.process.id` from `pw-dump`:
+
+  ```sh
+  pw-metadata -m -n default &             # bound first; prints every event
+  kill -STOP "$wp"                        # no pong from now on
+  timeout 1 pw-metadata -n default        # a second bind, gone before its pong
+  kill -CONT "$wp"
+  pw-metadata -n default 0 steno.after 1  # the monitor never prints it
+  pw-metadata -n default                  # a fresh bind lists it
+  ```
+
+  With the second bind run in the background instead
+  (`pw-metadata -n default &`), so it outlives the pong, the monitor
+  prints the set.
 - **`stop()` is bounded, except behind a blocked log write.** It closes
   the capture's gate to the sink, so no frame or report reaches the sink
   after it, and waits 2 s for the PipeWire thread; a thread that has not
@@ -1581,33 +1606,13 @@ request that fixes an item deletes it.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
-  list and no meeting detection, the latencies are unmeasured on real hardware, a
-  default move can go unreported, and the decoder reads a whole lane into memory
-  (1.4 GB for a two-hour 48 kHz lane). The default move is PipeWire's (1.6.5, with
-  WirePlumber 0.5.14) and is to be reported upstream. For WirePlumber's exported
-  `default` metadata, `src/modules/module-metadata/metadata.c` holds back events from
-  every earlier binder while a new binder waits for WirePlumber's pong: `global_bind`
-  pings WirePlumber and raises `pending` (lines 189 and 190), and `metadata_property`
-  forwards an event only while `pending` is 0 or to a binder still waiting (line 53).
-  `global_unbind` (line 106) never calls `remove_pending` (line 122), so a binder that
-  leaves before the pong keeps the events from every earlier binder until WirePlumber
-  restarts. #201 tried a periodic re-read (a fresh bind every 3 s) and dropped it: its
-  own binds caused the same miss for the other clients (pipewire-pulse, the desktop's
-  sound settings) and could stop their events for good. Reproduced on the private
-  daemon, in a shell under `scripts/pipewire-headless.sh bash`, with `$wp` set to
-  WirePlumber's `application.process.id` from `pw-dump`:
-
-  ```sh
-  pw-metadata -m -n default &             # bound first; prints every event
-  kill -STOP "$wp"                        # no pong from now on
-  timeout 1 pw-metadata -n default        # a second bind, gone before its pong
-  kill -CONT "$wp"
-  pw-metadata -n default 0 steno.after 1  # the monitor never prints it
-  pw-metadata -n default                  # a fresh bind lists it
-  ```
-
-  With the second bind allowed to finish (no `timeout`), the monitor prints the set.
-  Where: the Linux items under "Audio". Found: #166, #176, #197, #201.
+  list and no meeting detection, the latencies are unmeasured on real hardware, and
+  the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
+  Where: the Linux items under "Audio". Found: #166, #176.
+- **First Linux release.** A default move can go unreported (PipeWire 1.6.5 with
+  WirePlumber 0.5.14): report it to PipeWire upstream and check it on the release's
+  versions. Where: "A default move can go unreported" in the Linux list under
+  "Audio". Found: #197, #201.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
 - **First Linux release.** The web UI speaks Mac on every platform: "Reveal in
