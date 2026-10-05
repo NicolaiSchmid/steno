@@ -289,4 +289,9 @@ describe("usePlatform and useShortcut", () => {
 		expect(action).toHaveBeenCalledTimes(1);
 	});
 
+	it("throw without a provider", () => {
+		const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+		expect(() => renderHook(() => usePlatform())).toThrow("PlatformProvider");
+		quiet.mockRestore();
+	});
 });

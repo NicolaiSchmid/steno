@@ -244,20 +244,23 @@ describe("onboarding", () => {
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(sentence);
 	});
 
-	it("asks for one permission where the platform has one", async () => {
+	it.each([
+		["linux", ["microphone"], "One permission"],
+		["windows", ["microphone", "localNetwork"], "A few permissions"],
+	] as const)("on %s with %j asks for %s", async (os, kinds, asked) => {
 		const onboarding = (await loadFixtureSnapshots())
 			.onboarding as OnboardingSnapshot;
 		const harness = await createBridgeHarness("", {
 			onboarding: {
 				...onboarding,
-				permissions: onboarding.permissions.filter(
-					(step) => step.kind === "microphone",
+				permissions: onboarding.permissions.filter((step) =>
+					(kinds as readonly string[]).includes(step.kind),
 				),
 			} satisfies OnboardingSnapshot,
 		});
-		renderWithBridge(<OnboardingWindow />, harness, platformFor("linux"));
+		renderWithBridge(<OnboardingWindow />, harness, platformFor(os));
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
-			"One permission, then where summaries come from and where meetings go. Audio never leaves this computer.",
+			`${asked}, then where summaries come from and where meetings go. Audio never leaves this computer.`,
 		);
 	});
 
