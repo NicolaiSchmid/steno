@@ -1,6 +1,11 @@
 # Rust core and Tauri shell: Steno on macOS, Linux and Windows
 
-Status: started 2026-10-02 on branch `refactor/rust-workspace`. Amends
+Status: every work package from WP1 to WP10b except WP9b is merged on `main`; the
+last pull request of the port, #187, merged on 2026-10-05. Left: the Mac cutover (WP9b,
+`.plans/2026-10-04-mac-cutover.md`), the first Linux release, and the first Windows
+release (WP10's hardware checks; the Windows installers from #184 are unsigned). "Open after the port", before the
+progress table, lists what is still open and who owns it. Started 2026-10-02 on
+branch `refactor/rust-workspace`. Amends
 `.plans/2026-09-24-initial-scope.md` (removes "Windows, Linux" from the v1 non-goals for
 the next major version and replaces the "Language / UI", "Core" and "Apps" rows of the
 platform table) and `.plans/2026-09-29-macos-webview-ui.md` (its "no Electron, Tauri,
@@ -1412,8 +1417,15 @@ PR off `main`.
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | merged |
 | WASAPI follow-ups: slip window and immediate slip, trusted stream sizes, start deadline, detector start and stop serialised (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
 | Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | merged |
-| Revoke during a `complete`, a verify bound to the file it hashed, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | in review |
-| Speech sidecar follow-ups: download lock file, 64 MiB chunks, odd range answers, crash-report stderr, idle child replaced | `fix/rust-sidecar-followups` | #187 | open |
+| Revoke during a `complete`, a verify bound to the file it hashed, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | merged |
+| Speech sidecar follow-ups: download lock file, 64 MiB chunks, odd range answers, crash-report stderr, idle child replaced | `fix/rust-sidecar-followups` | #187 | merged |
+| Rust CI green on all three platforms after the first merges | `fix/rust-ci-main` | #168 | merged |
+| macOS panel size check held to what AppKit allows, panels kept non-activating | `fix/desktop-macos-panel-size` | #178 | merged |
+| #154 ported: the cleanup prompt's speaker-label rule and echoed labels stripped (`steno-llm`) | `fix/rust-port-154-cleanup` | #179 | merged |
+| The privacy rule names every network path (`AGENTS.md`) | `docs/privacy-network-paths` | #180 | merged |
+| #154 ported: the room fallback for a call whose tap carried nothing (`steno-pipeline`) | `fix/rust-port-154-room-fallback` | #181 | merged |
+| A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
+| The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
