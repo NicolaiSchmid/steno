@@ -633,6 +633,12 @@ async fn paired_with_a_window_open() -> (TestService, EngineDevice, Principal) {
     (test, phone, principal)
 }
 
+/// `first` and `second` run to the end together, bounded by
+/// [`common::signalled`]; `what` names them.
+async fn both<A: Future, B: Future>(what: &str, first: A, second: B) -> (A::Output, B::Output) {
+    common::signalled(what, async { tokio::join!(first, second) }).await
+}
+
 #[test]
 fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
     // The phone pairs again while the computer revokes it. The revoke
@@ -652,10 +658,7 @@ fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
         woken.pending(pairing.as_mut(), "the pairing waits on its save");
         let mut revoking = pin!(test.service.revoke(phone.device.id));
         woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
-        let (paired, revoked) = common::signalled("the pairing and the revoke", async {
-            tokio::join!(pairing, revoking)
-        })
-        .await;
+        let (paired, revoked) = both("the pairing and the revoke", pairing, revoking).await;
         assert_eq!(paired.status.as_u16(), 200);
         revoked.unwrap();
         let token = paired.decode::<wire::PairResponse>().unwrap().token;
@@ -705,10 +708,7 @@ fn a_pairing_during_a_revokes_delete_stays_paired() {
             &phone.device.name,
         ));
         woken.pending(pairing.as_mut(), "the pairing waits on its save");
-        let (revoked, paired) = common::signalled("the revoke and the pairing", async {
-            tokio::join!(revoking, pairing)
-        })
-        .await;
+        let (revoked, paired) = both("the revoke and the pairing", revoking, pairing).await;
         revoked.unwrap();
         assert_eq!(paired.status.as_u16(), 200);
         let token = paired.decode::<wire::PairResponse>().unwrap().token;
@@ -773,10 +773,7 @@ fn a_touch_does_not_overtake_a_revoke_asked_for_before_it() {
             vec![before],
             "nothing reached the store ahead of the delete"
         );
-        let (revoked, _) = common::signalled("the revoke and the touch", async {
-            tokio::join!(revoking, touching)
-        })
-        .await;
+        let (revoked, _) = both("the revoke and the touch", revoking, touching).await;
         revoked.unwrap();
         assert_eq!(test.service.paired_devices().await.unwrap(), Vec::new());
     });
@@ -825,10 +822,7 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
             before,
             "nothing reached the store ahead of the delete"
         );
-        let (deleted, announced) = common::signalled("the revoke and the announce", async {
-            tokio::join!(revoking, announcing)
-        })
-        .await;
+        let (deleted, announced) = both("the revoke and the announce", revoking, announcing).await;
         deleted.unwrap();
         assert_eq!(announced.status.as_u16(), 200);
         assert_ne!(
