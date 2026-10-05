@@ -47,7 +47,7 @@ fn the_retention_sentence_follows_the_stored_rule() {
         .to_owned();
     assert_eq!(
         sentence,
-        "Recordings are kept forever in audio. Change this any time in Settings > Audio."
+        "Recordings are kept until you delete them. Change this any time in Settings > Recording."
     );
     set_retention(&harness.store, AudioRetention::KeepDays(7));
     harness.host.onboarding_refresh().unwrap();
@@ -59,7 +59,7 @@ fn the_retention_sentence_follows_the_stored_rule() {
         sentence.contains("deleted 7 days after it was processed and exported"),
         "{sentence}"
     );
-    assert!(sentence.ends_with("Change this any time in Settings > Audio."));
+    assert!(sentence.ends_with("Change this any time in Settings > Recording."));
     set_retention(&harness.store, AudioRetention::DeleteAfterProcessing);
     harness.host.onboarding_refresh().unwrap();
     assert!(

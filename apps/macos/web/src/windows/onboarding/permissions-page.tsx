@@ -16,7 +16,7 @@ function permissionsIntro(
 
 /**
  * Page 1: one row per permission with the action that fits its state. The
- * required ones gate Done; the optional ones can be skipped; the local
+ * required ones gate Continue; the optional ones can be skipped; the local
  * network prompt comes with the first pairing, so its row only explains.
  * Later moves on with whatever is still open.
  */
@@ -38,7 +38,7 @@ export function PermissionsPage({
 						onClick={() => send(client, "onboarding.advance")}
 						variant="primary"
 					>
-						Done
+						Continue
 					</Button>
 				) : (
 					<Button

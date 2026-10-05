@@ -17,7 +17,6 @@ use steno_bridge::{
     OnboardingSetupStepState, OnboardingSnapshot, OnboardingVault, PermissionKind, PermissionState,
     Platform,
 };
-use steno_core::paths::file_url_path;
 use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, Settings, Store};
 
@@ -185,24 +184,17 @@ impl OnboardingViewModel {
     }
 
     /// One sentence on what the rule does to the files, then where to
-    /// change it. Swift: `OnboardingViewModel.retentionSentence(for:)`.
+    /// change it: Settings > Recording, the section that holds the rule.
+    /// Swift: `OnboardingViewModel.retentionSentence(for:)`.
     #[must_use]
     pub fn retention_sentence_for(settings: &Settings) -> String {
         let rule = match settings.default_retention {
-            AudioRetention::KeepForever => {
-                let folder = file_url_path(&settings.audio_folder)
-                    .and_then(|path| {
-                        path.file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                    })
-                    .unwrap_or_default();
-                format!("Recordings are kept forever in {folder}.")
-            }
+            AudioRetention::KeepForever => "Recordings are kept until you delete them.".to_owned(),
             rule @ (AudioRetention::KeepDays(_) | AudioRetention::DeleteAfterProcessing) => {
                 retention_footnote(rule)
             }
         };
-        format!("{rule} Change this any time in Settings > Audio.")
+        format!("{rule} Change this any time in Settings > Recording.")
     }
 
     // Page 1
@@ -279,7 +271,7 @@ impl OnboardingViewModel {
         }
     }
 
-    /// Done or Later on page 1. Page 2 with both rows already handled has
+    /// Continue or Later on page 1. Page 2 with both rows already handled has
     /// nothing to show, so it finishes.
     pub fn advance(&mut self, services: &Services) {
         self.page = OnboardingPage::Setup;

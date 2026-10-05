@@ -69,7 +69,7 @@ private func model(
     #expect(summaries.baseURL == "http://127.0.0.1:1234/v1")
     let vault = try #require(pageTwo.vault)
     #expect(vault.path == nil && vault.name == nil && vault.validationMessage == nil)
-    #expect(loaded.retentionSentence?.hasPrefix("Recordings are kept forever in ") == true)
+    #expect(loaded.retentionSentence?.hasPrefix("Recordings are kept until you delete them.") == true)
     #expect(!loaded.finished)
 
     onboarding.skip(.calendar)

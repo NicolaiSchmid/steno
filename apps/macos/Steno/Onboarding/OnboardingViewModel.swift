@@ -138,16 +138,17 @@ final class OnboardingViewModel {
   }
 
   /// One sentence on what the rule does to the files, then where to change
-  /// it. The days and delete sentences are the Audio tab's footnotes.
+  /// it: Settings > Recording, the section that holds the rule. The days
+  /// and delete sentences are that section's footnotes.
   static func retentionSentence(for settings: Settings) -> String {
     let rule =
       switch settings.defaultRetention {
       case .keepForever:
-        "Recordings are kept forever in \(settings.audioFolder.lastPathComponent)."
+        "Recordings are kept until you delete them."
       case .keepDays, .deleteAfterProcessing:
         settings.defaultRetention.footnote
       }
-    return rule + " Change this any time in Settings > Audio."
+    return rule + " Change this any time in Settings > Recording."
   }
 
   // MARK: - Page 1

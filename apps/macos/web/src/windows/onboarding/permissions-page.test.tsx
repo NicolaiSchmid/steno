@@ -49,7 +49,7 @@ describe("PermissionsPage", () => {
 		expect(
 			screen.queryByTestId("permission-localNetwork-skip"),
 		).not.toBeInTheDocument();
-		// Not every required permission is granted: Later, not Done.
+		// Not every required permission is granted: Later, not Continue.
 		expect(screen.getByTestId("onboarding-later")).toBeInTheDocument();
 		expect(screen.queryByTestId("onboarding-done")).not.toBeInTheDocument();
 	});
@@ -103,12 +103,13 @@ describe("PermissionsPage", () => {
 		expect(callsTo(harness.transport, "onboarding.refresh")).toHaveLength(1);
 	});
 
-	it("offers Done once every required permission is granted", async () => {
+	it("offers Continue once every required permission is granted", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=onboarding-granted");
 		renderWithBridge(<OnboardingWindow />, harness);
 		expect(screen.queryByTestId("onboarding-later")).not.toBeInTheDocument();
 		expect(screen.getAllByText("Allowed")).toHaveLength(4);
+		expect(screen.getByTestId("onboarding-done")).toHaveTextContent("Continue");
 		await user.click(screen.getByTestId("onboarding-done"));
 		expect(callsTo(harness.transport, "onboarding.advance")).toHaveLength(1);
 	});
