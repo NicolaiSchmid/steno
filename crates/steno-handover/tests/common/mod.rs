@@ -54,6 +54,28 @@ pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
         .unwrap_or_else(|_| panic!("{what} within {SIGNAL_BOUND:?}"))
 }
 
+/// Runs `test` as a task on a runtime with one worker and one blocking
+/// thread, which makes a write that does not wait its turn commit out of
+/// order every time instead of only when threads race. The engine hands
+/// each write on in a task of its own; the worker runs the task spawned
+/// last first (tokio's LIFO slot), and the one blocking thread runs the
+/// store calls in the order they reach it. A write the engine sent to the
+/// pool without waiting for the one asked for before it, or as it was
+/// asked for instead of from its task, would get there first.
+pub fn on_one_worker<F>(test: F) -> F::Output
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { tokio::spawn(test).await.unwrap() })
+}
+
 /// Holds the store's one connection from another thread until
 /// [`StoreHold::release`], so a store call of the engine waits on it.
 pub struct StoreHold {
