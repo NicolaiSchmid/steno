@@ -44,15 +44,14 @@ fn main() {
             Command::Dev(command) => command.run().await,
         }
     });
+    // The queued log lines, after the runtime, whose tasks may log as they
+    // end, and before a failure they led to, as when they were written at
+    // once.
+    drop(runtime);
+    steno_services::flush_logs();
     let Err(failure) = outcome else {
-        // After the runtime, whose tasks may log as they end.
-        drop(runtime);
-        steno_services::flush_logs();
         return;
     };
-    // The queued log lines first, so they come out before the failure they
-    // led to, as when they were written at once.
-    steno_services::flush_logs();
     let (code, message) = match failure {
         Failure::Usage(message) => (1, message),
         Failure::Runtime(message) => (2, message),
