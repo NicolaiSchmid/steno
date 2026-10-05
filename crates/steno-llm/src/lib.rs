@@ -7,11 +7,11 @@
 //! while summaries are off or not set up. For `LlmProvider::Endpoint`,
 //! build the client with [`OpenAiCompatibleClient::from_secret_store`]. For
 //! `LlmProvider::Codex`, use `CodexResponsesClient::new(endpoint,
-//! Arc::new(CodexCredentialStore::new(CodexCredentialStore::default_home(&env))))`
-//! (`env` from `steno_core::environment::process_environment()`; see the [`CodexResponsesClient::new`]
-//! example). Then give the same `Arc` and endpoint to
-//! [`LlmTranscriptCleaner::new`] and to [`LlmMeetingSummarizer::new`], the
-//! latter with the user's time zone.
+//! Arc::new(CodexCredentialStore::new(home)))`, `home` from
+//! [`CodexCredentialStore::default_home`] (see the
+//! [`CodexResponsesClient::new`] example). Then give the same `Arc` and
+//! endpoint to [`LlmTranscriptCleaner::new`] and to
+//! [`LlmMeetingSummarizer::new`], the latter with the user's time zone.
 //!
 //! - `endpoint` ([`LlmEndpoint`], [`StructuredOutputMode`], [`EndpointProbe`],
 //!   [`LlmClient`]): where the model lives, how much it holds, how JSON is

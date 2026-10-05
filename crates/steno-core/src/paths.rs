@@ -3,7 +3,7 @@
 //! today; Linux and Windows follow their platform conventions through the
 //! `directories` crate. Audio lives in `Settings::audio_folder`.
 
-use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -34,11 +34,11 @@ impl StenoPaths {
     /// [`StenoPaths::support_directory`] for the process environment.
     #[must_use]
     pub fn default_support_directory() -> PathBuf {
-        Self::support_directory(&crate::environment::process_environment())
+        Self::support_directory(|name| std::env::var_os(name))
     }
 
-    /// The platform's support directory for `environment`, which tests pass
-    /// explicitly:
+    /// The platform's support directory for the environment `variable`
+    /// looks up, which tests pass explicitly:
     ///
     /// - macOS: `$HOME/Library/Application Support/Steno` (Swift's path;
     ///   `HOME` first because not every Foundation honours it otherwise)
@@ -47,15 +47,14 @@ impl StenoPaths {
     ///
     /// A variable holding a relative path counts as unset, as the XDG base
     /// directory specification requires for `XDG_DATA_HOME`; `HOME` and
-    /// `APPDATA` get the same treatment.
+    /// `APPDATA` get the same treatment. A path that is not Unicode is used
+    /// as it is: skipping it would open a second database elsewhere.
     #[must_use]
-    pub fn support_directory(environment: &HashMap<String, String>) -> PathBuf {
+    pub fn support_directory(variable: impl Fn(&str) -> Option<OsString>) -> PathBuf {
         let absolute = |key: &str| {
-            environment
-                .get(key)
-                .map(Path::new)
+            variable(key)
+                .map(PathBuf::from)
                 .filter(|path| path.is_absolute())
-                .map(Path::to_path_buf)
         };
         let base_dirs = BaseDirs::new();
         let home = || {
@@ -210,6 +209,8 @@ fn drop_trailing_slash(bytes: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -389,19 +390,22 @@ mod tests {
         assert!(!starts_with_drive(b"/C"));
     }
 
+    /// A lookup over `pairs`, as the process environment answers.
+    fn lookup(pairs: Vec<(&str, OsString)>) -> impl Fn(&str) -> Option<OsString> {
+        let pairs: HashMap<String, OsString> = pairs
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect();
+        move |name| pairs.get(name).cloned()
+    }
+
     #[test]
     fn the_support_directory_follows_the_environment() {
-        let environment: HashMap<String, String> = [
-            ("HOME".to_owned(), "/home/nicolai".to_owned()),
-            ("XDG_DATA_HOME".to_owned(), "/data".to_owned()),
-            (
-                "APPDATA".to_owned(),
-                r"C:\Users\nicolai\AppData\Roaming".to_owned(),
-            ),
-        ]
-        .into_iter()
-        .collect();
-        let directory = StenoPaths::support_directory(&environment);
+        let directory = StenoPaths::support_directory(lookup(vec![
+            ("HOME", "/home/nicolai".into()),
+            ("XDG_DATA_HOME", "/data".into()),
+            ("APPDATA", r"C:\Users\nicolai\AppData\Roaming".into()),
+        ]));
         if cfg!(target_os = "macos") {
             assert_eq!(
                 directory,
@@ -419,5 +423,49 @@ mod tests {
             StenoPaths::new(&directory).database_path(),
             directory.join("steno.sqlite")
         );
+    }
+
+    /// A relative `XDG_DATA_HOME` is no `XDG_DATA_HOME`.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn a_relative_path_counts_as_unset() {
+        let directory = StenoPaths::support_directory(lookup(vec![
+            ("HOME", "/home/nicolai".into()),
+            ("XDG_DATA_HOME", "data".into()),
+        ]));
+        assert_eq!(directory, PathBuf::from("/home/nicolai/.local/share/Steno"));
+    }
+
+    /// The variable the platform reads, holding a path that is not
+    /// Unicode (a Latin-1 byte on Unix, an unpaired surrogate on Windows),
+    /// names the support directory as it is.
+    #[test]
+    fn a_path_that_is_not_unicode_is_used_as_it_is() {
+        #[cfg(unix)]
+        let (name, base) = {
+            use std::os::unix::ffi::OsStringExt;
+            let name = if cfg!(target_os = "macos") {
+                "HOME"
+            } else {
+                "XDG_DATA_HOME"
+            };
+            (name, OsString::from_vec(b"/home/caf\xE9".to_vec()))
+        };
+        #[cfg(windows)]
+        let (name, base) = {
+            use std::os::windows::ffi::OsStringExt;
+            let mut wide: Vec<u16> = r"C:\Users\caf".encode_utf16().collect();
+            wide.push(0xD800);
+            ("APPDATA", OsString::from_wide(&wide))
+        };
+        assert!(base.to_str().is_none());
+        let directory = StenoPaths::support_directory(lookup(vec![(name, base.clone())]));
+        let base = PathBuf::from(base);
+        let expected = if cfg!(target_os = "macos") {
+            base.join("Library").join("Application Support")
+        } else {
+            base
+        };
+        assert_eq!(directory, expected.join("Steno"));
     }
 }

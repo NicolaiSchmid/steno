@@ -21,7 +21,7 @@ use steno_llm::{
 #[must_use]
 pub fn codex_store() -> Arc<CodexCredentialStore> {
     Arc::new(CodexCredentialStore::new(
-        CodexCredentialStore::default_home(&steno_core::environment::process_environment()),
+        CodexCredentialStore::default_home(|name| std::env::var_os(name)),
     ))
 }
 

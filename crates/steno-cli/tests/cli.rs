@@ -19,9 +19,9 @@ fn steno(args: &[&str], home: &Path) -> Run {
         .env("XDG_DATA_HOME", home.join("share"))
         .env("APPDATA", home.join("appdata"))
         .env_remove("STENO_LLM_API_KEY");
-    // Every run carries a variable that is not Unicode, as a user's
-    // environment may: the support directory, the secret overrides and the
-    // Codex home must read past it (`std::env::vars()` would panic).
+    // Every run on Unix carries a variable that is not Unicode, as a
+    // user's environment may: the secret overrides, which read every
+    // variable, must read past it (`std::env::vars()` would panic).
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -556,15 +556,12 @@ fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     };
     assert!(line.ends_with(expected.as_str()), "{line}");
 
-    let environment = [
-        ("HOME", home.to_path_buf()),
-        ("XDG_DATA_HOME", home.join("share")),
-        ("APPDATA", home.join("appdata")),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_owned(), value.to_string_lossy().into_owned()))
-    .collect();
-    let support = steno_core::StenoPaths::support_directory(&environment);
+    let support = steno_core::StenoPaths::support_directory(|name| match name {
+        "HOME" => Some(home.into()),
+        "XDG_DATA_HOME" => Some(home.join("share").into()),
+        "APPDATA" => Some(home.join("appdata").into()),
+        _ => None,
+    });
     std::fs::create_dir_all(&support).unwrap();
     std::fs::write(
         support.join("speech.json"),

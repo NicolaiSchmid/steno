@@ -7,6 +7,7 @@
 
 mod common;
 
+use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 
 use common::*;
@@ -237,37 +238,54 @@ async fn a_transient_refresh_failure_is_not_a_sign_in_problem() {
     );
 }
 
+/// `CODEX_HOME` as given, else `~/.codex`.
+fn home_for(codex_home: Option<&str>) -> std::path::PathBuf {
+    home_for_os(codex_home.map(OsStr::new))
+}
+
+/// [`home_for`] with a value that need not be Unicode.
+fn home_for_os(codex_home: Option<&OsStr>) -> std::path::PathBuf {
+    CodexCredentialStore::default_home(|name| {
+        assert_eq!(name, "CODEX_HOME");
+        codex_home.map(OsString::from)
+    })
+}
+
 #[test]
 fn default_home_honours_codex_home() {
-    let env = |pairs: &[(&str, &str)]| {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect::<std::collections::HashMap<_, _>>()
-    };
     assert_eq!(
-        CodexCredentialStore::default_home(&env(&[("CODEX_HOME", "/tmp/elsewhere")])),
+        home_for(Some("/tmp/elsewhere")),
         std::path::Path::new("/tmp/elsewhere")
     );
-    assert_eq!(
-        CodexCredentialStore::default_home(&env(&[]))
-            .file_name()
-            .unwrap(),
-        ".codex"
-    );
+    assert_eq!(home_for(None).file_name().unwrap(), ".codex");
     // A trailing slash, as a shell export often has, does not double up;
     // an empty override is no override.
-    let slashed = CodexCredentialStore::default_home(&env(&[("CODEX_HOME", "/tmp/elsewhere/")]));
+    let slashed = home_for(Some("/tmp/elsewhere/"));
     assert_eq!(
         CodexCredentialStore::new(slashed).file_path(),
         std::path::Path::new("/tmp/elsewhere/auth.json")
     );
-    assert_eq!(
-        CodexCredentialStore::default_home(&env(&[("CODEX_HOME", "")]))
-            .file_name()
-            .unwrap(),
-        ".codex"
-    );
+    assert_eq!(home_for(Some("")).file_name().unwrap(), ".codex");
+}
+
+/// A `CODEX_HOME` that is not Unicode (a Latin-1 byte on Unix, an
+/// unpaired surrogate on Windows) is the home as it is, not `~/.codex`.
+#[test]
+fn a_codex_home_that_is_not_unicode_is_used_as_it_is() {
+    #[cfg(unix)]
+    let home = {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(b"/tmp/caf\xE9".to_vec())
+    };
+    #[cfg(windows)]
+    let home = {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = r"C:\Users\caf".encode_utf16().collect();
+        wide.push(0xD800);
+        OsString::from_wide(&wide)
+    };
+    assert!(home.to_str().is_none());
+    assert_eq!(home_for_os(Some(&home)), std::path::PathBuf::from(home));
 }
 
 /// Older CLI files have no `auth_mode`; tokens alone mean a `ChatGPT` login.
