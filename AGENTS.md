@@ -2,7 +2,7 @@
 
 > **Steno** is a bot-free meeting recorder for the desktop with a dumb iOS
 > companion recorder. Rust core and Tauri 2 shell for macOS, Linux and
-> Windows, Expo (React Native) mobile app; the Swift core and macOS app keep
+> Windows; Expo (React Native) mobile app; the Swift core and macOS app keep
 > shipping until the Mac cutover. GitHub repository `NicolaiSchmid/steno`; local checkouts may still sit in a directory named `audacious` from before the rename.
 
 Scope and every settled decision live in
@@ -89,8 +89,8 @@ missing local setup, run it. Do not ask first.
   - the model download, which fetches models and sends nothing but the
     request;
   - the updater, which fetches the signed update feed and the update;
-  - the phone handover server, which listens on the local network for paired
-    phones and only receives their recordings.
+  - the phone handover server, which listens on the local network and receives
+    pairing requests and the paired phones' recordings.
 - Tests with `swift test`. Fixtures under `Tests/Fixtures/`; keep audio
   fixtures short and synthetic, never recordings of real meetings.
 
@@ -161,9 +161,10 @@ missing local setup, run it. Do not ask first.
   - the Tauri updater, which fetches the manifest and the signed bundle from
     this repository's GitHub releases and sends nothing;
   - the phone handover server (`steno-handover`), which advertises itself over
-    Bonjour, serves connections only on the local network and loopback, over
-    TLS 1.3 with the self-signed certificate the phone pins, and receives
-    pairing requests and the paired phone's recordings.
+    Bonjour, serves connections only on the computer's LAN addresses and
+    loopback, over TLS 1.3 with the self-signed certificate the phone pins, and
+    receives pairing requests and the paired phone's recordings; it opens no
+    outbound connection.
 
   Audio reaches the speech sidecar only over the child's stdin, never a
   socket, and the sidecar opens no connection. ONNX Runtime's telemetry stays
