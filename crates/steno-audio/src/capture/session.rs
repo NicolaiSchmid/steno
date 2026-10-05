@@ -77,12 +77,15 @@
 //! 2 s for a Bluetooth sink; none within 3 s fails the start), on Windows
 //! until both streams have opened and started (process loopback's
 //! activation included; 10 s in all at most, then the start fails). A
-//! `stop()` arriving meanwhile queues behind it
-//! and then finds a started backend to tear down, instead of racing a
-//! half-built one; a backend never calls back into the session from
-//! `start`, so the hold cannot deadlock. It can stall, though: every
-//! caller, `state()` included, waits as long as `backend.start()` takes,
-//! so a HAL call that hangs there freezes the session's callers with it.
+//! `stop()` arriving meanwhile queues behind it and then finds a started
+//! backend to tear down, instead of racing a half-built one; a backend
+//! never calls back into the session from `start`, so the hold cannot
+//! deadlock. On Linux that rests on one rule: a failed start closes the
+//! capture's gate with the mutex held, and no device-change report can
+//! begin before `start` took the PipeWire thread's answer, so none is
+//! inside the gate then. It can stall, though: every caller, `state()`
+//! included, waits as long as `backend.start()` takes, so a HAL call that
+//! hangs there freezes the session's callers with it.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};

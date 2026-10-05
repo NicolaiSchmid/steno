@@ -83,7 +83,9 @@ use steno_core::AudioLane;
 
 use self::graph::{Graph, Latency, Targets};
 use crate::SAMPLE_RATE;
-use crate::capture::{CaptureBackend, CaptureError, CaptureStream, DeviceSnapshot, LaneSource};
+use crate::capture::{
+    CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot, LaneSource,
+};
 use crate::realtime::{LaneFrameSink, deliver_slices, interleaved_view};
 
 /// How long `start` lets PipeWire answer, link and run the first cycle.
@@ -135,8 +137,17 @@ impl Gate {
         self.inside.fetch_sub(1, Ordering::SeqCst);
     }
 
-    /// Closes the gate and waits for whoever is inside: a cycle's
-    /// `deliver_slices` (microseconds), or a report and its handler.
+    /// Closes the gate and waits, without a limit, for whoever is inside: a
+    /// cycle's `deliver_slices` (microseconds), or a report and its
+    /// handler.
+    ///
+    /// So a handler must not wait on the caller of `close`. The session's
+    /// handler takes the session mutex. The session never holds it across
+    /// `backend.stop()`; it does hold it across `backend.start()`, whose
+    /// failure path closes the gate, but no report can begin before
+    /// `start` took the thread's answer ([`hand_over`]), and a failed
+    /// `start` took none. A handler that stops or starts this backend, or
+    /// drops the last owner of it, would wait on itself here.
     fn close(&self) {
         self.open.store(false, Ordering::SeqCst);
         while self.inside.load(Ordering::SeqCst) != 0 {
@@ -843,10 +854,65 @@ impl Capture {
         );
         match snapshot.difference(&self.baseline) {
             None => tracing::info!("ignored a PipeWire graph change"),
-            Some(reason) => self.gate.pass(|| {
-                tracing::info!("PipeWire graph change reported {reason:?}");
-                self.sink.report_device_change(reason);
-            }),
+            Some(reason) => report(&self.gate, &self.sink, reason),
+        }
+    }
+}
+
+/// Reports `reason` to `sink` through `gate`: not at all once it closed.
+fn report(gate: &Gate, sink: &LaneFrameSink, reason: DeviceChangeReason) {
+    gate.pass(|| {
+        tracing::info!("PipeWire graph change reported {reason:?}");
+        sink.report_device_change(reason);
+    });
+}
+
+/// What `start` waits for: the stream the thread opened, or why it did not.
+type Answer = Result<CaptureStream, CaptureError>;
+
+/// The channel the thread answers `start` through: a rendezvous, so a send
+/// completes only into a `start` still waiting in [`await_answer`]. With a
+/// buffer, an answer sent right after `start` gave up would land in it,
+/// and the thread would go on to watch, and report, for a capture `start`
+/// is tearing down with the session mutex held.
+fn answer_channel() -> (SyncSender<Answer>, Receiver<Answer>) {
+    sync_channel(0)
+}
+
+/// `start`'s wait for the thread's answer, at most `limit`. The receiver
+/// drops on return, so a thread that answers later fails its send and
+/// tears down without watching ([`hand_over`]).
+fn await_answer(answered: Receiver<Answer>, limit: Duration) -> Answer {
+    let answer = answered.recv_timeout(limit);
+    drop(answered);
+    answer.unwrap_or_else(|_| {
+        Err(CaptureError::BackendFailed(
+            "the PipeWire thread did not answer".into(),
+        ))
+    })
+}
+
+/// Answers `start` with what opening gave and returns the capture to
+/// watch, once `start` took its stream. `None` when opening failed, or
+/// when `start` gave up waiting: the capture then drops here, unwatched,
+/// so no report can begin for a `start` that did not take the answer.
+fn hand_over<C>(
+    answer: &SyncSender<Answer>,
+    opened: Result<C, CaptureError>,
+    info: impl FnOnce(&C) -> CaptureStream,
+) -> Option<C> {
+    match opened {
+        Err(error) => {
+            let _ = answer.send(Err(error));
+            None
+        }
+        Ok(capture) => {
+            if answer.send(Ok(info(&capture))).is_ok() {
+                Some(capture)
+            } else {
+                tracing::warn!("start gave up on the PipeWire capture; tearing it down");
+                None
+            }
         }
     }
 }
@@ -858,23 +924,17 @@ fn run(
     input_device_uid: Option<&str>,
     sink: Arc<LaneFrameSink>,
     gate: Arc<Gate>,
-    answer: &SyncSender<Result<CaptureStream, CaptureError>>,
+    answer: &SyncSender<Answer>,
     quit: pw::channel::Receiver<()>,
 ) {
-    match Capture::open(lanes, input_device_uid, sink, gate) {
-        Err(error) => {
-            let _ = answer.send(Err(error));
-        }
-        Ok(capture) => {
-            // A `start` that gave up has sent the quit already; it is
-            // queued and ends `watch` at once.
-            let _ = answer.send(Ok(capture.info.clone()));
-            capture.watch(quit);
-            tracing::debug!("the PipeWire capture got its quit; tearing down");
-            drop(capture);
-            tracing::debug!("the PipeWire capture is torn down");
-        }
-    }
+    let opened = Capture::open(lanes, input_device_uid, sink, gate);
+    let Some(capture) = hand_over(answer, opened, |capture| capture.info.clone()) else {
+        return;
+    };
+    capture.watch(quit);
+    tracing::debug!("the PipeWire capture got its quit; tearing down");
+    drop(capture);
+    tracing::debug!("the PipeWire capture is torn down");
 }
 
 /// One started capture as `start` keeps it.
@@ -956,7 +1016,7 @@ impl CaptureBackend for LiveCaptureBackend {
         if active.is_some() {
             return Err(CaptureError::InvalidState("backend already started".into()));
         }
-        let (answer, answered) = sync_channel(1);
+        let (answer, answered) = answer_channel();
         let (quit, quit_receiver) = pw::channel::channel();
         let (ending, ended) = sync_channel::<()>(0);
         let gate = Arc::new(Gate::new());
@@ -980,13 +1040,10 @@ impl CaptureBackend for LiveCaptureBackend {
             .map_err(|e| CaptureError::BackendFailed(format!("the PipeWire thread: {e}")))?;
         // The thread answers by its own deadlines; the margin covers a
         // thread that is slow to get scheduled.
-        let outcome = answered
-            .recv_timeout(START_TIMEOUT + LATENCY_TIMEOUT + Duration::from_secs(2))
-            .unwrap_or_else(|_| {
-                Err(CaptureError::BackendFailed(
-                    "the PipeWire thread did not answer".into(),
-                ))
-            });
+        let outcome = await_answer(
+            answered,
+            START_TIMEOUT + LATENCY_TIMEOUT + Duration::from_secs(2),
+        );
         let started = Active {
             quit,
             gate,
@@ -1016,6 +1073,8 @@ impl Drop for LiveCaptureBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::TrySendError;
+
     use super::*;
 
     fn latency_pod(direction: u32, quantum: f32, rate: i32, ns: i64) -> Vec<u8> {
@@ -1056,30 +1115,189 @@ mod tests {
         .into_inner()
     }
 
+    /// A stream as `start` answers it, for the answer channel's tests.
+    fn stream() -> CaptureStream {
+        CaptureStream {
+            sample_rate: SAMPLE_RATE,
+            input_latency_frames: 0,
+            output_latency_frames: 0,
+            layout: None,
+        }
+    }
+
     #[test]
     fn nothing_passes_a_gate_once_it_closed() {
+        let gate = Gate::new();
+        let mut passed = 0;
+        gate.pass(|| passed += 1);
+        gate.close();
+        gate.pass(|| passed += 1);
+        assert_eq!(passed, 1);
+        assert_eq!(gate.inside.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn close_waits_for_the_pass_inside() {
         let gate = Arc::new(Gate::new());
-        let passed = Arc::new(AtomicUsize::new(0));
-        let done = Arc::new(AtomicBool::new(false));
-        let worker = std::thread::spawn({
-            let (gate, passed, done) = (Arc::clone(&gate), Arc::clone(&passed), Arc::clone(&done));
+        let (entered, inside) = sync_channel(0);
+        let (release, released) = sync_channel::<()>(0);
+        let passer = std::thread::spawn({
+            let gate = Arc::clone(&gate);
             move || {
-                while !done.load(Ordering::Relaxed) {
-                    gate.pass(|| {
-                        passed.fetch_add(1, Ordering::Relaxed);
-                    });
+                gate.pass(|| {
+                    entered.send(()).unwrap();
+                    released.recv().unwrap();
+                });
+            }
+        });
+        inside.recv().unwrap();
+        let (returned, closing) = sync_channel(1);
+        let stopper = std::thread::spawn({
+            let gate = Arc::clone(&gate);
+            move || {
+                gate.close();
+                returned.send(()).unwrap();
+            }
+        });
+        // The closer has closed the gate; it must still be waiting.
+        while gate.open.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            closing.recv_timeout(Duration::from_millis(200)),
+            Err(RecvTimeoutError::Timeout),
+            "close() returned while a pass was inside"
+        );
+        release.send(()).unwrap();
+        closing
+            .recv_timeout(Duration::from_secs(10))
+            .expect("close() returns once the pass left");
+        passer.join().unwrap();
+        stopper.join().unwrap();
+    }
+
+    #[test]
+    fn a_report_through_a_closed_gate_reaches_no_handler() {
+        let reports = Arc::new(AtomicUsize::new(0));
+        let sink = LaneFrameSink::with_handler(
+            &[AudioLane::Mic],
+            SAMPLE_RATE,
+            0.1,
+            Box::new({
+                let reports = Arc::clone(&reports);
+                move |_| {
+                    reports.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        );
+        let gate = Gate::new();
+        gate.close();
+        report(&gate, &sink, DeviceChangeReason::OutputDeviceGone);
+        assert_eq!(reports.load(Ordering::SeqCst), 0);
+        let open = Gate::new();
+        report(&open, &sink, DeviceChangeReason::OutputDeviceGone);
+        assert_eq!(reports.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn end_closes_the_gate_before_it_waits_for_the_thread() {
+        let gate = Arc::new(Gate::new());
+        let (quit, _quit_receiver) = pw::channel::channel();
+        let (ending, ended) = sync_channel::<()>(0);
+        // A thread that ends only once the gate closed.
+        let thread = std::thread::spawn({
+            let gate = Arc::clone(&gate);
+            move || {
+                let _ending = ending;
+                while gate.open.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
                 }
             }
         });
-        while passed.load(Ordering::Relaxed) < 1_000 {
-            std::thread::yield_now();
+        let started = Instant::now();
+        LiveCaptureBackend::end(Active {
+            quit,
+            gate: Arc::clone(&gate),
+            ended,
+            thread,
+        });
+        assert!(!gate.open.load(Ordering::SeqCst));
+        assert!(
+            started.elapsed() < STOP_TIMEOUT,
+            "the thread ended and was joined"
+        );
+    }
+
+    #[test]
+    fn the_answer_channel_holds_no_answer_nobody_waits_for() {
+        let (answer, _answered) = answer_channel();
+        assert!(
+            matches!(answer.try_send(Ok(stream())), Err(TrySendError::Full(_))),
+            "a buffered answer would outlive a start that gave up"
+        );
+    }
+
+    #[test]
+    fn a_start_that_gave_up_drops_its_receiver() {
+        let (answer, answered) = answer_channel();
+        assert!(await_answer(answered, Duration::ZERO).is_err());
+        assert!(matches!(
+            answer.try_send(Ok(stream())),
+            Err(TrySendError::Disconnected(_))
+        ));
+    }
+
+    #[test]
+    fn a_waiting_start_takes_the_answer() {
+        let (answer, answered) = answer_channel();
+        let thread = std::thread::spawn(move || answer.send(Ok(stream())));
+        assert_eq!(
+            await_answer(answered, Duration::from_secs(10)),
+            Ok(stream())
+        );
+        assert!(thread.join().unwrap().is_ok());
+    }
+
+    /// Counts its drops, standing in for a `Capture`.
+    struct Dropped(Arc<AtomicUsize>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
         }
-        gate.close();
-        let at_close = passed.load(Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(20));
-        assert_eq!(passed.load(Ordering::Relaxed), at_close);
-        done.store(true, Ordering::Relaxed);
-        worker.join().unwrap();
+    }
+
+    #[test]
+    fn a_capture_nobody_took_is_dropped_unwatched() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (answer, answered) = answer_channel();
+        drop(answered);
+        let watched = hand_over(&answer, Ok(Dropped(Arc::clone(&drops))), |_| stream());
+        assert!(watched.is_none(), "nobody took the answer");
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_capture_start_took_is_handed_back_to_watch() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (answer, answered) = answer_channel();
+        let start = std::thread::spawn(move || await_answer(answered, Duration::from_secs(10)));
+        let watched = hand_over(&answer, Ok(Dropped(Arc::clone(&drops))), |_| stream());
+        assert_eq!(start.join().unwrap(), Ok(stream()));
+        assert!(watched.is_some());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn a_failed_open_is_answered_and_not_watched() {
+        let (answer, answered) = answer_channel();
+        let start = std::thread::spawn(move || await_answer(answered, Duration::from_secs(10)));
+        let opened: Result<Dropped, _> = Err(CaptureError::InputDeviceUnavailable);
+        assert!(hand_over(&answer, opened, |_| stream()).is_none());
+        assert_eq!(
+            start.join().unwrap(),
+            Err(CaptureError::InputDeviceUnavailable)
+        );
     }
 
     #[test]
