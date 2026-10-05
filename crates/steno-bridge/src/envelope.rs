@@ -357,6 +357,59 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// The OS the host runs on, which decides the page's words ("this
+    /// Mac" or "this computer", Finder or File Explorer) and its shortcut
+    /// keys (⌘ or Ctrl). Not a message: the Tauri shell sets it as
+    /// `window.__STENO_PLATFORM__` before the page's scripts run, and a
+    /// page with nothing set is the Swift app's, always the Mac. The host
+    /// words its own sentences and lists the permissions for the same
+    /// value. Swift: none; the Swift app is the Mac.
+    pub enum Platform {
+        Macos = "macos",
+        Windows = "windows",
+        Linux = "linux",
+    }
+}
+
+impl Platform {
+    /// The OS this binary was built for; any other Unix counts as Linux.
+    pub const CURRENT: Platform = if cfg!(target_os = "macos") {
+        Platform::Macos
+    } else if cfg!(target_os = "windows") {
+        Platform::Windows
+    } else {
+        Platform::Linux
+    };
+
+    /// `mac` on the Mac, `elsewhere` on Windows and Linux: the host's
+    /// sentences that name the machine ("on this Mac", "on this
+    /// computer"), kept whole so each reads as one string.
+    #[must_use]
+    pub const fn mac_or(self, mac: &'static str, elsewhere: &'static str) -> &'static str {
+        match self {
+            Platform::Macos => mac,
+            Platform::Windows | Platform::Linux => elsewhere,
+        }
+    }
+
+    /// The permissions the OS has, in onboarding's order. The Mac has all
+    /// four. Windows has the microphone privacy switch and the firewall
+    /// prompt for the phone's connection; it records system audio without
+    /// a permission and Steno reads no calendar there. Linux has the
+    /// microphone (the portal asks inside a sandbox) and nothing else.
+    /// `platform` in `apps/macos/web/src/lib/platform.ts` says the same
+    /// for the General section's calendar row.
+    #[must_use]
+    pub const fn permissions(self) -> &'static [PermissionKind] {
+        match self {
+            Platform::Macos => PermissionKind::ALL,
+            Platform::Windows => &[PermissionKind::Microphone, PermissionKind::LocalNetwork],
+            Platform::Linux => &[PermissionKind::Microphone],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -502,6 +555,38 @@ mod tests {
         assert_eq!(
             json::to_compact_string(&event).unwrap(),
             r#"{"payload":{"version":"1"},"topic":"app"}"#
+        );
+    }
+
+    #[test]
+    fn the_current_platform_is_the_build_target() {
+        let expected = match std::env::consts::OS {
+            "macos" => Platform::Macos,
+            "windows" => Platform::Windows,
+            _ => Platform::Linux,
+        };
+        assert_eq!(Platform::CURRENT, expected);
+    }
+
+    #[test]
+    fn each_platform_lists_its_permissions_in_onboarding_order() {
+        for platform in Platform::ALL {
+            let kinds = platform.permissions();
+            assert_eq!(
+                kinds.first(),
+                Some(&PermissionKind::Microphone),
+                "{platform}"
+            );
+            assert!(kinds.is_sorted(), "{platform}: {kinds:?}");
+        }
+        assert_eq!(Platform::Macos.permissions(), PermissionKind::ALL);
+        assert_eq!(
+            Platform::Linux.mac_or("this Mac", "this computer"),
+            "this computer"
+        );
+        assert_eq!(
+            Platform::Macos.mac_or("this Mac", "this computer"),
+            "this Mac"
         );
     }
 }

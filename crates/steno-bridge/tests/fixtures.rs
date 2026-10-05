@@ -265,6 +265,7 @@ fn contract_ts_shared_vocabulary_matches() {
     assert_eq!(top_level("listFilter"), raw(ListFilter::ALL));
     assert_eq!(top_level("detailTab"), raw(DetailTab::ALL));
     assert_eq!(top_level("retentionMode"), raw(RetentionMode::ALL));
+    assert_eq!(top_level("platform"), raw(Platform::ALL));
 }
 
 /// The `z.enum` lists nested in a snapshot or params schema, against the

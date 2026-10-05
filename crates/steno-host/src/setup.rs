@@ -4,7 +4,7 @@
 //! Tasks tabs have nothing to show, what the export footer shows, what the
 //! setup banner says, and the copy all of them share.
 
-use steno_bridge::DetailTab;
+use steno_bridge::{DetailTab, Platform};
 use steno_core::{Delivery, DeliveryStatus, LlmProvider, Meeting, MeetingState, Settings};
 
 /// The chosen provider is set up (endpoint: URL and model stored; Codex:
@@ -199,11 +199,18 @@ impl SetupBannerMessage {
 
     /// The rest of the banner.
     #[must_use]
-    pub fn body(self) -> &'static str {
+    /// The sentence under the title, in `platform`'s word for the machine.
+    pub fn body(self, platform: Platform) -> &'static str {
         match self {
-            SetupBannerMessage::BothMissing => copy::BANNER_BOTH_MISSING_BODY,
+            SetupBannerMessage::BothMissing => platform.mac_or(
+                copy::BANNER_BOTH_MISSING_BODY,
+                copy::BANNER_BOTH_MISSING_BODY_ELSEWHERE,
+            ),
             SetupBannerMessage::EndpointMissing => copy::BANNER_ENDPOINT_MISSING_BODY,
-            SetupBannerMessage::VaultMissing => copy::BANNER_VAULT_MISSING_BODY,
+            SetupBannerMessage::VaultMissing => platform.mac_or(
+                copy::BANNER_VAULT_MISSING_BODY,
+                copy::BANNER_VAULT_MISSING_BODY_ELSEWHERE,
+            ),
         }
     }
 
@@ -226,12 +233,17 @@ impl SetupBannerMessage {
 pub mod copy {
     pub const BANNER_BOTH_MISSING_TITLE: &str = "Summaries and export are off.";
     pub const BANNER_BOTH_MISSING_BODY: &str = "Steno has no LLM endpoint and no Obsidian vault yet, so meetings keep a raw transcript on this Mac.";
+    /// Windows and Linux: "this computer" for "this Mac".
+    pub const BANNER_BOTH_MISSING_BODY_ELSEWHERE: &str = "Steno has no LLM endpoint and no Obsidian vault yet, so meetings keep a raw transcript on this computer.";
     pub const BANNER_ENDPOINT_MISSING_TITLE: &str = "Summaries are off.";
     pub const BANNER_ENDPOINT_MISSING_BODY: &str =
         "Steno has no LLM endpoint yet, so meetings keep a raw transcript.";
     pub const BANNER_VAULT_MISSING_TITLE: &str = "Export is off.";
     pub const BANNER_VAULT_MISSING_BODY: &str =
         "Steno has no Obsidian vault yet, so meetings stay on this Mac.";
+    /// Windows and Linux: "this computer" for "this Mac".
+    pub const BANNER_VAULT_MISSING_BODY_ELSEWHERE: &str =
+        "Steno has no Obsidian vault yet, so meetings stay on this computer.";
     pub const SUMMARY_SKIPPED_TITLE: &str = "Summary skipped";
     pub const SUMMARY_SKIPPED_BODY: &str =
         "No LLM endpoint is configured. The transcript is complete.";

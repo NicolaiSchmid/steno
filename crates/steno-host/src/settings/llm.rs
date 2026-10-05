@@ -5,6 +5,7 @@
 //! Swift: `Settings/LLMSettingsViewModel.swift`.
 
 use chrono::{DateTime, Utc};
+use steno_bridge::Platform;
 use steno_core::protocols::{BoundaryResult, SecretKey};
 use steno_core::{LlmProvider, Settings, Store, string_enum};
 
@@ -26,11 +27,15 @@ string_enum! {
 }
 
 impl LlmPreset {
+    /// The preset's name in the picker; the two local servers say where
+    /// they run in `platform`'s word for the machine.
     #[must_use]
-    pub fn title(self) -> &'static str {
+    pub fn title(self, platform: Platform) -> &'static str {
         match self {
-            LlmPreset::LmStudio => "LM Studio on this Mac",
-            LlmPreset::Ollama => "Ollama on this Mac",
+            LlmPreset::LmStudio => {
+                platform.mac_or("LM Studio on this Mac", "LM Studio on this computer")
+            }
+            LlmPreset::Ollama => platform.mac_or("Ollama on this Mac", "Ollama on this computer"),
             LlmPreset::Codex => "ChatGPT (Codex)",
             LlmPreset::OpenRouter => "OpenRouter",
             LlmPreset::OpenAi => "OpenAI",

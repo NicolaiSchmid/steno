@@ -12,7 +12,9 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use steno_bridge::{BridgeEvent, BridgeHost, BridgeTopic, ConfirmDestructiveParams, EventSink};
+use steno_bridge::{
+    BridgeEvent, BridgeHost, BridgeTopic, ConfirmDestructiveParams, EventSink, Platform,
+};
 use steno_core::paths::{file_url, file_url_path};
 use steno_core::*;
 use steno_host::fakes::FakeServices;
@@ -120,6 +122,7 @@ pub struct HarnessBuilder {
     chosen: Option<PathBuf>,
     seed: Vec<Seed>,
     page_ready: bool,
+    platform: Platform,
 }
 
 impl HarnessBuilder {
@@ -156,6 +159,12 @@ impl HarnessBuilder {
         self
     }
 
+    /// The host runs on `platform`; the Mac (Swift's words) by default.
+    pub fn platform(mut self, platform: Platform) -> Self {
+        self.platform = platform;
+        self
+    }
+
     /// Leaves the page not ready, for tests of the readiness gate.
     pub fn without_page_ready(mut self) -> Self {
         self.page_ready = false;
@@ -184,6 +193,7 @@ impl HarnessBuilder {
             HostConfig {
                 version: VERSION.to_owned(),
                 zone: steno_host::labels::utc(),
+                platform: self.platform,
             },
         )
         .unwrap()
@@ -224,6 +234,7 @@ impl Harness {
             chosen: None,
             seed: Vec::new(),
             page_ready: true,
+            platform: Platform::Macos,
         }
     }
 

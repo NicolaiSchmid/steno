@@ -543,6 +543,7 @@ impl App {
             HostConfig {
                 version: self.version.clone(),
                 zone: self.zone,
+                platform: steno_bridge::Platform::CURRENT,
             },
         )
     }

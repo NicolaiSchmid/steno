@@ -4,7 +4,7 @@
 use steno_bridge::{
     ExportSettingsSnapshot, GeneralAcknowledgement, GeneralAcknowledgementGroup, GeneralLoginItem,
     GeneralSettingsSnapshot, GeneralTemplate, GeneralUpdates, GeneralUpdatesOutcome, PhoneDevice,
-    PhoneListener, PhoneListenerState, PhonePairing, PhoneReceipt, PhoneSettingsSnapshot,
+    PhoneListener, PhoneListenerState, PhonePairing, PhoneReceipt, PhoneSettingsSnapshot, Platform,
     RecordingDevice, RecordingFolderUsage, RecordingPermission, RecordingRetention,
     RecordingSettingsSnapshot, SummariesCodex, SummariesCodexModel, SummariesCodexSignIn,
     SummariesPreset, SummariesSettingsSnapshot, SummariesTestResult, TranscriptionAsset,
@@ -12,7 +12,7 @@ use steno_bridge::{
 };
 use steno_core::{HandoverReceipt, SummaryTemplate};
 
-use super::audio::{AudioSettingsViewModel, FolderUsageState, RECORDING_PERMISSIONS};
+use super::audio::{AudioSettingsViewModel, FolderUsageState, recording_permissions};
 use super::general::GeneralSettingsViewModel;
 use super::llm::{CodexStatus, LlmPreset, LlmSettingsViewModel, TestResult};
 use super::obsidian::ObsidianSettingsViewModel;
@@ -140,7 +140,11 @@ pub fn general(
 }
 
 #[must_use]
-pub fn recording(audio: &AudioSettingsViewModel, subtitle: &str) -> RecordingSettingsSnapshot {
+pub fn recording(
+    audio: &AudioSettingsViewModel,
+    subtitle: &str,
+    platform: Platform,
+) -> RecordingSettingsSnapshot {
     let (usage, bytes) = match audio.folder_usage {
         FolderUsageState::Measuring => (RecordingFolderUsage::Measuring, None),
         FolderUsageState::Bytes(measured) => (RecordingFolderUsage::Measured, Some(measured)),
@@ -167,12 +171,11 @@ pub fn recording(audio: &AudioSettingsViewModel, subtitle: &str) -> RecordingSet
         },
         retention_footnote: audio.footnote(),
         kept_forever_count: audio.kept_forever,
-        permissions: RECORDING_PERMISSIONS
-            .iter()
+        permissions: recording_permissions(platform)
             .map(|kind| RecordingPermission {
-                kind: *kind,
-                state: audio.state_of(*kind),
-                is_requesting: audio.requesting == Some(*kind),
+                kind,
+                state: audio.state_of(kind),
+                is_requesting: audio.requesting == Some(kind),
             })
             .collect(),
         error: audio.errors.error.clone(),
@@ -240,7 +243,11 @@ pub fn transcription(
 }
 
 #[must_use]
-pub fn summaries(llm: &LlmSettingsViewModel, subtitle: &str) -> SummariesSettingsSnapshot {
+pub fn summaries(
+    llm: &LlmSettingsViewModel,
+    subtitle: &str,
+    platform: Platform,
+) -> SummariesSettingsSnapshot {
     let codex = (llm.preset == LlmPreset::Codex).then(|| {
         let (sign_in, detail) = match &llm.codex_status {
             CodexStatus::NotChecked => (SummariesCodexSignIn::NotChecked, None),
@@ -274,7 +281,7 @@ pub fn summaries(llm: &LlmSettingsViewModel, subtitle: &str) -> SummariesSetting
             .iter()
             .map(|preset| SummariesPreset {
                 id: preset.as_str().to_owned(),
-                title: preset.title().to_owned(),
+                title: preset.title(platform).to_owned(),
                 needs_api_key: preset.needs_api_key(),
                 shows_server_field: preset.shows_server_field(),
                 model_placeholder: preset.model_placeholder().to_owned(),
