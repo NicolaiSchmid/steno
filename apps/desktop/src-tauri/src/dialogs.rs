@@ -85,7 +85,7 @@ pub async fn choose_folder(
         });
     let chosen = receiver
         .await
-        .map_err(|_| BridgeError::failed("The folder panel closed without an answer."))?;
+        .map_err(|_| BridgeError::failed("The folder dialog closed without an answer."))?;
     match chosen {
         None => Ok(None),
         Some(path) => path.into_path().map(Some).map_err(failed),
