@@ -68,17 +68,6 @@
 //! rebuilds through `stop()` and `start`, as on the Mac. The capture never
 //! follows a default on its own.
 //!
-//! A default move can fail to reach the bound metadata's listener (seen
-//! with WirePlumber 0.5.14 and PipeWire 1.6.5 while another client bound
-//! the metadata at the same moment), and the metadata proxy keeps no copy
-//! to read again: what the listener missed, the proxy never had. So every
-//! [`LiveCaptureBackend::REREAD_INTERVAL`] while the capture runs, this
-//! thread binds the `default` metadata afresh, collects the properties the
-//! bind brings until a core roundtrip answers, and drops the proxy;
-//! defaults that differ from what the events set are a change like a
-//! metadata event, coalesced and judged the same way. Nothing of it runs
-//! on the data-loop thread.
-//!
 //! A lost connection or stream reads as the output gone (the input for an
 //! in-person capture). A lost link reads as the device of the lane it
 //! serves gone, as the Mac reads each device's own liveness: a monitor
@@ -108,7 +97,7 @@ use pw::spa;
 use pw::types::ObjectType;
 use steno_core::AudioLane;
 
-use self::graph::{Defaults, Graph, Latency, Lost, Targets};
+use self::graph::{Graph, Latency, Lost, Targets};
 use crate::SAMPLE_RATE;
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot, LaneSource,
@@ -267,10 +256,6 @@ struct Shared {
     /// What failed: the connection or the stream (everything), or one of
     /// Steno's links (the lane it serves).
     lost: Cell<Lost>,
-    /// The `default` metadata's property events are dropped: set by
-    /// [`LiveCaptureBackend::dropping_default_events`] once the capture
-    /// runs, so only the re-read sees a move.
-    drops_default_events: Cell<bool>,
     /// The first and the last change since the graph was last judged.
     pending: Cell<Option<(Instant, Instant)>>,
 }
@@ -288,11 +273,6 @@ impl Shared {
         self.pending
             .get()
             .map(|(first, last)| judged_at(first, last))
-    }
-
-    /// The global id of the bound `default` metadata.
-    fn metadata_id(&self) -> Option<u32> {
-        self.metadata.borrow().as_ref().map(|(id, ..)| *id)
     }
 
     /// `what` failed for good (logged with PipeWire's `message`): the
@@ -343,7 +323,6 @@ impl Shared {
                     .property(move |subject, key, _type, value| {
                         if subject == pw::core::PW_ID_CORE
                             && let Some(shared) = shared.upgrade()
-                            && !shared.drops_default_events.get()
                         {
                             tracing::debug!("PipeWire default metadata: {key:?} = {value:?}");
                             if shared.graph.borrow_mut().set_default(key, value) {
@@ -363,7 +342,12 @@ impl Shared {
     /// the bound `default` metadata, whose defaults go with it until it is
     /// announced again (WirePlumber restarting).
     fn forget(&self, id: u32) {
-        let changed = if self.metadata_id() == Some(id) {
+        let metadata = self
+            .metadata
+            .borrow()
+            .as_ref()
+            .is_some_and(|(bound, ..)| *bound == id);
+        let changed = if metadata {
             drop(self.metadata.borrow_mut().take());
             self.graph.borrow_mut().set_default(None, None)
         } else {
@@ -895,9 +879,8 @@ impl Capture {
         )
     }
 
-    /// The loop after `start` answered: changes are coalesced and judged,
-    /// and the defaults re-read every
-    /// [`LiveCaptureBackend::REREAD_INTERVAL`], until the quit arrives.
+    /// The loop after `start` answered: changes are coalesced and judged
+    /// until the quit arrives.
     fn watch(&self, quit: pw::channel::Receiver<()>) {
         let quitting = Rc::new(Cell::new(false));
         let main_loop = self.connection.main_loop.loop_();
@@ -908,21 +891,11 @@ impl Capture {
         // A change while starting stays pending and is judged against the
         // resolve-time baseline like any other.
         let shared = &self.connection.shared;
-        let mut reread: Option<Reread> = None;
-        let mut next_reread = Instant::now() + LiveCaptureBackend::REREAD_INTERVAL;
         while !quitting.get() {
-            if let Some(answered) = reread.take_if(|r| shared.done.get() == Some(r.seq)) {
-                self.finish_reread(&answered);
-            }
-            let now = Instant::now();
-            if now >= next_reread {
-                // One the core has not answered yet is dropped for the new.
-                reread = self.begin_reread();
-                next_reread = now + LiveCaptureBackend::REREAD_INTERVAL;
-            }
             let wait = match shared.due() {
                 None => IDLE_WAIT,
                 Some(due) => {
+                    let now = Instant::now();
                     if now >= due {
                         shared.pending.set(None);
                         self.judge();
@@ -930,82 +903,12 @@ impl Capture {
                     }
                     due - now
                 }
-            }
-            .min(next_reread - now);
+            };
             if main_loop.iterate(pw::loop_::Timeout::Finite(wait)) < 0 {
                 // A failing loop (the daemon gone) returns at once; do not
                 // spin while the session reacts to the report.
                 std::thread::sleep(PUMP_SLICE);
             }
-        }
-    }
-
-    /// Binds the `default` metadata afresh and asks the core for a
-    /// roundtrip: by its answer the new proxy's listener holds every
-    /// property the server has now. `None` while no `default` metadata is
-    /// bound, or when the bind or the roundtrip request fails (logged; the
-    /// next interval tries again).
-    fn begin_reread(&self) -> Option<Reread> {
-        let connection = &self.connection;
-        let metadata = connection.shared.metadata_id()?;
-        let global = pw::registry::GlobalObject {
-            id: metadata,
-            permissions: pw::permissions::PermissionFlags::empty(),
-            type_: ObjectType::Metadata,
-            version: 0,
-            props: None::<pw::properties::PropertiesBox>,
-        };
-        let proxy: pw::metadata::Metadata = match connection.registry.bind(&global) {
-            Ok(proxy) => proxy,
-            Err(error) => {
-                tracing::warn!(
-                    "binding the PipeWire default metadata to re-read it failed: {error}"
-                );
-                return None;
-            }
-        };
-        let found = Rc::new(RefCell::new(Defaults::default()));
-        let listener = proxy
-            .add_listener_local()
-            .property({
-                let found = Rc::clone(&found);
-                move |subject, key, _type, value| {
-                    if subject == pw::core::PW_ID_CORE {
-                        found.borrow_mut().set(key, value);
-                    }
-                    0
-                }
-            })
-            .register();
-        let seq = match connection.core.sync(0) {
-            Ok(seq) => seq,
-            Err(error) => {
-                tracing::warn!("re-reading the PipeWire default metadata failed: {error}");
-                return None;
-            }
-        };
-        Some(Reread {
-            _listener: listener,
-            _proxy: proxy,
-            metadata,
-            seq,
-            found,
-        })
-    }
-
-    /// The answered re-read's defaults into the graph: defaults that differ
-    /// from what the events set are a change, judged like an event's. A
-    /// re-read of a metadata that went meanwhile changes nothing: its
-    /// removal cleared the defaults, and they come back with the next one.
-    fn finish_reread(&self, reread: &Reread) {
-        let shared = &self.connection.shared;
-        if shared.metadata_id() == Some(reread.metadata)
-            && shared.graph.borrow_mut().reread(&reread.found.borrow())
-        {
-            tracing::info!(
-                "re-reading the PipeWire default metadata found a move its events missed"
-            );
-            shared.changed();
         }
     }
 
@@ -1023,18 +926,6 @@ impl Capture {
             Some(reason) => report(&self.gate, &self.sink, reason),
         }
     }
-}
-
-/// A re-read of the `default` metadata the core has not answered yet: a
-/// fresh proxy of global `metadata` and the listener collecting into
-/// `found` what its bind brings, until the roundtrip `seq` is done. Fields
-/// drop in order, the listener before the proxy.
-struct Reread {
-    _listener: pw::metadata::MetadataListener,
-    _proxy: pw::metadata::Metadata,
-    metadata: u32,
-    seq: spa::utils::result::AsyncSeq,
-    found: Rc<RefCell<Defaults>>,
 }
 
 /// When changes from `first` to `last` are judged:
@@ -1105,8 +996,6 @@ fn hand_over<C>(
 
 /// The `steno-pipewire` thread: start, answer, watch until the quit, tear
 /// down (by dropping the capture) before the thread ends.
-/// `drops_default_events` as in
-/// [`LiveCaptureBackend::dropping_default_events`].
 fn run(
     lanes: &[AudioLane],
     input_device_uid: Option<&str>,
@@ -1114,17 +1003,11 @@ fn run(
     gate: Arc<Gate>,
     answer: &SyncSender<Answer>,
     quit: pw::channel::Receiver<()>,
-    drops_default_events: bool,
 ) {
     let opened = Capture::open(lanes, input_device_uid, sink, gate);
     let Some(capture) = hand_over(answer, opened, |capture| capture.info.clone()) else {
         return;
     };
-    capture
-        .connection
-        .shared
-        .drops_default_events
-        .set(drops_default_events);
     capture.watch(quit);
     tracing::debug!("the PipeWire capture got its quit; tearing down");
     drop(capture);
@@ -1176,8 +1059,6 @@ fn where_it_waits(id: u32) -> String {
 /// logged and left behind), and `start` connects afresh.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
-    /// See [`Self::dropping_default_events`].
-    drops_default_events: bool,
 }
 
 impl Default for LiveCaptureBackend {
@@ -1200,32 +1081,10 @@ impl LiveCaptureBackend {
     /// starts a new burst.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
-    /// How often a running capture re-reads the `default` metadata through
-    /// a fresh bind (see the module doc). A move the events missed is
-    /// judged within about this plus [`Self::COALESCE_DELAY`], for one bind
-    /// and one roundtrip per interval. Shorter would bind more often, and a
-    /// bind at the moment of a move was seen keeping the move from the
-    /// clients already bound.
-    pub const REREAD_INTERVAL: Duration = Duration::from_secs(3);
-
     #[must_use]
     pub fn new() -> Self {
         Self {
             active: Mutex::new(None),
-            drops_default_events: false,
-        }
-    }
-
-    /// A backend whose captures, once started, drop the `default`
-    /// metadata's property events, as a client the server kept a move
-    /// from: only the re-read sees a default move. For the live tests in
-    /// `tests/pipewire.rs`, not for the app.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn dropping_default_events() -> Self {
-        Self {
-            active: Mutex::new(None),
-            drops_default_events: true,
         }
     }
 
@@ -1280,7 +1139,6 @@ impl CaptureBackend for LiveCaptureBackend {
         let thread_gate = Arc::clone(&gate);
         let thread_id = Arc::new(AtomicU32::new(0));
         let id_slot = Arc::clone(&thread_id);
-        let drops_default_events = self.drops_default_events;
         let thread = std::thread::Builder::new()
             .name("steno-pipewire".into())
             .spawn(move || {
@@ -1294,7 +1152,6 @@ impl CaptureBackend for LiveCaptureBackend {
                     thread_gate,
                     &answer,
                     quit_receiver,
-                    drops_default_events,
                 );
             })
             .map_err(|e| CaptureError::BackendFailed(format!("the PipeWire thread: {e}")))?;

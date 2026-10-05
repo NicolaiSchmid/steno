@@ -167,47 +167,13 @@ impl Lost {
     }
 }
 
-/// The names of the default sink and source, from the `default` metadata's
-/// properties on subject 0: the graph's from its events, a re-read's from
-/// the properties a fresh bind brings (see [`Graph::reread`]).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(crate) struct Defaults {
-    sink: Option<String>,
-    source: Option<String>,
-}
-
-impl Defaults {
-    /// A property of the `default` metadata on subject 0. `key` `None`
-    /// clears every key; `value` `None` removes one. The value is JSON,
-    /// `{"name":"alsa_output…"}`. True when a default this module reads
-    /// changed.
-    pub fn set(&mut self, key: Option<&str>, value: Option<&str>) -> bool {
-        let (sink, source) = match key {
-            None => (true, true),
-            Some(DEFAULT_SINK_KEY) => (true, false),
-            Some(DEFAULT_SOURCE_KEY) => (false, true),
-            Some(_) => return false,
-        };
-        let name = value.and_then(default_name);
-        let mut changed = false;
-        if sink && self.sink != name {
-            self.sink.clone_from(&name);
-            changed = true;
-        }
-        if source && self.source != name {
-            self.source = name;
-            changed = true;
-        }
-        changed
-    }
-}
-
 /// The registry and the defaults as last announced; see the module doc.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Graph {
     nodes: BTreeMap<u32, NodeEntry>,
     ports: BTreeMap<u32, PortEntry>,
-    defaults: Defaults,
+    default_sink: Option<String>,
+    default_source: Option<String>,
     /// The targets and the UID of the capture whose snapshot the graph
     /// serves, once [`Graph::track`] set them.
     tracked: Option<(Targets, Option<String>)>,
@@ -297,17 +263,27 @@ impl Graph {
             || targets.mic.is_some() && is(self.source_named(uid))
     }
 
-    /// A property of the `default` metadata; see [`Defaults::set`].
+    /// A property of the `default` metadata on subject 0. `key` `None`
+    /// clears every key; `value` `None` removes one. The value is JSON,
+    /// `{"name":"alsa_output…"}`. True when a default this module reads
+    /// changed.
     pub fn set_default(&mut self, key: Option<&str>, value: Option<&str>) -> bool {
-        self.defaults.set(key, value)
-    }
-
-    /// Both defaults as a re-read of the `default` metadata found them: a
-    /// key the re-read did not find is gone. True when they differ from
-    /// what the events had set.
-    pub fn reread(&mut self, found: &Defaults) -> bool {
-        let changed = self.defaults != *found;
-        self.defaults.clone_from(found);
+        let (sink, source) = match key {
+            None => (true, true),
+            Some(DEFAULT_SINK_KEY) => (true, false),
+            Some(DEFAULT_SOURCE_KEY) => (false, true),
+            Some(_) => return false,
+        };
+        let name = value.and_then(default_name);
+        let mut changed = false;
+        if sink && self.default_sink != name {
+            self.default_sink.clone_from(&name);
+            changed = true;
+        }
+        if source && self.default_source != name {
+            self.default_source = name;
+            changed = true;
+        }
         changed
     }
 
@@ -334,7 +310,7 @@ impl Graph {
     /// The source a microphone lane records: the node named `uid`, or the
     /// default source.
     fn source_named(&self, uid: Option<&str>) -> Option<(u32, &NodeEntry)> {
-        let name = uid.or(self.defaults.source.as_deref())?;
+        let name = uid.or(self.default_source.as_deref())?;
         self.nodes
             .iter()
             .find(|(_, node)| node.name == name && node.is_source())
@@ -343,7 +319,7 @@ impl Graph {
 
     /// The default sink.
     fn default_sink_node(&self) -> Option<(u32, &NodeEntry)> {
-        let name = self.defaults.sink.as_deref()?;
+        let name = self.default_sink.as_deref()?;
         self.nodes
             .iter()
             .find(|(_, node)| node.name == name && node.is_sink())
@@ -890,50 +866,6 @@ mod tests {
                 Some(crate::capture::DeviceChangeReason::InputDeviceGone)
             );
         }
-    }
-
-    #[test]
-    fn a_reread_changes_only_the_defaults_the_events_missed() {
-        let mut graph = laptop();
-        let targets = graph
-            .resolve(&[AudioLane::Mic, AudioLane::System], None)
-            .unwrap();
-        let baseline = graph.snapshot(&targets, None, Lost::default());
-        let mut found = Defaults::default();
-        found.set(
-            Some(DEFAULT_SINK_KEY),
-            Some(r#"{"name":"alsa_output.pci.analog-stereo"}"#),
-        );
-        found.set(
-            Some(DEFAULT_SOURCE_KEY),
-            Some(r#"{"name":"alsa_input.pci.analog-stereo"}"#),
-        );
-        found.set(Some("default.configured.audio.sink"), Some("{}"));
-        assert!(!graph.reread(&found), "what the events set already");
-
-        // A move whose event never came: only the re-read sees it.
-        node(&mut graph, 43, 1043, "bluez_output.headset", "Audio/Sink");
-        found.set(
-            Some(DEFAULT_SINK_KEY),
-            Some(r#"{"name":"bluez_output.headset"}"#),
-        );
-        assert!(graph.reread(&found));
-        assert_eq!(
-            graph
-                .snapshot(&targets, None, Lost::default())
-                .difference(&baseline),
-            Some(crate::capture::DeviceChangeReason::DefaultOutputChanged)
-        );
-        assert!(!graph.reread(&found), "the same re-read again");
-
-        // A key the re-read did not find is gone.
-        found.set(None, None);
-        assert_eq!(found, Defaults::default());
-        assert!(graph.reread(&found));
-        assert_eq!(
-            graph.resolve(&[AudioLane::Mic], None),
-            Err(CaptureError::InputDeviceUnavailable)
-        );
     }
 
     #[test]

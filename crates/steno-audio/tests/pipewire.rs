@@ -20,12 +20,10 @@
 //! report per default move or burst of moves, not before the coalescing
 //! delay after the last, and the rebuild's restart on the new default; a
 //! report while other apps' streams keep coming and going; no report for a
-//! default that comes back or for an unrelated node; a default move whose
-//! metadata events the capture drops, found by the re-read and reported
-//! once, and no report from re-reads that find nothing new; and each lane
+//! default that comes back or for an unrelated node; and each lane
 //! reported gone on its own: a removed microphone, in person or during a
-//! call, and Steno's microphone link removed from outside as the input,
-//! a monitor link removed from outside as the output.
+//! call, and Steno's microphone link removed from outside as the input, a
+//! monitor link removed from outside as the output.
 //!
 //! A round the machine stretched past the coalescing delay is not held to
 //! the one-burst checks (the timing of its one report, or no report for a
@@ -84,7 +82,6 @@ const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 const QUIET: Duration = Duration::from_millis(1_500);
 /// How long the daemon and WirePlumber get to settle after a change.
 const SETTLE: Duration = Duration::from_secs(2);
-const REREAD_INTERVAL: Duration = LiveCaptureBackend::REREAD_INTERVAL;
 
 /// The backend's logs into the test output, at `info` unless a non-empty
 /// `RUST_LOG` says otherwise.
@@ -539,35 +536,10 @@ fn moving_the_default_output_is_reported_once() {
     stop(&backend);
 }
 
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_default_move_the_events_missed_is_found_by_the_reread() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
-    let (sink, reasons) = reporting_sink(&lanes);
-    // As if the server kept every move from the bound metadata's listener.
-    let backend = Arc::new(LiveCaptureBackend::dropping_default_events());
-    let _restore = DefaultSink;
-    start(&backend, &lanes, None, &sink).expect("start");
-    assert!(
-        reasons.recv_timeout(REREAD_INTERVAL * 2 + QUIET).is_err(),
-        "re-reads that find the defaults unchanged report nothing"
-    );
-    let since = Instant::now();
-    DefaultSink::set(SECOND_SINK);
-    let after = assert_output_moved_once(&reasons, SECOND_SINK, since, true, "missed events: ");
-    println!("the re-read's report came {after:?} after the move");
-    assert!(
-        after <= REREAD_INTERVAL + COALESCE_DELAY + SETTLE,
-        "the next re-read finds the move: reported {after:?} after it"
-    );
-    stop_and_check_teardown(&backend, &sink);
-}
-
 /// Expects one `DefaultOutputChanged` report and no second, after
-/// WirePlumber moved the default to `to`, and returns how long after
-/// `since` it came. `since` is taken right before the last switch; when
-/// `timed`, the report must come no sooner than the coalescing delay after
-/// it.
+/// WirePlumber moved the default to `to`. `since` is taken right before
+/// the last switch; when `timed`, the report must come no sooner than the
+/// coalescing delay after it.
 ///
 /// WirePlumber moves `default.audio.sink` after the configured one, so
 /// the report gets time, and a failure says which side missed:
@@ -583,7 +555,7 @@ fn assert_output_moved_once(
     since: Instant,
     timed: bool,
     context: &str,
-) -> Duration {
+) {
     let wait = COALESCE_DELAY + Duration::from_secs(8);
     let (reason, at) = reasons.recv_timeout(wait).unwrap_or_else(|_| {
         let who = if default_sink().as_deref() == Some(to) {
@@ -608,7 +580,6 @@ fn assert_output_moved_once(
         reasons.recv_timeout(QUIET).is_err(),
         "{context}one report per change"
     );
-    after
 }
 
 /// Whether the switches reach the daemon as one burst, judged the
@@ -840,8 +811,8 @@ fn other_apps_streams_coming_and_going_do_not_hold_back_a_report() {
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// Starts a call capture of the default devices, removes its link from
-/// node `from` from outside, and expects one report of `gone`.
+/// Starts a call capture of the default devices, removes from outside its
+/// link from the node `from`, and expects one report of `gone`.
 fn assert_link_from_reported(from: &str, gone: DeviceChangeReason) {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let (sink, reasons) = reporting_sink(&lanes);
