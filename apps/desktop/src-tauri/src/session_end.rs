@@ -3,15 +3,14 @@
 //! runs before the app goes (`SaveAndQuit`), each on a thread of its own:
 //!
 //! - **A logout** on GNOME or Xfce: the app registers as a client of the
-//!   session manager on the session bus (`RegisterClient`; GNOME's
-//!   `org.gnome.SessionManager` first, then Xfce's `org.xfce.SessionManager`,
-//!   which serves the same protocol under names of its own, `SessionApi`),
-//!   answers `QueryEndSession` at once, and on `EndSession` saves first and
-//!   answers `EndSessionResponse` after, then quits. gnome-session waits
-//!   about ten seconds for that answer (older releases ninety), as long as
-//!   `SHUTDOWN_PATIENCE`, so a save that needs all of its patience can be
-//!   cut off when the session ends. A `GtkApplication` that sets
-//!   `register-session` does the same; tao's does not.
+//!   session manager on the session bus (`RegisterClient` on GNOME's
+//!   `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`,
+//!   `SessionApi`), answers `QueryEndSession` at once, and on `EndSession`
+//!   saves first and answers `EndSessionResponse` after, then quits.
+//!   gnome-session waits about ten seconds for that answer (older releases
+//!   ninety), as long as `SHUTDOWN_PATIENCE`, so a save that needs all of
+//!   its patience can be cut off when the session ends. A `GtkApplication`
+//!   that sets `register-session` does the same; tao's does not.
 //! - **A system shutdown or reboot**: the app holds logind's `shutdown`
 //!   delay lock (`Inhibit` on the system bus), and on
 //!   `PrepareForShutdown(true)` it saves and then releases the lock. logind
@@ -46,7 +45,7 @@ use zbus::zvariant::{OwnedFd, OwnedObjectPath};
 
 /// A session manager's client protocol: GNOME's, which Xfce serves under
 /// names of its own (GTK 3.24 falls back to them too).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 struct SessionApi {
     /// The manager's name on the session bus.
     name: &'static str,
@@ -517,77 +516,65 @@ mod tests {
         assert!(at("saved") < at("quit"), "{steps:?}");
     }
 
-    /// A session manager's two objects as far as one client goes, under
-    /// one API's interface names: the manager registers the client at
-    /// `client` and the client's object notes its answers.
-    macro_rules! fake_session_manager {
-        ($module:ident, $manager:tt, $client:tt) => {
-            mod $module {
-                use super::*;
+    /// The names gnome-session and xfce4-session serve, written out apart
+    /// from `SessionApi`'s so that a wrong name there fails the tests.
+    const GNOME_SESSION: SessionApi = SessionApi {
+        name: "org.gnome.SessionManager",
+        path: "/org/gnome/SessionManager",
+        manager: "org.gnome.SessionManager",
+        client: "org.gnome.SessionManager.ClientPrivate",
+    };
+    const XFCE4_SESSION: SessionApi = SessionApi {
+        name: "org.xfce.SessionManager",
+        path: "/org/xfce/SessionManager",
+        manager: "org.xfce.Session.Manager",
+        client: "org.xfce.Session.Client",
+    };
 
-                struct Manager {
-                    client: OwnedObjectPath,
-                    registered: mpsc::Sender<(String, String)>,
-                }
-
-                #[zbus::interface(name = $manager)]
-                impl Manager {
-                    fn register_client(
-                        &self,
-                        app_id: String,
-                        startup_id: String,
-                    ) -> OwnedObjectPath {
-                        let _ = self.registered.send((app_id, startup_id));
-                        self.client.clone()
+    /// A session manager under `api`'s names as far as one client goes, on
+    /// `manager`: it registers the client at `client` and notes the ids,
+    /// and notes the client's answers. A call that names another object,
+    /// interface or method goes unanswered.
+    fn serve_session_manager(
+        manager: &Connection,
+        api: SessionApi,
+        client: OwnedObjectPath,
+        registered: mpsc::Sender<(String, String)>,
+        steps: Steps,
+        answered: mpsc::Sender<()>,
+    ) {
+        let (manager, calls) = (manager.clone(), MessageIterator::from(manager));
+        std::thread::spawn(move || {
+            for call in calls {
+                let Ok(call) = call else {
+                    return;
+                };
+                let header = call.header();
+                let to = (
+                    header.path().map(zbus::zvariant::ObjectPath::as_str),
+                    header.interface().map(zbus::names::InterfaceName::as_str),
+                );
+                match header.member().map(zbus::names::MemberName::as_str) {
+                    Some("RegisterClient") if to == (Some(api.path), Some(api.manager)) => {
+                        let _ = registered.send(call.body().deserialize().unwrap());
+                        manager.reply(&header, &client).unwrap();
                     }
-                }
-
-                struct Client {
-                    steps: Steps,
-                    answered: mpsc::Sender<()>,
-                }
-
-                #[zbus::interface(name = $client)]
-                impl Client {
-                    fn end_session_response(&self, is_ok: bool, reason: String) {
+                    Some("EndSessionResponse")
+                        if to == (Some(client.as_str()), Some(api.client)) =>
+                    {
+                        let (is_ok, reason): (bool, String) = call.body().deserialize().unwrap();
                         // "answered true" for the yes without a reason the
                         // client gives.
                         let step = [format!("answered {is_ok}"), reason].concat();
-                        self.steps.lock().unwrap().push(step);
-                        let _ = self.answered.send(());
+                        steps.lock().unwrap().push(step);
+                        manager.reply(&header, &()).unwrap();
+                        let _ = answered.send(());
                     }
-                }
-
-                pub fn serve<'a>(
-                    builder: Builder<'a>,
-                    path: &'a str,
-                    client: &'a str,
-                    registered: mpsc::Sender<(String, String)>,
-                    steps: Steps,
-                    answered: mpsc::Sender<()>,
-                ) -> Builder<'a> {
-                    builder
-                        .serve_at(
-                            path,
-                            Manager {
-                                client: OwnedObjectPath::try_from(client).unwrap(),
-                                registered,
-                            },
-                        )
-                        .unwrap()
-                        .serve_at(client, Client { steps, answered })
-                        .unwrap()
+                    _ => {}
                 }
             }
-        };
+        });
     }
-
-    fake_session_manager!(
-        gnome,
-        "org.gnome.SessionManager",
-        "org.gnome.SessionManager.ClientPrivate"
-    );
-    fake_session_manager!(xfce, "org.xfce.Session.Manager", "org.xfce.Session.Client");
 
     /// A fake session manager under `api`'s names on a private bus, with a
     /// client following it that has registered.
@@ -609,22 +596,15 @@ mod tests {
             let (registered, registrations) = mpsc::channel();
             let (answered, answers) = mpsc::channel();
             let client = format!("{}/Client1", api.path);
-            let serve = if api == SessionApi::GNOME {
-                gnome::serve
-            } else {
-                xfce::serve
-            };
-            let builder = daemon.builder().name(api.name).unwrap();
-            let manager = serve(
-                builder,
-                api.path,
-                &client,
+            let manager = daemon.builder().name(api.name).unwrap().build().unwrap();
+            serve_session_manager(
+                &manager,
+                api,
+                OwnedObjectPath::try_from(client.as_str()).unwrap(),
                 registered,
                 steps.clone(),
                 answered,
-            )
-            .build()
-            .unwrap();
+            );
             let (connection, on_end) = (daemon.connect(), noting(&steps));
             let client_name = connection.unique_name().unwrap().to_string();
             let result = spawn(move || follow_session(&connection, "a-startup-id", &on_end));
@@ -694,12 +674,12 @@ mod tests {
 
     #[test]
     fn a_gnome_logout_saves_before_the_session_manager_is_answered() {
-        a_logout_saves_before_the_session_manager_is_answered(SessionApi::GNOME);
+        a_logout_saves_before_the_session_manager_is_answered(GNOME_SESSION);
     }
 
     #[test]
     fn an_xfce_logout_saves_before_the_session_manager_is_answered() {
-        a_logout_saves_before_the_session_manager_is_answered(SessionApi::XFCE);
+        a_logout_saves_before_the_session_manager_is_answered(XFCE4_SESSION);
     }
 
     /// A peer other than the session manager that sends the client's
@@ -709,7 +689,7 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let session = Session::follow(&daemon, SessionApi::GNOME);
+        let session = Session::follow(&daemon, GNOME_SESSION);
         let peer = daemon.connect();
         for destination in [None, Some(session.client_name.as_str())] {
             peer.emit_signal(
