@@ -44,15 +44,21 @@ fn main() {
             Command::Dev(command) => command.run().await,
         }
     });
-    match outcome {
-        Ok(()) => {}
-        Err(Failure::Usage(message)) => {
-            eprintln!("{message}");
-            std::process::exit(1);
+    let failure = match outcome {
+        Ok(()) => {
+            drop(runtime);
+            steno_services::flush_logs();
+            return;
         }
-        Err(Failure::Runtime(message)) => {
-            eprintln!("{message}");
-            std::process::exit(2);
-        }
-    }
+        Err(failure) => failure,
+    };
+    // The queued log lines first, so they come out before the failure they
+    // led to, as when they were written at once.
+    steno_services::flush_logs();
+    let (code, message) = match failure {
+        Failure::Usage(message) => (1, message),
+        Failure::Runtime(message) => (2, message),
+    };
+    eprintln!("{message}");
+    std::process::exit(code);
 }

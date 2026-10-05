@@ -26,6 +26,9 @@ fn lines_reach_stderr_from_warn_up_unless_rust_log_says_otherwise() {
         steno_services::log_to_stderr(&filter);
         tracing::warn!("a warning line");
         tracing::info!("an info line");
+        // The writer thread ends with the process, so the queued lines are
+        // written out first, as the shell and the CLI do.
+        steno_services::flush_logs();
         return;
     }
     let shell = child_stderr(steno_services::LOG_FILTER, None);

@@ -13,6 +13,7 @@
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels` |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
+//! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`flush_logs`] |
 //! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring and the 0600 secrets file behind `SecretStore` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
@@ -70,6 +71,7 @@ pub mod app;
 pub mod export;
 pub mod handover;
 pub mod llm;
+pub mod logs;
 pub mod pipeline;
 pub mod platform;
 pub mod recorder;
@@ -79,34 +81,11 @@ pub mod speech;
 mod testing;
 
 pub use app::{App, AppOptions, BuildError, build, open_store};
+pub use logs::{LOG_FILTER, flush_logs, log_to_stderr};
 pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};
 /// The durable writes live with the pipeline, whose phone intake needs
 /// them; the secrets file and the CLI's `meeting.json` use them from here.
 pub use steno_pipeline::files;
-
-/// The shell's log filter when `RUST_LOG` is unset.
-pub const LOG_FILTER: &str = "warn";
-
-/// Installs the log output of the shell and the CLI: lines on stderr,
-/// filtered by `RUST_LOG`, else by `default_filter` (the shell passes
-/// [`LOG_FILTER`]), so what the services warn about (no keychain, no
-/// handover identity, a re-run or re-export that failed in the background)
-/// is seen. A second call does nothing. A line that cannot be written is
-/// dropped: after a closed terminal every write to stderr fails, and
-/// `tracing-subscriber` would report that with `eprintln!`, which panics.
-///
-/// Privacy rule for every line at `warn` and above: ids, stages, counts and
-/// error kinds only, never transcript or model text, audio, a file path or
-/// a secret. Full error text goes to `debug`.
-pub fn log_to_stderr(default_filter: &str) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_filter));
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .log_internal_errors(false)
-        .try_init();
-}
 
 /// Runs `future` to completion on `runtime` from a synchronous host
 /// service (the host's traits are synchronous, the clients are async).
@@ -115,43 +94,4 @@ pub(crate) fn block_on<T>(
     future: impl std::future::Future<Output = T>,
 ) -> T {
     tokio::task::block_in_place(|| runtime.block_on(future))
-}
-
-// Unix only: there a closed terminal no longer ends the app (the shell's
-// SIGHUP asks for Quit), so its writes to stderr fail; on Windows a closed
-// console ends the process, and a release build has no console.
-#[cfg(all(test, unix))]
-mod tests {
-    use std::process::{Command, Stdio};
-
-    /// Set in the copy of this test binary the test runs.
-    const LOGGING_CHILD: &str = "STENO_TEST_LOGGING_CHILD";
-
-    /// The child logs a warning to a stderr nobody reads (a pipe with no
-    /// reader fails each write, as a closed terminal does), so the line
-    /// is lost; the child must still pass, not panic. `--nocapture`, or
-    /// the test harness would catch the `eprintln!` that panics.
-    #[test]
-    fn a_log_line_to_a_closed_stderr_is_dropped_without_a_panic() {
-        if std::env::var_os(LOGGING_CHILD).is_some() {
-            super::log_to_stderr(super::LOG_FILTER);
-            tracing::warn!("a line nobody reads");
-            return;
-        }
-        let (reader, writer) = std::io::pipe().unwrap();
-        drop(reader);
-        let status = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "tests::a_log_line_to_a_closed_stderr_is_dropped_without_a_panic",
-                "--nocapture",
-            ])
-            .env(LOGGING_CHILD, "1")
-            .env_remove("RUST_LOG")
-            .stdout(Stdio::null())
-            .stderr(writer)
-            .status()
-            .unwrap();
-        assert!(status.success(), "{status}");
-    }
 }

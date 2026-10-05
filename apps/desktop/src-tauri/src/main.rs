@@ -327,6 +327,7 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
                     || actions::quit(&app),
                 );
                 if let Some(code) = forced {
+                    steno_services::flush_logs();
                     std::process::exit(code);
                 }
             }
@@ -339,7 +340,8 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
 /// the one already running (a held request's, an earlier exit's) instead
 /// of starting one; at once when it already ran. `RunEvent::Exit`, the
 /// updater's relaunch and the Linux logout and shutdown clients
-/// (`session_end`) call it.
+/// (`session_end`) call it, each right before the process ends, so it
+/// writes out the queued log lines too.
 ///
 /// Swift: the Dock's Quit and a logout reached `applicationShouldTerminate`
 /// as Quit did.
@@ -348,6 +350,7 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
         steno_services::app::SHUTDOWN_PATIENCE,
         host::host(app).shutdown_action(),
     );
+    steno_services::flush_logs();
 }
 
 /// One turn of the run loop.
@@ -368,7 +371,10 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 #[cfg(target_os = "linux")]
                 if code != Some(tauri::RESTART_EXIT_CODE) {
                     let code = code.unwrap_or(0);
-                    end_within(EXIT_GRACE, move || std::process::exit(code));
+                    end_within(EXIT_GRACE, move || {
+                        steno_services::flush_logs();
+                        std::process::exit(code);
+                    });
                 }
             } else {
                 api.prevent_exit();
