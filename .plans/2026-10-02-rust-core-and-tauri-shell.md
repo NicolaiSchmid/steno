@@ -1214,15 +1214,20 @@ item to settle before the Linux release:
   (`InputDeviceGone` in person), and so does a microphone that vanishes
   during a call: the server removes Steno's link to it, and a lost link
   takes both lanes. `SampleRateChanged` never fires: PipeWire's adapter
-  resamples whatever the graph runs at. A device
-  destroyed and re-created under the same name and id (WirePlumber
-  restarting, a USB device re-enumerated) reads as gone, by its
-  `object.serial`; the defaults are forgotten while the `default`
-  metadata is gone. Of nodes and ports going away, only a node the
+  resamples whatever the graph runs at. A device destroyed and re-created
+  under the same name and id (WirePlumber restarting, a USB device
+  re-enumerated) reads as gone, by its `object.serial`; the defaults are
+  forgotten while the `default` metadata is gone. Of nodes and ports going away, only a node the
   capture reads (a linked device, the default sink, the source the
   microphone follows) or a port of one is a change, so other apps'
   streams ending do not hold a report back, and a burst of changes is
-  judged at most 2 s after its first.
+  judged at most 2 s after its first. A default move can go unreported:
+  with WirePlumber 0.5.14 and PipeWire 1.6.5 a client binding the
+  `default` metadata while WirePlumber moves a default kept the move from
+  every client already bound, Steno's capture included (seen in the live
+  tests when they polled the metadata with `pw-metadata`). Check it on
+  the release's versions; a periodic re-read of the defaults would cover
+  it.
 - **`stop()` is bounded.** It closes the capture's gate to the sink, so
   no frame or report reaches the sink after it, and waits 2 s for the
   PipeWire thread; a thread that has not ended by then is logged with the
@@ -1532,9 +1537,11 @@ request that fixes an item deletes it.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
-  list and no meeting detection, the latencies are unmeasured on real hardware, and
-  the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
-  Where: the Linux items under "Audio". Found: #166, #176.
+  list and no meeting detection, the latencies are unmeasured on real hardware, a
+  default move can go unreported when another client binds the `default` metadata at
+  the same moment, and the decoder reads a whole lane into memory (1.4 GB for a
+  two-hour 48 kHz lane). Where: the Linux items under "Audio". Found: #166, #176,
+  #197.
 - **First Linux release.** With a frozen session bus the single-instance plugin waits
   about 20 s at exit to release its bus name (measured with #172; upstream behaviour),
   and WebKitGTK leaks a file descriptor per destroyed webview (issue #160). Where:
@@ -1744,8 +1751,8 @@ private headless daemon with WirePlumber and null devices
 carries its own tone, PipeWire's data-loop thread makes zero allocations
 over a second of cycles, `stop()` leaves no thread, no node and no frame
 behind, the device changes are reported once per burst, no sooner than
-the coalescing delay and also while other apps' streams keep coming and going,
-the rebuild's restart runs, a link removed from outside reads as the
+the coalescing delay and also while other apps' streams keep coming and
+going, the rebuild's restart runs, a link removed from outside reads as the
 output gone, and changes that settle back or touch other nodes are not
 reported.
 Linux items: the list after the Swift defects above.
