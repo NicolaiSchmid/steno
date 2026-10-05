@@ -70,11 +70,10 @@
 //!
 //! A lost connection or stream reads as the output gone (the input for an
 //! in-person capture). A lost link reads as the device of the lane it
-//! serves gone, as the Mac reads each device's own liveness: a monitor
-//! link as the output gone, the microphone's link as the input gone, so a
-//! microphone that vanishes during a call (the server removes Steno's link
-//! to it) reads as the input gone. The sample rate never changes: the
-//! adapter resamples.
+//! serves gone: a monitor link as the output gone, the microphone's link
+//! as the input gone, so a microphone that vanishes during a call (the
+//! server removes Steno's link to it) reads as the input gone. The sample
+//! rate never changes: the adapter resamples.
 //!
 //! The system lane is the whole default sink, Steno's own output included
 //! (the Mac's tap excludes Steno's process; Steno plays nothing during a
@@ -253,8 +252,7 @@ struct Shared {
     metadata: RefCell<Option<(u32, pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
     /// The last `done` of a core roundtrip.
     done: Cell<Option<spa::utils::result::AsyncSeq>>,
-    /// What failed: the connection or the stream (everything), or one of
-    /// Steno's links (the lane it serves).
+    /// What the failures so far lost.
     lost: Cell<Lost>,
     /// The first and the last change since the graph was last judged.
     pending: Cell<Option<(Instant, Instant)>>,
