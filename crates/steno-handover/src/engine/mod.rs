@@ -232,9 +232,10 @@ pub struct Engine {
     receipts: watch::Sender<Vec<HandoverReceipt>>,
     state: Mutex<State>,
     /// Receipt saves run one after another, in the order they were asked
-    /// for: GRDB's writer queue gives Swift that for free, the blocking
-    /// pool here does not, and two saves of one receipt committing out of
-    /// order would leave the older chunk set in the store.
+    /// for: the blocking pool runs them in any order, and two saves of one
+    /// receipt committing out of order would leave the older chunk set in
+    /// the store. Swift: `HandoverEngine.inOrder`, which orders every store
+    /// write, not only the receipt saves.
     saves: tokio::sync::Mutex<()>,
 }
 
