@@ -27,12 +27,11 @@ export type PairingContextValue = {
 	replace(pairing: Pairing): Promise<void>;
 	clear(): Promise<void>;
 	/**
-	 * Runs `first`, then forgets the pairing, only while it still holds
-	 * `token`; resolves whether it did. A 401 answers the token its request
-	 * carried, so one that answers a pairing since replaced (or cleared)
-	 * leaves the current one alone. `null` is a token nobody recorded (a
-	 * chunk the background session started before a relaunch) and stands
-	 * for the current pairing.
+	 * Runs `first`, then forgets the pairing, but only while it still holds
+	 * `token`; resolves whether it did. `null` is a token nobody recorded and
+	 * stands for the pairing loaded from the keychain at launch, so it
+	 * matches nothing when none was. A 401 to a pairing since replaced or
+	 * cleared leaves the current one alone.
 	 */
 	clearIfCurrent(
 		token: string | null,
@@ -46,6 +45,10 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 	const [pairing, setPairing] = useState<Pairing | null>(null);
 	const [ready, setReady] = useState(false);
 	const pairingRef = useRef<Pairing | null>(null);
+	// The token of the pairing this process started with, which `replace`
+	// leaves alone: the one a request nobody recorded a token for was sent
+	// with.
+	const loadedTokenRef = useRef<string | null>(null);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -55,6 +58,7 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 				.then((loaded) => {
 					if (cancelled || pairingRef.current) return;
 					pairingRef.current = loaded;
+					if (loaded) loadedTokenRef.current = loaded.token;
 					setPairing(loaded);
 				})
 				.catch((error) => console.warn("[pairing] load failed", error))
@@ -71,12 +75,11 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 		};
 	}, []);
 
-	// The changes in call order: a `clearIfCurrent` called while a `replace`
-	// still saves compares its token with the pairing that replace leaves.
-	const changes = useRef<Promise<unknown>>(Promise.resolve());
+	const chain = useRef<Promise<unknown>>(Promise.resolve());
 	const inOrder = useCallback(<T,>(change: () => Promise<T>): Promise<T> => {
-		const run = changes.current.then(change, change);
-		changes.current = run.catch(() => {});
+		const run = chain.current.then(change);
+		// Keep the chain alive after a failure so later changes still run.
+		chain.current = run.catch(() => {});
 		return run;
 	}, []);
 
@@ -102,9 +105,8 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 		(token: string | null, first: () => Promise<unknown>) =>
 			inOrder(async () => {
 				const current = pairingRef.current;
-				if (!current || (token !== null && current.token !== token)) {
-					return false;
-				}
+				const expected = token ?? loadedTokenRef.current;
+				if (!current || current.token !== expected) return false;
 				await first();
 				await forget();
 				return true;

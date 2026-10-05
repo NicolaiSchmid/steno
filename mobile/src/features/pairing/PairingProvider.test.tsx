@@ -155,7 +155,7 @@ describe("PairingProvider", () => {
 			expect(h.value.pairing).toBeNull();
 		});
 
-		it("treats a token nobody recorded as the pairing's", async () => {
+		it("treats a token nobody recorded as the pairing loaded at launch's", async () => {
 			fake.loads.push(pairing);
 			const h = await mount();
 			await act(async () => {
@@ -163,6 +163,30 @@ describe("PairingProvider", () => {
 			});
 			expect(fake.clear).toHaveBeenCalledTimes(1);
 			expect(h.value.pairing).toBeNull();
+		});
+
+		it("keeps a pairing made in this process against a token nobody recorded", async () => {
+			fake.loads.push(pairing);
+			const h = await mount();
+			await act(() => h.value.replace(replacement));
+			let cleared = true;
+			await act(async () => {
+				cleared = await h.value.clearIfCurrent(null, async () => {});
+			});
+			expect(cleared).toBe(false);
+			expect(fake.clear).not.toHaveBeenCalled();
+			expect(h.value.pairing).toEqual(replacement);
+		});
+
+		it("matches nothing with a token nobody recorded when nothing was loaded at launch", async () => {
+			const h = await mount();
+			await act(() => h.value.replace(pairing));
+			let cleared = true;
+			await act(async () => {
+				cleared = await h.value.clearIfCurrent(null, async () => {});
+			});
+			expect(cleared).toBe(false);
+			expect(h.value.pairing).toEqual(pairing);
 		});
 
 		it("keeps a pairing that replaced the token, and runs nothing", async () => {
