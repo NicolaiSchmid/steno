@@ -13,9 +13,9 @@ const native: Record<Platform, { audio: string; speech: string }> = {
 	},
 	win: {
 		audio: "WASAPI process loopback",
-		// DirectML ships off by default until it is measured on a Windows GPU
-		// (.plans/2026-10-02-rust-core-and-tauri-shell.md).
-		speech: `${onnxSpeech}, on the CPU for now; DirectML GPU acceleration is being measured`,
+		// DirectML is off by default until gate G4 is measured on a Windows GPU
+		// (.plans/2026-10-02-rust-core-and-tauri-shell.md, WP10b); drop the CPU clause when it flips.
+		speech: `${onnxSpeech}, on the CPU; DirectML GPU acceleration is built in but off until it is measured`,
 	},
 	linux: {
 		audio: "PipeWire monitor of the default output",
