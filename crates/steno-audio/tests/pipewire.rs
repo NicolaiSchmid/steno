@@ -27,10 +27,10 @@
 //! The timing checks hold only for switches that reach the daemon close
 //! enough together: a round the machine stretched past the coalescing
 //! delay still needs its one report, but its timing is not checked, and
-//! the test prints that. A missing report says whether WirePlumber never
-//! moved the default or the capture missed the move. The backend's logs
-//! go to the test output, at `info` unless a non-empty `RUST_LOG` says
-//! otherwise.
+//! the test prints that. A missing report says whether the session
+//! manager never moved the default or the capture missed the move. The
+//! backend's logs go to the test output, at `info` unless a non-empty
+//! `RUST_LOG` says otherwise.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
