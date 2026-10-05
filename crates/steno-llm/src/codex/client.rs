@@ -91,7 +91,7 @@ impl CodexResponsesClient {
     /// use std::sync::Arc;
     /// use steno_llm::{CodexCredentialStore, CodexResponsesClient, LlmClient, LlmEndpoint};
     ///
-    /// let env: HashMap<String, String> = std::env::vars().collect();
+    /// let env: HashMap<String, String> = steno_core::environment::process_environment();
     /// let store = CodexCredentialStore::new(CodexCredentialStore::default_home(&env));
     /// let endpoint = LlmEndpoint::codex("gpt-5.6-luna", 200_000);
     /// let client = CodexResponsesClient::new(endpoint, Arc::new(store));

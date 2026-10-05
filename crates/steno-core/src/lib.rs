@@ -22,6 +22,8 @@
 //! - [`paths`]: where the database lives on each platform, and the file URL
 //!   codec the store's audio paths use.
 //! - [`content_hash`]: the SHA-256 every receipt carries.
+//! - [`environment`]: the process environment's Unicode variables, which
+//!   the support directory, the secret overrides and the Codex home read.
 //! - [`recording_layout`]: where one meeting's audio files live.
 //!
 //! Two rules hold the crate together. It depends on nothing else of ours
@@ -35,6 +37,7 @@
 //! sides; `migrations/README.md` has the procedure.
 
 pub mod content_hash;
+pub mod environment;
 pub mod json;
 pub mod model;
 pub mod paths;

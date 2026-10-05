@@ -8,7 +8,7 @@
 //! build the client with [`OpenAiCompatibleClient::from_secret_store`]. For
 //! `LlmProvider::Codex`, use `CodexResponsesClient::new(endpoint,
 //! Arc::new(CodexCredentialStore::new(CodexCredentialStore::default_home(&env))))`
-//! (`env` from `std::env::vars()`; see the [`CodexResponsesClient::new`]
+//! (`env` from `steno_core::environment::process_environment()`; see the [`CodexResponsesClient::new`]
 //! example). Then give the same `Arc` and endpoint to
 //! [`LlmTranscriptCleaner::new`] and to [`LlmMeetingSummarizer::new`], the
 //! latter with the user's time zone.

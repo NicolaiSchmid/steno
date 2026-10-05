@@ -111,7 +111,7 @@ impl FileSecretStore {
     pub fn in_support_directory(support_directory: &Path) -> Self {
         Self::new(
             support_directory.join("secrets.json"),
-            std::env::vars().collect(),
+            steno_core::environment::process_environment(),
         )
     }
 

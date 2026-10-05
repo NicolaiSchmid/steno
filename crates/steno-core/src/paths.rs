@@ -34,7 +34,7 @@ impl StenoPaths {
     /// [`StenoPaths::support_directory`] for the process environment.
     #[must_use]
     pub fn default_support_directory() -> PathBuf {
-        Self::support_directory(&std::env::vars().collect())
+        Self::support_directory(&crate::environment::process_environment())
     }
 
     /// The platform's support directory for `environment`, which tests pass
