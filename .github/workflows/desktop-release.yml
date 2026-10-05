@@ -440,15 +440,14 @@ jobs:
           retention-days: 5
           overwrite: true
 
-      # A manual run's proof: no signature, which would be a valid one for
-      # a build that is never published.
+      # A manual run's proof, without the signatures: each would be a valid
+      # one on a build that is never published.
       - name: Checksums and what was verified
         if: github.event_name != 'push'
         run: |
           set -euo pipefail
           mkdir -p checksums
           cp assets/SHA256SUMS "$RUNNER_TEMP/signatures.txt" checksums/
-          cat checksums/signatures.txt
       - name: Upload the checksums
         if: github.event_name != 'push'
         uses: actions/upload-artifact@v4

@@ -323,10 +323,9 @@ finding.
    secrets in the table below are set, and a manual run on the branch
    passes:
    `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
-   Its `assets` job proves the checksums and signatures: the
-   `desktop-release-checksums` artifact (kept 3 days) holds `SHA256SUMS`
-   and `signatures.txt`, which names the fingerprint and each signature
-   verified, and the run's summary holds the notes.
+   Its `desktop-release-checksums` artifact proves the checksums and
+   signatures (see Checksums and OpenPGP signatures), and the run's
+   summary holds the notes.
 1. On `main`, set `[workspace.package] version` in `Cargo.toml`, run
    `cargo check` so `Cargo.lock` follows (CI builds with `--locked`), and
    merge both. A hyphen (`0.2.0-rc.1`) means the beta lane only.
@@ -426,8 +425,8 @@ version, whose tag moves the lanes as usual.
 | `LINUX_GPG_PASSPHRASE` | `plan`'s Check secrets, `assets`' Checksums and signatures | Its passphrase |
 
 `scripts/require-secrets.sh` names every missing one before anything is
-built: the `plan` job checks the two OpenPGP secrets (it gets only
-whether each is set), each bundle job its own.
+built: the `plan` job checks the two OpenPGP secrets, each bundle job its
+own.
 
 Installed apps verify updates only with the `pubkey` they were built with.
 To rotate the updater key, publish one release (no hyphen, and at or
@@ -551,12 +550,14 @@ committed public key; a signature that does not verify fails the run
 before anything is published. An expired key fails the run before
 anything is signed, and the script warns 90 days before.
 `scripts/release-notes.sh` writes the release notes with the fingerprint
-and the commands above. On a tag the signed set is the
-`desktop-release-assets` artifact (kept 5 days) that `publish` uploads. A
-manual run signs and verifies the same way, but its
-`desktop-release-checksums` artifact (kept 3 days) holds only `SHA256SUMS`
-and `signatures.txt`, the script's log of what it signed and verified:
-a signature on a build that is never published stays on the runner.
+and the commands above.
+
+On a tag the signed set is the `desktop-release-assets` artifact (kept 5
+days) that `publish` uploads. A manual run signs and verifies the same
+way, but its `desktop-release-checksums` artifact (kept 3 days) holds only
+`SHA256SUMS` and `signatures.txt`, the script's log of what it signed and
+verified: a signature on a build that is never published stays on the
+runner.
 
 Before the key expires, extend it where the secret key is kept, then
 commit the new public key and the new date in the block above, and
