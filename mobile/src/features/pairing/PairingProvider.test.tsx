@@ -118,6 +118,26 @@ describe("PairingProvider", () => {
 		expect(h.value.pairing).toBeNull();
 	});
 
+	it("runs a clear after a replace still saving", async () => {
+		const h = await mount();
+		let saved!: () => void;
+		fake.save.mockImplementationOnce(
+			() =>
+				new Promise<void>((resolve) => {
+					saved = resolve;
+				}),
+		);
+		let cleared: Promise<void> | undefined;
+		await act(async () => {
+			void h.value.replace(pairing);
+			cleared = h.value.clear();
+		});
+		await act(async () => saved());
+		await act(async () => cleared);
+		expect(fake.clear).toHaveBeenCalledTimes(1);
+		expect(h.value.pairing).toBeNull();
+	});
+
 	it("persists before updating state on replace and clear", async () => {
 		const h = await mount();
 		await act(() => h.value.replace(pairing));
