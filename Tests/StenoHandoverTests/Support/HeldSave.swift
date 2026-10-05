@@ -4,10 +4,11 @@ import Synchronization
 
 @testable import StenoHandover
 
-/// The engine's receipt writes (`HandoverEngine.saveReceipt`) over a store,
-/// holding the first that lists a chunk on its way there, after it left the
-/// actor and before the store takes it, until `release()`. Records the chunk
-/// set of that write and of every later one as each goes on to the store.
+/// The engine's receipt saves (`HandoverEngine.saveReceipt`) over a store.
+/// Holds the first save that lists a chunk (the announce's lists none) after
+/// it left the actor and before the store takes it, until `release()`, and
+/// records the chunk set of that save and of every later one as each goes on
+/// to the store.
 final class HeldSave: Sendable {
   private struct State {
     var armed = true
@@ -37,13 +38,15 @@ final class HeldSave: Sendable {
     try await store.save(receipt)
   }
 
-  /// Whether a write is held now.
+  /// Whether a save is held now.
   var isHolding: Bool { state.withLock { $0.isHolding } }
 
-  /// The chunk set of the held write and of every later one, in the order
+  /// The chunk set of the held save and of every later one, in the order
   /// they went on to the store.
   var reachedStore: [[Int]] { state.withLock { $0.reachedStore } }
 
+  /// Lets the held save go on to the store; a save that comes later is not
+  /// held.
   func release() {
     releasing.finish()
   }

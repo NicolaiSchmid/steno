@@ -1,8 +1,7 @@
 import Testing
 
-/// Polls `condition`, set by the engine before a suspension, for at most
-/// five seconds; else fails at the caller's line and throws, so the test
-/// stops there.
+/// Polls `condition` every millisecond for at most five seconds; else fails
+/// at the caller's line and throws, so the test stops there.
 func until(
   _ condition: () async -> Bool, sourceLocation: SourceLocation = #_sourceLocation
 ) async throws {

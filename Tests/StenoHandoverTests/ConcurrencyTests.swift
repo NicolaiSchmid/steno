@@ -72,9 +72,9 @@ import Testing
   @Test(.timeLimit(.minutes(1)))
   func aReceiptSaveThatReachesTheStoreLateCannotUndoALaterOne() async throws {
     // `store.save` leaves the actor before GRDB's writer queue takes the
-    // write, so a save asked for first can reach the store second. Chunk
-    // 1's save is held on that way while chunk 0 lands; the store must end
-    // with both, as memory does.
+    // save, so a save asked for first can reach the store second. The save
+    // for chunk 1 is held on its way there while chunk 0 lands; the store
+    // must end with both chunks, as memory does.
     let chunkSize = 64 * 1024
     try await TestService.run(chunkSize: chunkSize, start: false) { test in
       let held = HeldSave(store: test.store)

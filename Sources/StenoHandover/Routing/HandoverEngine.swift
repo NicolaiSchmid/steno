@@ -8,7 +8,8 @@ import StenoCore
 /// engine tests and the same code runs on Linux. Owned by `HandoverService`;
 /// one actor, so pairing, tokens and partial files are touched by one request
 /// at a time, though every store, file and intake call is a suspension point
-/// at which the next request runs. The recording routes live in
+/// at which the next request runs. Its store writes still commit in the
+/// order they were asked for (`inOrder`). The recording routes live in
 /// `RecordingHandler.swift`.
 actor HandoverEngine: RequestHandling {
   let configuration: HandoverConfiguration
@@ -47,8 +48,8 @@ actor HandoverEngine: RequestHandling {
   var revoked: Set<UUID> = []
   /// The store write asked for last (`inOrder`).
   private var lastWrite: Task<Void, any Error>?
-  /// One receipt write, `store.save` outside the tests; a test holds one on
-  /// its way to the store, where two writes could change places.
+  /// Saves one receipt: `store.save`, or in a test a save it can hold on its
+  /// way to the store, where two saves could change places.
   private let saveReceipt: @Sendable (HandoverReceipt) async throws -> Void
 
   /// `lastSeenAt` is written at most this often per device.
@@ -332,7 +333,8 @@ actor HandoverEngine: RequestHandling {
   /// two writes asked for one after the other could reach the queue, and
   /// commit, the other way round: an older receipt over a newer one, or a
   /// receipt save after the device delete that should have followed it.
-  /// Every write of the engine goes through here; reads do not wait.
+  /// Every store write the engine makes itself goes through here; reads do
+  /// not wait. A failed write does not hold up the next.
   func inOrder(_ write: @escaping @Sendable () async throws -> Void) async throws {
     let previous = lastWrite
     let task = Task {

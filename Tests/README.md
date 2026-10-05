@@ -29,5 +29,9 @@ links on Linux (`linuxOnlyExclusions`), where Security does not exist.
 `StenoHandoverTests/Support/` also holds the helpers only that target uses:
 `TestService` (one service on loopback with an advanceable wall clock and
 `run { test in … }`), `RawClient` (byte-exact requests for the limit and
-timeout tests) and `EngineClient` (the protocol core driven without a
-listener, for the ordering tests).
+timeout tests), `EngineClient` (the protocol core driven without a
+listener, for the ordering tests), `StoreGate` (an on-disk store that holds
+a chosen statement's transaction open, for the revoke races), `HeldSave`
+(receipt saves that hold one on its way to the store, for the write order)
+and `until` (polls a condition the test waits on, failing after five
+seconds).
