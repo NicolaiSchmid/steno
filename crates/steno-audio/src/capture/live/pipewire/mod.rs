@@ -67,11 +67,13 @@
 //! change during `start` is judged once the capture runs. The session then
 //! rebuilds through `stop()` and `start`, as on the Mac. The capture never
 //! follows a default on its own.
-//! A lost connection, stream or link reads as the output gone (the input
-//! for an in-person capture), and so does a microphone that vanishes
-//! during a call: the server removes Steno's link to it, and a lost link
-//! takes both lanes. The sample rate never changes: the adapter
-//! resamples.
+//!
+//! A lost connection or stream reads as the output gone (the input for an
+//! in-person capture). A lost link reads as the device of the lane it
+//! serves gone: a monitor link as the output gone, the microphone's link
+//! as the input gone, so a microphone that vanishes during a call (the
+//! server removes Steno's link to it) reads as the input gone. The sample
+//! rate never changes: the adapter resamples.
 //!
 //! The system lane is the whole default sink, Steno's own output included
 //! (the Mac's tap excludes Steno's process; Steno plays nothing during a
@@ -94,7 +96,7 @@ use pw::spa;
 use pw::types::ObjectType;
 use steno_core::AudioLane;
 
-use self::graph::{Graph, Latency, Targets};
+use self::graph::{Graph, Latency, Lost, Targets};
 use crate::SAMPLE_RATE;
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot, LaneSource,
@@ -250,8 +252,8 @@ struct Shared {
     metadata: RefCell<Option<(u32, pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
     /// The last `done` of a core roundtrip.
     done: Cell<Option<spa::utils::result::AsyncSeq>>,
-    /// The connection, the stream or one of Steno's links failed.
-    lost: Cell<bool>,
+    /// What the failures so far lost.
+    lost: Cell<Lost>,
     /// The first and the last change since the graph was last judged.
     pending: Cell<Option<(Instant, Instant)>>,
 }
@@ -272,11 +274,19 @@ impl Shared {
     }
 
     /// `what` failed for good (logged with PipeWire's `message`): the
-    /// capture is lost.
-    fn fail(&self, what: &str, message: &str) {
+    /// capture lost `lost`.
+    fn fail(&self, what: &str, message: &str, lost: Lost) {
         tracing::warn!("{what} failed: {message}");
-        self.lost.set(true);
+        self.lost.set(self.lost.get().union(lost));
         self.changed();
+    }
+
+    /// The capture stream's new state: in its error state it loses both
+    /// lanes.
+    fn stream_state(&self, state: &pw::stream::StreamState) {
+        if let pw::stream::StreamState::Error(message) = state {
+            self.fail("the PipeWire capture stream", message, Lost::ALL);
+        }
     }
 
     /// A registry global: nodes and ports into the graph, the `default`
@@ -407,7 +417,7 @@ impl Connection {
                 let shared = Rc::clone(&shared);
                 move |id, _seq, res, message| {
                     if id == pw::core::PW_ID_CORE {
-                        shared.fail("the connection to PipeWire", message);
+                        shared.fail("the connection to PipeWire", message, Lost::ALL);
                     } else {
                         tracing::warn!("PipeWire error on object {id}: {message} ({res})");
                     }
@@ -445,7 +455,7 @@ impl Connection {
                 return true;
             }
             let now = Instant::now();
-            if now >= deadline || self.shared.lost.get() {
+            if now >= deadline || self.shared.lost.get().any() {
                 return false;
             }
             self.main_loop
@@ -467,7 +477,7 @@ impl Connection {
     /// The error for a start step that did not finish: the connection's
     /// loss, or the deadline.
     fn stalled(&self, step: &str) -> CaptureError {
-        if self.shared.lost.get() {
+        if self.shared.lost.get().any() {
             CaptureError::BackendFailed(
                 "the connection to PipeWire, the capture stream or a link failed".into(),
             )
@@ -564,10 +574,9 @@ struct Capture {
     baseline: DeviceSnapshot,
 }
 
-/// One of Steno's links and the listeners that mark the capture lost when
-/// it fails: an error on its proxy, the server putting it in its error
-/// state, or the server removing it. Fields drop in order, the listeners
-/// first.
+/// One of Steno's links and the listeners that mark its lane lost when it
+/// fails: an error on its proxy, the server putting it in its error state,
+/// or the server removing it. Fields drop in order, the listeners first.
 struct WatchedLink {
     _info: pw::link::LinkListener,
     _error: pw::proxy::ProxyListener,
@@ -652,18 +661,14 @@ impl Capture {
             .add_local_listener_with_user_data(())
             .state_changed({
                 let shared = Rc::clone(&connection.shared);
-                move |_, (), _old, new| {
-                    if let pw::stream::StreamState::Error(message) = new {
-                        shared.fail("the PipeWire capture stream", &message);
-                    }
-                }
+                move |_, (), _old, new| shared.stream_state(&new)
             })
             .register()
             .map_err(failed("the capture stream's state callback"))?;
         let baseline = {
             let mut graph = connection.shared.graph.borrow_mut();
             graph.track(&targets, input_device_uid);
-            graph.snapshot(&targets, input_device_uid, false)
+            graph.snapshot(&targets, input_device_uid, Lost::NONE)
         };
         Ok(Capture {
             _rt_listener: rt_listener,
@@ -739,26 +744,35 @@ impl Capture {
                 .core
                 .create_object::<pw::link::Link>("link-factory", &props)
                 .map_err(failed("linking the capture stream"))?;
-            links.push(Self::watch_link(&connection.shared, link));
+            let lost = self.targets.lost_with(node, port);
+            links.push(Self::watch_link(&connection.shared, link, lost));
         }
         self.links = links;
         Ok(())
     }
 
-    /// `link` with the listeners that fail the capture when it fails or the
-    /// server removes it (a patchbay, a device end gone). Steno's own
-    /// teardown never fires them: they drop before the link, and the loop
-    /// does not run in between.
-    fn watch_link(shared: &Rc<Shared>, link: pw::link::Link) -> WatchedLink {
+    /// `link` with the listeners that mark the lane it serves (`lost`) lost
+    /// when it fails or the server removes it (a patchbay, a device end
+    /// gone). Steno's own teardown never fires them: they drop before the
+    /// link, and the loop does not run in between.
+    fn watch_link(shared: &Rc<Shared>, link: pw::link::Link, lost: Lost) -> WatchedLink {
+        // One closure for all three ways a link fails, so they mark the same
+        // lane.
+        let fail = {
+            let shared = Rc::downgrade(shared);
+            move |message: &str| {
+                if let Some(shared) = shared.upgrade() {
+                    shared.fail("a capture link", message, lost);
+                }
+            }
+        };
         let info = link
             .add_listener_local()
             .info({
-                let shared = Rc::downgrade(shared);
+                let fail = fail.clone();
                 move |info| {
-                    if let pw::link::LinkState::Error(message) = info.state()
-                        && let Some(shared) = shared.upgrade()
-                    {
-                        shared.fail("a capture link", message);
+                    if let pw::link::LinkState::Error(message) = info.state() {
+                        fail(message);
                     }
                 }
             })
@@ -767,21 +781,10 @@ impl Capture {
             .upcast_ref()
             .add_listener_local()
             .error({
-                let shared = Rc::downgrade(shared);
-                move |_seq, _res, message| {
-                    if let Some(shared) = shared.upgrade() {
-                        shared.fail("a capture link", message);
-                    }
-                }
+                let fail = fail.clone();
+                move |_seq, _res, message| fail(message)
             })
-            .removed({
-                let shared = Rc::downgrade(shared);
-                move || {
-                    if let Some(shared) = shared.upgrade() {
-                        shared.fail("a capture link", "the server removed it");
-                    }
-                }
-            })
+            .removed(move || fail("the server removed it"))
             .register();
         WatchedLink {
             _info: info,
@@ -803,7 +806,7 @@ impl Capture {
         // Its own deadline: a first cycle late in the start's must not cut
         // the read short and leave the far-end delay at zero.
         let latencies = self.latencies(Instant::now() + LATENCY_TIMEOUT);
-        if connection.shared.lost.get() {
+        if connection.shared.lost.get().any() {
             return Err(connection.stalled("run the capture"));
         }
         (
@@ -1237,6 +1240,38 @@ mod tests {
             output_latency_frames: 0,
             layout: None,
         }
+    }
+
+    #[test]
+    fn a_failed_stream_loses_both_lanes() {
+        let shared = Shared::default();
+        shared.stream_state(&pw::stream::StreamState::Paused);
+        assert_eq!(shared.lost.get(), Lost::NONE);
+        assert!(
+            shared.due().is_none(),
+            "a state that is no error is no change"
+        );
+        shared.stream_state(&pw::stream::StreamState::Error("gone".into()));
+        assert_eq!(shared.lost.get(), Lost::ALL);
+        assert!(shared.due().is_some(), "a change to judge");
+    }
+
+    #[test]
+    fn what_each_failure_loses_adds_up() {
+        let shared = Shared::default();
+        let monitor = Lost {
+            mic: false,
+            output: true,
+        };
+        let mic = Lost {
+            mic: true,
+            output: false,
+        };
+        shared.fail("a capture link", "the server removed it", monitor);
+        shared.fail("a capture link", "the server removed it", mic);
+        assert_eq!(shared.lost.get(), Lost::ALL, "the monitor's loss stays");
+        shared.fail("a capture link", "the server removed it", Lost::NONE);
+        assert_eq!(shared.lost.get(), Lost::ALL);
     }
 
     #[test]

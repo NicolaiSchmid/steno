@@ -20,9 +20,11 @@
 //! report per default move or burst of moves, not before the coalescing
 //! delay after the last, and the rebuild's restart on the new default; a
 //! report while other apps' streams keep coming and going; no report for a
-//! default that comes back or for an unrelated node; and a removed
-//! microphone, or one of Steno's links removed from outside, reported
-//! gone.
+//! default that comes back or for an unrelated node; a lost microphone or
+//! its link reported as the input gone (in person or during a call), a lost
+//! monitor link as the output gone, both links lost (the monitor's first)
+//! as the output gone, and the capture's connection closed from outside as
+//! the output gone (the input in person).
 //!
 //! A round the machine stretched past the coalescing delay is not held to
 //! the one-burst checks (the timing of its one report, or no report for a
@@ -72,6 +74,8 @@ const SINK_TONE: f64 = 440.0;
 const MIC_TONE: f64 = 1_000.0;
 /// The capture stream's `node.name`.
 const CAPTURE_NODE: &str = "steno-capture";
+/// A call's lanes.
+const CALL: [AudioLane; 2] = [AudioLane::Mic, AudioLane::System];
 const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
 /// The backend's private `COALESCE_LIMIT`: a burst that never settles is
 /// judged this long after its first change.
@@ -81,6 +85,9 @@ const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 const QUIET: Duration = Duration::from_millis(1_500);
 /// How long the daemon and WirePlumber get to settle after a change.
 const SETTLE: Duration = Duration::from_secs(2);
+/// How long a tone's stream gets to be linked: the first test after the
+/// daemon came up can wait on WirePlumber still starting.
+const TONE_LINKED: Duration = Duration::from_secs(15);
 
 /// The backend's logs into the test output, at `info` unless a non-empty
 /// `RUST_LOG` says otherwise.
@@ -166,19 +173,30 @@ impl Tone {
     fn file(frequency: f64) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("tone.wav");
-        write_tone(&path, frequency, 30.0);
+        write_tone(&path, frequency, 60.0);
         (dir, path)
     }
 
-    /// Into a sink, linked by WirePlumber.
+    /// Into a sink, linked by WirePlumber; returns once the link is there.
     fn into_sink(sink: &str, frequency: f64) -> Self {
         let (dir, path) = Self::file(frequency);
+        let name = format!("steno-test-tone-{frequency}");
         let child = Command::new("pw-play")
-            .args(["--target", sink])
+            .args([
+                "--target",
+                sink,
+                "--properties",
+                &format!("{{ node.name = {name} }}"),
+            ])
             .arg(&path)
             .spawn()
             .expect("pw-play");
-        Self { child, _dir: dir }
+        let tone = Self { child, _dir: dir };
+        assert!(
+            eventually(TONE_LINKED, || linked(&name, sink)),
+            "WirePlumber did not link {name} to {sink}"
+        );
+        tone
     }
 
     /// Into a virtual source's input, linked here: WirePlumber links
@@ -197,10 +215,10 @@ impl Tone {
         let tone = Self { child, _dir: dir };
         let output = format!("{name}:output_MONO");
         let input = format!("{source}:input_MONO");
-        let linked = eventually(Duration::from_secs(5), || {
-            tool("pw-link", &[&output, &input])
-        });
-        assert!(linked, "could not link {output} to {input}");
+        assert!(
+            eventually(TONE_LINKED, || tool("pw-link", &[&output, &input])),
+            "could not link {output} to {input}"
+        );
         tone
     }
 }
@@ -252,29 +270,66 @@ fn dump() -> Vec<serde_json::Value> {
 
 /// The daemon's global id of the node named `name`, from `pw-dump`.
 fn node_id(name: &str) -> Option<u64> {
-    dump().iter().find_map(|object| {
+    node_in(&dump(), name)
+}
+
+/// The global id of the node named `name` among `objects`.
+fn node_in(objects: &[serde_json::Value], name: &str) -> Option<u64> {
+    objects.iter().find_map(|object| {
         let found = object.pointer("/info/props/node.name")?.as_str()?;
         (found == name).then(|| object.get("id")?.as_u64())?
     })
 }
 
-/// The global ids of the links into the capture's node, from `pw-dump`.
-fn capture_links() -> Vec<u64> {
-    let Some(capture) = node_id(CAPTURE_NODE) else {
-        return Vec::new();
+/// The links among `objects`: each one's global id and the ids of the
+/// nodes it connects, from and to.
+fn links_in(objects: &[serde_json::Value]) -> impl Iterator<Item = (u64, u64, u64)> + '_ {
+    let id = |object: &serde_json::Value, pointer: &str| {
+        object.pointer(pointer).and_then(serde_json::Value::as_u64)
     };
-    dump()
+    objects
         .iter()
         .filter(|object| {
             object.get("type").and_then(serde_json::Value::as_str)
                 == Some("PipeWire:Interface:Link")
-                && object
-                    .pointer("/info/input-node-id")
-                    .and_then(serde_json::Value::as_u64)
-                    == Some(capture)
         })
-        .filter_map(|object| object.get("id")?.as_u64())
-        .collect()
+        .filter_map(move |object| {
+            Some((
+                id(object, "/id")?,
+                id(object, "/info/output-node-id")?,
+                id(object, "/info/input-node-id")?,
+            ))
+        })
+}
+
+/// Removes, as a patchbay or a policy would, one of the capture's links
+/// from each node named in `from`, in that order.
+fn destroy_capture_links_from(from: &[&str]) {
+    let objects = dump();
+    let node = |name| node_in(&objects, name).unwrap_or_else(|| panic!("no node {name}"));
+    let capture = node(CAPTURE_NODE);
+    let links: Vec<_> = links_in(&objects)
+        .filter(|&(.., to)| to == capture)
+        .collect();
+    assert_eq!(links.len(), 3, "one link per channel: {links:?}");
+    for name in from {
+        let source = node(name);
+        let (link, ..) = links
+            .iter()
+            .find(|&&(_, from, _)| from == source)
+            .unwrap_or_else(|| panic!("no capture link from {name}: {links:?}"));
+        assert!(tool("pw-cli", &["destroy", &link.to_string()]));
+    }
+}
+
+/// Whether the daemon holds a link from the node named `from` to the node
+/// named `to`, from `pw-dump`.
+fn linked(from: &str, to: &str) -> bool {
+    let objects = dump();
+    let (Some(from), Some(to)) = (node_in(&objects, from), node_in(&objects, to)) else {
+        return false;
+    };
+    links_in(&objects).any(|(_, f, t)| (f, t) == (from, to))
 }
 
 /// Polls `done` for up to `limit`; whether it held.
@@ -367,6 +422,15 @@ fn collect(sink: &LaneFrameSink, frames: usize) -> Vec<Vec<f32>> {
 /// A device-change report and when the handler got it.
 type Report = (DeviceChangeReason, Instant);
 
+/// The next device-change report, which must come within 3 s after the
+/// coalescing delay.
+fn next_report(reasons: &Receiver<Report>) -> DeviceChangeReason {
+    reasons
+        .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
+        .expect("a device-change report")
+        .0
+}
+
 /// A sink whose device-change reports arrive on the returned channel.
 fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<Report>) {
     let (sender, receiver) = channel();
@@ -390,7 +454,7 @@ fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<Report>)
 fn a_call_records_the_microphone_and_the_monitor_aligned_without_allocating() {
     let _sink_tone = Tone::into_sink(SINK, SINK_TONE);
     let _mic_tone = Tone::into_source(MIC, MIC_TONE);
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let backend = Arc::new(LiveCaptureBackend::new());
     let stream = start(&backend, &lanes, None, &sink).expect("start");
@@ -501,7 +565,7 @@ impl Drop for DefaultSink {
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn moving_the_default_output_is_reported_once() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, None, &sink).expect("start");
@@ -609,7 +673,7 @@ fn default_sink() -> Option<String> {
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     let _restore = DefaultSink;
@@ -662,7 +726,7 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     let _restore = DefaultSink;
@@ -765,7 +829,7 @@ impl Drop for Churn {
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn other_apps_streams_coming_and_going_do_not_hold_back_a_report() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
+    let lanes = CALL;
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     let _restore = DefaultSink;
@@ -787,22 +851,80 @@ fn other_apps_streams_coming_and_going_do_not_hold_back_a_report() {
     stop_and_check_teardown(&backend, &sink);
 }
 
+/// Starts a capture of `lanes` from the default devices, does `outside`
+/// to it, and expects one report of `gone`.
+fn assert_reported_after(lanes: &[AudioLane], outside: impl FnOnce(), gone: DeviceChangeReason) {
+    let (sink, reasons) = reporting_sink(lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    start(&backend, lanes, None, &sink).expect("start");
+    outside();
+    assert_eq!(next_report(&reasons), gone);
+    stop_and_check_teardown(&backend, &sink);
+}
+
+/// Destroys the capture's client in the daemon (the `client.id` of its
+/// node), so the server drops the capture's connection.
+fn destroy_own_client() {
+    let client = dump()
+        .iter()
+        .find_map(|object| {
+            let props = object.pointer("/info/props")?;
+            let ours = props.get("node.name")?.as_str()? == CAPTURE_NODE;
+            ours.then(|| props.get("client.id")?.as_u64())?
+        })
+        .expect("the capture's client in the daemon");
+    assert!(tool("pw-cli", &["destroy", &client.to_string()]));
+}
+
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_link_removed_from_outside_is_reported_as_the_output_gone() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
-    let (sink, reasons) = reporting_sink(&lanes);
-    let backend = Arc::new(LiveCaptureBackend::new());
-    start(&backend, &lanes, None, &sink).expect("start");
-    let links = capture_links();
-    assert_eq!(links.len(), 3, "one link per channel: {links:?}");
-    // A patchbay or a policy removing one of them.
-    assert!(tool("pw-cli", &["destroy", &links[2].to_string()]));
-    let (reason, _) = reasons
-        .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
-        .expect("a device-change report");
-    assert_eq!(reason, DeviceChangeReason::OutputDeviceGone);
-    stop_and_check_teardown(&backend, &sink);
+fn a_monitor_link_removed_from_outside_is_reported_as_the_output_gone() {
+    assert_reported_after(
+        &CALL,
+        || destroy_capture_links_from(&[SINK]),
+        DeviceChangeReason::OutputDeviceGone,
+    );
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_microphone_link_removed_from_outside_is_reported_as_the_input_gone() {
+    assert_reported_after(
+        &CALL,
+        || destroy_capture_links_from(&[MIC]),
+        DeviceChangeReason::InputDeviceGone,
+    );
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_monitor_then_a_microphone_link_removed_are_reported_as_the_output_gone() {
+    // Both within one coalescing delay: the monitor's loss must stay.
+    assert_reported_after(
+        &CALL,
+        || destroy_capture_links_from(&[SINK, MIC]),
+        DeviceChangeReason::OutputDeviceGone,
+    );
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_connection_closed_from_outside_during_a_call_is_reported_as_the_output_gone() {
+    assert_reported_after(
+        &CALL,
+        destroy_own_client,
+        DeviceChangeReason::OutputDeviceGone,
+    );
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_connection_closed_from_outside_in_person_is_reported_as_the_input_gone() {
+    assert_reported_after(
+        &[AudioLane::Mixed],
+        destroy_own_client,
+        DeviceChangeReason::InputDeviceGone,
+    );
 }
 
 /// A lingering virtual microphone, created by `pw-cli`; destroyed when
@@ -848,16 +970,14 @@ impl Drop for TemporaryMic {
 
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_microphone_that_goes_away_is_reported_gone() {
+fn a_microphone_that_goes_away_in_person_is_reported_as_the_input_gone() {
     let mic = TemporaryMic::create("steno-test-mic-gone");
     let lanes = [AudioLane::Mixed];
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, Some(mic.name), &sink).expect("start");
     mic.destroy();
-    let (reason, _) = reasons
-        .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
-        .expect("a device-change report");
+    let reason = next_report(&reasons);
     assert_eq!(reason, DeviceChangeReason::InputDeviceGone);
     stop(&backend);
     assert_eq!(
@@ -865,4 +985,23 @@ fn a_microphone_that_goes_away_is_reported_gone() {
         Err(CaptureError::InputDeviceUnavailable),
         "the rebuild's restart finds it gone"
     );
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_microphone_that_goes_away_during_a_call_is_reported_as_the_input_gone() {
+    let mic = TemporaryMic::create("steno-test-mic-call");
+    let lanes = CALL;
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    start(&backend, &lanes, Some(mic.name), &sink).expect("start");
+    // The server removes Steno's link to it too; the output stays.
+    mic.destroy();
+    let reason = next_report(&reasons);
+    assert_eq!(
+        reason,
+        DeviceChangeReason::InputDeviceGone,
+        "not the output gone"
+    );
+    stop_and_check_teardown(&backend, &sink);
 }
