@@ -43,10 +43,35 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    diff against a database the Swift CLI created. New migrations after this plan
    starts are written once in SQL and mirrored in `Migrations.swift` and the Rust
    `.sql` files until cutover; the parity test proves them equal.
-3. **Audio never leaves the device.** Only `Destination` implementations, the LLM
-   client and the updater open network connections: the LLM client sends text, and
-   the updater fetches the release manifest and the signed bundle from the endpoint
-   in `apps/desktop/src-tauri/tauri.conf.json` and sends nothing.
+3. **Audio never leaves the device.** Only these code paths open network
+   connections, and a new one needs a plan first:
+   - the LLM client (`steno-llm`), which sends text only: the prompts and the
+     transcript text to the summaries endpoint the user set up, and the ChatGPT
+     sign-in's token refresh;
+   - a `Destination` (`steno-adapters`), text only; the Obsidian and Markdown folder
+     destinations write to local folders and open no connection;
+   - the model downloads, which send nothing but the request, from the app's own
+     process (the speech sidecar opens no connection): `steno-speech`'s `ModelStore`
+     fetches the fp32 Parakeet export from Hugging Face at a pinned commit and Silero
+     VAD from a GitHub release asset, or both from the mirror the speech settings
+     name (`crates/steno-speech/src/model_store.rs`); `steno-diarize` fetches its two
+     models from Hugging Face and a GitHub release asset
+     (`crates/steno-diarize/src/models.rs`);
+   - the Tauri updater, which fetches `latest.json` and the signed bundle from the
+     repository's GitHub releases (the `desktop-stable` endpoint in
+     `apps/desktop/src-tauri/tauri.conf.json`, the `desktop-beta` one in
+     `apps/desktop/src-tauri/src/updater.rs`) and sends nothing;
+   - the phone handover server (`steno-handover`), which advertises itself over
+     Bonjour, accepts connections only on the computer's LAN addresses and loopback,
+     speaks TLS 1.3 with the self-signed certificate the phone pins, and only
+     receives the paired phone's recordings; it opens no outbound connection.
+
+   Inside the computer, a transcription's samples reach the speech sidecar over the
+   child's stdin and its answers come back on stdout, never through a socket (WP4c).
+   ONNX Runtime's telemetry is off in every process that opens a session:
+   `init_environment` in `crates/steno-speech/src/onnx.rs` commits
+   `with_telemetry(false)` before the first session, and `steno-diarize` calls it too.
+   Until the cutover the Swift app keeps its own list in `AGENTS.md`.
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
    loop are shared; the backends are CoreML (`objc2-core-ml`) on the Mac and ONNX
    Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
