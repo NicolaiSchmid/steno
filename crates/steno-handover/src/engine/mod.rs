@@ -4,8 +4,8 @@
 //! session, the live receipts, the completions in flight, the revoked
 //! devices and the line of store writes, held for synchronous sections
 //! only, never across a store, file or intake call, so another request runs
-//! while one awaits. The store still commits the engine's writes in the
-//! order they were asked for (`Engine::in_order`). The recording
+//! while one awaits. The store commits the engine's writes in the order
+//! they were asked for all the same (`Engine::in_order`). The recording
 //! routes live in `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
 //! `Routing/HTTPMessages.swift`.
 
@@ -211,9 +211,9 @@ struct State {
     last_write: Option<oneshot::Receiver<()>>,
 }
 
-/// A store write's place in line ([`State::next_write`]): the write asked
-/// for just before it, which it waits for, and what it drops once it has
-/// returned, which lets the next one go.
+/// A store write's place in line ([`State::next_write`]): `previous`
+/// closes once the write asked for before it has returned, and dropping
+/// `done` once this write has returned lets the next one go.
 struct InOrder {
     previous: Option<oneshot::Receiver<()>>,
     done: oneshot::Sender<()>,
@@ -235,8 +235,10 @@ impl State {
 
     /// The next place in the line of store writes ([`Engine::in_order`]).
     /// Taken under the same guard as the memory the write stands for (the
-    /// revoke count it bumps or read, the receipt it saves), so the store
-    /// commits the writes in the order memory changed.
+    /// revoke count it bumps or reads, the receipt it saves), so the store
+    /// commits the writes in the order memory changed. The place must reach
+    /// [`Engine::in_order`] before any yield or panic: dropped on the way,
+    /// it would let the next write go without waiting for the one before.
     fn next_write(&mut self) -> InOrder {
         let (done, last) = oneshot::channel();
         InOrder {
@@ -325,9 +327,9 @@ impl Engine {
     /// Runs `write` on the blocking pool once the write asked for before it
     /// (`place`) has returned. The pool runs its calls in any order, so
     /// without the line an older receipt could commit over a newer one, a
-    /// revoke's delete could take out the pairing asked for after it, and a
-    /// pairing's save could put back the phone a revoke asked for after it
-    /// had deleted. The write runs in a task of its own, so it keeps its
+    /// revoke's delete could remove the pairing asked for after it, and a
+    /// revoke's delete could commit before the pairing's save asked for
+    /// before it, which leaves the revoked phone in the store. The write runs in a task of its own, so it keeps its
     /// place, and the writes behind it wait for it, also when the request
     /// that asked for it is dropped. A failed write does not hold up the
     /// next; reads do not wait. Swift: `HandoverEngine.inOrder`.
@@ -560,7 +562,7 @@ impl Engine {
             }
             return HandoverResponse::internal_error("saving the device", &error);
         }
-        // A revoke that started during the save deleted the device after
+        // A revoke that started during the save deletes the device after
         // it and keeps it revoked; the next pairing clears it.
         {
             let mut state = self.state();
@@ -629,8 +631,8 @@ impl Engine {
     /// the save runs: the phone keeps two chunks in flight, so the next
     /// request must already see this one's chunk or it would persist a stale
     /// copy over it. The save takes its place in line under the same guard,
-    /// so the saves commit in the order memory changed and the last save of
-    /// a burst carries every chunk of the burst.
+    /// so the saves commit in the order memory changed and the store ends
+    /// with the copy memory held last.
     pub(crate) async fn persist(&self, receipt: &HandoverReceipt) -> store::Result<()> {
         let place = {
             let mut state = self.state();
@@ -724,6 +726,7 @@ async fn on_blocking_pool<T: Send + 'static>(
         .map_err(|error| join_error(&error))?
 }
 
+/// A task that panicked or was cancelled, as a store I/O error.
 fn join_error(error: &tokio::task::JoinError) -> store::StoreError {
     store::StoreError::Io(std::io::Error::other(error.to_string()))
 }
