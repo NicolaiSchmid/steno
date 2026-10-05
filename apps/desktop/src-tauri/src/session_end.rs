@@ -33,6 +33,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use zbus::blocking::connection::Builder;
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::message::Type;
 use zbus::proxy::CacheProperties;
@@ -93,29 +94,19 @@ pub fn watch(app: &tauri::AppHandle) {
         run(
             "steno-session-client",
             "a logout saves only when a signal reaches the app",
-            move || follow_session(&connect(Bus::Session)?, &startup_id(), &ending),
+            move || follow_session(&patient(Builder::session()?)?, &startup_id(), &ending),
         );
     }
     run(
         "steno-shutdown-lock",
         "a shutdown saves only when a signal reaches the app",
-        move || hold_shutdown_lock(&connect(Bus::System)?, &ending),
+        move || hold_shutdown_lock(&patient(Builder::system()?)?, &ending),
     );
 }
 
-/// Which bus a client connects to.
-#[derive(Debug, Clone, Copy)]
-enum Bus {
-    Session,
-    System,
-}
-
-/// A connection to `bus` whose method calls wait `CALL_PATIENCE` at most.
-fn connect(bus: Bus) -> zbus::Result<Connection> {
-    let builder = match bus {
-        Bus::Session => zbus::blocking::connection::Builder::session()?,
-        Bus::System => zbus::blocking::connection::Builder::system()?,
-    };
+/// The connection `builder` makes, whose method calls wait `CALL_PATIENCE`
+/// at most.
+fn patient(builder: Builder<'_>) -> zbus::Result<Connection> {
     builder.method_timeout(CALL_PATIENCE).build()
 }
 
@@ -330,12 +321,12 @@ mod tests {
             })
         }
 
+        fn builder(&self) -> Builder<'_> {
+            Builder::address(self.address.as_str()).unwrap()
+        }
+
         fn connect(&self) -> Connection {
-            zbus::blocking::connection::Builder::address(self.address.as_str())
-                .unwrap()
-                .method_timeout(CALL_PATIENCE)
-                .build()
-                .unwrap()
+            patient(self.builder()).unwrap()
         }
     }
 
@@ -405,8 +396,8 @@ mod tests {
             return;
         };
         let (inhibited, inhibits) = mpsc::channel();
-        let logind = zbus::blocking::connection::Builder::address(daemon.address.as_str())
-            .unwrap()
+        let logind = daemon
+            .builder()
             .name(LOGIND)
             .unwrap()
             .serve_at(LOGIND_PATH, FakeLogind { inhibited })
@@ -502,8 +493,8 @@ mod tests {
         let steps = Arc::new(Mutex::new(Vec::new()));
         let (registered, registrations) = mpsc::channel();
         let (answered, answers) = mpsc::channel();
-        let manager = zbus::blocking::connection::Builder::address(daemon.address.as_str())
-            .unwrap()
+        let manager = daemon
+            .builder()
             .name(SESSION_MANAGER)
             .unwrap()
             .serve_at(SESSION_MANAGER_PATH, FakeSessionManager { registered })
