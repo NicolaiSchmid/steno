@@ -37,10 +37,13 @@ struct DeviceSnapshot: Sendable, Equatable {
   /// The real backend: process tap + private aggregate device + one IOProc.
   /// `.system` comes from the tap, `.mic` and `.mixed` from the first channel
   /// of the selected input device, which the aggregate resamples to the
-  /// output device's 48 kHz clock.
+  /// output device's clock. That clock is 48 kHz where the output device
+  /// accepts it; a Bluetooth headset in the hands-free profile keeps 24 or
+  /// 16 kHz, and the stream then reports that rate for the processing thread
+  /// to convert.
   ///
   /// Device notifications (a default device moving, a sub-device dying, the
-  /// aggregate leaving 48 kHz) are coalesced for `coalesceDelay` on
+  /// aggregate changing rate) are coalesced for `coalesceDelay` on
   /// `listenerQueue`, then the devices are resolved again and compared with
   /// what the capture started on. Nothing changed means the burst is logged
   /// and ignored; otherwise the sink gets one `DeviceChangeReason` and the
@@ -127,7 +130,7 @@ struct DeviceSnapshot: Sendable, Equatable {
     /// property destruction order.
     deinit { stop() }
 
-    /// Returns the stream it opened: the confirmed 48 kHz rate, both device
+    /// Returns the stream it opened: the confirmed rate, both device
     /// latencies for the far-end delay, and the resolved `StreamLayout` so
     /// `steno dev capture-spike` can attribute buffers to lanes.
     public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
@@ -194,19 +197,22 @@ struct DeviceSnapshot: Sendable, Equatable {
         throw error
       }
       // The aggregate inherits the clock master's rate. Ask for 48 kHz, then
-      // read it back: the HAL applies the change asynchronously and a device
-      // that cannot run at 48 kHz keeps its own, which would leave a
-      // pitch-shifted master labelled 48 kHz. Fail loud instead.
+      // read it back: the HAL applies the change asynchronously, and a
+      // device that cannot run at 48 kHz (a headset in the hands-free
+      // profile) keeps its own. The stream then reports that rate, which the
+      // processing thread converts; labelling it 48 kHz would leave a
+      // pitch-shifted master. A rate settling late changes the aggregate's
+      // rate, which the listener reports as a device change.
       if aggregate.nominalSampleRate != StenoAudio.sampleRate {
         try? aggregate.setNominalSampleRate(StenoAudio.sampleRate)
       }
       let sampleRate = NominalSampleRate.settle(
         to: StenoAudio.sampleRate, read: { aggregate.nominalSampleRate },
         wait: { Thread.sleep(forTimeInterval: NominalSampleRate.interval) })
-      guard sampleRate == StenoAudio.sampleRate else {
+      guard RateConverter.supports(sampleRate) else {
         aggregate.destroy()
         tap?.destroy()
-        throw CaptureError.sampleRateMismatch(actual: sampleRate)
+        throw CaptureError.unsupportedSampleRate(actual: sampleRate)
       }
 
       let layout: StreamLayout
@@ -230,7 +236,7 @@ struct DeviceSnapshot: Sendable, Equatable {
       }
 
       // Device changes: the default devices moving, a sub-device dying, the
-      // aggregate leaving 48 kHz (a Bluetooth profile switch can change the
+      // aggregate changing rate (a Bluetooth profile switch can change the
       // rate without moving a default). The tap mirrors the default output
       // device (where the call plays), the clock follows the system output
       // device (alerts); a change of either moves the far-end alignment, so

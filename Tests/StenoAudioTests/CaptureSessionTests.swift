@@ -674,6 +674,87 @@ import Testing
     #expect(clock.pendingSleepers == 0)
   }
 
+  /// A tone's frequency from its upward zero crossings at 48 kHz.
+  func frequency(_ samples: ArraySlice<Float>) -> Double {
+    let crossings = zip(samples, samples.dropFirst()).filter { $0 < 0 && $1 >= 0 }.count
+    return Double(crossings) / (Double(samples.count) / StenoAudio.sampleRate)
+  }
+
+  /// The level of `samples` in dB against a sine of amplitude 0.5.
+  func levelAgainstHalfScaleSine(_ samples: ArraySlice<Float>) -> Double {
+    let power = samples.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(samples.count)
+    return 20 * log10(power.squareRoot() / (0.5 / 2.0.squareRoot()))
+  }
+
+  /// A headset in the hands-free profile keeps the aggregate at 24 kHz: the
+  /// recording still starts, and the master and the sidecars are 48 and
+  /// 16 kHz with the tones at their frequencies and levels.
+  @Test func aDeviceAt24KilohertzRecordsTheUsualFiles() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 3, sampleRate: 24_000)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000)
+    try await session.start(meetingID: UUID())
+    #expect(await session.stream?.sampleRate == 24_000)
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+
+    #expect(backend.framesDelivered == 3 * 24_000)
+    #expect(result.statistics.droppedFrames == [:])
+    // Less half a converter window and the last partial frame.
+    #expect(abs(result.statistics.duration - 3) < 0.015, "\(result.statistics.duration) s")
+    let master = try CAFFile.read(result.asset.url)
+    #expect(master.sampleRate == StenoAudio.sampleRate)
+    #expect(master.channels.count == 2)
+    for (channel, hertz) in [(0, 440.0), (1, 1_000.0)] {
+      let steady = master.channels[channel][4_800..<140_000]
+      #expect(abs(frequency(steady) - hertz) < 2, "\(frequency(steady)) Hz")
+      #expect(abs(levelAgainstHalfScaleSine(steady)) < 0.1)
+    }
+    let mic = try WAVAudioDecoder.read(result.asset.sidecars16k[.mic]!)
+    #expect(abs(mic.duration - 3) < 0.015)
+  }
+
+  /// The call starts and the headset enters the hands-free profile while
+  /// recording: the rebuilt backend comes back at 24 kHz and the recording
+  /// carries on instead of ending as a lost device.
+  @Test func aChangeTo24KilohertzResumesTheRecording() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let handsFree = CaptureStream(
+      sampleRate: 24_000, inputLatencyFrames: 240, outputLatencyFrames: 4_800, layout: nil)
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 2, changeDeviceAfter: 1,
+      streamAfterRestart: handsFree)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000, clock: clock)
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    #expect(await notices.next() == .deviceResumed(attempt: 1, gapSeconds: 0))
+    #expect(await session.stream == handsFree)
+    // The far-end delay is built from the latencies in 48 kHz frames.
+    #expect(handsFree.resampled(240 + 4_800) == 10_080)
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+
+    #expect(backend.framesDelivered == 48_000 + 2 * 24_000)
+    #expect(result.statistics.deviceChanges == 1)
+    #expect(!result.statistics.endedOnDeviceLoss)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(abs(result.statistics.duration - 3) < 0.015, "\(result.statistics.duration) s")
+    let master = try CAFFile.read(result.asset.url)
+    let after = master.channels[0][52_800..<140_000]
+    #expect(abs(frequency(after) - 440) < 2, "\(frequency(after)) Hz after the change")
+  }
+
   /// The contiguity claim. A gap longer than the two seconds the sink's
   /// rings hold is written in full as silence through the relay, so the
   /// master runs to wall time with nothing truncated into `droppedFrames`:

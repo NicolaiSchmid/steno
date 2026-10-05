@@ -171,6 +171,45 @@ import Testing
         abs(thread.systemPeak - 0.375) < 0.01, "the folded stereo tap peaks at (0.5 + 0.25) / 2")
     }
 
+    /// A headset in the hands-free profile: the rings carry 24 kHz and the
+    /// loop converts every lane to 48 kHz before the canceller, still
+    /// without allocating.
+    @Test func theProcessingLoopConverting24KilohertzAllocatesNothingAfterWarmUp() throws {
+      let lanes: [AudioLane] = [.mic, .system]
+      let sink = LaneFrameSink(lanes: lanes)
+      let relay = FrameRelay(channels: 3, frameSize: Self.frameSize, capacityFrames: 256)
+      let thread = ProcessingThread(
+        sink: sink, relay: relay,
+        configuration: .init(
+          lanes: lanes, deviceRate: 24_000,
+          echoCanceller: try SpeexEchoCanceller(sampleRate: 48_000, frameSize: Self.frameSize),
+          farEndDelayFrames: 7_200, keepRawMic: true))
+      defer { thread.stop() }
+
+      // The material's samples, read as 24 kHz: 4 800 then 52 800 device
+      // samples convert to 2 * 4 800 - 64 and 2 * 52 800 - 64 outputs (half a
+      // window held back), 19 and then 219 whole frames.
+      let warmUp = Material(seconds: 0.1)
+      defer { warmUp.release() }
+      warmUp.deliver(to: sink)
+      thread.drain()
+      #expect(thread.framesProcessed == 19)
+
+      let second = Material(seconds: 1)
+      defer { second.release() }
+      let allocations = try AllocationHook.allocations {
+        second.deliver(to: sink)
+        thread.drain()
+      }
+      #expect(
+        allocations.count == 0,
+        "\(allocations.count) allocations on the converting path\(allocations.stacks)")
+      #expect(thread.framesProcessed == 219)
+      #expect(sink.availableToRead == 0)
+      #expect(sink.droppedSamples.isEmpty)
+      #expect(relay.droppedFrames == [0, 0, 0])
+    }
+
     @Test func theSidecarResamplerAllocatesNothingAfterInit() throws {
       let resampler = Resampler48kTo16k()
       let input = UnsafeMutablePointer<Float>.allocate(capacity: Self.frameSize)

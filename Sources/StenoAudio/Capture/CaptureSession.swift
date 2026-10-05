@@ -212,9 +212,10 @@ public actor CaptureSession {
 
   private func farEndDelayFrames(for stream: CaptureStream) -> Int {
     guard configuration.usesEchoCancellation else { return 0 }
+    // The latencies are device frames; the canceller runs at 48 kHz.
     return Self.farEndDelayFrames(
-      inputLatencyFrames: stream.inputLatencyFrames,
-      outputLatencyFrames: stream.outputLatencyFrames)
+      inputLatencyFrames: stream.resampled(stream.inputLatencyFrames),
+      outputLatencyFrames: stream.resampled(stream.outputLatencyFrames))
   }
 
   /// Whether the relay and the writer carry the raw microphone channel.
@@ -228,7 +229,7 @@ public actor CaptureSession {
     ProcessingThread(
       sink: sink, relay: relay,
       configuration: .init(
-        lanes: configuration.lanes, echoCanceller: echoCanceller,
+        lanes: configuration.lanes, deviceRate: stream.sampleRate, echoCanceller: echoCanceller,
         farEndDelayFrames: farEndDelayFrames(for: stream), keepRawMic: keepRaw),
       levels: levels)
   }
@@ -335,8 +336,9 @@ public actor CaptureSession {
     let files = active.writer.files
     let lanes = configuration.lanes
     var dropped: [AudioLane: Int] = [:]
+    // The rings hold the device's rate; the counts are 48 kHz frames.
     for (lane, samples) in active.sink.droppedSamples {
-      dropped[lane, default: 0] += samples / StenoAudio.frameSize
+      dropped[lane, default: 0] += active.stream.resampled(samples) / StenoAudio.frameSize
     }
     for (index, frames) in active.relay.droppedFrames.enumerated() where index < lanes.count {
       if frames > 0 { dropped[lanes[index], default: 0] += frames }
@@ -412,7 +414,8 @@ public actor CaptureSession {
       // full, when a start succeeds.
       let gapFrames = Self.gapFrames(for: min(elapsed(), Self.maximumGap))
       guard await writeSilence(frames: gapFrames, into: current.relay, generation: generation),
-        await relayHasRoom(for: current.sink, in: current.relay, generation: generation)
+        await relayHasRoom(
+          for: current.sink, at: stream, in: current.relay, generation: generation)
       else { return }
       resume(
         stream: stream, attempt: attempt, gapFrames: gapFrames, sink: current.sink,
@@ -523,10 +526,13 @@ public actor CaptureSession {
   /// the relay's capacity, re-read on every step): the new processing thread
   /// pushes them at once, and a relay still full of silence would refuse and
   /// count them. Returns false when the rebuild was abandoned meanwhile.
-  private func relayHasRoom(for sink: LaneFrameSink, in relay: FrameRelay, generation: Int) async
-    -> Bool
-  {
-    let backlog = { min(sink.availableToRead / StenoAudio.frameSize, relay.capacityFrames) }
+  private func relayHasRoom(
+    for sink: LaneFrameSink, at stream: CaptureStream, in relay: FrameRelay, generation: Int
+  ) async -> Bool {
+    // The rings hold the restarted device's rate.
+    let backlog = {
+      min(stream.resampled(sink.availableToRead) / StenoAudio.frameSize, relay.capacityFrames)
+    }
     while relay.capacityFrames - relay.availableFrames < backlog() {
       guard stillRebuilding(generation) else { return false }
       do {

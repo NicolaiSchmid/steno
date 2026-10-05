@@ -9,8 +9,9 @@ import StenoCore
 /// calling `stop()` and `start` again on the same backend and the same sink,
 /// so a backend must be restartable.
 public protocol CaptureBackend: Sendable {
-  /// Starts delivering `lanes` (in this order) at `StenoAudio.sampleRate`
-  /// and describes the stream it opened. `inputDeviceUID` nil selects the
+  /// Starts delivering `lanes` (in this order) and describes the stream it
+  /// opened, at `StenoAudio.sampleRate` or, where the device will not run at
+  /// it, at the device's own rate, which the processing thread converts. `inputDeviceUID` nil selects the
   /// default input device. Throws a `CaptureError` when a device or the tap
   /// cannot be set up.
   func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
@@ -24,13 +25,16 @@ public protocol CaptureBackend: Sendable {
 /// where each lane sits in the HAL's buffers. `CaptureSession.stream` keeps
 /// it while recording; `steno dev capture-spike` prints it.
 public struct CaptureStream: Sendable, Equatable {
-  /// The confirmed rate; `StenoAudio.sampleRate` for every backend that
-  /// started (the live one fails otherwise).
+  /// The confirmed rate the lanes arrive at: `StenoAudio.sampleRate`, except
+  /// when the clock master will not run at it (a Bluetooth headset in the
+  /// hands-free profile runs at 24 or 16 kHz).
   public var sampleRate: Double
-  /// Latency plus safety offset of the microphone's input path, in frames.
+  /// Latency plus safety offset of the microphone's input path, in frames at
+  /// `sampleRate`.
   public var inputLatencyFrames: Int
-  /// Latency plus safety offset of the loudspeaker's output path, in frames:
-  /// the tap sees a sample this long before the room hears it.
+  /// Latency plus safety offset of the loudspeaker's output path, in frames
+  /// at `sampleRate`: the tap sees a sample this long before the room hears
+  /// it.
   public var outputLatencyFrames: Int
   /// nil for a backend without HAL buffers (synthetic).
   public var layout: StreamLayout?
@@ -47,4 +51,11 @@ public struct CaptureStream: Sendable, Equatable {
   /// 48 kHz, no latency, no HAL layout.
   public static let synthetic = CaptureStream(
     sampleRate: StenoAudio.sampleRate, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil)
+
+  /// `samples` at the stream's rate as samples at `StenoAudio.sampleRate`,
+  /// rounded down.
+  public func resampled(_ samples: Int) -> Int {
+    guard sampleRate != StenoAudio.sampleRate else { return samples }
+    return Int((Double(samples) * StenoAudio.sampleRate / sampleRate).rounded(.down))
+  }
 }
