@@ -25,8 +25,8 @@ final class StoreGate: Sendable {
   let deviceRead = Hold(matching: "FROM \"pairedDevice\" WHERE \"tokenHash\"")
   /// The next paired device delete (a revoke), executed but not committed.
   let deviceDelete = Hold(matching: "DELETE FROM \"pairedDevice\"")
-  /// The next save of an existing paired device (pairing again under its
-  /// id), executed but not committed.
+  /// The next update of a paired device (pairing again under its id, or a
+  /// touch), executed but not committed.
   let deviceSave = Hold(matching: "UPDATE \"pairedDevice\"")
   private let holds: [Hold]
   private let directory: URL
