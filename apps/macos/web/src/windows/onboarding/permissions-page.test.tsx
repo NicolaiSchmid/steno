@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { OnboardingWindow } from "./onboarding-window";
-import { PERMISSIONS_INTRO } from "./permissions-page";
 
 describe("PermissionsPage", () => {
 	it("shows every permission in its state with the retention sentence", async () => {
@@ -16,7 +15,7 @@ describe("PermissionsPage", () => {
 			"Welcome to Steno",
 		);
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
-			PERMISSIONS_INTRO,
+			"A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac.",
 		);
 		expect(screen.getByTestId("onboarding-retention")).toHaveTextContent(
 			/^Each recording is deleted 30 days/,

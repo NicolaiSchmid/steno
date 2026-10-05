@@ -10,6 +10,7 @@ import {
 	Input,
 	Select,
 } from "@/components/ui";
+import { usePlatform } from "@/lib/platform";
 import { useDraft } from "@/lib/use-draft";
 import { SectionPage } from "./section-page";
 import { folderUsageText, retentionTitle } from "./settings-format";
@@ -113,6 +114,7 @@ function RetentionRow({
  */
 export function RecordingSection() {
 	const client = useBridge();
+	const { words } = usePlatform();
 	const recording = useSnapshot("settings.recording");
 	if (!recording) {
 		return <SectionPage id="recording" />;
@@ -216,7 +218,7 @@ export function RecordingSection() {
 								size="sm"
 								variant="ghost"
 							>
-								Show in Finder
+								{words.showInFileManager}
 							</Button>
 							<Button
 								data-testid="choose-folder"

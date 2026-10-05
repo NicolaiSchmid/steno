@@ -1,6 +1,7 @@
 import { CircleAlertIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { Callout, Disclosure } from "@/components/ui";
+import { usePlatform } from "@/lib/platform";
 import { type SectionId, sectionInfo } from "./sections";
 
 export interface SectionPageProps {
@@ -24,13 +25,14 @@ export function SectionPage({
 	children,
 }: SectionPageProps) {
 	const info = sectionInfo(id);
+	const { words } = usePlatform();
 	return (
 		<div className="flex flex-col gap-8" data-testid={`section-${id}`}>
 			<p
 				className="m-0 text-muted-foreground text-sm"
 				data-testid={`section-purpose-${id}`}
 			>
-				{info.purpose}
+				{info.purpose(words)}
 			</p>
 			{error ? (
 				<div className="flex flex-col gap-1.5" data-testid="section-error">

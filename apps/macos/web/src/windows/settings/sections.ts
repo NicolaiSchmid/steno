@@ -1,3 +1,5 @@
+import type { PlatformWords } from "@/lib/platform";
+
 /**
  * The six sections, named by what the user gets, not by the subsystem
  * behind it; the same words as `SettingsSection` on the Swift side, whose
@@ -18,42 +20,45 @@ export interface SectionInfo {
 	id: SectionId;
 	title: string;
 	/** One sentence at the top of the section page. */
-	purpose: string;
+	purpose: (words: PlatformWords) => string;
 }
 
 export const SECTIONS: readonly SectionInfo[] = [
 	{
 		id: "general",
 		title: "General",
-		purpose: "Steno runs in the menu bar and records when you ask it to.",
+		purpose: ({ runsIn }) =>
+			`Steno runs ${runsIn} and records when you ask it to.`,
 	},
 	{
 		id: "recording",
 		title: "Recording",
-		purpose: "Audio is recorded and kept on this Mac only.",
+		purpose: ({ computer }) =>
+			`Audio is recorded and kept on this ${computer} only.`,
 	},
 	{
 		id: "transcription",
 		title: "Transcription",
-		purpose: "Speech is turned into text on this Mac. Nothing is uploaded.",
+		purpose: ({ computer }) =>
+			`Speech is turned into text on this ${computer}. Nothing is uploaded.`,
 	},
 	{
 		id: "summaries",
 		title: "Summaries",
-		purpose:
+		purpose: () =>
 			"Meeting summaries and tasks are written by an AI model you choose. Only the transcript text is sent to it.",
 	},
 	{
 		id: "export",
 		title: "Export",
-		purpose:
+		purpose: () =>
 			"Finished meetings can be written into an Obsidian vault as notes you own.",
 	},
 	{
 		id: "iphone",
 		title: "iPhone",
-		purpose:
-			"Record on your iPhone when you are away from the Mac. Recordings travel over your Wi-Fi only, encrypted to this Mac.",
+		purpose: ({ computer }) =>
+			`Record on your iPhone when you are away from the ${computer}. Recordings travel over your Wi-Fi only, encrypted to this ${computer}.`,
 	},
 ];
 

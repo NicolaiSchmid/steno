@@ -12,6 +12,7 @@ import {
 	ProgressBar,
 	QRCode,
 } from "@/components/ui";
+import { usePlatform } from "@/lib/platform";
 import { useNow } from "@/lib/use-now";
 import { SectionPage } from "./section-page";
 import {
@@ -66,6 +67,7 @@ function PairingCard({
  */
 export function PhoneSection() {
 	const client = useBridge();
+	const { words } = usePlatform();
 	const phone = useSnapshot("settings.iphone");
 	if (!phone) {
 		return <SectionPage id="iphone" />;
@@ -97,13 +99,13 @@ export function PhoneSection() {
 			{phone.pairing ? <PairingCard pairing={phone.pairing} /> : null}
 
 			<FormCard
-				footer="The first pairing asks for local network access. Recordings travel over your Wi-Fi only, encrypted to this Mac."
+				footer={`The first pairing asks for local network access. Recordings travel over your Wi-Fi only, encrypted to this ${words.computer}.`}
 				title="Paired phones"
 			>
 				{phone.devices.length === 0 ? (
 					<FormRow
 						data-testid="no-phones"
-						description="Pair one to record away from the Mac."
+						description={`Pair one to record away from the ${words.computer}.`}
 						label="No iPhone paired yet."
 					/>
 				) : null}

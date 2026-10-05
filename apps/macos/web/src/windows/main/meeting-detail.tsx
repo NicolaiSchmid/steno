@@ -40,6 +40,7 @@ import {
 	TabsTab,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { SHORTCUTS, usePlatform, useShortcut } from "@/lib/platform";
 import { useElapsedSeconds } from "@/lib/use-now";
 import { deleteMeeting } from "./delete-meeting";
 import {
@@ -234,10 +235,12 @@ const EXPORT_ICON: Record<
 /**
  * The foot of the reading column: what happens to the recording, with the
  * keep switch when the host offers it, and where the export stands, with
- * Reveal in Finder and Export again when they apply.
+ * Show in Finder (the platform's file manager) and Export again when they
+ * apply.
  */
 function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 	const client = useBridge();
+	const { words } = usePlatform();
 	const status = EXPORT_ICON[detail.export.status];
 	return (
 		<footer
@@ -273,7 +276,7 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 						variant="ghost"
 					>
 						<FolderIcon aria-hidden="true" />
-						Reveal in Finder
+						{words.showInFileManager}
 					</Button>
 				) : null}
 				{detail.export.canReexport ? (
@@ -347,6 +350,7 @@ function DetailBody({
 	initialPickerOpen: boolean;
 }) {
 	const client = useBridge();
+	const platform = usePlatform();
 	const recording = useSnapshot("recording");
 	const progress = useSnapshot("progress");
 	const [tab, setTab] = useState<Tab>(detail.tab);
@@ -396,6 +400,13 @@ function DetailBody({
 	function rerun() {
 		send(client, "meeting.rerunSummary");
 	}
+
+	const canReexport = detail.export.canReexport && !detail.isBusy;
+	useShortcut(
+		SHORTCUTS.exportAgain,
+		() => send(client, "meeting.reexport"),
+		canReexport,
+	);
 
 	function panel(current: Tab) {
 		if (current === "notes") {
@@ -497,7 +508,7 @@ function DetailBody({
 						disabled={!detail.export.canReexport || detail.isBusy}
 						icon={<ShareIcon />}
 						onClick={() => send(client, "meeting.reexport")}
-						shortcut="⇧⌘E"
+						shortcut={platform.label(SHORTCUTS.exportAgain)}
 					>
 						Export again
 					</MenuItem>
@@ -506,7 +517,7 @@ function DetailBody({
 							icon={<FolderIcon />}
 							onClick={() => send(client, "meeting.revealExport")}
 						>
-							Reveal export
+							{platform.words.showExport}
 						</MenuItem>
 					) : null}
 					<MenuItem
@@ -514,7 +525,7 @@ function DetailBody({
 						icon={<FolderIcon />}
 						onClick={() => send(client, "meeting.revealRecording")}
 					>
-						Reveal recording
+						{platform.words.showRecording}
 					</MenuItem>
 					<MenuSeparator />
 					{detail.retention.filesExist ? (

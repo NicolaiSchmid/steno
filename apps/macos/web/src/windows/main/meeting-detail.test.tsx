@@ -138,7 +138,7 @@ describe("MeetingDetail", () => {
 		expect(screen.queryByTestId("reveal-export")).not.toBeInTheDocument();
 	});
 
-	it("offers Export again after a failed export, and Reveal in Finder once delivered", async () => {
+	it("offers Export again after a failed export, and Show in Finder once delivered", async () => {
 		const user = userEvent.setup();
 		const detail = await fixtureDetail();
 		const harness = await createBridgeHarness("scenario=export-failed");
