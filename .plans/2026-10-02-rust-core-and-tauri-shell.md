@@ -1217,28 +1217,28 @@ item to settle before the Linux release:
   resamples whatever the graph runs at. A device destroyed and re-created
   under the same name and id (WirePlumber restarting, a USB device
   re-enumerated) reads as gone, by its `object.serial`; the defaults are
-  forgotten while the `default` metadata is gone. Of nodes and ports going away, only a node the
-  capture reads (a linked device, the default sink, the source the
-  microphone follows) or a port of one is a change, so other apps'
-  streams ending do not hold a report back, and a burst of changes is
-  judged at most 2 s after its first. A default move can go unreported:
-  with WirePlumber 0.5.14 and PipeWire 1.6.5 a client binding the
-  `default` metadata while WirePlumber moves a default kept the move from
-  every client already bound, Steno's capture included (seen in the live
-  tests when they polled the metadata with `pw-metadata`). Check it on
-  the release's versions; a periodic re-read of the defaults would cover
-  it.
-- **`stop()` is bounded.** It closes the capture's gate to the sink, so
-  no frame or report reaches the sink after it, and waits 2 s for the
-  PipeWire thread; a thread that has not ended by then is logged with the
-  system call it waits in and left behind, and the devices may stay open
-  until Steno quits. Such a hang was seen once in testing, most likely
-  in a log write: logs are written synchronously, and a capture thread
-  left behind in a later run was blocked in `write(2)` to stderr, waiting
-  on the disk's journal at idle I/O priority. The stopper's own log of
-  the hang waits for the same stderr lock, so `stop()` then blocks too,
-  past its bound. A non-blocking log writer in the binaries closes this
-  (under "Open after the port").
+  forgotten while the `default` metadata is gone. Of nodes and ports
+  going away, only a node the capture reads (a linked device, the default
+  sink, the source the microphone follows) or a port of one is a change,
+  so other apps' streams ending do not hold a report back, and a burst of
+  changes is judged at most 2 s after its first.
+- **A default move can go unreported.** With WirePlumber 0.5.14 and
+  PipeWire 1.6.5, a client binding the `default` metadata while
+  WirePlumber moved a default kept the move from every client already
+  bound, Steno's capture included (seen when the live tests polled the
+  metadata with `pw-metadata`). Check it on the release's versions; a
+  periodic re-read of the defaults would cover it.
+- **`stop()` is bounded, except behind a blocked log write.** It closes
+  the capture's gate to the sink, so no frame or report reaches the sink
+  after it, and waits 2 s for the PipeWire thread; a thread that has not
+  ended by then is logged with the system call it waits in and left
+  behind, and the devices may stay open until Steno quits. Such a hang was
+  seen once in testing, most likely in a log write: logs are written
+  synchronously, and a capture thread left behind in a later run was
+  blocked in `write(2)` to stderr, waiting on the disk's journal at idle
+  I/O priority. `stop()`'s own log of the hang waits for the same stderr
+  lock, so `stop()` then blocks too, past its bound. A non-blocking log
+  writer in the binaries closes this (under "Open after the port").
 - **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
   names no Linux node, so a synced or copied settings file shows the input
   device as unavailable and the user picks again. A virtual source (a null
@@ -1520,20 +1520,11 @@ request that fixes an item deletes it.
   services (WP6b)". Found: #185.
 - **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
   threads alive, the node and its links left in the graph) and was never reproduced;
-  the likely cause is a blocking log write (the next item). `stop()` now gives the
-  thread `STOP_TIMEOUT` (2 s) and then leaves it behind the closed gate, and
-  `Gate::close` itself waits without a bound for a pass to leave. Where:
-  `crates/steno-audio/src/capture/live/pipewire/mod.rs`; the `stop()` item in the
-  Linux list under "Audio". Found: #176, #197.
-- **Unowned.** The desktop shell and the CLI write their logs synchronously to stderr,
-  so a write that blocks (a stalled disk, a full pipe) stops the thread that logs: a
-  PipeWire capture thread then outlives `stop()`'s bound, and the stopper's own log of
-  that waits for the same stderr lock, so `stop()` blocks as well. The shell's `warn`
-  filter makes such writes rare, `RUST_LOG=debug` common. A non-blocking writer
-  (`tracing-appender`'s `non_blocking`, which drops lines rather than wait) bounds
-  both. Where: `log_to_stderr` in `crates/steno-services/src/lib.rs`, called by
-  `apps/desktop/src-tauri/src/main.rs` and `crates/steno-cli/src/main.rs`. Found:
-  #197.
+  the likely cause is a blocking log write (the **Unowned.** item on log writes).
+  `stop()` now gives the thread `STOP_TIMEOUT` (2 s) and then leaves it behind the
+  closed gate, and `Gate::close` itself waits without a bound for a pass to leave.
+  Where: `crates/steno-audio/src/capture/live/pipewire/mod.rs`; the `stop()` item in
+  the Linux list under "Audio". Found: #176, #197.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
@@ -1649,6 +1640,15 @@ request that fixes an item deletes it.
   so the app shows the default date title while the export uses the given one. Swift's
   CLI does the same, so a fix changes both or neither. Where:
   `crates/steno-cli/src/commands/process.rs`. Found: #195 (whole-app smoke).
+- **Unowned.** The desktop shell and the CLI write their logs synchronously to stderr,
+  so a write that blocks (a stalled disk, a full pipe) stops the thread that logs: a
+  PipeWire capture thread then outlives `stop()`'s bound, and `stop()`'s own log of the
+  hang waits for the same stderr lock, so `stop()` blocks as well. The shell's `warn`
+  filter makes such writes rare, `RUST_LOG=debug` common. A non-blocking writer
+  (`tracing-appender`'s `non_blocking`, which drops lines rather than wait) bounds
+  both. Where: `log_to_stderr` in `crates/steno-services/src/lib.rs`, called by
+  `apps/desktop/src-tauri/src/main.rs` and `crates/steno-cli/src/main.rs`. Found:
+  #197.
 - **Unowned.** The headless PipeWire script fails when `TMPDIR` is long: its socket
   path under the `mktemp` directory passes the 108-byte limit of a Unix socket path
   ("File name too long"). A short base directory for the socket fixes it. Where:
