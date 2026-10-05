@@ -27,12 +27,12 @@
 //! stdout breaks, so a dead parent leaves no child behind. Its log goes to
 //! stderr, which the parent logs and keeps the tail of for crash reports.
 //!
-//! On Linux and macOS it ignores SIGINT, SIGTERM and SIGHUP once its
-//! heartbeat runs. Those are the signals that end the app, and they reach
-//! the child too: Ctrl-C and a closed terminal reach the terminal's whole
+//! On Linux and macOS it ignores SIGINT, SIGTERM and SIGHUP from its ready
+//! message on. Those are the signals that end the app, and they reach the
+//! child too: Ctrl-C and a closed terminal reach the terminal's whole
 //! foreground group, and systemd signals every process in a scope. A child
-//! that died of them would end its job before the app quit its pipeline.
-//! So the child finishes its request or exits within a heartbeat of its
+//! that died of them would end its job before the app quit its pipeline. So
+//! the child finishes its request or exits within a heartbeat of its
 //! parent's exit, when stdout breaks. The client ends a child only with a
 //! shutdown request or SIGKILL (the memory ceiling, a deadline, a broken
 //! protocol); the child also ends when its stdin closes or its stdout
@@ -514,8 +514,9 @@ fn send(reply: &Reply) {
 }
 
 /// Ignores SIGINT, SIGTERM and SIGHUP for the rest of the child's life
-/// (see the crate docs); only once the heartbeat runs, which ends a child
-/// whose parent is gone.
+/// (see the crate docs). Called just before the ready message, so a parent
+/// that has it knows they are ignored; the heartbeat, which ends a child
+/// whose parent is gone, starts right after it, or the child exits.
 #[cfg(unix)]
 fn ignore_exit_signals() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
@@ -625,6 +626,8 @@ pub fn serve(options: &Options) -> ExitCode {
     if start_fault == Some(Fault::SlowStart) {
         std::thread::sleep(Duration::from_millis(200));
     }
+    #[cfg(unix)]
+    ignore_exit_signals();
     // Before the heartbeat starts, so `Ready` is always the first frame.
     send(&Reply::Ready {
         protocol: if start_fault == Some(Fault::WrongProtocol) {
@@ -637,8 +640,6 @@ pub fn serve(options: &Options) -> ExitCode {
     if let Err(error) = start_heartbeat(options.heartbeat) {
         return give_up("no heartbeat thread", error);
     }
-    #[cfg(unix)]
-    ignore_exit_signals();
     let mut input = BufReader::new(io::stdin().lock());
     let mut fallback_told = None;
     loop {

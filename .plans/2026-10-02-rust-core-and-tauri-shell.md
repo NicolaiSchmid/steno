@@ -325,7 +325,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     `a_busy_child_exits_when_its_parent_goes_away`), and dropping the engine stops it
     without blocking a runtime worker
     (`dropping_the_engine_stops_its_child_inside_a_runtime_or_not`). On Linux and macOS
-    the child ignores SIGINT, SIGTERM and SIGHUP once its heartbeat runs: they reach it
+    the child ignores SIGINT, SIGTERM and SIGHUP from its ready message on: they reach it
     with the app (Ctrl-C, a closed terminal, systemd), and a child that died of them
     would end its job before the app's shutdown quit the pipeline
     (`the_signals_that_end_the_app_leave_a_request_in_the_child_answered`). The client
