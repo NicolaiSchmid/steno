@@ -8,9 +8,10 @@
 //! its meeting. A revoke and a pairing of the same phone commit in the
 //! order they were asked for: a revoke during a pairing's save leaves the
 //! device revoked, in the store too, and a pairing during a revoke's delete
-//! stays paired. A touch does not overtake a revoke. A revoke whose store
-//! delete fails still refuses the device, and a partial created again
-//! during a verify is never promoted.
+//! stays paired. A touch or a receipt save does not commit ahead of a
+//! revoke asked for before it. A revoke whose store delete fails still
+//! refuses the device, and a partial created again during a verify is never
+//! promoted.
 
 #![allow(
     clippy::assert_is_empty,
@@ -651,7 +652,10 @@ fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
         woken.pending(pairing.as_mut(), "the pairing waits on its save");
         let mut revoking = pin!(test.service.revoke(phone.device.id));
         woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
-        let (paired, revoked) = tokio::join!(pairing, revoking);
+        let (paired, revoked) = common::signalled("the pairing and the revoke", async {
+            tokio::join!(pairing, revoking)
+        })
+        .await;
         assert_eq!(paired.status.as_u16(), 200);
         revoked.unwrap();
         let token = paired.decode::<wire::PairResponse>().unwrap().token;
@@ -701,7 +705,10 @@ fn a_pairing_during_a_revokes_delete_stays_paired() {
             &phone.device.name,
         ));
         woken.pending(pairing.as_mut(), "the pairing waits on its save");
-        let (revoked, paired) = tokio::join!(revoking, pairing);
+        let (revoked, paired) = common::signalled("the revoke and the pairing", async {
+            tokio::join!(revoking, pairing)
+        })
+        .await;
         revoked.unwrap();
         assert_eq!(paired.status.as_u16(), 200);
         let token = paired.decode::<wire::PairResponse>().unwrap().token;
@@ -731,9 +738,12 @@ fn a_pairing_during_a_revokes_delete_stays_paired() {
 #[test]
 fn a_touch_does_not_overtake_a_revoke_asked_for_before_it() {
     // The gate refreshes `last_seen_at` of a device whose revoke is already
-    // on its way to the store. The touch waits for the delete like every
-    // other write: a read asked for after both, which skips the line, finds
-    // neither committed, never the touch alone.
+    // on its way to the store. The touch takes its place in line behind the
+    // delete: a read asked for after both, which skips the line, finds
+    // neither committed, where a touch sent straight to the pool would have
+    // committed ahead of it. That the touch then waits for the delete is
+    // the order tests' part: the read reaches the pool before either task
+    // runs, so a line that does not wait passes here too.
     common::on_one_worker(async {
         let test = TestService::with(common::Options {
             start: false,
@@ -763,9 +773,69 @@ fn a_touch_does_not_overtake_a_revoke_asked_for_before_it() {
             vec![before],
             "nothing reached the store ahead of the delete"
         );
-        let (revoked, _) = tokio::join!(revoking, touching);
+        let (revoked, _) = common::signalled("the revoke and the touch", async {
+            tokio::join!(revoking, touching)
+        })
+        .await;
         revoked.unwrap();
         assert_eq!(test.service.paired_devices().await.unwrap(), Vec::new());
+    });
+}
+
+#[test]
+fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
+    // Another phone announces its recording again while the computer
+    // revokes this one. The announce finds the receipt in memory and goes
+    // to its save without a yield, so the save takes its place in line
+    // behind the delete: a read asked for after both, which skips the
+    // line, finds neither committed, where a save sent straight to the pool
+    // would have committed ahead of it.
+    common::on_one_worker(async {
+        let test = TestService::with(common::Options {
+            chunk_size: DIRECT_CHUNK_SIZE,
+            start: false,
+            ..common::Options::default()
+        })
+        .await;
+        let revoked = EngineDevice::paired(&test, "Direct iPhone").await;
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        let bytes = seeded_bytes(2 * DIRECT_CHUNK_SIZE as usize, 101);
+        let metadata = other.metadata(&bytes, DIRECT_CHUNK_SIZE);
+        let id = metadata.recording_id;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+        let before = test.store.handover_receipt(id).unwrap();
+        assert!(before.is_some());
+        test.advance(Duration::from_secs(1));
+
+        let woken = Woken::new();
+        let mut revoking = pin!(test.service.revoke(revoked.device.id));
+        woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
+        let mut announcing = pin!(other.announce(&metadata));
+        woken.pending(
+            announcing.as_mut(),
+            "the announce waits on its receipt save",
+        );
+        assert_eq!(
+            test.service.paired_devices().await.unwrap().len(),
+            2,
+            "the delete has not committed"
+        );
+        assert_eq!(
+            test.store.handover_receipt(id).unwrap(),
+            before,
+            "nothing reached the store ahead of the delete"
+        );
+        let (deleted, announced) = common::signalled("the revoke and the announce", async {
+            tokio::join!(revoking, announcing)
+        })
+        .await;
+        deleted.unwrap();
+        assert_eq!(announced.status.as_u16(), 200);
+        assert_ne!(
+            test.store.handover_receipt(id).unwrap(),
+            before,
+            "the save commits after the delete"
+        );
     });
 }
 

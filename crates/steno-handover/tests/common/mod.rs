@@ -55,13 +55,15 @@ pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
 }
 
 /// Runs `test` as a task on a runtime with one worker and one blocking
-/// thread, which makes a write that does not wait its turn commit out of
-/// order every time instead of only when threads race. The engine hands
-/// each write on in a task of its own; the worker runs the task spawned
-/// last first (tokio's LIFO slot), and the one blocking thread runs the
-/// store calls in the order they reach it. A write the engine sent to the
-/// pool without waiting for the one asked for before it, or as it was
-/// asked for instead of from its task, would get there first.
+/// thread, so the order in which store calls reach the pool is fixed: the
+/// worker runs the task spawned last first (tokio's LIFO slot), and the one
+/// blocking thread runs the calls in the order they arrive. An `in_order`
+/// that does not wait for the write before it, or a write sent to the pool
+/// straight from the request while the write before it still sits in its
+/// task, then commits out of order every time instead of only when threads
+/// race. Catching the first relies on the LIFO slot of the tokio pinned in
+/// `Cargo.lock`: a tokio without it weakens the catch but cannot make the
+/// fixed code fail.
 pub fn on_one_worker(test: impl Future<Output = ()> + Send + 'static) {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
