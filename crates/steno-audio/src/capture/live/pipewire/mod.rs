@@ -47,10 +47,13 @@
 //! # Device changes
 //!
 //! The `default.audio.sink` and `default.audio.source` metadata changing
-//! or going away, a node or port going away, or the connection, the
-//! stream or a link failing mark a change;
-//! [`LiveCaptureBackend::COALESCE_DELAY`] after the last one the graph is
-//! compared with the devices the targets resolved to
+//! or going away, a node the capture's snapshot reads going away (a
+//! linked device, the default sink, the microphone's source) or a port of
+//! one, or the connection, the stream or a link failing mark a change;
+//! another app's stream ending does not.
+//! [`LiveCaptureBackend::COALESCE_DELAY`] after the last change, and at
+//! most 2 s after the first, the graph is compared with the devices the
+//! targets resolved to
 //! ([`DeviceSnapshot::difference`]), and a difference goes to the sink as
 //! a [`DeviceChangeReason`](crate::capture::DeviceChangeReason), from this
 //! thread, never during `start`. A change during `start` is judged once
@@ -98,6 +101,11 @@ const LATENCY_TIMEOUT: Duration = Duration::from_millis(500);
 const PUMP_SLICE: Duration = Duration::from_millis(20);
 /// The wait on the loop while nothing is pending.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
+
+/// The longest a stream of changes defers its judgement: one that keeps
+/// coming in less than [`LiveCaptureBackend::COALESCE_DELAY`] apart is
+/// judged this long after its first change, and again once it settles.
+const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 
 /// How long `stop()` waits for the PipeWire thread to tear down, a few
 /// milliseconds normally.
@@ -216,13 +224,15 @@ struct Shared {
     done: Cell<Option<spa::utils::result::AsyncSeq>>,
     /// The connection, the stream or one of Steno's links failed.
     lost: Cell<bool>,
-    /// The last change since the graph was last judged.
-    pending: Cell<Option<Instant>>,
+    /// The first and the last change since the graph was last judged.
+    pending: Cell<Option<(Instant, Instant)>>,
 }
 
 impl Shared {
     fn changed(&self) {
-        self.pending.set(Some(Instant::now()));
+        let now = Instant::now();
+        let first = self.pending.get().map_or(now, |(first, _)| first);
+        self.pending.set(Some((first, now)));
     }
 
     /// `what` failed for good (logged with PipeWire's `message`): the
@@ -607,11 +617,11 @@ impl Capture {
             })
             .register()
             .map_err(failed("the capture stream's state callback"))?;
-        let baseline = connection
-            .shared
-            .graph
-            .borrow()
-            .snapshot(&targets, input_device_uid, false);
+        let baseline = {
+            let mut graph = connection.shared.graph.borrow_mut();
+            graph.track(&targets, input_device_uid);
+            graph.snapshot(&targets, input_device_uid, false)
+        };
         Ok(Capture {
             _rt_listener: rt_listener,
             _state_listener: state_listener,
@@ -824,8 +834,8 @@ impl Capture {
         while !quitting.get() {
             let wait = match shared.pending.get() {
                 None => IDLE_WAIT,
-                Some(last) => {
-                    let due = last + LiveCaptureBackend::COALESCE_DELAY;
+                Some((first, last)) => {
+                    let due = judged_at(first, last);
                     let now = Instant::now();
                     if now >= due {
                         shared.pending.set(None);
@@ -857,6 +867,13 @@ impl Capture {
             Some(reason) => report(&self.gate, &self.sink, reason),
         }
     }
+}
+
+/// When changes from `first` to `last` are judged:
+/// [`LiveCaptureBackend::COALESCE_DELAY`] after the last, at most
+/// [`COALESCE_LIMIT`] after the first.
+fn judged_at(first: Instant, last: Instant) -> Instant {
+    (last + LiveCaptureBackend::COALESCE_DELAY).min(first + COALESCE_LIMIT)
 }
 
 /// Reports `reason` to `sink` through `gate`: not at all once it closed.
@@ -1343,6 +1360,17 @@ mod tests {
             start.join().unwrap(),
             Err(CaptureError::InputDeviceUnavailable)
         );
+    }
+
+    #[test]
+    fn changes_are_judged_after_the_last_and_at_most_the_limit_after_the_first() {
+        let first = Instant::now();
+        let delay = LiveCaptureBackend::COALESCE_DELAY;
+        assert_eq!(judged_at(first, first), first + delay);
+        let later = first + Duration::from_millis(300);
+        assert_eq!(judged_at(first, later), later + delay);
+        let late = first + COALESCE_LIMIT;
+        assert_eq!(judged_at(first, late), first + COALESCE_LIMIT);
     }
 
     #[test]
