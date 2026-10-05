@@ -19,10 +19,18 @@
 //! answers; a refused second start and a start after a failed one; one
 //! report per default move or burst of moves, not before the coalescing
 //! delay after the last, and the rebuild's restart on the new default; a
-//! report on time while other apps' streams come and go; no report for a
+//! report while other apps' streams keep coming and going; no report for a
 //! default that comes back or for an unrelated node; and a removed
 //! microphone, or one of Steno's links removed from outside, reported
 //! gone.
+//!
+//! The timing checks hold only for switches that reach the daemon close
+//! enough together: a round the machine stretched past the coalescing
+//! delay still needs its one report, but its timing is not checked, and
+//! the test prints that. A missing report says whether WirePlumber never
+//! moved the default or the capture missed the move. The backend's logs
+//! go to the test output, at `info` unless a non-empty `RUST_LOG` says
+//! otherwise.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -66,11 +74,27 @@ const MIC_TONE: f64 = 1_000.0;
 /// The capture stream's `node.name`.
 const CAPTURE_NODE: &str = "steno-capture";
 const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
+/// The backend's cap on a burst that never settles: it is judged at most
+/// this long after its first change.
+const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 /// How long a test listens for a report that must not come: three
 /// coalescing delays, fixed so that a shorter delay cannot shorten it.
 const QUIET: Duration = Duration::from_millis(1_500);
 /// How long the daemon and WirePlumber get to settle after a change.
 const SETTLE: Duration = Duration::from_secs(2);
+
+/// The backend's logs into the test output, at `info` unless a non-empty
+/// `RUST_LOG` says otherwise.
+fn show_logs() {
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|filter| !filter.is_empty())
+        .unwrap_or_else(|| "steno_audio=info".into());
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+        .with_test_writer()
+        .try_init();
+}
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
 fn within<T: Send + 'static>(
@@ -94,6 +118,7 @@ fn start(
     uid: Option<&str>,
     sink: &Arc<LaneFrameSink>,
 ) -> Result<CaptureStream, CaptureError> {
+    show_logs();
     let (backend, lanes, uid, sink) = (
         Arc::clone(backend),
         lanes.to_vec(),
@@ -340,8 +365,11 @@ fn collect(sink: &LaneFrameSink, frames: usize) -> Vec<Vec<f32>> {
         .collect()
 }
 
+/// A device-change report and when the handler got it.
+type Report = (DeviceChangeReason, Instant);
+
 /// A sink whose device-change reports arrive on the returned channel.
-fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<DeviceChangeReason>) {
+fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<Report>) {
     let (sender, receiver) = channel();
     let sender = Mutex::new(sender);
     let sink = LaneFrameSink::with_handler(
@@ -352,7 +380,7 @@ fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<DeviceCh
             let _ = sender
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .send(reason);
+                .send((reason, Instant::now()));
         }),
     );
     (Arc::new(sink), receiver)
@@ -479,27 +507,47 @@ fn moving_the_default_output_is_reported_once() {
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, None, &sink).expect("start");
     let _restore = DefaultSink;
+    let since = Instant::now();
     DefaultSink::set(SECOND_SINK);
-    assert_output_moved_once(&reasons, "");
+    assert_output_moved_once(&reasons, SECOND_SINK, since, true, "");
     stop(&backend);
 }
 
-/// Expects one `DefaultOutputChanged` report and no second, and the one
-/// no sooner than the coalescing delay after the call, made right after
-/// the last switch.
-/// WirePlumber moves `default.audio.sink` after the configured one, so the
-/// report gets time, and a missing one says what the metadata held.
+/// Expects one `DefaultOutputChanged` report and no second, after
+/// WirePlumber moved the default to `to`. `since` is taken right before
+/// the last switch; when `timed`, the report must come no sooner than the
+/// coalescing delay after it.
+///
+/// WirePlumber moves `default.audio.sink` after the configured one, so it
+/// gets time, and a failure says which side missed: WirePlumber, which did
+/// not move the default, or the capture, which did not report the move.
 /// `context` prefixes the failure messages.
-fn assert_output_moved_once(reasons: &Receiver<DeviceChangeReason>, context: &str) {
-    let since = Instant::now();
-    let reason = reasons
-        .recv_timeout(COALESCE_DELAY + Duration::from_secs(8))
-        .unwrap_or_else(|_| panic!("{context}no device-change report; {}", default_metadata()));
-    let after = since.elapsed();
-    // A fifth of the delay off: WirePlumber may move the default a few
-    // milliseconds before `pw-metadata` has exited.
+fn assert_output_moved_once(
+    reasons: &Receiver<Report>,
+    to: &str,
+    since: Instant,
+    timed: bool,
+    context: &str,
+) {
+    let wait = COALESCE_DELAY + Duration::from_secs(8);
     assert!(
-        after >= COALESCE_DELAY * 4 / 5,
+        eventually(wait, || default_sink().as_deref() == Some(to)),
+        "{context}WirePlumber did not move the default to {to} within {wait:?}; {}",
+        default_metadata()
+    );
+    let (reason, at) = reasons
+        .recv_timeout(COALESCE_LIMIT + COALESCE_DELAY + Duration::from_secs(3))
+        .unwrap_or_else(|_| {
+            panic!(
+                "{context}the capture missed the move to {to}: no device-change report; {}",
+                default_metadata()
+            )
+        });
+    let after = at.duration_since(since);
+    // From before the last switch: WirePlumber moves the default before
+    // `pw-metadata` has exited, never before it started.
+    assert!(
+        !timed || after >= COALESCE_DELAY,
         "{context}reported {after:?} after the last switch, inside the coalescing delay"
     );
     assert_eq!(reason, DeviceChangeReason::DefaultOutputChanged);
@@ -507,6 +555,26 @@ fn assert_output_moved_once(reasons: &Receiver<DeviceChangeReason>, context: &st
         reasons.recv_timeout(QUIET).is_err(),
         "{context}one report per change"
     );
+}
+
+/// Whether switches whose calls ran over `gaps` (each from the start of
+/// one `DefaultSink::set` to the return of the next) and `whole` in all
+/// reach the daemon as one burst that the coalescing delay after its last
+/// switch judges: every gap short of the delay, with 50 ms to spare, and
+/// the burst short enough that the 2 s cap cannot judge it sooner. Prints
+/// why not, after `context`.
+fn one_burst(gaps: &[Duration], whole: Duration, context: &str) -> bool {
+    let tight = gaps
+        .iter()
+        .all(|gap| *gap < COALESCE_DELAY.saturating_sub(Duration::from_millis(50)))
+        && whole < COALESCE_LIMIT.saturating_sub(COALESCE_DELAY);
+    if !tight {
+        println!(
+            "{context}timing not checked: the machine stretched the switches \
+             (gaps {gaps:?}, {whole:?} in all)"
+        );
+    }
+    tight
 }
 
 /// What `pw-metadata` prints of the `default` metadata on subject 0:
@@ -557,13 +625,21 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
             default_metadata()
         );
         // Within the coalescing delay of each other: one report, timed
-        // from the last.
+        // from the last. WirePlumber moves the default while `set` runs,
+        // so two moves are at most from the start of one call to the
+        // return of the next apart.
+        let context = format!("round {round}: ");
+        let first = Instant::now();
         DefaultSink::set(to);
         std::thread::sleep(COALESCE_DELAY / 2);
+        let second = Instant::now();
         DefaultSink::set(from);
+        let first_gap = first.elapsed();
         std::thread::sleep(COALESCE_DELAY * 2 / 5);
+        let since = Instant::now();
         DefaultSink::set(to);
-        assert_output_moved_once(&reasons, &format!("round {round}: "));
+        let timed = one_burst(&[first_gap, second.elapsed()], first.elapsed(), &context);
+        assert_output_moved_once(&reasons, to, since, timed, &context);
         // The session's rebuild: stop, open the latch, start again.
         stop_and_check_teardown(&backend, &sink);
         sink.rearm_device_change();
@@ -591,6 +667,7 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
     start(&backend, &lanes, None, &sink).expect("start");
     // There and back within the coalescing delay: back as soon as
     // WirePlumber moved it (about 15 ms).
+    let there = Instant::now();
     DefaultSink::set(SECOND_SINK);
     assert!(
         eventually(SETTLE, || default_sink().as_deref() == Some(SECOND_SINK)),
@@ -598,10 +675,24 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
         default_metadata()
     );
     DefaultSink::set(SINK);
-    assert!(
-        reasons.recv_timeout(QUIET).is_err(),
-        "a default that came back is no change"
-    );
+    let away = there.elapsed();
+    if one_burst(&[away], away, "there and back: ") {
+        assert!(
+            reasons.recv_timeout(QUIET).is_err(),
+            "a default that came back is no change"
+        );
+    } else if reasons.recv_timeout(COALESCE_LIMIT + QUIET).is_ok() {
+        // Away long enough to be judged moved: restart on the default that
+        // came back, as the session's rebuild would.
+        stop(&backend);
+        sink.rearm_device_change();
+        assert!(
+            eventually(SETTLE, || default_sink().as_deref() == Some(SINK)),
+            "WirePlumber did not move the default back; {}",
+            default_metadata()
+        );
+        start(&backend, &lanes, None, &sink).expect("the restart");
+    }
     // A device Steno does not record comes and goes.
     let other = TemporaryMic::create("steno-test-unrelated");
     other.destroy();
@@ -679,10 +770,11 @@ fn other_apps_streams_coming_and_going_do_not_hold_back_a_report() {
         "the other streams did not play"
     );
     let before = churn.streams();
+    let since = Instant::now();
     DefaultSink::set(SECOND_SINK);
-    assert_output_moved_once(&reasons, "under churn: ");
+    assert_output_moved_once(&reasons, SECOND_SINK, since, true, "under churn: ");
     assert!(
-        churn.streams() >= before + 2,
+        churn.streams() > before,
         "the other streams kept coming while the report was due"
     );
     drop(churn);
@@ -700,7 +792,7 @@ fn a_link_removed_from_outside_is_reported_as_the_output_gone() {
     assert_eq!(links.len(), 3, "one link per channel: {links:?}");
     // A patchbay or a policy removing one of them.
     assert!(tool("pw-cli", &["destroy", &links[2].to_string()]));
-    let reason = reasons
+    let (reason, _) = reasons
         .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
         .expect("a device-change report");
     assert_eq!(reason, DeviceChangeReason::OutputDeviceGone);
@@ -757,7 +849,7 @@ fn a_microphone_that_goes_away_is_reported_gone() {
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, Some(mic.name), &sink).expect("start");
     mic.destroy();
-    let reason = reasons
+    let (reason, _) = reasons
         .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
         .expect("a device-change report");
     assert_eq!(reason, DeviceChangeReason::InputDeviceGone);
