@@ -62,18 +62,14 @@ pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
 /// store calls in the order they reach it. A write the engine sent to the
 /// pool without waiting for the one asked for before it, or as it was
 /// asked for instead of from its task, would get there first.
-pub fn on_one_worker<F>(test: F) -> F::Output
-where
-    F: Future + Send + 'static,
-    F::Output: Send + 'static,
-{
+pub fn on_one_worker(test: impl Future<Output = ()> + Send + 'static) {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .max_blocking_threads(1)
         .enable_all()
         .build()
         .unwrap()
-        .block_on(async { tokio::spawn(test).await.unwrap() })
+        .block_on(async { tokio::spawn(test).await.unwrap() });
 }
 
 /// Holds the store's one connection from another thread until
