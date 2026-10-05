@@ -976,7 +976,7 @@ impl Capture {
                 let found = Rc::clone(&found);
                 move |subject, key, _type, value| {
                     if subject == pw::core::PW_ID_CORE {
-                        found.borrow_mut().property(key, value);
+                        found.borrow_mut().set(key, value);
                     }
                     0
                 }
