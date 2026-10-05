@@ -71,12 +71,17 @@ refuse() {
   fi
 }
 
-dir="$(dist deb-in-windows linux windows)"
-cp "$dir/steno-desktop-linux/deb/steno-desktop_0.2.0_amd64.deb" "$dir/steno-desktop-windows/msi/other_amd64.deb"
-refuse 'a .deb in the windows artifact' "$dir" linux windows
-dir="$(dist appimage-in-macos macos)"
-printf 'x\n' > "$dir/steno-desktop-macos/macos/Steno.AppImage"
-refuse 'an AppImage in the macos artifact' "$dir" macos
+# Another platform's bundle in an artifact, so only Linux's reach signing.
+for case in windows:steno-desktop_0.2.0_amd64.deb windows:steno-desktop_0.2.0_amd64.AppImage \
+  macos:steno-desktop_0.2.0_amd64.deb macos:steno-desktop_0.2.0_amd64.AppImage \
+  linux:Steno_0.2.0_x64_en-US.msi linux:Steno_0.2.0_aarch64.dmg; do
+  platform="${case%%:*}"
+  file="${case#*:}"
+  dir="$(dist "foreign-$platform-${file##*.}" "$platform")"
+  mkdir -p "$dir/steno-desktop-$platform/extra"
+  printf 'x\n' > "$dir/steno-desktop-$platform/extra/$file"
+  refuse "a ${file##*.} in the $platform artifact" "$dir" "$platform"
+done
 dir="$(dist stray-exe windows)"
 printf 'x\n' > "$dir/steno-desktop-windows/nsis/helper.exe"
 refuse 'an .exe that is no -setup.exe' "$dir" windows
@@ -91,6 +96,10 @@ refuse 'a platform without its artifact' "$dir" linux windows
 dir="$(dist duplicate linux)"
 cp "$dir/steno-desktop-linux/deb/steno-desktop_0.2.0_amd64.deb" "$dir/steno-desktop-linux/appimage/"
 refuse 'two files of one name' "$dir" linux
+dir="$(dist duplicate-newline linux)"
+mkdir -p "$dir/steno-desktop-linux/"$'x\n::warning::x'
+cp "$dir/steno-desktop-linux/deb/steno-desktop_0.2.0_amd64.deb" "$dir/steno-desktop-linux/"$'x\n::warning::x/'
+refuse 'two files of one name, one in a directory with a newline' "$dir" linux
 dir="$(dist unsigned-archive macos)"
 rm "$dir/steno-desktop-macos/macos/Steno.app.tar.gz.sig"
 refuse 'an archive without its signature' "$dir" macos
@@ -99,7 +108,10 @@ ln -s /etc/hostname "$dir/steno-desktop-linux/deb/link.deb"
 refuse 'a symlink' "$dir" linux
 dir="$(dist newline linux)"
 printf 'x\n' > "$dir/steno-desktop-linux/deb/"$'evil\n::warning::x'
-refuse 'a name with a newline' "$dir" linux
+refuse 'a foreign name with a newline' "$dir" linux
+dir="$(dist newline-dmg macos)"
+printf 'x\n' > "$dir/steno-desktop-macos/dmg/"$'evil\n::warning title=x::injected.dmg'
+refuse 'a .dmg name with a newline' "$dir" macos
 dir="$(dist not-empty linux)"
 mkdir -p "$dir-assets"
 printf 'x\n' > "$dir-assets/left-over.deb"

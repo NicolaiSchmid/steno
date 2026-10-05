@@ -15,10 +15,13 @@
 #
 # `Steno.app.tar.gz` becomes `Steno_<version>_aarch64.app.tar.gz` like the
 # other assets (its signature covers the bytes, not the name). Anything
-# else fails with an `::error::`: an artifact of a platform not named, a
-# platform without its artifact, a foreign file or symlink, two files of
-# one name, a non-empty <assets>. Errors quote names with `printf %q`, so a
-# newline in one cannot start a second workflow command.
+# else fails with an `::error::`: an unknown platform, an artifact of a
+# platform not named, a platform without its artifact, a foreign file or
+# symlink, a file name with a character other than A-Z a-z 0-9 . _ + -,
+# two files of one name, the macOS archive without its `.sig`, a non-empty
+# <assets>. Errors quote names with `printf %q`, and the allowed characters
+# keep the names the later steps print and publish to one line each, so no
+# name can start a second workflow command.
 # apps/desktop/scripts/release-assets.test.sh checks it; rust-ci.yml runs that.
 set -euo pipefail
 
@@ -60,18 +63,20 @@ done < <(find "$dist" -mindepth 1 -maxdepth 1 -print0)
 
 for platform in "${platforms[@]}"; do
   artifact="steno-desktop-$platform"
-  [[ -d "$dist/$artifact" ]] || error "no $artifact artifact"
+  [[ -d "$dist/$artifact" ]] || error "no $artifact artifact; its bundle job uploaded none"
   while IFS= read -r -d '' file; do
     path="${file#"$dist/"}"
     [[ -f "$file" && ! -L "$file" ]] || error "$(shown "$path") is not a regular file"
     base="${file##*/}"
+    [[ "$base" =~ ^[A-Za-z0-9._+-]+$ ]] \
+      || error "$(shown "$path") has a character other than A-Z a-z 0-9 . _ + -; name the bundle without it"
     case "$platform:$base" in
       linux:*.deb | linux:*.AppImage | linux:*.deb.sig | linux:*.AppImage.sig) target="$base" ;;
       windows:*.msi | windows:*-setup.exe | windows:*.msi.sig | windows:*-setup.exe.sig) target="$base" ;;
       macos:*.dmg) target="$base" ;;
       macos:Steno.app.tar.gz) target="Steno_${version}_aarch64.app.tar.gz" ;;
       macos:Steno.app.tar.gz.sig) target="Steno_${version}_aarch64.app.tar.gz.sig" ;;
-      *) error "$(shown "$path") is no file the $platform build makes" ;;
+      *) error "$(shown "$path") is not a file the $platform build makes; if the bundler now makes it, add it to release-assets.sh" ;;
     esac
     [[ ! -e "$assets/$target" ]] || error "two assets named $(shown "$target"); the second is $(shown "$path")"
     mv -- "$file" "$assets/$target"
