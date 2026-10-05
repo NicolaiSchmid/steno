@@ -9,7 +9,8 @@ name: Desktop release
 #            the Developer ID certificate from a throwaway keychain
 #            (signing-keychain.sh) and notarises the `.app`;
 #            notarize-dmg.sh then notarises the image.
-#   Linux    `.deb` and `.AppImage`, x86_64.
+#   Linux    `.deb` and `.AppImage`, x86_64. A detached OpenPGP signature
+#            (`.asc`) beside each.
 #   Windows  `.msi` and NSIS `-setup.exe`, x86_64. Not code-signed: there
 #            is no Windows certificate. The MSI version comes from
 #            wix-version.sh, since WiX takes numbers only.
@@ -23,15 +24,18 @@ name: Desktop release
 # three platforms and publishes; a manual run builds the platforms it is
 # given and publishes nothing.
 #
-# `assets` then gathers every bundle into one directory, checks the updater
-# signatures, writes `latest.json`, and checksums and signs the lot
-# (release-signatures.sh): `SHA256SUMS` over every asset, and a detached
-# OpenPGP signature (`.asc`) for it and for each Linux bundle from
-# LINUX_GPG_PRIVATE_KEY, verified against the committed
-# apps/desktop/release-signing-key.asc. It runs on a manual run too, so the
-# signing can be proven without publishing; the result is the
-# `desktop-release-assets` artifact. Neither the bundle job nor publish sees
-# the OpenPGP key.
+# `assets` then gathers every bundle into one directory (release-assets.sh),
+# checks the updater signatures, writes `latest.json`, and checksums and
+# signs the lot (release-signatures.sh): `SHA256SUMS` over every asset, and
+# a detached OpenPGP signature (`.asc`) for it and for each Linux bundle
+# with the release signing key (LINUX_GPG_PRIVATE_KEY), verified against
+# the committed apps/desktop/release-signing-key.asc. On a tag the result
+# is the `desktop-release-assets` artifact publish uploads. A manual run
+# signs and verifies too, which proves the key and its passphrase, but
+# keeps only `SHA256SUMS` and what was verified (`desktop-release-checksums`),
+# so no signature for an unpublished build leaves the runner. Only assets
+# signs; plan learns only whether the two secrets are set, and neither the
+# bundle jobs nor publish sees them.
 #
 # Publishing writes one GitHub release per tag with those assets, then
 # updates the rolling `desktop-beta` and `desktop-stable` lanes that
@@ -337,7 +341,7 @@ jobs:
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
   # The release as publish uploads it, on every run (see the top of this
-  # file); the only job with the OpenPGP key.
+  # file); the only job that signs with the release signing key.
   assets:
     name: assets
     needs: [plan, bundle]
@@ -403,14 +407,17 @@ jobs:
           cat assets/latest.json
 
       # Last, so the checksums cover latest.json too. Fails the run when a
-      # signature does not verify against the committed public key.
+      # signature does not verify against the committed public key. The
+      # script's log (which files it signed and verified, the fingerprint)
+      # is a manual run's proof.
       - name: Checksums and signatures
         env:
           GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
           GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
-          apps/desktop/scripts/release-signatures.sh assets apps/desktop/release-signing-key.asc
+          apps/desktop/scripts/release-signatures.sh assets apps/desktop/release-signing-key.asc 2>&1 \
+            | tee "$RUNNER_TEMP/signatures.txt"
           cat assets/SHA256SUMS
 
       # The notes publish will write, in the run's summary.
@@ -420,12 +427,36 @@ jobs:
           apps/desktop/scripts/release-notes.sh "$VERSION" "desktop-v$VERSION" assets \
             apps/desktop/release-signing-key.asc >> "$GITHUB_STEP_SUMMARY"
 
+      # Kept a few days, so a failed publish can be re-run
+      # (apps/desktop/README.md, When a run fails).
       - name: Upload the release assets
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
           name: desktop-release-assets
           path: assets/
           if-no-files-found: error
+          retention-days: 5
+          overwrite: true
+
+      # A manual run's proof: no signature, which would be a valid one for
+      # a build that is never published.
+      - name: Checksums and what was verified
+        if: github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          mkdir -p checksums
+          cp assets/SHA256SUMS "$RUNNER_TEMP/signatures.txt" checksums/
+          cat checksums/signatures.txt
+      - name: Upload the checksums
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-checksums
+          path: checksums/
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
 
   # Only a pushed tag publishes, one run at a time, so two tags never write
   # the lanes at once.
