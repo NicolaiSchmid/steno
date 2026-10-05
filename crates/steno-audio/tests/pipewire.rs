@@ -20,10 +20,12 @@
 //! report per default move or burst of moves, not before the coalescing
 //! delay after the last, and the rebuild's restart on the new default; a
 //! report while other apps' streams keep coming and going; no report for a
-//! default that comes back or for an unrelated node; and each lane
-//! reported gone on its own: a removed microphone, in person or during a
-//! call, and Steno's microphone link removed from outside as the input, a
-//! monitor link removed from outside as the output.
+//! default that comes back or for an unrelated node; each lane reported
+//! gone on its own: a removed microphone, in person or during a call, and
+//! Steno's microphone link removed from outside as the input, a monitor
+//! link removed from outside as the output, and both removed, the
+//! monitor's first, as the output; and Steno's connection closed from
+//! outside as the output gone (the input in person).
 //!
 //! A round the machine stretched past the coalescing delay is not held to
 //! the one-burst checks (the timing of its one report, or no report for a
@@ -280,16 +282,18 @@ fn capture_links() -> Vec<(u64, u64)> {
 }
 
 /// Removes, as a patchbay or a policy would, one of the capture's links
-/// from the node named `from`.
-fn destroy_capture_link_from(from: &str) {
+/// from each node named in `from`, in that order.
+fn destroy_capture_links_from(from: &[&str]) {
     let links = capture_links();
     assert_eq!(links.len(), 3, "one link per channel: {links:?}");
-    let node = node_id(from).unwrap_or_else(|| panic!("no node {from}"));
-    let (link, _) = links
-        .iter()
-        .find(|(_, output)| *output == node)
-        .unwrap_or_else(|| panic!("no capture link from {from}: {links:?}"));
-    assert!(tool("pw-cli", &["destroy", &link.to_string()]));
+    for name in from {
+        let node = node_id(name).unwrap_or_else(|| panic!("no node {name}"));
+        let (link, _) = links
+            .iter()
+            .find(|(_, output)| *output == node)
+            .unwrap_or_else(|| panic!("no capture link from {name}: {links:?}"));
+        assert!(tool("pw-cli", &["destroy", &link.to_string()]));
+    }
 }
 
 /// Polls `done` for up to `limit`; whether it held.
@@ -811,29 +815,78 @@ fn other_apps_streams_coming_and_going_do_not_hold_back_a_report() {
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// Starts a call capture of the default devices, removes from outside its
-/// link from the node `from`, and expects one report of `gone`.
-fn assert_link_from_reported(from: &str, gone: DeviceChangeReason) {
+/// Starts a call capture of the default devices, removes from outside
+/// its links from the nodes `from` in that order, and expects one report
+/// of `gone`.
+fn assert_links_from_reported(from: &[&str], gone: DeviceChangeReason) {
     let lanes = [AudioLane::Mic, AudioLane::System];
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, None, &sink).expect("start");
-    destroy_capture_link_from(from);
+    destroy_capture_links_from(from);
     let reason = next_report(&reasons);
-    assert_eq!(reason, gone, "the link from {from}");
+    assert_eq!(reason, gone, "the links from {from:?}");
     stop_and_check_teardown(&backend, &sink);
 }
 
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_monitor_link_removed_from_outside_is_reported_as_the_output_gone() {
-    assert_link_from_reported(SINK, DeviceChangeReason::OutputDeviceGone);
+    assert_links_from_reported(&[SINK], DeviceChangeReason::OutputDeviceGone);
 }
 
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_microphone_link_removed_from_outside_is_reported_as_the_input_gone() {
-    assert_link_from_reported(MIC, DeviceChangeReason::InputDeviceGone);
+    assert_links_from_reported(&[MIC], DeviceChangeReason::InputDeviceGone);
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_monitor_then_a_microphone_link_removed_are_reported_as_the_output_gone() {
+    // Both within one coalescing delay: the monitor's loss must stay.
+    assert_links_from_reported(&[SINK, MIC], DeviceChangeReason::OutputDeviceGone);
+}
+
+/// The daemon's global id of this process's own client (the capture's
+/// connection), by `pipewire.sec.pid`.
+fn own_client() -> Option<u64> {
+    let pid = u64::from(std::process::id());
+    dump().iter().find_map(|object| {
+        let props = object.pointer("/info/props")?;
+        let client = object.get("type")?.as_str()? == "PipeWire:Interface:Client";
+        let ours = props.get("pipewire.sec.pid")?.as_u64() == Some(pid);
+        (client && ours).then(|| object.get("id")?.as_u64())?
+    })
+}
+
+/// Starts a capture of `lanes` from the default devices, destroys its
+/// client in the daemon from outside, so the server drops the connection,
+/// and expects one report of `gone`.
+fn assert_connection_closed_reported(lanes: &[AudioLane], gone: DeviceChangeReason) {
+    let (sink, reasons) = reporting_sink(lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    start(&backend, lanes, None, &sink).expect("start");
+    let client = own_client().expect("the capture's client in the daemon");
+    assert!(tool("pw-cli", &["destroy", &client.to_string()]));
+    let reason = next_report(&reasons);
+    assert_eq!(reason, gone, "a lost connection loses both lanes");
+    stop_and_check_teardown(&backend, &sink);
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_connection_closed_from_outside_during_a_call_is_reported_as_the_output_gone() {
+    assert_connection_closed_reported(
+        &[AudioLane::Mic, AudioLane::System],
+        DeviceChangeReason::OutputDeviceGone,
+    );
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_connection_closed_from_outside_in_person_is_reported_as_the_input_gone() {
+    assert_connection_closed_reported(&[AudioLane::Mixed], DeviceChangeReason::InputDeviceGone);
 }
 
 /// A lingering virtual microphone, created by `pw-cli`; destroyed when
