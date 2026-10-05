@@ -57,7 +57,11 @@ export function useUploadCoordinator(): UploadCoordinator {
 	const { pairing, ready: pairingReady, clearIfCurrent } = usePairing();
 	const { index, ready: queueReady, update } = useQueue();
 	const discovery = useMacDiscovery(pairingReady && pairing !== null);
-	const [session, setSession] = useState<MacSession | null>(null);
+	const [resolved, setResolved] = useState<MacSession | null>(null);
+	// A session belongs to the pairing whose token it carries: from the
+	// render that changes the pairing on, the old token and the old Mac's
+	// origin reach no request, not even before the new Mac resolves.
+	const session = resolved?.token === pairing?.token ? resolved : null;
 	const [progress, setProgress] = useState<Record<string, number>>({});
 	const ticking = useRef(false);
 	const rerun = useRef(false);
@@ -83,10 +87,12 @@ export function useUploadCoordinator(): UploadCoordinator {
 		? (findByMacID(discovery.services, pairing.mac.macID)?.name ?? null)
 		: null;
 
-	// Resolve the Mac once per appearance; forget it when the service goes.
+	// Resolve the Mac once per appearance and pairing; forget it when the
+	// service goes.
 	useEffect(() => {
+		setResolved((s) => (s?.token === pairing?.token ? s : null));
 		if (!pairing || !serviceName) {
-			setSession(null);
+			setResolved(null);
 			return;
 		}
 		let cancelled = false;
@@ -94,10 +100,10 @@ export function useUploadCoordinator(): UploadCoordinator {
 		const token = pairing.token;
 		stenoLink()
 			.resolve(serviceName)
-			.then((resolved) => {
+			.then((mac) => {
 				if (cancelled) return;
-				setSession({
-					endpoint: { origin: macOrigin(resolved), fingerprint },
+				setResolved({
+					endpoint: { origin: macOrigin(mac), fingerprint },
 					token,
 				});
 			})
