@@ -146,6 +146,12 @@ pub(crate) struct Lost {
 }
 
 impl Lost {
+    /// Nothing.
+    pub const NONE: Self = Self {
+        mic: false,
+        output: false,
+    };
+
     /// Everything: the connection or the stream failed.
     pub const ALL: Self = Self {
         mic: true,
@@ -159,7 +165,7 @@ impl Lost {
 
     /// What either lost.
     #[must_use]
-    pub fn and(self, other: Self) -> Self {
+    pub fn union(self, other: Self) -> Self {
         Self {
             mic: self.mic || other.mic,
             output: self.output || other.output,
@@ -760,7 +766,7 @@ mod tests {
         let mut graph = laptop();
         let lanes = [AudioLane::Mic, AudioLane::System];
         let targets = graph.resolve(&lanes, None).unwrap();
-        let baseline = graph.snapshot(&targets, None, Lost::default());
+        let baseline = graph.snapshot(&targets, None, Lost::NONE);
         assert_eq!(
             baseline.output_uid.as_deref(),
             Some("alsa_output.pci.analog-stereo")
@@ -772,7 +778,7 @@ mod tests {
         assert!(baseline.output_alive && baseline.input_alive);
         assert_eq!(
             graph
-                .snapshot(&targets, None, Lost::default())
+                .snapshot(&targets, None, Lost::NONE)
                 .difference(&baseline),
             None
         );
@@ -783,7 +789,7 @@ mod tests {
         );
         assert_eq!(
             graph
-                .snapshot(&targets, None, Lost::default())
+                .snapshot(&targets, None, Lost::NONE)
                 .difference(&baseline),
             Some(crate::capture::DeviceChangeReason::DefaultInputChanged)
         );
@@ -798,7 +804,7 @@ mod tests {
         node(&mut graph, 40, 2040, "a-new-node", "Audio/Sink");
         assert_eq!(
             graph
-                .snapshot(&targets, None, Lost::default())
+                .snapshot(&targets, None, Lost::NONE)
                 .difference(&baseline),
             Some(crate::capture::DeviceChangeReason::OutputDeviceGone),
             "a reused id is not the device that went"
@@ -830,7 +836,7 @@ mod tests {
         );
         assert_eq!(targets.lost_with(40, 53), monitor);
         assert_eq!(targets.lost_with(41, 54), Lost::ALL, "not a linked port");
-        let baseline = graph.snapshot(&targets, None, Lost::default());
+        let baseline = graph.snapshot(&targets, None, Lost::NONE);
         let judged = |lost| graph.snapshot(&targets, None, lost).difference(&baseline);
         assert_eq!(
             judged(mic),
@@ -839,12 +845,12 @@ mod tests {
         );
         assert_eq!(judged(monitor), Some(OutputDeviceGone));
         assert_eq!(
-            judged(mic.and(monitor)),
+            judged(mic.union(monitor)),
             Some(OutputDeviceGone),
             "both lost loses the output first, as a lost connection does"
         );
-        assert_eq!(mic.and(monitor), Lost::ALL);
-        assert!(!Lost::default().any());
+        assert_eq!(mic.union(monitor), Lost::ALL);
+        assert!(!Lost::NONE.any());
     }
 
     #[test]
@@ -859,7 +865,7 @@ mod tests {
                 output: false
             }
         );
-        let baseline = graph.snapshot(&targets, None, Lost::default());
+        let baseline = graph.snapshot(&targets, None, Lost::NONE);
         for lost in [mic, Lost::ALL] {
             assert_eq!(
                 graph.snapshot(&targets, None, lost).difference(&baseline),
@@ -872,7 +878,7 @@ mod tests {
     fn a_device_recreated_under_its_id_and_name_reads_as_gone() {
         let mut graph = laptop();
         let targets = graph.resolve(&[AudioLane::Mixed], None).unwrap();
-        let baseline = graph.snapshot(&targets, None, Lost::default());
+        let baseline = graph.snapshot(&targets, None, Lost::NONE);
         assert!(graph.remove(55));
         assert!(graph.remove(54));
         assert!(graph.remove(41));
@@ -882,7 +888,7 @@ mod tests {
         port(&mut graph, 55, 2055, 41, "out", "FL");
         assert_eq!(
             graph
-                .snapshot(&targets, None, Lost::default())
+                .snapshot(&targets, None, Lost::NONE)
                 .difference(&baseline),
             Some(crate::capture::DeviceChangeReason::InputDeviceGone),
             "Steno's link died with the old port"
@@ -895,11 +901,11 @@ mod tests {
         let targets = graph
             .resolve(&[AudioLane::Mic, AudioLane::System], None)
             .unwrap();
-        let baseline = graph.snapshot(&targets, None, Lost::default());
+        let baseline = graph.snapshot(&targets, None, Lost::NONE);
         assert!(graph.remove(54), "a port going is a change to judge");
         assert_eq!(
             graph
-                .snapshot(&targets, None, Lost::default())
+                .snapshot(&targets, None, Lost::NONE)
                 .difference(&baseline),
             None,
             "the microphone's second channel was not linked"
@@ -907,7 +913,7 @@ mod tests {
         assert!(graph.remove(52));
         assert_eq!(
             graph
-                .snapshot(&targets, None, Lost::default())
+                .snapshot(&targets, None, Lost::NONE)
                 .difference(&baseline),
             Some(crate::capture::DeviceChangeReason::OutputDeviceGone)
         );
@@ -993,20 +999,20 @@ mod tests {
         let mut graph = laptop();
         let uid = Some("alsa_input.usb-headset.mono");
         let targets = graph.resolve(&[AudioLane::Mixed], uid).unwrap();
-        let baseline = graph.snapshot(&targets, uid, Lost::default());
+        let baseline = graph.snapshot(&targets, uid, Lost::NONE);
         assert_eq!(baseline.output_uid, None, "in person watches no output");
         graph.set_default(Some(DEFAULT_SOURCE_KEY), None);
         graph.set_default(Some(DEFAULT_SINK_KEY), None);
         assert_eq!(
             graph
-                .snapshot(&targets, uid, Lost::default())
+                .snapshot(&targets, uid, Lost::NONE)
                 .difference(&baseline),
             None
         );
         graph.remove(42);
         assert_eq!(
             graph
-                .snapshot(&targets, uid, Lost::default())
+                .snapshot(&targets, uid, Lost::NONE)
                 .difference(&baseline),
             Some(crate::capture::DeviceChangeReason::InputDeviceGone)
         );

@@ -279,8 +279,16 @@ impl Shared {
     /// capture lost `lost`.
     fn fail(&self, what: &str, message: &str, lost: Lost) {
         tracing::warn!("{what} failed: {message}");
-        self.lost.set(self.lost.get().and(lost));
+        self.lost.set(self.lost.get().union(lost));
         self.changed();
+    }
+
+    /// The capture stream's new state: in its error state it loses both
+    /// lanes.
+    fn stream_state(&self, state: &pw::stream::StreamState) {
+        if let pw::stream::StreamState::Error(message) = state {
+            self.fail("the PipeWire capture stream", message, Lost::ALL);
+        }
     }
 
     /// A registry global: nodes and ports into the graph, the `default`
@@ -655,18 +663,14 @@ impl Capture {
             .add_local_listener_with_user_data(())
             .state_changed({
                 let shared = Rc::clone(&connection.shared);
-                move |_, (), _old, new| {
-                    if let pw::stream::StreamState::Error(message) = new {
-                        shared.fail("the PipeWire capture stream", &message, Lost::ALL);
-                    }
-                }
+                move |_, (), _old, new| shared.stream_state(&new)
             })
             .register()
             .map_err(failed("the capture stream's state callback"))?;
         let baseline = {
             let mut graph = connection.shared.graph.borrow_mut();
             graph.track(&targets, input_device_uid);
-            graph.snapshot(&targets, input_device_uid, Lost::default())
+            graph.snapshot(&targets, input_device_uid, Lost::NONE)
         };
         Ok(Capture {
             _rt_listener: rt_listener,
@@ -749,7 +753,7 @@ impl Capture {
         Ok(())
     }
 
-    /// `link` with the listeners that mark `lost`, the lane it serves, lost
+    /// `link` with the listeners that mark the lane it serves (`lost`) lost
     /// when it fails or the server removes it (a patchbay, a device end
     /// gone). Steno's own teardown never fires them: they drop before the
     /// link, and the loop does not run in between.
@@ -1241,6 +1245,38 @@ mod tests {
             output_latency_frames: 0,
             layout: None,
         }
+    }
+
+    #[test]
+    fn a_failed_stream_loses_both_lanes() {
+        let shared = Shared::default();
+        shared.stream_state(&pw::stream::StreamState::Paused);
+        assert_eq!(shared.lost.get(), Lost::NONE);
+        assert!(
+            shared.due().is_none(),
+            "a state that is no error is no change"
+        );
+        shared.stream_state(&pw::stream::StreamState::Error("gone".into()));
+        assert_eq!(shared.lost.get(), Lost::ALL);
+        assert!(shared.due().is_some(), "a change to judge");
+    }
+
+    #[test]
+    fn what_each_failure_loses_adds_up() {
+        let shared = Shared::default();
+        let monitor = Lost {
+            mic: false,
+            output: true,
+        };
+        let mic = Lost {
+            mic: true,
+            output: false,
+        };
+        shared.fail("a capture link", "the server removed it", monitor);
+        shared.fail("a capture link", "the server removed it", mic);
+        assert_eq!(shared.lost.get(), Lost::ALL, "the monitor's loss stays");
+        shared.fail("a capture link", "the server removed it", Lost::NONE);
+        assert_eq!(shared.lost.get(), Lost::ALL);
     }
 
     #[test]
