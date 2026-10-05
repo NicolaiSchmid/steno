@@ -3,23 +3,25 @@
 //! graph cycle delivers all lanes in one interleaved buffer, aligned on the
 //! graph clock as the macOS aggregate aligns them on its clock master.
 //! WP5b of `.plans/2026-10-02-rust-core-and-tauri-shell.md`. No Swift
-//! counterpart (the Swift app is macOS-only); the macOS backend is
-//! `capture::live::backend` (Swift:
-//! `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`).
+//! counterpart (the Swift app is macOS-only); the macOS counterpart is
+//! `capture::live::backend`.
 //!
 //! # Threads
 //!
 //! PipeWire's objects are single-threaded, so every capture gets its own
 //! `steno-pipewire` thread owning the main loop, the context, the core,
 //! the registry, the stream and the links. `start` spawns it and waits for
-//! its answer (the [`CaptureStream`] or the error). `stop()` closes the
-//! capture's [`Gate`] to the sink, sends a quit through a
-//! `pipewire::channel` and joins the thread; a thread that has not ended
-//! within [`STOP_TIMEOUT`] is logged and left behind the closed gate, so
-//! `stop()` returns, and nothing reaches the sink after it either way. The
-//! stream runs with `RT_PROCESS`, so its `process` callback runs on
-//! PipeWire's data-loop thread, which is the real-time path here:
-//! `process` dequeues the buffer, turns its chunk into a
+//! its answer (the [`CaptureStream`] or the error) through a rendezvous:
+//! a thread that answers after `start` gave up finds nobody to take it
+//! and tears down without watching, so no device-change report begins
+//! before `start` took the answer. `stop()` closes the capture's `Gate` to
+//! the sink, sends a quit through a `pipewire::channel` and joins the
+//! thread; a thread that has not ended within `STOP_TIMEOUT` (2 s) is
+//! logged and left behind the closed gate, so `stop()` returns, and
+//! nothing reaches the sink after it either way. The stream runs with
+//! `RT_PROCESS`, so its `process` callback runs on PipeWire's data-loop
+//! thread, which is the real-time path here: `process` dequeues the
+//! buffer, turns its chunk into a
 //! [`SliceView`](crate::realtime::SliceView) with [`interleaved_view`]
 //! and, while the gate is open, hands it to [`deliver_slices`], the safe
 //! form of the IOProc body the macOS backend uses. No allocation, no lock,
@@ -38,7 +40,7 @@
 //! alone, and once its ports exist Steno creates one link per channel
 //! through the server's `link-factory` (not lingering: the links die with
 //! the connection). `start` returns once the first cycle arrived; a graph
-//! that does not run within [`START_TIMEOUT`] is an error rather than a
+//! that does not run within `START_TIMEOUT` (3 s) is an error rather than a
 //! silent recording, and so is a link that failed. The latencies come
 //! from the `SPA_PARAM_Latency` of the microphone port (capture side) and
 //! of the sink's first playback port (playback side), in frames of the
@@ -50,13 +52,11 @@
 //! or going away, a node the capture's snapshot reads going away (a
 //! linked device, the default sink, the microphone's source) or a port of
 //! one, or the connection, the stream or a link failing (a link removed
-//! from outside included) mark a change;
-//! another app's stream ending does not.
-//! [`LiveCaptureBackend::COALESCE_DELAY`] after the last change, and at
-//! most 2 s after the first, the graph is compared with the devices the
-//! targets resolved to
-//! ([`DeviceSnapshot::difference`]), and a difference goes to the sink as
-//! a [`DeviceChangeReason`](crate::capture::DeviceChangeReason), from this
+//! from outside included) mark a change; another app's stream ending
+//! does not. [`LiveCaptureBackend::COALESCE_DELAY`] after the last change,
+//! and at most 2 s after the first, the graph is compared with the devices
+//! the targets resolved to ([`DeviceSnapshot::difference`]), and a
+//! difference goes to the sink as a [`DeviceChangeReason`], from this
 //! thread, never during `start`. A change during `start` is judged once
 //! the capture runs. The session then rebuilds through `stop()` and
 //! `start`, as on the Mac. The capture never follows a default on its own.
@@ -108,20 +108,21 @@ const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// judged this long after its first change, and again once it settles.
 const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 
-/// How long `stop()` waits for the PipeWire thread to tear down, a few
-/// milliseconds normally.
+/// How long `stop()` waits for the PipeWire thread to tear down after the
+/// gate closed, a few milliseconds normally; past it the thread is left
+/// behind.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The capture stream's `node.name`.
 const STREAM_NODE_NAME: &str = "steno-capture";
 
-/// The capture's way into the sink, closed for good by `stop()` before it
-/// waits for the thread: once [`Gate::close`] returned, neither a cycle's
-/// [`deliver_slices`] nor a device-change report reaches the sink,
-/// whatever the thread does next. Lock-free on the real-time side: an
-/// increment, a load and a decrement, all `SeqCst`, so either a pass sees
-/// the gate closed or `close` sees the pass inside and waits for it to
-/// leave.
+/// The capture's way into the sink, closed for good by `stop()`, or by a
+/// `start` that failed, before it waits for the thread: once
+/// [`Gate::close`] returned, neither a cycle's [`deliver_slices`] nor a
+/// device-change report reaches the sink, whatever the thread does next.
+/// Lock-free on the real-time side: an increment, a load and a decrement,
+/// all `SeqCst`, so either a pass sees the gate closed or `close` sees the
+/// pass inside and waits for it to leave.
 #[derive(Debug)]
 struct Gate {
     open: AtomicBool,
@@ -154,7 +155,7 @@ impl Gate {
     /// handler takes the session mutex. The session never holds it across
     /// `backend.stop()`; it does hold it across `backend.start()`, whose
     /// failure path closes the gate, but no report can begin before
-    /// `start` took the thread's answer ([`hand_over`]), and a failed
+    /// `start` took the thread's stream ([`hand_over`]), and a failed
     /// `start` took none. A handler that stops or starts this backend, or
     /// drops the last owner of it, would wait on itself here.
     fn close(&self) {
@@ -186,8 +187,8 @@ const _: () = {
 /// The stream's `process` callback, on PipeWire's data-loop thread: one
 /// buffer through [`deliver_slices`] while the gate is open, then back to
 /// the stream. Nothing allocates, locks or logs; nothing can panic (the
-/// view and `deliver_slices` index only through checked lookups,
-/// `channels` is at least 1).
+/// view and `deliver_slices` index only within bounds they checked or
+/// computed, `channels` is at least 1).
 fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     let Some(mut buffer) = stream.dequeue_buffer() else {
         return;
@@ -334,8 +335,9 @@ impl Shared {
 
 /// One connection to the PipeWire daemon and the registry view over it.
 /// Fields drop in declaration order: the listeners before the proxies they
-/// listen on, the proxies before the core, the core before the context and
-/// the loop.
+/// listen on, `shared` (and the metadata proxy in it) after the listeners
+/// whose closures hold it, the proxies before the core, the core before
+/// the context and the loop.
 struct Connection {
     _registry_listener: pw::registry::Listener,
     _core_listener: pw::core::Listener,
@@ -518,7 +520,9 @@ fn parse_latency(pod: &spa::pod::Pod, direction: u32) -> Option<Latency> {
 /// stream (PipeWire removes its node from the data loop before that
 /// returns, so no `process` runs after it); the fields then drop in
 /// declaration order: the listeners removed while the stream still exists,
-/// the stream destroyed, the links destroyed, then the connection.
+/// the stream destroyed, the links destroyed, then the connection. The
+/// order is what keeps it sound: a stream destroyed before its listeners,
+/// or links destroyed after the connection, would be a use after free.
 struct Capture {
     _rt_listener: pw::stream::StreamListener<RealTime>,
     _state_listener: pw::stream::StreamListener<()>,
@@ -533,7 +537,8 @@ struct Capture {
     cycle_frames: Arc<AtomicUsize>,
     /// What `start` answers.
     info: CaptureStream,
-    /// The devices the targets resolved to, taken at `resolve`.
+    /// The devices the targets resolved to, taken in `new`, before the loop
+    /// runs again after `resolve`.
     baseline: DeviceSnapshot,
 }
 
@@ -549,9 +554,9 @@ struct WatchedLink {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        // `pw_stream_disconnect` returns 0 whatever happens; if it ever
-        // failed, the rt listener would still be freed right after this
-        // while `process` might run.
+        // No `process` runs once this returned, so the rt listener's user
+        // data can go next. `pw_stream_disconnect` returns 0 whatever
+        // happens; the log is for a version that does not.
         if let Err(error) = self.stream.disconnect() {
             tracing::warn!("disconnecting the PipeWire capture stream failed: {error}");
         }
@@ -1028,7 +1033,9 @@ fn where_it_waits(id: u32) -> String {
     )
 }
 
-/// The Linux capture backend; see the module doc.
+/// The PipeWire backend; see the module doc. Restartable: `stop()` closes
+/// the gate and joins the capture thread (one that hangs past 2 s is
+/// logged and left behind), and `start` connects afresh.
 pub struct LiveCaptureBackend {
     active: Mutex<Option<Active>>,
 }

@@ -28,14 +28,21 @@ pub struct DeviceSnapshot {
     /// the `eConsole` default.
     pub input_uid: Option<String>,
     /// The output device the capture started on still answers
-    /// `DeviceIsAlive`; on Windows, is still `DEVICE_STATE_ACTIVE`.
+    /// `DeviceIsAlive`. On Linux, its node and linked ports still carry
+    /// the `object.serial` they had at start, and the connection, stream
+    /// and links have not failed; on Windows, it is still
+    /// `DEVICE_STATE_ACTIVE`.
     pub output_alive: bool,
     /// The input device the capture started on still answers
-    /// `DeviceIsAlive`; on Windows, is still `DEVICE_STATE_ACTIVE`.
+    /// `DeviceIsAlive`. On Linux, its node and linked ports still carry
+    /// the `object.serial` they had at start, and the connection, stream
+    /// and links have not failed; on Windows, it is still
+    /// `DEVICE_STATE_ACTIVE`.
     pub input_alive: bool,
     /// The aggregate's nominal rate; 0 once it is gone. On Linux and
-    /// Windows always 48 kHz: the graph or the engine converts (on Windows
-    /// a format change invalidates the stream instead).
+    /// Windows always 48 kHz: PipeWire's adapter or the WASAPI engine
+    /// resamples (on Windows a format change invalidates the stream
+    /// instead).
     pub sample_rate: f64,
 }
 

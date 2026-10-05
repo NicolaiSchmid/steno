@@ -27,7 +27,7 @@ pub use devices::AudioDevices;
 pub use hal::CoreAudioError;
 
 #[cfg(target_os = "linux")]
-mod pipewire;
+pub mod pipewire;
 #[cfg(target_os = "linux")]
 pub use pipewire::LiveCaptureBackend;
 

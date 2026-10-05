@@ -412,11 +412,11 @@ impl Graph {
     }
 
     /// The devices as they are now, for a capture that resolved `targets`
-    /// with `uid`; `lost` once the connection or the stream failed. The
-    /// default sink stands for both of the snapshot's outputs (PipeWire has
-    /// no separate clock master: the graph resamples to the stream's 48
-    /// kHz), so `default_output_uid` stays `None` and `sample_rate` stays
-    /// [`SAMPLE_RATE`].
+    /// with `uid`; `lost` once the connection, the stream or a link failed.
+    /// The default sink stands for both of the snapshot's outputs
+    /// (PipeWire has no separate clock master: PipeWire's adapter
+    /// resamples to the stream's 48 kHz), so `default_output_uid` stays
+    /// `None` and `sample_rate` stays [`SAMPLE_RATE`].
     pub fn snapshot(&self, targets: &Targets, uid: Option<&str>, lost: bool) -> DeviceSnapshot {
         let alive = |endpoint: &Option<Endpoint>| {
             !lost && endpoint.as_ref().is_some_and(|e| self.is_alive(e))

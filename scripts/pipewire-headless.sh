@@ -14,25 +14,27 @@
 # 0.5 survives (its D-Bus modules log an error and are skipped).
 #
 #   scripts/pipewire-headless.sh cargo test -p steno-audio --test pipewire \
-#     -- --ignored --test-threads=1
+#     -- --ignored --test-threads=1 --nocapture
 #
-# Needs `pipewire`, `wireplumber`, `pw-cli`, `pw-dump` and `pw-play` on
-# PATH, and `dbus-daemon` for WirePlumber 0.4 (Ubuntu: pipewire,
-# pipewire-bin, wireplumber, dbus; Nix: pipewire, wireplumber, dbus). Used
-# by rust-ci.yml on ubuntu-latest.
+# Needs `pipewire`, `wireplumber`, `pw-cli`, `pw-dump`, `pw-link`,
+# `pw-metadata` and `pw-play` on PATH, and `dbus-daemon` for WirePlumber
+# 0.4 (Ubuntu: pipewire, pipewire-bin, wireplumber, dbus; Nix: pipewire,
+# wireplumber, dbus). Used by rust-ci.yml on ubuntu-latest.
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
   echo "usage: $0 <command> [args...]" >&2
   exit 2
 fi
-for tool in pipewire wireplumber pw-cli pw-dump pw-play; do
+for tool in pipewire wireplumber pw-cli pw-dump pw-link pw-metadata pw-play; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "pipewire-headless: $tool not found" >&2
     exit 1
   fi
 done
 
+# Keep TMPDIR short: the bus socket lives under it, and a Unix socket path
+# holds at most 107 bytes.
 root="$(mktemp -d "${TMPDIR:-/tmp}/steno-pipewire.XXXXXX")"
 pids=()
 cleanup() {

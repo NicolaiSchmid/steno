@@ -254,7 +254,8 @@ pub enum DeviceChangeReason {
     /// The input device the capture started on is gone.
     InputDeviceGone,
     /// The aggregate no longer runs at [`SAMPLE_RATE`]. macOS only:
-    /// PipeWire's adapter resamples, so the Linux backend never reports it.
+    /// PipeWire's adapter and the WASAPI engine resample, so the Linux and
+    /// Windows backends never report it.
     SampleRateChanged,
 }
 

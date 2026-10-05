@@ -39,7 +39,7 @@ fn samples(channel: &ChannelRef, buffers: &[BufferView], frames: usize) -> Optio
     let data = buffer.data?;
     if channel.offset >= buffer.channels
         || channel.stride != buffer.channels
-        || buffer.byte_size < frames * buffer.channels * 4
+        || buffer.byte_size < frames * buffer.channels * size_of::<f32>()
     {
         return None;
     }
@@ -58,7 +58,7 @@ fn callback_frames(buffers: &[BufferView], sources: &[LaneSource]) -> usize {
         if let Some(buffer) = buffers.get(source.left.buffer)
             && buffer.channels > 0
         {
-            let frames = buffer.byte_size / (buffer.channels * 4);
+            let frames = buffer.byte_size / (buffer.channels * size_of::<f32>());
             if frames > 0 {
                 return frames;
             }
@@ -149,7 +149,7 @@ pub fn deliver_slices(buffers: &[SliceView<'_>], sources: &[LaneSource], sink: &
                 .samples
                 .filter(|samples| samples.len() >= wanted)
                 .map(<[f32]>::as_ptr),
-            byte_size: wanted * 4,
+            byte_size: wanted * size_of::<f32>(),
         };
     }
     // SAFETY: every `data` pointer is the start of a slice borrowed for

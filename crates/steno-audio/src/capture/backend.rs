@@ -12,14 +12,13 @@ use crate::realtime::LaneFrameSink;
 
 /// A backend delivers frames for every lane into the [`LaneFrameSink`] from
 /// its own real-time context and reports device changes through the sink.
-/// `LiveCaptureBackend` is the tap + aggregate + IOProc on macOS and one
-/// self-linked PipeWire stream on Linux;
+/// `LiveCaptureBackend` is the tap + aggregate + IOProc on macOS, one
+/// self-linked PipeWire stream on Linux and two WASAPI streams on Windows
+/// (see `capture::live`);
 /// [`SyntheticCaptureBackend`](crate::testing::SyntheticCaptureBackend)
 /// generates deterministic tones. The session orchestrates a rebuild after
 /// a change by calling `stop()` and `start` again on the same backend and
-/// the same sink, so a backend must be restartable. The WASAPI backend
-/// (WP10 of `.plans/2026-10-02-rust-core-and-tauri-shell.md`) will
-/// implement this trait too (see `capture::live`).
+/// the same sink, so a backend must be restartable.
 pub trait CaptureBackend: Send + Sync {
     /// Starts delivering `lanes` (in this order) at [`SAMPLE_RATE`] and
     /// describes the stream it opened. `input_device_uid` `None` selects
