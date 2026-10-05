@@ -2,33 +2,43 @@
 //! no exit request of their own. Two D-Bus clients run the shutdown Quit
 //! runs before the app goes (`SaveAndQuit`), each on a thread of its own:
 //!
-//! - **A logout** on GNOME or Xfce: the app registers as a client of the
-//!   session manager on the session bus (`RegisterClient` on GNOME's
-//!   `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`,
-//!   `SessionApi`), answers `QueryEndSession` at once, and on `EndSession`
-//!   saves first and answers `EndSessionResponse` after, then quits.
-//!   gnome-session waits about ten seconds for that answer (older releases
-//!   ninety), as long as `SHUTDOWN_PATIENCE`, so a save that needs all of
-//!   its patience can be cut off when the session ends. A `GtkApplication`
-//!   that sets `register-session` does the same; tao's does not.
+//! - **A logout** on GNOME, and on Xfce under X11: the app registers as a
+//!   client of the session manager on the session bus (`RegisterClient`
+//!   on GNOME's `org.gnome.SessionManager`, else Xfce's
+//!   `org.xfce.SessionManager`, `SessionApi`), answers `QueryEndSession`
+//!   at once, and on `EndSession` saves first and answers
+//!   `EndSessionResponse` after, then quits. It finds the manager's unique
+//!   name with `GetNameOwner`, so it starts none, and takes the client
+//!   signals from that name only. After `EndSession` gnome-session waits
+//!   about ten seconds for the answer (older releases ninety) and
+//!   xfce4-session seven, on current releases both no more than
+//!   `SHUTDOWN_PATIENCE`, so a save that needs all of its patience can be
+//!   cut off when the session ends. A `GtkApplication` that sets
+//!   `register-session` registers the same way; tao's does not.
 //! - **A system shutdown or reboot**: the app holds logind's `shutdown`
 //!   delay lock (`Inhibit` on the system bus), and on
 //!   `PrepareForShutdown(true)` it saves and then releases the lock. logind
 //!   waits for the lock at most its `InhibitDelayMaxSec`, five seconds by
-//!   default, and then goes ahead; the SIGTERM that follows finds the save
-//!   running and waits for it (`exit_on_signals` in `main.rs`).
+//!   default, and then goes ahead; the SIGTERM that follows waits for the
+//!   save in progress (`exit_on_signals` in `main.rs`), but the display
+//!   closes then too, and GDK ends the process when it does, so a save
+//!   that outlasts logind's wait can be cut off as well.
 //!
 //! Neither follows sleep or the screen lock: a recording goes on through
 //! both, as it does on the Mac. A bus that is missing or refuses, a session
-//! manager that is not running, or a lock logind denies leaves the app as
-//! it was before: it saves when a signal reaches it. A slow or frozen bus
-//! holds only its client's thread, never the launch or an exit.
+//! manager that is not running, or a lock logind denies leaves the app to
+//! the signals: it saves when one reaches it. A slow or frozen bus holds
+//! only its client's thread, never the launch or an exit.
 //!
-//! Open: KDE Plasma serves no session-manager client API on D-Bus
-//! (Plasma's portal has no session monitor; its session manager speaks
-//! XSMP to X11 clients, which GTK 3 dropped), so a logout there saves only
-//! when systemd signals the app. logind runs there too, so the shutdown
-//! lock works there.
+//! Open: none of it has run on a real desktop, only against fakes on a
+//! private bus. A logout on KDE Plasma, or on Xfce under Wayland, saves
+//! only when systemd signals the app. Plasma before 6.6 serves no
+//! session-manager client API on D-Bus, and from 6.6 its portal's session
+//! monitor waits about 1.5 s at the query and not at the end, too short
+//! for the save; its session manager speaks XSMP to X11 clients, which
+//! GTK 3 does not speak. xfce4-session on Wayland quits after the save
+//! phase without sending `EndSession`. logind runs on both, so the
+//! shutdown lock works there.
 //!
 //! Swift: none; `AppKit` sends a logout and a shutdown to
 //! `applicationShouldTerminate`, which Quit goes through too.

@@ -49,25 +49,31 @@ exits reach the shutdown these ways:
   ends the process at once, unsaved; a SIGHUP never does. A signal the
   app inherited ignored (`nohup`, a background job's SIGINT) stays
   ignored.
-- A logout on GNOME or Xfce saves before the session ends: the app
-  registers with the session manager on the session bus (GNOME's
-  `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`,
-  which serves the same protocol under names of its own) and answers its
-  `EndSession` only after the save (`session_end.rs`). gnome-session
-  waits about ten seconds for that answer, as long as the shutdown's
+- A logout on GNOME, and on Xfce under X11, saves before the session
+  ends: the app registers with the session manager on the session bus
+  (GNOME's `org.gnome.SessionManager`, else Xfce's
+  `org.xfce.SessionManager`, which serves the same protocol under names
+  of its own) and answers its `EndSession` only after the save
+  (`session_end.rs`). gnome-session waits about ten seconds for that
+  answer and xfce4-session seven, both no more than the shutdown's
   patience, so a save that needs all of it can be cut off when the
   session ends.
 - A system shutdown or reboot on Linux saves while logind waits: the app
   holds logind's `shutdown` delay lock and releases it after the save.
   logind waits for the lock at most five seconds by default
   (`InhibitDelayMaxSec`), then goes ahead, and the SIGTERM that follows
-  waits for the shutdown in progress. Sleep and the screen lock do not
-  stop a recording.
-- A logout on KDE Plasma saves only when systemd signals the app (with
-  `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
-  SIGHUP). Plasma serves no session-manager client API on D-Bus, and
-  when the display connection closes first, GDK ends the process
-  unsaved.
+  waits for the save in progress. The display closes then too, and GDK
+  ends the process when it does, so a save that outlasts logind's wait
+  can be cut off as well. Sleep and the screen lock do not stop a
+  recording.
+- A logout on KDE Plasma, or on Xfce under Wayland, saves only when
+  systemd signals the app (with `KillUserProcesses=yes`, systemd stops
+  the scope with SIGTERM, then SIGHUP), and when the display connection
+  closes first, GDK ends the process unsaved. Plasma before 6.6 serves
+  no session-manager client API on D-Bus, and from 6.6 its portal's
+  session monitor waits about 1.5 s at the query and not at the end, too
+  short for the save; xfce4-session on Wayland quits after the save
+  phase without sending `EndSession`.
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).

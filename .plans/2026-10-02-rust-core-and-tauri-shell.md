@@ -877,27 +877,33 @@ still has to draw the window side. `[ ]` is not ported yet.
     second SIGTERM or a second SIGINT ends the process at once, unsaved, and a SIGHUP
     never does; a signal the app inherited ignored (`nohup`, a background job's SIGINT)
     stays ignored.
-  - A logout on GNOME or Xfce runs the shutdown before the session ends: the shell
-    registers with the first session manager on the session bus, GNOME's
-    `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager` (the same client
-    protocol under names of its own), answers `QueryEndSession` at once and
+  - A logout on GNOME, and on Xfce under X11, runs the shutdown before the session
+    ends: the shell registers with the first session manager on the session bus,
+    GNOME's `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager` (the same
+    client protocol under names of its own), answers `QueryEndSession` at once and
     `EndSession` only after the save, then quits
-    (`apps/desktop/src-tauri/src/session_end.rs`). It takes the client signals only
-    from the manager's unique name. gnome-session waits about ten seconds for the
-    answer (older releases ninety), as long as `SHUTDOWN_PATIENCE`, so a save that needs
-    all of its patience can be cut off when the session ends. A system shutdown or
-    reboot runs the shutdown while logind waits: the shell holds logind's `shutdown`
-    delay lock and releases it after the save on `PrepareForShutdown(true)`; logind
-    waits at most `InhibitDelayMaxSec` (five seconds by default) and then goes ahead,
-    and the SIGTERM that follows waits for the shutdown in progress. logind has no
+    (`apps/desktop/src-tauri/src/session_end.rs`). It finds the manager's unique name
+    with `GetNameOwner`, so it starts none, and takes the client signals from that name
+    only. After `EndSession` gnome-session waits about ten seconds for the answer
+    (older releases ninety) and xfce4-session seven, on current releases both no more
+    than `SHUTDOWN_PATIENCE`, so a save that needs all of its patience can be cut off
+    when the session ends. A system shutdown or reboot runs the shutdown while logind
+    waits: the shell holds logind's `shutdown` delay lock and releases it after the
+    save on `PrepareForShutdown(true)`; logind waits at most `InhibitDelayMaxSec` (five
+    seconds by default) and then goes ahead, and the SIGTERM that follows waits for the
+    save in progress. The display closes then too, and GDK ends the process when it
+    does, so a save that outlasts logind's wait can be cut off as well. logind has no
     logout signal, and its session `Lock` is the screen lock, which, like sleep, does
-    not stop a recording. A logout on KDE Plasma saves only when systemd signals the
-    app (with `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
-    SIGHUP): Plasma serves no session-manager client API on D-Bus (its portal has no
-    session monitor), and when the display connection closes first, GDK ends the
-    process unsaved; the logind lock works there too. Without a session bus, or
-    without logind, the shell behaves as before. The tests run both clients against
-    fakes on a private `dbus-daemon`.
+    not stop a recording. A logout on KDE Plasma, or on Xfce under Wayland, saves only
+    when systemd signals the app (with `KillUserProcesses=yes`, systemd stops the scope
+    with SIGTERM, then SIGHUP), and when the display connection closes first, GDK ends
+    the process unsaved: Plasma before 6.6 serves no session-manager client API on
+    D-Bus, and from 6.6 its portal's session monitor waits about 1.5 s at the query and
+    not at the end, too short for the save; xfce4-session on Wayland quits after the
+    save phase without sending `EndSession`. The logind lock works on both. Without a
+    session bus, a session manager or logind, or with the lock denied, a logout or a
+    shutdown saves only when a signal reaches the app. The tests run both clients
+    against fakes on a private `dbus-daemon`; none of it has run on a real desktop.
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -922,18 +928,19 @@ still has to draw the window side. `[ ]` is not ported yet.
     (`end_within` in the shell's `main.rs`), with its code; an update's relaunch is left to
     the teardown. `tauri-plugin-single-instance` 2.5 releases its bus name in its
     `RunEvent::Exit` handler, which Tauri runs before the shell's, with zbus's
-    `release_name` on a connection without a method timeout, so a frozen session bus held
-    the exit: about 20 s in #172's run, and past a minute under a stopped private
-    `dbus-daemon` (the main thread waiting in that `release_name`), where the exit now
-    takes 2.2 s. The bus drops the name with the connection anyway, and the shutdown has
-    ended before an exit goes through.
+    `release_name` on a connection without a method timeout, so a frozen session bus
+    would hold the exit without a bound (about 20 s in #172's run, past a minute under a
+    stopped private `dbus-daemon`); with the grace, the exit under that stopped bus takes
+    2.2 s. The bus drops the name with the connection anyway, and the shutdown has ended
+    before an exit goes through.
   - The services runtime is never dropped: dropping it waits, without a bound, for a
     transcription or a model load in progress.
   - Open: the Windows logoff is untested on hardware and can outlast the end-session
     timeout, and whether a logoff ends the speech sidecar before `RunEvent::Exit` quits
     the pipeline (which would mark its meeting `failed`) is unverified (WP10); the Linux
-    logout and shutdown are untested on a real desktop, and a KDE Plasma logout saves
-    only when systemd signals the app (before the first Linux release).
+    logout and shutdown are untested on a real desktop, and a logout on KDE Plasma, or on
+    Xfce under Wayland, saves only when systemd signals the app (before the first Linux
+    release).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes), and the tray's setters wait for the main thread when called from
@@ -1543,13 +1550,19 @@ request that fixes an item deletes it.
   Linux or Windows release, is the first run of the `publish` job against GitHub and
   the first MSI built for an `-rc.N` version. Where:
   `.github/workflows/desktop-release.yml`. Found: #184.
-- **First Linux release.** A logout on KDE Plasma saves the recording only when
-  systemd ends the session's processes with a signal; when nothing signals the app,
-  or the display connection closes first, GDK ends the process unsaved. Plasma serves
-  no session-manager client API on D-Bus: closing the gap needs XSMP, which GTK 3
-  dropped, or a handler for the lost X connection that saves before GDK's ends the
-  process. The GNOME and Xfce logout and the logind shutdown lock (`session_end.rs`)
-  ran only against fakes on a private bus, not on a real desktop. Where:
+- **First Linux release.** A logout on KDE Plasma, or on Xfce under Wayland, saves
+  the recording only when systemd ends the session's processes with a signal; when
+  nothing signals the app, or the display connection closes first, GDK ends the
+  process unsaved. Plasma before 6.6 serves no session-manager client API on D-Bus,
+  and from 6.6 its portal's session monitor waits about 1.5 s at the query and not at
+  the end, too short for the save; xfce4-session on Wayland quits after the save phase
+  without sending `EndSession`. Ways to close the gap: the portal's session monitor
+  (`CreateMonitor`), perhaps with a logout inhibitor held while recording; XSMP, which
+  GTK 3 does not speak; or a handler for the lost X connection that saves before GDK's
+  ends the process. The GNOME and Xfce logout and the logind shutdown lock
+  (`session_end.rs`) ran only against fakes on a private bus, not on a real desktop,
+  and a save that outlasts the session manager's wait (gnome-session ten seconds,
+  xfce4-session seven) or logind's (five) can be cut off. Where:
   `apps/desktop/src-tauri/src/session_end.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203.
 - **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
