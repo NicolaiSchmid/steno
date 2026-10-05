@@ -2,15 +2,24 @@ import type { OnboardingSnapshot } from "@/bridge/contract";
 import { send, useBridge } from "@/bridge/hooks";
 import { PermissionRow } from "@/components/permission-row";
 import { Button, FormCard } from "@/components/ui";
+import { type PlatformWords, usePlatform } from "@/lib/platform";
 import { OnboardingPage } from "./onboarding-page";
 
-/** The sentence the smoke test finds page 1 by. */
-export const PERMISSIONS_INTRO =
-	"A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac.";
+/**
+ * Page 1's intro, which the Mac smoke test finds page 1 by: "One
+ * permission" where the platform has one (Linux), else "A few permissions".
+ */
+function permissionsIntro(
+	{ computer }: PlatformWords,
+	permissions: number,
+): string {
+	const asked = permissions === 1 ? "One permission" : "A few permissions";
+	return `${asked}, then where summaries come from and where meetings go. Audio never leaves this ${computer}.`;
+}
 
 /**
  * Page 1: one row per permission with the action that fits its state. The
- * required ones gate Done; the optional ones can be skipped; the local
+ * required ones gate Continue; the optional ones can be skipped; the local
  * network prompt comes with the first pairing, so its row only explains.
  * Later moves on with whatever is still open.
  */
@@ -20,6 +29,7 @@ export function PermissionsPage({
 	onboarding: OnboardingSnapshot;
 }) {
 	const client = useBridge();
+	const { words } = usePlatform();
 	const busy = onboarding.permissions.some((step) => step.isRequesting);
 	return (
 		<OnboardingPage
@@ -31,7 +41,7 @@ export function PermissionsPage({
 						onClick={() => send(client, "onboarding.advance")}
 						variant="primary"
 					>
-						Done
+						Continue
 					</Button>
 				) : (
 					<Button
@@ -43,7 +53,7 @@ export function PermissionsPage({
 					</Button>
 				)
 			}
-			intro={PERMISSIONS_INTRO}
+			intro={permissionsIntro(words, onboarding.permissions.length)}
 			step={1}
 			testId="onboarding-permissions"
 			title="Welcome to Steno"

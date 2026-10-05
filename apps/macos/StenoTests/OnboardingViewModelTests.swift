@@ -25,18 +25,15 @@ final class OnboardingViewModelTests: XCTestCase {
     await model.load()
     XCTAssertTrue(model.isComplete, "permissions come from the environment")
     let forever = try XCTUnwrap(model.retentionSentence)
-    XCTAssertTrue(forever.hasPrefix("Recordings are kept forever in "), forever)
-    XCTAssertTrue(forever.hasSuffix(" Change this any time in Settings > Audio."), forever)
-    let folder = try await environment.settings.load().audioFolder
-    XCTAssertTrue(
-      forever.contains("in \(folder.lastPathComponent)."),
-      "names the folder, not the path: \(forever)")
+    XCTAssertEqual(
+      forever,
+      "Recordings are kept until you delete them. Change this any time in Settings > Recording.")
 
     try await environment.updateSettings { $0.defaultRetention = .keepDays(7) }
     await model.load()
     let days = try XCTUnwrap(model.retentionSentence)
     XCTAssertTrue(days.contains("deleted 7 days after it was processed and exported"), days)
-    XCTAssertTrue(days.hasSuffix("Change this any time in Settings > Audio."), days)
+    XCTAssertTrue(days.hasSuffix("Change this any time in Settings > Recording."), days)
 
     try await environment.updateSettings { $0.defaultRetention = .deleteAfterProcessing }
     await model.load()
@@ -169,7 +166,7 @@ final class OnboardingViewModelTests: XCTestCase {
     XCTAssertTrue(open, "a missing required permission reopens the window")
   }
 
-  /// Done and Later on page 1 advance to page 2 instead of finishing; Back
+  /// Continue and Later on page 1 advance to page 2 instead of finishing; Back
   /// returns; a second `load()` ("Check again") never moves the page.
   func testDoneAndLaterAdvanceToTheSetupPage() async throws {
     let permissions = FakePermissions()
@@ -185,7 +182,7 @@ final class OnboardingViewModelTests: XCTestCase {
 
     await model.request(.microphone)
     await model.request(.systemAudio)
-    XCTAssertTrue(model.isComplete, "Done is the button on offer")
+    XCTAssertTrue(model.isComplete, "Continue is the button on offer")
     await model.load()
     XCTAssertEqual(model.page, .permissions, "Check again stays on page 1")
     model.advance()

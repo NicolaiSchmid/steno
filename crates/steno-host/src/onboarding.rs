@@ -1,10 +1,12 @@
 //! Onboarding in two pages, after `Onboarding/OnboardingViewModel.swift`
 //! and `Web/OnboardingSnapshots.swift`. Page 1, permissions: microphone,
 //! system audio (both required), then calendar and local network
-//! (optional). Page 2, "Summaries and export": the LLM endpoint and the
-//! Obsidian vault, both optional, written through the same view models the
-//! Settings sections use. The model owns the exit: Finish, or both rows
-//! handled on page 2, set the completed flag and `finished`.
+//! (optional), as far as the platform has them (`Platform::permissions`:
+//! all four on the Mac, fewer on Windows and Linux). Page 2, "Summaries
+//! and export": the LLM endpoint and the Obsidian vault, both optional,
+//! written through the same view models the Settings sections use. The
+//! model owns the exit: Finish, or both rows handled on page 2, set the
+//! completed flag and `finished`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -13,8 +15,8 @@ use chrono::{DateTime, Utc};
 use steno_bridge::{
     OnboardingPage, OnboardingPermissionStep, OnboardingSetupStep, OnboardingSetupStepKind,
     OnboardingSetupStepState, OnboardingSnapshot, OnboardingVault, PermissionKind, PermissionState,
+    Platform,
 };
-use steno_core::paths::file_url_path;
 use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, Settings, Store};
 
@@ -63,6 +65,8 @@ pub const SETUP_STEPS: [OnboardingSetupStepKind; 2] = [
 
 #[derive(Debug)]
 pub struct OnboardingViewModel {
+    /// Which permissions page 1 lists and how the Summaries presets read.
+    pub platform: Platform,
     pub steps: Vec<Step>,
     pub requesting: Option<PermissionKind>,
     pub skipped: BTreeSet<PermissionKind>,
@@ -80,7 +84,7 @@ pub struct OnboardingViewModel {
 
 impl Default for OnboardingViewModel {
     fn default() -> Self {
-        Self::new()
+        Self::new(Platform::CURRENT)
     }
 }
 
@@ -88,10 +92,13 @@ impl OnboardingViewModel {
     /// The preferences flag: this install has finished the two pages.
     pub const COMPLETED_KEY: &'static str = "steno.onboardingCompleted";
 
+    /// Page 1 lists the permissions `platform` has.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(platform: Platform) -> Self {
         OnboardingViewModel {
-            steps: PermissionKind::ALL
+            platform,
+            steps: platform
+                .permissions()
                 .iter()
                 .map(|kind| Step {
                     kind: *kind,
@@ -118,8 +125,9 @@ impl OnboardingViewModel {
     /// install with the flag unset whose endpoint and vault are already in
     /// the settings has nothing left to ask: the flag is written and the
     /// window stays closed. Swift: `OnboardingViewModel.shouldOpen`.
-    pub fn should_open(store: &Store, services: &Services) -> bool {
-        if PermissionKind::ALL
+    pub fn should_open(store: &Store, services: &Services, platform: Platform) -> bool {
+        if platform
+            .permissions()
             .iter()
             .filter(|kind| permission_is_required(**kind))
             .any(|kind| services.permissions.state(*kind) != PermissionState::Granted)
@@ -176,24 +184,17 @@ impl OnboardingViewModel {
     }
 
     /// One sentence on what the rule does to the files, then where to
-    /// change it. Swift: `OnboardingViewModel.retentionSentence(for:)`.
+    /// change it: Settings > Recording, the section that holds the rule.
+    /// Swift: `OnboardingViewModel.retentionSentence(for:)`.
     #[must_use]
     pub fn retention_sentence_for(settings: &Settings) -> String {
         let rule = match settings.default_retention {
-            AudioRetention::KeepForever => {
-                let folder = file_url_path(&settings.audio_folder)
-                    .and_then(|path| {
-                        path.file_name()
-                            .map(|name| name.to_string_lossy().into_owned())
-                    })
-                    .unwrap_or_default();
-                format!("Recordings are kept forever in {folder}.")
-            }
+            AudioRetention::KeepForever => "Recordings are kept until you delete them.".to_owned(),
             rule @ (AudioRetention::KeepDays(_) | AudioRetention::DeleteAfterProcessing) => {
                 retention_footnote(rule)
             }
         };
-        format!("{rule} Change this any time in Settings > Audio.")
+        format!("{rule} Change this any time in Settings > Recording.")
     }
 
     // Page 1
@@ -207,7 +208,8 @@ impl OnboardingViewModel {
             .find(|step| {
                 step.state != PermissionState::Granted && !self.skipped.contains(&step.kind)
             })
-            .map_or(PermissionKind::LocalNetwork, |step| step.kind)
+            .or_else(|| self.steps.last())
+            .map_or(PermissionKind::Microphone, |step| step.kind)
     }
 
     #[must_use]
@@ -269,7 +271,7 @@ impl OnboardingViewModel {
         }
     }
 
-    /// Done or Later on page 1. Page 2 with both rows already handled has
+    /// Continue or Later on page 1. Page 2 with both rows already handled has
     /// nothing to show, so it finishes.
     pub fn advance(&mut self, services: &Services) {
         self.page = OnboardingPage::Setup;
@@ -467,7 +469,7 @@ pub fn snapshot(model: &OnboardingViewModel) -> OnboardingSnapshot {
             })
             .collect(),
         can_save_summaries: model.can_save_summaries(),
-        summaries: on_setup.then(|| settings_snapshots::summaries(&model.llm, "")),
+        summaries: on_setup.then(|| settings_snapshots::summaries(&model.llm, "", model.platform)),
         vault: on_setup.then(|| {
             let vault = model.obsidian.vault_url();
             OnboardingVault {

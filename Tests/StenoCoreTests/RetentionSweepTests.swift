@@ -241,7 +241,7 @@ import Testing
     #expect(try await sweep.run(now: SampleData.updatedAt) == [master])
   }
 
-  /// Switching Settings > Audio to Forever keeps every recording still on
+  /// Switching Settings > Recording to Forever keeps every recording still on
   /// disk: rule and stamp change together, so the next Re-export (the
   /// deferred-case stamp) leaves it alone. An asset whose master is gone is
   /// not rewritten.

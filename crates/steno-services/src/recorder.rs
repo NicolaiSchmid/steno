@@ -419,15 +419,26 @@ impl Recorder for CaptureRecorder {
     }
 
     fn refresh_permissions(&self) {
-        let denied: Vec<PermissionKind> = PermissionKind::ALL
-            .iter()
-            .copied()
-            .filter(|kind| steno_host::services::permission_is_required(*kind))
-            .filter(|kind| self.permissions.state(*kind) == steno_bridge::PermissionState::Denied)
-            .collect();
+        let denied = denied_permissions(steno_bridge::Platform::CURRENT, &*self.permissions);
         self.inner().status.denied_permissions = denied;
         self.notify();
     }
+}
+
+/// The required permissions `permissions` reports denied, among the ones
+/// `platform` has: off the Mac, system audio has no switch of its own
+/// (Windows' is the microphone's), so it is never reported denied there.
+fn denied_permissions(
+    platform: steno_bridge::Platform,
+    permissions: &dyn Permissions,
+) -> Vec<PermissionKind> {
+    platform
+        .permissions()
+        .iter()
+        .copied()
+        .filter(|kind| steno_host::services::permission_is_required(*kind))
+        .filter(|kind| permissions.state(*kind) == steno_bridge::PermissionState::Denied)
+        .collect()
 }
 
 #[cfg(test)]
@@ -894,5 +905,33 @@ mod tests {
             "nothing was downloaded"
         );
         stop(&harness.recorder).await;
+    }
+
+    #[test]
+    fn only_the_platform_s_own_required_permissions_are_reported_denied() {
+        use steno_bridge::{PermissionState, Platform};
+        let denied = FakePermissions::all(PermissionState::Denied);
+        assert_eq!(
+            denied_permissions(Platform::Macos, &denied),
+            [PermissionKind::Microphone, PermissionKind::SystemAudio],
+        );
+        assert_eq!(
+            denied_permissions(Platform::Windows, &denied),
+            [PermissionKind::Microphone]
+        );
+        assert_eq!(
+            denied_permissions(Platform::Linux, &denied),
+            [PermissionKind::Microphone]
+        );
+        let system_audio =
+            FakePermissions::with_states([(PermissionKind::SystemAudio, PermissionState::Denied)]);
+        assert_eq!(
+            denied_permissions(Platform::Linux, &system_audio),
+            Vec::new()
+        );
+        assert_eq!(
+            denied_permissions(Platform::Macos, &system_audio),
+            [PermissionKind::SystemAudio]
+        );
     }
 }

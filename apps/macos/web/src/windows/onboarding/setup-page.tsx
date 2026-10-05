@@ -9,7 +9,10 @@ import type { ReactNode } from "react";
 import type { BridgeClient } from "@/bridge/client";
 import type { OnboardingSnapshot } from "@/bridge/contract";
 import { send, useBridge } from "@/bridge/hooks";
-import { CodexConsentCard } from "@/components/codex-consent-card";
+import {
+	CodexConsentCard,
+	codexConsent,
+} from "@/components/codex-consent-card";
 import {
 	SummariesEndpointForm,
 	type SummariesUpdate,
@@ -23,6 +26,7 @@ import {
 	FormRow,
 	FormValue,
 } from "@/components/ui";
+import { type PlatformWords, usePlatform } from "@/lib/platform";
 import { OnboardingPage } from "./onboarding-page";
 
 type SetupStep = OnboardingSnapshot["setup"][number];
@@ -31,24 +35,29 @@ type SetupKind = SetupStep["kind"];
 /** The heading the smoke test finds page 2 by. */
 export const SETUP_TITLE = "Summaries and export";
 
-const COPY: Record<
-	SetupKind,
-	{ title: string; explanation: string; footnote: string }
-> = {
-	summaries: {
-		title: "Summaries",
-		explanation:
-			"Steno sends the transcript text, never audio, to a model to clean it up and write the summary, tasks and decisions: a server or API key of your choice, or your ChatGPT plan through the Codex sign-in on this Mac. Without one, meetings keep a raw transcript and no summary.",
-		footnote: "The context window and the rest live in Settings > Summaries.",
-	},
-	vault: {
-		title: "Obsidian vault",
-		explanation:
-			"Steno writes each meeting into Meetings/<date>-<slug>/ inside the vault: a folder note, transcript, tasks, VTT and JSON. It never touches files it did not write. Without a vault, meetings stay in Steno.",
-		footnote:
-			"People pages, the task tag and the audio copy live in Settings > Export.",
-	},
-};
+/** One row's words; the Summaries row names the machine as the platform does. */
+function setupCopy(
+	kind: SetupKind,
+	{ computer }: PlatformWords,
+): { title: string; explanation: string; footnote: string } {
+	switch (kind) {
+		case "summaries":
+			return {
+				title: "Summaries",
+				explanation: `Steno sends the transcript text, never audio, to a model to clean it up and write the summary, tasks and decisions: a server or API key of your choice, or your ChatGPT plan through the Codex sign-in on this ${computer}. Without one, meetings keep a raw transcript and no summary.`,
+				footnote:
+					"The context window and the rest live in Settings > Summaries.",
+			};
+		case "vault":
+			return {
+				title: "Obsidian vault",
+				explanation:
+					"Steno writes each meeting into Meetings/<date>-<slug>/ inside the vault: a folder note, transcript, tasks, VTT and JSON. It never touches files it did not write. Without a vault, meetings stay in Steno.",
+				footnote:
+					"People pages, the task tag and the audio copy live in Settings > Export.",
+			};
+	}
+}
 
 /**
  * Page 2: the Summaries row (a service and its fields, or the ChatGPT
@@ -101,7 +110,7 @@ export function SetupPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
  * with the fields under it and the footnote under the card.
  */
 function SetupRow({ row, children }: { row: SetupStep; children: ReactNode }) {
-	const copy = COPY[row.kind];
+	const copy = setupCopy(row.kind, usePlatform().words);
 	const open = row.state === "open";
 	return (
 		<FormCard footer={open ? copy.footnote : undefined}>
@@ -173,6 +182,7 @@ function SummariesFields({
 	client: BridgeClient;
 	onboarding: OnboardingSnapshot;
 }) {
+	const { words } = usePlatform();
 	const summaries = onboarding.summaries;
 	const skip = <SkipButton client={client} step="summaries" />;
 	if (!summaries) {
@@ -203,10 +213,7 @@ function SummariesFields({
 									data-testid="codex-unavailable"
 									icon={<CircleAlertIcon aria-hidden="true" />}
 									size="sm"
-									title={
-										codex.signInDetail ??
-										"No ChatGPT sign-in was found on this Mac."
-									}
+									title={codex.signInDetail ?? codexConsent(words).noSignIn}
 									variant="warning"
 								/>
 							) : null}

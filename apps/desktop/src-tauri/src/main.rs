@@ -84,6 +84,7 @@ mod navigation;
 mod panel_geometry;
 mod panels;
 mod permissions;
+mod platform;
 mod recording;
 #[cfg(target_os = "linux")]
 mod session_end;
@@ -130,7 +131,8 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(updater::plugin());
+        .plugin(updater::plugin())
+        .plugin(platform::plugin());
     #[cfg(target_os = "macos")]
     {
         // The menu bar's menu is the shell's own: Tauri's default one ends

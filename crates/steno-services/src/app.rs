@@ -543,6 +543,7 @@ impl App {
             HostConfig {
                 version: self.version.clone(),
                 zone: self.zone,
+                platform: steno_bridge::Platform::CURRENT,
             },
         )
     }
@@ -732,6 +733,41 @@ mod tests {
             1,
             "the transcribe rate was learned under the current engine's id"
         );
+    }
+
+    /// The shell's host lists the permissions of the OS it was built for,
+    /// so a host wired to the Mac fails here on Windows and Linux.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_host_runs_on_the_platform_the_app_was_built_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = build(AppOptions {
+            paths: StenoPaths::new(dir.path().join("support")),
+            database_path: None,
+            keyring: false,
+            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
+            login_item: None,
+            runtime: tokio::runtime::Handle::current(),
+            version: "0.0.0".to_owned(),
+            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+        })
+        .unwrap();
+        let onboarding = app
+            .host()
+            .unwrap()
+            .snapshot(steno_bridge::BridgeTopic::Onboarding)
+            .unwrap();
+        let listed: Vec<&str> = onboarding["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["kind"].as_str().unwrap())
+            .collect();
+        let expected: Vec<&str> = steno_bridge::Platform::CURRENT
+            .permissions()
+            .iter()
+            .map(|kind| kind.as_str())
+            .collect();
+        assert_eq!(listed, expected);
     }
 
     /// What `App::launch` does to a meeting a previous process left

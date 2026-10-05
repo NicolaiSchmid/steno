@@ -4,7 +4,8 @@
 //! on Windows a notification area icon, both with the app icon. The menu
 //! is the Swift popover's controls without its queue and recent rows, which
 //! the main window shows: Record (or Stop), Record in person, Open Steno,
-//! Settings, Launch at login, Check for Updates, Quit.
+//! Settings, Launch at login, Check for Updates, Quit (Exit on Windows).
+//! Only the Mac's menu shows shortcut hints (`shortcut`).
 //!
 //! The tray also keeps the process alive: with it, closing the main window
 //! hides it and the process stays, as the Swift menu bar app stays; without
@@ -30,6 +31,8 @@ use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::TrayIconBuilder,
 };
+
+use steno_bridge::Platform;
 
 use crate::{
     actions::MenuAction,
@@ -81,9 +84,21 @@ pub struct Tray {
     launch_at_login: CheckMenuItem<Wry>,
 }
 
+/// A menu item's shortcut hint, on the Mac only: the menu bar extra's
+/// menu shows one as the Swift menus did, while Windows' notification
+/// area menu and a Linux status notifier menu show none, and a key
+/// pressed there with the menu closed does nothing.
+const fn shortcut(platform: Platform, mac: &'static str) -> Option<&'static str> {
+    match platform {
+        Platform::Macos => Some(mac),
+        Platform::Windows | Platform::Linux => None,
+    }
+}
+
 /// Builds the menu and the icon and manages `Tray`.
 pub fn build(app: &AppHandle) -> tauri::Result<()> {
-    let record = MenuAction::Record.item(app, Some("CmdOrCtrl+Shift+R"))?;
+    let platform = Platform::CURRENT;
+    let record = MenuAction::Record.item(app, shortcut(platform, "Cmd+Shift+R"))?;
     let in_person = MenuAction::RecordInPerson.item(app, None)?;
     let launch_at_login = CheckMenuItem::with_id(
         app,
@@ -100,14 +115,14 @@ pub fn build(app: &AppHandle) -> tauri::Result<()> {
             &in_person,
             &PredefinedMenuItem::separator(app)?,
             &MenuAction::OpenMain.item(app, None)?,
-            &MenuAction::OpenSettings.item(app, Some("CmdOrCtrl+,"))?,
+            &MenuAction::OpenSettings.item(app, shortcut(platform, "Cmd+,"))?,
             &PredefinedMenuItem::separator(app)?,
             &launch_at_login,
             &MenuAction::CheckForUpdates.item(app, None)?,
             &PredefinedMenuItem::separator(app)?,
             // Not muda's predefined Quit: that one ends the process without
             // `ExitRequested`, so the shell could not shut down cleanly.
-            &MenuAction::Quit.item(app, Some("CmdOrCtrl+Q"))?,
+            &MenuAction::Quit.item(app, shortcut(platform, "Cmd+Q"))?,
         ],
     )?;
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
@@ -255,6 +270,13 @@ fn owner_in(reply: &gio::glib::Variant) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_mac_menu_shows_shortcuts() {
+        assert_eq!(shortcut(Platform::Macos, "Cmd+Q"), Some("Cmd+Q"));
+        assert_eq!(shortcut(Platform::Windows, "Cmd+Q"), None);
+        assert_eq!(shortcut(Platform::Linux, "Cmd+Q"), None);
+    }
 
     #[test]
     fn the_record_item_follows_the_recorder() {

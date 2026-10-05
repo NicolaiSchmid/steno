@@ -38,9 +38,8 @@ struct MainWindow: View {
 }
 
 /// The "focus the meeting search" action `AppCommands` runs for ⌘F. Nothing
-/// publishes it yet: the field now lives in the page and the contract has
-/// no `ui.focusSearch` event for the host to send, so the menu item stays
-/// disabled until that topic lands (plan Decision 6 names it).
+/// publishes it: the page answers ⌘F itself (`useShortcut` in
+/// `apps/macos/web/src/lib/platform.tsx`), so the menu item stays disabled.
 struct SearchFocusAction {
   let run: @MainActor () -> Void
 }

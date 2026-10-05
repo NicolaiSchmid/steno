@@ -10,10 +10,10 @@ public enum LLMProvider: String, Codable, Sendable, Equatable, Hashable, CaseIte
 }
 
 public struct Settings: Codable, Sendable, Equatable, Hashable {
-  /// Where recordings live; the user changes it in Settings > Audio.
+  /// Where recordings live; the user changes it in Settings > Recording.
   public var audioFolder: URL
   /// `.keepForever` for a new install: deletion is irreversible and the
-  /// Audio tab shows the disk cost next to the choice. A stored row wins.
+  /// Recording section shows the disk cost next to the choice. A stored row wins.
   public var defaultRetention: AudioRetention
   public var inputDeviceUID: String?
   public var meetingDetectionEnabled: Bool

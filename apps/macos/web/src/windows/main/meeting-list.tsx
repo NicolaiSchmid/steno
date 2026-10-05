@@ -28,6 +28,13 @@ import {
 	SectionLabel,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import {
+	type Platform,
+	type PlatformWords,
+	SHORTCUTS,
+	usePlatform,
+	useShortcut,
+} from "@/lib/platform";
 import { deleteMeeting } from "./delete-meeting";
 import { firstSentence, format, formatSource } from "./format";
 import { SOURCE } from "./source";
@@ -58,14 +65,22 @@ export function rowPreview(
 	}
 }
 
-function emptyCopy(list: MeetingsListSnapshot): {
+/** " The tray icon works too." where the platform always has one. */
+function trayHint({ trayItem }: PlatformWords): string {
+	return trayItem ? ` The ${trayItem} works too.` : "";
+}
+
+function emptyCopy(
+	list: MeetingsListSnapshot,
+	platform: Platform,
+): {
 	title: string;
 	body: string;
 } {
 	if (list.counts.all === 0) {
 		return {
 			title: "No meetings yet",
-			body: "Press Record above, or ⌘⇧R. The menu bar item works too.",
+			body: `Press Record above, or ${platform.label(SHORTCUTS.record)}.${trayHint(platform.words)}`,
 		};
 	}
 	if (list.query.trim()) {
@@ -119,10 +134,13 @@ function flatIDs(list: MeetingsListSnapshot): string[] {
  */
 export function MeetingList() {
 	const client = useBridge();
+	const platform = usePlatform();
 	const list = useSnapshot("meetings.list");
 	const progress = useSnapshot("progress");
 	const [query, setQuery] = useState("");
 	const pending = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+	const search = useRef<HTMLInputElement>(null);
+	useShortcut(SHORTCUTS.findMeetings, () => search.current?.focus());
 	const hostQuery = list?.query ?? "";
 
 	useEffect(() => {
@@ -197,7 +215,8 @@ export function MeetingList() {
 					data-testid="search-meetings"
 					onChange={onQueryChange}
 					placeholder="Search meetings"
-					shortcut="⌘F"
+					ref={search}
+					shortcut={platform.label(SHORTCUTS.findMeetings)}
 					value={query}
 					variant="row"
 				/>
@@ -230,7 +249,7 @@ export function MeetingList() {
 							)
 						}
 						id="empty-meetings"
-						{...emptyCopy(list)}
+						{...emptyCopy(list, platform)}
 					/>
 				) : null}
 				{list?.groups.map((group) => {

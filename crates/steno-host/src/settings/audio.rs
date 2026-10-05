@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use steno_bridge::{PermissionKind, PermissionState, RetentionMode};
+use steno_bridge::{PermissionKind, PermissionState, Platform, RetentionMode};
 use steno_core::paths::{file_url, file_url_path};
 use steno_core::{AudioRetention, Store};
 
@@ -26,6 +26,14 @@ pub enum FolderUsageState {
 /// The two permissions the section shows, in order.
 pub const RECORDING_PERMISSIONS: [PermissionKind; 2] =
     [PermissionKind::Microphone, PermissionKind::SystemAudio];
+
+/// The ones of [`RECORDING_PERMISSIONS`] `platform` has: both on the Mac,
+/// the microphone alone on Windows and Linux.
+pub fn recording_permissions(platform: Platform) -> impl Iterator<Item = PermissionKind> {
+    RECORDING_PERMISSIONS
+        .into_iter()
+        .filter(move |kind| platform.permissions().contains(kind))
+}
 
 /// The stepper's range for the days rule.
 pub const DAY_RANGE: std::ops::RangeInclusive<i64> = 1..=3650;

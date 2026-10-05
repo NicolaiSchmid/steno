@@ -589,7 +589,7 @@ public struct OnboardingSnapshot: Codable, Sendable, Equatable {
 
   public var page: Page
   public var permissions: [PermissionStep]
-  /// Every required permission granted: page 1 offers Done instead of Later.
+  /// Every required permission granted: page 1 offers Continue instead of Later.
   public var permissionsComplete: Bool
   public var setup: [SetupStep]
   public var canSaveSummaries: Bool

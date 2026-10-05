@@ -11,7 +11,7 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 | Command | What it does |
 |---|---|
 | `pnpm install` | pnpm 11, Node 24. Own lockfile. |
-| `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/main` (the default), `#/settings?section=general\|recording\|transcription\|summaries\|export\|iphone`, `#/onboarding`, `#/stories`. Flags: `dark`, `tab=summary\|transcript\|tasks\|notes`, `menu`, `picker`, `scenario=…` (below), for example `#/main?dark&tab=transcript&picker`, `#/settings?section=iphone&scenario=pairing` or `#/onboarding?scenario=onboarding-codex`. |
+| `pnpm dev` | Vite dev server on 5173 with the fixture bridge. `#/main` (the default), `#/settings?section=general\|recording\|transcription\|summaries\|export\|iphone`, `#/onboarding`, `#/stories`. Flags: `dark`, `platform=macos\|windows\|linux` (the words and keys of that OS; the Mac without it), `tab=summary\|transcript\|tasks\|notes`, `menu`, `picker`, `scenario=…` (below), for example `#/main?dark&tab=transcript&picker`, `#/settings?section=iphone&scenario=pairing` or `#/onboarding?scenario=onboarding-codex`. |
 | `pnpm check` | `lint`, `lint:ui`, `typecheck`, `test`. Must pass before a PR. |
 | `pnpm build` | Writes `dist/`, the bundle the app ships, with relative asset URLs and without the mock bridge or the fixtures; then `scripts/check-offline.mjs` greps it for fetchable URLs and `scripts/check-bundle.mjs` for any trace of the mock or a fixture. |
 | `pnpm build:screens` | Writes `dist-screens/`: the same pages over the fixture bridge (`vite build --mode screens`), for the screens and `vite preview --mode screens`. |
@@ -24,9 +24,10 @@ draws snapshots and sends commands over the bridge (`src/bridge/`). Plan:
 | `src/bridge/` | The contract (`contract.ts`), the typed client, the WebKit, Tauri and mock transports, and `hooks.ts` (`useSnapshot`, `useBridge`, `send`). `createBridge()` picks WebKit inside the Swift app, Tauri inside the Tauri shell (`apps/desktop`) and otherwise the `#bridge-fallback` module, which `vite.config.ts` resolves to `fallback-mock.ts` (dev server, Vitest, the screens bundle) or `fallback-none.ts` (the production bundle; it throws). |
 | `src/windows/main/` | The main window over the bridge: sidebar, meeting list, detail with its tabs, `format.ts` for every date and duration. |
 | `src/windows/settings/` | The Settings window: a sidebar of the six sections as single-line rows, one `*-section.tsx` per section built from `FormCard` and `FormRow`, `settings-format.ts` for sizes and relative times. Text fields keep a draft (`src/lib/use-draft.ts`) and send one `update` plus a `save` when focus leaves. |
-| `src/windows/onboarding/` | The onboarding window over the `onboarding` snapshot: `permissions-page.tsx` (one `PermissionRow` per permission, Later or Done) and `setup-page.tsx` (the Summaries row with the service form or the ChatGPT consent card, the Obsidian vault row with the native chooser, Back and Finish) in the frame `onboarding-page.tsx` draws. The host says which page is current and closes the window itself once `finished` is in the snapshot; the page does not send `window.close`. |
+| `src/windows/onboarding/` | The onboarding window over the `onboarding` snapshot: `permissions-page.tsx` (one `PermissionRow` per permission, Later or Continue) and `setup-page.tsx` (the Summaries row with the service form or the ChatGPT consent card, the Obsidian vault row with the native chooser, Back and Finish) in the frame `onboarding-page.tsx` draws. The host says which page is current and closes the window itself once `finished` is in the snapshot; the page does not send `window.close`. |
 | `src/components/` | Pieces two windows share, built from `ui/`: `permission-row.tsx` (Settings and onboarding), `summaries-endpoint-form.tsx` (the service and its server, model and key fields, laid out as rows or a stack), `codex-consent-card.tsx` (the ChatGPT consent words, once), `draft-field.tsx`. |
 | `src/components/ui/` | The component set; the only place a look is defined. |
+| `src/lib/platform.tsx` | The platform the page runs on (the Tauri shell's `window.__STENO_PLATFORM__`, else the `platform` flag, else the Swift app's Mac) and every word and key that follows from it: "this Mac" or "this computer", Finder or File Explorer, ⌘F or Ctrl+F. `usePlatform()` gives the words and the shortcut labels, `useShortcut()` binds a key; call sites never branch on the OS. |
 | `src/stories/` | Every component in every variant, rendered by the screens. |
 | `fixtures/bridge/` | Snapshots and replies recorded by the Swift side; the mock transport serves them outside the app. They never enter `dist/`. |
 
@@ -40,7 +41,7 @@ with its details, a login item awaiting approval, an update available),
 `codex` (from `settings.summaries.codex`), `export-on`, `pairing` (from
 `settings.iphone.pairing`) and `phone-unavailable`. For onboarding:
 `onboarding-unknown` (a fresh install), `onboarding-denied`,
-`onboarding-granted` (Done instead of Later), `onboarding-setup` (page 2 from
+`onboarding-granted` (Continue instead of Later), `onboarding-setup` (page 2 from
 `onboarding.setup`: Summaries saved, a vault chosen but refused),
 `onboarding-setup-open`, `onboarding-codex` (the consent card) and
 `onboarding-vault-saved`. Interactive elements carry the

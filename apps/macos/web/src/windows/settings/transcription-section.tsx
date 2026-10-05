@@ -10,11 +10,12 @@ import {
 	ProgressBar,
 	Select,
 } from "@/components/ui";
+import { usePlatform } from "@/lib/platform";
 import { SectionPage } from "./section-page";
 
 type Asset = TranscriptionSettingsSnapshot["assets"][number];
 
-/** One component on this Mac: its state, and the action that fits it. */
+/** One component on this computer: its state, and the action that fits it. */
 function AssetRow({ asset }: { asset: Asset }) {
 	const client = useBridge();
 	const download = () =>
@@ -110,10 +111,11 @@ function AssetRow({ asset }: { asset: Asset }) {
 
 /**
  * Transcription: the engine (when there is a choice) and the components it
- * needs on this Mac, with download progress.
+ * needs on this computer, with download progress.
  */
 export function TranscriptionSection() {
 	const client = useBridge();
+	const { words } = usePlatform();
 	const transcription = useSnapshot("settings.transcription");
 	if (!transcription) {
 		return <SectionPage id="transcription" />;
@@ -126,7 +128,7 @@ export function TranscriptionSection() {
 		>
 			{transcription.showsEnginePicker ? (
 				<FormCard
-					footer="Both run on this Mac. Parakeet is quicker; Whisper understands more languages."
+					footer={`Both run on this ${words.computer}. Parakeet is quicker; Whisper understands more languages.`}
 					title="Language model"
 				>
 					<FormRow
@@ -158,7 +160,7 @@ export function TranscriptionSection() {
 						? "Everything needed for transcription is installed."
 						: "Downloads happen once and are kept for later meetings."
 				}
-				title="On this Mac"
+				title={`On this ${words.computer}`}
 			>
 				{transcription.assets.map((asset) => (
 					<AssetRow asset={asset} key={asset.id} />

@@ -11,7 +11,7 @@ use steno_bridge::{
     DetailRetentionKind, DetailSpeaker, DetailSummaryStatus, DetailSummaryStatusKind, DetailTask,
     DetailTemplate, DetailTurn, ListCounts, ListDayGroup, ListFilter, ListTag,
     MeetingDetailSnapshot, MeetingRow, MeetingSource as BridgeSource, MeetingState as BridgeState,
-    MeetingsListSnapshot, ProgressEntry as BridgeProgressEntry, ProgressSnapshot,
+    MeetingsListSnapshot, Platform, ProgressEntry as BridgeProgressEntry, ProgressSnapshot,
     RecordingAutoStop, RecordingLevel, RecordingSnapshot, SettingsSection, SpeakerChip,
 };
 use steno_core::{
@@ -82,7 +82,12 @@ pub struct AppState {
 /// configuration is incomplete and "Not now" was not pressed this launch.
 /// Deep links are the controller's pending requests as they stand.
 #[must_use]
-pub fn app_snapshot(app: &AppState, has_meetings: bool, version: &str) -> AppSnapshot {
+pub fn app_snapshot(
+    app: &AppState,
+    has_meetings: bool,
+    version: &str,
+    platform: Platform,
+) -> AppSnapshot {
     let banner = app
         .stored_settings
         .as_ref()
@@ -90,7 +95,7 @@ pub fn app_snapshot(app: &AppState, has_meetings: bool, version: &str) -> AppSna
         .filter(|_| has_meetings && !app.setup_banner_dismissed)
         .map(|message| AppSetupBanner {
             title: message.title().to_owned(),
-            body: message.body().to_owned(),
+            body: message.body(platform).to_owned(),
             offers_summaries: message.offers_summaries(),
             offers_vault: message.offers_vault(),
         });

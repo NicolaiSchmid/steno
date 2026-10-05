@@ -111,6 +111,10 @@ setters wait for the main thread when called from another.
 The tray menu is the Swift menu bar popover's controls: Record (Stop
 recording while recording, with the recorder's words between), Record in
 person, Open Steno, Settings, Launch at login, Check for Updates, Quit.
+Each platform names them its own way (`MenuAction::label_on`): the Mac's
+"Settings…", "Check for Updates…" and "Quit Steno", the first two
+without the ellipsis on Windows and Linux, "Exit Steno" on Windows; only
+the Mac's menu shows shortcut hints.
 Recorder commands are bridge methods sent through the main window
 (`actions.rs`), so the shell has no recorder logic of its own; it follows
 the recorder off the `recording` snapshots the host publishes to that
@@ -129,6 +133,14 @@ AppIndicator extension brings the tray back. An `XEmbed`-only tray is not
 asked for, so there closing main also ends the app, the safe side. On macOS
 the menu bar carries the shell's own menu (`menu.rs`): Quit goes through
 the run loop, the Edit menu gives the pages their copy and paste shortcuts.
+
+Every webview gets the platform before its page runs: `platform.rs` adds
+`window.__STENO_PLATFORM__ = "linux"` (or `"macos"`, `"windows"`) as an
+initialization script, and the page words itself and binds its keys for
+it (`apps/macos/web/src/lib/platform.tsx`: "Show in File Explorer" for
+"Show in Finder", "this computer" for "this Mac", Ctrl+F for ⌘F). The
+host words its own sentences and lists the permissions for the same
+value (`HostConfig::platform`).
 
 The panels are the web app's `#/panel/bubble` and `#/panel/prompt` routes
 (`apps/macos/web/src/windows/panels/`), two webviews that hang from one
@@ -751,7 +763,8 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
 | `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client and logind's shutdown lock |
-| `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
+| `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |
+| `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
 | `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |

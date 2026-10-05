@@ -688,7 +688,7 @@ fn settings_iphone_pairing() {
     );
 }
 
-const RETENTION_SENTENCE: &str = "Each recording is deleted 30 days after it was processed and exported. Transcripts, summaries and exports are never deleted by this rule. Change this any time in Settings > Audio.";
+const RETENTION_SENTENCE: &str = "Each recording is deleted 30 days after it was processed and exported. Transcripts, summaries and exports are never deleted by this rule. Change this any time in Settings > Recording.";
 
 #[test]
 fn onboarding_permissions() {

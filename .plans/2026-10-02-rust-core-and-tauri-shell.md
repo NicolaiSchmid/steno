@@ -1407,6 +1407,23 @@ fix is ported to Swift before cutover.
   the approval state becomes unreachable.
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
   Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
+  The page answers the shortcuts it shows itself (`useShortcut` in
+  `apps/macos/web/src/lib/platform.tsx`): ⌘F and ⇧⌘E in both apps, ⌘⇧R in the
+  Tauri shell only, where no Record menu owns it.
+- Each platform's words and keys: the shell tells every page its platform before the
+  page runs (`apps/desktop/src-tauri/src/platform.rs`, `window.__STENO_PLATFORM__`),
+  the page words itself from one table (`apps/macos/web/src/lib/platform.tsx`: "this
+  computer", "Show in File Explorer", "Show in folder", Ctrl+F) and the host from
+  `HostConfig::platform` ("this computer" in its sentences, and only the permissions
+  the OS has: all four on the Mac, the microphone and local network on Windows, the
+  microphone on Linux). The tray says "Settings" and "Check for Updates" without the
+  ellipsis off the Mac and "Exit Steno" on Windows, and shows shortcut hints on the
+  Mac only. The Swift app sets no platform and keeps the Mac's words. Three changes
+  reach both apps: a vault the CLI named reads "Obsidian (<vault folder>)" in the
+  footer, onboarding page 1's button says Continue, and the retention sentence says
+  "Recordings are kept until you delete them" and points at Settings > Recording. The
+  page now answers ⌘F and ⇧⌘E in the Swift app too, where their hints showed but
+  nothing answered.
 - Linux on a Wayland session runs under XWayland: `main` allows GDK only its `x11`
   backend (inside the process, so nothing it starts inherits it) when
   `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
@@ -1615,16 +1632,17 @@ request that fixes an item deletes it.
   "Audio". Found: #197, #201.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
-- **First Linux release.** The web UI speaks Mac on every platform: "Reveal in
-  Finder", "on this Mac", "menu bar item" and ⌘ shortcuts show on Linux (and on
-  Windows), seen in the Linux smoke under Xvfb. The platform's wording has to come
-  from the shell (the host's platform in a snapshot), not from the web app. Where:
-  `apps/macos/web/src` (`windows/main/meeting-detail.tsx`,
-  `windows/main/meeting-list.tsx`, `windows/main/processing-card.tsx`,
-  `windows/onboarding/setup-page.tsx`, `windows/onboarding/permissions-page.tsx`,
-  `windows/settings/`, `components/codex-consent-card.tsx`,
-  `components/permission-row.tsx`, `components/ui/menu.tsx`). Found: #195
-  (whole-app smoke).
+- **First Linux release.** The exported folder note calls a call recorded on Windows
+  or Linux a "Mac call" (`FolderNoteRenderer.sourceLabel`, Swift's word); the app
+  says "Call". The golden notes in `Tests/Fixtures/snapshots/` are shared with the
+  Swift renderer, so a platform's own word needs a fixture per platform. Where:
+  `crates/steno-adapters/src/rendering/folder_note.rs`. Found: #204.
+- **First Linux release.** The pages keep the Mac's inset for the traffic lights (the
+  sidebar's header-high spacer, onboarding's 52 px top) where Windows and Linux draw
+  their own title bar above the page, so the top of each window has an empty band
+  there. Where: `apps/macos/web/src/components/ui/sidebar-column.tsx`,
+  `apps/macos/web/src/windows/onboarding/onboarding-page.tsx`,
+  `apps/desktop/src-tauri/src/windows.rs`. Found: #204.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
   `directmlOnWindows` stays off by default (`SpeechSettings` in
@@ -1655,6 +1673,12 @@ request that fixes an item deletes it.
 - **First Windows release.** The `.msi` and NSIS installers are not code-signed (no
   certificate), so SmartScreen asks before the first install. Where:
   `.github/workflows/desktop-release.yml`, the WP9a paragraph. Found: #184.
+- **First Windows release.** WebView2 keeps its own browser keys: on the pages that
+  do not bind them (Settings, onboarding) Ctrl+Shift+R reloads the page and Ctrl+F
+  opens WebView2's find bar. Tauri 2.12 does not expose wry's switch for them
+  (`AreBrowserAcceleratorKeysEnabled`); untested on Windows. Where:
+  `apps/desktop/src-tauri/src/windows.rs`, `apps/macos/web/src/lib/platform.tsx`.
+  Found: #204.
 - **Unowned.** The CoreML backend still has its own chunker, merge and decoder
   configuration; moving it onto the shared chunker settles the unticked items of the
   WP4 integration notes (decode loop, merge, recovery, chunking, names). Each backend
@@ -1709,11 +1733,6 @@ request that fixes an item deletes it.
   `pnpm/action-setup` on one runner can break another's install (a rerun passes); it
   needs a per-runner `PNPM_HOME` or a runner-local pnpm across the workflows. Where:
   `pnpm/action-setup` in `.github/workflows/*.yml`. Found: #184.
-- **Unowned.** After a delivery to a vault the CLI named (`steno deliver --vault`),
-  the meeting footer shows the raw destination id `obsidian-folder@<path>` on every
-  platform: `destination_display_name` names only the stored Obsidian destination's id
-  and shows any other id as it is. Where: `crates/steno-host/src/labels.rs`,
-  `crates/steno-cli/src/commands/deliver.rs`. Found: #195 (whole-app smoke).
 - **Unowned.** `steno process --title` stores the title with `TitleOrigin::Default`,
   so the app shows the default date title while the export uses the given one. Swift's
   CLI does the same, so a fix changes both or neither. Where:
@@ -1775,6 +1794,7 @@ PR off `main`.
 | #154 ported: the room fallback for a call whose tap carried nothing (`steno-pipeline`) | `fix/rust-port-154-room-fallback` | #181 | merged |
 | A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
+| Each platform's own wording and shortcuts: the platform from the shell, the page's words and keys, the host's permissions and sentences, the vault the CLI named | `fix/desktop-platform-wording` | #204 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
