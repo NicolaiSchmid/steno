@@ -1387,8 +1387,12 @@ fix is ported to Swift before cutover.
   the OS has: all four on the Mac, the microphone and local network on Windows, the
   microphone on Linux). The tray says "Settings" and "Check for Updates" without the
   ellipsis off the Mac and "Exit Steno" on Windows, and shows shortcut hints on the
-  Mac only. The Swift app sets no platform and reads as before; only a vault the CLI
-  named reads "Obsidian (<vault folder>)" in the footer, in both apps.
+  Mac only. The Swift app sets no platform and keeps the Mac's words. Three changes
+  reach both apps: a vault the CLI named reads "Obsidian (<vault folder>)" in the
+  footer, onboarding page 1's button says Continue, and the retention sentence says
+  "Recordings are kept until you delete them" and points at Settings > Recording. The
+  page now answers ⌘F and ⇧⌘E in the Swift app too, where their hints showed but
+  nothing answered.
 - Linux on a Wayland session runs under XWayland: `main` allows GDK only its `x11`
   backend (inside the process, so nothing it starts inherits it) when
   `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
