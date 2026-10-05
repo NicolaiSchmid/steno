@@ -13,7 +13,7 @@
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels` |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
-//! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`flush_logs`] |
+//! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
 //! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring and the 0600 secrets file behind `SecretStore` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
