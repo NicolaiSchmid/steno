@@ -15,7 +15,6 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use common::{EngineDevice, ScriptedIntake, TestService, engine_hello, seeded_bytes};
 use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
@@ -44,7 +43,7 @@ async fn a_pairing_secret_pairs_exactly_once_under_concurrent_use() {
     let runtime = tokio::runtime::Handle::current();
     for round in 0..ROUNDS {
         let payload = test.service.begin_pairing();
-        let principal = common::pairing_principal(&test, &payload).await;
+        let principal = common::pairing_principal(&test.service, &payload).await;
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let racers = [
             (Uuid::new_v4(), "Nicolai's iPhone"),
@@ -108,7 +107,7 @@ async fn concurrent_completes_admit_once_and_keep_the_complete_receipt() {
     // second meeting; with the real intake it can also fail on the moved
     // source and overwrite the `complete` receipt with `failed`.
     let chunk_size: i64 = 64 * 1024;
-    let intake = ScriptedIntake::with_delay(meeting_id(), 0, Duration::from_millis(300), true);
+    let intake = ScriptedIntake::gated(meeting_id(), true);
     let test = TestService::with(common::Options {
         chunk_size,
         intake: Some(intake.clone() as Arc<dyn steno_core::HandoverIntake>),
@@ -124,8 +123,10 @@ async fn concurrent_completes_admit_once_and_keep_the_complete_receipt() {
 
     let first = phone.complete(id);
     let second = async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        phone.complete(id).await
+        intake.admitting().await;
+        let retry = common::signalled("the retry answers", phone.complete(id)).await;
+        intake.release();
+        retry
     };
     let (a, b) = tokio::join!(first, second);
 

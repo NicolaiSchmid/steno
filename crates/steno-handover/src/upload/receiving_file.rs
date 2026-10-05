@@ -3,14 +3,18 @@
 //! send chunks in any order or twice. Whole-file hashing streams in 1 MiB
 //! reads.
 //!
-//! Every read and write runs on the blocking pool, never on the engine's
-//! task: a chunk's fsync or the hash of a 4 GiB file would otherwise hold
-//! every other request, including the auth gate of unrelated connections
-//! and `/v1/hello`. Swift: `Upload/ReceivingFile.swift`.
+//! Every chunk write and the hash run on the blocking pool, never on the
+//! engine's task: a chunk's fsync or the hash of a 4 GiB file would
+//! otherwise hold every other request, including the auth gate of
+//! unrelated connections and `/v1/hello`. Opening the partial and reading
+//! its `Identity` are single metadata calls and stay on the task.
+//! `Identity` tells the file a verify hashed from one created again at its
+//! path. Swift: `Upload/ReceivingFile.swift`.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use sha2::{Digest as _, Sha256};
 
@@ -41,10 +45,11 @@ pub async fn write(
     .await
 }
 
-/// Whether the whole file, streamed through SHA-256, hashes to `expected`.
-pub async fn hash_matches(path: PathBuf, expected: Vec<u8>) -> std::io::Result<bool> {
+/// Whether `file`, streamed through SHA-256 from its current position (the
+/// start of a freshly opened file), hashes to `expected`.
+pub async fn hash_matches(file: Arc<File>, expected: Vec<u8>) -> std::io::Result<bool> {
     off_task(move || {
-        let mut file = File::open(&path)?;
+        let mut file = &*file;
         let mut hasher = Sha256::new();
         let mut block = vec![0u8; READ_BLOCK];
         loop {
@@ -59,8 +64,93 @@ pub async fn hash_matches(path: PathBuf, expected: Vec<u8>) -> std::io::Result<b
     .await
 }
 
-pub fn size(path: &Path) -> std::io::Result<u64> {
-    Ok(std::fs::metadata(path)?.len())
+/// The volume and file number of a file. While a handle to a file is
+/// open, no other file gets its number, even after the file is unlinked:
+/// a path whose identity matches the identity of an open handle names
+/// that very file. The verify keeps the partial open from before the
+/// `verifying` write to the promote, so the file it hashed is the file it
+/// promotes. Swift: `ReceivingFile.Identity`, which relies on APFS never
+/// reusing a file number instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+    volume: u64,
+    file: u128,
+}
+
+#[cfg(unix)]
+impl Identity {
+    /// The identity of the open `file`.
+    pub fn of(file: &File) -> std::io::Result<Identity> {
+        Ok(Self::from_metadata(&file.metadata()?))
+    }
+
+    /// The identity of the file at `path` now.
+    pub fn at(path: &Path) -> std::io::Result<Identity> {
+        Ok(Self::from_metadata(&std::fs::metadata(path)?))
+    }
+
+    fn from_metadata(metadata: &std::fs::Metadata) -> Identity {
+        use std::os::unix::fs::MetadataExt as _;
+        Identity {
+            volume: metadata.dev(),
+            file: u128::from(metadata.ino()),
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Identity {
+    /// The identity of the open `file`: the 128-bit file id where the
+    /// file system keeps one, else the 64-bit file index. std's
+    /// `MetadataExt::file_index` is not stable yet.
+    #[allow(unsafe_code)]
+    pub fn of(file: &File) -> std::io::Result<Identity> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
+            GetFileInformationByHandleEx,
+        };
+
+        let handle = file.as_raw_handle();
+        let mut id = FILE_ID_INFO::default();
+        // SAFETY: `handle` is open for the call, and `id` is a writable
+        // `FILE_ID_INFO` of the size passed, the buffer `FileIdInfo` fills.
+        let filled = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileIdInfo,
+                (&raw mut id).cast(),
+                u32::try_from(size_of::<FILE_ID_INFO>()).expect("a small struct"),
+            )
+        };
+        if filled != 0 {
+            return Ok(Identity {
+                volume: id.VolumeSerialNumber,
+                file: u128::from_le_bytes(id.FileId.Identifier),
+            });
+        }
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `handle` is open for the call, and `information` is a
+        // writable `BY_HANDLE_FILE_INFORMATION`.
+        if unsafe { GetFileInformationByHandle(handle, &raw mut information) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(Identity {
+            volume: u64::from(information.dwVolumeSerialNumber),
+            file: (u128::from(information.nFileIndexHigh) << 32)
+                | u128::from(information.nFileIndexLow),
+        })
+    }
+
+    /// The identity of the file at `path` now, through a handle open for
+    /// the call. std opens with delete sharing, so this short-lived handle
+    /// blocks no rename or delete of the file. A delete while the verify
+    /// holds the partial open may only be marked pending until it closes:
+    /// an announce in between gets a 500 and this call fails, so the verify
+    /// answers 409; no file is lost.
+    pub fn at(path: &Path) -> std::io::Result<Identity> {
+        Self::of(&File::open(path)?)
+    }
 }
 
 async fn off_task<T: Send + 'static>(

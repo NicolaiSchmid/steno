@@ -194,13 +194,25 @@ struct State {
     /// intake's answer. The verify and the admit yield, so a retried
     /// `complete` must not start a second verify or admission.
     completing: BTreeSet<Uuid>,
-    /// Devices revoked since start and not paired again. Their receipts
-    /// stay out of `active_receipts` (and the stream), also when a request
-    /// that read one before the revoke writes it back after.
+    /// Devices revoked since start and not paired again: their receipts
+    /// stay out of `active_receipts` and the stream, also when a request
+    /// that read one before the revoke writes it back, and their recording
+    /// routes answer 401 before they read, also while the device is still
+    /// in the store (a failed delete, a pairing whose save a revoke
+    /// overtook).
     revoked: BTreeSet<Uuid>,
+    /// Revokes per device since start. A pairing never resets the count,
+    /// so a `complete` from before the revoke still sees it after the phone
+    /// pairs again under the same device id.
+    revocations: BTreeMap<Uuid, u64>,
 }
 
 impl State {
+    /// The device's revoke count, 0 when it was not revoked since start.
+    fn revocation_count(&self, device_id: Uuid) -> u64 {
+        self.revocations.get(&device_id).copied().unwrap_or(0)
+    }
+
     /// Keeps `receipt` as the live copy, unless its device was revoked.
     fn remember(&mut self, receipt: &HandoverReceipt) {
         if !self.revoked.contains(&receipt.device_id) {
@@ -356,12 +368,30 @@ impl Engine {
             .is_some_and(PairingSession::is_open)
     }
 
-    /// Forgets the device and drops whatever it was uploading.
+    /// Forgets the device and drops what it was uploading: the files of its
+    /// receipts in memory. A `complete` in flight that has not reached the
+    /// intake answers 401 when it sees the revoke, and discards the files
+    /// when its receipt was only in the store, where the revoke does not
+    /// look. An admission past that check may still finish; the revoke's
+    /// discard can also make it fail. Its `complete` receipt stays out of
+    /// memory while the device is revoked and out of the store while the
+    /// device is gone from it; once the phone paired again it is written
+    /// like any other. Files of a receipt only in the store (not read since
+    /// start) wait for the next start's sweep.
+    ///
+    /// A failed store delete leaves the device paired in the store but
+    /// revoked in memory: its recording routes answer 401 until it pairs
+    /// again, a retried revoke finishes or the app restarts, and the
+    /// receipts are published without its own. A half-revoked phone that
+    /// cannot hand over is safer than one that can.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
         {
+            // Before the first yield: a `complete` that starts or checks
+            // while the store delete runs must already see this revoke.
             let mut state = self.state();
             state.revoked.insert(device_id);
+            *state.revocations.entry(device_id).or_default() += 1;
             state.active_receipts.retain(|_, receipt| {
                 let owned = receipt.device_id == device_id;
                 if owned && receipt.state.kind() != HandoverStateKind::Complete {
@@ -373,10 +403,11 @@ impl Engine {
         for recording_id in unfinished {
             self.inbox.discard(recording_id);
         }
-        self.with_store(move |store| store.delete_paired_device(device_id))
-            .await?;
+        let deleted = self
+            .with_store(move |store| store.delete_paired_device(device_id))
+            .await;
         self.publish_receipts();
-        Ok(())
+        deleted
     }
 
     // Auth gate
@@ -459,6 +490,7 @@ impl Engine {
             last_seen_at: Some(timestamp),
         };
         let hash = DeviceTokens::hash(&token);
+        let revocation = self.state().revocation_count(device_id);
         if let Err(error) = self
             .with_store(move |store| store.save_paired_device(&device, &hash))
             .await
@@ -469,7 +501,15 @@ impl Engine {
             }
             return HandoverResponse::internal_error("saving the device", &error);
         }
-        self.state().revoked.remove(&device_id);
+        // A revoke that started during the save keeps the device revoked,
+        // whichever of the save and its delete commits first; the next
+        // pairing clears it.
+        {
+            let mut state = self.state();
+            if state.revocation_count(device_id) == revocation {
+                state.revoked.remove(&device_id);
+            }
+        }
         HandoverResponse::json(
             StatusCode::OK,
             &wire::PairResponse {
@@ -500,6 +540,13 @@ impl Engine {
 
     fn publish_receipts(&self) {
         self.receipts.send_replace(self.receipts_snapshot());
+    }
+
+    /// Drops the receipt from memory and tells the observers; the store
+    /// row, if any, stays. Swift: `HandoverEngine.forget`.
+    pub(crate) fn forget(&self, recording_id: Uuid) {
+        self.state().active_receipts.remove(&recording_id);
+        self.publish_receipts();
     }
 
     /// One state change: the state, the chunk set when given, `updated_at`,
@@ -673,6 +720,11 @@ impl RequestHandling for Engine {
             (Route::Pair, _) => self.pair(&request).await,
             (_, None) => Self::unauthorized(),
             (Route::Unpair, Some(device)) => self.unpair(device).await,
+            // A device revoked in memory may still pass the gate: its store
+            // delete failed or has not committed yet, or a pairing whose
+            // save the revoke overtook put it back. Its recording routes stop
+            // here; unpair stays open so the phone can still drop its pairing.
+            (_, Some(device)) if self.state().revoked.contains(&device.id) => Self::unauthorized(),
             (Route::Announce(recording_id), Some(device)) => {
                 self.announce(recording_id, device, &request.body).await
             }

@@ -14,7 +14,7 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -36,10 +36,57 @@ use steno_handover::{
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
 use uuid::Uuid;
 
 pub const START: i64 = 1_790_000_000;
+
+/// How long a test waits for a signal it is sure to get (an intake
+/// entered, a held future woken) before it fails instead of hanging the
+/// suite. A bound on a signal, not a guess at how long the work takes.
+pub const SIGNAL_BOUND: Duration = Duration::from_secs(30);
+
+/// Waits for `signal`; panics with `what` after [`SIGNAL_BOUND`].
+pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
+    tokio::time::timeout(SIGNAL_BOUND, signal)
+        .await
+        .unwrap_or_else(|_| panic!("{what} within {SIGNAL_BOUND:?}"))
+}
+
+/// Holds the store's one connection from another thread until
+/// [`StoreHold::release`], so a store call of the engine waits on it.
+pub struct StoreHold {
+    release: mpsc::Sender<()>,
+    holder: std::thread::JoinHandle<()>,
+}
+
+impl StoreHold {
+    pub fn new(store: &Arc<Store>) -> StoreHold {
+        let (held, store_is_held) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let store = store.clone();
+        let holder = std::thread::spawn(move || {
+            store
+                .write(|_| {
+                    held.send(()).unwrap();
+                    // A test that failed meanwhile drops the sender.
+                    let _ = released.recv();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        store_is_held
+            .recv_timeout(SIGNAL_BOUND)
+            .expect("the store is held");
+        StoreHold { release, holder }
+    }
+
+    pub fn release(self) {
+        self.release.send(()).unwrap();
+        self.holder.join().unwrap();
+    }
+}
 
 /// The one time source the service reads; tests move it to expire a
 /// pairing window or age a receipt.
@@ -90,7 +137,9 @@ pub fn execute_batch(store: &Store, sql: &str) {
 /// each admission open, the way the real intake's copy of a large file
 /// does; `admit_once` refuses every admission after the first successful
 /// one, the way the real intake fails when a second copy races the first
-/// one's removal of the source.
+/// one's removal of the source. A gated intake holds each admission until
+/// [`ScriptedIntake::release`], so a test acts while one is in flight
+/// without guessing how long the verify before it takes.
 pub struct ScriptedIntake {
     pub meeting_id: Uuid,
     pub delay: Duration,
@@ -98,6 +147,9 @@ pub struct ScriptedIntake {
     pub admissions: Mutex<Vec<PathBuf>>,
     failures_left: Mutex<u32>,
     admitted: Mutex<bool>,
+    gated: bool,
+    entered: Notify,
+    released: Notify,
 }
 
 /// Carries the file path, as an I/O error from the real intake's copy
@@ -131,7 +183,27 @@ impl ScriptedIntake {
             admissions: Mutex::new(Vec::new()),
             failures_left: Mutex::new(failures),
             admitted: Mutex::new(false),
+            gated: false,
+            entered: Notify::new(),
+            released: Notify::new(),
         })
+    }
+
+    /// Holds each admission open until [`ScriptedIntake::release`].
+    pub fn gated(meeting_id: Uuid, admit_once: bool) -> Arc<Self> {
+        let mut intake = Self::with_delay(meeting_id, 0, Duration::ZERO, admit_once);
+        Arc::get_mut(&mut intake).unwrap().gated = true;
+        intake
+    }
+
+    /// Returns once an admission of a gated intake is in flight.
+    pub async fn admitting(&self) {
+        signalled("the intake is entered", self.entered.notified()).await;
+    }
+
+    /// Lets the admission in flight answer.
+    pub fn release(&self) {
+        self.released.notify_one();
     }
 
     pub fn entries(&self) -> Vec<PathBuf> {
@@ -152,6 +224,10 @@ impl HandoverIntake for ScriptedIntake {
         _device: &PairedDevice,
     ) -> BoundaryResult<Uuid> {
         self.admissions.lock().unwrap().push(file.to_path_buf());
+        if self.gated {
+            self.entered.notify_one();
+            self.released.notified().await;
+        }
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
@@ -786,11 +862,32 @@ impl EngineDevice {
     pub async fn paired(test: &TestService, device_name: &str) -> EngineDevice {
         let payload = test.service.begin_pairing();
         let device_id = Uuid::new_v4();
-        let response = engine_pair(test, &payload, device_id, device_name).await;
+        let response = engine_pair(&test.service, &payload, device_id, device_name).await;
         assert_eq!(response.status, 200);
         let device = test.store.paired_device(device_id).unwrap().unwrap();
         EngineDevice {
             service: test.service.clone(),
+            device,
+        }
+    }
+
+    /// Pairs again under the same device id and name, as a revoked phone
+    /// that scans a new code does, and returns the new pairing's view.
+    pub async fn pair_again(&self) -> EngineDevice {
+        let payload = self.service.begin_pairing();
+        let response =
+            engine_pair(&self.service, &payload, self.device.id, &self.device.name).await;
+        assert_eq!(response.status, 200, "paired again");
+        let device = self
+            .service
+            .paired_devices()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|device| device.id == self.device.id)
+            .expect("the device is paired");
+        EngineDevice {
+            service: self.service.clone(),
             device,
         }
     }
@@ -864,12 +961,11 @@ impl EngineDevice {
 /// What the gate makes of `POST /v1/pair` with the secret of `payload`;
 /// panics on a rejection.
 pub async fn pairing_principal(
-    test: &TestService,
+    service: &HandoverService,
     payload: &steno_handover::PairingPayload,
 ) -> Principal {
     let authorization = pairing(&payload.secret);
-    match test
-        .service
+    match service
         .engine
         .authenticate(Route::Pair, Some(&authorization))
         .await
@@ -882,24 +978,24 @@ pub async fn pairing_principal(
 /// `POST /v1/pair` with the secret of `payload`, the gate and the body
 /// straight into the engine.
 pub async fn engine_pair(
-    test: &TestService,
+    service: &HandoverService,
     payload: &steno_handover::PairingPayload,
     device_id: Uuid,
     device_name: &str,
 ) -> HandoverResponse {
-    let principal = pairing_principal(test, payload).await;
-    engine_pair_as(test, principal, device_id, device_name).await
+    let principal = pairing_principal(service, payload).await;
+    engine_pair_as(service, principal, device_id, device_name).await
 }
 
 /// The body of `POST /v1/pair` straight into the engine, as `principal`,
 /// the gate's answer at the head.
 pub async fn engine_pair_as(
-    test: &TestService,
+    service: &HandoverService,
     principal: Principal,
     device_id: Uuid,
     device_name: &str,
 ) -> HandoverResponse {
-    test.service
+    service
         .engine
         .handle(
             HandoverRequest::new(Route::Pair, principal).with_body(

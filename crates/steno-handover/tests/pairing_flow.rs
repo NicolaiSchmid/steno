@@ -15,7 +15,6 @@
 
 mod common;
 
-use std::sync::mpsc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -265,8 +264,13 @@ async fn the_device_name_is_stored_trimmed() {
     .await;
     let payload = test.service.begin_pairing();
     let id = Uuid::new_v4();
-    let response =
-        common::engine_pair(&test, &payload, id, " \u{200B}Nicolai's iPhone\n\u{3000}").await;
+    let response = common::engine_pair(
+        &test.service,
+        &payload,
+        id,
+        " \u{200B}Nicolai's iPhone\n\u{3000}",
+    )
+    .await;
     assert_eq!(response.status.as_u16(), 200);
     let stored = test.store.paired_device(id).unwrap().unwrap();
     assert_eq!(stored.name, "Nicolai's iPhone");
@@ -287,13 +291,13 @@ async fn a_failed_device_save_reopens_the_window_for_the_same_secret() {
         "CREATE TEMP TRIGGER refuse_pairing BEFORE INSERT ON pairedDevice \
          BEGIN SELECT RAISE(ABORT, 'refused'); END",
     );
-    let failed = common::engine_pair(&test, &payload, Uuid::new_v4(), "iPhone").await;
+    let failed = common::engine_pair(&test.service, &payload, Uuid::new_v4(), "iPhone").await;
     assert_eq!(failed.status.as_u16(), 500);
     assert!(test.service.engine.pairing_is_open(), "the window is back");
 
     common::execute_batch(&test.store, "DROP TRIGGER temp.refuse_pairing");
     let id = Uuid::new_v4();
-    let paired = common::engine_pair(&test, &payload, id, "iPhone").await;
+    let paired = common::engine_pair(&test.service, &payload, id, "iPhone").await;
     assert_eq!(paired.status.as_u16(), 200);
     assert!(!test.service.engine.pairing_is_open(), "and now spent");
     assert!(test.store.paired_device(id).unwrap().is_some());
@@ -309,11 +313,11 @@ async fn a_head_authorised_against_a_closed_window_does_not_pair_against_the_nex
     })
     .await;
     let first = test.service.begin_pairing();
-    let principal = common::pairing_principal(&test, &first).await;
+    let principal = common::pairing_principal(&test.service, &first).await;
     test.service.cancel_pairing();
     let _second = test.service.begin_pairing();
 
-    let late = common::engine_pair_as(&test, principal, Uuid::new_v4(), "iPhone").await;
+    let late = common::engine_pair_as(&test.service, principal, Uuid::new_v4(), "iPhone").await;
     assert_eq!(late.status.as_u16(), 403);
     assert!(
         test.service.engine.pairing_is_open(),
@@ -352,33 +356,19 @@ async fn pair_during_a_held_save(
     principal: Principal,
     meanwhile: impl FnOnce(),
 ) -> u16 {
-    let (held, held_rx) = mpsc::channel();
-    let (release, release_rx) = mpsc::channel::<()>();
-    let store = test.store.clone();
-    let holder = std::thread::spawn(move || {
-        store
-            .read(|_| {
-                held.send(()).unwrap();
-                release_rx.recv().unwrap();
-                Ok(())
-            })
-            .unwrap();
-    });
-    held_rx.recv().unwrap();
-
-    let pair = common::engine_pair_as(test, principal, Uuid::new_v4(), "iPhone");
+    let hold = common::StoreHold::new(&test.store);
+    let pair = common::engine_pair_as(&test.service, principal, Uuid::new_v4(), "iPhone");
     let drive = async {
         while test.service.engine.pairing_is_open() {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
         meanwhile();
-        release.send(()).unwrap();
+        hold.release();
     };
     let (response, ()) =
         tokio::time::timeout(Duration::from_secs(10), async { tokio::join!(pair, drive) })
             .await
             .expect("the save was held and released");
-    holder.join().unwrap();
     response.status.as_u16()
 }
 
@@ -392,7 +382,7 @@ async fn a_window_cancelled_while_its_save_runs_stays_closed_when_the_save_fails
     })
     .await;
     let payload = test.service.begin_pairing();
-    let principal = common::pairing_principal(&test, &payload).await;
+    let principal = common::pairing_principal(&test.service, &payload).await;
     refuse_pairing(&test);
 
     let status = pair_during_a_held_save(&test, principal.clone(), || {
@@ -404,7 +394,7 @@ async fn a_window_cancelled_while_its_save_runs_stays_closed_when_the_save_fails
 
     common::execute_batch(&test.store, "DROP TRIGGER temp.refuse_pairing");
     assert!(gate_refuses(&test, &payload.secret).await);
-    let late = common::engine_pair_as(&test, principal, Uuid::new_v4(), "iPhone").await;
+    let late = common::engine_pair_as(&test.service, principal, Uuid::new_v4(), "iPhone").await;
     assert_eq!(late.status.as_u16(), 403);
     assert!(test.store.paired_devices().unwrap().is_empty());
 }
@@ -419,7 +409,7 @@ async fn a_window_replaced_and_cancelled_while_a_save_runs_brings_neither_back()
     })
     .await;
     let first = test.service.begin_pairing();
-    let principal = common::pairing_principal(&test, &first).await;
+    let principal = common::pairing_principal(&test.service, &first).await;
     refuse_pairing(&test);
 
     let mut second = None;
@@ -435,7 +425,7 @@ async fn a_window_replaced_and_cancelled_while_a_save_runs_brings_neither_back()
     common::execute_batch(&test.store, "DROP TRIGGER temp.refuse_pairing");
     assert!(gate_refuses(&test, &first.secret).await, "the first QR");
     assert!(gate_refuses(&test, &second.secret).await, "the second QR");
-    let late = common::engine_pair_as(&test, principal, Uuid::new_v4(), "iPhone").await;
+    let late = common::engine_pair_as(&test.service, principal, Uuid::new_v4(), "iPhone").await;
     assert_eq!(late.status.as_u16(), 403);
     assert!(test.store.paired_devices().unwrap().is_empty());
 }
