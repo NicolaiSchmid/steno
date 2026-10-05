@@ -68,7 +68,8 @@ exits reach the shutdown these ways:
 - On Linux an exit that went through ends the process two seconds later
   at the latest (`end_within` in `main.rs`): the single-instance plugin
   releases its bus name at the run loop's end and waits for the bus
-  without a bound, so a frozen session bus held the exit about 20 s.
+  without a bound, so a frozen session bus held the exit (past a minute
+  under a stopped private bus); now the exit takes about two seconds.
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).

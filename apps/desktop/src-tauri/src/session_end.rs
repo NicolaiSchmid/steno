@@ -223,7 +223,13 @@ fn follow_session(session: &Connection, startup_id: &str, ending: &Ending) -> zb
             continue;
         };
         match client_step(member.as_str()) {
-            ClientStep::Answer => answer()?,
+            // A lost answer leaves the client following: the end may still
+            // come.
+            ClientStep::Answer => {
+                if let Err(error) = answer() {
+                    tracing::warn!(%error, "the session manager's query went unanswered");
+                }
+            }
             ClientStep::SaveAnswerQuit => {
                 (ending.save)();
                 let answered = answer();

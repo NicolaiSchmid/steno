@@ -561,7 +561,8 @@ const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// the latest, with its code: the single-instance plugin releases its name
 /// on the session bus at `RunEvent::Exit` (before the shell's own handler
 /// runs) and waits for the bus's answer without a bound, so a frozen
-/// session bus held the exit about 20 s (measured with #172). The bus
+/// session bus held the exit (about 20 s in #172's run, past a minute
+/// under a stopped private bus, where it waited in `release_name`). The bus
 /// drops the name with the connection anyway, and an exit goes through
 /// only once the shutdown ended or ran out of patience, so ending the
 /// teardown early loses nothing. An update's relaunch

@@ -917,8 +917,10 @@ still has to draw the window side. `[ ]` is not ported yet.
     the teardown. `tauri-plugin-single-instance` 2.5 releases its bus name in its
     `RunEvent::Exit` handler, which Tauri runs before the shell's, with zbus's
     `release_name` on a connection without a method timeout, so a frozen session bus held
-    the exit about 20 s (measured with #172). The bus drops the name with the connection
-    anyway, and the shutdown has ended before an exit goes through.
+    the exit: about 20 s in #172's run, and past a minute under a stopped private
+    `dbus-daemon` (the main thread waiting in that `release_name`), where the exit now
+    takes 2.2 s. The bus drops the name with the connection anyway, and the shutdown has
+    ended before an exit goes through.
   - The services runtime is never dropped: dropping it waits, without a bound, for a
     transcription or a model load in progress.
   - Open: the Windows logoff is untested on hardware and can outlast the end-session
