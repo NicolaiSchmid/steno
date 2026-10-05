@@ -1,16 +1,19 @@
 //! A child on `DirectML` whose resident set passes the memory ceiling
-//! between requests switches `DirectML` off, as one during a request does:
-//! what it holds then is what its last request left, on the GPU too. The
-//! next call still gets no error, and its child loads on the CPU. The
-//! switch-off is process-wide and nothing clears it, so this test runs in
-//! a binary of its own. Windows only: the client asks for `DirectML`
-//! nowhere else.
+//! between requests switches `DirectML` off, as one during a request does
+//! (the rule: `steno_speech::sidecar::client`'s module docs), even when it
+//! dies before the next call. The next call still gets no error, and its
+//! child loads on the CPU. The switch-off is process-wide and nothing
+//! clears it, so this test runs in a binary of its own. Windows only: the
+//! client asks for `DirectML` nowhere else.
 
 #![cfg(windows)]
 
 mod common;
 
-use common::{assert_works, engine_with_fault, fault_queued_soon, provider, tone};
+use common::{
+    alive, assert_works, engine_with_fault, fault_queued_soon, kill, provider, tone,
+    within_ten_seconds,
+};
 use steno_core::SpeechEngine as _;
 use steno_speech::EncoderProvider;
 use steno_speech::sidecar::directml_switched_off;
@@ -25,6 +28,14 @@ async fn a_child_over_the_ceiling_while_idle_on_directml_switches_it_off() {
     assert!(
         fault_queued_soon(&engine),
         "the reader never queued the report over the ceiling"
+    );
+    // Killed by the system for memory, say, before the next call: the
+    // overrun the reader queued first still counts.
+    let pid = engine.pid().unwrap();
+    assert!(kill(pid));
+    assert!(
+        within_ten_seconds(|| (!alive(pid)).then_some(())).is_some(),
+        "the killed child never went away"
     );
     assert_works(&engine, &tone(0.5)).await;
     assert_eq!(engine.spawns(), 2);

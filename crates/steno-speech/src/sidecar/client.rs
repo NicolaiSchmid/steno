@@ -472,23 +472,25 @@ impl SidecarProcess {
     }
 
     /// Why this child, idle since its last request, cannot take the next
-    /// one: it has exited (killed for memory by the system, say), or the
-    /// reader queued the end of its stdout, garbage or a heartbeat over the
-    /// ceiling; anything else queued between requests is a fault too.
+    /// one: the reader queued the end of its stdout, garbage or a heartbeat
+    /// over the ceiling (anything else queued between requests is a fault
+    /// too), or it has exited (killed for memory by the system, say). The
+    /// queue comes first, so an overrun the child then died after still
+    /// counts as an overrun.
     fn failed_while_idle(&mut self) -> Option<SidecarError> {
-        if let Ok(Some(_)) = self.child.try_wait() {
-            return Some(self.crashed(None));
+        if let Ok(event) = self.events.try_recv() {
+            return Some(match event {
+                Event::OverCeiling(rss_bytes) => SidecarError::MemoryCeiling {
+                    rss_bytes,
+                    ceiling_bytes: self.ceiling,
+                },
+                Event::Closed => self.crashed(None),
+                Event::Garbage(detail) => SidecarError::Protocol(detail),
+                Event::WriteFailed(error) => self.crashed(Some(error)),
+                Event::Reply(reply) => SidecarError::Protocol(format!("unasked {reply:?}")),
+            });
         }
-        Some(match self.events.try_recv().ok()? {
-            Event::OverCeiling(rss_bytes) => SidecarError::MemoryCeiling {
-                rss_bytes,
-                ceiling_bytes: self.ceiling,
-            },
-            Event::Closed => self.crashed(None),
-            Event::Garbage(detail) => SidecarError::Protocol(detail),
-            Event::WriteFailed(error) => self.crashed(Some(error)),
-            Event::Reply(reply) => SidecarError::Protocol(format!("unasked {reply:?}")),
-        })
+        matches!(self.child.try_wait(), Ok(Some(_))).then(|| self.crashed(None))
     }
 
     /// The exit status, waiting up to `grace` for one.
