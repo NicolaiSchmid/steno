@@ -58,6 +58,8 @@ const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
 /// How long a test listens for a report that must not come: three
 /// coalescing delays, fixed so that a shorter delay cannot shorten it.
 const QUIET: Duration = Duration::from_millis(1_500);
+/// How long the daemon and WirePlumber get to settle after a change.
+const SETTLE: Duration = Duration::from_secs(2);
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
 fn within<T: Send + 'static>(
@@ -160,14 +162,10 @@ impl Tone {
         let tone = Self { child, _dir: dir };
         let output = format!("{name}:output_MONO");
         let input = format!("{source}:input_MONO");
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !tool("pw-link", &[&output, &input]) {
-            assert!(
-                Instant::now() < deadline,
-                "could not link {output} to {input}"
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let linked = eventually(Duration::from_secs(5), || {
+            tool("pw-link", &[&output, &input])
+        });
+        assert!(linked, "could not link {output} to {input}");
         tone
     }
 }
@@ -218,9 +216,9 @@ fn node_id(name: &str) -> Option<u64> {
     })
 }
 
-/// Polls `done` for up to two seconds; whether it held.
-fn eventually(mut done: impl FnMut() -> bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(2);
+/// Polls `done` for up to `limit`; whether it held.
+fn eventually(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + limit;
     while !done() {
         if Instant::now() >= deadline {
             return false;
@@ -242,15 +240,15 @@ fn stop_and_check_teardown(backend: &Arc<LiveCaptureBackend>, sink: &Arc<LaneFra
         1,
         "stop() returned before the capture thread let go of the sink"
     );
+    let threads_gone =
+        || thread_named("data-loop").is_none() && thread_named("steno-pipewire").is_none();
     assert!(
-        eventually(
-            || thread_named("data-loop").is_none() && thread_named("steno-pipewire").is_none()
-        ),
+        eventually(SETTLE, threads_gone),
         "the capture's threads outlive stop(): {:?}",
         threads()
     );
     assert!(
-        eventually(|| node_id(CAPTURE_NODE).is_none()),
+        eventually(SETTLE, || node_id(CAPTURE_NODE).is_none()),
         "{CAPTURE_NODE} is still in the graph after stop()"
     );
     assert_eq!(
@@ -292,11 +290,10 @@ fn collect(sink: &LaneFrameSink, frames: usize) -> Vec<Vec<f32>> {
     for lane in 0..sink.lanes().len() {
         drop(sink.ring(lane).drain_all());
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while sink.available_to_read() < frames {
-        assert!(Instant::now() < deadline, "the capture stalled");
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let filled = eventually(Duration::from_secs(5), || {
+        sink.available_to_read() >= frames
+    });
+    assert!(filled, "the capture stalled");
     (0..sink.lanes().len())
         .map(|lane| {
             let mut samples = vec![0.0f32; frames];
@@ -508,7 +505,7 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
             (SINK, SECOND_SINK)
         };
         assert!(
-            eventually(|| default_sink().as_deref() == Some(from)),
+            eventually(SETTLE, || default_sink().as_deref() == Some(from)),
             "round {round}: the default is not {from}; {}",
             default_metadata()
         );
@@ -520,7 +517,7 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
         stop_and_check_teardown(&backend, &sink);
         sink.rearm_device_change();
         assert!(
-            eventually(|| default_sink().as_deref() == Some(to)),
+            eventually(SETTLE, || default_sink().as_deref() == Some(to)),
             "round {round}: WirePlumber did not settle on {to}"
         );
         start(&backend, &lanes, None, &sink)
@@ -545,7 +542,7 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
     // WirePlumber moved it (about 15 ms).
     DefaultSink::set(SECOND_SINK);
     assert!(
-        eventually(|| default_sink().as_deref() == Some(SECOND_SINK)),
+        eventually(SETTLE, || default_sink().as_deref() == Some(SECOND_SINK)),
         "WirePlumber did not move the default; {}",
         default_metadata()
     );
@@ -585,11 +582,10 @@ impl TemporaryMic {
             ]
         ));
         let mic = Self { name };
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while node_id(name).is_none() {
-            assert!(Instant::now() < deadline, "{name} did not appear");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        assert!(
+            eventually(Duration::from_secs(5), || node_id(name).is_some()),
+            "{name} did not appear"
+        );
         mic
     }
 
