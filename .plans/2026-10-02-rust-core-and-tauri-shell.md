@@ -1275,10 +1275,11 @@ fix is ported to Swift before cutover.
   the LAN. On Windows the hardware rule refuses a LAN address on a Hyper-V external
   switch's or a Network Bridge's vEthernet adapter, so a computer whose LAN address
   moved there is unreachable.
-- Touch: `HandoverEngine.touch` should run an `UPDATE` of the row that still holds the
-  token (a new `MeetingStore` method), as the Rust engine does
-  (`Store::touch_paired_device`); today `store.save(seen, tokenHash:)` upserts the
-  device the gate read before a yield, so a revoke in between resurrects it.
+- Touch: `HandoverEngine.touch` runs an `UPDATE` of the row that still holds the token
+  (`MeetingStore.touchPairedDevice`), as the Rust engine does
+  (`Store::touch_paired_device`). Fixed by #205: before, `store.save(seen, tokenHash:)`
+  upserted the device the gate read before a yield, so a revoke in between
+  resurrected it.
 - Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt`
   read with `try?`, so a failed read counts as no receipt: the sweep deletes a
   resumable upload, a route answers 404, and an announce starts the recording over,
@@ -1489,13 +1490,6 @@ request that fixes an item deletes it.
   does not show yet. It blocks the first Linux release too. Where: `display_name`,
   `source_repo` and `expected_bytes` in `crates/steno-services/src/speech.rs`; the
   Settings > General item under "Pipeline and services (WP6b)". Found: #164, #183.
-- **WP9b.** The Swift `touch` upsert: `HandoverEngine.touch`
-  (`Sources/StenoHandover/Routing/HandoverEngine.swift`) records a phone's last-seen
-  time with `store.save(seen, tokenHash:)`, which writes back the whole device row it
-  read before a suspension, so a revoke that commits in between puts the revoked phone
-  back. The Rust store runs an `UPDATE` of the row that still holds the token
-  (`Store::touch_paired_device`). Needed only if the Swift app ships another release.
-  Where: the "Touch" line under "Handover". Found: #169, #191.
 - **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
   Swift defects (each ported to Swift if it ships another release, otherwise closed by
   the cutover), the fixtures the Swift side owes, and the audio choices to settle at
