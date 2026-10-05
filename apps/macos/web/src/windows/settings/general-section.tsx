@@ -180,7 +180,7 @@ export function GeneralSection() {
 			</FormCard>
 
 			<FormCard title="Meetings">
-				{platform.permissions.includes("calendar") ? (
+				{platform.readsCalendar ? (
 					<PermissionRow
 						isRequesting={general.requestingCalendar}
 						kind="calendar"

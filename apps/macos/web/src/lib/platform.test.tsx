@@ -4,6 +4,7 @@ import { platform as platformSchema } from "@/bridge/contract";
 import {
 	detectPlatform,
 	matchesShortcut,
+	type PlatformOS,
 	PlatformProvider,
 	platformFor,
 	SHORTCUTS,
@@ -13,12 +14,14 @@ import {
 	useShortcut,
 } from "./platform";
 
+/** A key event; `code` is the US layout's for an ASCII letter unless given. */
 function key(
 	key: string,
 	modifiers: Partial<Omit<ShortcutEvent, "key">> = {},
 ): ShortcutEvent {
 	return {
 		key,
+		code: /^[a-z]$/i.test(key) ? `Key${key.toUpperCase()}` : "",
 		metaKey: false,
 		ctrlKey: false,
 		shiftKey: false,
@@ -32,19 +35,14 @@ describe("shortcutLabel", () => {
 		expect(shortcutLabel("macos", SHORTCUTS.findMeetings)).toBe("⌘F");
 		expect(shortcutLabel("macos", SHORTCUTS.exportAgain)).toBe("⇧⌘E");
 		expect(shortcutLabel("macos", SHORTCUTS.record)).toBe("⌘⇧R");
-		expect(
-			shortcutLabel("macos", { modifiers: ["alt", "mod"], key: "," }),
-		).toBe("⌥⌘,");
+		expect(shortcutLabel("macos", { modifiers: ["mod"], key: "," })).toBe("⌘,");
 	});
 
-	it("spells Ctrl, Alt and Shift in that order on Windows and Linux", () => {
+	it("spells Ctrl, then Shift, on Windows and Linux", () => {
 		for (const os of ["windows", "linux"] as const) {
 			expect(shortcutLabel(os, SHORTCUTS.findMeetings)).toBe("Ctrl+F");
 			expect(shortcutLabel(os, SHORTCUTS.exportAgain)).toBe("Ctrl+Shift+E");
 			expect(shortcutLabel(os, SHORTCUTS.record)).toBe("Ctrl+Shift+R");
-			expect(
-				shortcutLabel(os, { modifiers: ["shift", "alt", "mod"], key: "P" }),
-			).toBe("Ctrl+Alt+Shift+P");
 		}
 	});
 });
@@ -100,6 +98,37 @@ describe("matchesShortcut", () => {
 			),
 		).toBe(false);
 	});
+
+	it("takes the physical key where the layout types no ASCII character", () => {
+		const find = SHORTCUTS.findMeetings;
+		// Russian: the F key types "а"; Greek: "φ".
+		expect(
+			matchesShortcut(
+				"windows",
+				key("а", { code: "KeyF", ctrlKey: true }),
+				find,
+			),
+		).toBe(true);
+		expect(
+			matchesShortcut("macos", key("φ", { code: "KeyF", metaKey: true }), find),
+		).toBe(true);
+		expect(
+			matchesShortcut("linux", key("б", { code: "Comma", ctrlKey: true }), {
+				modifiers: ["mod"],
+				key: ",",
+			}),
+		).toBe(true);
+		expect(
+			matchesShortcut("linux", key("а", { code: "KeyA", ctrlKey: true }), find),
+		).toBe(false);
+		// A Latin layout keeps its own letters: Dvorak's "f" is on the Y key.
+		expect(
+			matchesShortcut("linux", key("f", { code: "KeyY", ctrlKey: true }), find),
+		).toBe(true);
+		expect(
+			matchesShortcut("linux", key("y", { code: "KeyF", ctrlKey: true }), find),
+		).toBe(false);
+	});
 });
 
 describe("detectPlatform", () => {
@@ -129,7 +158,7 @@ describe("detectPlatform", () => {
 		for (const os of platformSchema.options) {
 			const platform = platformFor(os);
 			expect(platform.words.computer).not.toBe("");
-			expect(platform.permissions[0]).toBe("microphone");
+			expect(typeof platform.readsCalendar).toBe("boolean");
 		}
 	});
 });
@@ -139,26 +168,62 @@ describe("words", () => {
 		expect(platformFor("macos").words).toMatchObject({
 			computer: "Mac",
 			showInFileManager: "Show in Finder",
+			revealInFileManager: "Reveal in Finder",
+			showExport: "Reveal export",
+			showRecording: "Reveal recording",
 			systemSettings: "System Settings",
+			runsIn: "in the menu bar",
+			trayItem: "menu bar item",
 		});
 		expect(platformFor("windows").words).toMatchObject({
 			computer: "computer",
 			showInFileManager: "Show in File Explorer",
-			systemSettings: "Settings",
+			revealInFileManager: "Show in File Explorer",
+			systemSettings: "Windows Settings",
 			opensSystemSettings: true,
+			trayItem: "tray icon",
 		});
 		expect(platformFor("linux").words).toMatchObject({
 			computer: "computer",
 			showInFileManager: "Show in folder",
+			revealInFileManager: "Show in folder",
 			opensSystemSettings: false,
 		});
 		expect(platformFor("linux").words.localNetworkPrompt).toBeUndefined();
 	});
 
-	it("list the calendar on the Mac only", () => {
-		expect(platformFor("macos").permissions).toContain("calendar");
-		expect(platformFor("windows").permissions).not.toContain("calendar");
-		expect(platformFor("linux").permissions).toEqual(["microphone"]);
+	it("leave the tray unnamed on Linux, where it may not show", () => {
+		expect(platformFor("linux").words.runsIn).toBeUndefined();
+		expect(platformFor("linux").words.trayItem).toBeUndefined();
+	});
+
+	it("say where the API key and the Codex sign-in live", () => {
+		const where = (os: PlatformOS) => {
+			const { keychain, loginKeychain, codexSignInFile } =
+				platformFor(os).words;
+			return { keychain, loginKeychain, codexSignInFile };
+		};
+		expect(where("macos")).toEqual({
+			keychain: "your keychain",
+			loginKeychain: "your login keychain",
+			codexSignInFile: "~/.codex/auth.json",
+		});
+		expect(where("windows")).toEqual({
+			keychain: "Credential Manager",
+			loginKeychain: "Windows Credential Manager",
+			codexSignInFile: "%USERPROFILE%\\.codex\\auth.json",
+		});
+		expect(where("linux")).toEqual({
+			keychain: "a file only you can read",
+			loginKeychain: "a file only you can read",
+			codexSignInFile: "~/.codex/auth.json",
+		});
+	});
+
+	it("read the calendar on the Mac only", () => {
+		expect(platformFor("macos").readsCalendar).toBe(true);
+		expect(platformFor("windows").readsCalendar).toBe(false);
+		expect(platformFor("linux").readsCalendar).toBe(false);
 	});
 });
 

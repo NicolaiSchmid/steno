@@ -28,7 +28,9 @@ export const SECTIONS: readonly SectionInfo[] = [
 		id: "general",
 		title: "General",
 		purpose: ({ runsIn }) =>
-			`Steno runs ${runsIn} and records when you ask it to.`,
+			runsIn
+				? `Steno runs ${runsIn} and records when you ask it to.`
+				: "Steno records when you ask it to.",
 	},
 	{
 		id: "recording",

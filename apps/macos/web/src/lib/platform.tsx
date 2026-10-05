@@ -5,14 +5,7 @@ import {
 	useEffect,
 	useRef,
 } from "react";
-import type { z } from "zod";
-import {
-	type PlatformOS,
-	type permissionKind,
-	platform as platformSchema,
-} from "@/bridge/contract";
-
-type PermissionKind = z.infer<typeof permissionKind>;
+import { type PlatformOS, platform as platformSchema } from "@/bridge/contract";
 
 /**
  * The OS the page runs on and everything the page words or binds for it:
@@ -37,13 +30,21 @@ export type { PlatformOS };
 export interface PlatformWords {
 	/** The machine after "this", "your" or "the": "Mac", "computer". */
 	computer: string;
-	/** The button that shows a file or folder in the file manager. */
+	/** The button that shows a folder in the file manager (Settings). */
 	showInFileManager: string;
+	/**
+	 * The meeting footer's button that shows the export in the file
+	 * manager; the Mac's keeps the Swift app's "Reveal in Finder".
+	 */
+	revealInFileManager: string;
 	/** The actions menu item that shows the exported meeting folder. */
 	showExport: string;
 	/** The actions menu item that shows the recording's files. */
 	showRecording: string;
-	/** Where a saved API key lives, after "in": "your keychain". */
+	/**
+	 * Where a saved API key lives, after "in": "your keychain", "a file
+	 * only you can read" (`crates/steno-services/src/secrets.rs`).
+	 */
 	keychain: string;
 	/** The same in full, after "in": "your login keychain". */
 	loginKeychain: string;
@@ -51,10 +52,15 @@ export interface PlatformWords {
 	systemSettings: string;
 	/** Whether Steno can open that place itself ("Open System Settings"). */
 	opensSystemSettings: boolean;
-	/** Where Steno stays without a window, after "Steno runs". */
-	runsIn: string;
-	/** The always-there control, after "The": "menu bar item". */
-	trayItem: string;
+	/**
+	 * Where Steno stays without a window, after "Steno runs"; none on
+	 * Linux, whose tray shows only where a status notifier host runs.
+	 */
+	runsIn?: string;
+	/** The always-there control, after "The": "menu bar item"; none on Linux. */
+	trayItem?: string;
+	/** The file the Codex command-line tool keeps its sign-in in. */
+	codexSignInFile: string;
 	/** Who asks for the system audio recording, and when; Mac only. */
 	systemAudioPrompt?: string;
 	/** Who asks for local network access, and when. */
@@ -65,6 +71,7 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 	macos: {
 		computer: "Mac",
 		showInFileManager: "Show in Finder",
+		revealInFileManager: "Reveal in Finder",
 		showExport: "Reveal export",
 		showRecording: "Reveal recording",
 		keychain: "your keychain",
@@ -73,51 +80,57 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
 		opensSystemSettings: true,
 		runsIn: "in the menu bar",
 		trayItem: "menu bar item",
+		codexSignInFile: "~/.codex/auth.json",
 		systemAudioPrompt: "macOS asks once, during a short test recording.",
 		localNetworkPrompt: "macOS asks when you pair the first phone.",
 	},
 	windows: {
 		computer: "computer",
 		showInFileManager: "Show in File Explorer",
+		revealInFileManager: "Show in File Explorer",
 		showExport: "Show export in File Explorer",
 		showRecording: "Show recording in File Explorer",
 		keychain: "Credential Manager",
 		loginKeychain: "Windows Credential Manager",
-		systemSettings: "Settings",
+		systemSettings: "Windows Settings",
 		opensSystemSettings: true,
 		runsIn: "in the system tray",
 		trayItem: "tray icon",
+		codexSignInFile: "%USERPROFILE%\\.codex\\auth.json",
 		localNetworkPrompt:
 			"Windows may ask to let Steno through the firewall when you pair the first phone.",
 	},
 	linux: {
 		computer: "computer",
 		showInFileManager: "Show in folder",
+		revealInFileManager: "Show in folder",
 		showExport: "Show export in folder",
 		showRecording: "Show recording in folder",
-		keychain: "your keyring",
-		loginKeychain: "your keyring",
+		keychain: "a file only you can read",
+		loginKeychain: "a file only you can read",
 		systemSettings: "your system settings",
 		opensSystemSettings: false,
-		runsIn: "in the background",
-		trayItem: "tray icon",
+		codexSignInFile: "~/.codex/auth.json",
 	},
 };
 
 /**
- * The permissions each OS has, as the host lists them
- * (`Platform::permissions` in `crates/steno-bridge/src/envelope.rs`). The
- * host decides the onboarding and Recording rows; the page needs this only
- * for General's calendar row, whose state the snapshot always carries.
+ * Whether Steno reads a calendar on the OS: whether the host's list
+ * (`Platform::permissions` in `crates/steno-bridge/src/envelope.rs`) has
+ * the calendar. The host decides the onboarding and Recording rows; the
+ * page needs this only for General's calendar row, whose state the
+ * snapshot always carries. `crates/steno-bridge/tests/fixtures.rs` reads
+ * this record as text and compares it, so keep one `os: true|false,` line
+ * per platform.
  */
-const PERMISSIONS: Record<PlatformOS, readonly PermissionKind[]> = {
-	macos: ["microphone", "systemAudio", "calendar", "localNetwork"],
-	windows: ["microphone", "localNetwork"],
-	linux: ["microphone"],
+const READS_CALENDAR: Record<PlatformOS, boolean> = {
+	macos: true,
+	windows: false,
+	linux: false,
 };
 
 /** A modifier in a shortcut; `mod` is ⌘ on the Mac and Ctrl elsewhere. */
-type ShortcutModifier = "mod" | "shift" | "alt";
+type ShortcutModifier = "mod" | "shift";
 
 /**
  * A shortcut: its modifiers in the order the Mac label writes them, then
@@ -141,15 +154,13 @@ export const SHORTCUTS = {
 const MAC_GLYPHS: Record<ShortcutModifier, string> = {
 	mod: "⌘",
 	shift: "⇧",
-	alt: "⌥",
 };
 
-/** Windows' and Linux's order: Ctrl, Alt, Shift. */
-const PC_ORDER: readonly ShortcutModifier[] = ["mod", "alt", "shift"];
-const PC_NAMES: Record<ShortcutModifier, string> = {
+/** Windows' and Linux's order: Ctrl, then Shift. */
+const ELSEWHERE_ORDER: readonly ShortcutModifier[] = ["mod", "shift"];
+const ELSEWHERE_NAMES: Record<ShortcutModifier, string> = {
 	mod: "Ctrl",
 	shift: "Shift",
-	alt: "Alt",
 };
 
 /** "⇧⌘E" on the Mac, "Ctrl+Shift+E" on Windows and Linux. */
@@ -161,9 +172,9 @@ export function shortcutLabel(os: PlatformOS, shortcut: Shortcut): string {
 		);
 	}
 	return [
-		...PC_ORDER.filter((modifier) => shortcut.modifiers.includes(modifier)).map(
-			(modifier) => PC_NAMES[modifier],
-		),
+		...ELSEWHERE_ORDER.filter((modifier) =>
+			shortcut.modifiers.includes(modifier),
+		).map((modifier) => ELSEWHERE_NAMES[modifier]),
 		shortcut.key,
 	].join("+");
 }
@@ -171,16 +182,38 @@ export function shortcutLabel(os: PlatformOS, shortcut: Shortcut): string {
 /** The keys of a key event that a shortcut looks at. */
 export interface ShortcutEvent {
 	key: string;
+	code: string;
 	metaKey: boolean;
 	ctrlKey: boolean;
 	shiftKey: boolean;
 	altKey: boolean;
 }
 
+/** The physical key's `code` for a shortcut key: "KeyF", "Comma". */
+function keyCode(key: string): string | undefined {
+	if (/^[A-Za-z]$/.test(key)) {
+		return `Key${key.toUpperCase()}`;
+	}
+	return key === "," ? "Comma" : undefined;
+}
+
 /**
- * Whether `event` is `shortcut` on `os`: exactly its modifiers, with ⌘ for
- * `mod` on the Mac and Ctrl elsewhere (so Ctrl+F on the Mac and ⌘F, the
- * Windows key, elsewhere are not it), and the key in either case.
+ * Whether the event's key is `key`: the character in either case, or,
+ * where the layout types no ASCII character there (Cyrillic, Greek), the
+ * physical key that types it on a US layout.
+ */
+function keyMatches(event: ShortcutEvent, key: string): boolean {
+	if (/^[\x20-\x7e]$/.test(event.key)) {
+		return event.key.toLowerCase() === key.toLowerCase();
+	}
+	return event.code === keyCode(key);
+}
+
+/**
+ * Whether `event` is `shortcut` on `os`: exactly its modifiers (and no
+ * Alt), with ⌘ for `mod` on the Mac and Ctrl elsewhere (so Ctrl+F on the
+ * Mac and ⌘F, the Windows key, elsewhere are not it), and its key
+ * (`keyMatches`).
  */
 export function matchesShortcut(
 	os: PlatformOS,
@@ -195,8 +228,8 @@ export function matchesShortcut(
 		mod === has("mod") &&
 		!other &&
 		event.shiftKey === has("shift") &&
-		event.altKey === has("alt") &&
-		event.key.toLowerCase() === shortcut.key.toLowerCase()
+		!event.altKey &&
+		keyMatches(event, shortcut.key)
 	);
 }
 
@@ -204,8 +237,8 @@ export function matchesShortcut(
 export interface Platform {
 	os: PlatformOS;
 	words: PlatformWords;
-	/** The permissions the OS has (see `PERMISSIONS`). */
-	permissions: readonly PermissionKind[];
+	/** Whether Steno reads a calendar here (see `READS_CALENDAR`). */
+	readsCalendar: boolean;
 	/**
 	 * Whether the page answers the Record shortcut itself. The Swift app's
 	 * Record menu owns ⌘⇧R there, and a page that answered it too would
@@ -227,7 +260,7 @@ export function platformFor(os: PlatformOS): Platform {
 	return {
 		os,
 		words: WORDS[os],
-		permissions: PERMISSIONS[os],
+		readsCalendar: READS_CALENDAR[os],
 		bindsRecordShortcut: true,
 		label: (shortcut) => shortcutLabel(os, shortcut),
 		matches: (event, shortcut) => matchesShortcut(os, event, shortcut),
@@ -266,8 +299,6 @@ export function detectPlatform(
 
 const PlatformContext = createContext<Platform | null>(null);
 
-let pagePlatform: Platform | undefined;
-
 /** Supplies `usePlatform` below it; the app and the tests set one. */
 export function PlatformProvider({
 	platform,
@@ -283,14 +314,17 @@ export function PlatformProvider({
 	);
 }
 
-/** The provided platform, else the page's own (`detectPlatform`). */
+/**
+ * The provided platform. Every page renders under `PlatformProvider`
+ * (`App`, and `renderWithBridge` in the tests), so a component outside one
+ * is a bug that throws here rather than guessing the Mac.
+ */
 export function usePlatform(): Platform {
 	const provided = useContext(PlatformContext);
-	if (provided) {
-		return provided;
+	if (!provided) {
+		throw new Error("usePlatform needs a PlatformProvider above it");
 	}
-	pagePlatform ??= detectPlatform();
-	return pagePlatform;
+	return provided;
 }
 
 /**

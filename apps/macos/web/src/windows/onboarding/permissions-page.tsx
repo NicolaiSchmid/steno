@@ -5,9 +5,13 @@ import { Button, FormCard } from "@/components/ui";
 import { type PlatformWords, usePlatform } from "@/lib/platform";
 import { OnboardingPage } from "./onboarding-page";
 
-/** The sentence the smoke test finds page 1 by. */
-function permissionsIntro({ computer }: PlatformWords): string {
-	return `A few permissions, then where summaries come from and where meetings go. Audio never leaves this ${computer}.`;
+/** Page 1's intro, which the smoke test finds it by: one permission (Linux) or a few. */
+function permissionsIntro(
+	{ computer }: PlatformWords,
+	permissions: number,
+): string {
+	const asked = permissions === 1 ? "One permission" : "A few permissions";
+	return `${asked}, then where summaries come from and where meetings go. Audio never leaves this ${computer}.`;
 }
 
 /**
@@ -46,7 +50,7 @@ export function PermissionsPage({
 					</Button>
 				)
 			}
-			intro={permissionsIntro(words)}
+			intro={permissionsIntro(words, onboarding.permissions.length)}
 			step={1}
 			testId="onboarding-permissions"
 			title="Welcome to Steno"

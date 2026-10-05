@@ -30,6 +30,7 @@ import {
 import { cn } from "@/lib/cn";
 import {
 	type Platform,
+	type PlatformWords,
 	SHORTCUTS,
 	usePlatform,
 	useShortcut,
@@ -64,6 +65,11 @@ export function rowPreview(
 	}
 }
 
+/** " The tray icon works too." where the platform always has one. */
+function trayHint({ trayItem }: PlatformWords): string {
+	return trayItem ? ` The ${trayItem} works too.` : "";
+}
+
 function emptyCopy(
 	list: MeetingsListSnapshot,
 	platform: Platform,
@@ -74,7 +80,7 @@ function emptyCopy(
 	if (list.counts.all === 0) {
 		return {
 			title: "No meetings yet",
-			body: `Press Record above, or ${platform.label(SHORTCUTS.record)}. The ${platform.words.trayItem} works too.`,
+			body: `Press Record above, or ${platform.label(SHORTCUTS.record)}.${trayHint(platform.words)}`,
 		};
 	}
 	if (list.query.trim()) {

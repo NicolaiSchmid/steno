@@ -235,8 +235,8 @@ const EXPORT_ICON: Record<
 /**
  * The foot of the reading column: what happens to the recording, with the
  * keep switch when the host offers it, and where the export stands, with
- * Show in Finder (the platform's file manager) and Export again when they
- * apply.
+ * Reveal in Finder (the platform's file manager) and Export again when
+ * they apply.
  */
 function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 	const client = useBridge();
@@ -276,7 +276,7 @@ function DetailFooter({ detail }: { detail: MeetingDetailSnapshot }) {
 						variant="ghost"
 					>
 						<FolderIcon aria-hidden="true" />
-						{words.showInFileManager}
+						{words.revealInFileManager}
 					</Button>
 				) : null}
 				{detail.export.canReexport ? (
@@ -505,7 +505,7 @@ function DetailBody({
 						Re-run summary
 					</MenuItem>
 					<MenuItem
-						disabled={!detail.export.canReexport || detail.isBusy}
+						disabled={!canReexport}
 						icon={<ShareIcon />}
 						onClick={() => send(client, "meeting.reexport")}
 						shortcut={platform.label(SHORTCUTS.exportAgain)}

@@ -18,10 +18,10 @@ const CODEX_POINTS = [
  * place so onboarding and Settings say the same thing, in the platform's
  * word for the machine.
  */
-export function codexConsent({ computer }: PlatformWords) {
+export function codexConsent({ computer, codexSignInFile }: PlatformWords) {
 	return {
 		title: "Use your ChatGPT plan for summaries",
-		body: `Steno will use the sign-in that the Codex command-line tool saved on this ${computer} (~/.codex/auth.json) and send your meeting transcripts to OpenAI under your ChatGPT plan. Audio never leaves your ${computer}.`,
+		body: `Steno will use the sign-in that the Codex command-line tool saved on this ${computer} (${codexSignInFile}) and send your meeting transcripts to OpenAI under your ChatGPT plan. Audio never leaves your ${computer}.`,
 		points: CODEX_POINTS,
 		confirm: "Use my ChatGPT account",
 		checkAgain: "Check again",
