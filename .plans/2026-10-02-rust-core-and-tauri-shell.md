@@ -315,18 +315,21 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     starts only an absolute program path, never one looked up on `PATH` or in the
     working directory (`a_program_that_is_not_an_absolute_path_never_starts`): the
     child is handed the meeting's audio. A child that dies, hangs, overruns or breaks
-    the protocol is killed and reaped, the call fails with `SpeechError::Sidecar`, and
-    the next call spawns and loads again; an error the child reports keeps it
-    (`an_error_the_child_reports_keeps_the_child`). The child
+    the protocol during a request is killed and reaped, the call fails with
+    `SpeechError::Sidecar`, and the next call spawns and loads again; one that dies or
+    overruns between requests is replaced by the next call without an error (on
+    `DirectML` still after a death, not after an overrun: see WP10b). An error the
+    child reports keeps it (`an_error_the_child_reports_keeps_the_child`). The child
     exits when stdin ends or stdout breaks, so a dead app leaves no child, idle or busy
     (`the_child_greets_and_exits_when_its_parent_goes_away`,
     `a_busy_child_exits_when_its_parent_goes_away`), and dropping the engine stops it
     without blocking a runtime worker
     (`dropping_the_engine_stops_its_child_inside_a_runtime_or_not`). On Linux and macOS
-    the child ignores SIGINT, SIGTERM and SIGHUP once its heartbeat runs: they reach it
-    with the app (Ctrl-C, a closed terminal, systemd), and a child that died of them
-    would end its job before the app's shutdown quit the pipeline
-    (`the_signals_that_end_the_app_leave_a_request_in_the_child_answered`). The client
+    the child ignores SIGINT, SIGTERM and SIGHUP from its start, before its ready
+    message: they reach it with the app (Ctrl-C, a closed terminal, systemd), and a
+    child that died of them would end its job before the app's shutdown quit the
+    pipeline (`the_signals_that_end_the_app_leave_a_request_in_the_child_answered`,
+    `the_exit_signals_are_ignored_before_the_ready_message_is_written`). The client
     ends a child only with a shutdown request or SIGKILL (the memory ceiling, a
     deadline, a broken protocol); the child also ends when its stdin closes or its
     stdout breaks, as at the app's exit.
@@ -353,35 +356,92 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   - Crash isolation (`crates/steno-speech-sidecar/tests/isolation.rs`, the real client
     against the real binary with `--fake-engine --fault`): killed mid-request, abort
     (the way an uncaught C++ exception in ONNX Runtime ends the process), panic, a
-    panic after 1 MiB of stderr (the crash report stays bounded), exit,
-    hang past the deadline, allocation past the ceiling, garbage on stdout, silence at
-    start and another protocol version each end in an error and a working next call
-    in a new child. On a Ryzen 7 7700 desktop, in a release build, the child loads at
-    2.2 GB resident and transcribes 471 s of FLEURS German in 16.9 s, segment for
-    segment equal to the
+    panic after 1 MiB of stderr (the crash report stays bounded), exit, a reply over
+    the frame limit (status 2 and a line on stderr), hang past the deadline,
+    allocation past the ceiling, garbage on stdout, silence at start and another
+    protocol version each end in an error and a working next call in a new child. A
+    crash report waits up to 5 s for the end of the child's stderr (the wait ends when
+    stderr closes), so it keeps the child's last words on a loaded machine, and those
+    of a process it left behind holding stderr
+    (`a_crash_report_waits_for_stderr_a_process_left_behind_still_holds`). A child
+    that died or went over the ceiling between requests is replaced by the next call
+    without an error (`a_child_that_died_while_idle_is_replaced_without_an_error`,
+    `a_child_over_the_ceiling_while_idle_is_replaced_without_an_error`); those tests
+    wait until the client's reader has queued the fault, not for a zombie pid, whose
+    other threads may still hold stdout. A request the child cannot read ends it with
+    status 2 and a line on stderr, with its stderr gone too
+    (`a_child_that_cannot_read_a_request_says_so_and_exits_with_status_2`), and the
+    ready message is the first frame even from a child that greets 200 ms late
+    (`the_child_greets_and_exits_when_its_parent_goes_away`). The tests
+    find the binary through `CARGO_BIN_EXE_steno-speech-sidecar`, which cargo builds
+    for them, run it once by hand before any start timeout counts, and give every
+    start 60 s but the silent child's (20 s). They wait for what they test (a fault
+    marker, a gone pid, a queued fault, a held download) rather than for a fixed
+    time. A macOS CI run on 2026-10-04 failed nine of these tests: eight children
+    greeted after the 10 s start timeout the tests then had, and the silent child's
+    test (5 s) read the marker of a child killed before it started, so its `NotFound`
+    was the missing marker, not a missing binary. macOS checks a new executable on
+    its first start (1.2 s with 16 starting at once, 0.04 s after), which on a runner
+    shared with three other jobs made the starts slow; hence the warm-up run, the
+    60 s timeouts and a missing marker that names itself. On a Ryzen 7 7700
+    desktop, in a release build, the child loads at 2.2 GB resident and
+    transcribes 471 s of FLEURS German in 16.9 s, segment for segment equal to the
     in-process engine (`the_real_models_load_and_transcribe_in_the_sidecar_when_installed`,
-    ignored by default, gated on `STENO_MODELS_DIR` and `STENO_FLEURS_DIR`, not run in
-    CI).
-  - Models: a file's source is a URL (GitHub release assets, 2 GB at most: Silero;
-    `steno-diarize` fetches its own models, `crates/steno-diarize/src/models.rs`) or a Hugging Face repository at a
-    pinned commit, `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the
-    2.6 GB fp32 export (`encoder.weights` alone is 2.4 GB). `scripts/upload-models.sh`
-    verifies the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and
-    uploads it to `nicolaischmid/steno-models`, pinned at commit `4a133253`
-    (`STENO_MODELS_REPO`, `PARAKEET_V3_FP32_REVISION`). Downloads resume
-    `<name>.partial` under a file lock with `Range` requests, across retries and runs;
-    a second download of the same file, in this process or another, waits for the
-    lock and then finds the file installed or resumes it, so the bytes cross the wire
-    once. The partial goes once its file is installed; a mirror
-    (`SpeechSettings::models_mirror`) serves `<mirror>/<asset id>/<file>`. Tests:
-    `crates/steno-speech/tests/download.rs` (`a_cut_connection_resumes_with_a_range_request`,
+    ignored by default, needs `STENO_MODELS_DIR` and fails without the models,
+    compares with `STENO_FLEURS_DIR` when set, not run in CI).
+  - Models: a file's source is a URL (GitHub release assets, 2 GB at most: Silero)
+    or a Hugging Face repository at a pinned commit,
+    `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the 2.6 GB fp32
+    export (`encoder.weights` alone is 2.4 GB); `steno-diarize` fetches its own
+    models (`crates/steno-diarize/src/models.rs`). `scripts/upload-models.sh` verifies
+    the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and uploads
+    it to `nicolaischmid/steno-models`, pinned at commit `4a133253`
+    (`STENO_MODELS_REPO`, `PARAKEET_V3_FP32_REVISION`). The files on disk and what may
+    be deleted: `model_store`'s "On disk" section; how a download runs: its
+    "Downloads" section. Decided: a download holds `<name>.lock`, which no download
+    deletes, while it writes `<name>.partial`, so two downloads of a file, in one
+    process or two, never write the same partial; the one that waits then finds the
+    file installed or resumes it, and gives up once the holder has written nothing for
+    10 minutes, or for as long as a live holder's attempts may take without a byte,
+    each hop of the host's redirect timed afresh (about 42 minutes for the decoder,
+    which is one request, and 12 for a file of several chunks). A file over 64 MiB comes
+    in `Range` requests of 64 MiB, each with a body timeout of at most 128 s, so a
+    silent connection costs minutes; from the export's repository 128 MiB took 13 to
+    15 s in 8 MiB chunks and 6 to 8 s in 64 MiB ones, as each request costs a round
+    trip through the redirect. A mirror
+    (`SpeechSettings::models_mirror`, `<mirror>/<asset id>/<file>`, the speech models
+    only) should answer `Range`: a host that ignores it gets the whole file under one
+    timeout for its size. Every request asks for the bytes uncompressed, as a range of
+    a compressed body is no range of the file. An odd answer to a range keeps the
+    partial; only wrong or surplus bytes throw it away. The lock waits run on a clock
+    the tests move, and only the tests of a stalled body change the body timeouts,
+    so no download test depends on the machine's speed. Tests:
+    `crates/steno-speech/tests/download.rs`
+    (`a_cut_connection_resumes_with_a_range_request`,
     `a_partial_a_killed_run_left_is_resumed_not_fetched_again`,
+    `a_partial_longer_than_the_file_or_already_complete_is_handled`,
     `a_206_from_the_wrong_offset_or_without_a_range_is_not_appended`,
     `a_mirror_serves_every_file_from_asset_id_and_file_name`) and the unit tests in
     `crates/steno-speech/src/model_store.rs`
     (`a_second_download_of_one_file_waits_for_the_first_and_fetches_nothing`,
+    `a_download_that_waited_installs_the_file_after_the_first_threw_its_partial_away`,
+    `a_download_waits_while_the_holder_writes_and_gives_up_once_it_stops`,
+    `a_holder_s_growth_starts_the_wait_for_a_stopped_holder_again`,
+    `a_waiter_outlasts_a_holder_whose_one_request_may_still_be_silent`,
+    `a_lock_this_process_holds_is_neither_locked_again_nor_opened`,
+    `a_large_file_comes_in_chunks_and_a_chunk_cut_short_is_resumed_alone`,
+    `a_range_s_body_timeout_follows_its_length_up_to_the_longest`,
+    `a_silent_chunk_is_given_up_at_the_longest_timeout_not_its_own`,
+    `a_range_follows_a_redirect_to_another_host`,
+    `a_host_that_sends_less_than_a_range_asks_for_is_asked_for_the_rest`,
+    `an_odd_answer_to_a_range_keeps_the_partial`,
+    `a_416_to_a_resumed_range_restarts_the_file_from_zero`,
     `a_partial_is_deleted_once_its_file_is_installed_another_way`,
-    `a_download_that_finds_its_file_installed_leaves_no_partial`).
+    `a_download_that_finds_its_file_installed_leaves_no_partial`; ignored, as it
+    fetches from Hugging Face:
+    `a_partial_of_the_hosted_export_resumes_through_its_redirect_in_chunks`). The engine
+    installs the models on first use and outside its lock
+    (`the_engine_installs_its_models_on_first_use_and_outside_its_lock`).
   - Shipped beside the app by WP9's first half: every bundle carries the binary as a
     Tauri `externalBin` (`apps/desktop/src-tauri/tauri.release.conf.json`), checked in
     its installed layout by `apps/desktop/scripts/check-bundle.sh`.
@@ -586,6 +646,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   pipeline-side downloads in the row of the engine that runs (and map those engines'
   rows to Parakeet v3's models), or fail processing with "Download the speech model in
   Settings" until the engine's models are installed.
+- [ ] One model store: `steno-diarize` keeps its own `ModelStore` and `ModelAsset`
+  (`crates/steno-diarize/src/models.rs`: `.part` files, no resume, no lock, no
+  mirror), so a mirror serves only the speech models. It could fetch through
+  `steno_speech::ModelStore`; its root `onnx/diarization` already fits
+  `<root>/<asset id>/`.
 
 ### Beyond the bridge
 
@@ -1346,8 +1411,9 @@ PR off `main`.
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | merged |
 | WASAPI follow-ups: slip window and immediate slip, trusted stream sizes, start deadline, detector start and stop serialised (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
-| Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | in review |
+| Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | merged |
 | Revoke during a `complete`, a verify bound to the file it hashed, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | in review |
+| Speech sidecar follow-ups: download lock file, 64 MiB chunks, odd range answers, crash-report stderr, idle child replaced | `fix/rust-sidecar-followups` | #187 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -1450,19 +1516,22 @@ A child whose CPU reopen fails too exits without answering, which counts as a
 crash on DirectML.
 
 An abort inside the driver still ends the sidecar. A child that crashes, hangs or
-overruns the memory ceiling with DirectML in use switches DirectML off for the rest
-of the app's run: the switch is process-wide, so the engines `steno-services`
-builds on every pipeline reload ask for the CPU too. Inside the probe such an end
-costs no job: no audio was sent yet, so the same call loads again in a new child
-on the CPU. Mid-run it costs that job. The provider is logged at info level, with
-no paths: by the backend when it runs in-process, and by the parent from the
-child's answers, which carry the provider in force, so a fallback after the load
-shows in the parent's log and in `SidecarHealth`. The child has no log
-subscriber; its stderr reaches the parent's log (at debug level, the fallback line
-at info) and the crash tail, so the child writes the reason for a fallback there
-in fixed words. A killed child is logged at warn level with its exit status and
-the kind of failure only; the error with the crash tail goes to debug. What is and
-is not proven:
+overruns the memory ceiling during a load or a request with DirectML in use
+switches DirectML off for the rest of the app's run: the switch is process-wide,
+so the engines `steno-services` builds on every pipeline reload ask for the CPU
+too. A child that dies between requests is replaced on DirectML, as nothing ran on
+it since its last answer; one that overruns the ceiling between requests still
+switches DirectML off, as what it holds then is what its last request left, on the
+GPU too. Inside the probe such an end costs no job: no audio was sent yet, so the
+same call loads again in a new child on the CPU. Mid-run it costs that job. The
+provider is logged at info level, with no paths: by the backend when it runs
+in-process, and by the parent from the child's answers, which carry the provider
+in force, so a fallback after the load shows in the parent's log and in
+`SidecarHealth`. The child has no log subscriber; its stderr reaches the parent's
+log (at debug level, the fallback line at info) and the crash tail, so the child
+writes the reason for a fallback there in fixed words. A killed child is logged at
+warn level with its exit status and the kind of failure only; the error with the
+crash tail goes to debug. What is and is not proven:
 
 - **Off by default.** Gate G4 (at least three times the CPU's speed on an
   integrated GPU) is open with no machine, and so is whether DirectML's
@@ -1487,9 +1556,11 @@ is not proven:
   the fake engine on Windows: an abort on DirectML leaves the next child and every
   later engine on the CPU, an abort inside the probe loads again on the CPU within
   the same call, a child that lost its encoder on DirectML exits unanswered and
-  switches DirectML off, and an error, a release or a crash after a fallback to
-  the CPU leaves DirectML on. On every platform, a crash inside a load on the CPU
-  is not retried within the call. No real GPU fault has run.
+  switches DirectML off, a child over the ceiling between requests on DirectML
+  switches it off too (`directml_idle_overrun.rs`), and a child killed between
+  requests on DirectML (`directml_idle_death.rs`), an error, a release or a crash
+  after a fallback to the CPU leaves DirectML on. On every platform, a crash inside
+  a load on the CPU is not retried within the call. No real GPU fault has run.
 - **`DirectML.dll` is a load-time import** of every Windows binary that links
   ONNX Runtime, with or without this package: pyke publishes only DirectML builds
   of ONNX Runtime for Windows, and `ort-sys` links `DirectML.lib` for them. ONNX

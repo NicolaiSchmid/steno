@@ -14,7 +14,9 @@
 #   --repo     the target repository; default nicolaischmid/steno-models,
 #              the one STENO_MODELS_REPO names
 #   --models   a store root holding parakeet-tdt-0.6b-v3-fp32/ (the files
-#              spikes/onnx-speech/export/ writes); default $STENO_MODELS_DIR
+#              spikes/onnx-speech/export/ writes); default
+#              $STENO_MODELS_DIR/onnx, the store root inside the models
+#              directory
 #   --private  create the repository private if it does not exist yet
 #   --dry-run  verify and stage, print the upload commands, upload nothing
 #
@@ -22,13 +24,13 @@
 # with a write token (hf auth login, or HF_TOKEN in the environment), curl
 # and sha256sum or shasum. The repository is created on the first upload.
 #
-# What lands in the repository, and nothing else from the models directory
-# (no partial downloads, no Finder files):
+# What lands in the repository, and nothing else from the store root (no
+# partial downloads, no lock files, no Finder files):
 #   parakeet-tdt-0.6b-v3-fp32/{encoder.onnx,encoder.weights,decoder.onnx,joiner.onnx,tokens.txt}
 #   README.md       the model card, licence cc-by-4.0, base model named
 #   ATTRIBUTION.md  the CC-BY-4.0 credit: creator, source, licence link and
 #                   the changes made (ONNX conversion, longer position table)
-# The layout is <asset id>/<file name>, the same as a Steno models root, so
+# The layout is <asset id>/<file name>, the same as a Steno store root, so
 # the output of `hf download <repo> --revision <commit> --local-dir <dir>`
 # can be served as a mirror unchanged.
 #
@@ -42,7 +44,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 manifest="$repo_root/crates/steno-speech/src/model_store.rs"
 repo="nicolaischmid/steno-models"
-models="${STENO_MODELS_DIR:-}"
+models="${STENO_MODELS_DIR:+$STENO_MODELS_DIR/onnx}"
 private=()
 dry_run=0
 asset="parakeet-tdt-0.6b-v3-fp32"
@@ -79,7 +81,7 @@ while (($# > 0)); do
 	esac
 done
 
-[[ -n "$models" ]] || fail 2 "no models root: pass --models or set STENO_MODELS_DIR"
+[[ -n "$models" ]] || fail 2 "no store root: pass --models or set STENO_MODELS_DIR"
 directory="$models/$asset"
 [[ -d "$directory" ]] || fail 1 "$directory: not a directory"
 [[ "$repo" == */* ]] || fail 2 "--repo must be <owner>/<name>"
@@ -194,9 +196,11 @@ if ((dry_run)); then
 	exit 0
 fi
 
+# The token goes to curl on stdin, not its command line, where ps shows it.
 auth=()
-[[ -n "${HF_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer $HF_TOKEN")
-revision="$(curl -fsS ${auth[@]+"${auth[@]}"} "https://huggingface.co/api/models/$repo/revision/main" |
+[[ -n "${HF_TOKEN:-}" ]] && auth=(-H @-)
+revision="$(printf 'Authorization: Bearer %s\n' "${HF_TOKEN:-}" |
+	curl -fsS ${auth[@]+"${auth[@]}"} "https://huggingface.co/api/models/$repo/revision/main" |
 	sed -n 's/.*"sha":"\([0-9a-f]\{40\}\)".*/\1/p' | head -n 1)"
 [[ -n "$revision" ]] || fail 1 "uploaded, but could not read the commit of $repo; look it up on the repository page"
 

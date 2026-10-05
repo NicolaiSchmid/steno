@@ -2,25 +2,15 @@
 //! Parakeet on ONNX Runtime for the app (decision 5 of
 //! `.plans/2026-10-01-cross-platform-speech-stack.md`, invariant 4 of
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md`). The app, its parent,
-//! drives it through `steno_speech::SidecarSpeechEngine`; the wire format
-//! is `steno_speech::sidecar::protocol`.
+//! drives it through [`steno_speech::SidecarSpeechEngine`]; the wire format
+//! is [`steno_speech::sidecar::protocol`]. Which platform runs it:
+//! [`steno_speech::runtime`].
 //!
 //! - [`serve`]: the child's whole life, from the ready message to exit.
 //! - [`Options::parse`]: the command line the parent passes.
 //! - [`Fault`]: what the fake engine does wrong for the isolation tests.
 //!
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
-//!
-//! # Platform policy
-//!
-//! On Linux and Windows this process is where speech runs, always: the app
-//! never runs Parakeet on ONNX Runtime itself (the diarizer's ONNX models
-//! still run in the app's process). On macOS the in-process `CoreML` engine
-//! is the default and this sidecar is a fallback behind the speech setting
-//! `onnxSidecarOnMac` (`steno_speech::SpeechSettings`). The reason is the
-//! same everywhere: an uncaught C++ exception in ONNX Runtime ends the
-//! process, and ONNX Runtime works in 2 to 3 GB; in a child such an end
-//! costs one request, and the memory goes back when the child exits.
 //!
 //! # What the child does
 //!
@@ -37,12 +27,12 @@
 //! stdout breaks, so a dead parent leaves no child behind. Its log goes to
 //! stderr, which the parent logs and keeps the tail of for crash reports.
 //!
-//! On Linux and macOS it ignores SIGINT, SIGTERM and SIGHUP once its
-//! heartbeat runs. Those are the signals that end the app, and they reach
-//! the child too: Ctrl-C and a closed terminal reach the terminal's whole
+//! On Linux and macOS it ignores SIGINT, SIGTERM and SIGHUP from its start,
+//! before its ready message. Those are the signals that end the app, and they reach the
+//! child too: Ctrl-C and a closed terminal reach the terminal's whole
 //! foreground group, and systemd signals every process in a scope. A child
-//! that died of them would end its job before the app quit its pipeline.
-//! So the child finishes its request or exits within a heartbeat of its
+//! that died of them would end its job before the app quit its pipeline. So
+//! the child finishes its request or exits within a heartbeat of its
 //! parent's exit, when stdout breaks. The client ends a child only with a
 //! shutdown request or SIGKILL (the memory ceiling, a deadline, a broken
 //! protocol); the child also ends when its stdin closes or its stdout
@@ -50,7 +40,7 @@
 //!
 //! # Privacy
 //!
-//! Its sessions open through `steno_speech::onnx`, which switches ONNX
+//! Its sessions open through [`steno_speech::onnx`], which switches ONNX
 //! Runtime's telemetry off first, so ONNX Runtime sends nothing. With
 //! `DirectML` on, `DirectML.dll` and Direct3D 12 may still log to Windows'
 //! own diagnostic data, as for any program that uses them; the child opens
@@ -63,23 +53,26 @@
 //! answers a load that asks for `DirectML` with `DirectML`, and reports no
 //! live provider until `--fault fallback`. Only with it, `--fault <kind>`
 //! ([`Fault`]) makes the next transcription abort, panic, flood stderr and
-//! panic, exit, hang, allocate 4 GiB, write garbage, fail, report a
-//! fallback to the CPU or lose the encoder, the child abort on any load or
-//! on a load that asks for `DirectML`, or stay silent or announce another
-//! protocol version from the start; `--fault-once <path>` limits that to
-//! the first child that creates `<path>`, which holds that child's pid.
-//! The isolation tests and the `DirectML` test binaries drive the real
-//! client against these.
+//! panic, exit, exit leaving a process that writes to its stderr later,
+//! hang, allocate 4 GiB, write garbage, fail, answer with a reply too large
+//! to send, answer and then report a resident set over any ceiling, report
+//! a fallback to the CPU or lose the encoder, the child abort on any load
+//! or on a load that asks for `DirectML`, or stay silent, greet late or
+//! announce another protocol version from the start. `--fault-once
+//! <path>` limits that to the first child that creates `<path>`, which
+//! holds that child's pid. The isolation tests and the `DirectML` test
+//! binaries drive the real client against these.
 
 use std::fs::File;
 use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use steno_core::{AudioBuffer16k, LanguageTag, RawSegment};
 use steno_speech::sidecar::FALLBACK_NOTICE;
-use steno_speech::sidecar::protocol::{self, PROTOCOL_VERSION, Reply, Request};
+use steno_speech::sidecar::protocol::{self, MAX_HEADER_BYTES, PROTOCOL_VERSION, Reply, Request};
 use steno_speech::{
     EncoderProvider, ModelStore, OnnxBackend, OnnxOptions, OnnxSpeechEngine, PipelineConfig,
     Transcriber, VadConfig,
@@ -109,6 +102,11 @@ steno_core::string_enum! {
         Garbage = "garbage",
         /// Answers with an error and keeps running.
         Error = "error",
+        /// On unix, leaves a process behind that holds the child's stderr
+        /// and writes a line to it 300 ms after the child exits with
+        /// status 3; elsewhere only exits. The crash report must still hold
+        /// that line.
+        LateStderr = "late-stderr",
         /// Answers, and from then on reports the CPU as the encoder's
         /// provider and writes why to stderr, as a child does after a run
         /// that failed on `DirectML`.
@@ -122,18 +120,38 @@ steno_core::string_enum! {
         /// `std::process::abort` inside a load that asks for `DirectML`,
         /// the way a driver may end the probe; a load on the CPU works.
         AbortOnDirectmlLoad = "abort-on-directml-load",
+        /// Answers with a transcript over the frame limit, which the child
+        /// cannot send.
+        Oversize = "oversize",
+        /// Answers, then reports a resident set over any ceiling from the
+        /// next heartbeat on, while idle.
+        Swell = "swell",
         /// At start: sends nothing, reads nothing, hangs.
         Silent = "silent",
         /// At start: announces protocol version 0 in its ready message.
         WrongProtocol = "wrong-protocol",
+        /// At start: waits 200 ms before its ready message, so a heartbeat
+        /// started before it would come first.
+        SlowStart = "slow-start",
     }
 }
 
 impl Fault {
     /// Committed when the child starts, not at the next transcription.
     fn at_start(self) -> bool {
-        matches!(self, Fault::Silent | Fault::WrongProtocol)
+        matches!(
+            self,
+            Fault::Silent | Fault::WrongProtocol | Fault::SlowStart
+        )
     }
+}
+
+/// Writes one line to stderr, dropping it when stderr is gone, where
+/// `eprintln!` would panic.
+macro_rules! stderr_line {
+    ($($line:tt)*) => {{
+        let _ = writeln!(io::stderr(), $($line)*);
+    }};
 }
 
 /// The command line.
@@ -372,6 +390,17 @@ impl Engine for FakeEngine {
                 panic!("simulated panic after a flood of stderr")
             }
             Some(Fault::Exit) => std::process::exit(3),
+            Some(Fault::LateStderr) => {
+                // Only stderr is inherited: stdout closes with the child,
+                // so the parent sees it die at once.
+                #[cfg(unix)]
+                let _ = std::process::Command::new("sh")
+                    .args(["-c", "sleep 0.3; echo 'a line after the exit' >&2"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .spawn();
+                std::process::exit(3)
+            }
             Some(Fault::Hang) => hang(),
             Some(Fault::Allocate) => {
                 let mut hoard: Vec<Vec<u8>> = Vec::new();
@@ -401,10 +430,20 @@ impl Engine for FakeEngine {
                 self.lost_encoder = true;
                 Err("simulated loss of the speech encoder".to_owned())
             }
+            Some(Fault::Oversize) => {
+                let mut segments = describe(samples, hint);
+                segments[0].text = "x".repeat(MAX_HEADER_BYTES as usize);
+                Ok(segments)
+            }
+            Some(Fault::Swell) => {
+                SWELL_AFTER_REPLY.store(true, Ordering::Relaxed);
+                Ok(describe(samples, hint))
+            }
             // The start and load faults were committed, if at all, there.
             Some(
                 Fault::Silent
                 | Fault::WrongProtocol
+                | Fault::SlowStart
                 | Fault::AbortOnLoad
                 | Fault::AbortOnDirectmlLoad,
             )
@@ -428,6 +467,12 @@ fn describe(samples: &[f32], hint: Option<&LanguageTag>) -> Vec<RawSegment> {
     }]
 }
 
+/// Set by [`Fault::Swell`]: [`SWOLLEN`] follows once the reply is out.
+static SWELL_AFTER_REPLY: AtomicBool = AtomicBool::new(false);
+
+/// Set after [`Fault::Swell`]'s reply: the resident set reads as `u64::MAX`.
+static SWOLLEN: AtomicBool = AtomicBool::new(false);
+
 fn hang() -> ! {
     loop {
         std::thread::sleep(Duration::from_secs(3600));
@@ -436,32 +481,43 @@ fn hang() -> ! {
 
 /// The resident set of this process; 0 where it cannot be read.
 fn rss_bytes() -> u64 {
+    if SWOLLEN.load(Ordering::Relaxed) {
+        return u64::MAX;
+    }
     memory_stats::memory_stats().map_or(0, |m| m.physical_mem as u64)
 }
 
-/// Writes one reply; a broken stdout means the parent is gone, so the
-/// child exits. On unix through `_exit`: the heartbeat thread can get here
-/// while ONNX Runtime still infers on others, and `process::exit` would run
-/// the atexit handlers and C++ static destructors beside them; a hang there
-/// would keep the working set alive past the ignored exit signals. Nothing
-/// needs flushing, stdout is gone.
+/// Writes one reply. A broken stdout means the parent is gone, so the
+/// child exits quietly, on unix through `_exit`: the heartbeat thread can
+/// get here while ONNX Runtime still infers on others, and
+/// `process::exit` would run the atexit handlers and C++ static
+/// destructors beside them; a hang there would keep the working set alive
+/// past the ignored exit signals. Nothing needs flushing, stdout is gone.
+/// Any other failure (a reply over the frame limit) is said on stderr
+/// first and exits with status 2, so the parent's crash report shows it.
 fn send(reply: &Reply) {
     let mut out = io::stdout().lock();
-    if protocol::write_frame(&mut out, reply, &[]).is_err() {
-        #[cfg(unix)]
-        // SAFETY: `_exit` ends the process at once; it runs no handler and
-        // touches no state the other threads hold.
-        unsafe {
-            libc::_exit(0);
+    if let Err(error) = protocol::write_frame(&mut out, reply, &[]) {
+        if error.kind() == io::ErrorKind::BrokenPipe {
+            #[cfg(unix)]
+            // SAFETY: `_exit` ends the process at once; it runs no handler
+            // and touches no state the other threads hold.
+            unsafe {
+                libc::_exit(0);
+            }
+            #[cfg(not(unix))]
+            std::process::exit(0);
         }
-        #[cfg(not(unix))]
-        std::process::exit(0);
+        stderr_line!("steno-speech-sidecar: could not send a reply: {error}");
+        std::process::exit(2);
     }
 }
 
 /// Ignores SIGINT, SIGTERM and SIGHUP for the rest of the child's life
-/// (see the crate docs); only once the heartbeat runs, which ends a child
-/// whose parent is gone.
+/// (see the crate docs). Called first in [`serve`], so a signal does not
+/// fail the start and a parent that has the ready message knows they are
+/// ignored; a child whose parent is gone still ends when its ready message
+/// or a heartbeat finds stdout broken.
 #[cfg(unix)]
 fn ignore_exit_signals() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
@@ -483,7 +539,7 @@ fn start_heartbeat(interval: Duration) -> io::Result<()> {
             loop {
                 let rss_bytes = rss_bytes();
                 if rss_bytes == 0 && !warned {
-                    eprintln!(
+                    stderr_line!(
                         "steno-speech-sidecar: the resident set cannot be read here, so the parent's memory ceiling cannot act"
                     );
                     warned = true;
@@ -503,7 +559,7 @@ fn tell_fallback(engine: &dyn Engine, told: &mut Option<&'static str>) {
     if let Some(reason) = engine.fallback()
         && *told != Some(reason)
     {
-        eprintln!("{FALLBACK_NOTICE} ({reason}); the speech encoder runs on the CPU");
+        stderr_line!("{FALLBACK_NOTICE} ({reason}); the speech encoder runs on the CPU");
         *told = Some(reason);
     }
 }
@@ -521,10 +577,8 @@ fn transcribe(
     sample_count: u64,
     hint: Option<&LanguageTag>,
 ) -> Result<Reply, ExitCode> {
-    let samples = protocol::read_samples(input, sample_count).map_err(|error| {
-        eprintln!("steno-speech-sidecar: unreadable audio: {error}");
-        ExitCode::from(2)
-    })?;
+    let samples = protocol::read_samples(input, sample_count)
+        .map_err(|error| give_up("unreadable audio", error))?;
     match engine.transcribe(&samples, hint) {
         Ok(segments) => Ok(Reply::Transcript {
             id,
@@ -532,7 +586,7 @@ fn transcribe(
             provider: engine.provider(),
         }),
         Err(_) if !engine.usable() => {
-            eprintln!(
+            stderr_line!(
                 "steno-speech-sidecar: the speech encoder lost its session after a failed run on DirectML, and the CPU could not reopen it"
             );
             Err(ExitCode::from(70))
@@ -541,10 +595,19 @@ fn transcribe(
     }
 }
 
-/// Runs the child until a shutdown request, the end of stdin, a broken
-/// stdout or an unreadable request; on unix SIGINT, SIGTERM and SIGHUP do
-/// not end it (see the crate docs).
+/// Says on stderr why the child stops, for the parent's crash report, and
+/// returns the exit status for it, 2 even when stderr is gone.
+fn give_up(why: &str, error: impl std::fmt::Display) -> ExitCode {
+    stderr_line!("steno-speech-sidecar: {why}: {error}");
+    ExitCode::from(2)
+}
+
+/// Runs the child until it exits, with status 0 or 2 as
+/// [`steno_speech::sidecar::protocol`] says; on unix SIGINT, SIGTERM and
+/// SIGHUP do not end it (see the crate docs).
 pub fn serve(options: &Options) -> ExitCode {
+    #[cfg(unix)]
+    ignore_exit_signals();
     let fake = options.fake_engine.then(|| FakeEngine {
         loaded: false,
         fault: options.fault,
@@ -559,16 +622,14 @@ pub fn serve(options: &Options) -> ExitCode {
     if start_fault == Some(Fault::Silent) {
         hang();
     }
-    if let Err(error) = start_heartbeat(options.heartbeat) {
-        eprintln!("steno-speech-sidecar: no heartbeat thread: {error}");
-        return ExitCode::from(2);
-    }
-    #[cfg(unix)]
-    ignore_exit_signals();
     let mut engine: Box<dyn Engine> = match fake {
         Some(fake) => Box::new(fake),
         None => Box::new(OnnxEngine::default()),
     };
+    if start_fault == Some(Fault::SlowStart) {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // Before the heartbeat starts, so `Ready` is always the first frame.
     send(&Reply::Ready {
         protocol: if start_fault == Some(Fault::WrongProtocol) {
             0
@@ -577,16 +638,16 @@ pub fn serve(options: &Options) -> ExitCode {
         },
         pid: std::process::id(),
     });
+    if let Err(error) = start_heartbeat(options.heartbeat) {
+        return give_up("no heartbeat thread", error);
+    }
     let mut input = BufReader::new(io::stdin().lock());
     let mut fallback_told = None;
     loop {
         let request = match protocol::read_header::<_, Request>(&mut input) {
             Ok(Some(request)) => request,
             Ok(None) => return ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("steno-speech-sidecar: unreadable request: {error}");
-                return ExitCode::from(2);
-            }
+            Err(error) => return give_up("unreadable request", error),
         };
         let reply = match request {
             Request::Load {
@@ -628,6 +689,9 @@ pub fn serve(options: &Options) -> ExitCode {
         };
         tell_fallback(&*engine, &mut fallback_told);
         send(&reply);
+        if SWELL_AFTER_REPLY.load(Ordering::Relaxed) {
+            SWOLLEN.store(true, Ordering::Relaxed);
+        }
     }
 }
 

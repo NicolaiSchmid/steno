@@ -1,8 +1,8 @@
-//! A child that dies with `DirectML` in use switches `DirectML` off for
-//! the rest of the process's run, for every engine. The switch-off is
-//! process-wide and nothing clears it, so this test runs in a binary of its
-//! own, apart from the tests that need `DirectML` on. Windows only: the
-//! client asks for `DirectML` nowhere else.
+//! A child that dies during a request with `DirectML` in use switches
+//! `DirectML` off for the rest of the process's run, for every engine. The
+//! switch-off is process-wide and nothing clears it, so this test runs in a
+//! binary of its own, apart from the tests that need `DirectML` on. Windows
+//! only: the client asks for `DirectML` nowhere else.
 
 #![cfg(windows)]
 

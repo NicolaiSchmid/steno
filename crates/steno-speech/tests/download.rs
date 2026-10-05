@@ -1,8 +1,9 @@
 //! The model store against a local HTTP server that serves a temporary
 //! directory: resumable `.partial` downloads (a cut connection, a partial
-//! a killed run left, a corrupt prefix, a host that ignores `Range`, a
-//! `206` from the wrong offset or without `Content-Range`), the mirror
-//! layout and the checksum gate. No network beyond 127.0.0.1.
+//! a killed run left, a corrupt prefix, a complete partial, a host that
+//! ignores `Range`, a `206` from the wrong offset or without
+//! `Content-Range`), the mirror layout and the checksum gate. No network
+//! beyond 127.0.0.1.
 
 #![allow(clippy::cast_possible_truncation)]
 
@@ -28,11 +29,13 @@ struct Behaviour {
     whole_file_as_206: Option<bool>,
 }
 
-/// One request the server saw: the path and the `Range` header.
+/// One request the server saw: the path and the `Range` and
+/// `Accept-Encoding` headers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Seen {
     path: String,
     range: Option<String>,
+    accept_encoding: Option<String>,
 }
 
 /// Serves the files under `root` at `http://127.0.0.1:<port>/<path>` until
@@ -83,21 +86,24 @@ fn answer(
         .unwrap_or("/")
         .trim_start_matches('/')
         .to_owned();
-    let mut range = None;
+    let (mut range, mut accept_encoding) = (None, None);
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 || header == "\r\n" {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("range")
-        {
-            range = Some(value.trim().to_owned());
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("range") {
+                range = Some(value.trim().to_owned());
+            } else if name.eq_ignore_ascii_case("accept-encoding") {
+                accept_encoding = Some(value.trim().to_owned());
+            }
         }
     }
     log.lock().unwrap().push(Seen {
         path: path.clone(),
         range: range.clone(),
+        accept_encoding,
     });
     let mut out = stream;
     let Ok(body) = fs::read(root.join(&path)) else {
@@ -166,13 +172,7 @@ fn answer(
 }
 
 fn digest(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    Sha256::digest(bytes)
-        .iter()
-        .fold(String::new(), |mut out, b| {
-            let _ = write!(out, "{b:02x}");
-            out
-        })
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 /// A body that is not periodic in any short stride, so a misplaced offset
@@ -184,6 +184,7 @@ fn body(len: usize) -> Vec<u8> {
 const ID: &str = "test-asset";
 const NAME: &str = "model.onnx";
 const PARTIAL: &str = "model.onnx.partial";
+const LOCK: &str = "model.onnx.lock";
 
 /// A server over a directory holding a file at `<ID>/<NAME>`, an empty
 /// store and the asset of that one file.
@@ -285,7 +286,13 @@ fn a_cut_connection_resumes_with_a_range_request() {
         .expect("a Range request");
     assert!(resumed_at > 0 && resumed_at <= 100_000, "{resumed_at}");
     assert_eq!(starts, [0, resumed_at]);
-    assert_eq!(names(&f.directory()), [NAME]);
+    // Uncompressed, so a byte range is a range of the file itself.
+    assert!(
+        seen.iter()
+            .all(|s| s.accept_encoding.as_deref() == Some("identity")),
+        "{seen:?}"
+    );
+    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
@@ -306,9 +313,10 @@ fn a_partial_a_killed_run_left_is_resumed_not_fetched_again() {
         [Seen {
             path: format!("{ID}/{NAME}"),
             range: Some("bytes=123456-".to_owned()),
+            accept_encoding: Some("identity".to_owned()),
         }]
     );
-    assert_eq!(names(&f.directory()), [NAME]);
+    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
@@ -319,7 +327,7 @@ fn a_corrupt_prefix_fails_its_checksum_and_is_fetched_again_from_zero() {
     f.install();
     let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
     assert_eq!(ranges, [Some("bytes=20000-".to_owned()), None]);
-    assert_eq!(names(&f.directory()), [NAME]);
+    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
@@ -346,11 +354,16 @@ fn a_partial_longer_than_the_file_or_already_complete_is_handled() {
     f.leave_partial(&vec![1; 20_000]);
     f.install();
     assert_eq!(f.server.seen()[0].range, None);
-    // Complete but never renamed (killed between the sync and the rename):
-    // the range is past the end, the host answers 416, and the file is
-    // fetched whole once more.
+    // Complete but never renamed (killed between the sync and the rename,
+    // or a rename Windows refused): verified and installed without a
+    // request.
     f.store.remove(&f.asset).unwrap();
     f.leave_partial(&contents);
+    f.install();
+    assert_eq!(f.server.seen().len(), 1);
+    // Complete but wrong: checked, then fetched once more from zero.
+    f.store.remove(&f.asset).unwrap();
+    f.leave_partial(&vec![7; contents.len()]);
     f.install();
     let ranges: Vec<_> = f
         .server
@@ -359,7 +372,7 @@ fn a_partial_longer_than_the_file_or_already_complete_is_handled() {
         .skip(1)
         .map(|s| s.range)
         .collect();
-    assert_eq!(ranges, [Some("bytes=10000-".to_owned()), None]);
+    assert_eq!(ranges, [None]);
 }
 
 #[test]
@@ -369,7 +382,7 @@ fn a_wrong_checksum_is_rejected_and_nothing_is_kept() {
     f.asset.files[0].sha256 = digest(b"something else");
     let error = f.store.ensure(&f.asset, &mut |_| {}).unwrap_err();
     assert!(matches!(error, SpeechError::Checksum { .. }), "{error}");
-    assert_eq!(names(&f.directory()), Vec::<String>::new());
+    assert_eq!(names(&f.directory()), [LOCK]);
     assert!(!f.store.is_installed(&f.asset));
 }
 
@@ -395,23 +408,28 @@ fn a_mirror_serves_every_file_from_asset_id_and_file_name() {
 
 #[test]
 fn a_download_waits_for_the_one_holding_its_partial_and_resumes_it() {
-    // Another download holds the partial and stops; this one waits for
-    // the lock instead of fetching a copy of its own, then continues the
-    // bytes the other left.
+    // Another download holds the lock and stops; this one waits for the
+    // lock instead of fetching a copy of its own, then continues the bytes
+    // the other left.
     let contents = body(20_000);
     let f = fixture(&contents, Behaviour::default());
-    let partial = f.leave_partial(&contents[..7_000]);
-    let held = File::options().write(true).open(&partial).unwrap();
-    held.lock().unwrap();
-    let holder = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        drop(held);
-    });
-    f.install();
-    holder.join().unwrap();
+    f.leave_partial(&contents[..7_000]);
+    let mut held = Some(File::create(f.directory().join(LOCK)).unwrap());
+    held.as_ref().unwrap().lock().unwrap();
+    // While the lock is held, a report can only come from the wait; the
+    // first one lets go of it.
+    let mut reports = Vec::new();
+    f.store
+        .ensure(&f.asset, &mut |p| {
+            reports.push((p.received, held.is_some()));
+            held = None;
+        })
+        .unwrap();
+    f.store.verify(&f.asset).unwrap();
+    assert_eq!(reports[0], (7_000, true));
     let ranges: Vec<_> = f.server.seen().into_iter().map(|s| s.range).collect();
     assert_eq!(ranges, [Some("bytes=7000-".to_owned())]);
-    assert_eq!(names(&f.directory()), [NAME]);
+    assert_eq!(names(&f.directory()), [NAME, LOCK]);
 }
 
 #[test]
@@ -435,6 +453,6 @@ fn a_206_from_the_wrong_offset_or_without_a_range_is_not_appended() {
             [Some("bytes=12000-".to_owned()), None],
             "labelled {labelled}"
         );
-        assert_eq!(names(&f.directory()), [NAME]);
+        assert_eq!(names(&f.directory()), [NAME, LOCK]);
     }
 }

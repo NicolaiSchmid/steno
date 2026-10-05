@@ -9,11 +9,25 @@
 //! the engine was given. The header follows the bridge's JSON convention
 //! (`steno_core::json`: sorted keys, camelCase), with a `type` tag.
 //!
-//! The child sends [`Reply::Ready`] once it runs, then [`Reply::Memory`]
-//! every heartbeat interval from a thread of its own, between and during
+//! The child sends [`Reply::Ready`] first, then [`Reply::Memory`] every
+//! heartbeat interval from a thread of its own, between and during
 //! requests, and one reply per request with the request's `id`. It exits
-//! after [`Request::Shutdown`] and when its stdin or stdout closes, so a
-//! dead parent leaves no child behind.
+//! with status 0 after [`Request::Shutdown`] and when its stdin or stdout
+//! closes, so a dead parent leaves no child behind. It exits with status
+//! 2, after a line on stderr, when it cannot read a frame, write a reply
+//! or start its heartbeat.
+//!
+//! ```
+//! use steno_speech::sidecar::protocol::{self, Request};
+//!
+//! let mut frame = Vec::new();
+//! protocol::write_frame(&mut frame, &Request::Health { id: 1 }, &[]).unwrap();
+//! let header = br#"{"id":1,"type":"health"}"#;
+//! assert_eq!(frame[..4], (header.len() as u32).to_le_bytes());
+//! assert_eq!(&frame[4..], header);
+//! let read: Request = protocol::read_header(&mut &frame[..]).unwrap().unwrap();
+//! assert_eq!(read, Request::Health { id: 1 });
+//! ```
 //!
 //! Swift: none; the Mac app runs `FluidAudio` in-process only.
 
@@ -56,7 +70,11 @@ pub enum Request {
     Load {
         id: u64,
         models_root: PathBuf,
+        /// `intraThreads`: ONNX Runtime's threads within one operator
+        /// ([`OnnxOptions::intra_threads`](crate::OnnxOptions::intra_threads)).
         intra_threads: usize,
+        /// `interThreads`: its threads across operators
+        /// ([`OnnxOptions::inter_threads`](crate::OnnxOptions::inter_threads)).
         inter_threads: usize,
         /// [`OnnxOptions::directml`](crate::OnnxOptions::directml); absent
         /// is `false`, so a parent from before it still loads on the CPU.
@@ -106,8 +124,15 @@ impl Request {
     rename_all_fields = "camelCase"
 )]
 pub enum Reply {
-    /// Sent once at start.
-    Ready { protocol: u32, pid: u32 },
+    /// Sent once at start, before any other frame; by then a child on
+    /// Linux or macOS ignores SIGINT, SIGTERM and SIGHUP (the sidecar
+    /// crate's docs).
+    Ready {
+        /// The child's [`PROTOCOL_VERSION`].
+        protocol: u32,
+        /// The child's process id.
+        pid: u32,
+    },
     /// The heartbeat: the child's resident set, for the parent's ceiling.
     Memory { rss_bytes: u64 },
     /// The models are loaded, the encoder on `provider`
@@ -243,6 +268,9 @@ pub fn read_header<R: Read, T: DeserializeOwned>(input: &mut R) -> Result<Option
 /// bytes or samples: a frame's prefix may claim far more than ever comes.
 const INITIAL_CAPACITY: usize = 1 << 16;
 
+/// The bytes of payload [`read_samples`] reads at a time.
+const READ_CHUNK: usize = 1 << 16;
+
 /// Reads the payload of a transcribe request: `sample_count` samples.
 pub fn read_samples<R: Read>(input: &mut R, sample_count: u64) -> Result<Vec<f32>, FrameError> {
     if sample_count > MAX_SAMPLES {
@@ -251,10 +279,10 @@ pub fn read_samples<R: Read>(input: &mut R, sample_count: u64) -> Result<Vec<f32
     // At most 24 hours of samples, so the count and its bytes fit a usize.
     let total = sample_count as usize;
     let mut samples = Vec::with_capacity(total.min(INITIAL_CAPACITY));
-    let mut buffer = vec![0u8; 1 << 16];
+    let mut buffer = vec![0u8; READ_CHUNK];
     let mut remaining = total * 4;
     while remaining > 0 {
-        let chunk = &mut buffer[..remaining.min(1 << 16)];
+        let chunk = &mut buffer[..remaining.min(READ_CHUNK)];
         read_exact(input, chunk)?;
         if samples.capacity() - samples.len() < chunk.len() / 4 {
             // Doubles as the bytes arrive, never past the declared count.

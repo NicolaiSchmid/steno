@@ -1,17 +1,17 @@
 //! ONNX inference in a child process, the speech sidecar (decision 5 of
 //! `.plans/2026-10-01-cross-platform-speech-stack.md`, invariant 4 of
-//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`). An uncaught C++
-//! exception in ONNX Runtime ends the process, and the fp32 export works in
-//! 2 to 3 GB; in `steno-speech-sidecar` such an end takes the child, not the
-//! app, and the working set goes when the child does.
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`). Why speech runs in a
+//! child, and on which platform: [`runtime`](crate::runtime).
 //!
 //! - [`protocol`]: the framed JSON messages over the child's stdin and
 //!   stdout, with the samples as a binary payload. No socket, no file.
 //! - [`client`]: [`SidecarSpeechEngine`], the `SpeechEngine` that spawns,
 //!   limits (per-request deadline, memory ceiling) and replaces the child;
-//!   [`directml_switched_off`], whether a child crashed, hung or overran
-//!   the memory ceiling on `DirectML`; and [`FALLBACK_NOTICE`], the start
-//!   of the child's stderr line about a fallback.
+//!   [`directml_switched_off`], whether a child's end switched `DirectML`
+//!   off for the rest of the app's run (which ends count: the [`client`]
+//!   docs); and
+//!   [`FALLBACK_NOTICE`], the start of the child's stderr line about a
+//!   fallback.
 //!
 //! The binary lives in `crates/steno-speech-sidecar`; its tests kill,
 //! abort, hang and overfill the child and check that the engine reports
