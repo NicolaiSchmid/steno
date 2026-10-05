@@ -533,6 +533,7 @@ struct PairedDeviceRow: StenoRecord {
   enum Columns {
     static let id = Column(CodingKeys.id)
     static let pairedAt = Column(CodingKeys.pairedAt)
+    static let lastSeenAt = Column(CodingKeys.lastSeenAt)
     static let tokenHash = Column(CodingKeys.tokenHash)
   }
 

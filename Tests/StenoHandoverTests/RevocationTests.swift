@@ -21,6 +21,8 @@ import Testing
 /// does not bring it back into memory (also past a pairing during or after
 /// the revoke, a second revoke that fails, or one that fails while another
 /// starts during a pairing), and a failed revoke leaves the device working.
+/// A request whose gate read the device before a revoke does not pair it
+/// again when it records the last-seen time.
 @Suite struct RevocationTests {
   static let chunkSize = 256 * 1024
 
@@ -600,6 +602,44 @@ import Testing
     gate.receiptRead.release()
     #expect(await reading.value.code == 200, "it read before the revoke")
     #expect(await engine.receiptsSnapshot.isEmpty, "the deleted device's receipt stays out")
+    #expect(!gate.timedOut, "nothing waited on a held statement")
+  }
+
+  /// The gate reads the device, then records the last-seen time after the
+  /// read returns. A revoke whose delete commits in between must stand: the
+  /// touch updates the row that still holds the token, and there is none.
+  @Test(.timeLimit(.minutes(1)))
+  func aTouchAfterARevokeDuringTheGatesReadDoesNotPairThePhoneAgain() async throws {
+    let gate = try StoreGate()
+    let test = try TestService.prepare(chunkSize: 64 * 1024, store: gate.store)
+    defer {
+      gate.remove()
+      try? FileManager.default.removeItem(at: test.directory)
+    }
+    let engine = test.service.engine
+    _ = await engine.beginPairing()
+    let deviceID = UUID()
+    let token = try await EngineClient(engine: engine).pair(deviceID: deviceID)
+      .json(Wire.PairResponse.self).token
+    test.advance(by: .seconds(2 * HandoverEngine.lastSeenResolution))
+
+    gate.deviceDelete.arm()
+    let revoking = Task { try await engine.revoke(deviceID) }
+    await gate.deviceDelete.held()
+    gate.deviceRead.arm()
+    let request = Task {
+      await engine.authenticate(.status(UUID()), authorization: "Bearer \(token)")
+    }
+    // The read sees the device the held delete has not committed yet; the
+    // delete commits before the read returns, so the touch comes after it.
+    await gate.deviceRead.held()
+    gate.deviceDelete.release()
+    try await revoking.value
+    gate.deviceRead.release()
+
+    #expect(await request.value != .rejected(HandoverEngine.unauthorized), "it read before")
+    #expect(try await gate.store.pairedDevice(id: deviceID) == nil, "the phone stays revoked")
+    #expect(try await gate.store.device(forTokenHash: DeviceTokens.hash(token)) == nil)
     #expect(!gate.timedOut, "nothing waited on a held statement")
   }
 

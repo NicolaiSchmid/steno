@@ -613,6 +613,32 @@ import Testing
     #expect(try await store.handoverReceipt(recordingID: SampleData.uuid(91)) == nil)
   }
 
+  @Test func touchMovesOnlyTheLastSeenTimeOfTheRowThatStillHoldsTheToken() async throws {
+    let store = try MeetingStore.inMemory()
+    let device = SampleData.pairedDevice()
+    let hash = Data(repeating: 1, count: 32)
+    try await store.save(device, tokenHash: hash)
+    let seen = Date(timeIntervalSince1970: 1_790_000_000)
+
+    // A wrong token hash touches nothing.
+    try await store.touchPairedDevice(
+      id: device.id, tokenHash: Data(repeating: 9, count: 32), seenAt: seen)
+    #expect(try await store.pairedDevice(id: device.id) == device)
+
+    // The right one moves `lastSeenAt` and nothing else.
+    try await store.touchPairedDevice(id: device.id, tokenHash: hash, seenAt: seen)
+    var touched = device
+    touched.lastSeenAt = seen
+    #expect(try await store.device(forTokenHash: hash) == touched)
+
+    // The engine's shape: the device was read, a revoke landed, the touch
+    // runs. The row stays gone and the token stays unknown.
+    try await store.delete(deviceID: device.id)
+    try await store.touchPairedDevice(id: device.id, tokenHash: hash, seenAt: seen)
+    #expect(try await store.pairedDevices().isEmpty)
+    #expect(try await store.device(forTokenHash: hash) == nil)
+  }
+
   @Test func rebuildSearchIndexRestoresMatches() async throws {
     let store = try await Self.populated()
     try await store.writer.write { db in

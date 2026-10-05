@@ -197,7 +197,9 @@ actor HandoverEngine: RequestHandling {
     }
     var seen = device
     seen.lastSeenAt = timestamp
-    try? await inOrder { [store, seen] in try await store.save(seen, tokenHash: tokenHash) }
+    try? await inOrder { [store] in
+      try await store.touchPairedDevice(id: device.id, tokenHash: tokenHash, seenAt: timestamp)
+    }
     return seen
   }
 
