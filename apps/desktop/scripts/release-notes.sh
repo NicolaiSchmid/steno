@@ -45,17 +45,17 @@ key_url="https://raw.githubusercontent.com/$repository/$tag/apps/desktop/release
 fence='```'
 
 cat <<EOF
-Steno desktop $version for macOS (Apple silicon, signed and notarised), Linux (\`.deb\`, AppImage) and Windows (\`.msi\`, NSIS \`-setup.exe\`). On macOS, install the Mac app from the Swift releases (the repository's latest release) for now.
+Steno desktop $version for macOS (Apple silicon, signed and notarised), Linux (\`.deb\`, AppImage) and Windows (\`.msi\`, NSIS \`-setup.exe\`). On a Mac, install the app from the repository's latest release for now; this macOS build is a preview.
 
 **Windows:** the installers are not code-signed yet, so SmartScreen warns before the first install ("Windows protected your PC"; choose *More info*, then *Run anyway*). Check the installer against \`SHA256SUMS\` first: in PowerShell, \`(Get-FileHash .\\<installer>).Hash -eq '<its hash in SHA256SUMS>'\` must print \`True\`.
 
 ### Verify a download
 
-\`SHA256SUMS\` lists every file of this release but the signatures. It and each Linux bundle have a detached OpenPGP signature (\`<file>.asc\`) from the Steno release signing key:
+\`SHA256SUMS\` lists every other file of this release but the OpenPGP signatures (\`.asc\`). It and each Linux bundle have a detached OpenPGP signature (\`<file>.asc\`) from the Steno release signing key:
 
     $grouped
 
-Download \`SHA256SUMS\`, \`SHA256SUMS.asc\` and the files you want into one directory, then run these commands in it (where \`curl\` is missing, \`wget\` fetches the key as well):
+Download \`SHA256SUMS\`, \`SHA256SUMS.asc\` and the files you want into one directory and run these commands there; \`wget\` fetches the key where \`curl\` is missing:
 
 ${fence}sh
 curl -fsSLO $key_url
@@ -67,5 +67,5 @@ if [[ ${#bundles[@]} -gt 0 ]]; then printf '%s\n' "${bundles[@]}"; fi
 cat <<EOF
 $fence
 
-Each \`gpg --verify\` must say "Good signature" from the fingerprint above (the warning that the key is not certified is expected), and \`sha256sum\` must print OK for every file you downloaded. The \`.sig\` files are the in-app updater's signatures, not OpenPGP ones.
+Each \`gpg --verify\` must report "Good signature" from the fingerprint above, and \`sha256sum\` must print OK for every file you downloaded; the warning that the key is not certified by a trusted signature is expected. The \`.sig\` files are the in-app updater's signatures, not OpenPGP ones.
 EOF

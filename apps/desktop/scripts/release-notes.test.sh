@@ -36,8 +36,13 @@ has() {
 has 'the version' 'Steno desktop 0.2.0 for macOS'
 # shellcheck disable=SC2016 # the backticks are Markdown
 has 'the platforms' 'Linux (`.deb`, AppImage) and Windows (`.msi`, NSIS `-setup.exe`)'
+has 'the macOS note' "On a Mac, install the app from the repository's latest release for now; this macOS build is a preview."
 has 'the Windows note' 'the installers are not code-signed yet, so SmartScreen warns'
 has 'the hash check in PowerShell' "(Get-FileHash .\\<installer>).Hash -eq '<its hash in SHA256SUMS>'"
+# shellcheck disable=SC2016 # the backticks are Markdown
+has 'what SHA256SUMS lists' 'lists every other file of this release but the OpenPGP signatures (`.asc`)'
+# shellcheck disable=SC2016 # the backticks are Markdown
+has 'where to run the commands' 'into one directory and run these commands there; `wget` fetches the key where `curl` is missing:'
 has 'the fingerprint' "    $fingerprint"
 has 'the key link at the tag' 'curl -fsSLO https://raw.githubusercontent.com/owner/repo/desktop-v0.2.0/apps/desktop/release-signing-key.asc'
 has 'the key import' 'gpg --import release-signing-key.asc'
@@ -45,8 +50,15 @@ has 'the checksum check' 'sha256sum --check --ignore-missing SHA256SUMS'
 has 'the SHA256SUMS signature' 'gpg --verify SHA256SUMS.asc SHA256SUMS'
 has 'the .deb' 'gpg --verify steno-desktop_0.2.0_amd64.deb.asc steno-desktop_0.2.0_amd64.deb'
 has 'the AppImage' 'gpg --verify steno-desktop_0.2.0_amd64.AppImage.asc steno-desktop_0.2.0_amd64.AppImage'
+# shellcheck disable=SC2016 # the backticks are Markdown
+has 'what a good check prints' 'must report "Good signature" from the fingerprint above, and `sha256sum` must print OK for every file you downloaded'
 [[ "$(grep -c '^gpg --verify' <<< "$notes")" == 3 ]] || fail "the notes verify $(grep -c '^gpg --verify' <<< "$notes") files"
 [[ "$(grep -c '^```' <<< "$notes")" == 2 ]] || fail "the code block is not closed"
+
+# Without GITHUB_REPOSITORY, the key link names this repository.
+default="$(env -u GITHUB_REPOSITORY "$script" 0.2.0 desktop-v0.2.0 "$dir" "$public_key")"
+[[ "$default" == *'https://raw.githubusercontent.com/NicolaiSchmid/steno/desktop-v0.2.0/'* ]] \
+  || fail "the notes without GITHUB_REPOSITORY link no key in NicolaiSchmid/steno"
 
 # refuse <why> <args...>: exit non-zero with an ::error::.
 refuse() {
