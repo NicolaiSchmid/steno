@@ -54,8 +54,9 @@ name: Rust CI
 # the libpipewire headers (scripts/setup-linux.sh installs them). The Linux
 # job also runs its live tests, `crates/steno-audio/tests/pipewire.rs`,
 # against a private headless daemon with WirePlumber and null devices that
-# `scripts/pipewire-headless.sh` starts: real links, real cycles, and the
-# allocation count on PipeWire's own data-loop thread.
+# `scripts/pipewire-headless.sh` starts: real links and cycles,
+# device-change reports, the teardown, and the allocation count on
+# PipeWire's own data-loop thread.
 #
 # The `tsan` job runs the audio ring tests under ThreadSanitizer: the
 # two-thread accounting test in `crates/steno-audio/tests/ring.rs` is what
@@ -225,13 +226,24 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             ran on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
           fi
+
+      # The step fails unless as many tests passed as the file has live
+      # tests: a `cfg` or a filter that left none to run would pass with
+      # "0 passed". A live test is one whose `#[ignore]` reason starts
+      # "needs a PipeWire daemon"; give new ones the same reason. Bash runs
+      # with `pipefail`, so `tee` keeps the exit code.
       - name: PipeWire live tests
         if: matrix.name == 'linux'
         timeout-minutes: 10
-        run: >-
-          scripts/pipewire-headless.sh
-          cargo test -p steno-audio --test pipewire --locked
-          -- --ignored --test-threads=1 --nocapture
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/pipewire-live.log"
+          scripts/pipewire-headless.sh \
+            cargo test -p steno-audio --test pipewire --locked \
+            -- --ignored --test-threads=1 --nocapture | tee "$log"
+          expected=$(grep -c '^#\[ignore = "needs a PipeWire daemon' crates/steno-audio/tests/pipewire.rs)
+          grep -qF "test result: ok. $expected passed" "$log" \
+            || { echo "::error::expected $expected PipeWire live tests to pass"; exit 1; }
 
       # The desktop release workflow's platform filter, MSI version, updater
       # manifest and lanes.

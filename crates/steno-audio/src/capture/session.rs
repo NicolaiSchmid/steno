@@ -42,11 +42,12 @@
 //! # Threads
 //!
 //! Swift's actor becomes one mutex over the session state. The rule that
-//! keeps it deadlock-free: **no thread is joined while the mutex is held**.
-//! The backend's producer, the processing thread and the writer thread all
-//! call back into the session (device changes, levels, write errors) and
-//! take the mutex to do so; teardown therefore moves the recording out of
-//! the state under the lock, releases it, and only then stops the threads.
+//! keeps it deadlock-free: **no thread is joined while the mutex is held**
+//! (one bounded exception on Linux, below). The backend's producer, the
+//! processing thread and the writer thread all call back into the session
+//! (device changes, levels, write errors) and take the mutex to do so;
+//! teardown therefore moves the recording out of the state under the
+//! lock, releases it, and only then stops the threads.
 //! The rebuild runs on its own thread, takes the mutex for each step that
 //! touches the state and sleeps outside it on the injected [`Clock`], with
 //! a [`Cancel`] token `stop()` raises. Teardown raises that token and then
@@ -77,12 +78,16 @@
 //! 2 s for a Bluetooth sink; none within 3 s fails the start), on Windows
 //! until both streams have opened and started (process loopback's
 //! activation included; 10 s in all at most, then the start fails). A
-//! `stop()` arriving meanwhile queues behind it
-//! and then finds a started backend to tear down, instead of racing a
-//! half-built one; a backend never calls back into the session from
-//! `start`, so the hold cannot deadlock. It can stall, though: every
-//! caller, `state()` included, waits as long as `backend.start()` takes,
-//! so a HAL call that hangs there freezes the session's callers with it.
+//! `stop()` arriving meanwhile queues behind it and then finds a started
+//! backend to tear down, instead of racing a half-built one; a backend
+//! never calls back into the session from `start`, so the hold cannot
+//! deadlock. On Linux a failed start closes the capture's gate and joins
+//! the PipeWire thread (2 s at most) with the mutex held, the one join
+//! under it; that is safe because no device-change report can begin
+//! before `start` took the thread's answer, so nothing that thread does
+//! waits on the mutex. It can stall, though: every caller, `state()`
+//! included, waits as long as `backend.start()` takes, so a HAL call that
+//! hangs there freezes the session's callers with it.
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, Sender, channel};

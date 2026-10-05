@@ -77,8 +77,8 @@
 //! # Platforms
 //!
 //! The live backend and the process-activity source are Core Audio on
-//! macOS and WASAPI on Windows; on Linux the live backend is PipeWire
-//! (WP5b) and the process-activity source a stub. **The Windows backend
+//! macOS and WASAPI on Windows; on Linux the live backend is PipeWire and
+//! the process-activity source a stub. **The Windows backend
 //! has not run on hardware:** no Windows machine with audio devices has
 //! run it. It is written against Microsoft's documentation, built, linted
 //! and tested on the `windows-latest` CI runner, which has no audio

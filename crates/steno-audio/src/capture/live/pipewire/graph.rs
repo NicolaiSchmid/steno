@@ -123,6 +123,9 @@ pub(crate) struct Graph {
     ports: BTreeMap<u32, PortEntry>,
     default_sink: Option<String>,
     default_source: Option<String>,
+    /// The targets and the UID of the capture whose snapshot the graph
+    /// serves, once [`Graph::track`] set them.
+    tracked: Option<(Targets, Option<String>)>,
 }
 
 impl Graph {
@@ -168,13 +171,45 @@ impl Graph {
         );
     }
 
-    /// A global went away. True when it was a node or a port: the change a
-    /// capture may have to react to. A port can go while its node stays
-    /// (the node's ports reconfigured), and Steno's link to it dies with it.
+    /// From now on a removal counts as a change only when the snapshot for
+    /// `targets` with `uid` reads what went; see [`Self::remove`].
+    pub fn track(&mut self, targets: &Targets, uid: Option<&str>) {
+        self.tracked = Some((targets.clone(), uid.map(str::to_owned)));
+    }
+
+    /// A global went away. True when it was a node or a port the capture
+    /// may have to react to: before [`Self::track`] any, after it a node
+    /// the snapshot reads (a linked node, the default sink for a system
+    /// lane, the source the microphone follows) or a port of one, so
+    /// another app's stream ending is no change. A port can go while its
+    /// node stays (the node's ports reconfigured), and Steno's link to it
+    /// dies with it.
     pub fn remove(&mut self, id: u32) -> bool {
-        let port = self.ports.remove(&id).is_some();
-        let node = self.nodes.remove(&id).is_some();
-        port || node
+        let node = match self.ports.get(&id) {
+            Some(port) => Some(port.node),
+            None => self.nodes.contains_key(&id).then_some(id),
+        };
+        let changed = node.is_some_and(|node| {
+            self.tracked
+                .as_ref()
+                .is_none_or(|(targets, uid)| self.is_read(node, targets, uid.as_deref()))
+        });
+        self.ports.remove(&id);
+        self.nodes.remove(&id);
+        changed
+    }
+
+    /// Whether the snapshot for `targets` with `uid` reads node `node`: a
+    /// linked node, the default sink for a system lane, or the source the
+    /// microphone follows.
+    fn is_read(&self, node: u32, targets: &Targets, uid: Option<&str>) -> bool {
+        let is = |found: Option<(u32, &NodeEntry)>| found.is_some_and(|(id, _)| id == node);
+        [&targets.mic, &targets.output]
+            .into_iter()
+            .flatten()
+            .any(|endpoint| endpoint.node == node)
+            || targets.output.is_some() && is(self.default_sink_node())
+            || targets.mic.is_some() && is(self.source_named(uid))
     }
 
     /// A property of the `default` metadata on subject 0. `key` `None`
@@ -378,11 +413,11 @@ impl Graph {
     }
 
     /// The devices as they are now, for a capture that resolved `targets`
-    /// with `uid`; `lost` once the connection or the stream failed. The
-    /// default sink stands for both of the snapshot's outputs (PipeWire has
-    /// no separate clock master: the graph resamples to the stream's 48
-    /// kHz), so `default_output_uid` stays `None` and `sample_rate` stays
-    /// [`SAMPLE_RATE`].
+    /// with `uid`; `lost` once the connection, the stream or a link failed.
+    /// The default sink stands for both of the snapshot's outputs
+    /// (PipeWire has no separate clock master: its adapter resamples to
+    /// the stream's 48 kHz), so `default_output_uid` stays
+    /// `None` and `sample_rate` stays [`SAMPLE_RATE`].
     pub fn snapshot(&self, targets: &Targets, uid: Option<&str>, lost: bool) -> DeviceSnapshot {
         let alive = |endpoint: &Option<Endpoint>| {
             !lost && endpoint.as_ref().is_some_and(|e| self.is_alive(e))
@@ -748,6 +783,51 @@ mod tests {
             Some(crate::capture::DeviceChangeReason::OutputDeviceGone)
         );
         assert!(!graph.remove(52), "gone already");
+    }
+
+    #[test]
+    fn once_tracked_only_what_the_snapshot_reads_going_is_a_change() {
+        let mut graph = laptop();
+        // Another app's playback stream and its port.
+        node(&mut graph, 90, 1090, "an-app", "Stream/Output/Audio");
+        port(&mut graph, 91, 1091, 90, "out", "FL");
+        let lanes = [AudioLane::Mic, AudioLane::System];
+        let targets = graph.resolve(&lanes, None).unwrap();
+        graph.track(&targets, None);
+        assert!(!graph.remove(91), "another app's port");
+        assert!(!graph.remove(90), "another app's stream");
+        assert!(graph.remove(54), "an unlinked port of the microphone");
+        assert!(graph.remove(50), "a playback port of the default sink");
+        // The default source moves to the headset: its going now counts,
+        // and the built-in microphone, linked, still does.
+        graph.set_default(
+            Some(DEFAULT_SOURCE_KEY),
+            Some(r#"{"name":"alsa_input.usb-headset.mono"}"#),
+        );
+        assert!(graph.remove(56), "the new default source's port");
+        assert!(graph.remove(42), "the new default source");
+        assert!(graph.remove(41), "the linked microphone");
+        assert!(!graph.remove(41), "gone already");
+        // The default sink moves to a headset: its going counts too.
+        node(&mut graph, 43, 1043, "bluez_output.headset", "Audio/Sink");
+        assert!(!graph.remove(43), "a sink nothing reads");
+        node(&mut graph, 43, 1043, "bluez_output.headset", "Audio/Sink");
+        graph.set_default(
+            Some(DEFAULT_SINK_KEY),
+            Some(r#"{"name":"bluez_output.headset"}"#),
+        );
+        assert!(graph.remove(43), "the new default sink");
+    }
+
+    #[test]
+    fn an_explicit_microphone_tracks_only_its_own_source() {
+        let mut graph = laptop();
+        let uid = Some("alsa_input.usb-headset.mono");
+        let targets = graph.resolve(&[AudioLane::Mixed], uid).unwrap();
+        graph.track(&targets, uid);
+        assert!(!graph.remove(55), "the default source, not recorded");
+        assert!(!graph.remove(53), "the default sink, not recorded");
+        assert!(graph.remove(56), "the headset's port");
     }
 
     #[test]
