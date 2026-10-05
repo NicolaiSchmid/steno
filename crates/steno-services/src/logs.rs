@@ -87,15 +87,12 @@ impl LineQueue {
         let (done, written) = sync_channel(1);
         let mut flush = Message::Flush(done);
         // `SyncSender` has no `send_timeout`; a flush is rare enough to poll.
-        loop {
-            match self.0.try_send(flush) {
-                Ok(()) => break,
-                Err(TrySendError::Full(again)) if Instant::now() < deadline => {
-                    flush = again;
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(_) => return false,
+        while let Err(error) = self.0.try_send(flush) {
+            match error {
+                TrySendError::Full(again) if Instant::now() < deadline => flush = again,
+                _ => return false,
             }
+            std::thread::sleep(Duration::from_millis(5));
         }
         written
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -136,9 +133,8 @@ fn spawn_writer(output: impl Write + Send + 'static, capacity: usize) -> LineQue
 
 fn write_lines(mut output: impl Write, lines: &Receiver<Message>) {
     while let Ok(message) = lines.recv() {
-        let mut next = Some(message);
         // Everything already queued, then one flush.
-        while let Some(message) = next.take() {
+        for message in std::iter::once(message).chain(lines.try_iter()) {
             match message {
                 Message::Line(line) => {
                     let _ = output.write_all(&line);
@@ -148,7 +144,6 @@ fn write_lines(mut output: impl Write, lines: &Receiver<Message>) {
                     let _ = done.send(());
                 }
             }
-            next = lines.try_recv().ok();
         }
         let _ = output.flush();
     }
@@ -157,28 +152,29 @@ fn write_lines(mut output: impl Write, lines: &Receiver<Message>) {
 #[cfg(test)]
 mod tests {
     use std::io::Write;
-    use std::sync::mpsc::{Receiver, Sender, channel};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use super::{LineQueue, spawn_writer};
+    use super::spawn_writer;
 
-    /// An output whose writes wait until the test opens it, recording what
-    /// they wrote.
-    struct Stalled {
-        open: Receiver<()>,
-        opened: bool,
-        written: Arc<Mutex<Vec<u8>>>,
+    /// An output that records what is written to it; its writes wait while
+    /// the test holds its lock.
+    #[derive(Clone, Default)]
+    struct Recorded(Arc<Mutex<Vec<u8>>>);
+
+    impl Recorded {
+        fn lines(&self) -> Vec<String> {
+            String::from_utf8(self.0.lock().unwrap().clone())
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
     }
 
-    impl Write for Stalled {
+    impl Write for Recorded {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            if !self.opened {
-                self.open.recv().unwrap();
-                self.opened = true;
-            }
-            self.written.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
+            self.0.lock().unwrap().write(bytes)
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
@@ -186,37 +182,14 @@ mod tests {
         }
     }
 
-    fn stalled(capacity: usize) -> (LineQueue, Sender<()>, Arc<Mutex<Vec<u8>>>) {
-        let (open, opener) = {
-            let (sender, receiver) = channel();
-            (receiver, sender)
-        };
-        let written = Arc::new(Mutex::new(Vec::new()));
-        let queue = spawn_writer(
-            Stalled {
-                open,
-                opened: false,
-                written: written.clone(),
-            },
-            capacity,
-        );
-        (queue, opener, written)
-    }
-
-    fn lines(written: &Mutex<Vec<u8>>) -> Vec<String> {
-        String::from_utf8(written.lock().unwrap().clone())
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect()
-    }
-
     /// The thread that logs goes on while stderr is stuck: the queue fills,
     /// further lines are dropped, a flush gives up at its bound, and once
     /// stderr moves again the queued lines come out in order.
     #[test]
     fn a_stalled_output_never_blocks_the_thread_that_logs() {
-        let (queue, opener, written) = stalled(4);
+        let output = Recorded::default();
+        let stall = output.0.lock().unwrap();
+        let queue = spawn_writer(output.clone(), 4);
         let subscriber = tracing_subscriber::fmt()
             .with_writer(queue.clone())
             .with_ansi(false)
@@ -237,11 +210,12 @@ mod tests {
         );
         assert!(!queue.flush_within(Duration::from_millis(50)));
 
-        opener.send(()).unwrap();
+        drop(stall);
         assert!(queue.flush_within(Duration::from_secs(10)));
         // The four queued lines and the one the writer held when it
         // stalled, if it had taken one by then; the rest were dropped.
-        let numbers: Vec<usize> = lines(&written)
+        let numbers: Vec<usize> = output
+            .lines()
             .iter()
             .map(|line| line.strip_prefix("line ").unwrap().parse().unwrap())
             .collect();
@@ -252,8 +226,8 @@ mod tests {
 
     #[test]
     fn a_flush_answers_once_every_queued_line_is_written() {
-        let (queue, opener, written) = stalled(64);
-        opener.send(()).unwrap();
+        let output = Recorded::default();
+        let queue = spawn_writer(output.clone(), 64);
         for line in 0..32 {
             // One write per line, as the subscriber writes them.
             (&queue)
@@ -262,7 +236,7 @@ mod tests {
         }
         assert!(queue.flush_within(Duration::from_secs(10)));
         let expected: Vec<String> = (0..32).map(|line| format!("line {line}")).collect();
-        assert_eq!(lines(&written), expected);
+        assert_eq!(output.lines(), expected);
     }
 }
 
