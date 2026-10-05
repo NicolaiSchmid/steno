@@ -1,6 +1,5 @@
 import {
 	createContext,
-	createElement,
 	type ReactNode,
 	useContext,
 	useEffect,
@@ -118,7 +117,7 @@ const PERMISSIONS: Record<PlatformOS, readonly PermissionKind[]> = {
 };
 
 /** A modifier in a shortcut; `mod` is ⌘ on the Mac and Ctrl elsewhere. */
-export type ShortcutModifier = "mod" | "shift" | "alt";
+type ShortcutModifier = "mod" | "shift" | "alt";
 
 /**
  * A shortcut: its modifiers in the order the Mac label writes them, then
@@ -219,24 +218,27 @@ export interface Platform {
 	matches(event: ShortcutEvent, shortcut: Shortcut): boolean;
 }
 
-export function isPlatformOS(value: unknown): value is PlatformOS {
+function isPlatformOS(value: unknown): value is PlatformOS {
 	return platformSchema.safeParse(value).success;
 }
 
-/** The platform for `os`; the Record shortcut is the page's unless said. */
-export function platformFor(
-	os: PlatformOS,
-	{ bindsRecordShortcut = true }: { bindsRecordShortcut?: boolean } = {},
-): Platform {
+/** The platform for `os` in the Tauri shell, which binds Record in the page. */
+export function platformFor(os: PlatformOS): Platform {
 	return {
 		os,
 		words: WORDS[os],
 		permissions: PERMISSIONS[os],
-		bindsRecordShortcut,
+		bindsRecordShortcut: true,
 		label: (shortcut) => shortcutLabel(os, shortcut),
 		matches: (event, shortcut) => matchesShortcut(os, event, shortcut),
 	};
 }
+
+/** The Swift app's Mac, whose Record menu owns the Record shortcut. */
+export const SWIFT_MAC: Platform = {
+	...platformFor("macos"),
+	bindsRecordShortcut: false,
+};
 
 /** What the Tauri shell sets (`platform.rs`). */
 interface StenoWindow {
@@ -259,24 +261,26 @@ export function detectPlatform(
 	if (isPlatformOS(flag)) {
 		return platformFor(flag);
 	}
-	return platformFor("macos", { bindsRecordShortcut: false });
+	return SWIFT_MAC;
 }
 
 const PlatformContext = createContext<Platform | null>(null);
 
 let pagePlatform: Platform | undefined;
 
-export interface PlatformProviderProps {
-	platform: Platform;
-	children?: ReactNode;
-}
-
 /** Supplies `usePlatform` below it; the app and the tests set one. */
 export function PlatformProvider({
 	platform,
 	children,
-}: PlatformProviderProps) {
-	return createElement(PlatformContext.Provider, { value: platform }, children);
+}: {
+	platform: Platform;
+	children?: ReactNode;
+}) {
+	return (
+		<PlatformContext.Provider value={platform}>
+			{children}
+		</PlatformContext.Provider>
+	);
 }
 
 /** The provided platform, else the page's own (`detectPlatform`). */

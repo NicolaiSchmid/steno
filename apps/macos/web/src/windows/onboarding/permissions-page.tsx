@@ -6,7 +6,7 @@ import { type PlatformWords, usePlatform } from "@/lib/platform";
 import { OnboardingPage } from "./onboarding-page";
 
 /** The sentence the smoke test finds page 1 by. */
-export function permissionsIntro({ computer }: PlatformWords): string {
+function permissionsIntro({ computer }: PlatformWords): string {
 	return `A few permissions, then where summaries come from and where meetings go. Audio never leaves this ${computer}.`;
 }
 

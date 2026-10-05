@@ -6,7 +6,7 @@ import type {
 	RecordingSettingsSnapshot,
 } from "@/bridge/contract";
 import { loadFixtureSnapshots } from "@/bridge/mock-transport";
-import { type PlatformOS, platformFor } from "@/lib/platform";
+import { type PlatformOS, platformFor, SWIFT_MAC } from "@/lib/platform";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { MeetingDetail } from "./main/meeting-detail";
 import { MeetingList } from "./main/meeting-list";
@@ -26,7 +26,6 @@ import { TranscriptionSection } from "./settings/transcription-section";
 
 /** The Tauri shell's page on `os`: it answers the Record shortcut itself. */
 const on = (os: PlatformOS) => platformFor(os);
-const SWIFT_MAC = platformFor("macos", { bindsRecordShortcut: false });
 
 async function delivered(): Promise<MeetingDetailSnapshot> {
 	const detail = (await loadFixtureSnapshots())[

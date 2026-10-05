@@ -19,9 +19,9 @@ import { SettingsWindow } from "@/windows/settings/settings-window";
  * `#/panel/prompt?app=<name>&seconds=<n>&raised=<n>`
  * (`src/windows/panels/`), and `#/stories` (every component). Query flags:
  * `dark`; `platform=macos|windows|linux` words the page for that OS where
- * the shell set none (`src/lib/platform.tsx`); for the main window `menu` and `picker` open the actions menu and
- * the speaker picker on mount, and the mock bridge reads `scenario` and
- * `tab` (`src/bridge/mock-transport.ts`).
+ * the shell set none (`src/lib/platform.tsx`); for the main window `menu`
+ * and `picker` open the actions menu and the speaker picker on mount, and
+ * the mock bridge reads `scenario` and `tab` (`src/bridge/mock-transport.ts`).
  * A hash change re-renders the page in place; nothing reloads.
  */
 

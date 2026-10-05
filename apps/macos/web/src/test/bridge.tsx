@@ -11,7 +11,7 @@ import {
 	type MockTransport,
 } from "@/bridge/mock-transport";
 import { TooltipProvider } from "@/components/ui";
-import { type Platform, PlatformProvider, platformFor } from "@/lib/platform";
+import { type Platform, PlatformProvider, SWIFT_MAC } from "@/lib/platform";
 
 export interface BridgeHarness {
 	transport: MockTransport;
@@ -51,7 +51,7 @@ export async function createBridgeHarness(
 export function renderWithBridge(
 	ui: ReactElement,
 	harness: BridgeHarness,
-	platform: Platform = platformFor("macos", { bindsRecordShortcut: false }),
+	platform: Platform = SWIFT_MAC,
 ): RenderResult {
 	return render(
 		<PlatformProvider platform={platform}>

@@ -479,7 +479,7 @@ function DetailBody({
 			{holdsRecorder && recording ? <HeaderStop recording={recording} /> : null}
 			<Button
 				data-testid="export-meeting"
-				disabled={!detail.export.canReexport || detail.isBusy}
+				disabled={!canReexport}
 				onClick={() => send(client, "meeting.reexport")}
 				size="sm"
 				variant="outline"
