@@ -1241,9 +1241,9 @@ mod tests {
     fn nothing_passes_a_gate_once_it_closed() {
         let gate = Gate::new();
         let mut passed = 0;
-        gate.pass(|| passed += 1);
+        assert!(gate.pass(|| passed += 1));
         gate.close();
-        gate.pass(|| passed += 1);
+        assert!(!gate.pass(|| passed += 1), "the pass says it did not run");
         assert_eq!(passed, 1);
         assert_eq!(gate.inside.load(Ordering::SeqCst), 0);
     }
