@@ -638,7 +638,8 @@ import Testing
     try await revoking.value
     gate.deviceRead.release()
 
-    #expect(await request.value != .rejected(HandoverEngine.unauthorized), "it read before the revoke")
+    #expect(
+      await request.value != .rejected(HandoverEngine.unauthorized), "it read before the revoke")
     #expect(try await gate.store.pairedDevice(id: deviceID) == nil, "the phone stays revoked")
     #expect(try await gate.store.device(forTokenHash: DeviceTokens.hash(token)) == nil)
     #expect(!gate.timedOut, "nothing waited on a held statement")
