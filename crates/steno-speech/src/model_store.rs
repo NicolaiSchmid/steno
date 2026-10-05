@@ -75,10 +75,12 @@
 //! meanwhile: it then finds the file installed and returns, or resumes
 //! what the first left. It gives up once the first has written nothing for
 //! 10 minutes (a stopped process), or for longer where the first may still
-//! be waiting on its connection: a file of one chunk is fetched in one
-//! request, and each attempt at it may take the request's whole timeout
-//! (about 39 minutes in all for the 47 MB decoder). Once a file is
-//! installed, by whatever path, the next call deletes its `<name>.partial`.
+//! be waiting on its connection: each attempt may take the connect and
+//! response timeouts of both hops of the host's redirect and the body
+//! timeout of its longest request (about 42 minutes in all for the 47 MB
+//! decoder, which is one request, and about 12 minutes for a file of
+//! several chunks). Once a file is installed, by whatever path, the next
+//! call deletes its `<name>.partial`.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File, TryLockError};
@@ -663,15 +665,17 @@ impl ModelStore {
     /// lets the holder's partial stand still before it gives up on the
     /// holder: [`STALE_PARTIAL`], or longer where a live holder can write
     /// nothing for longer. Each of its [`DOWNLOAD_ATTEMPTS`] attempts may
-    /// spend the connect and response timeouts and the body timeout of its
-    /// longest request without a byte, with the retry waits between them:
-    /// about 39 minutes for the 47 MB decoder, which is one request, and
-    /// 10 minutes for a file of several chunks. A holder whose host
-    /// ignored `Range` for a larger file waits out the whole file's body
-    /// timeout and can stay silent longer; a mirror should answer `Range`.
+    /// spend the connect and response timeouts twice, as the host answers
+    /// through one redirect (as Hugging Face's does) and `ureq` times each
+    /// hop afresh, and the body timeout of its longest request without a
+    /// byte, with the retry waits between them: about 42 minutes for the
+    /// 47 MB decoder, which is one request, and about 12 minutes for a file
+    /// of several chunks. A holder whose host ignored `Range` for a larger
+    /// file waits out the whole file's body timeout and can stay silent
+    /// longer; a mirror should answer `Range`.
     fn lock_wait_limit(&self, size: u64) -> Duration {
-        let attempt =
-            CONNECT_TIMEOUT + RESPONSE_TIMEOUT + self.range_timeout(size, 0, size.min(self.chunk));
+        let hop = CONNECT_TIMEOUT + RESPONSE_TIMEOUT;
+        let attempt = 2 * hop + self.range_timeout(size, 0, size.min(self.chunk));
         let waits: Duration = (1..DOWNLOAD_ATTEMPTS).map(|n| RETRY_DELAY * n).sum();
         STALE_PARTIAL.max(attempt * DOWNLOAD_ATTEMPTS + waits)
     }
@@ -2217,21 +2221,28 @@ mod tests {
 
     #[test]
     fn a_waiter_outlasts_a_holder_whose_one_request_may_still_be_silent() {
-        // A file of one chunk comes in one request, which may spend its
-        // connect, response and body timeouts without a byte, on every
-        // attempt. The waiter waits that out before it gives up on the
-        // holder, on the clock the test moves.
+        // A file of one chunk comes in one request, which may spend the
+        // connect and response timeouts of both hops of a redirect and its
+        // body timeout without a byte, on every attempt. The waiter waits
+        // that out, and the retry waits between the attempts, before it
+        // gives up on the holder, on the clock the test moves.
         let defaults = ModelStore::new("/models");
         let decoder = 47_234_123;
-        assert_eq!(defaults.lock_wait_limit(decoder).as_secs(), 3 * (60 + 720));
+        assert_eq!(
+            defaults.lock_wait_limit(decoder),
+            Duration::from_secs(3 * (120 + 720)) + RETRY_DELAY * 3
+        );
         assert_eq!(defaults.lock_wait_limit(643_854), STALE_PARTIAL);
-        assert_eq!(defaults.lock_wait_limit(2_435_420_160), STALE_PARTIAL);
+        assert_eq!(
+            defaults.lock_wait_limit(2_435_420_160),
+            Duration::from_secs(3 * (120 + 128)) + RETRY_DELAY * 3
+        );
         let body: Vec<u8> = (0..10_000u32).map(|i| (i % 227) as u8).collect();
         let dir = tempfile::tempdir().unwrap();
         let mut store = ModelStore::new(dir.path());
         store.min_body_timeout = Duration::from_secs(3600);
         let limit = store.lock_wait_limit(body.len() as u64);
-        assert_eq!(limit.as_secs(), 3 * (60 + 3600));
+        assert_eq!(limit.as_secs(), 3 * (120 + 3600));
         let asset = asset(
             Some("http://127.0.0.1:9/never".to_owned()),
             &body,

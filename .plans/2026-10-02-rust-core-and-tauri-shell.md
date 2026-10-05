@@ -401,8 +401,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     deletes, while it writes `<name>.partial`, so two downloads of a file, in one
     process or two, never write the same partial; the one that waits then finds the
     file installed or resumes it, and gives up once the holder has written nothing for
-    10 minutes, or for as long as a live holder's attempts at a file of one chunk may
-    take without a byte (about 39 minutes for the decoder). A file over 64 MiB comes
+    10 minutes, or for as long as a live holder's attempts may take without a byte,
+    each hop of the host's redirect timed afresh (about 42 minutes for the decoder,
+    which is one request, and 12 for a file of several chunks). A file over 64 MiB comes
     in `Range` requests of 64 MiB, each with a body timeout of at most 128 s, so a
     silent connection costs minutes; from the export's repository 128 MiB took 13 to
     15 s in 8 MiB chunks and 6 to 8 s in 64 MiB ones, as each request costs a round
