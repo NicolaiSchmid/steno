@@ -290,6 +290,11 @@ impl Shared {
             .map(|(first, last)| judged_at(first, last))
     }
 
+    /// The global id of the bound `default` metadata.
+    fn metadata_id(&self) -> Option<u32> {
+        self.metadata.borrow().as_ref().map(|(id, ..)| *id)
+    }
+
     /// `what` failed for good (logged with PipeWire's `message`): the
     /// capture lost `lost`.
     fn fail(&self, what: &str, message: &str, lost: Lost) {
@@ -358,12 +363,7 @@ impl Shared {
     /// the bound `default` metadata, whose defaults go with it until it is
     /// announced again (WirePlumber restarting).
     fn forget(&self, id: u32) {
-        let metadata = self
-            .metadata
-            .borrow()
-            .as_ref()
-            .is_some_and(|(bound, ..)| *bound == id);
-        let changed = if metadata {
+        let changed = if self.metadata_id() == Some(id) {
             drop(self.metadata.borrow_mut().take());
             self.graph.borrow_mut().set_default(None, None)
         } else {
@@ -947,12 +947,7 @@ impl Capture {
     /// next interval tries again).
     fn begin_reread(&self) -> Option<Reread> {
         let connection = &self.connection;
-        let metadata = connection
-            .shared
-            .metadata
-            .borrow()
-            .as_ref()
-            .map(|(id, ..)| *id)?;
+        let metadata = connection.shared.metadata_id()?;
         let global = pw::registry::GlobalObject {
             id: metadata,
             permissions: pw::permissions::PermissionFlags::empty(),
@@ -1004,8 +999,7 @@ impl Capture {
     /// removal cleared the defaults, and they come back with the next one.
     fn finish_reread(&self, reread: &Reread) {
         let shared = &self.connection.shared;
-        let bound = shared.metadata.borrow().as_ref().map(|(id, ..)| *id);
-        if bound == Some(reread.metadata)
+        if shared.metadata_id() == Some(reread.metadata)
             && shared.graph.borrow_mut().reread(&reread.found.borrow())
         {
             tracing::info!(
@@ -1207,14 +1201,11 @@ impl LiveCaptureBackend {
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
     /// How often a running capture re-reads the `default` metadata through
-    /// a fresh bind (see the module doc). 3 s: a move the events missed is
-    /// then judged within about 3.5 s (this plus [`Self::COALESCE_DELAY`]),
-    /// so the system lane stays on the old output for seconds, not for the
-    /// rest of the meeting, while the cost is one bind, the metadata's few
-    /// properties and one roundtrip per interval on the capture's own
-    /// connection. Shorter would bind more often, and a bind at the moment
-    /// of a move is what was seen keeping the move from the clients already
-    /// bound.
+    /// a fresh bind (see the module doc). A move the events missed is
+    /// judged within about this plus [`Self::COALESCE_DELAY`], for one bind
+    /// and one roundtrip per interval. Shorter would bind more often, and a
+    /// bind at the moment of a move was seen keeping the move from the
+    /// clients already bound.
     pub const REREAD_INTERVAL: Duration = Duration::from_secs(3);
 
     #[must_use]
