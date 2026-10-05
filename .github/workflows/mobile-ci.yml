@@ -45,9 +45,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `dest` per job: the default `~/setup-pnpm` is shared by every runner
+      # on a self-hosted machine, and two concurrent installs collide there.
       - uses: pnpm/action-setup@v4
         with:
-          # Per runner: two jobs on the shared-home Macs collide in ~/setup-pnpm (ENOTEMPTY).
           dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: mobile/package.json
 
@@ -86,9 +87,10 @@ jobs:
           fetch-depth: 0 # the `ios-fp-*` tags drive the lane decision
           fetch-tags: true
 
+      # `dest` per job: the default `~/setup-pnpm` is shared by every runner
+      # on a self-hosted machine, and two concurrent installs collide there.
       - uses: pnpm/action-setup@v4
         with:
-          # Per runner: two jobs on the shared-home Macs collide in ~/setup-pnpm (ENOTEMPTY).
           dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: mobile/package.json
 

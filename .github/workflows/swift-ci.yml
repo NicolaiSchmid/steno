@@ -321,9 +321,10 @@ jobs:
 
       # The web UI is built here with pnpm so the Xcode pre-build phase only
       # copies dist/ into the bundle (scripts/build-web.sh).
+      # `dest` per job: the default `~/setup-pnpm` is shared by every runner
+      # on a self-hosted machine, and two concurrent installs collide there.
       - uses: pnpm/action-setup@v4
         with:
-          # Per runner: two jobs on the shared-home Macs collide in ~/setup-pnpm (ENOTEMPTY).
           dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: apps/macos/web/package.json
 
@@ -445,9 +446,10 @@ jobs:
 
       # The web UI is built here with pnpm so the Xcode pre-build phase only
       # copies dist/ into the bundle (scripts/build-web.sh).
+      # `dest` per job: the default `~/setup-pnpm` is shared by every runner
+      # on a self-hosted machine, and two concurrent installs collide there.
       - uses: pnpm/action-setup@v4
         with:
-          # Per runner: two jobs on the shared-home Macs collide in ~/setup-pnpm (ENOTEMPTY).
           dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: apps/macos/web/package.json
 
