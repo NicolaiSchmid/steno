@@ -16,8 +16,9 @@ fail() {
   failures=$((failures + 1))
 }
 
-# The fingerprint apps/desktop/README.md publishes (Release, Signing).
-fingerprint=048B527950E4F609B90E63495F8810A6E6D4DB46
+# The fingerprint apps/desktop/README.md publishes (Checksums and OpenPGP
+# signatures), grouped as gpg prints it.
+fingerprint='048B 5279 50E4 F609 B90E  6349 5F88 10A6 E6D4 DB46'
 
 dir="$scratch/assets"
 mkdir -p "$dir"
@@ -33,9 +34,13 @@ has() {
   [[ "$notes" == *"$2"* ]] || fail "the notes lack $1: $2"
 }
 has 'the version' 'Steno desktop 0.2.0 for macOS'
+# shellcheck disable=SC2016 # the backticks are Markdown
+has 'the platforms' 'Linux (`.deb`, AppImage) and Windows (`.msi`, NSIS `-setup.exe`)'
 has 'the Windows note' 'the installers are not code-signed yet, so SmartScreen warns'
+has 'the hash check in PowerShell' "(Get-FileHash .\\<installer>).Hash -eq '<its hash in SHA256SUMS>'"
 has 'the fingerprint' "    $fingerprint"
 has 'the key link at the tag' 'curl -fsSLO https://raw.githubusercontent.com/owner/repo/desktop-v0.2.0/apps/desktop/release-signing-key.asc'
+has 'the key import' 'gpg --import release-signing-key.asc'
 has 'the checksum check' 'sha256sum --check --ignore-missing SHA256SUMS'
 has 'the SHA256SUMS signature' 'gpg --verify SHA256SUMS.asc SHA256SUMS'
 has 'the .deb' 'gpg --verify steno-desktop_0.2.0_amd64.deb.asc steno-desktop_0.2.0_amd64.deb'

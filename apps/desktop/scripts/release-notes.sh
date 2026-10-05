@@ -34,19 +34,28 @@ while IFS= read -r -d '' signature; do
   [[ "$file" == SHA256SUMS ]] || bundles+=("gpg --verify $file.asc $file")
 done < <(find "$dir" -maxdepth 1 -type f -name '*.asc' -print0 | LC_ALL=C sort -z)
 
+# The fingerprint as gpg prints it: ten groups of four, two spaces between
+# the halves.
+half() {
+  sed -E 's/(.{4})(.{4})(.{4})(.{4})(.{4})/\1 \2 \3 \4 \5/' <<< "$1"
+}
+grouped="$(half "${fingerprint:0:20}")  $(half "${fingerprint:20}")"
+
 key_url="https://raw.githubusercontent.com/$repository/$tag/apps/desktop/release-signing-key.asc"
 fence='```'
 
 cat <<EOF
-Steno desktop $version for macOS (Apple silicon, signed and notarised), Linux (\`.deb\`, AppImage) and Windows (\`.msi\`, NSIS \`-setup.exe\`). The Mac app on the Swift releases stays the one to install on macOS until the cutover.
+Steno desktop $version for macOS (Apple silicon, signed and notarised), Linux (\`.deb\`, AppImage) and Windows (\`.msi\`, NSIS \`-setup.exe\`). On macOS, install the Mac app from the Swift releases (the repository's latest release) for now.
 
-**Windows:** the installers are not code-signed yet, so SmartScreen warns before the first install ("Windows protected your PC"; choose *More info*, then *Run anyway*). Check the installer against \`SHA256SUMS\` first: in PowerShell, \`(Get-FileHash .\\<installer>).Hash\` must equal its line there (in any case).
+**Windows:** the installers are not code-signed yet, so SmartScreen warns before the first install ("Windows protected your PC"; choose *More info*, then *Run anyway*). Check the installer against \`SHA256SUMS\` first: in PowerShell, \`(Get-FileHash .\\<installer>).Hash -eq '<its hash in SHA256SUMS>'\` must print \`True\`.
 
 ### Verify a download
 
-\`SHA256SUMS\` lists every file of this release. It and each Linux bundle carry a detached OpenPGP signature (\`.asc\`) from the Steno release signing key:
+\`SHA256SUMS\` lists every file of this release but the signatures. It and each Linux bundle have a detached OpenPGP signature (\`<file>.asc\`) from the Steno release signing key:
 
-    $fingerprint
+    $grouped
+
+Download \`SHA256SUMS\`, \`SHA256SUMS.asc\` and the files you want into one directory, then run these commands in it (where \`curl\` is missing, \`wget\` fetches the key as well):
 
 ${fence}sh
 curl -fsSLO $key_url
@@ -58,5 +67,5 @@ if [[ ${#bundles[@]} -gt 0 ]]; then printf '%s\n' "${bundles[@]}"; fi
 cat <<EOF
 $fence
 
-Each \`gpg --verify\` must say "Good signature" from the fingerprint above (the warning that the key is not certified is expected), and \`sha256sum\` OK for every file you downloaded. The \`.sig\` files are the in-app updater's signatures, not OpenPGP ones.
+Each \`gpg --verify\` must say "Good signature" from the fingerprint above (the warning that the key is not certified is expected), and \`sha256sum\` must print OK for every file you downloaded. The \`.sig\` files are the in-app updater's signatures, not OpenPGP ones.
 EOF
