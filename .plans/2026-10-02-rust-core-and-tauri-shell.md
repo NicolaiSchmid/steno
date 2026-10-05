@@ -1600,12 +1600,6 @@ request that fixes an item deletes it.
   `FileSecretStore::in_support_directory` (`crates/steno-services/src/secrets.rs`) and
   in `StenoPaths::default_support_directory` (`crates/steno-core/src/paths.rs`).
   Found: on `main` on 2026-10-04 (no pull request names it).
-- **Unowned.** The phone clears its pairing on any 401, also one that answers a
-  request sent under a pairing since replaced, so an old request that races a
-  re-pairing unpairs the new one; only the chunk uploads are cancelled before a
-  re-pairing. Where: `onUnauthorized` is `clearPairing` in
-  `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
-  `mobile/src/features/sync/recording-client.ts`. Found: #191.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,

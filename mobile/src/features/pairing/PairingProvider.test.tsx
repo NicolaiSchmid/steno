@@ -133,4 +133,81 @@ describe("PairingProvider", () => {
 		await act(async () => fake.emit("active"));
 		expect(h.value.pairing).toEqual(pairing);
 	});
+
+	describe("clearIfCurrent", () => {
+		const replacement = { ...pairing, token: "new-token" };
+
+		it("clears, after its first step, when the token is the pairing's", async () => {
+			fake.loads.push(pairing);
+			const h = await mount();
+			const steps: string[] = [];
+			fake.clear.mockImplementationOnce(async () => {
+				steps.push("clear");
+			});
+			let cleared = false;
+			await act(async () => {
+				cleared = await h.value.clearIfCurrent("tok", async () => {
+					steps.push("first");
+				});
+			});
+			expect(cleared).toBe(true);
+			expect(steps).toEqual(["first", "clear"]);
+			expect(h.value.pairing).toBeNull();
+		});
+
+		it("treats a token nobody recorded as the pairing's", async () => {
+			fake.loads.push(pairing);
+			const h = await mount();
+			await act(async () => {
+				await h.value.clearIfCurrent(null, async () => {});
+			});
+			expect(fake.clear).toHaveBeenCalledTimes(1);
+			expect(h.value.pairing).toBeNull();
+		});
+
+		it("keeps a pairing that replaced the token, and runs nothing", async () => {
+			fake.loads.push(replacement);
+			const h = await mount();
+			const first = vi.fn(async () => {});
+			let cleared = true;
+			await act(async () => {
+				cleared = await h.value.clearIfCurrent("tok", first);
+			});
+			expect(cleared).toBe(false);
+			expect(first).not.toHaveBeenCalled();
+			expect(fake.clear).not.toHaveBeenCalled();
+			expect(h.value.pairing).toEqual(replacement);
+		});
+
+		it("does nothing without a pairing", async () => {
+			const h = await mount();
+			const first = vi.fn(async () => {});
+			await act(async () => {
+				expect(await h.value.clearIfCurrent(null, first)).toBe(false);
+			});
+			expect(first).not.toHaveBeenCalled();
+			expect(fake.clear).not.toHaveBeenCalled();
+		});
+
+		it("waits for a replace still saving, then compares with the new pairing", async () => {
+			fake.loads.push(pairing);
+			const h = await mount();
+			let saved!: () => void;
+			fake.save.mockImplementationOnce(
+				() =>
+					new Promise<void>((resolve) => {
+						saved = resolve;
+					}),
+			);
+			let cleared: Promise<boolean> | undefined;
+			await act(async () => {
+				void h.value.replace(replacement);
+				cleared = h.value.clearIfCurrent("tok", async () => {});
+			});
+			await act(async () => saved());
+			expect(await cleared).toBe(false);
+			expect(fake.clear).not.toHaveBeenCalled();
+			expect(h.value.pairing).toEqual(replacement);
+		});
+	});
 });

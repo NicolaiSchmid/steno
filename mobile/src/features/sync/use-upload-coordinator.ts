@@ -34,7 +34,8 @@ export type { CoordinatorStatus } from "./upload-coordinator";
  * Runs the planner (plan P6) over the real module, files and clock: resolves
  * the paired Mac when Bonjour sees it, runs one action per tick through
  * `upload-executor.ts`, retries on the backoff, reconciles with the
- * background session after a relaunch, and turns a 401 into `unpaired`.
+ * background session after a relaunch, and turns a 401 to the current
+ * pairing's token into `unpaired`.
  */
 export type UploadCoordinator = {
 	status: CoordinatorStatus;
@@ -53,7 +54,7 @@ const recordingFiles: RecordingFiles = {
 };
 
 export function useUploadCoordinator(): UploadCoordinator {
-	const { pairing, ready: pairingReady, clear: clearPairing } = usePairing();
+	const { pairing, ready: pairingReady, clearIfCurrent } = usePairing();
 	const { index, ready: queueReady, update } = useQueue();
 	const discovery = useMacDiscovery(pairingReady && pairing !== null);
 	const [session, setSession] = useState<MacSession | null>(null);
@@ -71,11 +72,11 @@ export function useUploadCoordinator(): UploadCoordinator {
 				files: recordingFiles,
 				deviceName: async () => (await deviceIdentity()).deviceName,
 				update,
-				onUnauthorized: clearPairing,
+				onUnauthorized: clearIfCurrent,
 				now: () => new Date(),
 				random: Math.random,
 			}),
-		[update, clearPairing],
+		[update, clearIfCurrent],
 	);
 
 	const serviceName = pairing

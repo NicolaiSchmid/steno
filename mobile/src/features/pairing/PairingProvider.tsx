@@ -17,8 +17,8 @@ import { type Pairing, pairingStore } from "./pairing-store";
  * and again on every return to the foreground while nothing is loaded: a
  * background relaunch on a locked phone can find the keychain unreadable,
  * and that must not look like "unpaired" for the rest of the process.
- * `replace` and `clear` persist first so a crash never leaves the UI ahead
- * of the store.
+ * `replace`, `clear` and `clearIfCurrent` persist first so a crash never
+ * leaves the UI ahead of the store, and run one at a time in call order.
  */
 export type PairingContextValue = {
 	pairing: Pairing | null;
@@ -26,6 +26,18 @@ export type PairingContextValue = {
 	ready: boolean;
 	replace(pairing: Pairing): Promise<void>;
 	clear(): Promise<void>;
+	/**
+	 * Forgets the pairing only while it still holds `token`, after `first`
+	 * ran; whether it did. A 401 answers the token its request carried, so
+	 * one that answers a pairing since replaced (or cleared) leaves the
+	 * current one alone. `null` is a token nobody recorded (a chunk the
+	 * background session started before a relaunch) and stands for the
+	 * current pairing.
+	 */
+	clearIfCurrent(
+		token: string | null,
+		first: () => Promise<unknown>,
+	): Promise<boolean>;
 };
 
 const PairingContext = createContext<PairingContextValue | null>(null);
@@ -59,21 +71,50 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 		};
 	}, []);
 
-	const replace = useCallback(async (next: Pairing) => {
-		await pairingStore.save(next);
-		pairingRef.current = next;
-		setPairing(next);
+	// The changes in call order: a `clearIfCurrent` called while a `replace`
+	// still saves compares its token with the pairing that replace leaves.
+	const changes = useRef<Promise<unknown>>(Promise.resolve());
+	const inOrder = useCallback(<T,>(change: () => Promise<T>): Promise<T> => {
+		const run = changes.current.then(change, change);
+		changes.current = run.catch(() => {});
+		return run;
 	}, []);
 
-	const clear = useCallback(async () => {
+	const forget = useCallback(async () => {
 		await pairingStore.clear();
 		pairingRef.current = null;
 		setPairing(null);
 	}, []);
 
+	const replace = useCallback(
+		(next: Pairing) =>
+			inOrder(async () => {
+				await pairingStore.save(next);
+				pairingRef.current = next;
+				setPairing(next);
+			}),
+		[inOrder],
+	);
+
+	const clear = useCallback(() => inOrder(forget), [inOrder, forget]);
+
+	const clearIfCurrent = useCallback(
+		(token: string | null, first: () => Promise<unknown>) =>
+			inOrder(async () => {
+				const current = pairingRef.current;
+				if (!current || (token !== null && current.token !== token)) {
+					return false;
+				}
+				await first();
+				await forget();
+				return true;
+			}),
+		[inOrder, forget],
+	);
+
 	const value = useMemo(
-		() => ({ pairing, ready, replace, clear }),
-		[pairing, ready, replace, clear],
+		() => ({ pairing, ready, replace, clear, clearIfCurrent }),
+		[pairing, ready, replace, clear, clearIfCurrent],
 	);
 	return (
 		<PairingContext.Provider value={value}>{children}</PairingContext.Provider>

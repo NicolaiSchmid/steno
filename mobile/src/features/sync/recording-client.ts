@@ -111,8 +111,8 @@ export async function complete(
 
 /**
  * Cancels every chunk still in the background session. Before a re-pairing:
- * a task started under the old token would otherwise finish with 401 and
- * unpair the fresh Mac.
+ * a task started under the old token would only finish with 401 (which
+ * leaves the new pairing alone and retries the recording after the backoff).
  */
 export async function cancelAllUploads(): Promise<void> {
 	const link = stenoLink();
