@@ -197,9 +197,8 @@ impl SetupBannerMessage {
         }
     }
 
-    /// The rest of the banner.
+    /// The rest of the banner, in `platform`'s word for the machine.
     #[must_use]
-    /// The sentence under the title, in `platform`'s word for the machine.
     pub fn body(self, platform: Platform) -> &'static str {
         match self {
             SetupBannerMessage::BothMissing => platform.mac_or(

@@ -398,8 +398,8 @@ impl Platform {
     /// prompt for the phone's connection; it records system audio without
     /// a permission and Steno reads no calendar there. Linux has the
     /// microphone (the portal asks inside a sandbox) and nothing else.
-    /// `platform` in `apps/macos/web/src/lib/platform.ts` says the same
-    /// for the General section's calendar row.
+    /// `PERMISSIONS` in `apps/macos/web/src/lib/platform.tsx` says the
+    /// same for the General section's calendar row.
     #[must_use]
     pub const fn permissions(self) -> &'static [PermissionKind] {
         match self {

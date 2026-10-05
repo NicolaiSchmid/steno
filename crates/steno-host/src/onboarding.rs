@@ -2,10 +2,11 @@
 //! and `Web/OnboardingSnapshots.swift`. Page 1, permissions: microphone,
 //! system audio (both required), then calendar and local network
 //! (optional), as far as the platform has them (`Platform::permissions`:
-//! all four on the Mac, fewer on Windows and Linux). Page 2, "Summaries and export": the LLM endpoint and the
-//! Obsidian vault, both optional, written through the same view models the
-//! Settings sections use. The model owns the exit: Finish, or both rows
-//! handled on page 2, set the completed flag and `finished`.
+//! all four on the Mac, fewer on Windows and Linux). Page 2, "Summaries
+//! and export": the LLM endpoint and the Obsidian vault, both optional,
+//! written through the same view models the Settings sections use. The
+//! model owns the exit: Finish, or both rows handled on page 2, set the
+//! completed flag and `finished`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
