@@ -1338,10 +1338,9 @@ fix is ported to Swift before cutover.
   the LAN. On Windows the hardware rule refuses a LAN address on a Hyper-V external
   switch's or a Network Bridge's vEthernet adapter, so a computer whose LAN address
   moved there is unreachable.
-- Touch: `HandoverEngine.touch` should run an `UPDATE` of the row that still holds the
-  token (a new `MeetingStore` method), as the Rust engine does
-  (`Store::touch_paired_device`); today `store.save(seen, tokenHash:)` upserts the
-  device the gate read before a yield, so a revoke in between resurrects it.
+- Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
+  (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
+  commits between the gate's read and its touch stands.
 - Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt`
   read with `try?`, so a failed read counts as no receipt: the sweep deletes a
   resumable upload, a route answers 404, and an announce starts the recording over,
@@ -1569,13 +1568,6 @@ request that fixes an item deletes it.
   does not show yet. It blocks the first Linux release too. Where: `display_name`,
   `source_repo` and `expected_bytes` in `crates/steno-services/src/speech.rs`; the
   Settings > General item under "Pipeline and services (WP6b)". Found: #164, #183.
-- **WP9b.** The Swift `touch` upsert: `HandoverEngine.touch`
-  (`Sources/StenoHandover/Routing/HandoverEngine.swift`) records a phone's last-seen
-  time with `store.save(seen, tokenHash:)`, which writes back the whole device row it
-  read before a suspension, so a revoke that commits in between puts the revoked phone
-  back. The Rust store runs an `UPDATE` of the row that still holds the token
-  (`Store::touch_paired_device`). Needed only if the Swift app ships another release.
-  Where: the "Touch" line under "Handover". Found: #169, #191.
 - **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
   Swift defects (each ported to Swift if it ships another release, otherwise closed by
   the cutover), the fixtures the Swift side owes, and the audio choices to settle at
@@ -1708,6 +1700,16 @@ request that fixes an item deletes it.
   re-pairing. Where: `onUnauthorized` is `clearPairing` in
   `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
   `mobile/src/features/sync/recording-client.ts`. Found: #191.
+- **Unowned.** The Rust handover engine orders only its receipt saves (the `saves`
+  turn); a revoke's device delete and a pairing's device save run on the blocking pool
+  outside it, so they can commit in either order. A phone that pairs again while a
+  revoke of it is still deleting can have the new pairing deleted after its save
+  commits: the user just paired it, and its next request is answered 401, so the phone
+  unpairs itself. The other way round, a revoke during a pairing's save whose delete
+  commits before the save leaves the revoked phone in the store: memory refuses it, but
+  after a restart it hands over again. Swift runs every engine write in the order asked
+  for (`HandoverEngine.inOrder`). Where: `revoke` and `pair` in
+  `crates/steno-handover/src/engine/mod.rs`. Found: #205.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,

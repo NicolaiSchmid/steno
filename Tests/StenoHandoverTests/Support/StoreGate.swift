@@ -20,17 +20,20 @@ final class StoreGate: Sendable {
   /// The next save of an existing handover receipt, executed but not
   /// committed; every later write queues behind it.
   let receiptWrite = Hold(matching: "UPDATE \"handoverReceipt\"")
+  /// The next paired device read by token hash (the auth gate); the engine
+  /// resumes with a device that may no longer be in the store.
+  let deviceRead = Hold(matching: "FROM \"pairedDevice\" WHERE \"tokenHash\"")
   /// The next paired device delete (a revoke), executed but not committed.
   let deviceDelete = Hold(matching: "DELETE FROM \"pairedDevice\"")
-  /// The next save of an existing paired device (pairing again under its
-  /// id), executed but not committed.
+  /// The next update of a paired device (pairing again under its id, or a
+  /// touch), executed but not committed.
   let deviceSave = Hold(matching: "UPDATE \"pairedDevice\"")
   private let holds: [Hold]
   private let directory: URL
 
   init() throws {
     directory = try Fixtures.temporaryDirectory("store-gate")
-    let holds = [receiptRead, receiptWrite, deviceDelete, deviceSave]
+    let holds = [receiptRead, receiptWrite, deviceRead, deviceDelete, deviceSave]
     self.holds = holds
     var configuration = Configuration()
     configuration.prepareDatabase { db in
