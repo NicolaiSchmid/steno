@@ -561,13 +561,11 @@ const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// the latest, with its code: the single-instance plugin releases its name
 /// on the session bus at `RunEvent::Exit` (before the shell's own handler
 /// runs) and waits for the bus's answer without a bound, so a frozen
-/// session bus held the exit (about 20 s in #172's run, past a minute
-/// under a stopped private bus, where it waited in `release_name`). The bus
-/// drops the name with the connection anyway, and an exit goes through
-/// only once the shutdown ended or ran out of patience, so ending the
-/// teardown early loses nothing. An update's relaunch
-/// (`tauri::RESTART_EXIT_CODE`) is left to the teardown, which relaunches
-/// at its end.
+/// session bus held the exit. The bus drops the name with the connection
+/// anyway, and an exit goes through only once the shutdown ended or ran
+/// out of patience, so ending the teardown early loses nothing. An
+/// update's relaunch (`tauri::RESTART_EXIT_CODE`) is left to the teardown,
+/// which relaunches at its end.
 #[cfg(target_os = "linux")]
 fn end_within(grace: std::time::Duration, end: impl FnOnce() + Send + 'static) {
     std::thread::spawn(move || {
@@ -578,7 +576,6 @@ fn end_within(grace: std::time::Duration, end: impl FnOnce() + Send + 'static) {
 
 /// Whether the session bus is named (`DBUS_SESSION_BUS_ADDRESS`): the
 /// shell treats a session without one as having none.
-#[cfg(target_os = "linux")]
 fn session_bus_named() -> bool {
     std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
 }
@@ -588,14 +585,7 @@ fn session_bus_named() -> bool {
 /// `xvfb-run` has none), so it is skipped there; macOS and Windows need
 /// nothing.
 fn single_instance_available() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        session_bus_named()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        true
-    }
+    !cfg!(target_os = "linux") || session_bus_named()
 }
 
 #[cfg(test)]
