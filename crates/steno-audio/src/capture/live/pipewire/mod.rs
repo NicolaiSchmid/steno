@@ -55,19 +55,22 @@
 //!
 //! The `default.audio.sink` and `default.audio.source` metadata changing
 //! or going away, a node the capture's snapshot reads going away (a
-//! linked device, the default sink, the microphone's source) or a port of
-//! one, or the connection, the stream or a link failing (a link removed
-//! from outside included) mark a change; another app's stream ending
-//! does not. [`LiveCaptureBackend::COALESCE_DELAY`] after the last change,
-//! and at most 2 s after the first, the graph is compared with the devices
+//! linked device, the default sink, the source the microphone follows) or
+//! a port of one, or the connection, the stream or a link failing (a link
+//! removed from outside included) mark a change; another app's stream
+//! ending does not. [`LiveCaptureBackend::COALESCE_DELAY`] after the last
+//! change, and at most `COALESCE_LIMIT` (2 s) after the first, the graph is
+//! compared with the devices
 //! the targets resolved to ([`DeviceSnapshot::difference`]), and a
 //! difference goes to the sink as a [`DeviceChangeReason`], from this
 //! thread, never during `start`. A change during `start` is judged once
 //! the capture runs. The session then rebuilds through `stop()` and
 //! `start`, as on the Mac. The capture never follows a default on its own.
 //! A lost connection, stream or link reads as the output gone (the input
-//! for an in-person capture), and the sample rate never changes: the
-//! adapter resamples.
+//! for an in-person capture), and so does a microphone that vanishes
+//! during a call: the server removes Steno's link to it, and a lost link
+//! takes both lanes. The sample rate never changes: the adapter
+//! resamples.
 //!
 //! The system lane is the whole default sink, Steno's own output included
 //! (the Mac's tap excludes Steno's process; Steno plays nothing during a
@@ -108,9 +111,10 @@ const PUMP_SLICE: Duration = Duration::from_millis(20);
 /// The wait on the loop while nothing is pending.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
-/// The longest a stream of changes defers its judgement: one that keeps
-/// coming in less than [`LiveCaptureBackend::COALESCE_DELAY`] apart is
-/// judged this long after its first change, and again once it settles.
+/// The longest a stream of changes defers its judgement: changes that keep
+/// coming less than [`LiveCaptureBackend::COALESCE_DELAY`] apart are
+/// judged this long after the first of them, and the changes after that
+/// judgement start a new stream.
 const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 
 /// How long `stop()` waits for the PipeWire thread to tear down after the
@@ -941,8 +945,8 @@ type Answer = Result<CaptureStream, CaptureError>;
 /// The channel the thread answers `start` through: a rendezvous, so a send
 /// completes only into a `start` still waiting in [`await_answer`]. With a
 /// buffer, an answer sent right after `start` gave up would land in it,
-/// and the thread would go on to watch, and report, for a capture `start`
-/// is tearing down with the session mutex held.
+/// and the thread would go on to watch and report while `start` closes
+/// the gate, which [`Gate::close`] forbids.
 fn answer_channel() -> (SyncSender<Answer>, Receiver<Answer>) {
     sync_channel(0)
 }
@@ -1012,8 +1016,8 @@ struct Active {
     /// Disconnected once the thread is done, its teardown included.
     ended: Receiver<()>,
     thread: JoinHandle<()>,
-    /// The thread's kernel id once it runs, 0 before or when unreadable:
-    /// where a hung teardown waits is read from `/proc` by it.
+    /// The thread's kernel id, 0 until it runs or when `/proc` does not give
+    /// it; the log of a hung teardown reads `/proc/self/task/<id>` with it.
     thread_id: Arc<AtomicU32>,
 }
 
@@ -1067,7 +1071,8 @@ impl std::fmt::Debug for LiveCaptureBackend {
 impl LiveCaptureBackend {
     /// How long a burst of graph changes settles before it is judged once,
     /// as on the Mac. A Bluetooth profile switch removes and adds nodes
-    /// and moves both defaults within it.
+    /// and moves both defaults within it. Unlike the Mac, a burst that
+    /// never settles is judged at most 2 s after its first change.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
     #[must_use]
