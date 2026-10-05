@@ -24,10 +24,9 @@
 //! microphone, or one of Steno's links removed from outside, reported
 //! gone.
 //!
-//! The timing checks hold only for switches that reach the daemon close
-//! enough together: a round the machine stretched past the coalescing
-//! delay still needs its one report, but its timing is not checked, and
-//! the test prints that. A missing report says whether the session
+//! A round the machine stretched past the coalescing delay is not held to
+//! the one-burst checks (the timing of its one report, or no report for a
+//! default that came back), and the test prints that. A missing report says whether the session
 //! manager never moved the default or the capture missed the move. The
 //! backend's logs go to the test output, at `info` unless a non-empty
 //! `RUST_LOG` says otherwise.
@@ -74,8 +73,8 @@ const MIC_TONE: f64 = 1_000.0;
 /// The capture stream's `node.name`.
 const CAPTURE_NODE: &str = "steno-capture";
 const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
-/// The backend's cap on a burst that never settles: it is judged at most
-/// this long after its first change.
+/// The backend's private `COALESCE_LIMIT`: a burst that never settles is
+/// judged this long after its first change.
 const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 /// How long a test listens for a report that must not come: three
 /// coalescing delays, fixed so that a shorter delay cannot shorten it.
@@ -518,8 +517,8 @@ fn moving_the_default_output_is_reported_once() {
 /// the last switch; when `timed`, the report must come no sooner than the
 /// coalescing delay after it.
 ///
-/// WirePlumber moves `default.audio.sink` after the configured one, so it
-/// gets time, and a failure says which side missed: WirePlumber, which did
+/// WirePlumber moves `default.audio.sink` after the configured one, so the
+/// report gets time, and a failure says which side missed: WirePlumber, which did
 /// not move the default, or the capture, which did not report the move.
 /// The metadata is read only once the report is late: a client binding it
 /// while WirePlumber moves the default can keep that move from every
@@ -559,12 +558,12 @@ fn assert_output_moved_once(
     );
 }
 
-/// Whether switches whose calls ran over `gaps` (each from the start of
-/// one `DefaultSink::set` to the return of the next) and `whole` in all
-/// reach the daemon as one burst that the coalescing delay after its last
-/// switch judges: every gap short of the delay, with 50 ms to spare, and
-/// the burst short enough that the 2 s cap cannot judge it sooner. Prints
-/// why not, after `context`.
+/// Whether the switches reach the daemon as one burst, judged the
+/// coalescing delay after its last switch: each of `gaps` (from the start
+/// of one `DefaultSink::set` to the return of the next) at least 50 ms
+/// short of the delay, and `whole`, the first call to the last, short
+/// enough that the 2 s cap cannot judge it sooner. Prints why not, after
+/// `context`.
 fn one_burst(gaps: &[Duration], whole: Duration, context: &str) -> bool {
     let tight = gaps
         .iter()
@@ -572,8 +571,8 @@ fn one_burst(gaps: &[Duration], whole: Duration, context: &str) -> bool {
         && whole < COALESCE_LIMIT.saturating_sub(COALESCE_DELAY);
     if !tight {
         println!(
-            "{context}timing not checked: the machine stretched the switches \
-             (gaps {gaps:?}, {whole:?} in all)"
+            "{context}not judged as one burst: the machine stretched the \
+             switches (gaps {gaps:?}, {whole:?} in all)"
         );
     }
     tight
@@ -627,9 +626,10 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
             default_metadata()
         );
         // Within the coalescing delay of each other: one report, timed
-        // from the last. WirePlumber moves the default while `set` runs,
-        // so two moves are at most from the start of one call to the
-        // return of the next apart.
+        // from the last. WirePlumber usually moves the default while `set`
+        // runs, so two moves are never further apart than the start of one
+        // call and the return of the next; when it moves after `set`
+        // returned, `one_burst`'s 50 ms spare covers its lag.
         let context = format!("round {round}: ");
         let first = Instant::now();
         DefaultSink::set(to);
@@ -668,7 +668,11 @@ fn changes_that_settle_back_or_touch_other_nodes_are_not_reported() {
     let _restore = DefaultSink;
     start(&backend, &lanes, None, &sink).expect("start");
     // There and back within the coalescing delay: back as soon as
-    // WirePlumber moved it (about 15 ms).
+    // WirePlumber moved it (about 15 ms). Polling the metadata while
+    // WirePlumber moves the default can keep the move from the capture
+    // (see `assert_output_moved_once`), and a missed move also ends in no
+    // report, so this round can pass without the capture having seen the
+    // move; a fixed pause instead would not know when WirePlumber moved.
     let there = Instant::now();
     DefaultSink::set(SECOND_SINK);
     assert!(
