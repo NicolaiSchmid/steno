@@ -59,11 +59,10 @@
 //! a port of one, or the connection, the stream or a link failing (a link
 //! removed from outside included) mark a change; another app's stream
 //! ending does not. [`LiveCaptureBackend::COALESCE_DELAY`] after the last
-//! change, and at most `COALESCE_LIMIT` (2 s) after the first, the graph is
-//! compared with the devices
-//! the targets resolved to ([`DeviceSnapshot::difference`]), and a
-//! difference goes to the sink as a [`DeviceChangeReason`], from this
-//! thread, never during `start`. A change during `start` is judged once
+//! change, and at most `COALESCE_LIMIT` (2 s) after the first, the graph
+//! is compared with the devices the targets resolved to
+//! ([`DeviceSnapshot::difference`]), and a difference goes to the sink as
+//! a [`DeviceChangeReason`], from this thread, never during `start`. A change during `start` is judged once
 //! the capture runs. The session then rebuilds through `stop()` and
 //! `start`, as on the Mac. The capture never follows a default on its own.
 //! A lost connection, stream or link reads as the output gone (the input
