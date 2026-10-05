@@ -348,7 +348,7 @@ impl Engine {
             written
         })
         .await
-        .map_err(join_error)?
+        .map_err(|error| join_error(&error))?
     }
 
     /// On start, drop inbox files no receipt accounts for (a crash between
@@ -721,10 +721,10 @@ async fn on_blocking_pool<T: Send + 'static>(
 ) -> store::Result<T> {
     tokio::task::spawn_blocking(move || body(&store))
         .await
-        .map_err(join_error)?
+        .map_err(|error| join_error(&error))?
 }
 
-fn join_error(error: tokio::task::JoinError) -> store::StoreError {
+fn join_error(error: &tokio::task::JoinError) -> store::StoreError {
     store::StoreError::Io(std::io::Error::other(error.to_string()))
 }
 
