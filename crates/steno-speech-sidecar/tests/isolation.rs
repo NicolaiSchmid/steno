@@ -12,11 +12,12 @@
 //! stops its child, inside a runtime or not. Driven by hand, without the
 //! client, a child must greet first, exit when its parent's pipes close,
 //! idle or busy, with status 2 on a request it cannot read, and on unix
-//! answer a request that SIGINT, SIGTERM and SIGHUP reach mid-request.
+//! answer a request that SIGINT, SIGTERM and SIGHUP reach mid-request (on
+//! Linux, ignore them before it writes its ready message).
 //!
-//! Nothing here ends a child with `DirectML` in use. During a load or a
-//! request that switches `DirectML` off for the rest of the process's run,
-//! so those tests run in binaries of their own (`directml_switch_off.rs`,
+//! Nothing here ends a child with `DirectML` in use. Such an end during a
+//! load or a request switches `DirectML` off for the rest of the process's
+//! run, so those tests run in binaries of their own (`directml_switch_off.rs`,
 //! `directml_probe_crash.rs`, `directml_lost_encoder.rs`); so do the tests
 //! of a child on `DirectML` that ends between requests
 //! (`directml_idle_death.rs`, `directml_idle_overrun.rs`), so that a
@@ -80,13 +81,38 @@ fn faulted_child(dir: &tempfile::TempDir, which: &str) -> u32 {
 
 /// A child with `args`, started by hand without the client.
 fn spawn_by_hand(args: &[&str]) -> Child {
-    Command::new(binary())
+    let mut command = Command::new(binary());
+    command
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    default_exit_signals(&mut command);
+    command.spawn().unwrap()
+}
+
+/// Has `command`'s child start with SIGINT, SIGTERM and SIGHUP at their
+/// default action, so the signal tests check the child's own ignore, not
+/// one inherited from a test process run under `nohup` or as a background
+/// job. Unix only.
+fn default_exit_signals(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+
+        // SAFETY: between fork and exec the closure only calls `signal`,
+        // which is async-signal-safe, and allocates nothing.
+        unsafe {
+            command.pre_exec(|| {
+                for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
+                    libc::signal(signal, libc::SIG_DFL);
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = command;
 }
 
 /// Reads past the heartbeats to the child's next other message. A child
@@ -620,6 +646,87 @@ fn the_signals_that_end_the_app_leave_a_request_in_the_child_answered() {
     assert!(status.success(), "{status}");
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn the_exit_signals_are_ignored_before_the_ready_message_is_written() {
+    use std::io::PipeReader;
+    use std::os::fd::AsRawFd as _;
+
+    /// The signals `pid` ignores, from `/proc/<pid>/status`.
+    fn ignored(pid: u32) -> u64 {
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("SigIgn:"))
+            .map_or(0, |mask| u64::from_str_radix(mask.trim(), 16).unwrap())
+    }
+
+    // A full stdout pipe holds the child inside its ready write; by then
+    // it must ignore the signals, and they must not end it.
+    let (reader, writer) = std::io::pipe().unwrap();
+    let fd = writer.as_raw_fd();
+    let chunk = [0u8; 4096];
+    let mut filled = 0;
+    // SAFETY: `fcntl` and `write` on a pipe this test owns, from a buffer
+    // that outlives the calls.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        for size in [chunk.len(), 1] {
+            loop {
+                let written = libc::write(fd, chunk.as_ptr().cast(), size);
+                if written <= 0 {
+                    break;
+                }
+                filled += written as usize;
+            }
+        }
+        libc::fcntl(fd, libc::F_SETFL, flags);
+    }
+    let mut command = Command::new(binary());
+    command
+        .args(["--fake-engine", "--heartbeat-ms", "20"])
+        .stdin(Stdio::piped())
+        .stdout(writer)
+        .stderr(Stdio::null());
+    default_exit_signals(&mut command);
+    let mut child = command.spawn().unwrap();
+    drop(command);
+    let pid = child.id();
+    let signals = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+    let wanted = signals.iter().fold(0u64, |mask, s| mask | 1 << (s - 1));
+    if within_ten_seconds(|| (ignored(pid) & wanted == wanted).then_some(())).is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the child reached its ready write without ignoring the exit signals");
+    }
+    for signal in signals {
+        // SAFETY: `kill` only sends `signal` to the child's pid.
+        let sent = unsafe { libc::kill(libc::pid_t::try_from(pid).unwrap(), signal) };
+        assert_eq!(sent, 0, "signal {signal}");
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "a signal ended the child"
+    );
+    let mut stdout: BufReader<PipeReader> = BufReader::new(reader);
+    let mut queued = vec![0u8; filled];
+    stdout.read_exact(&mut queued).unwrap();
+    let first = protocol::read_header::<_, Reply>(&mut stdout).unwrap();
+    assert_eq!(
+        first,
+        Some(Reply::Ready {
+            protocol: PROTOCOL_VERSION,
+            pid
+        })
+    );
+    drop(child.stdin.take());
+    drop(stdout);
+    let status = exit_status(&mut child, "the child outlived its stdin");
+    assert!(status.success(), "{status}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_real_engine_reports_missing_models_and_keeps_running() {
     // No `--fake-engine`: the child tries the store and says what is
@@ -706,7 +813,11 @@ async fn a_child_over_the_ceiling_while_idle_is_replaced_without_an_error() {
 async fn a_reply_the_child_cannot_send_is_a_crash_that_says_why() {
     // A transcript over the frame limit: the child says so on stderr and
     // exits with status 2 rather than leave the parent waiting.
-    let (engine, _dir) = engine_with_fault("oversize", |_| {});
+    // The deadline is not what this test checks: debug serialization of
+    // the transcript takes seconds on a loaded machine.
+    let (engine, _dir) = engine_with_fault("oversize", |c| {
+        c.transcribe_timeout_floor = Duration::from_secs(300);
+    });
     assert_recovers(&engine, |error| {
         let SidecarError::Crashed { status, stderr } = error else {
             panic!("{error}");
