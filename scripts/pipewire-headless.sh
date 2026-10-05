@@ -39,10 +39,12 @@ root="$(mktemp -d "${TMPDIR:-/tmp}/steno-pipewire.XXXXXX")"
 # The sockets (the bus, `pipewire-0-manager`) live in the runtime
 # directory, and a Unix socket path holds at most 107 bytes, so it gets a
 # short base of its own: TMPDIR while that leaves room (the longest socket
-# path is the base plus 35 bytes), else /tmp. A nix-shell's or a CI
-# runner's TMPDIR can be far longer.
+# path is the base plus 35 bytes) and holds only characters a D-Bus
+# address takes unescaped, else /tmp. A nix-shell's or a CI runner's
+# TMPDIR can be far longer.
 runtime_base="${TMPDIR:-/tmp}"
-if [[ ${#runtime_base} -gt 64 ]]; then
+if [[ ${#runtime_base} -gt 64 ]] ||
+  LC_ALL=C grep -q '[^A-Za-z0-9/._-]' <<<"$runtime_base"; then
   runtime_base=/tmp
 fi
 runtime="$(mktemp -d "$runtime_base/steno-pw.XXXXXX")"
