@@ -118,7 +118,8 @@ impl Targets {
     /// What losing Steno's link from `port` of node `node` loses: the
     /// microphone when the microphone endpoint takes that port, the output
     /// when the output endpoint does (both for a port both take). A port
-    /// neither takes is not one of Steno's links; it loses everything.
+    /// neither takes cannot be one of Steno's links; to be safe it loses
+    /// both.
     pub fn lost_with(&self, node: u32, port: u32) -> Lost {
         let takes = |endpoint: &Option<Endpoint>| {
             endpoint
@@ -133,15 +134,15 @@ impl Targets {
     }
 }
 
-/// What a capture lost of its devices: Steno's link to the microphone, to
-/// the output, or both, as a lost connection or stream loses both. The Mac
+/// What a capture lost of its devices: Steno's links from the microphone,
+/// from the output, or both (what a lost connection or stream loses). The Mac
 /// reads each device's own liveness the same way (Swift:
 /// `LiveCaptureBackend.resolve`, `inputAlive` and `outputAlive`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Lost {
-    /// The microphone lane's link failed or went.
+    /// Steno's link from the microphone failed or went.
     pub mic: bool,
-    /// One of the system lane's links failed or went.
+    /// One of Steno's links from the output failed or went.
     pub output: bool,
 }
 
@@ -152,7 +153,7 @@ impl Lost {
         output: false,
     };
 
-    /// Everything: the connection or the stream failed.
+    /// Both: what a lost connection or stream loses.
     pub const ALL: Self = Self {
         mic: true,
         output: true,

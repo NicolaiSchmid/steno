@@ -756,15 +756,23 @@ impl Capture {
     /// gone). Steno's own teardown never fires them: they drop before the
     /// link, and the loop does not run in between.
     fn watch_link(shared: &Rc<Shared>, link: pw::link::Link, lost: Lost) -> WatchedLink {
+        // One closure for all three ways a link fails, so they mark the same
+        // lane.
+        let fail = {
+            let shared = Rc::downgrade(shared);
+            move |message: &str| {
+                if let Some(shared) = shared.upgrade() {
+                    shared.fail("a capture link", message, lost);
+                }
+            }
+        };
         let info = link
             .add_listener_local()
             .info({
-                let shared = Rc::downgrade(shared);
+                let fail = fail.clone();
                 move |info| {
-                    if let pw::link::LinkState::Error(message) = info.state()
-                        && let Some(shared) = shared.upgrade()
-                    {
-                        shared.fail("a capture link", message, lost);
+                    if let pw::link::LinkState::Error(message) = info.state() {
+                        fail(message);
                     }
                 }
             })
@@ -773,21 +781,10 @@ impl Capture {
             .upcast_ref()
             .add_listener_local()
             .error({
-                let shared = Rc::downgrade(shared);
-                move |_seq, _res, message| {
-                    if let Some(shared) = shared.upgrade() {
-                        shared.fail("a capture link", message, lost);
-                    }
-                }
+                let fail = fail.clone();
+                move |_seq, _res, message| fail(message)
             })
-            .removed({
-                let shared = Rc::downgrade(shared);
-                move || {
-                    if let Some(shared) = shared.upgrade() {
-                        shared.fail("a capture link", "the server removed it", lost);
-                    }
-                }
-            })
+            .removed(move || fail("the server removed it"))
             .register();
         WatchedLink {
             _info: info,
