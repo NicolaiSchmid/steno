@@ -2,25 +2,23 @@
 # The release's assets in one flat directory, from the bundle jobs'
 # artifacts as actions/download-artifact leaves them without
 # merge-multiple: <dist>/steno-desktop-<platform>/<bundle type>/<file>.
-# Each platform named is taken from its own artifact, and from it only the
-# files that platform builds:
+#
+#   apps/desktop/scripts/release-assets.sh <version> <dist> <assets> <platform...>
+#
+# Each platform named comes from its own artifact, with only the files it
+# builds, so only the Linux artifact's `.deb` and `.AppImage` reach the
+# OpenPGP signing (release-signatures.sh):
 #
 #   linux    `.deb`, `.AppImage` and the `.sig` of each
 #   windows  `.msi`, NSIS `-setup.exe` and the `.sig` of each
 #   macos    `.dmg`, `Steno.app.tar.gz` and its `.sig`
 #
-# The macOS updater archive is `Steno.app.tar.gz` on every version; it
-# becomes `Steno_<version>_aarch64.app.tar.gz` like the other assets (its
-# signature covers the bytes, not the name). Anything else is an
-# `::error::` and exit 1: an artifact of a platform not named, a platform
-# without its artifact, a file its platform does not build, two files of
-# one name, a non-empty <assets>. So only the Linux artifact's `.deb` and
-# `.AppImage` reach the OpenPGP signing (release-signatures.sh).
-#
-#   apps/desktop/scripts/release-assets.sh <version> <dist> <assets> <platform...>
-#
-# Names from an artifact appear in errors quoted (`printf %q`), so a newline
-# in one cannot start a second workflow command.
+# `Steno.app.tar.gz` becomes `Steno_<version>_aarch64.app.tar.gz` like the
+# other assets (its signature covers the bytes, not the name). Anything
+# else fails with an `::error::`: an artifact of a platform not named, a
+# platform without its artifact, a foreign file or symlink, two files of
+# one name, a non-empty <assets>. Errors quote names with `printf %q`, so a
+# newline in one cannot start a second workflow command.
 # apps/desktop/scripts/release-assets.test.sh checks it; rust-ci.yml runs that.
 set -euo pipefail
 
