@@ -209,6 +209,20 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     rt.cycle_frames.store(view.frames, Ordering::Release);
 }
 
+/// The capture and playback latencies in frames at [`SAMPLE_RATE`], for a
+/// first cycle of `cycle` frames on a graph whose clock ticks `clock` (the
+/// stream's `1/48000` at 48 kHz; a zero denominator reads as 48 kHz).
+fn latency_frames(
+    (input, output): (Latency, Latency),
+    cycle: usize,
+    clock: spa::utils::Fraction,
+) -> (usize, usize) {
+    (
+        input.frames(cycle, clock.denom),
+        output.frames(cycle, clock.denom),
+    )
+}
+
 /// A `pipewire` error as a backend failure naming what failed.
 fn failed(what: &'static str) -> impl FnOnce(pw::Error) -> CaptureError {
     move |error| CaptureError::BackendFailed(format!("{what}: {error}"))
@@ -758,15 +772,22 @@ impl Capture {
             return Err(connection.stalled("run the capture"));
         }
         let cycle = self.cycle_frames.load(Ordering::Relaxed);
-        let graph_rate = self.stream.time().map_or(0, |time| time.rate().denom);
+        let clock = self
+            .stream
+            .time()
+            .map_or(spa::utils::Fraction { num: 0, denom: 0 }, |time| {
+                time.rate()
+            });
         // Its own deadline: a first cycle late in the start's must not cut
         // the read short and leave the far-end delay at zero.
-        let (input, output) = self.latencies(Instant::now() + LATENCY_TIMEOUT);
+        let latencies = self.latencies(Instant::now() + LATENCY_TIMEOUT);
         if connection.shared.lost.get() {
             return Err(connection.stalled("run the capture"));
         }
-        self.info.input_latency_frames = input.frames(cycle, graph_rate);
-        self.info.output_latency_frames = output.frames(cycle, graph_rate);
+        (
+            self.info.input_latency_frames,
+            self.info.output_latency_frames,
+        ) = latency_frames(latencies, cycle, clock);
         Ok(())
     }
 
@@ -1384,6 +1405,32 @@ mod tests {
         assert_eq!(judged_at(first, later), later + delay);
         let late = first + COALESCE_LIMIT;
         assert_eq!(judged_at(first, late), first + COALESCE_LIMIT);
+    }
+
+    #[test]
+    fn the_latencies_are_counted_on_the_graph_clock_in_their_own_direction() {
+        let input = Latency {
+            quantum: 0.0,
+            rate: 441,
+            ns: 0,
+        };
+        let output = Latency {
+            quantum: 1.0,
+            rate: 0,
+            ns: 0,
+        };
+        // A 44.1 kHz graph ticks `1/44100`: 441 samples are 10 ms, 480
+        // frames at 48 kHz; one quantum is the first cycle.
+        let clock = spa::utils::Fraction {
+            num: 1,
+            denom: 44_100,
+        };
+        assert_eq!(latency_frames((input, output), 1_024, clock), (480, 1_024));
+        let unknown = spa::utils::Fraction { num: 0, denom: 0 };
+        assert_eq!(
+            latency_frames((input, output), 1_024, unknown),
+            (441, 1_024)
+        );
     }
 
     #[test]
