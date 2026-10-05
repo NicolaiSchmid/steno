@@ -165,11 +165,15 @@ function harness(initial: QueueIndex, random = () => 1) {
 		removed: [] as string[],
 	};
 	// The phone's pairing, as `PairingProvider.clearIfCurrent` sees it.
-	const pairing = { token: session.token as string | null };
+	// `loaded` is the token it was loaded with at launch.
+	const pairing = {
+		token: session.token as string | null,
+		loaded: session.token as string | null,
+	};
 	const onUnauthorized = vi.fn(
 		async (token: string | null, unpairRows: () => Promise<unknown>) => {
-			if (pairing.token === null) return false;
-			if (token !== null && token !== pairing.token) return false;
+			const expected = token ?? pairing.loaded;
+			if (pairing.token === null || pairing.token !== expected) return false;
 			await unpairRows();
 			pairing.token = null;
 			return true;
@@ -541,19 +545,27 @@ describe("401 revokes the pairing", () => {
 	});
 });
 
-describe("a 401 to a pairing since replaced", () => {
+describe("a 401 to a pairing since replaced keeps the new one", () => {
 	function repaired(h: ReturnType<typeof harness>) {
 		h.pairing.token = "new-token";
 		h.mac.revoked = true;
 	}
 
-	function expectRetried(h: ReturnType<typeof harness>) {
+	function expectOldToken(h: ReturnType<typeof harness>) {
 		expect(h.onUnauthorized).toHaveBeenCalledWith(
 			session.token,
 			expect.any(Function),
 		);
 		expect(h.pairing.token).toBe("new-token");
-		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
+	}
+
+	function expectRetried(h: ReturnType<typeof harness>) {
+		expectOldToken(h);
+		expect(h.row("a")).toMatchObject({
+			state: "queued",
+			attempts: 1,
+			lastError: "Paired again; retrying",
+		});
 		expect(h.row("a")?.nextAttemptAt).not.toBeNull();
 		expect(h.row("bb")?.state).toBe("queued");
 	}
@@ -565,7 +577,7 @@ describe("a 401 to a pairing since replaced", () => {
 		);
 	}
 
-	it("at announce keeps the new pairing and retries the recording after the backoff", async () => {
+	it("at announce", async () => {
 		const h = harness(twoQueued());
 		repaired(h);
 		await h.executor.execute(
@@ -586,12 +598,108 @@ describe("a 401 to a pairing since replaced", () => {
 	});
 
 	it("at complete", async () => {
+		const h = harness(twoPending());
+		await h.drive();
+		await h.finishChunk("a", 0);
+		h.mac.revoked = true;
+		await h.drive();
+		expectRevoked(h);
+	});
+
+	it("while refreshing the chunk set after a relaunch", async () => {
+		const h = harness(setState(twoPending(), "a", "uploading"));
+		h.mac.revoked = true;
+		await h.executor.refreshUploading(session, h.state.index);
+		expectRevoked(h);
+	});
+
+	it("on the result of a chunk started before a relaunch, whose token nobody recorded", async () => {
+		const h = harness(setState(twoPending(), "a", "uploading"));
+		h.executor.reconcile([taskIDs.chunk("a", 0)]);
+		h.mac.revoked = true;
+		await h.finishChunk("a", 0, 401);
+		expect(h.onUnauthorized).toHaveBeenCalledWith(null, expect.any(Function));
+		expectRevoked(h);
+	});
+
+	it("leaves nothing pending for the planner afterwards", async () => {
+		const h = harness(twoPending());
+		h.mac.revoked = true;
+		await h.drive();
+		expect(planNext(h.state.index, true, new Set(), h.clock.now)).toEqual({
+			kind: "idle",
+		});
+	});
+});
+
+describe("a 401 to a pairing since replaced keeps the new one", () => {
+	function repaired(h: ReturnType<typeof harness>) {
+		h.pairing.token = "new-token";
+		h.mac.revoked = true;
+	}
+
+	function expectOldToken(h: ReturnType<typeof harness>) {
+		expect(h.onUnauthorized).toHaveBeenCalledWith(
+			session.token,
+			expect.any(Function),
+		);
+		expect(h.pairing.token).toBe("new-token");
+	}
+
+	function expectRetried(h: ReturnType<typeof harness>) {
+		expectOldToken(h);
+		expect(h.row("a")).toMatchObject({
+			state: "queued",
+			attempts: 1,
+			lastError: "Paired again; retrying",
+		});
+		expect(h.row("a")?.nextAttemptAt).not.toBeNull();
+		expect(h.row("bb")?.state).toBe("queued");
+	}
+
+	function twoQueued() {
+		return addRecording(
+			addRecording(EMPTY_INDEX, rec("a", CHUNK)),
+			rec("bb", CHUNK),
+		);
+	}
+
+	it("at announce", async () => {
+		const h = harness(twoQueued());
+		repaired(h);
+		await h.executor.execute(
+			{ kind: "announce", recordingID: "a" },
+			session,
+			h.state.index,
+		);
+		expectRetried(h);
+	});
+
+	it("on the result of a chunk sent with the old token", async () => {
+		const h = harness(twoQueued());
+		await h.drive();
+		repaired(h);
+		await h.finishChunk("a", 0, 401);
+		expectRetried(h);
+		expect(h.row("a")?.uploadedChunks).toEqual([]);
+	});
+
+	it("on the result of a chunk still in flight after a reconcile", async () => {
+		const h = harness(twoQueued());
+		await h.drive();
+		h.executor.reconcile([taskIDs.chunk("a", 0)]);
+		repaired(h);
+		await h.finishChunk("a", 0, 401);
+		expectRetried(h);
+	});
+
+	it("at complete", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
 		await h.drive();
 		await h.finishChunk("a", 0);
 		repaired(h);
 		await h.drive();
-		expect(h.pairing.token).toBe("new-token");
+		expectOldToken(h);
 		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
 	});
 
@@ -599,8 +707,18 @@ describe("a 401 to a pairing since replaced", () => {
 		const h = harness(setState(twoQueued(), "a", "uploading"));
 		repaired(h);
 		await h.executor.refreshUploading(session, h.state.index);
-		expect(h.pairing.token).toBe("new-token");
+		expectOldToken(h);
 		expect(h.row("a")?.state).toBe("uploading");
+	});
+
+	it("stops refreshing the chunk sets at the first one", async () => {
+		const h = harness(
+			setState(setState(twoQueued(), "a", "uploading"), "bb", "uploading"),
+		);
+		repaired(h);
+		await h.executor.refreshUploading(session, h.state.index);
+		expect(h.mac.calls).toEqual(["status a"]);
+		expect(h.row("bb")?.state).toBe("uploading");
 	});
 });
 

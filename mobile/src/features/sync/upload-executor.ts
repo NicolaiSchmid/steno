@@ -57,11 +57,12 @@ export type ExecutorDependencies = {
 	update(transform: (index: QueueIndex) => QueueIndex): Promise<unknown>;
 	/**
 	 * A 401 answered a request sent with `token` (`null` when nobody recorded
-	 * it). While `token` is still the pairing's, the Mac revoked it: runs
-	 * `unpairRows` (every pending row becomes `unpaired`), forgets the
-	 * pairing and resolves true. False for a pairing since replaced or
-	 * cleared; the executor then retries the recording after the backoff,
-	 * under the pairing that is current by then.
+	 * it, which stands for the pairing loaded at launch). While `token` is
+	 * still the pairing's, the Mac revoked it: runs `unpairRows` (every
+	 * pending row becomes `unpaired`), forgets the pairing and resolves true.
+	 * Resolves false for a pairing since replaced or cleared; the executor
+	 * then handles the 401 like any other failure of that request, except
+	 * that a refresh of the chunk sets stops there.
 	 */
 	onUnauthorized(
 		token: string | null,
@@ -109,7 +110,7 @@ export function createUploadExecutor(
 	// started before a relaunch has none.
 	const chunkTokens = new Map<string, string>();
 
-	/** Whether the 401 to `token` unpaired the phone. */
+	// Whether the 401 to `token` unpaired the phone.
 	const unauthorized = (token: string | null) =>
 		deps.onUnauthorized(token, () => deps.update(unpairPending));
 
@@ -118,12 +119,11 @@ export function createUploadExecutor(
 		error: unknown,
 		token: string | null = null,
 	) => {
-		if (
-			error instanceof HandoverError &&
-			error.kind === "unauthorized" &&
-			(await unauthorized(token))
-		) {
-			return;
+		let message = errorMessage(error);
+		if (error instanceof HandoverError && error.kind === "unauthorized") {
+			if (await unauthorized(token)) return;
+			// A 401 to a pairing since replaced: not a revoke of this one.
+			message = "Paired again; retrying";
 		}
 		await deps.update((current) => {
 			const rec = findRecording(current, recordingID);
@@ -133,7 +133,7 @@ export function createUploadExecutor(
 				recordingID,
 				deps.now(),
 				backoffMs(rec.attempts + 1, deps.random),
-				errorMessage(error),
+				message,
 			);
 		});
 	};
@@ -348,9 +348,11 @@ export function createUploadExecutor(
 					);
 				} else if (
 					error instanceof HandoverError &&
-					error.kind === "unauthorized" &&
-					(await unauthorized(session.token))
+					error.kind === "unauthorized"
 				) {
+					// Revoked, or a pairing since replaced whose session is about
+					// to go: either way the other rows would only answer 401 too.
+					await unauthorized(session.token);
 					return;
 				}
 			}
