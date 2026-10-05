@@ -1211,8 +1211,8 @@ fix is ported to Swift before cutover.
   point-to-point interface, which most tunnels there are (`wg0`, `tun0`, `utun3`); on
   Windows every adapter but hardware Ethernet and Wi-Fi that is up
   (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters.
-- Network, Rust differs (WP8 decides): the record is not re-published after a network
-  change (restart on network change, or re-register). Layer-2 tunnels (a TAP device,
+- Network, Rust differs (open: "Open after the port"): the record is not re-published
+  after a network change (restart on network change, or re-register). Layer-2 tunnels (a TAP device,
   `feth`) and bridges (`docker0`, `bridge100`) are not point-to-point, and are served;
   Swift classes bridges `.other`. A LAN numbered in `100.64.0.0/10` is refused, on
   every platform. Rust judges a connection by its local address where Swift judges the
@@ -1607,25 +1607,26 @@ baseline carries none. Parity numbers: see the PR.
 WP5a is `crates/steno-audio`: the rings, Speex AEC over vendored SpeexDSP,
 the writer, the session with its device-change rebuild, the synthetic
 backend, the macOS live backend, the meeting detector and the symphonia
-decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs (WP5b and WP10a
-below replace them). The zero-allocation
+decoder; PipeWire and WASAPI were stubs until WP5b and WP10a (below)
+replaced them. The zero-allocation
 proof is `crates/steno-audio/tests/realtime.rs`; the ERLE table is
 identical to Swift's `aec-bench --synthetic`; the ring tests run under
 ThreadSanitizer in CI's `tsan` job; the live Core Audio tests sit behind
 `--ignored` in `tests/live.rs`. Parity items: the Audio list above.
 
-What WP7c leaves for the next package: `crates/steno-handover` is a rustls (ring)
+What WP7c left for the next package: `crates/steno-handover` is a rustls (ring)
 listener, TLS 1.3 only, hyper 1 HTTP/1.1, with the pinned verifier (`pinning`), the
 rcgen identity in the `SecretStore` as one PEM bundle, pairing, the seven routes, the
 inbox and the mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. The store
-gains the paired-device and handover-receipt queries. Core's `RecordingIntake`
-(copy into the audio folder, enqueue) waits for WP6b: Rust core has no pipeline to
-enqueue into yet; the audio folder's path comes from `paths::file_url_path`, the
-meeting's folder from `RecordingLayout`. Durability before `complete` answers 200 is
-the intake's, as in Swift: the listener fsyncs each chunk (`receiving_file::write`) and
-writes its own `complete` receipt only after `HandoverIntake::admit` returns, so the
-port must have the master and its commits on disk by then (the `RecordingIntake.admit`
-line under Store). Pairing and revoke commits stay `NORMAL`, as in Swift: a power loss
+gains the paired-device and handover-receipt queries. The intake (copy into the audio
+folder, enqueue) arrived with WP6b as `RecordingIntake` in
+`crates/steno-pipeline/src/intake.rs`; the audio folder's path comes from
+`paths::file_url_path`, the meeting's folder from `RecordingLayout`. Durability before
+`complete` answers 200 is the intake's, as in Swift: the listener fsyncs each chunk
+(`receiving_file::write`) and writes its own `complete` receipt only after
+`HandoverIntake::admit` returns. The intake syncs the copy and its folder first
+(`steno_pipeline::files::copy_durably`); its commits still run under `NORMAL` (the
+`RecordingIntake.admit` line under Store). Pairing and revoke commits stay `NORMAL`, as in Swift: a power loss
 right after one can forget a pairing (the phone gets 401 and unpairs, and the user
 pairs it again) or bring a revoked device back.
 
