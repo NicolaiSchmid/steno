@@ -1210,12 +1210,22 @@ item to settle before the Linux release:
   `backend.start()`, so its callers, `state()` included, wait as long: 1
   to 2 s for a Bluetooth sink, against the Mac's 200 ms at most.
 - **Device changes read differently.** A lost connection, stream or link
-  reads as `OutputDeviceGone` (`InputDeviceGone` in person), and
-  `SampleRateChanged` never fires: the adapter resamples whatever the
-  graph runs at. A device destroyed and re-created under the same name and
-  id (WirePlumber restarting, a USB device re-enumerated) reads as gone,
-  by its `object.serial`; the defaults are forgotten while the `default`
-  metadata is gone.
+  (one removed from outside included) reads as `OutputDeviceGone`
+  (`InputDeviceGone` in person), and `SampleRateChanged` never fires:
+  PipeWire's adapter resamples whatever the graph runs at. A device
+  destroyed and re-created under the same name and id (WirePlumber
+  restarting, a USB device re-enumerated) reads as gone, by its
+  `object.serial`; the defaults are forgotten while the `default`
+  metadata is gone. Only a node the capture reads going away (a linked
+  device, the default sink, the microphone's source) or a port of one is
+  a change, so other apps' streams ending do not hold a report back, and
+  a burst of changes is judged at most 2 s after its first.
+- **`stop()` is bounded.** It closes the capture's gate to the sink, so
+  no frame or report reaches the sink after it, and waits 2 s for the
+  PipeWire thread; a thread that has not ended by then is logged with the
+  system call it waits in and left behind, and the devices may stay open
+  until Steno quits. One such hang was seen once in testing and is not
+  explained.
 - **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
   names no Linux node, so a synced or copied settings file shows the input
   device as unavailable and the user picks again. A virtual source (a null
@@ -1706,16 +1716,20 @@ Every graph cycle brings all lanes in one interleaved buffer, which goes
 through `deliver_slices`, the safe form of the `deliver` the Mac's IOProc
 calls (the view type it shares with WP10a's stream bodies); the stream's `process`
 runs on PipeWire's data-loop thread. Default device moves, a node or port
-going away, a failed link and a lost connection are coalesced for 500 ms
-and judged with `DeviceSnapshot::difference` against the devices the
-targets resolved to, as on the Mac. The proof: `tests/realtime.rs` counts
+the capture reads going away, a failed or removed link and a lost
+connection are coalesced for 500 ms (2 s at most from the first) and
+judged with `DeviceSnapshot::difference` against the devices the targets
+resolved to, as on the Mac. The proof: `tests/realtime.rs` counts
 the process body on every OS, and `tests/pipewire.rs` runs against a
 private headless daemon with WirePlumber and null devices
 (`scripts/pipewire-headless.sh`, a step of the Linux CI job): each lane
 carries its own tone, PipeWire's data-loop thread makes zero allocations
-over a second of cycles, `stop()` leaves no thread and no node behind, the
-device changes are reported once per burst and the rebuild's restart
-runs, and changes that settle back or touch other nodes are not reported.
+over a second of cycles, `stop()` leaves no thread, no node and no frame
+behind, the device changes are reported once per burst, no sooner than
+the coalescing delay and on time while other apps' streams come and go,
+the rebuild's restart runs, a link removed from outside reads as the
+output gone, and changes that settle back or touch other nodes are not
+reported.
 Linux items: the list after the Swift defects above.
 WP6b is `crates/steno-pipeline`, `crates/steno-cli` and `crates/steno-services`,
 and `apps/desktop` on the real host. It sits on `main` with every parent merged,
