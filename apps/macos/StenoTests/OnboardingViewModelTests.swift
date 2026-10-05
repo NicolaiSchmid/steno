@@ -166,7 +166,7 @@ final class OnboardingViewModelTests: XCTestCase {
     XCTAssertTrue(open, "a missing required permission reopens the window")
   }
 
-  /// Done and Later on page 1 advance to page 2 instead of finishing; Back
+  /// Continue and Later on page 1 advance to page 2 instead of finishing; Back
   /// returns; a second `load()` ("Check again") never moves the page.
   func testDoneAndLaterAdvanceToTheSetupPage() async throws {
     let permissions = FakePermissions()
@@ -182,7 +182,7 @@ final class OnboardingViewModelTests: XCTestCase {
 
     await model.request(.microphone)
     await model.request(.systemAudio)
-    XCTAssertTrue(model.isComplete, "Done is the button on offer")
+    XCTAssertTrue(model.isComplete, "Continue is the button on offer")
     await model.load()
     XCTAssertEqual(model.page, .permissions, "Check again stays on page 1")
     model.advance()

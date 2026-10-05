@@ -5,7 +5,10 @@ import { Button, FormCard } from "@/components/ui";
 import { type PlatformWords, usePlatform } from "@/lib/platform";
 import { OnboardingPage } from "./onboarding-page";
 
-/** Page 1's intro, which the smoke test finds it by: one permission (Linux) or a few. */
+/**
+ * Page 1's intro, which the Mac smoke test finds page 1 by: "One
+ * permission" where the platform has one (Linux), else "A few permissions".
+ */
 function permissionsIntro(
 	{ computer }: PlatformWords,
 	permissions: number,

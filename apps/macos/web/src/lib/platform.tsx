@@ -20,8 +20,8 @@ import { type PlatformOS, platform as platformSchema } from "@/bridge/contract";
  *   page's scripts run (`apps/desktop/src-tauri/src/platform.rs`);
  * - the `platform` query flag in the hash (`#/main?platform=linux`), for
  *   the dev server, the screens and the tests over the mock bridge;
- * - otherwise the Mac: the Swift app sets nothing, and its pages read
- *   exactly as they did before the other platforms existed.
+ * - otherwise the Mac: the Swift app sets nothing, and its pages keep
+ *   the Mac's words.
  */
 
 export type { PlatformOS };
@@ -30,7 +30,10 @@ export type { PlatformOS };
 export interface PlatformWords {
 	/** The machine after "this", "your" or "the": "Mac", "computer". */
 	computer: string;
-	/** The button that shows a folder in the file manager (Settings). */
+	/**
+	 * Settings > Recording's button that shows the recordings folder in
+	 * the file manager.
+	 */
 	showInFileManager: string;
 	/**
 	 * The meeting footer's button that shows the export in the file
@@ -48,7 +51,10 @@ export interface PlatformWords {
 	keychain: string;
 	/** The same in full, after "in": "your login keychain". */
 	loginKeychain: string;
-	/** Where the privacy switches live, after "in": "System Settings". */
+	/**
+	 * Where the privacy switches live, after "in": "System Settings", and
+	 * after "Open" and "Fix in" where `opensSystemSettings`.
+	 */
 	systemSettings: string;
 	/** Whether Steno can open that place itself ("Open System Settings"). */
 	opensSystemSettings: boolean;
@@ -63,7 +69,10 @@ export interface PlatformWords {
 	codexSignInFile: string;
 	/** Who asks for the system audio recording, and when; Mac only. */
 	systemAudioPrompt?: string;
-	/** Who asks for local network access, and when. */
+	/**
+	 * Who asks for local network access, and when; none on Linux, which
+	 * lists no local network step.
+	 */
 	localNetworkPrompt?: string;
 }
 
@@ -211,8 +220,8 @@ function keyMatches(event: ShortcutEvent, key: string): boolean {
 /**
  * Whether `event` is `shortcut` on `os`: exactly its modifiers (and no
  * Alt), with ⌘ for `mod` on the Mac and Ctrl elsewhere (so Ctrl+F on the
- * Mac and ⌘F, the Windows key, elsewhere are not it), and its key
- * (`keyMatches`).
+ * Mac, and the Windows or Super key with F elsewhere, do not match), and
+ * its key (`keyMatches`).
  */
 export function matchesShortcut(
 	os: PlatformOS,

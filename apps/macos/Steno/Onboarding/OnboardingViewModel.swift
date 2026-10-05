@@ -201,7 +201,7 @@ final class OnboardingViewModel {
     skipped.insert(kind)
   }
 
-  /// Done or Later on page 1. Page 2 with both rows already handled (an
+  /// Continue or Later on page 1. Page 2 with both rows already handled (an
   /// install configured in Settings) has nothing to show, so it finishes.
   func advance() {
     page = .setup
