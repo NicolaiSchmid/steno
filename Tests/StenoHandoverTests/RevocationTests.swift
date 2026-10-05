@@ -126,21 +126,6 @@ import Testing
     }
   }
 
-  /// Polls `condition`, set by the engine before a suspension, for at most
-  /// five seconds; else fails at the caller's line and throws, so the test
-  /// stops there.
-  private static func until(
-    _ condition: () async -> Bool, sourceLocation: SourceLocation = #_sourceLocation
-  ) async throws {
-    let deadline = ContinuousClock.now + .seconds(5)
-    var held = await condition()
-    while !held, ContinuousClock.now < deadline {
-      try await Task.sleep(for: .milliseconds(1))
-      held = await condition()
-    }
-    try #require(held, "the condition never held", sourceLocation: sourceLocation)
-  }
-
   /// A phone paired over an on-disk `StoreGate` store, with a two-chunk
   /// recording not yet announced.
   private struct Gated {
@@ -374,15 +359,15 @@ import Testing
     let first = Task { await phone.upload(id, chunk: 0, chunks[0]) }
     await gate.receiptWrite.held()
     let second = Task { await phone.upload(id, chunk: 1, chunks[1]) }
-    try await Self.until { await engine.activeReceipts[id]?.receivedChunks == [0, 1] }
+    try await until { await engine.activeReceipts[id]?.receivedChunks == [0, 1] }
     let completing = Task { await phone.complete(id) }
-    try await Self.until { await engine.activeReceipts[id]?.state.kind == .verifying }
+    try await until { await engine.activeReceipts[id]?.state.kind == .verifying }
     let revoking = Task { try await gated.service.revoke(phone.device.id) }
-    try await Self.until { await engine.revoking[phone.device.id] != nil }
+    try await until { await engine.revoking[phone.device.id] != nil }
     #expect(!engine.inbox.hasPartial(id), "the revoke discarded the partial")
 
     let announcing = Task { try await phone.announce(gated.metadata) }
-    try await Self.until { engine.inbox.loadMetadata(id) != nil }
+    try await until { engine.inbox.loadMetadata(id) != nil }
     for (index, chunk) in chunks.enumerated() {
       // Written, then answered 404: the receipt stays out of memory.
       #expect(await phone.upload(id, chunk: index, chunk).code == 404)
@@ -458,10 +443,10 @@ import Testing
     let completing = Task { await phone.complete(id) }
     await gate.receiptWrite.held()
     let revoking = Task { try await gated.service.revoke(deviceID) }
-    try await Self.until { await engine.revoking[deviceID] != nil }
+    try await until { await engine.revoking[deviceID] != nil }
     #expect(!engine.inbox.hasPartial(id), "the revoke discarded the partial")
     let announcing = Task { try await phone.announce(gated.metadata) }
-    try await Self.until { engine.inbox.hasPartial(id) }
+    try await until { engine.inbox.hasPartial(id) }
     gate.receiptWrite.release()
 
     await #expect(throws: (any Error).self) { try await revoking.value }
@@ -496,14 +481,14 @@ import Testing
     let completing = Task { await phone.complete(id) }
     await gate.receiptWrite.held()
     let revoking = Task { try await gated.service.revoke(device.id) }
-    try await Self.until { await engine.revoking[device.id] != nil }
+    try await until { await engine.revoking[device.id] != nil }
     let announcing = Task { try await phone.announce(gated.metadata) }
-    try await Self.until { engine.inbox.hasPartial(id) }
+    try await until { engine.inbox.hasPartial(id) }
     _ = await engine.beginPairing()
     let pairing = Task {
       try await EngineClient(engine: engine).pair(deviceID: device.id, deviceName: device.name)
     }
-    try await Self.until { await !engine.pairingIsOpen }
+    try await until { await !engine.pairingIsOpen }
     gate.receiptWrite.release()
 
     #expect(await completing.value.code == 401, "the phone learns it was unpaired")
@@ -531,9 +516,9 @@ import Testing
     let reading = Task { await restarted.phone.status(restarted.id) }
     await gate.receiptRead.held()
     let first = Task { try await restarted.service.revoke(device.id) }
-    try await Self.until { deletes.started == 1 }
+    try await until { deletes.started == 1 }
     let second = Task { try await restarted.service.revoke(device.id) }
-    try await Self.until { await engine.revoking[device.id] == 2 }
+    try await until { await engine.revoking[device.id] == 2 }
     deletes.release(0)
     await #expect(throws: (any Error).self) { try await first.value }
     // The first revoke ran its undo while the second's delete is held.
@@ -605,7 +590,7 @@ import Testing
     }
     await gate.deviceSave.held()
     let revoking = Task { try await restarted.service.revoke(device.id) }
-    try await Self.until { await engine.revoking[device.id] != nil }
+    try await until { await engine.revoking[device.id] != nil }
     gate.deviceSave.release()
 
     #expect(try await pairing.value.code == 200)
@@ -635,7 +620,7 @@ import Testing
     let reading = Task { await restarted.phone.status(restarted.id) }
     await gate.receiptRead.held()
     let first = Task { try await restarted.service.revoke(device.id) }
-    try await Self.until { deletes.started == 1 }
+    try await until { deletes.started == 1 }
     // The pairing takes the counts with the first revoke in them; its save
     // queues behind the first delete.
     _ = await engine.beginPairing()
@@ -643,12 +628,12 @@ import Testing
     let pairing = Task {
       try await EngineClient(engine: engine).pair(deviceID: device.id, deviceName: device.name)
     }
-    try await Self.until { await !engine.pairingIsOpen }
+    try await until { await !engine.pairingIsOpen }
     deletes.release(0)
     await #expect(throws: (any Error).self) { try await first.value }
     await gate.deviceSave.held()
     let second = Task { try await restarted.service.revoke(device.id) }
-    try await Self.until { await engine.revoking[device.id] != nil }
+    try await until { await engine.revoking[device.id] != nil }
     gate.deviceSave.release()
     #expect(try await pairing.value.code == 200)
     deletes.release(1)

@@ -69,6 +69,50 @@ import Testing
     }
   }
 
+  @Test(.timeLimit(.minutes(1)))
+  func aReceiptSaveThatReachesTheStoreLateCannotUndoALaterOne() async throws {
+    // `store.save` leaves the actor before GRDB's writer queue takes the
+    // write, so a save asked for first can reach the store second. Chunk
+    // 1's save is held on that way while chunk 0 lands; the store must end
+    // with both, as memory does.
+    let chunkSize = 64 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let held = HeldSave(store: test.store)
+      let now = test.now
+      let engine = HandoverEngine(
+        configuration: test.service.configuration, identity: test.service.identity,
+        store: test.store, intake: test.intake, receipts: Broadcast(initial: []),
+        now: { now }, saveReceipt: held.save)
+      _ = await engine.beginPairing()
+      let deviceID = UUID()
+      #expect(try await EngineClient(engine: engine).pair(deviceID: deviceID).code == 200)
+      let phone = EngineDevice(
+        engine: engine, device: try #require(try await test.store.pairedDevice(id: deviceID)))
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 62)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: chunkSize)
+      let id = metadata.recordingID
+      #expect(try await phone.announce(metadata).code == 201)
+
+      let first = Task { await phone.upload(id, chunk: 1, chunks[1]) }
+      try await until { held.isHolding }
+      let second = Task { await phone.upload(id, chunk: 0, chunks[0]) }
+      try await until { await engine.activeReceipts[id]?.receivedChunks == [0, 1] }
+      // Give chunk 0's save the time an in-memory write takes to overtake.
+      let deadline = ContinuousClock.now + .milliseconds(200)
+      while held.reachedStore.isEmpty, ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(1))
+      }
+      #expect(held.reachedStore.isEmpty, "no receipt save overtakes the held one")
+      held.release()
+
+      #expect(await first.value.code == 204)
+      #expect(await second.value.code == 204)
+      #expect(held.reachedStore == [[1], [0, 1]], "the saves reach the store in order")
+      #expect(try await test.store.handoverReceipt(recordingID: id)?.receivedChunks == [0, 1])
+    }
+  }
+
   @Test func theGateAnswersWhileAWholeFileHashRuns() async throws {
     // Verifying a 4 GiB upload takes seconds; `/v1/hello` and every other
     // connection's auth gate must not queue behind it on the actor.

@@ -45,6 +45,11 @@ actor HandoverEngine: RequestHandling {
   /// out of `activeReceipts` (and the stream), also when a request that
   /// read one before the revoke caches or writes it after.
   var revoked: Set<UUID> = []
+  /// The store write asked for last (`inOrder`).
+  private var lastWrite: Task<Void, any Error>?
+  /// One receipt write, `store.save` outside the tests; a test holds one on
+  /// its way to the store, where two writes could change places.
+  private let saveReceipt: @Sendable (HandoverReceipt) async throws -> Void
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -64,7 +69,8 @@ actor HandoverEngine: RequestHandling {
     store: MeetingStore,
     intake: any HandoverIntake,
     receipts: Broadcast<[HandoverReceipt]>,
-    now: @escaping @Sendable () -> Date
+    now: @escaping @Sendable () -> Date,
+    saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil
   ) {
     self.configuration = configuration
     self.identity = identity
@@ -72,6 +78,7 @@ actor HandoverEngine: RequestHandling {
     self.intake = intake
     self.receiptUpdates = receipts
     self.now = now
+    self.saveReceipt = saveReceipt ?? { try await store.save($0) }
     self.inbox = Inbox(directory: configuration.inboxDirectory)
   }
 
@@ -140,7 +147,7 @@ actor HandoverEngine: RequestHandling {
       activeReceipts.removeValue(forKey: recordingID)
     }
     do {
-      try await store.delete(deviceID: deviceID)
+      try await inOrder { [store] in try await store.delete(deviceID: deviceID) }
     } catch {
       // The delete rolled back, so the device is still paired and no read
       // since the bump was stale. Files discarded above stay gone, though,
@@ -189,7 +196,7 @@ actor HandoverEngine: RequestHandling {
     }
     var seen = device
     seen.lastSeenAt = timestamp
-    try? await store.save(seen, tokenHash: tokenHash)
+    try? await inOrder { [store, seen] in try await store.save(seen, tokenHash: tokenHash) }
     return seen
   }
 
@@ -263,7 +270,9 @@ actor HandoverEngine: RequestHandling {
       id: body.deviceID, name: name, pairedAt: timestamp, lastSeenAt: timestamp)
     let revokeStart = revokeStarts[device.id, default: 0]
     do {
-      try await store.save(device, tokenHash: DeviceTokens.hash(token))
+      try await inOrder { [store] in
+        try await store.save(device, tokenHash: DeviceTokens.hash(token))
+      }
     } catch {
       if pairing == nil { pairing = session }
       return .internalError("saving the device", error)
@@ -310,11 +319,28 @@ actor HandoverEngine: RequestHandling {
   /// updated before the awaited save: the actor is reentrant at that
   /// `await`, and the phone keeps two chunks in flight, so the next request
   /// must already see this one's chunk or it would persist a stale copy over
-  /// it.
+  /// it. The saves commit in that order too (`inOrder`), so the last of a
+  /// burst, the one carrying every chunk, is the one the store keeps.
   func persist(_ receipt: HandoverReceipt) async throws {
     remember(receipt)
-    try await store.save(receipt)
+    try await inOrder { [saveReceipt] in try await saveReceipt(receipt) }
     receiptUpdates.send(receiptsSnapshot)
+  }
+
+  /// Runs `write` once every store write asked for before it has returned.
+  /// A store call leaves the actor before GRDB's writer queue takes it, so
+  /// two writes asked for one after the other could reach the queue, and
+  /// commit, the other way round: an older receipt over a newer one, or a
+  /// receipt save after the device delete that should have followed it.
+  /// Every write of the engine goes through here; reads do not wait.
+  func inOrder(_ write: @escaping @Sendable () async throws -> Void) async throws {
+    let previous = lastWrite
+    let task = Task {
+      _ = await previous?.result
+      try await write()
+    }
+    lastWrite = task
+    try await task.value
   }
 
   /// Keeps `receipt` as the live copy, unless its device was revoked.
