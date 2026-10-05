@@ -35,7 +35,6 @@ describe("shortcutLabel", () => {
 		expect(shortcutLabel("macos", SHORTCUTS.findMeetings)).toBe("⌘F");
 		expect(shortcutLabel("macos", SHORTCUTS.exportAgain)).toBe("⇧⌘E");
 		expect(shortcutLabel("macos", SHORTCUTS.record)).toBe("⌘⇧R");
-		expect(shortcutLabel("macos", { modifiers: ["mod"], key: "," })).toBe("⌘,");
 	});
 
 	it("spells Ctrl, then Shift, on Windows and Linux", () => {
@@ -111,12 +110,6 @@ describe("matchesShortcut", () => {
 		).toBe(true);
 		expect(
 			matchesShortcut("macos", key("φ", { code: "KeyF", metaKey: true }), find),
-		).toBe(true);
-		expect(
-			matchesShortcut("linux", key("б", { code: "Comma", ctrlKey: true }), {
-				modifiers: ["mod"],
-				key: ",",
-			}),
 		).toBe(true);
 		expect(
 			matchesShortcut("linux", key("а", { code: "KeyA", ctrlKey: true }), find),
@@ -265,4 +258,5 @@ describe("usePlatform and useShortcut", () => {
 		fireEvent.keyDown(window, { key: "f", ctrlKey: true });
 		expect(action).toHaveBeenCalledTimes(1);
 	});
+
 });

@@ -142,7 +142,7 @@ type ShortcutModifier = "mod" | "shift";
 
 /**
  * A shortcut: its modifiers in the order the Mac label writes them, then
- * the key as the label shows it ("F", ",").
+ * the key as the label shows it ("F").
  */
 export interface Shortcut {
 	modifiers: readonly ShortcutModifier[];
@@ -197,12 +197,9 @@ export interface ShortcutEvent {
 	altKey: boolean;
 }
 
-/** The physical key's `code` for a shortcut key: "KeyF", "Comma". */
+/** The physical key's `code` for a shortcut's letter key: "KeyF". */
 function keyCode(key: string): string | undefined {
-	if (/^[A-Za-z]$/.test(key)) {
-		return `Key${key.toUpperCase()}`;
-	}
-	return key === "," ? "Comma" : undefined;
+	return /^[A-Za-z]$/.test(key) ? `Key${key.toUpperCase()}` : undefined;
 }
 
 /**
