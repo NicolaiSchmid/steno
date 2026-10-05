@@ -1246,11 +1246,13 @@ item to settle before the Linux release:
   mode waits for an output client). The session holds its mutex across
   `backend.start()`, so its callers, `state()` included, wait as long: 1
   to 2 s for a Bluetooth sink, against the Mac's 200 ms at most.
-- **Device changes read differently.** A lost connection, stream or link
-  (one removed from outside included) reads as `OutputDeviceGone`
-  (`InputDeviceGone` in person), and so does a microphone that vanishes
-  during a call: the server removes Steno's link to it, and a lost link
-  takes both lanes. `SampleRateChanged` never fires: PipeWire's adapter
+- **Device changes read differently.** A lost connection or stream reads
+  as `OutputDeviceGone` (`InputDeviceGone` in person). A lost link (one
+  removed from outside included) reads as the device of the lane it
+  serves gone, as the Mac reads each device's own liveness: a monitor
+  link as `OutputDeviceGone`, the microphone's link as `InputDeviceGone`,
+  so a microphone that vanishes during a call reads as `InputDeviceGone`,
+  as on the Mac. `SampleRateChanged` never fires: PipeWire's adapter
   resamples whatever the graph runs at. A device destroyed and re-created
   under the same name and id (WirePlumber restarting, a USB device
   re-enumerated) reads as gone, by its `object.serial`; the defaults are
@@ -1259,12 +1261,18 @@ item to settle before the Linux release:
   sink, the source the microphone follows) or a port of one is a change,
   so other apps' streams ending do not hold a report back, and a burst of
   changes is judged at most 2 s after its first.
-- **A default move can go unreported.** With WirePlumber 0.5.14 and
+- **A default move can reach Steno late.** With WirePlumber 0.5.14 and
   PipeWire 1.6.5, a client binding the `default` metadata while
   WirePlumber moved a default kept the move from every client already
   bound, Steno's capture included (seen when the live tests polled the
-  metadata with `pw-metadata`). Check it on the release's versions; a
-  periodic re-read of the defaults would cover it.
+  metadata with `pw-metadata`; not reproduced in 32 later rounds of moves
+  under concurrent `pw-metadata` reads). The metadata proxy keeps no copy
+  of the properties to read again, so a running capture binds the
+  metadata afresh every 3 s (`REREAD_INTERVAL`), collects what the bind
+  brings, and judges defaults that differ like a metadata event: a missed
+  move is reported within about 3.5 s instead of never. The re-read's
+  bind could itself fall on a move and keep it from the other clients
+  bound to the metadata; Steno's capture finds it at the next re-read.
 - **`stop()` is bounded, except behind a blocked log write.** It closes
   the capture's gate to the sink, so no frame or report reaches the sink
   after it, and waits 2 s for the PipeWire thread; a thread that has not
@@ -1575,11 +1583,9 @@ request that fixes an item deletes it.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
-  list and no meeting detection, the latencies are unmeasured on real hardware, a
-  default move can go unreported when another client binds the `default` metadata at
-  the same moment, and the decoder reads a whole lane into memory (1.4 GB for a
-  two-hour 48 kHz lane). Where: the Linux items under "Audio". Found: #166, #176,
-  #197.
+  list and no meeting detection, the latencies are unmeasured on real hardware, and
+  the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
+  Where: the Linux items under "Audio". Found: #166, #176, #197.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
 - **First Linux release.** The web UI speaks Mac on every platform: "Reveal in
@@ -1785,11 +1791,12 @@ microphone's first output port and the default sink's front monitor ports.
 Every graph cycle brings all lanes in one interleaved buffer, which goes
 through `deliver_slices`, the safe form of the `deliver` the Mac's IOProc
 calls (the view type it shares with WP10a's stream bodies); the stream's `process`
-runs on PipeWire's data-loop thread. Default device moves, a node or port
-the capture reads going away, a failed or removed link and a lost
-connection are coalesced for 500 ms (2 s at most from the first) and
-judged with `DeviceSnapshot::difference` against the devices the targets
-resolved to, as on the Mac. The proof: `tests/realtime.rs` counts
+runs on PipeWire's data-loop thread. Default device moves (from the
+metadata's events and from a re-read of the metadata every 3 s), a node
+or port the capture reads going away, a failed or removed link (lost for
+the lane it serves) and a lost connection are coalesced for 500 ms (2 s
+at most from the first) and judged with `DeviceSnapshot::difference`
+against the devices the targets resolved to, as on the Mac. The proof: `tests/realtime.rs` counts
 the process body on every OS, and `tests/pipewire.rs` runs against a
 private headless daemon with WirePlumber and null devices
 (`scripts/pipewire-headless.sh`, a step of the Linux CI job): each lane
@@ -1797,8 +1804,11 @@ carries its own tone, PipeWire's data-loop thread makes zero allocations
 over a second of cycles, `stop()` leaves no thread, no node and no frame
 behind, the device changes are reported once per burst, no sooner than
 the coalescing delay and also while other apps' streams keep coming and
-going, the rebuild's restart runs, a link removed from outside reads as the
-output gone, and changes that settle back or touch other nodes are not
+going, the rebuild's restart runs, a default move whose metadata events
+the capture drops is found by the re-read and reported once, a monitor
+link removed from outside reads as the output gone, the microphone's link
+removed from outside or a microphone that vanishes during a call reads as
+the input gone, and changes that settle back or touch other nodes are not
 reported.
 Linux items: the list after the Swift defects above.
 WP6b is `crates/steno-pipeline`, `crates/steno-cli` and `crates/steno-services`,
