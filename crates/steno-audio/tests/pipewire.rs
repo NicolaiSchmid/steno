@@ -480,16 +480,18 @@ fn moving_the_default_output_is_reported_once() {
     start(&backend, &lanes, None, &sink).expect("start");
     let _restore = DefaultSink;
     DefaultSink::set(SECOND_SINK);
-    assert_output_moved_once(&reasons, Instant::now(), "");
+    assert_output_moved_once(&reasons, "");
     stop(&backend);
 }
 
 /// Expects one `DefaultOutputChanged` report and no second, and the one
-/// no sooner than the coalescing delay after `since`, the last switch.
+/// no sooner than the coalescing delay after the call, made right after
+/// the last switch.
 /// WirePlumber moves `default.audio.sink` after the configured one, so the
 /// report gets time, and a missing one says what the metadata held.
 /// `context` prefixes the failure messages.
-fn assert_output_moved_once(reasons: &Receiver<DeviceChangeReason>, since: Instant, context: &str) {
+fn assert_output_moved_once(reasons: &Receiver<DeviceChangeReason>, context: &str) {
+    let since = Instant::now();
     let reason = reasons
         .recv_timeout(COALESCE_DELAY + Duration::from_secs(8))
         .unwrap_or_else(|_| panic!("{context}no device-change report; {}", default_metadata()));
@@ -561,7 +563,7 @@ fn a_burst_of_switches_is_reported_once_and_the_rebuild_restarts() {
         DefaultSink::set(from);
         std::thread::sleep(COALESCE_DELAY * 2 / 5);
         DefaultSink::set(to);
-        assert_output_moved_once(&reasons, Instant::now(), &format!("round {round}: "));
+        assert_output_moved_once(&reasons, &format!("round {round}: "));
         // The session's rebuild: stop, open the latch, start again.
         stop_and_check_teardown(&backend, &sink);
         sink.rearm_device_change();
@@ -678,7 +680,7 @@ fn other_apps_streams_coming_and_going_do_not_hold_back_a_report() {
     );
     let before = churn.streams();
     DefaultSink::set(SECOND_SINK);
-    assert_output_moved_once(&reasons, Instant::now(), "under churn: ");
+    assert_output_moved_once(&reasons, "under churn: ");
     assert!(
         churn.streams() >= before + 2,
         "the other streams kept coming while the report was due"
