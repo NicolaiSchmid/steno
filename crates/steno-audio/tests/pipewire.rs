@@ -521,7 +521,11 @@ fn moving_the_default_output_is_reported_once() {
 /// WirePlumber moves `default.audio.sink` after the configured one, so it
 /// gets time, and a failure says which side missed: WirePlumber, which did
 /// not move the default, or the capture, which did not report the move.
-/// `context` prefixes the failure messages.
+/// The metadata is read only once the report is late: a client binding it
+/// while WirePlumber moves the default can keep that move from every
+/// client already bound (seen with WirePlumber 0.5.14 and PipeWire 1.6.5),
+/// so polling it here would make the miss it looks for. `context`
+/// prefixes the failure messages.
 fn assert_output_moved_once(
     reasons: &Receiver<Report>,
     to: &str,
@@ -530,19 +534,17 @@ fn assert_output_moved_once(
     context: &str,
 ) {
     let wait = COALESCE_DELAY + Duration::from_secs(8);
-    assert!(
-        eventually(wait, || default_sink().as_deref() == Some(to)),
-        "{context}WirePlumber did not move the default to {to} within {wait:?}; {}",
-        default_metadata()
-    );
-    let (reason, at) = reasons
-        .recv_timeout(COALESCE_LIMIT + COALESCE_DELAY + Duration::from_secs(3))
-        .unwrap_or_else(|_| {
-            panic!(
-                "{context}the capture missed the move to {to}: no device-change report; {}",
-                default_metadata()
-            )
-        });
+    let (reason, at) = reasons.recv_timeout(wait).unwrap_or_else(|_| {
+        let who = if default_sink().as_deref() == Some(to) {
+            "the capture missed the move"
+        } else {
+            "WirePlumber did not move the default"
+        };
+        panic!(
+            "{context}no device-change report within {wait:?}: {who} to {to}; {}",
+            default_metadata()
+        )
+    });
     let after = at.duration_since(since);
     // From before the last switch: WirePlumber moves the default before
     // `pw-metadata` has exited, never before it started.
