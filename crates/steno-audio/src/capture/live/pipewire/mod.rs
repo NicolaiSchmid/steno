@@ -258,6 +258,14 @@ impl Shared {
         self.pending.set(Some((first, now)));
     }
 
+    /// When the pending changes are judged ([`judged_at`]); `None` while
+    /// nothing is pending.
+    fn due(&self) -> Option<Instant> {
+        self.pending
+            .get()
+            .map(|(first, last)| judged_at(first, last))
+    }
+
     /// `what` failed for good (logged with PipeWire's `message`): the
     /// capture is lost.
     fn fail(&self, what: &str, message: &str) {
@@ -875,10 +883,9 @@ impl Capture {
         // resolve-time baseline like any other.
         let shared = &self.connection.shared;
         while !quitting.get() {
-            let wait = match shared.pending.get() {
+            let wait = match shared.due() {
                 None => IDLE_WAIT,
-                Some((first, last)) => {
-                    let due = judged_at(first, last);
+                Some(due) => {
                     let now = Instant::now();
                     if now >= due {
                         shared.pending.set(None);
@@ -1332,7 +1339,12 @@ mod tests {
     #[test]
     fn a_thread_reads_its_kernel_id_for_the_hang_log() {
         let id = kernel_thread_id();
-        assert_ne!(id, 0);
+        if id == 0 {
+            // A sandbox without `/proc/thread-self` (gVisor, some
+            // containers): the hang log then says the id is unknown.
+            assert_eq!(where_it_waits(id), "its kernel id is unknown");
+            return;
+        }
         assert!(where_it_waits(id).starts_with(&format!("thread {id} in system call ")));
     }
 
@@ -1417,6 +1429,21 @@ mod tests {
         assert_eq!(judged_at(first, later), later + delay);
         let late = first + COALESCE_LIMIT;
         assert_eq!(judged_at(first, late), first + COALESCE_LIMIT);
+    }
+
+    #[test]
+    fn changes_keep_their_first_and_are_due_at_most_the_limit_after_it() {
+        let shared = Shared::default();
+        assert_eq!(shared.due(), None);
+        let first = Instant::now();
+        shared.pending.set(Some((first, first)));
+        shared.changed();
+        assert_eq!(shared.pending.get().unwrap().0, first, "the first stays");
+        shared.pending.set(Some((
+            first,
+            first + COALESCE_LIMIT + Duration::from_secs(1),
+        )));
+        assert_eq!(shared.due(), Some(first + COALESCE_LIMIT));
     }
 
     #[test]

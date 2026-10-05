@@ -171,8 +171,8 @@ impl Graph {
         );
     }
 
-    /// From now on only removals the snapshot for `targets` with `uid`
-    /// reads count as changes; see [`Self::remove`].
+    /// From now on a removal counts as a change only when the snapshot for
+    /// `targets` with `uid` reads what went; see [`Self::remove`].
     pub fn track(&mut self, targets: &Targets, uid: Option<&str>) {
         self.tracked = Some((targets.clone(), uid.map(str::to_owned)));
     }
@@ -180,9 +180,10 @@ impl Graph {
     /// A global went away. True when it was a node or a port the capture
     /// may have to react to: before [`Self::track`] any, after it a node
     /// the snapshot reads (a linked node, the default sink for a system
-    /// lane, the microphone's source) or a port of one, so another app's
-    /// stream ending is no change. A port can go while its node stays (the
-    /// node's ports reconfigured), and Steno's link to it dies with it.
+    /// lane, the source the microphone follows) or a port of one, so
+    /// another app's stream ending is no change. A port can go while its
+    /// node stays (the node's ports reconfigured), and Steno's link to it
+    /// dies with it.
     pub fn remove(&mut self, id: u32) -> bool {
         let node = match self.ports.get(&id) {
             Some(port) => Some(port.node),
@@ -200,7 +201,7 @@ impl Graph {
 
     /// Whether the snapshot for `targets` with `uid` reads node `node`: a
     /// linked node, the default sink for a system lane, or the source the
-    /// microphone lane follows.
+    /// microphone follows.
     fn is_read(&self, node: u32, targets: &Targets, uid: Option<&str>) -> bool {
         let is = |found: Option<(u32, &NodeEntry)>| found.is_some_and(|(id, _)| id == node);
         [&targets.mic, &targets.output]
@@ -414,8 +415,8 @@ impl Graph {
     /// The devices as they are now, for a capture that resolved `targets`
     /// with `uid`; `lost` once the connection, the stream or a link failed.
     /// The default sink stands for both of the snapshot's outputs
-    /// (PipeWire has no separate clock master: PipeWire's adapter
-    /// resamples to the stream's 48 kHz), so `default_output_uid` stays
+    /// (PipeWire has no separate clock master: its adapter resamples to
+    /// the stream's 48 kHz), so `default_output_uid` stays
     /// `None` and `sample_rate` stays [`SAMPLE_RATE`].
     pub fn snapshot(&self, targets: &Targets, uid: Option<&str>, lost: bool) -> DeviceSnapshot {
         let alive = |endpoint: &Option<Endpoint>| {
@@ -807,6 +808,15 @@ mod tests {
         assert!(graph.remove(42), "the new default source");
         assert!(graph.remove(41), "the linked microphone");
         assert!(!graph.remove(41), "gone already");
+        // The default sink moves to a headset: its going counts too.
+        node(&mut graph, 43, 1043, "bluez_output.headset", "Audio/Sink");
+        assert!(!graph.remove(43), "a sink nothing reads");
+        node(&mut graph, 43, 1043, "bluez_output.headset", "Audio/Sink");
+        graph.set_default(
+            Some(DEFAULT_SINK_KEY),
+            Some(r#"{"name":"bluez_output.headset"}"#),
+        );
+        assert!(graph.remove(43), "the new default sink");
     }
 
     #[test]
