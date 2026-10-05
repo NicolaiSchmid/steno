@@ -6,8 +6,9 @@
 #   steno-test-sink-2   stereo null sink, a second output to switch to
 #   steno-test-mic      mono virtual source, the default input
 #
-# Everything lives in a temporary XDG runtime, config and state directory,
-# so neither the daemon nor WirePlumber touches the user's own session or
+# Everything lives in a temporary XDG runtime, config and state directory
+# (the runtime directory under a short path, for its sockets), so neither
+# the daemon nor WirePlumber touches the user's own session or
 # remembers anything afterwards. A private session bus comes up beside them
 # when `dbus-daemon` is installed: WirePlumber 0.4 (Ubuntu 24.04) exits
 # without one. Without `dbus-daemon` the bus is disabled, which WirePlumber
@@ -34,9 +35,17 @@ for tool in pipewire wireplumber pw-cli pw-dump pw-link pw-metadata pw-play stdb
   fi
 done
 
-# Keep TMPDIR short: the bus socket lives under it, and a Unix socket path
-# holds at most 107 bytes.
 root="$(mktemp -d "${TMPDIR:-/tmp}/steno-pipewire.XXXXXX")"
+# The sockets (the bus, `pipewire-0-manager`) live in the runtime
+# directory, and a Unix socket path holds at most 107 bytes, so it gets a
+# short base of its own: TMPDIR while that leaves room (the longest socket
+# path is the base plus 35 bytes), else /tmp. A nix-shell's or a CI
+# runner's TMPDIR can be far longer.
+runtime_base="${TMPDIR:-/tmp}"
+if [[ ${#runtime_base} -gt 64 ]]; then
+  runtime_base=/tmp
+fi
+runtime="$(mktemp -d "$runtime_base/steno-pw.XXXXXX")"
 # The processes this script started, and only those, are the ones it ends.
 dbus_pid=""
 daemon_pids=()
@@ -63,13 +72,13 @@ cleanup() {
   if [[ -n "$dbus_pid" ]]; then
     terminate "$dbus_pid"
   fi
-  command rm -rf "$root"
+  command rm -rf "$root" "$runtime"
 }
 # A signal ends the script but not the command it runs: send it to the
 # script's process group (as Ctrl-C and CI's cancel do), not to its PID.
 trap cleanup EXIT
 
-export XDG_RUNTIME_DIR="$root/runtime"
+export XDG_RUNTIME_DIR="$runtime"
 export XDG_CONFIG_HOME="$root/config"
 export XDG_STATE_HOME="$root/state"
 export PIPEWIRE_RUNTIME_DIR="$XDG_RUNTIME_DIR"
