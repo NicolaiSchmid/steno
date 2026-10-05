@@ -11,13 +11,13 @@ import Synchronization
 final class HeldSave: Sendable {
   private struct State {
     var armed = true
-    var released = false
-    var waiter: CheckedContinuation<Void, Never>?
+    var isHolding = false
     var reachedStore: [[Int]] = []
   }
 
   private let store: MeetingStore
   private let state = Mutex(State())
+  private let (released, releasing) = AsyncStream<Void>.makeStream()
 
   init(store: MeetingStore) {
     self.store = store
@@ -25,38 +25,26 @@ final class HeldSave: Sendable {
 
   func save(_ receipt: HandoverReceipt) async throws {
     let (hold, record) = state.withLock { state in
-      guard state.armed else { return (false, true) }
-      guard !receipt.receivedChunks.isEmpty else { return (false, false) }
-      state.armed = false
-      return (true, true)
+      let hold = state.armed && !receipt.receivedChunks.isEmpty
+      if hold { (state.armed, state.isHolding) = (false, true) }
+      return (hold, !state.armed)
     }
     if hold {
-      await withCheckedContinuation { continuation in
-        let goOn = state.withLock { state in
-          if state.released { return true }
-          state.waiter = continuation
-          return false
-        }
-        if goOn { continuation.resume() }
-      }
+      for await _ in released {}
+      state.withLock { $0.isHolding = false }
     }
     if record { state.withLock { $0.reachedStore.append(receipt.receivedChunks) } }
     try await store.save(receipt)
   }
 
   /// Whether a write is held now.
-  var isHolding: Bool { state.withLock { $0.waiter != nil } }
+  var isHolding: Bool { state.withLock { $0.isHolding } }
 
   /// The chunk set of the held write and of every later one, in the order
   /// they went on to the store.
   var reachedStore: [[Int]] { state.withLock { $0.reachedStore } }
 
   func release() {
-    let waiter = state.withLock { state in
-      state.released = true
-      defer { state.waiter = nil }
-      return state.waiter
-    }
-    waiter?.resume()
+    releasing.finish()
   }
 }

@@ -99,10 +99,7 @@ import Testing
       let second = Task { await phone.upload(id, chunk: 0, chunks[0]) }
       try await until { await engine.activeReceipts[id]?.receivedChunks == [0, 1] }
       // Give chunk 0's save the time an in-memory write takes to overtake.
-      let deadline = ContinuousClock.now + .milliseconds(200)
-      while held.reachedStore.isEmpty, ContinuousClock.now < deadline {
-        try await Task.sleep(for: .milliseconds(1))
-      }
+      try await Task.sleep(for: .milliseconds(200))
       #expect(held.reachedStore.isEmpty, "no receipt save overtakes the held one")
       held.release()
 
