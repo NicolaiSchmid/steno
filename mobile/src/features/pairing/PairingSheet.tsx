@@ -86,8 +86,9 @@ export function PairingSheet() {
 					device: deviceIdentity,
 					now: () => new Date(),
 				});
-				// Chunks in flight for the old pairing would only answer 401 under
-				// the new one; the retry backoff re-queues them.
+				// Chunks in flight for the old pairing can only end in 401 now;
+				// cancel them rather than wait, and the retry backoff re-queues
+				// them.
 				await cancelAllUploads().catch(() => {});
 				await replace(outcome);
 				// Anything the old Mac revoked is eligible for the new one.
