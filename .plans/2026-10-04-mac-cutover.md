@@ -8,10 +8,11 @@ release workflow and the updater lanes) is #184
 cutover paragraph of WP9 in the Rust plan, whose progress table tracks it
 as WP9b.
 This plan is one pull request, opened only once the parity list in the
-Rust plan is empty. That list includes four gaps of the shell's that no
-package owns yet (the clip player's audio output is WP5's): the tray's
-badge for pending speaker reviews, the QR encoder, the clip player and the
-update schedule (Swift checks daily).
+Rust plan is empty, apart from its two Rust-only "Speech" lines
+(`SpeechSettings` and "One model store"), which do not gate it. That list
+includes four gaps of the shell's ("Open after the port" in the Rust
+plan): the tray's badge for pending speaker reviews, the QR encoder, the
+clip player and the update schedule (Swift checks daily).
 
 ## Goal
 

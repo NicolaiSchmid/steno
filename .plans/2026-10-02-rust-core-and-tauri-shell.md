@@ -1,13 +1,18 @@
 # Rust core and Tauri shell: Steno on macOS, Linux and Windows
 
-Status: started 2026-10-02 on branch `refactor/rust-workspace`. Amends
-`.plans/2026-09-24-initial-scope.md` (removes "Windows, Linux" from the v1 non-goals for
-the next major version and replaces the "Language / UI", "Core" and "Apps" rows of the
-platform table) and `.plans/2026-09-29-macos-webview-ui.md` (its "no Electron, Tauri,
-Node at runtime" decision held for the Swift host; the Tauri shell replaces that host
-at cutover). The evidence is `.plans/2026-10-01-cross-platform-spikes.md` and the
-speech-stack decisions and gates in `.plans/2026-10-01-cross-platform-speech-stack.md`,
-which this plan executes rather than restates.
+Status: every work package from WP1 to WP10b except WP9b is merged on `main`; the port's
+last pull request, #187, merged on 2026-10-05. Left: the Mac cutover (WP9b,
+`.plans/2026-10-04-mac-cutover.md`), the first Linux release and the first Windows
+release (WP10's hardware checks; the Windows installers from #184 are unsigned). "Open
+after the port" lists each open item and its owner. Started 2026-10-02 on branch
+`refactor/rust-workspace`. Amends `.plans/2026-09-24-initial-scope.md` (removes
+"Windows, Linux" from the v1 non-goals for the next major version and replaces the
+"Language / UI", "Core" and "Apps" rows of the platform table) and
+`.plans/2026-09-29-macos-webview-ui.md` (its "no Electron, Tauri, Node at runtime"
+decision held for the Swift host; the Tauri shell replaces that host at cutover). The
+evidence is `.plans/2026-10-01-cross-platform-spikes.md` and the speech-stack decisions
+and gates in `.plans/2026-10-01-cross-platform-speech-stack.md`, which this plan
+executes rather than restates.
 
 ## Goal
 
@@ -38,10 +43,35 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    diff against a database the Swift CLI created. New migrations after this plan
    starts are written once in SQL and mirrored in `Migrations.swift` and the Rust
    `.sql` files until cutover; the parity test proves them equal.
-3. **Audio never leaves the device.** Only `Destination` implementations, the LLM
-   client and the updater open network connections: the LLM client sends text, and
-   the updater fetches the release manifest and the signed bundle from the endpoint
-   in `apps/desktop/src-tauri/tauri.conf.json` and sends nothing.
+3. **Audio never leaves the device.** Only these code paths use the network, and a
+   new one needs a plan first:
+   - the LLM client (`steno-llm`), text only: the prompts and the transcript to the
+     summaries endpoint the user set up, its model list, and the ChatGPT sign-in's
+     token refresh;
+   - a `Destination` (`steno-adapters`), which sends only text over a network; today's
+     one destination, the Obsidian folder, writes to a local folder, including the
+     audio mixdown when the user turns that on, and opens no connection;
+   - the model downloads, which send nothing but the request: `steno-speech`'s
+     `ModelStore` (`crates/steno-speech/src/model_store.rs`) fetches the fp32 Parakeet
+     export from Hugging Face at a pinned commit and Silero VAD from a GitHub release
+     asset, or both from the mirror the speech settings name; `steno-diarize`
+     (`crates/steno-diarize/src/models.rs`) fetches its two models from Hugging Face
+     and a GitHub release asset;
+   - the Tauri updater, which fetches `latest.json` and the signed bundle from the
+     repository's GitHub releases and sends nothing (the `desktop-stable` endpoint in
+     `apps/desktop/src-tauri/tauri.conf.json`, the `desktop-beta` one in
+     `apps/desktop/src-tauri/src/updater.rs`);
+   - the phone handover server (`steno-handover`), which advertises itself over
+     Bonjour, serves connections only on the computer's LAN addresses and loopback,
+     speaks TLS 1.3 with the self-signed certificate the phone pins, and receives
+     pairing requests and the paired phone's recordings; it opens no outbound
+     connection.
+
+   The speech sidecar gets its samples on stdin and answers on stdout, never through a
+   socket, and opens no connection (WP4c). ONNX Runtime's telemetry is off in every
+   process that opens a session (`init_environment` in
+   `crates/steno-speech/src/onnx.rs`, which `steno-diarize` calls too). Until the
+   cutover the Swift app keeps its own list in `AGENTS.md`.
 4. **One speech pipeline above the tensors.** Chunker, overlap merge and the TDT decode
    loop are shared; the backends are CoreML (`objc2-core-ml`) on the Mac and ONNX
    Runtime (`ort`) elsewhere. ONNX inference runs in a sidecar process; the Mac stays
@@ -65,7 +95,7 @@ crates/
   steno-speech/            VAD, chunker, merge, TDT decoder; CoreML and ONNX Runtime backends; model store
   steno-diarize/           speaker diarization: segmentation and embedding backends (CoreML, ONNX Runtime), Steno's clustering and refinement, model store
   steno-llm/               OpenAI-compatible and Codex clients, cleanup and summary passes
-  steno-adapters/          destinations (Obsidian, Markdown folder), export
+  steno-adapters/          destinations (the Obsidian folder), export
   steno-handover/          phone handover server (TLS pinned), shared wire contract with mobile/
   steno-cli/               `steno` binary: record, process, export, dev tools
 apps/
@@ -94,8 +124,9 @@ default and the feature is opt-in, for UI work without a database.
 
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
-`SecretStore` (Keychain, Secret Service, DPAPI via the `keyring` crate), `Updater`
-(Tauri updater on every platform; Sparkle retires at cutover).
+`SecretStore` (Keychain and the Windows credential store via `keyring`; a 0600 file on
+Linux until a Secret Service backend is chosen), `Updater` (Tauri updater on every
+platform; Sparkle retires at cutover).
 
 ## Transition
 
@@ -479,13 +510,13 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   onboarding permissions per OS, deep links, single instance, dialogs, the six
   installer bundles, and `.github/workflows/desktop-release.yml`: a manual run that
   builds the bundles on the three platforms, unsigned, as workflow artifacts.
-- **WP9 Mac cutover and signed releases.** Parity list empty, same bundle id, Sparkle
-  handoff, Swift app removed, web app moved to `apps/web`, Swift rows removed from
-  `AGENTS.md`; `cargo deny` with a licence allow list in CI; the signing key for the
-  updater artifacts, notarisation, and the tag-triggered release workflow that
-  publishes the bundles and the updater manifests. The bundles carry
-  `steno-speech-sidecar` (WP4c) beside the app binary, where
-  `SidecarConfig::beside_current_exe` looks: a Tauri `externalBin`, which needs the
+- **WP9 Mac cutover and signed releases.** Parity list empty (apart from the two
+  Rust-only "Speech" lines), same bundle id, Sparkle handoff, Swift app removed, web
+  app moved to `apps/web`, Swift rows removed from `AGENTS.md`; `cargo deny` with a
+  licence allow list in CI; the signing key for the updater artifacts, notarisation,
+  and the tag-triggered release workflow that publishes the bundles and the updater
+  manifests. The bundles carry `steno-speech-sidecar` (WP4c) beside the app binary,
+  where `SidecarConfig::beside_current_exe` looks: a Tauri `externalBin`, which needs the
   binary built as `steno-speech-sidecar-<target triple>` (Tauri strips the suffix
   when it bundles); on macOS it is signed with the app, with the hardened runtime,
   and notarised with it.
@@ -502,10 +533,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   that `updater.rs` reads, each only moving forward
   (`apps/desktop/scripts/updater-lanes.sh`). No desktop release is GitHub's "latest"
   before the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
-  The shell's gaps that must close before the cutover (WP9b) opens; no package owns
-  them yet (the clip player's audio output is WP5's; "Pipeline and services (WP6b)"):
-  the tray's badge for pending speaker reviews; the QR encoder, a fake until a QR crate
-  draws the pairing code; the clip player, a fake until WP5 adds an audio output; and
+  The shell's gaps that must close before the cutover (WP9b) opens ("Open after the
+  port"): the tray's badge for pending speaker reviews; the QR encoder, a fake until a
+  QR crate draws the pairing code; the clip player, a fake with no audio output; and
   the update schedule behind the host's `Updater`.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
@@ -898,7 +928,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   shell's `UpdateOutcome` stays beside the host's until then; (4) the QR encoder and
   the clip player are fakes, so the pairing code shows no QR image and a speaker's
   sample clip does not play: each needs new code (a QR crate, an audio output), not
-  wiring; the audio output is WP5's; both must close before the cutover (WP9b) opens.
+  wiring; both must close before the cutover (WP9b) opens.
 - The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
   `App::launch` and runs whether or not a code is shown, where Swift ran it only while
   the Phones pane showed one.
@@ -1206,16 +1236,17 @@ fix is ported to Swift before cutover.
   point-to-point interface, which most tunnels there are (`wg0`, `tun0`, `utun3`); on
   Windows every adapter but hardware Ethernet and Wi-Fi that is up
   (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters.
-- Network, Rust differs (WP8 decides): the record is not re-published after a network
-  change (restart on network change, or re-register). Layer-2 tunnels (a TAP device,
-  `feth`) and bridges (`docker0`, `bridge100`) are not point-to-point, and are served;
-  Swift classes bridges `.other`. A LAN numbered in `100.64.0.0/10` is refused, on
-  every platform. Rust judges a connection by its local address where Swift judges the
-  interface it arrives on, so on Linux and macOS (weak host model) a packet addressed
-  to the LAN address that arrives over a tunnel is served: the computer is a subnet
-  router or exit node, or a peer's allowed IPs cover the LAN. On Windows the hardware
-  rule refuses a LAN address on a Hyper-V external switch's or a Network Bridge's
-  vEthernet adapter, so a computer whose LAN address moved there is unreachable.
+- Network, Rust differs (still open; see "Open after the port"): the record is not
+  re-published after a network change (restart on network change, or re-register).
+  Layer-2 tunnels (a TAP device, `feth`) and bridges (`docker0`, `bridge100`) are not
+  point-to-point, and are served; Swift classes bridges `.other`. A LAN numbered in
+  `100.64.0.0/10` is refused, on every platform. Rust judges a connection by its local
+  address where Swift judges the interface it arrives on, so on Linux and macOS (weak
+  host model) a packet addressed to the LAN address that arrives over a tunnel is
+  served: the computer is a subnet router or exit node, or a peer's allowed IPs cover
+  the LAN. On Windows the hardware rule refuses a LAN address on a Hyper-V external
+  switch's or a Network Bridge's vEthernet adapter, so a computer whose LAN address
+  moved there is unreachable.
 - Touch: `HandoverEngine.touch` should run an `UPDATE` of the row that still holds the
   token (a new `MeetingStore` method), as the Rust engine does
   (`Store::touch_paired_device`); today `store.save(seen, tokenHash:)` upserts the
@@ -1378,6 +1409,216 @@ Rust fixes these Swift behaviours; each is ported to Swift or accepted before cu
   text only and ignores a failed remove, so the two details differ and a leftover
   `.auth.json.steno-<uuid>`, which holds the only live tokens, goes unmentioned.
 
+## Open after the port
+
+What the merged packages left open. Each item starts with its owner: **WP9b** (the Mac
+cutover, `.plans/2026-10-04-mac-cutover.md`), **First Linux release**, **First Windows
+release** (WP10's hardware checks and the unsigned installers) or **Unowned** (no
+package or release has it yet). Then it says what is open, where it lives (pointing to
+this plan where the plan already covers it) and which pull requests found it. The pull
+request that fixes an item deletes it.
+
+- **WP9b.** The unticked lines of the parity list must all be ticked before the
+  cutover opens: the menu bar's queue and recent meetings, the detection prompt, the
+  auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
+  bar's Record and Find Meetings items, and the "Where the speech sidecar runs
+  Parakeet v3" line under "Speech" (its two items below). Several name WP5 or WP8,
+  which merged without them. The two other unticked "Speech" lines, `SpeechSettings`
+  and "One model store", cover Rust-only settings and code with no Swift behaviour to
+  match: they do not gate the cutover and have their own **Unowned.** items. Where:
+  the unticked lines under "Beyond the bridge" and "Speech" and the open items under
+  "Pipeline and services (WP6b)" and "Shell" in the parity list. Found: #170, #172,
+  #173.
+- **WP9b.** The shell's four gaps: no tray badge for pending speaker reviews, a fake
+  QR encoder (the pairing code shows no QR image), a fake clip player (a speaker's
+  sample does not play) and no update schedule (the host's `Updater` is a fake and the
+  shell checks only when asked, where Sparkle checks daily). Where: the fakes in
+  `build` (`crates/steno-services/src/app.rs`), `apps/desktop/src-tauri/src/updater.rs`;
+  the WP9 paragraph and seams (3) and (4) under "Pipeline and services (WP6b)". Found:
+  #173, #185.
+- **WP9b.** The Rust app cannot download the Mac's CoreML Parakeet model: Settings
+  answers "This build cannot download the CoreML Parakeet v3 model", so only a Mac
+  where the Swift app installed it can transcribe, and a fresh install of the cutover
+  build (cutover test 5) has no speech model. Where: `ModelStoreSpeechModels::download`
+  in `crates/steno-services/src/speech.rs`. Found: #173.
+- **WP9b.** Whisper, Ultra and DE cannot be installed on the Rust side: a stored
+  `whisperkit-large-v3-turbo`, `parakeet-ultra` or `parakeet-de` runs Parakeet v3 in
+  the speech sidecar on every platform, the Mac included, while its Settings row
+  answers "has no Rust engine yet", so only processing installs the export, unseen.
+  Swift users who chose one of them carry it across the cutover. Where:
+  `speech_asset` and `download` in `crates/steno-services/src/speech.rs`; the "Where
+  the speech sidecar runs Parakeet v3" item under "Speech" in the parity list. Found:
+  #189.
+- **WP9b.** Processing a meeting before the speech models are installed starts a
+  silent 2.6 GB download inside the pipeline wherever the sidecar speech engine
+  (`SidecarSpeechEngine`) runs, on the Mac for Whisper, Ultra and DE: it installs its
+  models on first use, and the Settings row shows no progress. It blocks the first
+  Linux release too. Where: the "Where the speech sidecar runs Parakeet v3" item under
+  "Speech" in the parity list. Found: #189.
+- **WP9b.** Settings still describes the diarizer as the Swift app's CoreML model (its
+  acknowledgement and its size), while every platform, the Mac included, runs the ONNX
+  pyannote segmentation and WeSpeaker embedding models, whose licence notices the app
+  does not show yet. It blocks the first Linux release too. Where: `display_name`,
+  `source_repo` and `expected_bytes` in `crates/steno-services/src/speech.rs`; the
+  Settings > General item under "Pipeline and services (WP6b)". Found: #164, #183.
+- **WP9b.** The Swift `touch` upsert: `HandoverEngine.touch`
+  (`Sources/StenoHandover/Routing/HandoverEngine.swift`) records a phone's last-seen
+  time with `store.save(seen, tokenHash:)`, which writes back the whole device row it
+  read before a suspension, so a revoke that commits in between puts the revoked phone
+  back. The Rust store runs an `UPDATE` of the row that still holds the token
+  (`Store::touch_paired_device`). Needed only if the Swift app ships another release.
+  Where: the "Touch" line under "Handover". Found: #169, #191.
+- **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
+  Swift defects (each ported to Swift if it ships another release, otherwise closed by
+  the cutover), the fixtures the Swift side owes, and the audio choices to settle at
+  cutover (the WAV mixdown, the resampler, the sidecar's 2 ms lag, AAC priming, call
+  mode without an output client). Where: "Store", "Adapters", "Handover", "LLM",
+  "Audio" and "Bridge" in the parity list. Found: #155, #165, #166, #167, #169, #190.
+- **WP9b.** The Bonjour record is not published again after a network change, on
+  every platform, where Swift's `NWListener` follows it; and the shell passes no
+  computer name on any platform, so the Mac and Windows advertise `HOSTNAME`,
+  `/etc/hostname` or "Steno". The first Linux and Windows releases need the re-publish
+  too. Where: `crates/steno-handover/src/server/advertise.rs`,
+  `HandoverConfiguration::default_service_name` in
+  `crates/steno-handover/src/configuration.rs`; the "Network" and "Service name"
+  lines under "Handover". Found: #169.
+- **WP9b.** No concurrency group spans the two release workflows, so two macOS signing
+  jobs can run at once; only both READMEs state the one-at-a-time rule, until
+  `release.yml` retires at the cutover. Where: `.github/workflows/release.yml`,
+  `.github/workflows/desktop-release.yml`. Found: #184.
+- **WP9b.** The first `desktop-v*` tag, which the Mac's pre-releases bring before any
+  Linux or Windows release, is the first run of the `publish` job against GitHub and
+  the first MSI built for an `-rc.N` version. Where:
+  `.github/workflows/desktop-release.yml`. Found: #184.
+- **First Linux release.** A Linux logout saves the recording only when logind ends
+  the session's processes with a signal; when nothing signals the app, or the display
+  connection closes first, GDK ends the process unsaved. Untested on GNOME and KDE.
+  Where: `apps/desktop/src-tauri/src/main.rs`; the shutdown items under "Pipeline and
+  services (WP6b)". Found: #185.
+- **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
+  threads alive, the node and its links left in the graph) and was never reproduced;
+  the root cause is unknown. `stop()` now gives the thread `STOP_TIMEOUT` (2 s) and
+  then leaves it behind the closed gate, and `Gate::close` itself waits without a
+  bound for a pass to leave. Where:
+  `crates/steno-audio/src/capture/live/pipewire/mod.rs`. Found: #176.
+- **First Linux release.** The PipeWire backend's differences from the Mac's: the
+  system lane is the whole default sink (Steno's own output included), a Mac device
+  UID names no Linux node, `start` waits for the first cycle, there is no input device
+  list and no meeting detection, the latencies are unmeasured on real hardware, and
+  the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
+  Where: the Linux items under "Audio". Found: #166, #176.
+- **First Linux release.** With a frozen session bus the single-instance plugin waits
+  about 20 s at exit to release its bus name (measured with #172; upstream behaviour),
+  and WebKitGTK leaks a file descriptor per destroyed webview (issue #160). Where:
+  `apps/desktop/src-tauri/src/main.rs`, `apps/desktop/README.md`. Found: #172.
+- **First Linux release.** The web UI speaks Mac on every platform: "Reveal in
+  Finder", "on this Mac", "menu bar item" and ⌘ shortcuts show on Linux (and on
+  Windows), seen in the Linux smoke under Xvfb. The platform's wording has to come
+  from the shell (the host's platform in a snapshot), not from the web app. Where:
+  `apps/macos/web/src` (`windows/main/meeting-detail.tsx`,
+  `windows/main/meeting-list.tsx`, `windows/main/processing-card.tsx`,
+  `windows/onboarding/setup-page.tsx`, `windows/onboarding/permissions-page.tsx`,
+  `windows/settings/`, `components/codex-consent-card.tsx`,
+  `components/permission-row.tsx`, `components/ui/menu.tsx`). Found: #195
+  (whole-app smoke).
+- **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
+  measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
+  `directmlOnWindows` stays off by default (`SpeechSettings` in
+  `crates/steno-speech/src/runtime.rs`). The same machine checks that DirectML's
+  FLEURS transcripts match the CPU's, which nodes ONNX Runtime leaves on the CPU, and
+  which event providers a session uses. Before the default flips, the Windows bundles
+  must also carry the licence notice of the `DirectML.dll` they ship
+  (`apps/desktop/src-tauri/tauri.release.windows.conf.json`). Where: the WP10b
+  paragraph, "Off by default" and "Privacy". Found: #188.
+- **First Windows release.** A sidecar killed at its deadline is then waited for
+  without a bound (`kill` in `crates/steno-speech/src/sidecar/client.rs`), so a child
+  stuck in a GPU driver call could hold the engine's lock; the G4 machine checks
+  whether a hung DirectML child exits when killed. Where: "Off by default" under
+  WP10b. Found: #188.
+- **First Windows release.** A Windows logoff or shutdown gives the app about five
+  seconds, less than `SHUTDOWN_PATIENCE` (10 s, `crates/steno-services/src/app.rs`),
+  and the shell does not call `ShutdownBlockReasonCreate` while a recording runs, so a
+  long save at logoff can be cut off. Whether a logoff ends the speech sidecar before
+  the pipeline quits (which would mark its meeting `failed`) is unverified. Where: the
+  WP10 paragraph and the shutdown items under "Pipeline and services (WP6b)". Found:
+  #185.
+- **First Windows release.** No Windows machine has run the WASAPI backend: the
+  `--ignored` tests in `crates/steno-audio/tests/live_windows.rs`, a real call over
+  process loopback, a device switch while recording, the two-clock slip rate and
+  detection by executable name; and the services do not read the WASAPI device list
+  yet, so Settings > Recording offers only the default input. Where: the Windows list
+  under "Audio". Found: #175, #186.
+- **First Windows release.** The `.msi` and NSIS installers are not code-signed (no
+  certificate), so SmartScreen asks before the first install. Where:
+  `.github/workflows/desktop-release.yml`, the WP9a paragraph. Found: #184.
+- **Unowned.** The CoreML backend still has its own chunker, merge and decoder
+  configuration; moving it onto the shared chunker settles the unticked items of the
+  WP4 integration notes (decode loop, merge, recovery, chunking, names). Each backend
+  keeps its own until then, so FLEURS and the Swift parity both hold. Where:
+  `crates/steno-speech-coreml`, `crates/steno-speech`; the integration notes under WP4.
+  Found: #171, #182.
+- **Unowned.** The diarizer's ONNX inference runs in the app's process on every
+  platform, against invariant 4, so a crash in ONNX Runtime there ends the app; moving
+  it needs its own request in the sidecar protocol. Where: `crates/steno-diarize`; the
+  "Open, against invariant 4" item under "Pipeline and services (WP6b)". Found: #183.
+- **Unowned.** Every pipeline reload (a change of engine or of the summaries
+  settings) builds a new speech engine: on the Mac a save during a recording drops the
+  CoreML model the warm-up loaded, and off the Mac a reload while a job transcribes
+  leaves two speech sidecars running (about 4.4 GB) until the retired job releases its
+  own. Where: `CurrentPipeline::reload` in `crates/steno-services/src/pipeline.rs`.
+  Found: #183.
+- **Unowned.** `build()` panics when any environment variable's name or value is not
+  valid Unicode, so the app and the CLI do not start; reading the few variables each
+  caller needs with `std::env::var_os` avoids it. Where: `std::env::vars()` in
+  `codex_store` (`crates/steno-services/src/llm.rs`, every platform), in
+  `FileSecretStore::in_support_directory` (`crates/steno-services/src/secrets.rs`) and
+  in `StenoPaths::default_support_directory` (`crates/steno-core/src/paths.rs`).
+  Found: on `main` on 2026-10-04 (no pull request names it).
+- **Unowned.** The phone clears its pairing on any 401, also one that answers a
+  request sent under a pairing since replaced, so an old request that races a
+  re-pairing unpairs the new one; only the chunk uploads are cancelled before a
+  re-pairing. Where: `onUnauthorized` is `clearPairing` in
+  `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
+  `mobile/src/features/sync/recording-client.ts`. Found: #191.
+- **Unowned.** The phone intake's receipt and meeting commits run under
+  `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
+  power loss after the computer answers `complete`, when the phone deletes its copy,
+  can roll them back; the copied file itself is synced. Both apps. Where: the
+  `RecordingIntake.admit` item under "Store". Found: #169, #173, #174.
+- **Unowned.** Linux keeps secrets in the 0600 `secrets.json` under the support
+  directory, not in the Secret Service. Where: `crates/steno-services/src/secrets.rs`.
+  Found: #173.
+- **Unowned.** The speech settings (`onnxSidecarOnMac`, `directmlOnWindows`,
+  `modelsMirror`) live only in `speech.json`, which nothing writes, and the bridge has
+  no field for them; the macOS fallback and the DirectML switch wait for a plan that
+  words them for users. Where: the `SpeechSettings` item under "Speech" in the parity
+  list. Found: #177, #187.
+- **Unowned.** The diarizer keeps its own model store (no resume, no lock, no mirror),
+  so a mirror serves only the speech models. Where:
+  `crates/steno-diarize/src/models.rs`; the "One model store" item under "Speech" in
+  the parity list. Found: #183.
+- **Unowned.** Untested paths with no seam to test them: the phone intake's fsync
+  calls, and in `steno-llm` the cleanup after a failed `auth.json` write and the detail
+  that names a temporary file that could not be removed. Where:
+  `crates/steno-pipeline/src/files.rs`, `crates/steno-llm`. Found: #167, #185.
+- **Unowned.** CI: the self-hosted macOS runners share one pnpm setup directory, so
+  `pnpm/action-setup` on one runner can break another's install (a rerun passes); it
+  needs a per-runner `PNPM_HOME` or a runner-local pnpm across the workflows. Where:
+  `pnpm/action-setup` in `.github/workflows/*.yml`. Found: #184.
+- **Unowned.** After a delivery to a vault the CLI named (`steno deliver --vault`),
+  the meeting footer shows the raw destination id `obsidian-folder@<path>` on every
+  platform: `destination_display_name` names only the stored Obsidian destination's id
+  and shows any other id as it is. Where: `crates/steno-host/src/labels.rs`,
+  `crates/steno-cli/src/commands/deliver.rs`. Found: #195 (whole-app smoke).
+- **Unowned.** `steno process --title` stores the title with `TitleOrigin::Default`,
+  so the app shows the default date title while the export uses the given one. Swift's
+  CLI does the same, so a fix changes both or neither. Where:
+  `crates/steno-cli/src/commands/process.rs`. Found: #195 (whole-app smoke).
+- **Unowned.** The headless PipeWire script fails when `TMPDIR` is long: its socket
+  path under the `mktemp` directory passes the 108-byte limit of a Unix socket path
+  ("File name too long"). A short base directory for the socket fixes it. Where:
+  `scripts/pipewire-headless.sh`. Found: #195 (whole-app smoke).
+
 ## Progress
 
 One row per package. WP1 to WP3 were a chain; every package after them is one
@@ -1412,8 +1653,15 @@ PR off `main`.
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | merged |
 | WASAPI follow-ups: slip window and immediate slip, trusted stream sizes, start deadline, detector start and stop serialised (`steno-audio`) | `fix/rust-wasapi-followups` | #186 | merged |
 | Every exit saves first, snapshots on the main thread, the recorder's toggle and the services runtime fixed | `fix/desktop-exit-and-deadlock` | #185 | merged |
-| Revoke during a `complete`, a verify bound to the file it hashed, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | in review |
-| Speech sidecar follow-ups: download lock file, 64 MiB chunks, odd range answers, crash-report stderr, idle child replaced | `fix/rust-sidecar-followups` | #187 | open |
+| Revoke during a `complete`, a verify bound to the file it hashed, no fixed sleeps in the handover tests | `fix/rust-handover-revocation-flake` | #190 | merged |
+| Speech sidecar follow-ups: download lock file, 64 MiB chunks, odd range answers, crash-report stderr, idle child replaced | `fix/rust-sidecar-followups` | #187 | merged |
+| Rust CI green on all three platforms after the first merges | `fix/rust-ci-main` | #168 | merged |
+| macOS panel size check held to what AppKit allows, panels kept non-activating | `fix/desktop-macos-panel-size` | #178 | merged |
+| #154 ported: the cleanup prompt's speaker-label rule and echoed labels stripped (`steno-llm`) | `fix/rust-port-154-cleanup` | #179 | merged |
+| The privacy rule names every network path (`AGENTS.md`) | `docs/privacy-network-paths` | #180 | merged |
+| #154 ported: the room fallback for a call whose tap carried nothing (`steno-pipeline`) | `fix/rust-port-154-room-fallback` | #181 | merged |
+| A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
+| The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -1427,27 +1675,28 @@ baseline carries none. Parity numbers: see the PR.
 WP5a is `crates/steno-audio`: the rings, Speex AEC over vendored SpeexDSP,
 the writer, the session with its device-change rebuild, the synthetic
 backend, the macOS live backend, the meeting detector and the symphonia
-decoder; PipeWire (WP5b) and WASAPI (WP10) are stubs (WP5b and WP10a
-below replace them). The zero-allocation
+decoder; PipeWire and WASAPI were stubs until WP5b and WP10a (below)
+replaced them. The zero-allocation
 proof is `crates/steno-audio/tests/realtime.rs`; the ERLE table is
 identical to Swift's `aec-bench --synthetic`; the ring tests run under
 ThreadSanitizer in CI's `tsan` job; the live Core Audio tests sit behind
 `--ignored` in `tests/live.rs`. Parity items: the Audio list above.
 
-What WP7c leaves for the next package: `crates/steno-handover` is a rustls (ring)
+What WP7c left for the next package: `crates/steno-handover` is a rustls (ring)
 listener, TLS 1.3 only, hyper 1 HTTP/1.1, with the pinned verifier (`pinning`), the
 rcgen identity in the `SecretStore` as one PEM bundle, pairing, the seven routes, the
 inbox and the mdns-sd advertiser; `tests/wire_contract.rs` reads `wire.ts`. The store
-gains the paired-device and handover-receipt queries. Core's `RecordingIntake`
-(copy into the audio folder, enqueue) waits for WP6b: Rust core has no pipeline to
-enqueue into yet; the audio folder's path comes from `paths::file_url_path`, the
-meeting's folder from `RecordingLayout`. Durability before `complete` answers 200 is
-the intake's, as in Swift: the listener fsyncs each chunk (`receiving_file::write`) and
-writes its own `complete` receipt only after `HandoverIntake::admit` returns, so the
-port must have the master and its commits on disk by then (the `RecordingIntake.admit`
-line under Store). Pairing and revoke commits stay `NORMAL`, as in Swift: a power loss
-right after one can forget a pairing (the phone gets 401 and unpairs, and the user
-pairs it again) or bring a revoked device back.
+gains the paired-device and handover-receipt queries. The intake (copy into the audio
+folder, enqueue) arrived with WP6b as `RecordingIntake` in
+`crates/steno-pipeline/src/intake.rs`; the audio folder's path comes from
+`paths::file_url_path`, the meeting's folder from `RecordingLayout`. Durability before
+`complete` answers 200 is the intake's, as in Swift: the listener fsyncs each chunk
+(`receiving_file::write`) and writes its own `complete` receipt only after
+`HandoverIntake::admit` returns. The intake syncs the copy and its folder first
+(`steno_pipeline::files::copy_durably`); its commits still run under `NORMAL` (the
+`RecordingIntake.admit` line under Store). Pairing and revoke commits stay `NORMAL`,
+as in Swift: a power loss right after one can forget a pairing (the phone gets 401
+and unpairs, and the user pairs it again) or bring a revoked device back.
 
 WP5b is the Linux `LiveCaptureBackend`, `crates/steno-audio/src/capture/live/pipewire/`:
 one PipeWire capture stream (48 kHz `f32`, one `AUXn` channel per linked
