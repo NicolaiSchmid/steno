@@ -1691,7 +1691,7 @@ PR off `main`.
 | #154 ported: the room fallback for a call whose tap carried nothing (`steno-pipeline`) | `fix/rust-port-154-room-fallback` | #181 | merged |
 | A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
-| Only a 401 to the current pairing's token unpairs the phone (`mobile/`) | `fix/mobile-current-pairing-401` | #200 | merged |
+| Only a 401 to the current pairing's token unpairs the phone (`mobile/`) | `fix/mobile-current-pairing-401` | #200 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
