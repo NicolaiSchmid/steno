@@ -17,11 +17,16 @@
 //! before `start` took the answer. `stop()` closes the capture's `Gate` to
 //! the sink, sends a quit through a `pipewire::channel` and joins the
 //! thread; a thread that has not ended within `STOP_TIMEOUT` (2 s) is
-//! logged and left behind the closed gate, so `stop()` returns, and
-//! nothing reaches the sink after it either way. The stream runs with
-//! `RT_PROCESS`, so its `process` callback runs on PipeWire's data-loop
-//! thread, which is the real-time path here: `process` dequeues the
-//! buffer, turns its chunk into a
+//! left behind the closed gate, so `stop()` returns (within the rule on
+//! `Gate::close`), with a log of where it waits, and nothing reaches the
+//! sink after it either way. Logs go through the subscriber the binary
+//! installed, synchronously unless it buffers them: a log write that
+//! blocks (stderr on a stalled disk) can hold the thread past
+//! `STOP_TIMEOUT`, and then `stop()` in its own log of that.
+//!
+//! The stream runs with `RT_PROCESS`, so its `process` callback runs on
+//! PipeWire's data-loop thread, which is the real-time path here:
+//! `process` dequeues the buffer, turns its chunk into a
 //! [`SliceView`](crate::realtime::SliceView) with [`interleaved_view`]
 //! and, while the gate is open, hands it to [`deliver_slices`], the safe
 //! form of the IOProc body the macOS backend uses. No allocation, no lock,
@@ -137,14 +142,17 @@ impl Gate {
         }
     }
 
-    /// Runs `work` if the gate is open, counted inside while it does.
+    /// Runs `work` if the gate is open, counted inside while it does;
+    /// whether it ran.
     #[inline(always)]
-    fn pass(&self, work: impl FnOnce()) {
+    fn pass(&self, work: impl FnOnce()) -> bool {
         self.inside.fetch_add(1, Ordering::SeqCst);
-        if self.open.load(Ordering::SeqCst) {
+        let open = self.open.load(Ordering::SeqCst);
+        if open {
             work();
         }
         self.inside.fetch_sub(1, Ordering::SeqCst);
+        open
     }
 
     /// Closes the gate and waits, without a limit, for whoever is inside: a
@@ -298,9 +306,11 @@ impl Shared {
                     .property(move |subject, key, _type, value| {
                         if subject == pw::core::PW_ID_CORE
                             && let Some(shared) = shared.upgrade()
-                            && shared.graph.borrow_mut().set_default(key, value)
                         {
-                            shared.changed();
+                            tracing::debug!("PipeWire default metadata: {key:?} = {value:?}");
+                            if shared.graph.borrow_mut().set_default(key, value) {
+                                shared.changed();
+                            }
                         }
                         0
                     })
@@ -910,11 +920,12 @@ fn judged_at(first: Instant, last: Instant) -> Instant {
 }
 
 /// Reports `reason` to `sink` through `gate`: not at all once it closed.
+/// The log comes after the pass, so a log write that blocks never keeps
+/// [`Gate::close`] waiting.
 fn report(gate: &Gate, sink: &LaneFrameSink, reason: DeviceChangeReason) {
-    gate.pass(|| {
+    if gate.pass(|| sink.report_device_change(reason)) {
         tracing::info!("PipeWire graph change reported {reason:?}");
-        sink.report_device_change(reason);
-    });
+    }
 }
 
 /// What `start` waits for: the stream the thread opened, or why it did not.
