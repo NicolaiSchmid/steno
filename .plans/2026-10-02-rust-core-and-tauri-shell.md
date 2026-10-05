@@ -1380,14 +1380,15 @@ fix is ported to Swift before cutover.
   `apps/macos/web/src/lib/platform.tsx`): ⌘F and ⇧⌘E in both apps, ⌘⇧R in the
   Tauri shell only, where no Record menu owns it.
 - Each platform's words and keys: the shell tells every page its platform before the
-  page runs (`platform.rs`, `window.__STENO_PLATFORM__`), the page words itself from
-  one table (`platform.tsx`: "this computer", "Show in File Explorer", "Show in
-  folder", Ctrl+F) and the host from `HostConfig::platform` ("this computer" in its
-  sentences, and only the permissions the OS has: all four on the Mac, the
-  microphone and local network on Windows, the microphone on Linux). The tray says
-  "Settings" without the ellipsis off the Mac and "Exit Steno" on Windows, and shows
-  shortcut hints on the Mac only. The Swift app sets no platform and reads as
-  before, but for "Show in Finder" where it said "Reveal in Finder".
+  page runs (`apps/desktop/src-tauri/src/platform.rs`, `window.__STENO_PLATFORM__`),
+  the page words itself from one table (`apps/macos/web/src/lib/platform.tsx`: "this
+  computer", "Show in File Explorer", "Show in folder", Ctrl+F) and the host from
+  `HostConfig::platform` ("this computer" in its sentences, and only the permissions
+  the OS has: all four on the Mac, the microphone and local network on Windows, the
+  microphone on Linux). The tray says "Settings" and "Check for Updates" without the
+  ellipsis off the Mac and "Exit Steno" on Windows, and shows shortcut hints on the
+  Mac only. The Swift app sets no platform and reads as before; only a vault the CLI
+  named reads "Obsidian (<vault folder>)" in the footer, in both apps.
 - Linux on a Wayland session runs under XWayland: `main` allows GDK only its `x11`
   backend (inside the process, so nothing it starts inherits it) when
   `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
@@ -1635,6 +1636,12 @@ request that fixes an item deletes it.
 - **First Windows release.** The `.msi` and NSIS installers are not code-signed (no
   certificate), so SmartScreen asks before the first install. Where:
   `.github/workflows/desktop-release.yml`, the WP9a paragraph. Found: #184.
+- **First Windows release.** WebView2 keeps its own browser keys: on the pages that
+  do not bind them (Settings, onboarding) Ctrl+Shift+R reloads the page and Ctrl+F
+  opens WebView2's find bar. Tauri 2.12 does not expose wry's switch for them
+  (`AreBrowserAcceleratorKeysEnabled`); untested on Windows. Where:
+  `apps/desktop/src-tauri/src/windows.rs`, `apps/macos/web/src/lib/platform.tsx`.
+  Found: #204.
 - **Unowned.** The CoreML backend still has its own chunker, merge and decoder
   configuration; moving it onto the shared chunker settles the unticked items of the
   WP4 integration notes (decode loop, merge, recovery, chunking, names). Each backend
