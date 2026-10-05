@@ -141,11 +141,26 @@ missing local setup, run it. Do not ask first.
 - Persistence shares the Swift schema. New migrations are written once in SQL
   and mirrored in `Migrations.swift` and the Rust `.sql` files until cutover;
   the schema parity test proves them equal.
-- Same privacy rule as Swift, with the same list of network paths:
-  destinations (`steno-adapters`) and the LLM client (`steno-llm`), text only;
-  the model downloads (`steno-speech`'s `ModelStore` and `steno-diarize`'s
-  model fetch); the Tauri updater; and the handover server (`steno-handover`).
-  ONNX Runtime's telemetry stays off in every process that opens a session.
+- Same privacy rule as Swift: audio never leaves the device, and a new network
+  path needs a plan first. The Rust app's paths, with their hosts in the plan's
+  invariant 3:
+  - the LLM client (`steno-llm`) and destinations (`steno-adapters`), which
+    send text only; today's destinations write to local folders and open no
+    connection;
+  - the model downloads, which send nothing but the request: `steno-speech`'s
+    `ModelStore` (Hugging Face, a GitHub release asset or the configured
+    mirror) and `steno-diarize`'s model fetch (Hugging Face and a GitHub
+    release asset);
+  - the Tauri updater, which fetches the manifest and the signed bundle from
+    this repository's GitHub releases (`tauri.conf.json`, `updater.rs`);
+  - the handover server (`steno-handover`), which accepts connections on the
+    local network and loopback only, over TLS with the certificate the paired
+    phone pins, and only receives that phone's recordings.
+
+  Audio reaches the speech sidecar only over the child's stdin, never a
+  socket, and the sidecar opens no connection. ONNX Runtime's telemetry stays
+  off in every process that opens a session (`init_environment` in
+  `crates/steno-speech/src/onnx.rs`).
 
 ## Review guidelines
 
