@@ -84,6 +84,9 @@ const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 const QUIET: Duration = Duration::from_millis(1_500);
 /// How long the daemon and WirePlumber get to settle after a change.
 const SETTLE: Duration = Duration::from_secs(2);
+/// How long a tone's stream gets to be linked: the first test after the
+/// daemon came up can wait on WirePlumber still starting.
+const TONE_LINKED: Duration = Duration::from_secs(15);
 
 /// The backend's logs into the test output, at `info` unless a non-empty
 /// `RUST_LOG` says otherwise.
@@ -173,15 +176,26 @@ impl Tone {
         (dir, path)
     }
 
-    /// Into a sink, linked by WirePlumber.
+    /// Into a sink, linked by WirePlumber; returns once the link is there.
     fn into_sink(sink: &str, frequency: f64) -> Self {
         let (dir, path) = Self::file(frequency);
+        let name = format!("steno-test-tone-{frequency}");
         let child = Command::new("pw-play")
-            .args(["--target", sink])
+            .args([
+                "--target",
+                sink,
+                "--properties",
+                &format!("{{ node.name = {name} }}"),
+            ])
             .arg(&path)
             .spawn()
             .expect("pw-play");
-        Self { child, _dir: dir }
+        let tone = Self { child, _dir: dir };
+        assert!(
+            eventually(TONE_LINKED, || linked(&name, sink)),
+            "WirePlumber did not link {name} to {sink}"
+        );
+        tone
     }
 
     /// Into a virtual source's input, linked here: WirePlumber links
@@ -200,10 +214,10 @@ impl Tone {
         let tone = Self { child, _dir: dir };
         let output = format!("{name}:output_MONO");
         let input = format!("{source}:input_MONO");
-        let linked = eventually(Duration::from_secs(5), || {
-            tool("pw-link", &[&output, &input])
-        });
-        assert!(linked, "could not link {output} to {input}");
+        assert!(
+            eventually(TONE_LINKED, || tool("pw-link", &[&output, &input])),
+            "could not link {output} to {input}"
+        );
         tone
     }
 }
@@ -255,7 +269,12 @@ fn dump() -> Vec<serde_json::Value> {
 
 /// The daemon's global id of the node named `name`, from `pw-dump`.
 fn node_id(name: &str) -> Option<u64> {
-    dump().iter().find_map(|object| {
+    node_in(&dump(), name)
+}
+
+/// The global id of the node named `name` among `objects`.
+fn node_in(objects: &[serde_json::Value], name: &str) -> Option<u64> {
+    objects.iter().find_map(|object| {
         let found = object.pointer("/info/props/node.name")?.as_str()?;
         (found == name).then(|| object.get("id")?.as_u64())?
     })
@@ -294,6 +313,26 @@ fn destroy_capture_links_from(from: &[&str]) {
             .unwrap_or_else(|| panic!("no capture link from {name}: {links:?}"));
         assert!(tool("pw-cli", &["destroy", &link.to_string()]));
     }
+}
+
+/// Whether the daemon holds a link from the node named `from` to the node
+/// named `to`, from `pw-dump`.
+fn linked(from: &str, to: &str) -> bool {
+    let objects = dump();
+    let (Some(from), Some(to)) = (node_in(&objects, from), node_in(&objects, to)) else {
+        return false;
+    };
+    objects.iter().any(|object| {
+        object.get("type").and_then(serde_json::Value::as_str) == Some("PipeWire:Interface:Link")
+            && object
+                .pointer("/info/output-node-id")
+                .and_then(serde_json::Value::as_u64)
+                == Some(from)
+            && object
+                .pointer("/info/input-node-id")
+                .and_then(serde_json::Value::as_u64)
+                == Some(to)
+    })
 }
 
 /// Polls `done` for up to `limit`; whether it held.
