@@ -22,7 +22,8 @@
 //! sink after it either way. Logs go through the subscriber the binary
 //! installed, synchronously unless it buffers them: a log write that
 //! blocks (stderr on a stalled disk) can hold the thread past
-//! `STOP_TIMEOUT`, and then `stop()` in its own log of that.
+//! `STOP_TIMEOUT`, and then holds `stop()` too, in its own log of the
+//! hang.
 //!
 //! The stream runs with `RT_PROCESS`, so its `process` callback runs on
 //! PipeWire's data-loop thread, which is the real-time path here:
@@ -1069,10 +1070,11 @@ impl std::fmt::Debug for LiveCaptureBackend {
 }
 
 impl LiveCaptureBackend {
-    /// How long a burst of graph changes settles before it is judged once,
-    /// as on the Mac. A Bluetooth profile switch removes and adds nodes
-    /// and moves both defaults within it. Unlike the Mac, a burst that
-    /// never settles is judged at most 2 s after its first change.
+    /// How long a burst of graph changes settles before it is judged, as
+    /// on the Mac. A Bluetooth profile switch removes and adds nodes and
+    /// moves both defaults within it. Unlike the Mac, a burst that never
+    /// settles is judged 2 s after its first change, and what follows
+    /// starts a new burst.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
     #[must_use]
