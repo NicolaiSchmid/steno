@@ -159,6 +159,10 @@ fn the_swift_cli_flow_runs_end_to_end_on_a_fresh_home() {
     assert_eq!(decoded["meeting"]["state"], "ready");
     assert_eq!(decoded["meeting"]["source"], "macInPerson");
     assert_eq!(
+        decoded["meeting"]["titleOrigin"], "user",
+        "--title is the user's title, so the app shows it as the export does"
+    );
+    assert_eq!(
         decoded["meeting"]["title"], "Sweep",
         "no fake summarizer renames the meeting"
     );

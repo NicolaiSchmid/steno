@@ -159,12 +159,19 @@ impl Process {
         };
 
         let now = Utc::now();
-        let title = self.title.clone().unwrap_or_else(|| {
-            self.input
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
+        // A given title is the user's: the app shows it, as the export
+        // does, and the summary keeps it. Swift's CLI stored it as the
+        // default title (see the parity list).
+        let (title, title_origin) = match &self.title {
+            Some(title) => (title.clone(), TitleOrigin::User),
+            None => (
+                self.input
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                TitleOrigin::Default,
+            ),
+        };
         // Whole milliseconds of a recording's length.
         #[allow(clippy::cast_possible_truncation)]
         let length = Duration::milliseconds((duration * 1000.0) as i64);
@@ -179,7 +186,7 @@ impl Process {
             tags: Vec::new(),
             state: MeetingState::Queued,
             end_reason: None,
-            title_origin: TitleOrigin::Default,
+            title_origin,
             template_id: self
                 .template
                 .clone()
