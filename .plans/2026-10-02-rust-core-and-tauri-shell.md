@@ -1605,6 +1605,14 @@ request that fixes an item deletes it.
   re-pairing. Where: `onUnauthorized` is `clearPairing` in
   `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
   `mobile/src/features/sync/recording-client.ts`. Found: #191.
+- **Unowned.** The Rust handover engine orders only its receipt saves (the `saves`
+  turn); a revoke's device delete and a pairing's device save run on the blocking pool
+  outside it, so they can commit in either order. A phone that pairs again while a
+  revoke of it is still deleting can have the new pairing deleted after its save
+  commits: the user just paired it, and its next request is answered 401, so the phone
+  unpairs itself. Swift runs every engine write in the order asked
+  (`HandoverEngine.inOrder`). Where: `revoke` and `pair` in
+  `crates/steno-handover/src/engine/mod.rs`. Found: #205.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
