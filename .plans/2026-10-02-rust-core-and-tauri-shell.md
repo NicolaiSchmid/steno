@@ -822,12 +822,12 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The Swift `steno process` stamped `startedAt` from `Date()` minus the duration; the
   Rust CLI does the same to the millisecond, so a `steno export` of a CLI-processed
   meeting differs only in the ids both sides mint at random.
-- Rust fixes (#202): `steno process --title` stores the title as the user's
+- Since #202 `steno process --title` stores the title as the user's
   (`TitleOrigin::User`), so the app shows it and the summary keeps it. Swift's CLI
   stores it as the default title, so the Swift app shows the date title while the
   export carries the given one, and a summary may rename the meeting; port to Swift
   only if it ships another release. Without `--title` both store the file name as the
-  default title.
+  default title; Rust does so for a blank `--title` too, as the intake treats one.
 - The CLI's secret store is the 0600 `secrets.json` under the support directory
   (`STENO_<KEY>` wins, as in Swift); the app's is the platform keyring on macOS and
   Windows, filed as the Swift app files it: service `uno.schmid.steno.mac`, account the
@@ -1302,7 +1302,7 @@ item to settle before the Linux release:
   With the second bind run in the background instead
   (`pw-metadata -n default &`), so it outlives the pong, the monitor
   prints the set.
-- **`stop()` is bounded.** It closes the capture's gate to the sink, so
+- **`stop()` is bounded, except in `Gate::close`.** It closes the capture's gate to the sink, so
   no frame or report reaches the sink after it, and waits 2 s for the
   PipeWire thread; a thread that has not ended by then is logged with the
   system call it waits in and left behind, and the devices may stay open
@@ -1313,7 +1313,8 @@ item to settle before the Linux release:
   waited for the same stderr lock. Since #202 the binaries queue log lines
   for one writer thread and drop a line rather than wait
   (`steno_services::logs`), so a stalled stderr holds neither the capture
-  thread nor `stop()`.
+  thread nor `stop()`. Only log lines are queued: the shell's `stderr_line!`
+  and the CLI's progress lines still write to stderr directly.
 - **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
   names no Linux node, so a synced or copied settings file shows the input
   device as unavailable and the user picks again. A virtual source (a null
@@ -1615,7 +1616,8 @@ request that fixes an item deletes it.
   services (WP6b)". Found: #185, #203.
 - **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
   threads alive, the node and its links left in the graph) and was never reproduced;
-  the likely cause, a blocking log write, cannot recur since the log writer (#202).
+  the likely cause, a blocking log write, is gone since #202 queues log lines for one
+  writer thread.
   `stop()` now gives the thread `STOP_TIMEOUT` (2 s) and then leaves it behind the
   closed gate, and `Gate::close` itself waits without a bound for a pass to leave.
   Where: `crates/steno-audio/src/capture/live/pipewire/mod.rs`; the `stop()` item in
@@ -1732,11 +1734,6 @@ request that fixes an item deletes it.
   calls, and in `steno-llm` the cleanup after a failed `auth.json` write and the detail
   that names a temporary file that could not be removed. Where:
   `crates/steno-pipeline/src/files.rs`, `crates/steno-llm`. Found: #167, #185.
-- **Unowned.** CI: the release workflow still unpacks pnpm into the default
-  `~/setup-pnpm`, which the self-hosted Macs share, so two jobs at once can fail with
-  ENOTEMPTY (a rerun passes); every other workflow passes `pnpm/action-setup` a
-  per-job `dest` (`${{ runner.temp }}/setup-pnpm`) since #202. Where:
-  `pnpm/action-setup` in `.github/workflows/desktop-release.yml`. Found: #184.
 
 ## Progress
 
@@ -1782,7 +1779,7 @@ PR off `main`.
 | A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
 | Each platform's own wording and shortcuts: the platform from the shell, the page's words and keys, the host's permissions and sentences, the vault the CLI named | `fix/desktop-platform-wording` | #204 | merged |
-| Small fixes after the port: non-Unicode environment variables, `steno process --title` as the user's title, logs that never wait for stderr, the headless PipeWire script's socket paths, a pnpm setup directory per CI job | `fix/rust-small-after-port` | #202 | merged |
+| Small fixes after the port: non-Unicode environment variables, `steno process --title` as the user's title, logs that never wait for stderr, the headless PipeWire script's socket paths, a pnpm setup directory per CI job | `fix/rust-small-after-port` | #202 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
