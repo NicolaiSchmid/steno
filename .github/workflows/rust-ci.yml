@@ -183,6 +183,13 @@ jobs:
         shell: bash
         run: echo "STENO_REQUIRE_LAN_TEST=1" >> "$GITHUB_ENV"
 
+      # The shell's logout and shutdown tests run their fakes on a private
+      # `dbus-daemon` (scripts/setup-linux.sh installs it); on Linux a
+      # missing daemon fails them instead of skipping them.
+      - name: Require the D-Bus logout and shutdown tests (Linux)
+        if: matrix.name == 'linux'
+        run: echo "STENO_REQUIRE_DBUS_TEST=1" >> "$GITHUB_ENV"
+
       - name: Format
         run: cargo fmt --all --check
       - name: Lint

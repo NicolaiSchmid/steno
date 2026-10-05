@@ -49,11 +49,31 @@ exits reach the shutdown these ways:
   ends the process at once, unsaved; a SIGHUP never does. A signal the
   app inherited ignored (`nohup`, a background job's SIGINT) stays
   ignored.
-- A logout on Linux saves when logind ends the session's processes (with
-  `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
-  SIGHUP). Otherwise nothing signals the app, and when the display
-  connection closes first, GDK ends the process unsaved; untested (before
-  the first Linux release; no work package yet).
+- A logout on GNOME, and on Xfce under X11, saves before the session
+  ends: the app registers with the session manager on the session bus
+  (GNOME's `org.gnome.SessionManager`, else Xfce's
+  `org.xfce.SessionManager`, which serves the same protocol under names
+  of its own) and answers its `EndSession` only after the save
+  (`session_end.rs`). gnome-session waits about ten seconds for that
+  answer and xfce4-session seven, both no more than the shutdown's
+  patience, so a save that needs all of it can be cut off when the
+  session ends.
+- A system shutdown or reboot on Linux saves while logind waits: the app
+  holds logind's `shutdown` delay lock and releases it after the save.
+  logind waits for the lock at most five seconds by default
+  (`InhibitDelayMaxSec`), then goes ahead, and the SIGTERM that follows
+  waits for the save in progress. The display closes then too, and GDK
+  ends the process when it does, so a save that outlasts logind's wait
+  can be cut off as well. Sleep and the screen lock do not stop a
+  recording.
+- A logout on KDE Plasma, or on Xfce under Wayland, saves only when
+  systemd signals the app (with `KillUserProcesses=yes`, systemd stops
+  the scope with SIGTERM, then SIGHUP), and when the display connection
+  closes first, GDK ends the process unsaved. Plasma before 6.6 serves
+  no session-manager client API on D-Bus, and from 6.6 its portal's
+  session monitor waits about 1.5 s at the query and not at the end, too
+  short for the save; xfce4-session on Wayland quits after the save
+  phase without sending `EndSession`.
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
@@ -67,6 +87,15 @@ exits reach the shutdown these ways:
   the speech sidecar, a console process, before `RunEvent::Exit` quits
   the pipeline, so its job could leave the meeting failed; unverified
   (WP10).
+
+None of the Linux paths above has been tested on a real desktop (before
+the first Linux release); the tests run the session client and the
+logind lock against fakes on a private bus.
+
+On Linux an exit that went through ends the process two seconds later at
+the latest (`end_within` in `main.rs`): the single-instance plugin
+releases its bus name at the run loop's end and waits for the bus
+without a bound, so a frozen session bus would hold the exit.
 
 The speech sidecar ignores SIGINT, SIGTERM and SIGHUP on Linux and
 macOS: Ctrl-C, a closed terminal and systemd signal it with the app, and
@@ -721,7 +750,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session) |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client and logind's shutdown lock |
 | `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
