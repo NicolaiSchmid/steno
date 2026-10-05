@@ -49,7 +49,8 @@
 //! The `default.audio.sink` and `default.audio.source` metadata changing
 //! or going away, a node the capture's snapshot reads going away (a
 //! linked device, the default sink, the microphone's source) or a port of
-//! one, or the connection, the stream or a link failing mark a change;
+//! one, or the connection, the stream or a link failing (a link removed
+//! from outside included) mark a change;
 //! another app's stream ending does not.
 //! [`LiveCaptureBackend::COALESCE_DELAY`] after the last change, and at
 //! most 2 s after the first, the graph is compared with the devices the
@@ -523,8 +524,9 @@ struct Capture {
 }
 
 /// One of Steno's links and the listeners that mark the capture lost when
-/// it fails: an error on its proxy, or the server putting it in its error
-/// state. Fields drop in order, the listeners first.
+/// it fails: an error on its proxy, the server putting it in its error
+/// state, or the server removing it. Fields drop in order, the listeners
+/// first.
 struct WatchedLink {
     _info: pw::link::LinkListener,
     _error: pw::proxy::ProxyListener,
@@ -702,7 +704,10 @@ impl Capture {
         Ok(())
     }
 
-    /// `link` with the listeners that fail the capture when it fails.
+    /// `link` with the listeners that fail the capture when it fails or the
+    /// server removes it (a patchbay, a device end gone). Steno's own
+    /// teardown never fires them: they drop before the link, and the loop
+    /// does not run in between.
     fn watch_link(shared: &Rc<Shared>, link: pw::link::Link) -> WatchedLink {
         let info = link
             .add_listener_local()
@@ -725,6 +730,14 @@ impl Capture {
                 move |_seq, _res, message| {
                     if let Some(shared) = shared.upgrade() {
                         shared.fail("a capture link", message);
+                    }
+                }
+            })
+            .removed({
+                let shared = Rc::downgrade(shared);
+                move || {
+                    if let Some(shared) = shared.upgrade() {
+                        shared.fail("a capture link", "the server removed it");
                     }
                 }
             })
