@@ -65,7 +65,7 @@ public struct RetentionSweep: Sendable {
   }
 
   /// Every asset whose master file is still on disk becomes `.keepForever`
-  /// with `expiresAt` nil, in one write; Settings > Audio calls this when
+  /// with `expiresAt` nil, in one write; Settings > Recording calls this when
   /// the rule changes to Forever, so the safe direction needs no per-meeting
   /// work. Assets whose master is gone are left as they are. Returns the
   /// number of assets kept.

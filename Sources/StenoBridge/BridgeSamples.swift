@@ -322,7 +322,7 @@ public enum BridgeSamples {
     retentionSentence: onboardingRetention, finished: false)
 
   static let onboardingRetention =
-    "Each recording is deleted 30 days after it was processed and exported. Change this any time in Settings > Audio."
+    "Each recording is deleted 30 days after it was processed and exported. Change this any time in Settings > Recording."
 
   static var onboardingSummaries: SummariesSettingsSnapshot {
     var summaries = settingsSummaries

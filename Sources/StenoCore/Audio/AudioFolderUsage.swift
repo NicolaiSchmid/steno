@@ -1,6 +1,6 @@
 import Foundation
 
-/// The disk cost of "Keep forever", for Settings > Audio: the logical size
+/// The disk cost of "Keep forever", for Settings > Recording: the logical size
 /// of every regular file under the audio folder, recursively, hidden files
 /// skipped. Logical (`.fileSizeKey`) rather than allocated size, which is
 /// block-rounded on APFS and not reported by every file system.

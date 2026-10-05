@@ -129,7 +129,7 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
     }
 }
 
-/// What the rule does to the files, as Settings > Audio says it under the
+/// What the rule does to the files, as Settings > Recording says it under the
 /// picker. Swift: `AudioRetention.footnote`.
 #[must_use]
 pub fn retention_footnote(retention: AudioRetention) -> String {

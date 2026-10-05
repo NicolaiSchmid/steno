@@ -148,7 +148,7 @@ extension RecordingEndReason {
 }
 
 extension AudioRetention {
-  /// What the rule does to the files, as Settings > Audio says it under the
+  /// What the rule does to the files, as Settings > Recording says it under the
   /// picker; onboarding reuses the days and delete sentences. Transcripts,
   /// summaries and exports are never touched by any rule.
   var footnote: String {
