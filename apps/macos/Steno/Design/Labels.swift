@@ -165,10 +165,17 @@ extension AudioRetention {
 
 extension Delivery {
   /// The destination as the footer names it. Ids are storage spellings
-  /// ("obsidian-folder") and never reach a chip; a destination this app
-  /// does not know is shown by its id, the only name it has.
+  /// ("obsidian-folder") and never reach a chip: a vault `steno deliver
+  /// --vault` named (`obsidian-folder@<vault path>`) reads "Obsidian (Notes)"
+  /// with the vault's folder; a destination this app does not know is shown
+  /// by its id, the only name it has.
   var destinationDisplayName: String {
-    destinationID == ObsidianFolderDestination.destinationID ? "Obsidian" : destinationID
+    let obsidian = ObsidianFolderDestination.destinationID
+    if destinationID == obsidian { return "Obsidian" }
+    guard destinationID.hasPrefix(obsidian + "@") else { return destinationID }
+    let vault = URL(fileURLWithPath: String(destinationID.dropFirst(obsidian.count + 1)))
+      .lastPathComponent
+    return vault.isEmpty || vault == "/" ? "Obsidian" : "Obsidian (\(vault))"
   }
 }
 

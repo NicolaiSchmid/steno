@@ -13,6 +13,11 @@ final class DetailStatesTests: XCTestCase {
       meetingID: SampleData.meetingID, destinationID: ObsidianFolderDestination.destinationID,
       status: .delivered)
     XCTAssertEqual(obsidian.destinationDisplayName, "Obsidian")
+    let named = Delivery(
+      meetingID: SampleData.meetingID,
+      destinationID: ObsidianFolderDestination.destinationID + "@/Users/me/Notes",
+      status: .delivered)
+    XCTAssertEqual(named.destinationDisplayName, "Obsidian (Notes)", "a vault the CLI named")
     let unknown = Delivery(
       meetingID: SampleData.meetingID, destinationID: "notion", status: .pending)
     XCTAssertEqual(
