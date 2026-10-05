@@ -27,8 +27,8 @@
 //! stdout breaks, so a dead parent leaves no child behind. Its log goes to
 //! stderr, which the parent logs and keeps the tail of for crash reports.
 //!
-//! On Linux and macOS it ignores SIGINT, SIGTERM and SIGHUP from its ready
-//! message on. Those are the signals that end the app, and they reach the
+//! On Linux and macOS it ignores SIGINT, SIGTERM and SIGHUP from its start,
+//! before its ready message. Those are the signals that end the app, and they reach the
 //! child too: Ctrl-C and a closed terminal reach the terminal's whole
 //! foreground group, and systemd signals every process in a scope. A child
 //! that died of them would end its job before the app quit its pipeline. So
@@ -514,9 +514,10 @@ fn send(reply: &Reply) {
 }
 
 /// Ignores SIGINT, SIGTERM and SIGHUP for the rest of the child's life
-/// (see the crate docs). Called just before the ready message, so a parent
-/// that has it knows they are ignored; the heartbeat, which ends a child
-/// whose parent is gone, starts right after it, or the child exits.
+/// (see the crate docs). Called first in [`serve`], so a signal does not
+/// fail the start and a parent that has the ready message knows they are
+/// ignored; a child whose parent is gone still ends when its ready message
+/// or a heartbeat finds stdout broken.
 #[cfg(unix)]
 fn ignore_exit_signals() {
     for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
@@ -605,6 +606,8 @@ fn give_up(why: &str, error: impl std::fmt::Display) -> ExitCode {
 /// [`steno_speech::sidecar::protocol`] says; on unix SIGINT, SIGTERM and
 /// SIGHUP do not end it (see the crate docs).
 pub fn serve(options: &Options) -> ExitCode {
+    #[cfg(unix)]
+    ignore_exit_signals();
     let fake = options.fake_engine.then(|| FakeEngine {
         loaded: false,
         fault: options.fault,
@@ -626,8 +629,6 @@ pub fn serve(options: &Options) -> ExitCode {
     if start_fault == Some(Fault::SlowStart) {
         std::thread::sleep(Duration::from_millis(200));
     }
-    #[cfg(unix)]
-    ignore_exit_signals();
     // Before the heartbeat starts, so `Ready` is always the first frame.
     send(&Reply::Ready {
         protocol: if start_fault == Some(Fault::WrongProtocol) {

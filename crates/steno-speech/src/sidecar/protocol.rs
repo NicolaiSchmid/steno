@@ -124,7 +124,9 @@ impl Request {
     rename_all_fields = "camelCase"
 )]
 pub enum Reply {
-    /// Sent once at start, before any other frame.
+    /// Sent once at start, before any other frame; by then a child on
+    /// Linux or macOS ignores SIGINT, SIGTERM and SIGHUP (the sidecar
+    /// crate's docs).
     Ready {
         /// The child's [`PROTOCOL_VERSION`].
         protocol: u32,
