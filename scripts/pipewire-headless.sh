@@ -51,7 +51,11 @@ terminate() {
     kill -0 "$@" 2>/dev/null || break
     sleep 0.1
   done
-  kill -9 "$@" 2>/dev/null || true
+  # Only while one is still alive: a KILL to gone processes could reach a
+  # reused PID.
+  if kill -0 "$@" 2>/dev/null; then
+    kill -9 "$@" 2>/dev/null || true
+  fi
   wait "$@" 2>/dev/null || true
 }
 cleanup() {
@@ -61,6 +65,8 @@ cleanup() {
   fi
   command rm -rf "$root"
 }
+# A signal ends the script but not the command it runs: send it to the
+# script's process group (as Ctrl-C and CI's cancel do), not to its PID.
 trap cleanup EXIT
 
 export XDG_RUNTIME_DIR="$root/runtime"
