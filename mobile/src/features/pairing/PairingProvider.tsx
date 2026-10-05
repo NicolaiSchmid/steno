@@ -27,12 +27,12 @@ export type PairingContextValue = {
 	replace(pairing: Pairing): Promise<void>;
 	clear(): Promise<void>;
 	/**
-	 * Forgets the pairing only while it still holds `token`, after `first`
-	 * ran; whether it did. A 401 answers the token its request carried, so
-	 * one that answers a pairing since replaced (or cleared) leaves the
-	 * current one alone. `null` is a token nobody recorded (a chunk the
-	 * background session started before a relaunch) and stands for the
-	 * current pairing.
+	 * Runs `first`, then forgets the pairing, only while it still holds
+	 * `token`; resolves whether it did. A 401 answers the token its request
+	 * carried, so one that answers a pairing since replaced (or cleared)
+	 * leaves the current one alone. `null` is a token nobody recorded (a
+	 * chunk the background session started before a relaunch) and stands
+	 * for the current pairing.
 	 */
 	clearIfCurrent(
 		token: string | null,

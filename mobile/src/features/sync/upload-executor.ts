@@ -79,15 +79,8 @@ export type UploadExecutor = {
 		session: MacSession,
 		index: QueueIndex,
 	): Promise<void>;
-	/**
-	 * A transient failure, or a 401 to a request sent with `token`, for one
-	 * recording.
-	 */
-	fail(
-		recordingID: string,
-		error: unknown,
-		token?: string | null,
-	): Promise<void>;
+	/** A transient failure or a 401 for one recording. */
+	fail(recordingID: string, error: unknown): Promise<void>;
 	uploadFinished(event: UploadFinished): Promise<void>;
 	uploadFailed(event: UploadFailed): Promise<void>;
 	/**
