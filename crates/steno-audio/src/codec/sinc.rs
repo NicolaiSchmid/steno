@@ -37,7 +37,18 @@ impl SincResampler {
     /// `input_rate` to `output_rate`, both in hertz.
     #[must_use]
     pub fn new(input_rate: f64, output_rate: f64) -> Self {
-        let ratio = input_rate / output_rate;
+        Self {
+            ratio: input_rate / output_rate,
+            table: Self::table(input_rate, output_rate),
+            taps: Self::TAPS,
+        }
+    }
+
+    /// The `PHASES + 1` sub-filters of `TAPS` coefficients for one pair of
+    /// rates, each normalised to unit gain. Shared with the streaming
+    /// [`RateConverter`](crate::realtime::RateConverter).
+    #[must_use]
+    pub fn table(input_rate: f64, output_rate: f64) -> Vec<f32> {
         // The low-pass sits below the lower Nyquist, normalised to the
         // input rate; when upsampling the input's own band is the limit.
         let cutoff = 0.45 * output_rate.min(input_rate) / input_rate;
@@ -70,7 +81,7 @@ impl SincResampler {
             // The coefficients are small; the sum is near 2 * cutoff.
             table.extend(coefficients.iter().map(|c| (c / sum) as f32));
         }
-        Self { ratio, table, taps }
+        table
     }
 
     /// The whole signal; the output has `ceil(len / ratio)` samples, which

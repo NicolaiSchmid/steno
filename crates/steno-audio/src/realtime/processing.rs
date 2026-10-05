@@ -1,6 +1,10 @@
 //! Drains the sink's rings in 10 ms frames on a dedicated thread.
 //! Swift: `Sources/StenoAudio/RealTime/ProcessingThread.swift`.
 //!
+//! The rings carry the device's rate. A device that does not run at
+//! [`SAMPLE_RATE`] has every lane converted to it by a [`RateConverter`]
+//! first, so everything below works at 48 kHz.
+//!
 //! Echo cancellation on the mic lane with the system lane of the same frame
 //! as far-end (optionally delayed by the device latency through a
 //! preallocated line), metering, and the hand-off to the writer through
@@ -15,10 +19,11 @@ use std::time::Duration;
 use steno_core::{AudioLane, EchoCanceller};
 
 use super::level_meter::{LevelMeter, LevelSlot};
+use super::rate_converter::RateConverter;
 use super::relay::FrameRelay;
 use super::ring::LaneRingBuffer;
 use super::sink::LaneFrameSink;
-use crate::FRAME_SIZE;
+use crate::{FRAME_SIZE, SAMPLE_RATE};
 
 /// What a [`ProcessingThread`] is built with.
 pub struct ProcessingConfiguration {
@@ -26,6 +31,9 @@ pub struct ProcessingConfiguration {
     pub lanes: Vec<AudioLane>,
     /// Samples per processing frame.
     pub frame_size: usize,
+    /// The rate the rings carry, the device's; anything but
+    /// [`SAMPLE_RATE`] is converted to it.
+    pub device_rate: f64,
     /// Applied to the microphone with the system lane as far end; `None`
     /// passes the microphone through.
     pub echo_canceller: Option<Box<dyn EchoCanceller>>,
@@ -38,13 +46,14 @@ pub struct ProcessingConfiguration {
 }
 
 impl ProcessingConfiguration {
-    /// [`FRAME_SIZE`] frames, no far-end delay, no raw microphone, levels
-    /// every ten frames.
+    /// [`FRAME_SIZE`] frames at [`SAMPLE_RATE`], no far-end delay, no raw
+    /// microphone, levels every ten frames.
     #[must_use]
     pub fn new(lanes: &[AudioLane], echo_canceller: Option<Box<dyn EchoCanceller>>) -> Self {
         Self {
             lanes: lanes.to_vec(),
             frame_size: FRAME_SIZE,
+            device_rate: SAMPLE_RATE,
             echo_canceller,
             far_end_delay_frames: 0,
             keep_raw_mic: false,
@@ -64,6 +73,8 @@ struct Worker {
     system_index: Option<usize>,
     /// What the rings deliver, one buffer per lane.
     lane_buffers: Vec<Vec<f32>>,
+    /// Set when the device does not run at [`SAMPLE_RATE`].
+    conversion: Option<Conversion>,
     /// The canceller's output; the written mic channel while AEC runs.
     processed_mic: Vec<f32>,
     delayed_far: Vec<f32>,
@@ -74,6 +85,16 @@ struct Worker {
     shared: Arc<Shared>,
 }
 
+/// The rate conversion in front of the frames, one converter per lane.
+struct Conversion {
+    converters: Vec<RateConverter>,
+    /// One read of device samples per lane.
+    input: Vec<Vec<f32>>,
+    /// Converted samples per lane; the first `pending` are not yet framed.
+    output: Vec<Vec<f32>>,
+    pending: usize,
+}
+
 struct Shared {
     levels: Arc<LevelSlot>,
     frames_processed: AtomicUsize,
@@ -82,15 +103,58 @@ struct Shared {
 }
 
 impl Worker {
-    /// Processes every whole frame the rings hold right now.
+    /// Processes every whole frame the rings hold right now; with a
+    /// conversion, everything they hold, and the converted remainder of
+    /// less than a frame waits for the next drain.
     #[inline(always)]
     fn drain(&mut self) {
+        if let Some(mut conversion) = self.conversion.take() {
+            self.drain_converted(&mut conversion);
+            self.conversion = Some(conversion);
+            return;
+        }
         let frame_size = self.frame_size;
         while self.sink.available_to_read() >= frame_size {
             for (index, buffer) in self.lane_buffers.iter_mut().enumerate() {
                 self.sink.ring(index).read(&mut buffer[..frame_size]);
             }
             self.process_frame();
+        }
+    }
+
+    /// Reads every lane in equal counts, converts them in step and
+    /// processes each whole 48 kHz frame.
+    #[inline(always)]
+    fn drain_converted(&mut self, conversion: &mut Conversion) {
+        let frame_size = self.frame_size;
+        loop {
+            let count = self
+                .sink
+                .available_to_read()
+                .min(conversion.converters[0].max_input());
+            if count == 0 {
+                return;
+            }
+            let mut written = 0;
+            for (index, converter) in conversion.converters.iter_mut().enumerate() {
+                let input = &mut conversion.input[index][..count];
+                self.sink.ring(index).read(input);
+                written =
+                    converter.process(input, &mut conversion.output[index][conversion.pending..]);
+            }
+            conversion.pending += written;
+            let mut start = 0;
+            while conversion.pending - start >= frame_size {
+                for (buffer, output) in self.lane_buffers.iter_mut().zip(&conversion.output) {
+                    buffer[..frame_size].copy_from_slice(&output[start..start + frame_size]);
+                }
+                start += frame_size;
+                self.process_frame();
+            }
+            for output in &mut conversion.output {
+                output.copy_within(start..conversion.pending, 0);
+            }
+            conversion.pending -= start;
         }
     }
 
@@ -248,6 +312,23 @@ impl ProcessingThread {
             system_peak_bits: AtomicU32::new(0),
             stop_requested: AtomicBool::new(false),
         });
+        // One read is a frame's worth of device samples.
+        let conversion = (configuration.device_rate != SAMPLE_RATE).then(|| {
+            let read =
+                (frame_size as f64 * configuration.device_rate / SAMPLE_RATE).ceil() as usize;
+            let converters: Vec<RateConverter> = configuration
+                .lanes
+                .iter()
+                .map(|_| RateConverter::new(configuration.device_rate, SAMPLE_RATE, read))
+                .collect();
+            let output = frame_size + converters[0].max_output();
+            Conversion {
+                input: converters.iter().map(|_| vec![0.0; read]).collect(),
+                output: converters.iter().map(|_| vec![0.0; output]).collect(),
+                converters,
+                pending: 0,
+            }
+        });
         let worker = Worker {
             sink: Arc::clone(&sink),
             relay,
@@ -261,6 +342,7 @@ impl ProcessingThread {
                 .iter()
                 .map(|_| vec![0.0; frame_size])
                 .collect(),
+            conversion,
             processed_mic: vec![0.0; frame_size],
             delayed_far: vec![0.0; frame_size],
             delay_line,

@@ -186,7 +186,13 @@ impl AudioFixtures {
     /// Swift's integer phase step for `frequency` at 48 kHz.
     #[must_use]
     pub fn phase_increment(frequency: f64) -> u32 {
-        (frequency / Self::SAMPLE_RATE * 4_294_967_296.0).round() as u32
+        Self::phase_increment_at(frequency, Self::SAMPLE_RATE)
+    }
+
+    /// The integer phase step for `frequency` at `rate` hertz.
+    #[must_use]
+    pub fn phase_increment_at(frequency: f64, rate: f64) -> u32 {
+        (frequency / rate * 4_294_967_296.0).round() as u32
     }
 
     /// The sine of a 32-bit phase.

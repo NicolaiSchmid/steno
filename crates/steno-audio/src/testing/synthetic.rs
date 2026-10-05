@@ -20,9 +20,12 @@
 //! `start_panics_once_running` the first start once its producer runs,
 //! for the guard around the session's start; `stream` is what the first
 //! start reports and `stream_after_restart` what every restart reports
-//! (new latencies, the fallback microphone), `SYNTHETIC` when `None`.
-//! `seconds` counts per `start`, so a restarted backend delivers again,
-//! and `frames_delivered` sums over starts.
+//! (new latencies, a new rate, the fallback microphone), `SYNTHETIC` when
+//! `None`. A start delivers at the rate of the stream it reports, as a
+//! device the Mac cannot move to 48 kHz; the tones keep their frequencies
+//! at any rate. `seconds` counts per `start`, so a restarted backend
+//! delivers again, and `frames_delivered` sums over starts (in each
+//! start's rate).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -33,7 +36,6 @@ use std::time::{Duration, Instant};
 use steno_core::AudioLane;
 
 use super::fixtures::AudioFixtures;
-use crate::SAMPLE_RATE;
 use crate::capture::{CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason};
 use crate::realtime::LaneFrameSink;
 
@@ -333,14 +335,26 @@ impl CaptureBackend for SyntheticCaptureBackend {
         }
         self.stop_requested.store(false, Ordering::Release);
         self.completion.reset();
-        let mut generator =
-            Generator::new(lanes, &self.options.signals, self.options.callback_frames);
+        let stream = if is_restart {
+            &self.options.stream_after_restart
+        } else {
+            &self.options.stream
+        }
+        .clone()
+        .unwrap_or(CaptureStream::SYNTHETIC);
+        let rate = stream.sample_rate;
+        let mut generator = Generator::new(
+            lanes,
+            &self.options.signals,
+            self.options.callback_frames,
+            rate,
+        );
         // Whole frames of positive durations.
-        let total_frames = (self.options.seconds * SAMPLE_RATE) as usize;
+        let total_frames = (self.options.seconds * rate) as usize;
         let change_frame = if self.changes_remaining.load(Ordering::Relaxed) > 0 {
             self.options
                 .change_device_after
-                .map(|s| (s * SAMPLE_RATE) as usize)
+                .map(|s| (s * rate) as usize)
         } else {
             None
         };
@@ -374,7 +388,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
                     }
                     if real_time {
                         // Positive sample counts in seconds.
-                        let due = started + Duration::from_secs_f64(delivered as f64 / SAMPLE_RATE);
+                        let due = started + Duration::from_secs_f64(delivered as f64 / rate);
                         let now = Instant::now();
                         if due > now {
                             std::thread::sleep(due - now);
@@ -408,12 +422,7 @@ impl CaptureBackend for SyntheticCaptureBackend {
             drop(state);
             panic!("the synthetic backend's start panics once it runs");
         }
-        let stream = if is_restart {
-            &self.options.stream_after_restart
-        } else {
-            &self.options.stream
-        };
-        Ok(stream.clone().unwrap_or(CaptureStream::SYNTHETIC))
+        Ok(stream)
     }
 
     fn stop(&self) {
@@ -484,6 +493,7 @@ impl Generator {
         lanes: &[AudioLane],
         signals: &BTreeMap<AudioLane, SyntheticLane>,
         callback_frames: usize,
+        rate: f64,
     ) -> Self {
         let states = lanes
             .iter()
@@ -494,11 +504,11 @@ impl Generator {
                     .and_then(|echo| lanes.iter().position(|l| *l == echo.of));
                 // Positive, rounded as Swift rounds.
                 LaneState {
-                    increment: AudioFixtures::phase_increment(signal.frequency),
+                    increment: AudioFixtures::phase_increment_at(signal.frequency, rate),
                     phase: 0,
                     amplitude: signal.amplitude as f32,
                     echo_lane,
-                    echo_delay_samples: (signal.echo.map_or(0.0, |e| e.delay) * SAMPLE_RATE).round()
+                    echo_delay_samples: (signal.echo.map_or(0.0, |e| e.delay) * rate).round()
                         as usize,
                     echo_gain: signal.echo.map_or(0.0, |e| e.gain) as f32,
                 }

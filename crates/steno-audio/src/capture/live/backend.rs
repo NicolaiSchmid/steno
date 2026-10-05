@@ -5,14 +5,17 @@
 //!
 //! `System` comes from the tap, `Mic` and `Mixed` from the first channel of
 //! the chosen input device, which the aggregate resamples to the output
-//! device's 48 kHz clock. A chosen device that is not connected records
-//! the default input instead ([`chosen_or_default_input`]), and the device
-//! list is watched so the rebuild returns to it once it is back; Swift
-//! fails the start with `InputDeviceUnavailable` there (a deliberate parity
-//! change: no recording is lost to a missing microphone).
+//! device's clock. That clock is 48 kHz where the output device accepts it;
+//! a Bluetooth headset in the hands-free profile keeps 24 or 16 kHz, and
+//! the stream then reports that rate for the processing thread to convert.
+//! A chosen device that is not connected records the default input
+//! instead ([`chosen_or_default_input`]), and the device list is watched so
+//! the rebuild returns to it once it is back; Swift fails the start with
+//! `InputDeviceUnavailable` there (a deliberate parity change: no recording
+//! is lost to a missing microphone).
 //!
 //! Device notifications (a default device moving, a sub-device dying, the
-//! aggregate leaving 48 kHz) arrive on the HAL's notification thread and
+//! aggregate changing rate) arrive on the HAL's notification thread and
 //! are coalesced for [`LiveCaptureBackend::COALESCE_DELAY`] on a watcher
 //! thread, then the devices are resolved again and compared with what the
 //! capture started on ([`DeviceSnapshot::difference`]); a capture on the
@@ -64,7 +67,7 @@ use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource, NominalSampleRate, StreamLayout,
 };
-use crate::realtime::{BufferView, LaneFrameSink, deliver};
+use crate::realtime::{BufferView, LaneFrameSink, RateConverter, deliver};
 
 /// Shared with the IOProc through a raw pointer; boxed so it never moves,
 /// alive until the `IoProc` is dropped.
@@ -406,9 +409,12 @@ impl CaptureBackend for LiveCaptureBackend {
             AggregateDevice::new("Steno capture", &output.uid, &sub_device_uids, &tap_uids)?;
 
         // The aggregate inherits the clock master's rate. Ask for 48 kHz,
-        // then read it back: the HAL applies the change asynchronously and a
-        // device that cannot run at 48 kHz keeps its own, which would leave
-        // a pitch-shifted master labelled 48 kHz. Fail loud instead.
+        // then read it back: the HAL applies the change asynchronously, and
+        // a device that cannot run at 48 kHz (a headset in the hands-free
+        // profile) keeps its own. The stream then reports that rate, which
+        // the processing thread converts; labelling it 48 kHz would leave a
+        // pitch-shifted master. A rate settling late changes the aggregate's
+        // rate, which the watcher reports as a device change.
         if aggregate.nominal_sample_rate() != SAMPLE_RATE {
             let _ = aggregate.set_nominal_sample_rate(SAMPLE_RATE);
         }
@@ -418,9 +424,9 @@ impl CaptureBackend for LiveCaptureBackend {
             || aggregate.nominal_sample_rate(),
             || std::thread::sleep(NominalSampleRate::INTERVAL),
         );
-        if sample_rate != SAMPLE_RATE {
+        if !RateConverter::supports(sample_rate) {
             // Whole hertz.
-            return Err(CaptureError::SampleRateMismatch {
+            return Err(CaptureError::UnsupportedSampleRate {
                 actual: sample_rate as u32,
             });
         }
@@ -453,7 +459,7 @@ impl CaptureBackend for LiveCaptureBackend {
         };
 
         // Device changes: the default devices moving, a sub-device dying,
-        // the aggregate leaving 48 kHz. The tap mirrors the default output
+        // the aggregate changing rate. The tap mirrors the default output
         // device (where the call plays), the clock follows the system
         // output device (alerts); a change of either moves the far-end
         // alignment, so both are watched. The listener carries no value,

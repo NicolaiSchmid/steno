@@ -118,8 +118,9 @@ pub mod realtime;
 pub mod testing;
 pub mod writer;
 
-/// The rate the aggregate device runs at, the Linux and Windows streams are
-/// opened at, and the master file is written in.
+/// The rate the Linux and Windows streams are opened at, the aggregate
+/// device asks for, the processing thread converts any other device rate
+/// to, and the master file is written in.
 pub const SAMPLE_RATE: f64 = 48_000.0;
 /// One processing frame: 10 ms at 48 kHz. The echo canceller, the level
 /// meter and the writer all work in this unit.

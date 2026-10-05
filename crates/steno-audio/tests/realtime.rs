@@ -186,6 +186,50 @@ fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
     );
 }
 
+/// A headset in the hands-free profile: the rings carry 24 kHz and the
+/// loop converts every lane to 48 kHz before the canceller, still without
+/// allocating.
+#[test]
+fn the_processing_loop_converting_24_khz_allocates_nothing_after_warm_up() {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let layout = StreamLayout::resolve(&lanes, &[1, 2], &[vec![], vec![1]], &[2], Some(1)).unwrap();
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let relay = Arc::new(FrameRelay::new(3, FRAME_SIZE, 256));
+    let mut configuration = ProcessingConfiguration::new(
+        &lanes,
+        Some(Box::new(
+            SpeexEchoCanceller::new(48_000.0, FRAME_SIZE).unwrap(),
+        )),
+    );
+    configuration.device_rate = 24_000.0;
+    configuration.far_end_delay_frames = 7_200;
+    configuration.keep_raw_mic = true;
+    let mut thread =
+        ProcessingThread::new(Arc::clone(&sink), Arc::clone(&relay), configuration, None);
+
+    // The material's samples, read as 24 kHz: 4 800 then 52 800 device
+    // samples convert to 2 * 4 800 - 64 and 2 * 52 800 - 64 outputs (half
+    // a window held back), 19 and then 219 whole frames.
+    let warm_up = Material::new(0.1);
+    warm_up.deliver(&sink, &layout.sources);
+    thread.drain_on_caller();
+    assert_eq!(thread.frames_processed(), 19);
+
+    let second = Material::new(1.0);
+    let allocations = CountingAllocator::allocations_during(|| {
+        second.deliver(&sink, &layout.sources);
+        thread.drain_on_caller();
+    });
+    assert_eq!(
+        allocations, 0,
+        "{allocations} allocations on the converting path"
+    );
+    assert_eq!(thread.frames_processed(), 219);
+    assert_eq!(sink.available_to_read(), 0);
+    assert!(sink.dropped_samples().is_empty());
+    assert_eq!(relay.dropped_frames(), vec![0, 0, 0]);
+}
+
 /// `work` through the PipeWire capture's gate, as `process` delivers a
 /// cycle; the backend and its gate are Linux only.
 fn through_the_gate(work: impl FnOnce()) {

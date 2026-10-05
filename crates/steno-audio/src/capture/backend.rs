@@ -20,12 +20,14 @@ use crate::realtime::LaneFrameSink;
 /// a change by calling `stop()` and `start` again on the same backend and
 /// the same sink, so a backend must be restartable.
 pub trait CaptureBackend: Send + Sync {
-    /// Starts delivering `lanes` (in this order) at [`SAMPLE_RATE`] and
-    /// describes the stream it opened. `input_device_uid` `None` selects
-    /// the default input device. A live backend given a UID that names no
-    /// connected input records the default input instead (the fallback),
-    /// says so in [`CaptureStream::input`], and reports a change once the
-    /// chosen device is back, so the rebuild's `start` returns to it; the
+    /// Starts delivering `lanes` (in this order) and describes the stream
+    /// it opened, at [`SAMPLE_RATE`] or, where the device will not run at
+    /// it, at the device's own rate, which the processing thread converts.
+    /// `input_device_uid` `None` selects the default input device. A live
+    /// backend given a UID that names no connected input records the
+    /// default input instead (the fallback), says so in
+    /// [`CaptureStream::input`], and reports a change once the chosen
+    /// device is back, so the rebuild's `start` returns to it; the
     /// recording never fails or ends because the chosen microphone is
     /// missing while the default input can be opened. A chosen device that
     /// is connected but fails to open fails this `start` (with
@@ -48,13 +50,16 @@ pub trait CaptureBackend: Send + Sync {
 /// from, and where each lane sits in the HAL's buffers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CaptureStream {
-    /// The confirmed rate; [`SAMPLE_RATE`] for every backend that started
-    /// (the live one fails otherwise).
+    /// The confirmed rate the lanes arrive at: [`SAMPLE_RATE`], except on
+    /// the Mac when the clock master will not run at it (a Bluetooth
+    /// headset in the hands-free profile runs at 24 or 16 kHz).
     pub sample_rate: f64,
-    /// Latency plus safety offset of the microphone's input path, in frames.
+    /// Latency plus safety offset of the microphone's input path, in frames
+    /// at `sample_rate`.
     pub input_latency_frames: usize,
     /// Latency plus safety offset of the loudspeaker's output path, in
-    /// frames: the tap sees a sample this long before the room hears it.
+    /// frames at `sample_rate`: the tap sees a sample this long before the
+    /// room hears it.
     pub output_latency_frames: usize,
     /// `None` for a backend without HAL buffers (synthetic).
     pub layout: Option<StreamLayout>,
@@ -88,4 +93,14 @@ impl CaptureStream {
         layout: None,
         input: None,
     };
+
+    /// `samples` at the stream's rate as samples at [`SAMPLE_RATE`],
+    /// rounded down.
+    #[must_use]
+    pub fn resampled(&self, samples: usize) -> usize {
+        if self.sample_rate == SAMPLE_RATE {
+            return samples;
+        }
+        (samples as f64 * SAMPLE_RATE / self.sample_rate).floor() as usize
+    }
 }

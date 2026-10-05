@@ -1947,6 +1947,127 @@ fn a_device_change_keeps_recording_on_the_same_files() {
     assert_eq!(clock.pending_sleepers(), 0);
 }
 
+/// A tone's frequency from its upward zero crossings.
+fn frequency(samples: &[f32], sample_rate: f64) -> f64 {
+    let crossings = samples
+        .windows(2)
+        .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+        .count();
+    crossings as f64 / (samples.len() as f64 / sample_rate)
+}
+
+/// A headset in the hands-free profile keeps the Mac's aggregate at
+/// 24 kHz: the recording still starts, and the master and the sidecars are
+/// 48 and 16 kHz with the tones at their frequencies and levels.
+#[test]
+fn a_device_at_24_khz_records_the_usual_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let hands_free = CaptureStream {
+        sample_rate: 24_000.0,
+        ..CaptureStream::SYNTHETIC
+    };
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 3.0).stream(hands_free),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(session.stream().unwrap().sample_rate, 24_000.0);
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+
+    assert_eq!(backend.frames_delivered(), 3 * 24_000);
+    assert!(result.statistics.dropped_frames.is_empty());
+    // Less half a converter window and the last partial frame.
+    assert!(
+        (result.statistics.duration - 3.0).abs() < 0.015,
+        "{} s",
+        result.statistics.duration
+    );
+    let master = master_of(&result);
+    assert_eq!(master.sample_rate, SAMPLE_RATE);
+    assert_eq!(master.channels.len(), 2);
+    for (channel, hertz) in [(0, 440.0), (1, 1_000.0)] {
+        let steady = &master.channels[channel][4_800..140_000];
+        let measured = frequency(steady, SAMPLE_RATE);
+        assert!((measured - hertz).abs() < 2.0, "{measured} Hz");
+        let level = EchoMetrics::decibels(EchoMetrics::rms(steady) / (0.5 / 2f32.sqrt()));
+        assert!(level.abs() < 0.1, "{level} dB");
+    }
+    let mic = sidecar_of(&result, AudioLane::Mic);
+    assert!((mic.len() as f64 / 16_000.0 - 3.0).abs() < 0.015);
+}
+
+/// The call starts and the headset enters the hands-free profile while
+/// recording: the rebuilt backend comes back at 24 kHz and the recording
+/// carries on instead of ending as a lost device.
+#[test]
+fn a_change_to_24_khz_resumes_the_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let hands_free = CaptureStream {
+        sample_rate: 24_000.0,
+        input_latency_frames: 240,
+        output_latency_frames: 4_800,
+        layout: None,
+        input: None,
+    };
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0)
+            .change_device_after(1.0)
+            .stream_after_restart(hands_free.clone()),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        clock.clone(),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds: 0.0
+        }
+    );
+    assert_eq!(session.stream(), Some(hands_free.clone()));
+    // The far-end delay is built from the latencies in 48 kHz frames.
+    assert_eq!(hands_free.resampled(240 + 4_800), 10_080);
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+
+    assert_eq!(backend.frames_delivered(), 48_000 + 2 * 24_000);
+    assert_eq!(result.statistics.device_changes, 1);
+    assert!(!result.statistics.ended_on_device_loss);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert!(
+        (result.statistics.duration - 3.0).abs() < 0.015,
+        "{} s",
+        result.statistics.duration
+    );
+    let master = master_of(&result);
+    let after = &master.channels[0][52_800..140_000];
+    let measured = frequency(after, SAMPLE_RATE);
+    assert!(
+        (measured - 440.0).abs() < 2.0,
+        "{measured} Hz after the change"
+    );
+}
+
 /// The contiguity claim: a gap longer than the two seconds the sink's rings
 /// hold is written in full as silence through the relay, so the master runs
 /// to wall time with nothing truncated into `dropped_frames`. Three restarts

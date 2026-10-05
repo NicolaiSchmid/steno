@@ -535,9 +535,10 @@ impl Core {
         if !self.configuration.uses_echo_cancellation() {
             return 0;
         }
+        // The latencies are device frames; the canceller runs at 48 kHz.
         CaptureSession::far_end_delay_frames(
-            stream.input_latency_frames,
-            stream.output_latency_frames,
+            stream.resampled(stream.input_latency_frames),
+            stream.resampled(stream.output_latency_frames),
         )
     }
 
@@ -563,6 +564,7 @@ impl Core {
         let mut configuration =
             ProcessingConfiguration::new(&self.configuration.lanes(), echo_canceller);
         configuration.far_end_delay_frames = self.far_end_delay_frames(stream);
+        configuration.device_rate = stream.sample_rate;
         configuration.keep_raw_mic = self.keep_raw();
         ProcessingThread::new(Arc::clone(sink), Arc::clone(relay), configuration, levels)
     }
@@ -854,9 +856,10 @@ impl Core {
         // Read before `clear()`, which zeroes the ring overrun counts. Whole
         // frames still in the rings never reached the relay: a restarted
         // backend delivered them after a stop overtook its rebuild, with no
-        // processing thread running yet. They count as dropped.
+        // processing thread running yet. They count as dropped. The rings
+        // hold the device's rate; the counts are 48 kHz frames.
         let ring_drops = active.sink.dropped_samples();
-        let undrained = active.sink.available_to_read() / FRAME_SIZE;
+        let undrained = active.stream.resampled(active.sink.available_to_read()) / FRAME_SIZE;
         active.sink.clear();
         let closing = writer.finish().err();
         let failure = write_failure
@@ -878,7 +881,7 @@ impl Core {
         let lanes = self.configuration.lanes();
         let mut dropped: BTreeMap<AudioLane, usize> = BTreeMap::new();
         for (lane, samples) in ring_drops {
-            *dropped.entry(lane).or_default() += samples / FRAME_SIZE;
+            *dropped.entry(lane).or_default() += active.stream.resampled(samples) / FRAME_SIZE;
         }
         if undrained > 0 {
             for lane in &lanes {
@@ -1091,7 +1094,7 @@ impl Core {
                     CaptureSession::gap_frames(elapsed.min(CaptureSession::MAXIMUM_GAP));
                 let written = self.write_silence(gap_frames, &relay, generation, cancel);
                 if written == gap_frames
-                    && self.relay_has_room(&sink, &relay, generation, cancel)
+                    && self.relay_has_room(&sink, &relay, &stream, generation, cancel)
                     && self.resume(stream, attempt, gap_frames, &sink, &relay, generation)
                 {
                     0
@@ -1299,10 +1302,14 @@ impl Core {
         &self,
         sink: &LaneFrameSink,
         relay: &FrameRelay,
+        stream: &CaptureStream,
         generation: usize,
         cancel: &Cancel,
     ) -> bool {
-        let backlog = || (sink.available_to_read() / FRAME_SIZE).min(relay.capacity_frames());
+        // The rings hold the restarted device's rate.
+        let backlog = || {
+            (stream.resampled(sink.available_to_read()) / FRAME_SIZE).min(relay.capacity_frames())
+        };
         while relay
             .capacity_frames()
             .saturating_sub(relay.available_frames())
