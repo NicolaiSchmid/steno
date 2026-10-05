@@ -1,10 +1,10 @@
 # Rust core and Tauri shell: Steno on macOS, Linux and Windows
 
 Status: every work package from WP1 to WP10b except WP9b is merged on `main`; the
-last pull request of the port, #187, merged on 2026-10-05. Left: the Mac cutover (WP9b,
-`.plans/2026-10-04-mac-cutover.md`), the first Linux release, and the first Windows
-release (WP10's hardware checks; the Windows installers from #184 are unsigned). "Open after the port", before the
-progress table, lists what is still open and who owns it. Started 2026-10-02 on
+port's last pull request, #187, merged on 2026-10-05. Left: the Mac cutover (WP9b,
+`.plans/2026-10-04-mac-cutover.md`), the first Linux release and the first Windows
+release (WP10's hardware checks; the Windows installers from #184 are unsigned).
+"Open after the port" lists each open item and its owner. Started 2026-10-02 on
 branch `refactor/rust-workspace`. Amends
 `.plans/2026-09-24-initial-scope.md` (removes "Windows, Linux" from the v1 non-goals for
 the next major version and replaces the "Language / UI", "Core" and "Apps" rows of the
@@ -45,29 +45,28 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    `.sql` files until cutover; the parity test proves them equal.
 3. **Audio never leaves the device.** Only these code paths open network
    connections, and a new one needs a plan first:
-   - the LLM client (`steno-llm`), which sends text only: the prompts and the
-     transcript text to the summaries endpoint the user set up, and the ChatGPT
-     sign-in's token refresh;
+   - the LLM client (`steno-llm`), text only: the prompts and the transcript to the
+     summaries endpoint the user set up, and the ChatGPT sign-in's token refresh;
    - a `Destination` (`steno-adapters`), text only; the Obsidian and Markdown folder
      destinations write to local folders and open no connection;
-   - the model downloads, which send nothing but the request, from the app's own
-     process (the speech sidecar opens no connection): `steno-speech`'s `ModelStore`
+   - the model downloads, from the app's own process, which send nothing but the
+     request: `steno-speech`'s `ModelStore` (`crates/steno-speech/src/model_store.rs`)
      fetches the fp32 Parakeet export from Hugging Face at a pinned commit and Silero
      VAD from a GitHub release asset, or both from the mirror the speech settings
-     name (`crates/steno-speech/src/model_store.rs`); `steno-diarize` fetches its two
-     models from Hugging Face and a GitHub release asset
-     (`crates/steno-diarize/src/models.rs`);
+     name; `steno-diarize` (`crates/steno-diarize/src/models.rs`) fetches its two
+     models from Hugging Face and a GitHub release asset;
    - the Tauri updater, which fetches `latest.json` and the signed bundle from the
-     repository's GitHub releases (the `desktop-stable` endpoint in
+     repository's GitHub releases and sends nothing (the `desktop-stable` endpoint in
      `apps/desktop/src-tauri/tauri.conf.json`, the `desktop-beta` one in
-     `apps/desktop/src-tauri/src/updater.rs`) and sends nothing;
+     `apps/desktop/src-tauri/src/updater.rs`);
    - the phone handover server (`steno-handover`), which advertises itself over
      Bonjour, accepts connections only on the computer's LAN addresses and loopback,
      speaks TLS 1.3 with the self-signed certificate the phone pins, and only
      receives the paired phone's recordings; it opens no outbound connection.
 
    Inside the computer, a transcription's samples reach the speech sidecar over the
-   child's stdin and its answers come back on stdout, never through a socket (WP4c).
+   child's stdin and its answers come back on stdout, never through a socket, and the
+   sidecar opens no connection (WP4c).
    ONNX Runtime's telemetry is off in every process that opens a session:
    `init_environment` in `crates/steno-speech/src/onnx.rs` commits
    `with_telemetry(false)` before the first session, and `steno-diarize` calls it too.
