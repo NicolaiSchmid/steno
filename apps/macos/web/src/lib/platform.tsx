@@ -119,9 +119,8 @@ const WORDS: Record<PlatformOS, PlatformWords> = {
  * (`Platform::permissions` in `crates/steno-bridge/src/envelope.rs`) has
  * the calendar. The host decides the onboarding and Recording rows; the
  * page needs this only for General's calendar row, whose state the
- * snapshot always carries. `crates/steno-bridge/tests/fixtures.rs` reads
- * this record as text and compares it, so keep one `os: true|false,` line
- * per platform.
+ * snapshot always carries. `crates/steno-bridge/tests/fixtures.rs`
+ * compares this record's text with that list.
  */
 const READS_CALENDAR: Record<PlatformOS, boolean> = {
 	macos: true,
