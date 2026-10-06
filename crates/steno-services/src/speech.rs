@@ -287,32 +287,25 @@ fn engine_on(runtime: SpeechRuntime, setup: &SpeechSetup) -> Arc<dyn SpeechEngin
 pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine> + Send + Sync>;
 
 /// The speech engines the app's pipelines share, so a pipeline reload (a
-/// Settings save of the engine or of the summaries) keeps the engine the
-/// current pipeline runs on, with its claims
-/// ([`SharedSpeechEngine`]): the `CoreML` model a recording's warm-up
-/// loaded stays loaded, and a job the reload retired and a job on the new
-/// pipeline run on the one speech sidecar child.
+/// Settings save of the engine or of the summaries) keeps the current
+/// engine with its claims ([`SharedSpeechEngine`]): the `CoreML` model a
+/// recording's warm-up loaded stays loaded, and a job the reload retired
+/// and a job on the new pipeline share one speech sidecar child.
 ///
-/// What shapes an engine ([`speech_engine`]) is where
-/// [`SpeechSetup::runtime`] runs the stored engine id and the setup
-/// itself: the models directory, the speech settings and how the sidecar
-/// starts. [`build`](crate::app::build) reads the setup once, at launch,
-/// and it belongs to this value, so here the runtime alone tells two
-/// engines apart: a reload whose engine id runs where the current one does
-/// gets the same engine, and so do two ids that run in the same place (the
-/// engines the Swift app offered beside Parakeet v3 all run Parakeet v3 in
-/// the sidecar). A changed setup means a new value, at the next launch.
+/// The setup (the models directory, the speech settings, how the sidecar
+/// starts) is read once at launch and belongs to this value, so the
+/// runtime [`SpeechSetup::runtime`] gives the engine id is all that tells
+/// two engines apart: two ids that run in the same place get the same
+/// engine. A changed setup takes a new value, at the next launch.
 ///
 /// The sidecar engine is built at its first use and kept for the app's
-/// run. It starts its child in a job's warm-up and stops it once no job
-/// needs it, so kept without a job it holds no child; and as the app's only
-/// sidecar engine it never runs two children at once, also when a reload
-/// on the Mac goes to `CoreML` and back while a retired pipeline still
-/// transcribes in the sidecar. The in-process engine (`CoreML` on the Mac)
-/// is kept while the pipelines ask for it: a reload to the sidecar lets
-/// it go, and its model is freed once the retired pipelines on it are
-/// idle; a reload back to `CoreML` before then builds a second one beside
-/// it until they are.
+/// run. It holds a child only while a job needs one, and as the only
+/// sidecar engine it never runs two at once, also when a reload on the
+/// Mac goes to `CoreML` and back while a retired pipeline still
+/// transcribes. The in-process engine (`CoreML` on the Mac) is kept until
+/// a reload asks for the sidecar; its model is freed once the retired
+/// pipelines on it are idle, and a reload back to `CoreML` before then
+/// builds a second one beside it.
 ///
 /// ```no_run
 /// use steno_core::{Settings, StenoPaths};

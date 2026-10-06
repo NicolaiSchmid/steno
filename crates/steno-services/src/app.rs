@@ -135,13 +135,12 @@ fn api_key(
 
 /// The dependencies of one pipeline from the stored settings, the API key
 /// and `engines`, shared by the first build and every reload, with the
-/// speech engine they hold: the one `engines` keeps for the runtime the
-/// stored engine id runs on, so a reload that leaves it there keeps the
-/// engine ([`SpeechEngines`]). The setup of `engines` is read once by
-/// [`build`] and also backs the model service, so the two agree on where
-/// each engine runs; the recorder's warm-up reads the engine from the
-/// pipeline. A secret store that cannot be read is logged and the passes
-/// are built without a key.
+/// speech engine they hold: the one `engines` keeps for the runtime of the
+/// stored engine id ([`SpeechEngines`]). The setup of `engines` is read
+/// once by [`build`] and also backs the model service, so the two agree on
+/// where each engine runs; the recorder's warm-up reads the engine from
+/// the pipeline. A secret store that cannot be read is logged and the
+/// passes are built without a key.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,

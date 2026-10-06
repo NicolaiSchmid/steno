@@ -164,10 +164,9 @@ impl QuitLatch {
 /// lane, and the engine is released only once no job on any of those
 /// pipelines holds a claim. Its warm-ups and that release take one lock,
 /// so a warm-up never overlaps a release. Clones share the engine and its
-/// claims; [`new`](Self::new) starts with none. The services hand one to
-/// each pipeline they build over the same engine, so a reload's pipeline
-/// and the retired one still finishing a job do not release the engine
-/// under each other's jobs. Rust only: Swift has no release.
+/// claims; [`new`](Self::new) starts with none. The services hand a
+/// clone to each pipeline a reload builds over the same engine. Rust
+/// only: Swift has no release.
 ///
 /// ```
 /// use std::sync::Arc;
