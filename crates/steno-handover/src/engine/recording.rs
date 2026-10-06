@@ -247,9 +247,10 @@ impl Engine {
         {
             return HandoverResponse::internal_error("writing the chunk", &error);
         }
-        // The write yielded: another chunk may have landed, or the device
-        // may have been revoked. Fold this chunk into the receipt as it
-        // stands now, never into the copy from before the write.
+        // The write yielded: another chunk may have landed, the device may
+        // have been revoked, or a `complete` may have admitted the
+        // recording. Fold this chunk into the receipt as it stands now,
+        // never into the copy from before the write.
         match self.add_chunk(recording_id, device.id, index).await {
             None => no_such_recording(),
             Some(Err(error)) => HandoverResponse::internal_error("saving the receipt", &error),

@@ -214,6 +214,7 @@ struct State {
 /// A store write's place in line ([`State::next_write`]): `previous`
 /// closes once the write asked for before it has returned, and dropping
 /// `done` once this write has returned lets the next one go.
+#[must_use = "a place dropped before `Engine::in_order` lets the write behind it go at once"]
 struct InOrder {
     previous: Option<oneshot::Receiver<()>>,
     done: oneshot::Sender<()>,
@@ -675,8 +676,8 @@ impl Engine {
     /// `receiving` and saves it. `None`, with nothing changed, when memory
     /// holds no receipt of `device_id` for `recording_id` (revoked,
     /// forgotten). A receipt memory holds as `complete` stays as it is, as
-    /// in [`Engine::update`], and the chunk counts as received: `Ok` with
-    /// nothing saved.
+    /// in [`Engine::update`], and the chunk counts as received:
+    /// `Some(Ok(()))` with nothing saved.
     pub(crate) async fn add_chunk(
         &self,
         recording_id: Uuid,
