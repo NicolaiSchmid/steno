@@ -670,9 +670,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   `setting` table, which the Swift app rewrites whole on every save;
   `STENO_MODELS_MIRROR` overrides the mirror (the speech models only: the diarizer's
   models keep their hosts). Nothing writes the file and the bridge contract has no
-  field for any of them, so the Settings window shows none: the macOS fallback and the
-  DirectML switch wait for a plan that words them for users, and the mirror stays
-  configuration only.
+  field for any of them, so the Settings window shows none:
+  `.plans/2026-10-07-speech-settings-ui.md` proposes their place and wording.
 - [ ] Where the speech sidecar runs Parakeet v3, processing a meeting before its models
   are downloaded starts a silent 2.6 GB download inside the pipeline, which the Settings
   row does not show. The same holds for a stored engine other than Parakeet v3:
@@ -792,8 +791,28 @@ still has to draw the window side. `[ ]` is not ported yet.
   `each_job_starts_the_sidecar_and_frees_it_once_its_lanes_are_transcribed`. So each
   job in the speech sidecar loads the 2.6 GB export again; the Mac's `CoreML` engine
   ignores the release and stays warm. A job that panics or is cancelled leaves the
-  child to the next job's release or to the engine's drop. Rust only: Swift has no
-  release.
+  child to the next job's release or to the app's exit, as the sidecar engine is kept
+  for the run (below). Rust only: Swift has no release.
+- A pipeline reload (a Settings save of the engine or of the summaries) keeps the
+  speech engine while the stored engine id runs where the current one does
+  (`steno_services::speech::SpeechEngines`): the setup that shapes an engine (the
+  models directory, the speech settings, the sidecar binary and its options) is read
+  once at launch, so the runtime `SpeechSetup::runtime` gives the engine id is all
+  that tells two engines apart. The new pipeline gets the same engine and its claims
+  (`steno_pipeline::SharedSpeechEngine`): the claims and the warm-up's lock belong to
+  the engine, not to one pipeline, so a job on the new pipeline and one on the retired
+  pipeline still finishing never release the engine under each other
+  (`a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too`). The sidecar engine
+  is built at its first use and kept for the app's run; without a job it holds no
+  child, and as the app's only sidecar engine it never runs two children at once, also
+  when a reload on the Mac goes to `CoreML` and back while a retired job transcribes
+  (`a_reload_while_a_job_transcribes_keeps_one_sidecar_child`,
+  `a_reload_keeps_the_speech_engine_while_the_engine_id_runs_where_it_did`). So a save
+  during a recording keeps the `CoreML` model the warm-up loaded. The `CoreML` engine is
+  kept while the pipelines ask for it: a reload to the sidecar lets it go, and it is
+  freed once the retired pipelines on it are idle; a reload back before then builds a
+  second one beside it until they are. Swift rebuilt the engine on every
+  `reloadPipeline`.
 - A recording's warm-up (Swift's `warmUpPipelineIfModelsInstalled`, gated on the
   same installed check) loads the speech engine only where it runs in the app's
   process, `CoreML` on the Mac, as Swift did; with Parakeet in the speech sidecar it
@@ -1722,12 +1741,6 @@ request that fixes an item deletes it.
   platform, against invariant 4, so a crash in ONNX Runtime there ends the app; moving
   it needs its own request in the sidecar protocol. Where: `crates/steno-diarize`; the
   "Open, against invariant 4" item under "Pipeline and services (WP6b)". Found: #183.
-- **Unowned.** Every pipeline reload (a change of engine or of the summaries
-  settings) builds a new speech engine: on the Mac a save during a recording drops the
-  CoreML model the warm-up loaded, and off the Mac a reload while a job transcribes
-  leaves two speech sidecars running (about 4.4 GB) until the retired job releases its
-  own. Where: `CurrentPipeline::reload` in `crates/steno-services/src/pipeline.rs`.
-  Found: #183.
 - **Unowned.** A `complete` whose device was revoked while the intake admitted its
   recording removes the metadata sidecar afterwards whatever memory holds, so when
   another device announced the same recording id meanwhile, that device's sidecar
@@ -1785,9 +1798,9 @@ request that fixes an item deletes it.
   Found: #173.
 - **Unowned.** The speech settings (`onnxSidecarOnMac`, `directmlOnWindows`,
   `modelsMirror`) live only in `speech.json`, which nothing writes, and the bridge has
-  no field for them; the macOS fallback and the DirectML switch wait for a plan that
-  words them for users. Where: the `SpeechSettings` item under "Speech" in the parity
-  list. Found: #177, #187.
+  no field for them; `.plans/2026-10-07-speech-settings-ui.md` proposes where they
+  appear and how they read, and the item stays open until that UI ships. Where: the
+  `SpeechSettings` item under "Speech" in the parity list. Found: #177, #187.
 - **Unowned.** The diarizer keeps its own model store (no resume, no lock, no mirror),
   so a mirror serves only the speech models. Where:
   `crates/steno-diarize/src/models.rs`; the "One model store" item under "Speech" in
@@ -1960,8 +1973,8 @@ crash on DirectML.
 An abort inside the driver still ends the sidecar. A child that crashes, hangs or
 overruns the memory ceiling during a load or a request with DirectML in use
 switches DirectML off for the rest of the app's run: the switch is process-wide,
-so the engines `steno-services` builds on every pipeline reload ask for the CPU
-too. A child that dies between requests is replaced on DirectML, as nothing ran on
+so the sidecar engine `steno-services` keeps across pipeline reloads, and any other in
+the process, asks for the CPU too. A child that dies between requests is replaced on DirectML, as nothing ran on
 it since its last answer; one that overruns the ceiling between requests still
 switches DirectML off, as what it holds then is what its last request left, on the
 GPU too. Inside the probe such an end costs no job: no audio was sent yet, so the
