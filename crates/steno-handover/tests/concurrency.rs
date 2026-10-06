@@ -218,11 +218,13 @@ async fn the_gate_answers_while_a_whole_file_hash_runs() {
 /// and the metadata and chunks of a two-chunk recording of that phone.
 type Recording = (TestService, EngineDevice, RecordingMetadata, Vec<Vec<u8>>);
 
-/// A [`Recording`] the phone has not announced yet.
-async fn two_chunk_recording(seed: u64) -> Recording {
+/// A [`Recording`] the phone has not announced yet, with `intake` in
+/// place of the fake one when given.
+async fn two_chunk_recording(seed: u64, intake: Option<Arc<ScriptedIntake>>) -> Recording {
     let chunk_size: i64 = 64 * 1024;
     let test = TestService::with(common::Options {
         chunk_size,
+        intake: intake.map(|intake| intake as Arc<dyn steno_core::HandoverIntake>),
         start: false,
         ..common::Options::default()
     })
@@ -235,9 +237,18 @@ async fn two_chunk_recording(seed: u64) -> Recording {
 
 /// A [`Recording`] the phone announced.
 async fn announced_two_chunks(seed: u64) -> Recording {
-    let recording = two_chunk_recording(seed).await;
+    let recording = two_chunk_recording(seed, None).await;
     let (_, phone, metadata, _) = &recording;
     assert_eq!(phone.announce(metadata).await.status.as_u16(), 201);
+    recording
+}
+
+/// A [`Recording`] the phone announced and sent in full, with `intake` in
+/// place of the fake one when given.
+async fn uploaded_two_chunks(seed: u64, intake: Option<Arc<ScriptedIntake>>) -> Recording {
+    let recording = two_chunk_recording(seed, intake).await;
+    let (_, phone, metadata, chunks) = &recording;
+    phone.upload_all(metadata, &chunks.concat()).await;
     recording
 }
 
@@ -286,6 +297,12 @@ fn receipts(test: &TestService, recording_id: Uuid) -> (HandoverReceipt, Handove
 fn chunk_sets(test: &TestService, recording_id: Uuid) -> (Vec<i64>, Vec<i64>) {
     let (in_memory, stored) = receipts(test, recording_id);
     (in_memory.received_chunks, stored.received_chunks)
+}
+
+/// The device memory and the store hold `recording_id` for.
+fn owners(test: &TestService, recording_id: Uuid) -> (Uuid, Uuid) {
+    let (in_memory, stored) = receipts(test, recording_id);
+    (in_memory.device_id, stored.device_id)
 }
 
 /// The meeting a `complete` of `recording_id` admitted.
@@ -392,12 +409,8 @@ async fn a_reannounce_during_a_complete_leaves_the_receipt_complete() {
     // `complete` in memory, changes nothing and answers with that. Written
     // back, `receiving` would send the phone's next `complete` back to the
     // start, and the upload after it would become a second meeting.
-    let (test, phone, metadata, chunks) = announced_two_chunks(66).await;
+    let (test, phone, metadata, _) = uploaded_two_chunks(66, None).await;
     let id = metadata.recording_id;
-    for (index, chunk) in chunks.iter().enumerate() {
-        let uploaded = phone.upload(id, index as i64, chunk).await;
-        assert_eq!(uploaded.status.as_u16(), 204);
-    }
     let reannounce = {
         let other = phone.clone();
         async move { other.announce(&metadata).await }
@@ -447,7 +460,7 @@ async fn an_announce_that_found_no_receipt_keeps_the_one_made_meanwhile() {
     // receipt read found nothing and it opened the partial, while the other
     // one answers 201 and chunk 0 lands. The held one then finds that
     // receipt in memory and answers as a re-announce, so chunk 0 stays.
-    let (test, phone, metadata, chunks) = two_chunk_recording(68).await;
+    let (test, phone, metadata, chunks) = two_chunk_recording(68, None).await;
     let id = metadata.recording_id;
     let second = {
         let (other, metadata) = (phone.clone(), metadata.clone());
@@ -477,7 +490,7 @@ async fn an_announce_of_another_phone_that_found_no_receipt_is_refused() {
     // while phone A's announce answers 201 and chunk 0 lands. B's then finds
     // A's receipt in memory and is refused as a re-announce of another
     // device's recording, and the receipt stays A's.
-    let (test, phone, metadata, chunks) = two_chunk_recording(69).await;
+    let (test, phone, metadata, chunks) = two_chunk_recording(69, None).await;
     let id = metadata.recording_id;
     let other = EngineDevice::paired(&test, "Other iPhone").await;
     let second = {
@@ -491,11 +504,7 @@ async fn an_announce_of_another_phone_that_found_no_receipt_is_refused() {
     .await;
     assert_eq!(refused.status.as_u16(), 409);
 
-    let (in_memory, stored) = receipts(&test, id);
-    assert_eq!(
-        (in_memory.device_id, stored.device_id),
-        (phone.device.id, phone.device.id)
-    );
+    assert_eq!(owners(&test, id), (phone.device.id, phone.device.id));
     assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
 }
 
@@ -507,19 +516,8 @@ async fn a_complete_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
     // in memory and changes nothing. Written into it, it would tell the
     // other phone `complete` for a recording never admitted from it, and
     // that phone would delete its copy.
-    let chunk_size: i64 = 64 * 1024;
     let intake = ScriptedIntake::gated(meeting_id(), false);
-    let test = TestService::with(common::Options {
-        chunk_size,
-        intake: Some(intake.clone() as Arc<dyn steno_core::HandoverIntake>),
-        start: false,
-        ..common::Options::default()
-    })
-    .await;
-    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
-    let bytes = seeded_bytes(2 * chunk_size as usize, 70);
-    let metadata = phone.metadata(&bytes, chunk_size);
-    phone.upload_all(&metadata, &bytes).await;
+    let (test, phone, metadata, _) = uploaded_two_chunks(70, Some(intake.clone())).await;
     let id = metadata.recording_id;
 
     let completion = phone.complete(id);
@@ -534,11 +532,8 @@ async fn a_complete_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
     let (completed, other) = tokio::join!(completion, meanwhile);
     assert_eq!(completed.status.as_u16(), 200);
 
+    assert_eq!(owners(&test, id), (other.device.id, other.device.id));
     let (in_memory, stored) = receipts(&test, id);
-    assert_eq!(
-        (in_memory.device_id, stored.device_id),
-        (other.device.id, other.device.id)
-    );
     assert_eq!(
         (in_memory.state, stored.state),
         (HandoverState::Receiving, HandoverState::Receiving)
@@ -553,19 +548,8 @@ async fn a_reannounce_during_an_admission_leaves_no_files_behind() {
     // `complete` runs to the end. Its `receiving` write then finds the
     // receipt `complete`, and the files it opened go: a stale `complete`
     // would find them and start a verify of an empty partial.
-    let chunk_size: i64 = 64 * 1024;
     let intake = ScriptedIntake::gated(meeting_id(), false);
-    let test = TestService::with(common::Options {
-        chunk_size,
-        intake: Some(intake.clone() as Arc<dyn steno_core::HandoverIntake>),
-        start: false,
-        ..common::Options::default()
-    })
-    .await;
-    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
-    let bytes = seeded_bytes(2 * chunk_size as usize, 71);
-    let metadata = phone.metadata(&bytes, chunk_size);
-    phone.upload_all(&metadata, &bytes).await;
+    let (test, phone, metadata, _) = uploaded_two_chunks(71, Some(intake.clone())).await;
     let id = metadata.recording_id;
     let inbox = test.inbox();
 
@@ -576,7 +560,7 @@ async fn a_reannounce_during_an_admission_leaves_no_files_behind() {
     intake.admitting().await;
     std::fs::remove_file(inbox.verified(id, metadata.format)).unwrap();
     let reannounce = {
-        let (phone, metadata) = (phone.clone(), metadata.clone());
+        let phone = phone.clone();
         async move { phone.announce(&metadata).await }
     };
     let (reannounced, completed) = held_while(&test, reannounce, async {
