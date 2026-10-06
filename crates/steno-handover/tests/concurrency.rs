@@ -346,8 +346,8 @@ async fn two_chunks_that_land_at_once_both_stay_in_the_receipt() {
     let (test, phone, metadata, chunks) = announced_two_chunks(63).await;
     let id = metadata.recording_id;
     let first = {
-        let (other, chunk) = (phone.clone(), chunks[0].clone());
-        async move { other.upload(id, 0, &chunk).await }
+        let (phone, chunk) = (phone.clone(), chunks[0].clone());
+        async move { phone.upload(id, 0, &chunk).await }
     };
     let (first, second) = held_while(&test, first, phone.upload(id, 1, &chunks[1])).await;
     assert_eq!(second.status.as_u16(), 204);
@@ -366,8 +366,8 @@ async fn a_reannounce_keeps_a_chunk_that_lands_while_it_runs() {
     let id = metadata.recording_id;
     assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
     let reannounce = {
-        let other = phone.clone();
-        async move { other.announce(&metadata).await }
+        let phone = phone.clone();
+        async move { phone.announce(&metadata).await }
     };
     let (reannounced, uploaded) =
         held_while(&test, reannounce, phone.upload(id, 1, &chunks[1])).await;
@@ -401,6 +401,34 @@ async fn a_late_chunk_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
 }
 
 #[tokio::test]
+async fn a_reannounce_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
+    // The partial went (a sweep), so the phone's announce opens a new one
+    // and empties the chunk set. It is held at its clock read while the
+    // phone is revoked and another phone announces the same recording id
+    // and sends chunk 0. Its `receiving` write then finds a receipt of
+    // another device and changes nothing, so that phone's chunk stays.
+    let (test, phone, metadata, chunks) = announced_two_chunks(72).await;
+    let id = metadata.recording_id;
+    std::fs::remove_file(test.inbox().partial(id)).unwrap();
+    let reannounce = {
+        let (phone, metadata) = (phone.clone(), metadata.clone());
+        async move { phone.announce(&metadata).await }
+    };
+    let (reannounced, other) = held_while(&test, reannounce, async {
+        test.service.revoke(phone.device.id).await.unwrap();
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+        assert_eq!(other.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+        other
+    })
+    .await;
+    assert_eq!(reannounced.status.as_u16(), 200);
+
+    assert_eq!(owners(&test, id), (other.device.id, other.device.id));
+    assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
+}
+
+#[tokio::test]
 async fn a_reannounce_during_a_complete_leaves_the_receipt_complete() {
     // The phone announces again (a retry after its own timeout) while its
     // `complete` admits the recording. The announce is held at its clock
@@ -412,8 +440,8 @@ async fn a_reannounce_during_a_complete_leaves_the_receipt_complete() {
     let (test, phone, metadata, _) = uploaded_two_chunks(66, None).await;
     let id = metadata.recording_id;
     let reannounce = {
-        let other = phone.clone();
-        async move { other.announce(&metadata).await }
+        let phone = phone.clone();
+        async move { phone.announce(&metadata).await }
     };
     let (reannounced, meeting_id) = held_while(&test, reannounce, completed(&phone, id)).await;
     assert_eq!(reannounced.status.as_u16(), 200);
@@ -440,8 +468,8 @@ async fn a_chunk_that_lands_during_a_complete_leaves_the_receipt_complete() {
     let id = metadata.recording_id;
     assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
     let first = {
-        let (other, chunk) = (phone.clone(), chunks[1].clone());
-        async move { other.upload(id, 1, &chunk).await }
+        let (phone, chunk) = (phone.clone(), chunks[1].clone());
+        async move { phone.upload(id, 1, &chunk).await }
     };
     let (first, meeting_id) = held_while(&test, first, async {
         assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
@@ -463,8 +491,8 @@ async fn an_announce_that_found_no_receipt_keeps_the_one_made_meanwhile() {
     let (test, phone, metadata, chunks) = two_chunk_recording(68, None).await;
     let id = metadata.recording_id;
     let second = {
-        let (other, metadata) = (phone.clone(), metadata.clone());
-        async move { other.announce(&metadata).await }
+        let (phone, metadata) = (phone.clone(), metadata.clone());
+        async move { phone.announce(&metadata).await }
     };
     let (reannounced, ()) = held_while(&test, second, async {
         assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
@@ -529,8 +557,8 @@ async fn a_complete_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
         intake.release();
         other
     };
-    let (completed, other) = tokio::join!(completion, meanwhile);
-    assert_eq!(completed.status.as_u16(), 200);
+    let (answer, other) = tokio::join!(completion, meanwhile);
+    assert_eq!(answer.status.as_u16(), 200);
 
     assert_eq!(owners(&test, id), (other.device.id, other.device.id));
     let (in_memory, stored) = receipts(&test, id);
@@ -563,12 +591,12 @@ async fn a_reannounce_during_an_admission_leaves_no_files_behind() {
         let phone = phone.clone();
         async move { phone.announce(&metadata).await }
     };
-    let (reannounced, completed) = held_while(&test, reannounce, async {
+    let (reannounced, answer) = held_while(&test, reannounce, async {
         intake.release();
         completion.await.unwrap()
     })
     .await;
-    assert_eq!(completed.status.as_u16(), 200);
+    assert_eq!(answer.status.as_u16(), 200);
     assert_eq!(
         reannounced.decode::<wire::RecordingStatus>().unwrap().state,
         HandoverStateKind::Complete
