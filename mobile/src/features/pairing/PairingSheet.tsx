@@ -86,11 +86,14 @@ export function PairingSheet() {
 					device: deviceIdentity,
 					now: () => new Date(),
 				});
-				// Chunks in flight for the old pairing can only end in 401 now;
-				// cancel them rather than wait, and the retry backoff re-queues
-				// them.
-				await cancelAllUploads().catch(() => {});
-				await replace(outcome);
+				// `replace` first: from the call on, the upload loop sends nothing
+				// under the old pairing. Chunks still in flight went out under it:
+				// the same Mac answers them 401, another Mac would take them.
+				// Cancel them; the retry backoff re-queues them.
+				await Promise.all([
+					replace(outcome),
+					cancelAllUploads().catch(() => {}),
+				]);
 				// Anything the old Mac revoked is eligible for the new one.
 				await update((index) =>
 					index.recordings

@@ -111,8 +111,8 @@ export async function complete(
 
 /**
  * Cancels every chunk still in the background session. Before a re-pairing:
- * a task started under the old token can only end in 401, so it is
- * cancelled rather than left to run; the recording retries after the
+ * a task started under the old pairing ends in 401 at the same Mac or lands
+ * on the old one, so it is cancelled; the recording retries after the
  * backoff under the new pairing.
  */
 export async function cancelAllUploads(): Promise<void> {

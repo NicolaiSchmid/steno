@@ -25,6 +25,7 @@ import {
 	coordinatorStatus,
 	parseChunkTaskID,
 	planNext,
+	taskIDs,
 } from "./upload-coordinator";
 import { createUploadExecutor, type RecordingFiles } from "./upload-executor";
 
@@ -47,6 +48,10 @@ export type UploadCoordinator = {
 	retryNow(recordingID: string): void;
 };
 
+/** How soon a tick looks again while the pairing is changing. */
+const REPAIRING_RECHECK_MS = 1000;
+const PAIRING_AGAIN = "Pairing again; retrying";
+
 const recordingFiles: RecordingFiles = {
 	exists: (fileName) => queuedFile(fileName).exists,
 	uri: (fileName) => queuedFile(fileName).uri,
@@ -54,13 +59,18 @@ const recordingFiles: RecordingFiles = {
 };
 
 export function useUploadCoordinator(): UploadCoordinator {
-	const { pairing, ready: pairingReady, clearIfCurrent } = usePairing();
+	const {
+		pairing,
+		ready: pairingReady,
+		currentToken,
+		clearIfCurrent,
+	} = usePairing();
 	const { index, ready: queueReady, update } = useQueue();
 	const discovery = useMacDiscovery(pairingReady && pairing !== null);
 	const [resolved, setResolved] = useState<MacSession | null>(null);
-	// A session belongs to the pairing whose token it carries: from the
-	// render that changes the pairing on, the old token and the old Mac's
-	// origin reach no request, not even before the new Mac resolves.
+	// A session belongs to the pairing whose token it carries: no tick that
+	// starts after the pairing changes plans with the old token or the old
+	// Mac's origin, not even before the new Mac resolves.
 	const session = resolved?.token === pairing?.token ? resolved : null;
 	const [progress, setProgress] = useState<Record<string, number>>({});
 	const ticking = useRef(false);
@@ -69,19 +79,41 @@ export function useUploadCoordinator(): UploadCoordinator {
 	const indexRef = useRef(index);
 	const sessionRef = useRef(session);
 
-	const executor = useMemo(
-		() =>
-			createUploadExecutor({
-				client: { announce, status: fetchStatus, complete, startChunkUpload },
-				files: recordingFiles,
-				deviceName: async () => (await deviceIdentity()).deviceName,
-				update,
-				onUnauthorized: clearIfCurrent,
-				now: () => new Date(),
-				random: Math.random,
-			}),
-		[update, clearIfCurrent],
-	);
+	const executor = useMemo(() => {
+		// A tick already running when a re-pairing starts still holds the old
+		// session: its next request is refused, and a chunk whose task was
+		// still being created, so the re-pairing's cancel missed it, is
+		// cancelled once it exists.
+		const current =
+			<Args extends unknown[], Result>(
+				request: (session: MacSession, ...args: Args) => Promise<Result>,
+			) =>
+			async (session: MacSession, ...args: Args): Promise<Result> => {
+				if (session.token !== currentToken()) throw new Error(PAIRING_AGAIN);
+				return request(session, ...args);
+			};
+		return createUploadExecutor({
+			client: {
+				announce: current(announce),
+				status: current(fetchStatus),
+				complete: current(complete),
+				startChunkUpload: current(async (session, recordingID, chunk, uri) => {
+					await startChunkUpload(session, recordingID, chunk, uri);
+					if (session.token !== currentToken()) {
+						await stenoLink().cancelUpload(
+							taskIDs.chunk(recordingID, chunk.index),
+						);
+					}
+				}),
+			},
+			files: recordingFiles,
+			deviceName: async () => (await deviceIdentity()).deviceName,
+			update,
+			onUnauthorized: clearIfCurrent,
+			now: () => new Date(),
+			random: Math.random,
+		});
+	}, [update, currentToken, clearIfCurrent]);
 
 	const serviceName = pairing
 		? (findByMacID(discovery.services, pairing.mac.macID)?.name ?? null)
@@ -127,6 +159,12 @@ export function useUploadCoordinator(): UploadCoordinator {
 		}
 		const run = async () => {
 			const active = sessionRef.current;
+			if (active && active.token !== currentToken()) {
+				// The pairing is changing: plan nothing under the old one, and
+				// look again shortly in case the re-pairing fails and it stays.
+				waitTimer.current = setTimeout(() => tick(), REPAIRING_RECHECK_MS);
+				return;
+			}
 			const action = planNext(
 				indexRef.current,
 				active !== null,
@@ -154,7 +192,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 					tick();
 				}
 			});
-	}, [queueReady, executor]);
+	}, [queueReady, currentToken, executor]);
 
 	// Publish the latest inputs to the tick loop and re-plan on every change.
 	useEffect(() => {

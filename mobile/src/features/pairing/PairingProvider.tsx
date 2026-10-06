@@ -27,11 +27,20 @@ export type PairingContextValue = {
 	replace(pairing: Pairing): Promise<void>;
 	clear(): Promise<void>;
 	/**
+	 * The token a request may go out with now: the current pairing's, or,
+	 * from the moment `replace` is called, the new one's while it is still
+	 * saving; the current one's again if that save fails.
+	 */
+	currentToken(): string | null;
+	/**
 	 * Runs `first`, then forgets the pairing, but only while it still holds
 	 * `token`; resolves whether it did. `null` is a token nobody recorded and
-	 * stands for the pairing loaded from the keychain at launch, so it
-	 * matches nothing when none was. A 401 to a pairing since replaced or
-	 * cleared leaves the current one alone.
+	 * stands for the pairing read from the keychain, so it matches nothing
+	 * when the keychain held none. A 401 to a pairing since replaced or
+	 * cleared leaves the current one alone. One case remains: if the
+	 * re-pairing's cancel fails and the app is relaunched, a chunk started
+	 * under the old pairing comes back with no token, and its 401 to the same
+	 * Mac unpairs the new one.
 	 */
 	clearIfCurrent(
 		token: string | null,
@@ -45,10 +54,11 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 	const [pairing, setPairing] = useState<Pairing | null>(null);
 	const [ready, setReady] = useState(false);
 	const pairingRef = useRef<Pairing | null>(null);
-	// The token of the pairing this process started with, which `replace`
-	// leaves alone: the one a request nobody recorded a token for was sent
-	// with.
+	// The token read from the keychain, which `replace` leaves alone: a
+	// request whose token nobody recorded went out under it.
 	const loadedTokenRef = useRef<string | null>(null);
+	// The pairing a `replace` will commit, from the moment it is called.
+	const replacingRef = useRef<Pairing | null>(null);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -90,13 +100,24 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 	}, []);
 
 	const replace = useCallback(
-		(next: Pairing) =>
-			inOrder(async () => {
-				await pairingStore.save(next);
-				pairingRef.current = next;
-				setPairing(next);
-			}),
+		(next: Pairing) => {
+			replacingRef.current = next;
+			return inOrder(async () => {
+				try {
+					await pairingStore.save(next);
+					pairingRef.current = next;
+					setPairing(next);
+				} finally {
+					if (replacingRef.current === next) replacingRef.current = null;
+				}
+			});
+		},
 		[inOrder],
+	);
+
+	const currentToken = useCallback(
+		() => (replacingRef.current ?? pairingRef.current)?.token ?? null,
+		[],
 	);
 
 	const clear = useCallback(() => inOrder(forget), [inOrder, forget]);
@@ -115,8 +136,8 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 	);
 
 	const value = useMemo(
-		() => ({ pairing, ready, replace, clear, clearIfCurrent }),
-		[pairing, ready, replace, clear, clearIfCurrent],
+		() => ({ pairing, ready, replace, clear, currentToken, clearIfCurrent }),
+		[pairing, ready, replace, clear, currentToken, clearIfCurrent],
 	);
 	return (
 		<PairingContext.Provider value={value}>{children}</PairingContext.Provider>
