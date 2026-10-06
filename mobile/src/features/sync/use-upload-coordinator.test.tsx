@@ -317,7 +317,7 @@ describe("useUploadCoordinator", () => {
 		expect(fake.cancelled).toEqual([]);
 	});
 
-	it("sends nothing after Forget Mac", async () => {
+	it("sends nothing after the phone unpairs", async () => {
 		const h = await mount(queued("a"), A);
 		await h.repair(null);
 		const sentUnderA = fake.sent.length;

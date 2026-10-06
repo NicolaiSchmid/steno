@@ -113,7 +113,7 @@ export async function complete(
  * Cancels every chunk still in the background session. Before a re-pairing:
  * a task started under the old pairing ends in 401 at the same Mac or lands
  * on the old one, so it is cancelled; the recording retries after the
- * backoff under the new pairing. After Forget Mac too, so a Mac that was
+ * backoff under the new pairing. After an unpair too, so a Mac that was
  * away does not take them when it is back.
  */
 export async function cancelAllUploads(): Promise<void> {
