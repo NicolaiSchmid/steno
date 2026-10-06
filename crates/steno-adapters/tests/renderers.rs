@@ -43,28 +43,19 @@ fn folder_note_matches_the_goldens_in_every_variant() {
 fn folder_note_names_the_platform_a_call_was_recorded_on() {
     let export = export();
     for &platform in Platform::ALL {
-        assert_matches_golden(
-            &renderer().render_folder_note(
-                &export,
-                &RenderOptions {
-                    platform,
-                    ..plain()
-                },
-                None,
-            ),
-            &folder_note_golden(platform, "plain-utc"),
-        );
-        assert_matches_golden(
-            &renderer().render_folder_note(
-                &export,
-                &RenderOptions {
-                    platform,
-                    ..wikilink()
-                },
-                None,
-            ),
-            &folder_note_golden(platform, "wikilink-berlin"),
-        );
+        for (options, variant) in [(plain(), "plain-utc"), (wikilink(), "wikilink-berlin")] {
+            assert_matches_golden(
+                &renderer().render_folder_note(
+                    &export,
+                    &RenderOptions {
+                        platform,
+                        ..options
+                    },
+                    None,
+                ),
+                &folder_note_golden(platform, variant),
+            );
+        }
     }
 }
 

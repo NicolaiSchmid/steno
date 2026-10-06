@@ -1137,36 +1137,21 @@ fn a_person_page_that_is_not_utf8_is_left_alone_and_reported() {
 
 #[test]
 fn the_folder_note_names_the_platform_the_app_runs_on() {
-    let vault = Vault::new();
-    let settings = vault
-        .destination_with(false, Some("People"))
-        .settings()
-        .clone();
-    let destination = ObsidianFolderDestination::new(settings.clone(), BERLIN);
+    let settings = Vault::new().destination().settings().clone();
     assert_eq!(
-        destination.platform(),
+        ObsidianFolderDestination::new(settings, BERLIN).platform(),
         Platform::CURRENT,
         "the app's calls were recorded where it runs"
     );
-    deliver(&destination, &export(), None);
-    assert_matches_golden(
-        &vault.text(&format!("{FOLDER}/{FOLDER_SLUG}.md")),
-        &folder_note_golden(Platform::CURRENT, "wikilink-berlin"),
-    );
 
     for &platform in Platform::ALL {
-        let other = Vault::new();
-        let destination = ObsidianFolderDestination::new(
-            ObsidianSettings {
-                vault_path: other.root.to_string_lossy().into_owned(),
-                ..settings.clone()
-            },
-            BERLIN,
-        )
-        .with_platform(platform);
+        let vault = Vault::new();
+        let destination = vault
+            .destination_with(false, Some("People"))
+            .with_platform(platform);
         deliver(&destination, &export(), None);
         assert_matches_golden(
-            &other.text(&format!("{FOLDER}/{FOLDER_SLUG}.md")),
+            &vault.text(&format!("{FOLDER}/{FOLDER_SLUG}.md")),
             &folder_note_golden(platform, "wikilink-berlin"),
         );
     }

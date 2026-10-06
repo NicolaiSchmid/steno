@@ -97,9 +97,8 @@ pub fn wikilink() -> RenderOptions {
     RenderOptions {
         link_style: LinkStyle::Wikilink,
         person_pages: true,
-        task_tag: None,
         time_zone: BERLIN,
-        platform: Platform::Macos,
+        ..RenderOptions::PLAIN
     }
 }
 pub fn wikilink_utc() -> RenderOptions {
