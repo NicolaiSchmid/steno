@@ -16,6 +16,7 @@ import {
 	EMPTY_INDEX,
 	findRecording,
 	type QueueIndex,
+	setState,
 } from "@/features/queue/queue-index";
 import { taskIDs } from "./upload-coordinator";
 import { useUploadCoordinator } from "./use-upload-coordinator";
@@ -35,8 +36,12 @@ const fake = vi.hoisted(() => {
 		sent: [] as { url: string; auth: string | undefined }[],
 		cancelled: [] as string[],
 		releaseMacB: null as (() => void) | null,
-		/** When set, the next background upload or device name waits for it. */
+		/**
+		 * When set, the next background upload, pinned request or device
+		 * name waits for it.
+		 */
 		holdUpload: null as Promise<void> | null,
+		holdRequest: null as Promise<void> | null,
 		holdDeviceName: null as Promise<void> | null,
 		/** The chunks the Mac answers it has. */
 		receivedChunks: [] as number[],
@@ -87,6 +92,7 @@ const link = {
 	},
 	async request(request: PinnedRequest) {
 		fake.sent.push({ url: request.url, auth: request.headers.Authorization });
+		await fake.holdRequest;
 		if (request.method === "POST") {
 			return { status: 200, headers: {}, body: '{"meetingID":"m"}' };
 		}
@@ -238,6 +244,7 @@ beforeEach(() => {
 	fake.cancelled.length = 0;
 	fake.releaseMacB = null;
 	fake.holdUpload = null;
+	fake.holdRequest = null;
 	fake.holdDeviceName = null;
 	fake.receivedChunks = [];
 	fake.replacing = null;
@@ -364,6 +371,14 @@ describe("useUploadCoordinator", () => {
 			await act(async () => upload.resolve());
 			await settle();
 			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 1)]);
+		});
+
+		it("refuses the status refresh under the old pairing", async () => {
+			// A request that goes out anyway is held, so the tick ends there.
+			fake.holdRequest = new Promise(() => {});
+			fake.replacing = "token-b";
+			await mount(setState(queued("a"), "a", "uploading"), A);
+			expect(fake.sent).toEqual([]);
 		});
 
 		it("goes on under the old pairing when the save fails", async () => {
