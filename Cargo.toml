@@ -57,6 +57,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # the lock through GTK, which the shell links anyway.
 gdk = "0.18"
 gio = "0.18"
+# Linux only: the desktop shell's log writer, which saves the recording
+# when GDK reports a lost display (`display_lost`). Already in the lock
+# through GTK.
+glib = "0.18"
 # Linux only: the desktop shell's logout and shutdown clients on D-Bus
 # (`session_end`). Already in the lock through the single-instance and
 # opener plugins.

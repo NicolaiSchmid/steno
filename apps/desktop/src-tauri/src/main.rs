@@ -75,6 +75,8 @@ mod deep_links;
 mod dialogs;
 #[cfg(target_os = "linux")]
 mod display;
+#[cfg(target_os = "linux")]
+mod display_lost;
 #[cfg(feature = "fixture-host")]
 mod fixtures;
 mod host;
@@ -107,7 +109,10 @@ fn main() {
         None,
     );
     #[cfg(target_os = "linux")]
-    display::choose();
+    {
+        display::choose();
+        display_lost::watch();
+    }
     // Before the app is built: GTK unsets it when it starts.
     #[cfg(target_os = "linux")]
     let startup_id = session_end::startup_id();
@@ -173,7 +178,10 @@ fn main() {
         .setup(move |app| {
             if setup(app.handle(), runtime)? {
                 #[cfg(target_os = "linux")]
-                session_end::watch(app.handle(), startup_id);
+                {
+                    session_end::watch(app.handle(), startup_id);
+                    display_lost::arm(app.handle());
+                }
             }
             Ok(())
         })
