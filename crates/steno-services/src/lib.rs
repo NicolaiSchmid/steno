@@ -11,7 +11,7 @@
 //! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()`, `launch()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`] |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with, and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
-//! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels` |
+//! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac) and [`SpeechEngines`](speech::SpeechEngines), which the pipelines share across reloads, the ONNX diarizer, the host's `SpeechModels` |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
 //! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |

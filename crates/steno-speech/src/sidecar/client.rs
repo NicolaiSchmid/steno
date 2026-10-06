@@ -134,8 +134,9 @@ pub struct SidecarHealth {
 }
 
 /// Backs [`directml_switched_off`]. Process-wide, so it holds for the rest
-/// of the app's run: `steno-services` builds a new engine on every pipeline
-/// reload, and none of them asks for `DirectML` again. Nothing clears it.
+/// of the app's run and for every engine in it: the one `steno-services`
+/// keeps across pipeline reloads and any other a caller builds (the CLI's,
+/// the tests'), none of which asks for `DirectML` again. Nothing clears it.
 static DIRECTML_SWITCHED_OFF: AtomicBool = AtomicBool::new(false);
 
 /// Whether `DirectML` is off for the rest of the app's run: a child in

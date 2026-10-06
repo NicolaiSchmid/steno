@@ -26,7 +26,7 @@ use crate::pipeline::{
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, MakeCaptureSession};
 use crate::secrets::secret_store;
-use crate::speech::{ModelStoreSpeechModels, SpeechSetup};
+use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 
 /// What stops the graph from being built: the database could not be
 /// opened or read. A secret store that cannot be read and a handover
@@ -134,14 +134,17 @@ fn api_key(
 }
 
 /// The dependencies of one pipeline from the stored settings, the API key
-/// and `speech`, shared by the first build and every reload, with the
-/// speech engine they hold. `speech` is read once by [`build`] and also
-/// backs the model service, so the two agree on where each engine runs; the
-/// recorder's warm-up reads the engine from the pipeline. A secret store
-/// that cannot be read is logged and the passes are built without a key.
+/// and `engines`, shared by the first build and every reload, with the
+/// speech engine they hold: the one `engines` keeps for the runtime the
+/// stored engine id runs on, so a reload that leaves it there keeps the
+/// engine ([`SpeechEngines`]). The setup of `engines` is read once by
+/// [`build`] and also backs the model service, so the two agree on where
+/// each engine runs; the recorder's warm-up reads the engine from the
+/// pipeline. A secret store that cannot be read is logged and the passes
+/// are built without a key.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
-    speech: &SpeechSetup,
+    engines: &SpeechEngines,
     secrets: &Arc<dyn SecretStore>,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
@@ -154,15 +157,19 @@ pub fn pipeline_dependencies(
     });
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
+    let speech = engines.setup();
+    let engine_runtime = speech.runtime(&settings.speech_engine_id);
+    let speech_engine = engines.engine(engine_runtime);
     let dependencies = PipelineDependencies::new(
         Arc::new(SymphoniaAudioCodec::new()),
-        crate::speech::speech_engine(&settings.speech_engine_id, speech),
+        speech_engine.engine().clone(),
         crate::speech::diarizer(&speech.models_directory),
         Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
         Arc::new(DeliveryCoordinator::new(store.clone())),
         store.clone(),
         events.clone(),
-    );
+    )
+    .with_speech_engine(speech_engine);
     let dependencies = match passes {
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
@@ -170,7 +177,7 @@ pub fn pipeline_dependencies(
     Ok(BuiltPipeline {
         dependencies,
         engine: BuiltEngine {
-            runtime: speech.runtime(&settings.speech_engine_id),
+            runtime: engine_runtime,
             engine_id: settings.speech_engine_id,
         },
     })
@@ -179,21 +186,21 @@ pub fn pipeline_dependencies(
 /// [`pipeline_dependencies`] over clones of its inputs, for the reloads.
 fn make_dependencies(
     store: &Arc<Store>,
-    speech: &SpeechSetup,
+    engines: &Arc<SpeechEngines>,
     secrets: &Arc<dyn SecretStore>,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
 ) -> MakeDependencies {
-    let (store, speech, secrets, codex, events, runtime) = (
+    let (store, engines, secrets, codex, events, runtime) = (
         store.clone(),
-        speech.clone(),
+        engines.clone(),
         secrets.clone(),
         codex.clone(),
         events.clone(),
         runtime.clone(),
     );
-    Arc::new(move || pipeline_dependencies(&store, &speech, &secrets, &codex, &events, &runtime))
+    Arc::new(move || pipeline_dependencies(&store, &engines, &secrets, &codex, &events, &runtime))
 }
 
 /// The phone intake over whichever pipeline is current when a recording
@@ -269,16 +276,21 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let zone = local_zone();
 
     // The speech settings and the models directory are read once, here:
-    // the pipeline (and every reload) and the model service share them.
-    let speech = SpeechSetup::new(&store.settings()?, &paths);
+    // the pipeline (and every reload, which keeps its engine when it runs
+    // where the last one did) and the model service share them.
+    let engines = Arc::new(SpeechEngines::new(SpeechSetup::new(
+        &store.settings()?,
+        &paths,
+    )));
+    let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
-    let make = make_dependencies(&store, &speech, &secrets, &codex, &events, &runtime);
+    let make = make_dependencies(&store, &engines, &secrets, &codex, &events, &runtime);
     let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
     let sweep = RetentionSweep::new(store.clone());
 
     let permissions = Arc::new(FakePermissions::all_granted());
-    let speech_models = Arc::new(ModelStoreSpeechModels::new(&speech));
+    let speech_models = Arc::new(ModelStoreSpeechModels::new(speech));
     let recorder = Arc::new(CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
@@ -341,7 +353,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         services,
         handover: handover.map(|(service, _)| service),
         recorder,
-        models_directory: speech.models_directory,
+        models_directory: speech.models_directory.clone(),
         zone,
         runtime,
         version: options.version,
@@ -663,6 +675,7 @@ mod tests {
         async_trait, paths::file_url, protocols::BoundaryResult,
     };
     use steno_pipeline::MeetingEventBus;
+    use steno_speech::SpeechRuntime;
 
     use super::*;
     use crate::testing::{PATIENCE, built, fake_dependencies, on_own_thread, temp_store};
@@ -850,6 +863,53 @@ mod tests {
             error.contains(&named) && !error.contains("reloaded-models"),
             "{named} in {error}"
         );
+    }
+
+    /// The app's reloads keep the speech engine (the same engine and
+    /// claims) while the stored engine id runs where the last one did: a
+    /// reload with the settings unchanged, and on Linux and Windows a
+    /// switch to an engine id the sidecar runs too. On the Mac, where
+    /// `parakeet-v3` runs on `CoreML` in this process and other ids in the
+    /// sidecar, the switch builds the sidecar engine, and the switch back
+    /// a new `CoreML` one, as the first was let go. Nothing here starts a
+    /// sidecar: no job runs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_keeps_the_speech_engine_while_the_engine_id_runs_where_it_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = build(AppOptions {
+            paths: StenoPaths::new(dir.path().join("support")),
+            database_path: None,
+            keyring: false,
+            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
+            login_item: None,
+            runtime: tokio::runtime::Handle::current(),
+            version: "0.0.0".to_owned(),
+            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+        })
+        .unwrap();
+        let engine = || app.pipeline.current().dependencies().speech_engine.clone();
+        let reload_with = |engine_id: &str| {
+            let mut settings = app.store.settings().unwrap();
+            engine_id.clone_into(&mut settings.speech_engine_id);
+            app.store.save_settings(&settings).unwrap();
+            app.pipeline.reload().unwrap();
+            app.pipeline.current_with_engine().1.runtime
+        };
+        let first = engine();
+        let first_runtime = app.pipeline.current_with_engine().1.runtime;
+        app.pipeline.reload().unwrap();
+        assert!(engine().ptr_eq(&first), "unchanged settings, same engine");
+
+        let other_runtime = reload_with("whisperkit-large-v3-turbo");
+        assert_eq!(other_runtime, SpeechRuntime::OnnxSidecar);
+        let in_process = first_runtime == SpeechRuntime::CoreMlInProcess;
+        assert_eq!(engine().ptr_eq(&first), !in_process, "{first_runtime:?}");
+        let other = engine();
+        assert_eq!(reload_with("parakeet-ultra"), SpeechRuntime::OnnxSidecar);
+        assert!(engine().ptr_eq(&other), "both ids run in the sidecar");
+
+        assert_eq!(reload_with("parakeet-v3"), first_runtime);
+        assert_eq!(engine().ptr_eq(&first), !in_process, "{first_runtime:?}");
     }
 
     /// The shell's login item is the one the host reads and switches; the
@@ -1328,7 +1388,7 @@ mod tests {
         let paths = StenoPaths::new(dir.path().join("support"));
         let built = pipeline_dependencies(
             &store,
-            &SpeechSetup::new(&store.settings().unwrap(), &paths),
+            &SpeechEngines::new(SpeechSetup::new(&store.settings().unwrap(), &paths)),
             &secrets,
             &codex_store(),
             &MeetingEventBus::new(),

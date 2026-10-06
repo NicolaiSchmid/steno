@@ -124,7 +124,11 @@ impl CurrentPipeline {
 
     /// Replaces the pipeline with one built from the stored settings and
     /// the secret store's API key. A failed build keeps the current
-    /// pipeline and its engine.
+    /// pipeline and its engine. The app's builds keep the speech engine,
+    /// with its claims, while the stored engine id runs where it did
+    /// ([`SpeechEngines`](crate::speech::SpeechEngines)), so the retired
+    /// pipeline's jobs and the new one's share it and its one sidecar
+    /// child.
     pub fn reload(&self) -> Result<(), BuildError> {
         let replacement = Current::new((self.make)()?, &self.quit_latch);
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
@@ -222,15 +226,18 @@ pub fn run_sweep(sweep: &RetentionSweep) {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use steno_core::{
-        Delivery, DeliveryDispatcher, MeetingEvent, MeetingOperation, MeetingState,
-        MeetingSummarizer, PipelineStage, Store, SummaryInput, SummaryOutput, async_trait,
-        testing::sample_data,
+        AudioBuffer16k, Delivery, DeliveryDispatcher, LanguageTag, MeetingEvent, MeetingOperation,
+        MeetingState, MeetingSummarizer, PipelineStage, RawSegment, SpeechEngine, Store,
+        SummaryInput, SummaryOutput, async_trait,
+        testing::{FakeSpeechEngine, sample_data},
     };
     use steno_pipeline::EventReceiver;
 
     use super::*;
+    use crate::speech::SpeechEngines;
     use crate::testing::{
         PATIENCE, current_pipeline, eventually, fake_dependencies, on_own_thread, temp_store,
     };
@@ -570,6 +577,216 @@ mod tests {
             reexport.pipeline.current().in_flight().is_empty()
         })
         .await;
+    }
+
+    /// The children of every [`FakeSidecar`] of a test: alive now, the
+    /// most alive at once, started and stopped.
+    #[derive(Default)]
+    struct Children {
+        live: AtomicUsize,
+        most: AtomicUsize,
+        spawns: AtomicUsize,
+        stops: AtomicUsize,
+    }
+
+    impl Children {
+        fn counts(&self) -> [usize; 4] {
+            [&self.live, &self.most, &self.spawns, &self.stops].map(|n| n.load(Ordering::SeqCst))
+        }
+    }
+
+    /// A speech engine that runs a pretend child, as the sidecar engine
+    /// does: `prepare` or `transcribe` starts it when none runs, `release`
+    /// stops it. The first transcription waits for `open` after notifying
+    /// `entered`.
+    struct FakeSidecar {
+        inner: FakeSpeechEngine,
+        children: Arc<Children>,
+        child: std::sync::Mutex<bool>,
+        gated: AtomicBool,
+        entered: Arc<tokio::sync::Notify>,
+        open: Arc<tokio::sync::Notify>,
+    }
+
+    impl FakeSidecar {
+        fn start_child(&self) {
+            let mut child = self.child.lock().unwrap();
+            if !*child {
+                *child = true;
+                let live = self.children.live.fetch_add(1, Ordering::SeqCst) + 1;
+                self.children.most.fetch_max(live, Ordering::SeqCst);
+                self.children.spawns.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl SpeechEngine for FakeSidecar {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+
+        fn supported_languages(&self) -> &std::collections::BTreeSet<LanguageTag> {
+            self.inner.supported_languages()
+        }
+
+        async fn prepare(&self) -> BoundaryResult<()> {
+            self.start_child();
+            self.inner.prepare().await
+        }
+
+        async fn transcribe(
+            &self,
+            audio: &AudioBuffer16k,
+            hint: Option<&LanguageTag>,
+        ) -> BoundaryResult<Vec<RawSegment>> {
+            self.start_child();
+            if !self.gated.swap(true, Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.open.notified().await;
+            }
+            self.inner.transcribe(audio, hint).await
+        }
+
+        async fn release(&self) -> BoundaryResult<()> {
+            let mut child = self.child.lock().unwrap();
+            if std::mem::take(&mut *child) {
+                self.children.live.fetch_sub(1, Ordering::SeqCst);
+                self.children.stops.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    /// A job on a pipeline a reload retired still transcribes in the
+    /// sidecar while a reload goes to the in-process engine and back and a
+    /// job on the new pipeline transcribes too: both run on the one
+    /// sidecar engine and its one child, the new job's end does not stop
+    /// the child under the retired one's, and the retired job's end stops
+    /// it once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reload_while_a_job_transcribes_keeps_one_sidecar_child() {
+        let (dir, store) = temp_store();
+        let children = Arc::new(Children::default());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let open = Arc::new(tokio::sync::Notify::new());
+        let builds = Arc::new(AtomicUsize::new(0));
+        let engines = Arc::new(SpeechEngines::with_builder(
+            crate::speech::testing::setup(dir.path(), steno_speech::SpeechSettings::default()),
+            Box::new({
+                let (children, entered, open, builds) = (
+                    children.clone(),
+                    entered.clone(),
+                    open.clone(),
+                    builds.clone(),
+                );
+                move |runtime| -> Arc<dyn SpeechEngine> {
+                    builds.fetch_add(1, Ordering::SeqCst);
+                    match runtime {
+                        SpeechRuntime::OnnxSidecar => Arc::new(FakeSidecar {
+                            inner: FakeSpeechEngine::default(),
+                            children: children.clone(),
+                            child: std::sync::Mutex::new(false),
+                            gated: AtomicBool::new(false),
+                            entered: entered.clone(),
+                            open: open.clone(),
+                        }),
+                        SpeechRuntime::CoreMlInProcess => Arc::new(FakeSpeechEngine::default()),
+                    }
+                }
+            }),
+        ));
+        // The runtime the stored engine id runs on, as the next build sees it.
+        let runtime = Arc::new(std::sync::Mutex::new(SpeechRuntime::OnnxSidecar));
+        let make: MakeDependencies = {
+            let (store, engines, runtime) = (store.clone(), engines.clone(), runtime.clone());
+            Arc::new(move || {
+                let runtime = *runtime.lock().unwrap();
+                Ok(BuiltPipeline {
+                    dependencies: fake_dependencies(&store, "fake-engine")
+                        .with_speech_engine(engines.engine(runtime)),
+                    engine: BuiltEngine {
+                        engine_id: "parakeet-v3".to_owned(),
+                        runtime,
+                    },
+                })
+            })
+        };
+        let current =
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let switch_to = |next| {
+            *runtime.lock().unwrap() = next;
+            current.reload().unwrap();
+            current.current()
+        };
+
+        let retired = current.current();
+        let held = enqueue_call(dir.path(), &retired);
+        tokio::time::timeout(PATIENCE, entered.notified())
+            .await
+            .expect("the first job is transcribing");
+
+        let in_process = switch_to(SpeechRuntime::CoreMlInProcess);
+        assert!(
+            !in_process
+                .dependencies()
+                .speech_engine
+                .ptr_eq(&retired.dependencies().speech_engine),
+            "another runtime, another engine"
+        );
+        let back = switch_to(SpeechRuntime::OnnxSidecar);
+        assert!(
+            back.dependencies()
+                .speech_engine
+                .ptr_eq(&retired.dependencies().speech_engine),
+            "back in the sidecar: the engine the retired job runs on"
+        );
+        let unchanged = switch_to(SpeechRuntime::OnnxSidecar);
+        assert!(
+            unchanged
+                .dependencies()
+                .speech_engine
+                .ptr_eq(&back.dependencies().speech_engine),
+            "a reload that keeps the runtime keeps the engine"
+        );
+        assert_eq!(builds.load(Ordering::SeqCst), 2, "one per runtime");
+
+        let next = enqueue_call(dir.path(), &unchanged);
+        unchanged.wait_until_idle().await;
+        assert_eq!(meeting_state(&store, next), MeetingState::Ready);
+        // [live, most at once, started, stopped]
+        assert_eq!(
+            children.counts(),
+            [1, 1, 1, 0],
+            "the new job ran on the retired job's child and left it running"
+        );
+
+        // The reload's own wait took the retired job's handle, so
+        // `retired.wait_until_idle` would return at once: wait for the
+        // meeting and the child instead.
+        open.notify_one();
+        eventually("the retired job finished and stopped the child", || {
+            meeting_state(&store, held) == MeetingState::Ready
+                && children.stops.load(Ordering::SeqCst) == 1
+        })
+        .await;
+        assert_eq!(children.counts(), [0, 1, 1, 1]);
+    }
+
+    /// Enqueues a two-lane call in `audio` on `pipeline` as a meeting of
+    /// its own; its id.
+    fn enqueue_call(audio: &std::path::Path, pipeline: &ProcessingPipeline) -> Uuid {
+        let mut meeting = sample_data::meeting();
+        meeting.id = Uuid::new_v4();
+        let asset =
+            steno_pipeline::fixtures::two_lane_call(audio, meeting.id, AudioRetention::KeepForever)
+                .unwrap();
+        pipeline.enqueue(&meeting, &asset).unwrap();
+        meeting.id
+    }
+
+    fn meeting_state(store: &Store, id: Uuid) -> MeetingState {
+        store.meeting(id).unwrap().unwrap().state
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
