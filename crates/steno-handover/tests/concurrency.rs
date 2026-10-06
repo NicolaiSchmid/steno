@@ -18,11 +18,13 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{EngineDevice, ScriptedIntake, TestService, chunks, engine_hello, seeded_bytes};
+use common::{
+    EngineDevice, ScriptedIntake, TestService, chunks, engine_hello, held_while, seeded_bytes,
+};
 use steno_core::{
     AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
 };
-use steno_handover::engine::{HandoverRequest, HandoverResponse, Principal, RequestHandling as _};
+use steno_handover::engine::{HandoverRequest, Principal, RequestHandling as _};
 use steno_handover::route::Route;
 use steno_handover::{HandoverConfiguration, wire};
 use uuid::Uuid;
@@ -250,30 +252,6 @@ async fn uploaded_two_chunks(seed: u64, intake: Option<Arc<ScriptedIntake>>) -> 
     let (_, phone, metadata, chunks) = &recording;
     phone.upload_all(metadata, &chunks.concat()).await;
     recording
-}
-
-/// Runs `request` against the engine on a thread of its own, as a second
-/// worker of the listener's runtime would, holds it at its clock read
-/// ([`common::WallClock::hold_next_read`]) while `meanwhile` runs, then
-/// lets it finish. Returns the held request's answer and what `meanwhile`
-/// returned.
-async fn held_while<T>(
-    test: &TestService,
-    request: impl Future<Output = HandoverResponse> + Send + 'static,
-    meanwhile: impl Future<Output = T>,
-) -> (HandoverResponse, T) {
-    let hold = test.clock.hold_next_read();
-    let thread = std::thread::spawn(move || {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(request)
-    });
-    hold.reached();
-    let during = meanwhile.await;
-    hold.release();
-    (thread.join().unwrap(), during)
 }
 
 /// The receipt memory and the store hold for `recording_id`.
@@ -570,7 +548,7 @@ async fn a_complete_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
 
 #[tokio::test]
 async fn a_reannounce_during_an_admission_leaves_no_files_behind() {
-    // The intake moved the verified file, as the real one does, and the
+    // The intake took the verified file, as the real one does, and the
     // phone announces again. The announce finds no file, opens a new
     // partial and sidecar, and is held at its clock read while the
     // `complete` runs to the end. Its `receiving` write then finds the
@@ -586,7 +564,7 @@ async fn a_reannounce_during_an_admission_leaves_no_files_behind() {
         tokio::spawn(async move { phone.complete(id).await })
     };
     intake.admitting().await;
-    std::fs::remove_file(inbox.verified(id, metadata.format)).unwrap();
+    assert!(!inbox.has_verified(id, metadata.format));
     let reannounce = {
         let phone = phone.clone();
         async move { phone.announce(&metadata).await }

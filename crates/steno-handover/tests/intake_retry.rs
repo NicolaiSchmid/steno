@@ -246,7 +246,7 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
     let second = HandoverService::new(
         first.service.configuration.clone(),
         first.store.clone(),
-        intake.clone(),
+        common::taking(intake.clone()),
         Arc::new(HandoverIdentity::mint("Steno test identity", now).unwrap()),
         Arc::new(move || now),
     );

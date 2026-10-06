@@ -367,7 +367,7 @@ impl Restarted {
         let service = Arc::new(HandoverService::new(
             first.service.configuration.clone(),
             first.store.clone(),
-            intake.clone(),
+            common::taking(intake.clone()),
             first.service.identity.clone(),
             first.clock.clock(),
         ));

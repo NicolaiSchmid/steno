@@ -1,6 +1,7 @@
 //! One `HandoverService` on loopback with a minted identity, an in-memory
-//! store, a fake intake, a wall clock the tests advance and a fresh
-//! temporary inbox. `advertise` is always false: nothing leaves 127.0.0.1.
+//! store, a fake intake that takes the file as the real one does
+//! ([`TakingIntake`]), a wall clock the tests advance and a fresh temporary
+//! inbox. `advertise` is always false: nothing leaves 127.0.0.1.
 //! The clients pin the listener's fingerprint through `pinning`, the Rust
 //! form of the phone's `PinnedTrustEvaluator.swift`.
 
@@ -194,6 +195,41 @@ impl WallClock {
     }
 }
 
+/// Runs `request` against the engine on a thread of its own, as a second
+/// worker of the listener's runtime would, holds it at its clock read
+/// ([`WallClock::hold_next_read`]) while `meanwhile` runs, then lets it
+/// finish. Returns the held request's answer and what `meanwhile`
+/// returned.
+pub async fn held_while<T>(
+    test: &TestService,
+    request: impl Future<Output = HandoverResponse> + Send + 'static,
+    meanwhile: impl Future<Output = T>,
+) -> (HandoverResponse, T) {
+    let (hold, thread) = held(test, request);
+    let during = meanwhile.await;
+    hold.release();
+    (thread.join().unwrap(), during)
+}
+
+/// Runs `request` against the engine on a thread of its own and returns
+/// once it is held at its clock read, with the hold and the thread: the
+/// caller releases the one and joins the other.
+pub fn held(
+    test: &TestService,
+    request: impl Future<Output = HandoverResponse> + Send + 'static,
+) -> (ClockHold, std::thread::JoinHandle<HandoverResponse>) {
+    let hold = test.clock.hold_next_read();
+    let thread = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(request)
+    });
+    hold.reached();
+    (hold, thread)
+}
+
 pub fn date(seconds: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(seconds, 0).single().unwrap()
 }
@@ -212,6 +248,44 @@ pub fn execute_batch(store: &Store, sql: &str) {
     store
         .write(|transaction| Ok(transaction.execute_batch(sql)?))
         .unwrap();
+}
+
+/// Takes the verified file out of the inbox before `inner` sees it, as the
+/// real intake does (`RecordingIntake::admit` in `steno-pipeline` copies
+/// it into the audio folder and deletes it), and puts it back when `inner`
+/// refuses, as the real intake leaves it for the phone's retry. The file
+/// moves into a directory of its own under the same name, so `inner` gets
+/// the same path for every attempt of a recording and the test reads the
+/// admitted bytes there after the engine discarded the recording's files.
+pub struct TakingIntake {
+    inner: Arc<dyn HandoverIntake>,
+    directory: tempfile::TempDir,
+}
+
+/// `inner` behind a [`TakingIntake`].
+pub fn taking(inner: Arc<dyn HandoverIntake>) -> Arc<dyn HandoverIntake> {
+    Arc::new(TakingIntake {
+        inner,
+        directory: tempfile::tempdir().unwrap(),
+    })
+}
+
+#[steno_core::async_trait]
+impl HandoverIntake for TakingIntake {
+    async fn admit(
+        &self,
+        file: &Path,
+        metadata: &RecordingMetadata,
+        device: &PairedDevice,
+    ) -> BoundaryResult<Uuid> {
+        let taken = self.directory.path().join(file.file_name().unwrap());
+        std::fs::rename(file, &taken)?;
+        let admitted = self.inner.admit(&taken, metadata, device).await;
+        if admitted.is_err() {
+            std::fs::rename(&taken, file)?;
+        }
+        admitted
+    }
 }
 
 /// A `HandoverIntake` that fails the first `failures` admissions and then
@@ -393,7 +467,7 @@ impl TestService {
         let directory = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::in_memory().unwrap());
         let fake = Arc::new(FakeHandoverIntake::default());
-        let intake: Arc<dyn HandoverIntake> = options.intake.unwrap_or_else(|| fake.clone());
+        let intake = taking(options.intake.unwrap_or_else(|| fake.clone()));
         let clock = WallClock::new(date(START));
         let configuration = HandoverConfiguration {
             service_name: "Test Mac".to_owned(),
@@ -943,13 +1017,23 @@ pub struct EngineDevice {
 impl EngineDevice {
     /// Opens a window, pairs and returns the paired device's view.
     pub async fn paired(test: &TestService, device_name: &str) -> EngineDevice {
-        let payload = test.service.begin_pairing();
+        Self::paired_on(&test.service, &test.store, device_name).await
+    }
+
+    /// [`EngineDevice::paired`] on `service` over `store`, such as a
+    /// computer started again over a test's store.
+    pub async fn paired_on(
+        service: &Arc<HandoverService>,
+        store: &Store,
+        device_name: &str,
+    ) -> EngineDevice {
+        let payload = service.begin_pairing();
         let device_id = Uuid::new_v4();
-        let response = engine_pair(&test.service, &payload, device_id, device_name).await;
+        let response = engine_pair(service, &payload, device_id, device_name).await;
         assert_eq!(response.status, 200);
-        let device = test.store.paired_device(device_id).unwrap().unwrap();
+        let device = store.paired_device(device_id).unwrap().unwrap();
         EngineDevice {
-            service: test.service.clone(),
+            service: service.clone(),
             device,
         }
     }
