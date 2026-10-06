@@ -469,3 +469,32 @@ async fn an_announce_that_found_no_receipt_keeps_the_one_made_meanwhile() {
 
     assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
 }
+
+#[tokio::test]
+async fn an_announce_of_another_phone_that_found_no_receipt_is_refused() {
+    // Two phones announce the same recording id at once. Phone B's announce
+    // is held at its clock read, after its receipt read found nothing,
+    // while phone A's announce answers 201 and chunk 0 lands. B's then finds
+    // A's receipt in memory and is refused as a re-announce of another
+    // device's recording, and the receipt stays A's.
+    let (test, phone, metadata, chunks) = two_chunk_recording(69).await;
+    let id = metadata.recording_id;
+    let other = EngineDevice::paired(&test, "Other iPhone").await;
+    let second = {
+        let metadata = metadata.clone();
+        async move { other.announce(&metadata).await }
+    };
+    let (refused, ()) = held_while(&test, second, async {
+        assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
+        assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    })
+    .await;
+    assert_eq!(refused.status.as_u16(), 409);
+
+    let (in_memory, stored) = receipts(&test, id);
+    assert_eq!(
+        (in_memory.device_id, stored.device_id),
+        (phone.device.id, phone.device.id)
+    );
+    assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
+}
