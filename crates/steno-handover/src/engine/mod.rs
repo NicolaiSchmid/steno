@@ -637,8 +637,8 @@ impl Engine {
     /// A change of the receipt a request read, through [`Engine::change`]:
     /// `edit` changes the copy memory holds, or `receipt` when memory holds
     /// none (a revoked device), and `receipt` comes back as changed. When
-    /// memory holds another device's receipt (a revoked phone paired
-    /// again), nothing changes, `receipt` included. A receipt memory holds
+    /// memory holds another device's receipt (another phone announced the
+    /// same recording id), nothing changes, `receipt` included. A receipt memory holds
     /// as `complete` stays as it is, nothing is saved and `receipt` comes
     /// back as memory holds it: a request that read it before the phone's
     /// `complete` admitted the recording must not put it back, or the
