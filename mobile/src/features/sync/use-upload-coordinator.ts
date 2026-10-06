@@ -50,7 +50,6 @@ export type UploadCoordinator = {
 
 /** How soon a tick looks again while the pairing is changing. */
 const REPAIRING_RECHECK_MS = 1000;
-const PAIRING_AGAIN = "Pairing again; retrying";
 
 const recordingFiles: RecordingFiles = {
 	exists: (fileName) => queuedFile(fileName).exists,
@@ -84,27 +83,29 @@ export function useUploadCoordinator(): UploadCoordinator {
 		// session: its next request is refused, and a chunk whose task was
 		// still being created, so the re-pairing's cancel missed it, is
 		// cancelled once it exists.
-		const current =
+		const whileCurrent =
 			<Args extends unknown[], Result>(
 				request: (session: MacSession, ...args: Args) => Promise<Result>,
 			) =>
 			async (session: MacSession, ...args: Args): Promise<Result> => {
-				if (session.token !== currentToken()) throw new Error(PAIRING_AGAIN);
+				if (session.token !== currentToken()) throw new Error("Retrying");
 				return request(session, ...args);
 			};
 		return createUploadExecutor({
 			client: {
-				announce: current(announce),
-				status: current(fetchStatus),
-				complete: current(complete),
-				startChunkUpload: current(async (session, recordingID, chunk, uri) => {
-					await startChunkUpload(session, recordingID, chunk, uri);
-					if (session.token !== currentToken()) {
-						await stenoLink().cancelUpload(
-							taskIDs.chunk(recordingID, chunk.index),
-						);
-					}
-				}),
+				announce: whileCurrent(announce),
+				status: whileCurrent(fetchStatus),
+				complete: whileCurrent(complete),
+				startChunkUpload: whileCurrent(
+					async (session, recordingID, chunk, uri) => {
+						await startChunkUpload(session, recordingID, chunk, uri);
+						if (session.token !== currentToken()) {
+							await stenoLink().cancelUpload(
+								taskIDs.chunk(recordingID, chunk.index),
+							);
+						}
+					},
+				),
 			},
 			files: recordingFiles,
 			deviceName: async () => (await deviceIdentity()).deviceName,

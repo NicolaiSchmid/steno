@@ -347,7 +347,7 @@ describe("useUploadCoordinator", () => {
 			expect(fake.sent).toEqual([]);
 			expect(h.row("a")).toMatchObject({
 				state: "queued",
-				lastError: "Pairing again; retrying",
+				lastError: "Retrying",
 			});
 		});
 
