@@ -23,7 +23,7 @@ use steno_core::{
 use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no_conversation};
 use steno_pipeline::{
     LaneMerger, MeetingEventBus, MonotonicClock, PipelineDependencies, ProcessingPipeline,
-    QuitLatch, RetentionSweep, StageRates,
+    QuitLatch, RetentionSweep, SharedSpeechEngine, StageRates,
 };
 use uuid::Uuid;
 
@@ -661,9 +661,11 @@ async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
 
 /// The world's dependencies with `engine` as the speech engine.
 fn with_engine(world: &World, engine: Arc<dyn steno_core::SpeechEngine>) -> PipelineDependencies {
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = engine;
-    dependencies
+    world
+        .pipeline
+        .dependencies()
+        .clone()
+        .with_speech_engine(SharedSpeechEngine::new(engine))
 }
 
 /// Enqueues the two-lane call as a meeting of its own; its id.
@@ -908,6 +910,41 @@ async fn a_job_leaves_the_engine_loaded_while_another_still_transcribes() {
 
     engine.open.notify_one();
     pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, slow), MeetingState::Ready);
+    assert_eq!(engine.inner.releases.count(), 1);
+}
+
+/// Two pipelines over one engine and its claims, as the services build
+/// them across a reload: a job on the new one that finishes while a job
+/// on the retired one still transcribes leaves the engine loaded; the
+/// retired one's job, the last, releases it once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let shared = with_engine(&world, engine.clone());
+    let retired = ProcessingPipeline::new(shared.clone());
+    let current = ProcessingPipeline::new(shared);
+    assert!(
+        retired
+            .dependencies()
+            .speech_engine
+            .ptr_eq(&current.dependencies().speech_engine)
+    );
+
+    let slow = enqueue_call(&world, &retired);
+    engine.wait_until_entered().await;
+    let fast = enqueue_call(&world, &current);
+    current.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, fast), MeetingState::Ready);
+    assert_eq!(
+        engine.inner.releases.count(),
+        0,
+        "the retired pipeline's job still needs the engine"
+    );
+
+    engine.open.notify_one();
+    retired.wait_until_idle().await;
     assert_eq!(meeting_state(&world, slow), MeetingState::Ready);
     assert_eq!(engine.inner.releases.count(), 1);
 }
@@ -1274,9 +1311,10 @@ impl steno_core::SpeechEngine for PanickingEngine {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = Arc::new(PanickingEngine(std::collections::BTreeSet::new()));
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = ProcessingPipeline::new(with_engine(
+        &world,
+        Arc::new(PanickingEngine(std::collections::BTreeSet::new())),
+    ));
     let meeting = call_meeting(world.now);
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
     pipeline.enqueue(&meeting, &asset).unwrap();
