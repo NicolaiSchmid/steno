@@ -1346,13 +1346,14 @@ touch lines; each fix is ported to Swift before cutover.
   restart, and a pairing during a revoke's delete saves after it and stays. Rust takes
   the place in line under the state lock together with the memory the write stands
   for (the revoke count, the pairing's read of it, the receipt); in Swift the actor
-  makes the two one step. Every receipt change is made under that same lock to the
-  copy memory holds (`Engine::change`), so two chunks that land at once on two threads
-  both stay, and so does a chunk that lands during a re-announce or a second first
-  announce; a receipt memory holds as `complete` stays `complete` (Swift's chunk fold
-  not yet, see "Open after the port"). The intake's own receipt saves
-  (`RecordingIntake::admit`, `RecordingIntake.admit`) run outside the line in both
-  apps.
+  makes the two one step. Rust makes every receipt change to the copy memory holds
+  under that same lock (`Engine::change`), so two chunks that land at once on two
+  threads both stay, and so does a chunk that lands during a re-announce or during
+  another first announce of the same recording. A receipt memory holds as `complete`
+  stays `complete`, and a late write of a revoked device leaves another device's
+  receipt alone. Swift's chunk fold and first announce are still open, see "Open after
+  the port". The intake's own receipt saves (`RecordingIntake::admit`,
+  `RecordingIntake.admit`) run outside the line in both apps.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
@@ -1720,11 +1721,21 @@ request that fixes an item deletes it.
   chunk whose write ends after the phone's `complete` admitted the recording puts the
   receipt back to `receiving`, in memory and in the store; the phone's next `complete`
   then starts over, and the upload after it becomes a second meeting. A first announce
-  whose store read found nothing likewise replaces a receipt another first announce
-  made meanwhile, and the chunks folded into it. Rust leaves a `complete` receipt as it
-  is and answers the late announce as a re-announce (`Engine::change`). Where:
-  `receiveChunk` and `announce` in
+  whose store read found nothing replaces the receipt another first announce of the
+  same recording made meanwhile, and drops the chunks folded into it. Rust leaves a
+  `complete` receipt as it is and answers the late announce as a re-announce
+  (`Engine::change`). Where: `receiveChunk` and `announce` in
   `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #208.
+- **Unowned.** Two first announces of one recording that race both run `Inbox::begin`
+  before the receipt is made, and `begin` keeps the partial but writes the metadata
+  sidecar each time, so the receipt is the one whose change ran first and the sidecar
+  is the one whose `begin` ran last. With the same metadata (the phone's retry) nothing
+  differs; with other metadata the late announce is refused with 409, but its sidecar,
+  `format` included, may stay and reach `promote` and the intake at `complete`. Running
+  `begin` only once the receipt is made moves the partial's creation behind the
+  receipt and needs the place in line of a failed `begin` handled. Where: `announce` in
+  `crates/steno-handover/src/engine/recording.rs` and `Inbox::begin` in
+  `crates/steno-handover/src/upload/inbox.rs`. Found: #208.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
