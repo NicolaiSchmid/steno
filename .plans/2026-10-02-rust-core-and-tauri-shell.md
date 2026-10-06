@@ -1735,12 +1735,6 @@ it) and which pull requests found it. The pull request that fixes an item delete
   "Audio". Found: #197, #201.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
-- **First Linux release.** The pages keep the Mac's inset for the traffic lights (the
-  sidebar's header-high spacer, onboarding's 52 px top) where Windows and Linux draw
-  their own title bar above the page, so the top of each window has an empty band
-  there. Where: `apps/macos/web/src/components/ui/sidebar-column.tsx`,
-  `apps/macos/web/src/windows/onboarding/onboarding-page.tsx`,
-  `apps/desktop/src-tauri/src/windows.rs`. Found: #204.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
   `directmlOnWindows` stays off by default (`SpeechSettings` in

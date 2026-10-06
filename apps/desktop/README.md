@@ -814,8 +814,8 @@ has no status API; the audio crate's probe (WP5) records it and until
 then it reads `unknown`. The panels are re-tuned on the Mac once they run
 there beside the Swift ones (the plan's risk list). Linux and Windows
 keep their native title bar; macOS gets the overlay title bar the Swift
-windows have. The page's traffic light inset is a design question for the
-other two platforms. On Linux, WebKitGTK leaks one shared-memory file
+windows have, and only there the page leaves the traffic lights their
+inset (`titleBarInset` in `apps/macos/web/src/lib/platform.tsx`). On Linux, WebKitGTK leaks one shared-memory file
 descriptor per destroyed webview that lived longer than about 250 ms (29
 to 107 fds over 70 Settings open/close cycles; wry/WebKitGTK level, not
 the shell), so long sessions with many Settings opens should be watched
