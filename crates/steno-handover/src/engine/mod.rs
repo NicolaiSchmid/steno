@@ -4,9 +4,9 @@
 //! session, the live receipts, the completions in flight, the revoked
 //! devices and the line of store writes, held for synchronous sections
 //! only, never across a store, file or intake call, so another request runs
-//! while one awaits. The store commits the engine's writes in the order
-//! they were asked for all the same (`Engine::in_order`). The recording
-//! routes live in `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
+//! while one awaits. Even so, the store commits the engine's writes in the
+//! order they were asked for (`Engine::in_order`). The recording routes
+//! live in `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
 //! `Routing/HTTPMessages.swift`.
 
 mod recording;
@@ -200,7 +200,7 @@ struct State {
     /// stay out of `active_receipts` and the stream, also when a request
     /// that read one before the revoke writes it back, and their recording
     /// routes answer 401 before they read, also while the device is still
-    /// in the store (a failed delete, or one still waiting in line).
+    /// in the store (a failed delete, or one not committed yet).
     revoked: BTreeSet<Uuid>,
     /// Revokes per device since start. A pairing never resets the count,
     /// so a `complete` from before the revoke still sees it after the phone
@@ -238,7 +238,8 @@ impl State {
     /// revoke count it bumps or reads, the receipt it saves), so the store
     /// commits the writes in the order memory changed. The place must reach
     /// [`Engine::in_order`] before any yield or panic: dropped on the way,
-    /// it would let the next write go without waiting for the one before.
+    /// it lets the write behind it go at once, before the writes ahead of
+    /// it have returned.
     fn next_write(&mut self) -> InOrder {
         let (done, last) = oneshot::channel();
         InOrder {
@@ -325,7 +326,7 @@ impl Engine {
     }
 
     /// Runs `write` on the blocking pool once the write asked for before it
-    /// (`place`) has returned. The pool runs its calls in any order, so
+    /// has returned (`place`, from [`State::next_write`]). The pool runs its calls in any order, so
     /// without the line an older receipt could commit over a newer one, and
     /// a revoke's delete could remove the pairing asked for after it or
     /// commit before the pairing's save asked for before it, which leaves
