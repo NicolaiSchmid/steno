@@ -743,7 +743,9 @@ fn a_touch_does_not_overtake_a_revoke_asked_for_before_it() {
     // neither committed, where a touch sent straight to the pool would have
     // committed ahead of it. That the touch then waits for the delete is
     // the order tests' part: the read reaches the pool before either task
-    // runs, so a line that does not wait passes here too.
+    // runs, so a line that does not wait passes here too. The read in
+    // between holds only on `on_one_worker`, where neither task runs before
+    // this one yields.
     common::on_one_worker(async {
         let test = TestService::with(common::Options {
             start: false,
@@ -781,12 +783,14 @@ fn a_touch_does_not_overtake_a_revoke_asked_for_before_it() {
 
 #[test]
 fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
-    // Another phone announces its recording again while the computer
-    // revokes this one. The announce finds the receipt in memory and goes
-    // to its save without a yield, so the save takes its place in line
-    // behind the delete: a read asked for after both, which skips the
-    // line, finds neither committed, where a save sent straight to the pool
-    // would have committed ahead of it.
+    // The computer revokes one phone while another announces its recording
+    // again. The announce finds the receipt in memory and goes to its save
+    // without a yield, so the save takes its place in line behind the
+    // delete: a read asked for after both, which skips the line, finds
+    // neither committed, where a save sent straight to the pool would have
+    // committed ahead of it. That the save then waits for the delete is the
+    // order tests' part. The task count and the reads in between hold only
+    // on `on_one_worker`, where neither task runs before this one yields.
     common::on_one_worker(async {
         let test = TestService::with(common::Options {
             chunk_size: DIRECT_CHUNK_SIZE,
@@ -813,6 +817,13 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
             "the announce waits on its receipt save",
         );
         assert_eq!(
+            tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks(),
+            3,
+            "the delete and the save wait in their own tasks"
+        );
+        assert_eq!(
             test.service.paired_devices().await.unwrap().len(),
             2,
             "the delete has not committed"
@@ -828,7 +839,7 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
         assert_ne!(
             test.store.handover_receipt(id).unwrap(),
             before,
-            "the save commits after the delete"
+            "the save commits"
         );
     });
 }
