@@ -17,13 +17,12 @@ import {
 	useMacDiscovery,
 } from "@/features/discovery/use-mac-discovery";
 import { useQueue } from "@/features/queue/QueueProvider";
-import { resetForUpload, unpairPending } from "@/features/queue/queue-index";
 import { cancelAllUploads } from "@/features/sync/recording-client";
 import { errorMessage } from "@/lib/error-message";
 import { DURATION_ENTRANCE, HIT_SLOP } from "@/lib/motion";
 import { usePairing } from "./PairingProvider";
 import { hello, pair, unpair } from "./pairing-client";
-import { performPairing } from "./pairing-flow";
+import { commitPairing, forgetPairing, performPairing } from "./pairing-flow";
 import { describePairingFailure, parsePairingPayload } from "./pairing-payload";
 import { deviceIdentity } from "./pairing-store";
 
@@ -86,16 +85,7 @@ export function PairingSheet() {
 					device: deviceIdentity,
 					now: () => new Date(),
 				});
-				// Chunks in flight for the old pairing would answer 401 under the
-				// new one and wipe it; the retry backoff re-queues them.
-				await cancelAllUploads().catch(() => {});
-				await replace(outcome);
-				// Anything the old Mac revoked is eligible for the new one.
-				await update((index) =>
-					index.recordings
-						.filter((r) => r.state === "unpaired")
-						.reduce((acc, r) => resetForUpload(acc, r.recordingID), index),
-				);
+				await commitPairing(outcome, { replace, cancelAllUploads, update });
 				setPhase({ kind: "paired", macName: outcome.mac.macName });
 			} catch (error) {
 				scanBlockedUntil.current = Date.now() + RESCAN_DELAY_MS;
@@ -120,9 +110,10 @@ export function PairingSheet() {
 			} catch {
 				// The Mac is away; forgetting locally is what the user asked for.
 			}
-			await clear();
-			await update(unpairPending);
+			await forgetPairing({ clear, cancelAllUploads, update });
 			navigation.goBack();
+		} catch (error) {
+			setPhase({ kind: "error", message: errorMessage(error) });
 		} finally {
 			busy.current = false;
 		}

@@ -55,8 +55,20 @@ export type ExecutorDependencies = {
 	files: RecordingFiles;
 	deviceName(): Promise<string>;
 	update(transform: (index: QueueIndex) => QueueIndex): Promise<unknown>;
-	/** Called after every pending row became `unpaired`; forgets the pairing. */
-	onUnauthorized(): Promise<void>;
+	/**
+	 * A 401 answered a request sent with `token` (`null` when nobody
+	 * recorded it, which stands for the pairing read from the keychain).
+	 * While `token` is still the pairing's, the Mac revoked it: runs
+	 * `unpairRows` (every pending row becomes `unpaired`), forgets the
+	 * pairing and resolves true.
+	 * Resolves false for a pairing since replaced or cleared; the executor
+	 * then handles the 401 like any other failure of that request, except
+	 * that a refresh of the chunk sets stops there.
+	 */
+	onUnauthorized(
+		token: string | null,
+		unpairRows: () => Promise<unknown>,
+	): Promise<boolean>;
 	now(): Date;
 	random(): number;
 };
@@ -94,16 +106,25 @@ export function createUploadExecutor(
 	deps: ExecutorDependencies,
 ): UploadExecutor {
 	const inFlight = new Set<string>();
+	// The token each chunk in the background session was started with, so
+	// its 401 is judged against the pairing it was sent under. A chunk
+	// started before a relaunch has none.
+	const chunkTokens = new Map<string, string>();
 
-	const unauthorized = async () => {
-		await deps.update(unpairPending);
-		await deps.onUnauthorized();
-	};
+	// Whether the 401 to `token` unpaired the phone.
+	const unauthorized = (token: string | null) =>
+		deps.onUnauthorized(token, () => deps.update(unpairPending));
 
-	const fail = async (recordingID: string, error: unknown) => {
+	const fail = async (
+		recordingID: string,
+		error: unknown,
+		token: string | null = null,
+	) => {
+		let message = errorMessage(error);
 		if (error instanceof HandoverError && error.kind === "unauthorized") {
-			await unauthorized();
-			return;
+			if (await unauthorized(token)) return;
+			// A 401 to a pairing since replaced: not a revoke of this one.
+			message = "Retrying";
 		}
 		await deps.update((current) => {
 			const rec = findRecording(current, recordingID);
@@ -113,7 +134,7 @@ export function createUploadExecutor(
 				recordingID,
 				deps.now(),
 				backoffMs(rec.attempts + 1, deps.random),
-				errorMessage(error),
+				message,
 			);
 		});
 	};
@@ -152,7 +173,7 @@ export function createUploadExecutor(
 						),
 					);
 				} catch (error) {
-					await fail(rec.recordingID, error);
+					await fail(rec.recordingID, error, session.token);
 				} finally {
 					inFlight.delete(id);
 				}
@@ -165,6 +186,7 @@ export function createUploadExecutor(
 				if (!chunk) return;
 				const id = taskIDs.chunk(rec.recordingID, action.chunk);
 				inFlight.add(id);
+				chunkTokens.set(id, session.token);
 				try {
 					await deps.client.startChunkUpload(
 						session,
@@ -174,7 +196,8 @@ export function createUploadExecutor(
 					);
 				} catch (error) {
 					inFlight.delete(id);
-					await fail(rec.recordingID, error);
+					chunkTokens.delete(id);
+					await fail(rec.recordingID, error, session.token);
 				}
 				return;
 			}
@@ -225,7 +248,7 @@ export function createUploadExecutor(
 						);
 					}
 				} catch (error) {
-					await fail(rec.recordingID, error);
+					await fail(rec.recordingID, error, session.token);
 				} finally {
 					inFlight.delete(id);
 				}
@@ -239,6 +262,8 @@ export function createUploadExecutor(
 
 	const uploadFinished = async ({ taskID, status }: UploadFinished) => {
 		inFlight.delete(taskID);
+		const token = chunkTokens.get(taskID) ?? null;
+		chunkTokens.delete(taskID);
 		const parsed = parseChunkTaskID(taskID);
 		if (!parsed) return;
 		const { recordingID, chunk } = parsed;
@@ -248,8 +273,6 @@ export function createUploadExecutor(
 					? markChunk(current, recordingID, chunk)
 					: current,
 			);
-		} else if (status === 401) {
-			await unauthorized();
 		} else if (status === 404) {
 			// The Mac lost the partial (restart, cleanup): announce again after
 			// the backoff, so a Mac that keeps forgetting does not cost a
@@ -269,10 +292,11 @@ export function createUploadExecutor(
 			await fail(
 				recordingID,
 				new HandoverError(
-					"server",
+					status === 401 ? "unauthorized" : "server",
 					status,
 					`Chunk ${chunk} was answered ${status}`,
 				),
+				token,
 			);
 		}
 	};
@@ -282,6 +306,7 @@ export function createUploadExecutor(
 	// 16 MiB copy and a TLS handshake per tick.
 	const uploadFailed = async ({ taskID, message }: UploadFailed) => {
 		inFlight.delete(taskID);
+		chunkTokens.delete(taskID);
 		const parsed = parseChunkTaskID(taskID);
 		if (!parsed) return;
 		await fail(parsed.recordingID, new Error(message));
@@ -292,6 +317,9 @@ export function createUploadExecutor(
 			if (parseChunkTaskID(id)) inFlight.delete(id);
 		}
 		for (const id of pendingTaskIDs) inFlight.add(id);
+		for (const id of chunkTokens.keys()) {
+			if (!inFlight.has(id)) chunkTokens.delete(id);
+		}
 	};
 
 	const refreshUploading = async (
@@ -323,7 +351,9 @@ export function createUploadExecutor(
 					error instanceof HandoverError &&
 					error.kind === "unauthorized"
 				) {
-					await unauthorized();
+					// Revoked, or a pairing since replaced whose session is about
+					// to go: either way the other rows would only answer 401 too.
+					await unauthorized(session.token);
 					return;
 				}
 			}

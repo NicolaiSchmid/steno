@@ -234,6 +234,20 @@ describe("unpairPending", () => {
 		expect(nextUploadable(unpairPending(index), now)).toBeNull();
 	});
 
+	it("clears the retry error of the rows it unpairs", () => {
+		const index = scheduleRetry(
+			addRecording(EMPTY_INDEX, rec("q", "1")),
+			"q",
+			now,
+			1,
+			"Retrying",
+		);
+		expect(unpairPending(index).recordings[0]).toMatchObject({
+			state: "unpaired",
+			lastError: null,
+		});
+	});
+
 	it("returns the same index when nothing is pending", () => {
 		const idle = setState(
 			addRecording(EMPTY_INDEX, rec("f", "1")),

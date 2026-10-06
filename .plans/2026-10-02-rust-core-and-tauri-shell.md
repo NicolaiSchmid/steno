@@ -1718,12 +1718,17 @@ request that fixes an item deletes it.
   leaves two speech sidecars running (about 4.4 GB) until the retired job releases its
   own. Where: `CurrentPipeline::reload` in `crates/steno-services/src/pipeline.rs`.
   Found: #183.
-- **Unowned.** The phone clears its pairing on any 401, also one that answers a
-  request sent under a pairing since replaced, so an old request that races a
-  re-pairing unpairs the new one; only the chunk uploads are cancelled before a
-  re-pairing. Where: `onUnauthorized` is `clearPairing` in
-  `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
-  `mobile/src/features/sync/recording-client.ts`. Found: #191.
+- **Unowned.** A `complete` the phone sent before an unpair and that is answered after
+  it is lost on the phone: the row is `unpaired` by then and cannot move to
+  `delivered`, so the write throws, and the failure handler leaves a row that is not
+  pending alone. The computer has the meeting, but the phone keeps the row and its
+  file. After the phone pairs again it uploads the recording again, and the computer,
+  whose receipt went with the revoked device (`Store::delete_paired_device`), admits
+  it as a second meeting. The unpair's cancel does not reach it, because `complete` is
+  a pinned request, not a background upload. Allowing `unpaired` to `delivered`
+  closes it. Where: the `complete` answer in
+  `createUploadExecutor` (`mobile/src/features/sync/upload-executor.ts`), `TRANSITIONS`
+  in `mobile/src/features/queue/queue-index.ts`. Found: #200.
 - **Unowned.** A `complete` whose device was revoked while the intake admitted its
   recording removes the metadata sidecar afterwards whatever memory holds, so when
   another device announced the same recording id meanwhile, that device's sidecar
@@ -1833,7 +1838,8 @@ PR off `main`.
 | Every handover engine write in the order asked for: the revoke's delete, the pairing's save and the touch join the receipt saves (`steno-handover`) | `fix/rust-handover-device-writes` | #207 | merged |
 | A receipt change is made to the copy memory holds, under the lock that takes its place in line: two chunks that land at once both stay, a `complete` receipt stays `complete` (`steno-handover`) | `fix/rust-handover-chunk-fold` | #208 | merged |
 | A `complete` receipt stays `complete`, a racing first announce answers as a re-announce, and a revoked device's late write leaves another device's receipt alone (Swift core, the counterpart of #208) | `fix/swift-handover-complete-stays` | #209 | merged |
-| Small fixes after the port: non-Unicode environment variables, `steno process --title` as the user's title, logs that never wait for stderr, the headless PipeWire script's socket paths, a pnpm setup directory per CI job | `fix/rust-small-after-port` | #202 | in review |
+| Small fixes after the port: non-Unicode environment variables, `steno process --title` as the user's title, logs that never wait for stderr, the headless PipeWire script's socket paths, a pnpm setup directory per CI job | `fix/rust-small-after-port` | #202 | merged |
+| Only a 401 to the current pairing's token unpairs the phone (`mobile/`) | `fix/mobile-current-pairing-401` | #200 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
