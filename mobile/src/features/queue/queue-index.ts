@@ -260,11 +260,17 @@ export function isPending(rec: QueuedRecording): boolean {
 	return rec.state === "queued" || rec.state === "uploading";
 }
 
-/** The Mac revoked us (401) or the user unpaired: nothing pending can proceed. */
+/**
+ * The Mac revoked us (401) or the user unpaired: nothing pending can proceed,
+ * and a retry's error no longer applies.
+ */
 export function unpairPending(index: QueueIndex): QueueIndex {
 	return index.recordings
 		.filter(isPending)
-		.reduce((acc, r) => setState(acc, r.recordingID, "unpaired"), index);
+		.reduce(
+			(acc, r) => setState(acc, r.recordingID, "unpaired", { lastError: null }),
+			index,
+		);
 }
 
 function isDue(rec: QueuedRecording, now: Date): boolean {
