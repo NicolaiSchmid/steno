@@ -38,9 +38,9 @@ export type PairingContextValue = {
 	 * stands for the pairing read from the keychain, so it matches nothing
 	 * when the keychain held none. A 401 to a pairing since replaced or
 	 * cleared leaves the current one alone. One case remains: if the
-	 * re-pairing's cancel fails and the app is relaunched, a chunk started
-	 * under the old pairing comes back with no token, and its 401 to the same
-	 * Mac unpairs the new one.
+	 * re-pairing's cancel does not land (it fails, or the app dies first), a
+	 * chunk started under the old pairing comes back after the relaunch with
+	 * no token, and its 401 to the same Mac unpairs the new one.
 	 */
 	clearIfCurrent(
 		token: string | null,
@@ -57,7 +57,8 @@ export function PairingProvider({ children }: { children: ReactNode }) {
 	// The token read from the keychain, which `replace` leaves alone: a
 	// request whose token nobody recorded went out under it.
 	const loadedTokenRef = useRef<string | null>(null);
-	// The pairing a `replace` will commit, from the moment it is called.
+	// The pairing a `replace` is saving, from the moment it is called until
+	// the save settles.
 	const replacingRef = useRef<Pairing | null>(null);
 
 	useEffect(() => {
