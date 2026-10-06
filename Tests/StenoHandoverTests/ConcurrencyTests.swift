@@ -11,7 +11,7 @@ import Testing
 /// only make likely are certain. Tests that need one request stopped at a
 /// chosen suspension point hold it there: a receipt save on its way to the
 /// store (`HeldSave`), a chunk write after its bytes landed (`HeldWrite`), a
-/// store read (`StoreGate`).
+/// store read (`StoreGate`), an admission in the intake (`HeldIntake`).
 @Suite struct ConcurrencyTests {
   static let meetingID = UUID(uuidString: "C0C0C0C0-0000-4000-8000-000000000001")!
 
@@ -295,6 +295,51 @@ import Testing
     #expect(await phone.engine.activeReceipts[id]?.receivedChunks == [0, 1])
     #expect(try await gated.test.store.handoverReceipt(recordingID: id)?.receivedChunks == [0, 1])
     #expect(!gated.gate.timedOut, "nothing waited on the held read")
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aCompleteOfARevokedPhoneStaysOutOfAnotherPhonesReceipt() async throws {
+    // The phone is revoked while its `complete` is held in the intake, and
+    // another phone pairs, announces the same recording id and sends chunk
+    // 0. The intake then answers, so the revoked phone's `complete` answers
+    // 200 with the meeting it admitted, and its `.complete` write finds the
+    // other phone's receipt in memory and changes nothing. Written into it,
+    // it would tell the other phone `complete` for a recording never
+    // admitted from it, and that phone would delete its copy.
+    let chunkSize = 64 * 1024
+    let fake = FakeHandoverIntake(meetingID: Self.meetingID)
+    let intake = HeldIntake(fake)
+    defer { intake.release() }
+    try await TestService.run(
+      chunkSize: chunkSize, intake: fake, customIntake: intake, start: false
+    ) { test in
+      let phone = try await EngineClient.paired(test)
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 67)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: chunkSize)
+      let id = metadata.recordingID
+      try await phone.uploadAll(metadata, bytes)
+
+      let completion = Task { await phone.complete(id) }
+      await intake.held()
+      try await test.service.revoke(phone.device.id)
+      let other = try await EngineClient.paired(test, deviceName: "Other iPhone")
+      #expect(try await other.announce(metadata).code == 201)
+      #expect(await other.upload(id, chunk: 0, chunks[0]).code == 204)
+      intake.release()
+      let completed = await completion.value
+
+      #expect(completed.code == 200, "the intake admitted the revoked phone's recording")
+      #expect(try completed.json(Wire.CompleteResponse.self).meetingID == Self.meetingID)
+      #expect(await fake.admissions.count == 1)
+      let inMemory = try #require(await test.service.engine.activeReceipts[id])
+      let stored = try #require(try await test.store.handoverReceipt(recordingID: id))
+      for receipt in [inMemory, stored] {
+        #expect(receipt.deviceID == other.device.id)
+        #expect(receipt.state == .receiving, "not `.complete` with the revoked phone's meeting")
+        #expect(receipt.receivedChunks == [0])
+      }
+    }
   }
 
   /// An engine beside `test`'s service, over its store and intake, that
