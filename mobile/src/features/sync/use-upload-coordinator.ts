@@ -77,6 +77,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 	const waitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const indexRef = useRef(index);
 	const sessionRef = useRef(session);
+	const unmounted = useRef(false);
 
 	const executor = useMemo(() => {
 		// A tick already running when a re-pairing starts still holds the old
@@ -149,8 +150,18 @@ export function useUploadCoordinator(): UploadCoordinator {
 		};
 	}, [pairing, serviceName]);
 
+	// After unmount no timer is left and no new tick starts.
+	useEffect(() => {
+		unmounted.current = false;
+		return () => {
+			unmounted.current = true;
+			if (waitTimer.current) clearTimeout(waitTimer.current);
+			waitTimer.current = null;
+		};
+	}, []);
+
 	const tick = useCallback(() => {
-		if (!queueReady) return;
+		if (!queueReady || unmounted.current) return;
 		if (ticking.current) {
 			rerun.current = true;
 			return;

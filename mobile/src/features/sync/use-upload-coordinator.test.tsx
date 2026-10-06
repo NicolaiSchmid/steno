@@ -401,5 +401,24 @@ describe("useUploadCoordinator", () => {
 				vi.useRealTimers();
 			}
 		});
+
+		it("stops looking again once the screen is gone", async () => {
+			vi.useFakeTimers({ shouldAdvanceTime: true, toFake: ["setTimeout"] });
+			try {
+				// A request that goes out anyway is held, so the tick ends there.
+				fake.holdRequest = new Promise(() => {});
+				fake.replacing = "token-b";
+				await mount(queued("a"), A);
+				act(() => root?.unmount());
+				root = null;
+
+				fake.replacing = null;
+				await act(() => vi.advanceTimersByTimeAsync(1000));
+				await settle();
+				expect(fake.sent).toEqual([]);
+			} finally {
+				vi.useRealTimers();
+			}
+		});
 	});
 });
