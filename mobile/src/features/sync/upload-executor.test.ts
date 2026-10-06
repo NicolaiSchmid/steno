@@ -1,6 +1,7 @@
 import type { RecordingMetadata, RecordingStatus } from "@modules/steno-link";
 import { HandoverError } from "@modules/steno-link/native";
 import { describe, expect, it, vi } from "vitest";
+
 import { commitPairing, forgetPairing } from "@/features/pairing/pairing-flow";
 import type { Chunk } from "@/features/queue/queue-index";
 import {
@@ -733,7 +734,6 @@ describe("a complete sent before an unpair and answered after it", () => {
 		await repair(h);
 		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 0 });
 		h.mac.revoked = false;
-		h.mac.completeGate = null;
 		await h.drive();
 		expect(h.mac.calls.at(-1)).toBe("complete a");
 		expect(h.row("a")?.state).toBe("delivered");
