@@ -33,7 +33,8 @@ final class HeldWrite: Sendable {
     for await _ in heldSignal { return }
   }
 
-  /// Lets the held write return to the engine.
+  /// Lets the held write return to the engine. Single use: a write armed
+  /// after this goes straight through.
   func release() {
     releasing.finish()
   }

@@ -31,8 +31,8 @@ links on Linux (`linuxOnlyExclusions`), where Security does not exist.
 `run { test in … }`), `RawClient` (byte-exact requests for the limit and
 timeout tests), `EngineClient` (the protocol core driven without a
 listener, for the ordering tests), `StoreGate` (an on-disk store that holds
-a chosen statement's transaction open, for the revoke races), `HeldSave`
-(receipt saves that hold one on its way to the store, for the write order),
-`HeldWrite` (chunk writes that hold one after its bytes landed, for a chunk
-that lands during a `complete`) and `until` (polls a condition the test waits on, failing after five
-seconds).
+a chosen statement's transaction open, for the revoke and announce races),
+`HeldSave` (receipt saves that hold one on its way to the store, for the
+write order), `HeldWrite` (chunk writes that hold one after its bytes
+landed, for a chunk that lands during a `complete`) and `until` (polls a
+condition the test waits on, failing after five seconds).

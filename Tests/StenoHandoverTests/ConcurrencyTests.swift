@@ -4,11 +4,14 @@ import Testing
 
 @testable import StenoHandover
 
-/// The engine is one actor, but every store write, file write and hash is a
-/// suspension point at which the next request runs. These tests drive
-/// `HandoverEngine.handle` directly (`EngineClient`), so two requests enter
-/// the actor in a known order and the races the loopback clients can only
-/// make likely are certain.
+/// The engine is one actor, but every store read and write, file write and
+/// hash is a suspension point at which the next request runs. These tests
+/// drive `HandoverEngine.handle` directly (`EngineClient`), so two requests
+/// enter the actor in a known order and the races the loopback clients can
+/// only make likely are certain. Tests that need one request stopped at a
+/// chosen suspension point hold it there: a receipt save on its way to the
+/// store (`HeldSave`), a chunk write after its bytes landed (`HeldWrite`), a
+/// store read (`StoreGate`).
 @Suite struct ConcurrencyTests {
   static let meetingID = UUID(uuidString: "C0C0C0C0-0000-4000-8000-000000000001")!
 
@@ -163,13 +166,12 @@ import Testing
       held.release()
       #expect(await first.value.code == 204, "the chunk counts as received")
 
-      try await Self.staysComplete(
-        phone, id, meetingID: meetingID, store: test.store, intake: test.intake)
+      try await Self.staysComplete(phone, id, meetingID: meetingID, test: test)
     }
   }
 
-  /// A phone paired over an on-disk `StoreGate` store, so a test can hold an
-  /// announce's receipt read, with a two-chunk recording not yet announced.
+  /// A phone paired over an on-disk `StoreGate` store, so a test can hold a
+  /// request's receipt read, with a two-chunk recording not yet announced.
   private struct Gated {
     static let chunkSize = 64 * 1024
     let gate: StoreGate
@@ -189,13 +191,15 @@ import Testing
 
     var id: UUID { metadata.recordingID }
 
-    /// Starts an announce whose receipt read is held, and returns once it
-    /// is: the read ran, and found no receipt.
-    func announceHeldAtItsRead() async -> Task<HandoverResponse, any Error> {
+    /// Starts `request` with its receipt read held, and returns once it is:
+    /// the read ran, and found what the store held then.
+    func heldAtItsRead(
+      _ request: @escaping @Sendable () async throws -> HandoverResponse
+    ) async -> Task<HandoverResponse, any Error> {
       gate.receiptRead.arm()
-      let announcing = Task { [phone, metadata] in try await phone.announce(metadata) }
+      let requesting = Task { try await request() }
       await gate.receiptRead.held()
-      return announcing
+      return requesting
     }
 
     /// Releases the gate's holds and deletes both directories.
@@ -217,7 +221,9 @@ import Testing
     defer { gated.remove() }
     let (phone, id) = (gated.phone, gated.id)
 
-    let second = await gated.announceHeldAtItsRead()
+    let second = await gated.heldAtItsRead { [metadata = gated.metadata] in
+      try await phone.announce(metadata)
+    }
     #expect(try await phone.announce(gated.metadata).code == 201)
     #expect(await phone.upload(id, chunk: 0, gated.chunks[0]).code == 204)
     gated.gate.receiptRead.release()
@@ -243,7 +249,9 @@ import Testing
     defer { gated.remove() }
     let (phone, id) = (gated.phone, gated.id)
 
-    let second = await gated.announceHeldAtItsRead()
+    let second = await gated.heldAtItsRead { [metadata = gated.metadata] in
+      try await phone.announce(metadata)
+    }
     #expect(try await phone.announce(gated.metadata).code == 201)
     for (index, chunk) in gated.chunks.enumerated() {
       #expect(await phone.upload(id, chunk: index, chunk).code == 204)
@@ -256,8 +264,36 @@ import Testing
     #expect(
       try reannounced.json(Wire.RecordingStatus.self)
         == Wire.RecordingStatus(state: .complete, receivedChunks: [0, 1]))
-    try await Self.staysComplete(
-      phone, id, meetingID: meetingID, store: gated.test.store, intake: gated.test.intake)
+    try await Self.staysComplete(phone, id, meetingID: meetingID, test: gated.test)
+    #expect(!gated.gate.timedOut, "nothing waited on the held read")
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aReadThatFoundAnOlderReceiptKeepsTheOneAdvancedMeanwhile() async throws {
+    // Memory holds no receipt (as after a restart), so a status request
+    // reads chunk 0's receipt from the store and is held there while chunk
+    // 1 lands. Memory then holds both chunks and wins over the older row,
+    // so the status lists both and nothing is lost. Remembered over memory,
+    // the row would drop chunk 1, or put a `.complete` receipt back to
+    // `.receiving`, and the upload after it would become a second meeting.
+    let gated = try await Gated(seed: 66)
+    defer { gated.remove() }
+    let (phone, id) = (gated.phone, gated.id)
+    #expect(try await phone.announce(gated.metadata).code == 201)
+    #expect(await phone.upload(id, chunk: 0, gated.chunks[0]).code == 204)
+    await phone.engine.forget(id)
+
+    let status = await gated.heldAtItsRead { await phone.status(id) }
+    #expect(await phone.upload(id, chunk: 1, gated.chunks[1]).code == 204)
+    gated.gate.receiptRead.release()
+    let answered = try await status.value
+
+    #expect(answered.code == 200)
+    #expect(
+      try answered.json(Wire.RecordingStatus.self)
+        == Wire.RecordingStatus(state: .receiving, receivedChunks: [0, 1]))
+    #expect(await phone.engine.activeReceipts[id]?.receivedChunks == [0, 1])
+    #expect(try await gated.test.store.handoverReceipt(recordingID: id)?.receivedChunks == [0, 1])
     #expect(!gated.gate.timedOut, "nothing waited on the held read")
   }
 
@@ -286,14 +322,13 @@ import Testing
   /// `meetingID`, the intake admitted it once, and the phone's next
   /// `complete` answers that meeting again.
   private static func staysComplete(
-    _ phone: EngineDevice, _ recordingID: UUID, meetingID: UUID, store: MeetingStore,
-    intake: FakeHandoverIntake
+    _ phone: EngineDevice, _ recordingID: UUID, meetingID: UUID, test: TestService
   ) async throws {
     let complete = HandoverState.complete(meetingID: meetingID)
     #expect(await phone.engine.activeReceipts[recordingID]?.state == complete)
-    #expect(try await store.handoverReceipt(recordingID: recordingID)?.state == complete)
-    #expect(await intake.admissions.count == 1)
+    #expect(try await test.store.handoverReceipt(recordingID: recordingID)?.state == complete)
+    #expect(await test.intake.admissions.count == 1)
     #expect(try await completed(phone, recordingID) == meetingID)
-    #expect(await intake.admissions.count == 1, "the next complete admits nothing new")
+    #expect(await test.intake.admissions.count == 1, "the next complete admits nothing new")
   }
 }
