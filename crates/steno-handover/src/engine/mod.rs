@@ -634,11 +634,13 @@ impl Engine {
 
     /// A change of the receipt a request read, through [`Engine::change`]:
     /// `edit` changes the copy memory holds, or `receipt` when memory holds
-    /// none (a revoked device), and `receipt` comes back as memory then
-    /// holds it. A receipt memory holds as `complete` stays as it is and
-    /// nothing is saved: a request that read it before the phone's
-    /// `complete` admitted the recording must not put it back, or the
-    /// phone's next `complete` would start over and admit it again.
+    /// none (a revoked device), and `receipt` comes back as changed, or as
+    /// memory holds it when it stays `complete`. When memory holds another
+    /// device's receipt (a revoked phone paired again), nothing changes. A
+    /// receipt memory holds as `complete` stays as it is and nothing is
+    /// saved: a request that read it before the phone's `complete` admitted
+    /// the recording must not put it back, or the phone's next `complete`
+    /// would start over and admit it again.
     async fn update(
         &self,
         receipt: &mut HandoverReceipt,
@@ -647,8 +649,9 @@ impl Engine {
         let picked = self.change(
             receipt.recording_id,
             |held| match held {
+                Some(held) if held.device_id != receipt.device_id => Err(None),
                 Some(held) if held.state.kind() == HandoverStateKind::Complete => {
-                    Err(Box::new(held.clone()))
+                    Err(Some(Box::new(held.clone())))
                 }
                 held => Ok(held.unwrap_or(receipt).clone()),
             },
@@ -660,7 +663,9 @@ impl Engine {
                 self.save(changed, place).await
             }
             Err(complete) => {
-                *receipt = *complete;
+                if let Some(complete) = complete {
+                    *receipt = *complete;
+                }
                 Ok(())
             }
         }

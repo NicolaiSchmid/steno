@@ -498,3 +498,49 @@ async fn an_announce_of_another_phone_that_found_no_receipt_is_refused() {
     );
     assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
 }
+
+#[tokio::test]
+async fn a_complete_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
+    // The phone is revoked while its `complete` is in the intake, and
+    // another phone announces the same recording id. The intake then
+    // answers, and the `complete` write finds a receipt of another device
+    // in memory and changes nothing. Written into it, it would tell the
+    // other phone `complete` for a recording never admitted from it, and
+    // that phone would delete its copy.
+    let chunk_size: i64 = 64 * 1024;
+    let intake = ScriptedIntake::gated(meeting_id(), false);
+    let test = TestService::with(common::Options {
+        chunk_size,
+        intake: Some(intake.clone() as Arc<dyn steno_core::HandoverIntake>),
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * chunk_size as usize, 70);
+    let metadata = phone.metadata(&bytes, chunk_size);
+    phone.upload_all(&metadata, &bytes).await;
+    let id = metadata.recording_id;
+
+    let completion = phone.complete(id);
+    let meanwhile = async {
+        intake.admitting().await;
+        test.service.revoke(phone.device.id).await.unwrap();
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+        intake.release();
+        other
+    };
+    let (completed, other) = tokio::join!(completion, meanwhile);
+    assert_eq!(completed.status.as_u16(), 200);
+
+    let (in_memory, stored) = receipts(&test, id);
+    assert_eq!(
+        (in_memory.device_id, stored.device_id),
+        (other.device.id, other.device.id)
+    );
+    assert_eq!(
+        (in_memory.state, stored.state),
+        (HandoverState::Receiving, HandoverState::Receiving)
+    );
+}
