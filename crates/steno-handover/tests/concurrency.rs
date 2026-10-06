@@ -19,7 +19,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{
-    EngineDevice, ScriptedIntake, TestService, chunks, engine_hello, held_while, seeded_bytes,
+    EngineDevice, ScriptedIntake, TestService, chunks, engine_hello, held, held_while, seeded_bytes,
 };
 use steno_core::{
     AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
@@ -281,6 +281,14 @@ fn chunk_sets(test: &TestService, recording_id: Uuid) -> (Vec<i64>, Vec<i64>) {
 fn owners(test: &TestService, recording_id: Uuid) -> (Uuid, Uuid) {
     let (in_memory, stored) = receipts(test, recording_id);
     (in_memory.device_id, stored.device_id)
+}
+
+/// Sends every chunk of `recording_id`, each answered 204.
+async fn sent(phone: &EngineDevice, recording_id: Uuid, chunks: &[Vec<u8>]) {
+    for (index, chunk) in chunks.iter().enumerate() {
+        let response = phone.upload(recording_id, index as i64, chunk).await;
+        assert_eq!(response.status.as_u16(), 204, "chunk {index}");
+    }
 }
 
 /// The meeting a `complete` of `recording_id` admitted.
@@ -615,12 +623,7 @@ async fn a_complete_of_a_revoked_phone_leaves_another_phones_upload_alone() {
         "and so does its sidecar"
     );
 
-    for (index, chunk) in chunks.iter().enumerate() {
-        assert_eq!(
-            other.upload(id, index as i64, chunk).await.status.as_u16(),
-            204
-        );
-    }
+    sent(&other, id, &chunks).await;
     // The gated intake lets the other phone's admission through at once.
     intake.release();
     assert_eq!(completed(&other, id).await, meeting_id());
@@ -644,11 +647,11 @@ fn racing_first_announces(
         device_name: late.device.name.clone(),
         ..metadata.clone()
     };
-    let (first_hold, first_thread) = common::held(test, {
+    let (first_hold, first_thread) = held(test, {
         let (phone, metadata) = (phone.clone(), metadata.clone());
         async move { phone.announce(&metadata).await }
     });
-    let (late_hold, late_thread) = common::held(test, {
+    let (late_hold, late_thread) = held(test, {
         let late = late.clone();
         async move { late.announce(&late_metadata).await }
     });
@@ -669,12 +672,7 @@ async fn the_sidecar_is_the_receipts(
     let id = metadata.recording_id;
     assert_eq!(owners(test, id), (phone.device.id, phone.device.id));
     assert_eq!(test.inbox().load_metadata(id).as_ref(), Some(metadata));
-    for (index, chunk) in chunks.iter().enumerate() {
-        assert_eq!(
-            phone.upload(id, index as i64, chunk).await.status.as_u16(),
-            204
-        );
-    }
+    sent(phone, id, chunks).await;
     completed(phone, id).await;
     let admissions = test.intake.admissions.entries();
     assert_eq!(admissions.len(), 1);
@@ -733,12 +731,7 @@ async fn an_announce_whose_files_cannot_be_opened_keeps_its_receipt() {
     std::fs::remove_file(&directory).unwrap();
     assert_eq!(phone.announce(&metadata).await.status.as_u16(), 200);
     assert_eq!(test.inbox().load_metadata(id), Some(metadata.clone()));
-    for (index, chunk) in chunks.iter().enumerate() {
-        assert_eq!(
-            phone.upload(id, index as i64, chunk).await.status.as_u16(),
-            204
-        );
-    }
+    sent(&phone, id, &chunks).await;
     completed(&phone, id).await;
     assert_eq!(test.intake.admissions.count(), 1);
 }
