@@ -1,15 +1,27 @@
 # Mac cutover: the Tauri app replaces the Swift app
 
-Extended by `.plans/2026-10-07-stable-promotion.md` (2026-10-07), which
-replaces this plan's opening gate (every unticked parity line) with a blocking
-list, replaces steps 2 (the Sparkle handoff) and 3 (distribution), and proposes
-answers to the open choices in steps 1 and 5. The inventory, steps 4, 6 and 7,
-and the tests stand. No longer true here: publishing to the beta channel first
-stages nothing, because every installed Swift build is a release candidate
-that reads `beta` (and `v0.9.0-rc.1` reads `releases/latest/download/appcast.xml`,
-not the `appcast` branch); the two-login-items risk is moot if the Rust app
-keeps `SMAppService` (that plan's D4); and test 1's "a Swift release build
-reads no channel" does not hold for any installed build.
+Extended by `.plans/2026-10-07-stable-promotion.md` (2026-10-07). That plan:
+
+- replaces the opening gate (every unticked parity line) with its blocking list,
+  and this plan's one pull request with its packages S6 to S9;
+- replaces step 2's beta staging and signing and all of step 3 (distribution);
+  step 2's frozen `appcast` branch stands, with one handoff item (its D8), and
+  step 7's removal of `release.yml` moves to its S7;
+- answers the open choices in step 1 (its D5) and step 5 (its D4, which keeps
+  `SMAppService`, so the two-login-items risk is moot);
+- carries step 4 as two preference keys plus Sparkle's update flags.
+
+The inventory, steps 4, 6 and 7, and the tests stand, with three corrections
+(that plan's Facts):
+
+- test 1's premise that a Swift release build reads no channel matches no
+  installed build: every one is a release candidate, and from `v0.9.0-rc.2`
+  on each reads `beta` too, while `v0.9.0-rc.1` reads
+  `releases/latest/download/appcast.xml`;
+- test 1's `codesign -dr -` texts never match, so `codesign --verify -R` is
+  the check;
+- Sparkle does not refuse a bundle for its id, so the first risk keeps only the
+  missing key and the signature.
 
 Status: planned 2026-10-04, not started. WP9b, the second half of WP9 in
 `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP9a (signed, notarised

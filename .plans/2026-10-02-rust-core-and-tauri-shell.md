@@ -511,8 +511,8 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   onboarding permissions per OS, deep links, single instance, dialogs, the six
   installer bundles, and `.github/workflows/desktop-release.yml`: a manual run that
   builds the bundles on the three platforms, unsigned, as workflow artifacts.
-- **WP9 Mac cutover and signed releases.** Parity list empty (apart from the two
-  Rust-only "Speech" lines), same bundle id, Sparkle handoff, Swift app removed, web
+- **WP9 Mac cutover and signed releases.** The blocking list of
+  `.plans/2026-10-07-stable-promotion.md` (D3) closed, same bundle id, Sparkle handoff, Swift app removed, web
   app moved to `apps/web`, Swift rows removed from `AGENTS.md`; `cargo deny` with a
   licence allow list in CI; the signing key for the updater artifacts, notarisation,
   and the tag-triggered release workflow that publishes the bundles and the updater
@@ -1512,9 +1512,9 @@ touch lines; each fix is ported to Swift before cutover.
 
 - Launch at login is a Launch Agent through `tauri-plugin-autostart`, where the Swift
   app registers with `SMAppService`; the `requiresApproval` state never occurs on the
-  Rust side. At cutover (WP9) the Swift registration has to be removed or migrated so
-  the user does not end up with two login items, and the General section's copy for
-  the approval state becomes unreachable.
+  Rust side. On macOS the cutover moves the Rust app onto `SMAppService.mainApp` too,
+  so the Swift registration carries over and the approval copy stays reachable
+  (`.plans/2026-10-07-stable-promotion.md`, D4).
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
   Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
   The page answers the shortcuts it shows itself (`useShortcut` in
@@ -1690,7 +1690,9 @@ covers it) and which pull requests found it. The pull request that fixes an item
   cutover (the WAV mixdown, the resampler, the sidecar's 2 ms lag, AAC priming, call
   mode without an output client). Where: "Store", "Adapters", "Handover", "LLM",
   "Audio" and "Bridge" in the parity list, and the CLI's `--title` under "Pipeline
-  and services (WP6b)". Found: #155, #165, #166, #167, #169, #190.
+  and services (WP6b)". `.plans/2026-10-07-stable-promotion.md` (D9) settles all of
+  them, the parity notes' other "before cutover" ports to Swift included; the stable
+  promotion's S7 deletes this item. Found: #155, #165, #166, #167, #169, #190.
 - **WP9b.** The Bonjour record is not published again after a network change, on
   every platform, where Swift's `NWListener` follows it; and the shell passes no
   computer name on any platform, so the Mac and Windows advertise `HOSTNAME`,
