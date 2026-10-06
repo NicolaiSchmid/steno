@@ -8,7 +8,9 @@
 //! the meeting reached it after its `page.ready`, the tray was built, both
 //! panels were visible at the size their page reported and held it
 //! (`keeps_its_size`), a second prompt reached the prompt's window, both
-//! panels hid, and closing main hid it rather than destroying it; 1
+//! panels hid, closing main hid it rather than destroying it, and on Linux
+//! closing Settings kept it and opening it again on a section loaded a
+//! fresh page there (`windows::Retired`); 1
 //! otherwise; a value that is not a positive number ends the run at once
 //! with 2. Screenshots of the Xvfb root during the wait are the review
 //! evidence; the windows carry what the host's database holds (nothing on a
@@ -50,6 +52,9 @@ pub struct Smoke {
     /// The meeting asked of main before its page mounted reached it after
     /// its `page.ready` (`windows::Pages`).
     request_delivered: AtomicBool,
+    /// How many times a Settings page sent `page.ready`: a kept window
+    /// opened again mounts a new one.
+    settings_ready: AtomicUsize,
     tray_built: AtomicBool,
     /// The size each panel's page last reported, checked against the
     /// window at the end.
@@ -100,6 +105,9 @@ impl Smoke {
         }
         if label == BridgeWindow::Main.as_str() {
             self.main_ready.store(true, Ordering::SeqCst);
+        }
+        if label == BridgeWindow::Settings.as_str() {
+            self.settings_ready.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -271,7 +279,9 @@ pub fn arm(app: &AppHandle) {
     let handle = app.clone();
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(seconds));
-        let checks = check_panels(&handle).and_then(|()| check_main_hides(&handle));
+        let checks = check_panels(&handle)
+            .and_then(|()| check_main_hides(&handle))
+            .and_then(|()| check_settings_reopens(&handle));
         let outcome = handle.state::<Smoke>().outcome(checks);
         stderr_line!("[steno-desktop] smoke: {}", outcome.message(seconds));
         handle.exit(outcome.exit_code());
@@ -365,6 +375,67 @@ fn check_main_hides(app: &AppHandle) -> Result<(), String> {
         return Err("the main window stayed visible after a close".into());
     }
     stderr_line!("[steno-desktop] smoke: closing main hid it");
+    Ok(())
+}
+
+/// On Linux closing Settings keeps the window (`windows::Retired`), and
+/// opening it again on a section loads a fresh page on that section, as a
+/// new window would: the window is visible, shows the section's route and
+/// a new page sent `page.ready`. Elsewhere a close destroys it, as before.
+fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
+    if !windows::retires_on_close(BridgeWindow::Settings.as_str()) {
+        return Ok(());
+    }
+    let label = BridgeWindow::Settings.as_str();
+    let settings = app
+        .get_webview_window(label)
+        .ok_or("Settings was gone before the close")?;
+    let mounted = app.state::<Smoke>().settings_ready.load(Ordering::SeqCst);
+    settings.close().map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(1000));
+    let kept = app
+        .get_webview_window(label)
+        .ok_or("closing Settings destroyed it")?;
+    if kept.is_visible().map_err(|error| error.to_string())? {
+        return Err("Settings stayed visible after a close".into());
+    }
+    // A second close of the kept window changes nothing.
+    kept.close().map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(300));
+    let section = steno_bridge::SettingsSection::Export;
+    let params = WindowParams {
+        window: BridgeWindow::Settings,
+        section: Some(section),
+        meeting_id: None,
+    };
+    windows::open_requested(app, &app.state::<Host>(), &params)
+        .map_err(|error| format!("opening Settings again: {error}"))?;
+    // A page mounts within a second or two; a debug build on a busy
+    // machine may need longer.
+    let smoke = app.state::<Smoke>();
+    for _ in 0..50 {
+        if smoke.settings_ready.load(Ordering::SeqCst) > mounted {
+            break;
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    if !kept.is_visible().map_err(|error| error.to_string())? {
+        return Err("Settings opened again stayed hidden".into());
+    }
+    let wanted = format!("/settings?section={section}");
+    let url = kept.url().map_err(|error| error.to_string())?;
+    if url.fragment() != Some(wanted.as_str()) {
+        return Err(format!(
+            "Settings opened again shows {:?}, not {wanted:?}",
+            url.fragment()
+        ));
+    }
+    if smoke.settings_ready.load(Ordering::SeqCst) <= mounted {
+        return Err("Settings opened again mounted no new page in 10 s".into());
+    }
+    stderr_line!(
+        "[steno-desktop] smoke: closing Settings kept it, and it opened again on {section}"
+    );
     Ok(())
 }
 
