@@ -1,5 +1,12 @@
 # Mac cutover: the Tauri app replaces the Swift app
 
+Extended by `.plans/2026-10-07-stable-promotion.md` (2026-10-07), which
+replaces this plan's opening gate (every unticked parity line) with a
+blocking list, replaces steps 2 (the Sparkle handoff: every installed Swift
+build reads the `beta` channel, so a beta item stages nothing) and 3
+(distribution), and proposes answers to the open choices in steps 1 and 5.
+The inventory, steps 4, 6 and 7, the risks and the tests stand.
+
 Status: planned 2026-10-04, not started. WP9b, the second half of WP9 in
 `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP9a (signed, notarised
 bundles that carry the speech sidecar, `cargo deny`, the `desktop-v*`

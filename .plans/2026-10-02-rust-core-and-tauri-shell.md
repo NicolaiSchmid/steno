@@ -2,7 +2,8 @@
 
 Status: every work package from WP1 to WP10b except WP9b is merged on `main`; the port's
 last pull request, #187, merged on 2026-10-05. Left: the Mac cutover (WP9b,
-`.plans/2026-10-04-mac-cutover.md`), the first Linux release and the first Windows
+`.plans/2026-10-04-mac-cutover.md`, ordered and gated by
+`.plans/2026-10-07-stable-promotion.md`), the first Linux release and the first Windows
 release (WP10's hardware checks; the Windows installers from #184 are unsigned). "Open
 after the port" lists each open item and its owner. Started 2026-10-02 on branch
 `refactor/rust-workspace`. Amends `.plans/2026-09-24-initial-scope.md` (removes
@@ -1628,11 +1629,12 @@ Rust fixes these Swift behaviours; each is ported to Swift or accepted before cu
 ## Open after the port
 
 What the merged packages left open. Each item starts with its owner: **WP9b** (the Mac
-cutover, `.plans/2026-10-04-mac-cutover.md`), **First Linux release**, **First Windows
-release** (WP10's hardware checks and the unsigned installers), the branch of a
-follow-up pull request, or **Unowned** (no package or release has it yet). Then it
-says what is open, where it lives (pointing to this plan where the plan already covers
-it) and which pull requests found it. The pull request that fixes an item deletes it.
+cutover, `.plans/2026-10-04-mac-cutover.md`; which items block the stable release, and the
+package that closes each, are in `.plans/2026-10-07-stable-promotion.md`), **First Linux
+release**, **First Windows release** (WP10's hardware checks and the unsigned installers),
+the branch of a follow-up pull request, or **Unowned** (no package or release has it yet).
+Then it says what is open, where it lives (pointing to this plan where the plan already
+covers it) and which pull requests found it. The pull request that fixes an item deletes it.
 
 - **WP9b.** The unticked lines of the parity list must all be ticked before the
   cutover opens: the menu bar's queue and recent meetings, the detection prompt, the
@@ -1695,10 +1697,6 @@ it) and which pull requests found it. The pull request that fixes an item delete
 - **WP9b.** No concurrency group spans the two release workflows, so two macOS signing
   jobs can run at once; only both READMEs state the one-at-a-time rule, until
   `release.yml` retires at the cutover. Where: `.github/workflows/release.yml`,
-  `.github/workflows/desktop-release.yml`. Found: #184.
-- **WP9b.** The first `desktop-v*` tag, which the Mac's pre-releases bring before any
-  Linux or Windows release, is the first run of the `publish` job against GitHub and
-  the first MSI built for an `-rc.N` version. Where:
   `.github/workflows/desktop-release.yml`. Found: #184.
 - **First Linux release.** A logout on KDE Plasma, or on Xfce under Wayland, saves
   the recording only when systemd ends the session's processes with a signal; when
@@ -1881,7 +1879,7 @@ PR off `main`.
 | WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | merged |
 | Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
 | WP9a signed and notarised release bundles with the speech sidecar, `cargo deny`, the `desktop-v*` release and the updater lanes | `feat/rust-release-signing` | #184 | merged |
-| WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`) | | | planned |
+| WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`), ordered by the stable promotion (`.plans/2026-10-07-stable-promotion.md`) | | | planned |
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | merged |
