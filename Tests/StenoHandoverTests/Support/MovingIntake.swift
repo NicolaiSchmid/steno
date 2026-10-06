@@ -15,9 +15,7 @@ struct MovingIntake: HandoverIntake {
   func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws -> UUID {
     let taken = directory.appendingPathComponent(file.lastPathComponent)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    if FileManager.default.fileExists(atPath: taken.path) {
-      try FileManager.default.removeItem(at: taken)
-    }
+    try? FileManager.default.removeItem(at: taken)
     try FileManager.default.moveItem(at: file, to: taken)
     do {
       return try await intake.admit(file: taken, metadata: metadata, device: device)
