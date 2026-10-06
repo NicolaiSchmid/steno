@@ -1268,7 +1268,7 @@ item to settle before the Linux release:
   another output is not in the lane. Steno plays no audio today (no
   playback in the Rust crates, no `<audio>` in the web UI), so nothing of
   its own is in the lane. Leaving its output out was weighed and not done
-  (PIPEWIRE_PR); the measurements, on the private daemon with PipeWire
+  (#214); the measurements, on the private daemon with PipeWire
   1.6.5 and WirePlumber 0.5.14:
   - A playback node names its process only through its client: the node
     carries `client.id`, and that client `application.process.id` (equal
@@ -1364,7 +1364,7 @@ item to settle before the Linux release:
   (`pw-metadata -n default &`), so it outlives the pong, the monitor
   prints the set.
 
-  Upstream (checked 2026-10-07, PIPEWIRE_PR): this is
+  Upstream (checked 2026-10-07, #214): this is
   [pipewire#5445](https://gitlab.freedesktop.org/pipewire/pipewire/-/work_items/5445),
   reported against PipeWire 1.6.8 with WirePlumber 0.5.15 and fixed by
   06de0ed2 ("metadata: remove pending pong on unbind"), which calls
