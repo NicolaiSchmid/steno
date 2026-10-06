@@ -963,7 +963,7 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The phone intake syncs the copy and its folder to the disk before it marks the
   receipt complete (`steno_pipeline::files::copy_durably`); Swift's `copyItem` did
   not, so a power loss after the phone's 200 lost the recording on both devices. The
-  receipt and meeting commits still run under `NORMAL` (the Store item below).
+  receipt and meeting commits are durable in both apps (the Store item below).
 - Every exit runs `App::shutdown` first, once, at most ten seconds (`ExitGate`): the
   pipelines quit, a start or a stop in progress settles, a recording in progress stops
   with `quit` and is saved, the handover listener stops, and no recording starts
@@ -1128,12 +1128,24 @@ still has to draw the window side. `[ ]` is not ported yet.
   database with an identifier it does not know, as the Rust store does
   (`StoreError::UnknownMigration`); today GRDB ignores unknown identifiers and the
   Swift app would run on a newer schema without noticing.
-- `RecordingIntake.admit` should have the copied master (fsynced with its folder), the
-  receipt and the meeting-row commits on disk before the Mac answers `complete`,
-  because the phone then deletes its copy; today the copy is not fsynced and under
-  `synchronous = NORMAL` a power loss can roll the commits back. Those commits need
-  `FULL` (and `fullfsync` on macOS for the drive cache), here and in the Rust port of
-  the intake.
+- `RecordingIntake.admit` has the `complete` receipt and the meeting-row commits on
+  disk before the computer answers `complete`, because the phone then deletes its
+  copy. Both apps run each of those transactions under `synchronous = FULL` with
+  `fullfsync` on (`F_FULLFSYNC` on Apple platforms also flushes the drive's cache),
+  so its commit syncs the WAL, and set the writer back to `NORMAL` once it has ended,
+  on every path, in the same hold of the writer: `Store::write_durably` (a guard that
+  restores on errors and panics), `MeetingStore.writeDurably` (one
+  `writeWithoutTransaction`, a `defer`). The receipt goes through
+  `save_handover_receipt_durably` and `saveDurably(_:)`, the meeting through
+  `ProcessingPipeline::enqueue_durably` and `enqueueDurably`, which every production
+  wiring of the intake uses (`RecordingIntake::over`,
+  `steno_services::app::handover_intake`, `RecordingIntake.init(pipeline:)`,
+  `AppEnvironment.makeIntake`). A refused admission's `failed` receipt and every
+  other write stay `NORMAL`. Tests read the level inside the commits (Rust's
+  `Store::probe_commits` behind `testing`, Swift's `CommitLog` over the writer's
+  trace); a power loss itself is not tested. Swift should still fsync the copied
+  master with its folder, as Rust's `copy_durably` does; its `copyItem` syncs
+  nothing.
 
 ### Adapters
 
@@ -2207,11 +2219,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
     in as a new recording, as in the part above. Where: the 409 of `reannounce` (also
     reached from `announce`) in `crates/steno-handover/src/engine/recording.rs` and of
     `announce` in `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #223.
-- **Unowned.** The phone intake's receipt and meeting commits run under
-  `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
-  power loss after the computer answers `complete`, when the phone deletes its copy,
-  can roll them back; the copied file itself is synced. Both apps. Where: the
-  `RecordingIntake.admit` item under "Store". Found: #169, #173, #174.
 - **Unowned.** Linux keeps secrets in the 0600 `secrets.json` under the support
   directory, not in the Secret Service. Where: `crates/steno-services/src/secrets.rs`.
   Found: #173.
@@ -2287,6 +2294,7 @@ PR off `main`.
 | A re-announce of a `complete` recording with another size or hash is answered 409, so the phone keeps its file, and the same bytes in other chunks are answered `complete` (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | open |
 | A first announce, one that finds no receipt in memory or the store, discards every inbox file of the recording id before it opens its own, so an old verified file is never admitted unhashed; Swift's announce answers a failed receipt read with 500 (`steno-handover`, Swift core) | `fix/handover-first-announce-discard` | #239 | open |
 | The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
+| The phone intake's receipt and meeting commit under `FULL` before `complete` answers (both apps) | `fix/handover-durable-intake` | | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -2318,8 +2326,9 @@ folder, enqueue) arrived with WP6b as `RecordingIntake` in
 `complete` answers 200 is the intake's, as in Swift: the listener fsyncs each chunk
 (`receiving_file::write`) and writes its own `complete` receipt only after
 `HandoverIntake::admit` returns. The intake syncs the copy and its folder first
-(`steno_pipeline::files::copy_durably`); its commits still run under `NORMAL` (the
-`RecordingIntake.admit` line under Store). Pairing and revoke commits stay `NORMAL`,
+(`steno_pipeline::files::copy_durably`), and its receipt and meeting commits run
+under `FULL` in both apps (the `RecordingIntake.admit` line under Store). Pairing and
+revoke commits stay `NORMAL`,
 as in Swift: a power loss right after one can forget a pairing (the phone gets 401
 and unpairs, and the user pairs it again) or bring a revoked device back.
 
