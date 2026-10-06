@@ -1363,6 +1363,40 @@ item to settle before the Linux release:
   With the second bind run in the background instead
   (`pw-metadata -n default &`), so it outlives the pong, the monitor
   prints the set.
+
+  Upstream (checked 2026-10-07, PIPEWIRE_PR): this is
+  [pipewire#5445](https://gitlab.freedesktop.org/pipewire/pipewire/-/work_items/5445),
+  reported against PipeWire 1.6.8 with WirePlumber 0.5.15 and fixed by
+  06de0ed2 ("metadata: remove pending pong on unbind"), which calls
+  `remove_pending` first thing in `global_unbind`. PipeWire 1.6.9
+  (2026-09-17) is the first release with it. `metadata.c` is the same
+  file, line for line, in 1.2.7, 1.4.11, the head of the `1.4` branch and
+  1.6.5 to 1.6.8, and has the same code at the same lines in 1.0.5: a
+  distribution on the 1.0 to 1.4 lines keeps the miss unless it carries
+  the fix. The reproduction still holds with the nix shell's
+  PipeWire 1.6.5 and WirePlumber 0.5.14 (both variants re-run); it was not
+  run against 1.6.9. Nothing is left to report for 1.6. What could still
+  be asked is a backport to 1.4; the text below is ready and not filed
+  (Nicolai files it if the Linux release targets a distribution on 1.4):
+
+  > **metadata: backport "remove pending pong on unbind" (#5445) to 1.4**
+  >
+  > PipeWire 1.4.11 and the `1.4` branch still have the bug 06de0ed2
+  > fixed for 1.6.9. In `src/modules/module-metadata/metadata.c`,
+  > `global_bind` pings the metadata's owner and raises `impl->pending`
+  > (lines 189 and 190); `metadata_property` forwards an event only while
+  > `pending` is 0 or to a resource still waiting for its pong (line 53);
+  > `global_unbind` (line 106) removes the pong listener without calling
+  > `remove_pending` (line 122). So a client that unbinds before the owner
+  > answers its ping stops property events for every bound client until
+  > the owner restarts. Reproduced with PipeWire 1.6.5 and WirePlumber
+  > 0.5.14, whose `metadata.c` is identical to 1.4.11's, with `$wp` the
+  > WirePlumber process: `pw-metadata -m -n default &`, then
+  > `kill -STOP $wp`, `timeout 1 pw-metadata -n default`,
+  > `kill -CONT $wp`, `pw-metadata -n default 0 test.after 1`.
+  > Expected: the monitor prints `test.after`. Actual: it never does,
+  > while a fresh `pw-metadata -n default` lists it. Could 06de0ed2 go
+  > into 1.4?
 - **`stop()` is bounded.** It closes the capture's gate to the sink and
   joins the PipeWire thread, all within 2 s of its call. A cycle's
   delivery already inside the gate is waited for without a bound: it takes
@@ -1795,10 +1829,11 @@ it) and which pull requests found it. The pull request that fixes an item delete
   list and no meeting detection, the latencies are unmeasured on real hardware, and
   the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
   Where: the Linux items under "Audio". Found: #166, #176.
-- **First Linux release.** A default move can go unreported (PipeWire 1.6.5 with
-  WirePlumber 0.5.14): report it to PipeWire upstream and check it on the release's
-  versions. Where: "A default move can go unreported" in the Linux list under
-  "Audio". Found: #197, #201.
+- **First Linux release.** A default move can go unreported on PipeWire before 1.6.9
+  (pipewire#5445, fixed upstream by 06de0ed2; seen with 1.6.5 and WirePlumber
+  0.5.14). Check the versions the release's distributions ship; for one on 1.4, file
+  the backport request whose text is ready (not filed). Where: "A default move can go
+  unreported" in the Linux list under "Audio". Found: #197, #201.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
