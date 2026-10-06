@@ -432,3 +432,44 @@ async fn stays_complete(
     assert_eq!(completed(phone, recording_id).await, meeting_id);
     assert_eq!(test.intake.admissions.count(), 1);
 }
+
+#[tokio::test]
+async fn an_announce_that_found_no_receipt_keeps_the_one_made_meanwhile() {
+    // The phone announces a new recording twice at once (a retry after its
+    // own timeout). One announce is held at its clock read, after its
+    // receipt read found nothing and it opened the partial, while the other
+    // one answers 201 and chunk 0 lands. The held one then finds that
+    // receipt in memory and answers as a re-announce, so chunk 0 stays.
+    let chunk_size: i64 = 64 * 1024;
+    let test = TestService::with(common::Options {
+        chunk_size,
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * chunk_size as usize, 68);
+    let metadata = phone.metadata(&bytes, chunk_size);
+    let id = metadata.recording_id;
+    let chunks = chunks(&bytes, chunk_size);
+    let hold = test.clock.hold_next_read();
+    let second = on_another_thread({
+        let (other, metadata) = (phone.clone(), metadata.clone());
+        async move { other.announce(&metadata).await }
+    });
+    hold.reached();
+    assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
+    assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    hold.release();
+    let reannounced = second.join().unwrap();
+    assert_eq!(reannounced.status.as_u16(), 200);
+    assert_eq!(
+        reannounced.decode::<wire::RecordingStatus>().unwrap(),
+        wire::RecordingStatus {
+            state: HandoverStateKind::Receiving,
+            received_chunks: vec![0]
+        }
+    );
+
+    assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
+}

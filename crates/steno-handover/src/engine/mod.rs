@@ -722,19 +722,6 @@ impl Engine {
         Ok((changed, state.next_write()))
     }
 
-    /// Writes a new receipt and tells the observers. Memory holds it before
-    /// the save runs, and the save takes its place in line under the same
-    /// guard, so the saves commit in the order memory changed. Changes to a
-    /// known receipt go through [`Engine::change`].
-    pub(crate) async fn persist(&self, receipt: &HandoverReceipt) -> store::Result<()> {
-        let place = {
-            let mut state = self.state();
-            state.remember(receipt);
-            state.next_write()
-        };
-        self.save(receipt.clone(), place).await
-    }
-
     /// Saves `receipt` at its place in line and tells the observers.
     async fn save(&self, receipt: HandoverReceipt, place: InOrder) -> store::Result<()> {
         let result = self
