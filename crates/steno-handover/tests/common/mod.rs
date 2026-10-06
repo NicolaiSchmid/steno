@@ -163,6 +163,8 @@ impl WallClock {
     /// Holds the service's next read of the clock, on the thread that makes
     /// it, until the hold is released, so a test stops a request at that
     /// point while another one runs. Reads by the test itself go through.
+    /// A read not released within [`SIGNAL_BOUND`] panics, so a clock read
+    /// moved under the state lock fails the test.
     pub fn hold_next_read(&self) -> ClockHold {
         let (reached, reached_here) = mpsc::channel();
         let (release, released) = mpsc::channel();

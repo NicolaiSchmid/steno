@@ -288,6 +288,36 @@ fn chunk_sets(test: &TestService, recording_id: Uuid) -> (Vec<i64>, Vec<i64>) {
     (in_memory.received_chunks, stored.received_chunks)
 }
 
+/// The meeting a `complete` of `recording_id` admitted.
+async fn completed(phone: &EngineDevice, recording_id: Uuid) -> Uuid {
+    let completed = phone.complete(recording_id).await;
+    assert_eq!(completed.status.as_u16(), 200);
+    completed
+        .decode::<wire::CompleteResponse>()
+        .unwrap()
+        .meeting_id
+}
+
+/// Memory and the store hold `recording_id` as `complete` with
+/// `meeting_id`, the intake admitted it once, and the phone's next
+/// `complete` answers that meeting again.
+async fn stays_complete(
+    test: &TestService,
+    phone: &EngineDevice,
+    recording_id: Uuid,
+    meeting_id: Uuid,
+) {
+    let (in_memory, stored) = receipts(test, recording_id);
+    let complete = HandoverState::Complete { meeting_id };
+    assert_eq!(
+        (in_memory.state, stored.state),
+        (complete.clone(), complete)
+    );
+    assert_eq!(test.intake.admissions.count(), 1);
+    assert_eq!(completed(phone, recording_id).await, meeting_id);
+    assert_eq!(test.intake.admissions.count(), 1);
+}
+
 #[tokio::test]
 async fn two_chunks_that_land_at_once_both_stay_in_the_receipt() {
     // The phone keeps two chunks in flight, and the listener runs each on
@@ -339,8 +369,8 @@ async fn a_late_chunk_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
     let (test, phone, metadata, chunks) = announced_two_chunks(65).await;
     let id = metadata.recording_id;
     let late = {
-        let (other, chunk) = (phone.clone(), chunks[0].clone());
-        async move { other.upload(id, 0, &chunk).await }
+        let (phone, chunk) = (phone.clone(), chunks[0].clone());
+        async move { phone.upload(id, 0, &chunk).await }
     };
     let (late, ()) = held_while(&test, late, async {
         test.service.revoke(phone.device.id).await.unwrap();
@@ -408,36 +438,6 @@ async fn a_chunk_that_lands_during_a_complete_leaves_the_receipt_complete() {
     assert_eq!(first.status.as_u16(), 204);
 
     stays_complete(&test, &phone, id, meeting_id).await;
-}
-
-/// The meeting a `complete` of `recording_id` admitted.
-async fn completed(phone: &EngineDevice, recording_id: Uuid) -> Uuid {
-    let completed = phone.complete(recording_id).await;
-    assert_eq!(completed.status.as_u16(), 200);
-    completed
-        .decode::<wire::CompleteResponse>()
-        .unwrap()
-        .meeting_id
-}
-
-/// Memory and the store hold `recording_id` as `complete` with
-/// `meeting_id`, the intake admitted it once, and the phone's next
-/// `complete` answers that meeting again.
-async fn stays_complete(
-    test: &TestService,
-    phone: &EngineDevice,
-    recording_id: Uuid,
-    meeting_id: Uuid,
-) {
-    let (in_memory, stored) = receipts(test, recording_id);
-    let complete = HandoverState::Complete { meeting_id };
-    assert_eq!(
-        (in_memory.state, stored.state),
-        (complete.clone(), complete)
-    );
-    assert_eq!(test.intake.admissions.count(), 1);
-    assert_eq!(completed(phone, recording_id).await, meeting_id);
-    assert_eq!(test.intake.admissions.count(), 1);
 }
 
 #[tokio::test]
