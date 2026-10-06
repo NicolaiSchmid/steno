@@ -350,6 +350,45 @@ import Testing
     }
   }
 
+  @Test(.timeLimit(.minutes(1)))
+  func aLateChunkOfARevokedPhoneStaysOutOfAnotherPhonesReceipt() async throws {
+    // Chunk 0 is held after its file write while the phone is revoked (its
+    // receipt and partial go) and another phone pairs and announces the
+    // same recording id. The fold then finds the other phone's receipt in
+    // memory and changes nothing: 404, and that receipt lists no chunk.
+    // Folded in, the chunk would be listed though the other phone's partial
+    // lacks it, so that phone would never send it and its `complete` would
+    // fail the hash and start over.
+    let chunkSize = 64 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let held = HeldWrite()
+      let engine = Self.engine(test, writeChunk: held.write)
+      let phone = try await EngineClient.paired(test, engine: engine)
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 68)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: chunkSize)
+      let id = metadata.recordingID
+      #expect(try await phone.announce(metadata).code == 201)
+
+      held.arm()
+      defer { held.release() }
+      let late = Task { await phone.upload(id, chunk: 0, chunks[0]) }
+      await held.held()
+      try await engine.revoke(phone.device.id)
+      let other = try await EngineClient.paired(test, engine: engine, deviceName: "Other iPhone")
+      #expect(try await other.announce(metadata).code == 201)
+      held.release()
+
+      #expect(await late.value.code == 404)
+      let inMemory = try #require(await engine.activeReceipts[id])
+      let stored = try #require(try await test.store.handoverReceipt(recordingID: id))
+      for receipt in [inMemory, stored] {
+        #expect(receipt.deviceID == other.device.id)
+        #expect(receipt.receivedChunks == [], "not the revoked phone's chunk 0")
+      }
+    }
+  }
+
   /// An engine beside `test`'s service, over its store and intake, that
   /// saves receipts and writes chunks through the given seams.
   private static func engine(
