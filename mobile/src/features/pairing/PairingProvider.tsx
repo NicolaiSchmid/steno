@@ -27,9 +27,9 @@ export type PairingContextValue = {
 	replace(pairing: Pairing): Promise<void>;
 	clear(): Promise<void>;
 	/**
-	 * The token a request may go out with now: the current pairing's, or,
-	 * from the moment `replace` is called, the new one's while it is still
-	 * saving; the current one's again if that save fails.
+	 * The token a request may go out with now: from the moment `replace` is
+	 * called until its save settles, the new pairing's; otherwise the
+	 * current one's.
 	 */
 	currentToken(): string | null;
 	/**
