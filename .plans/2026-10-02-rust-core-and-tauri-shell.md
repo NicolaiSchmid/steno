@@ -1710,15 +1710,14 @@ request that fixes an item deletes it.
   re-pairing. Where: `onUnauthorized` is `clearPairing` in
   `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
   `mobile/src/features/sync/recording-client.ts`. Found: #191.
-- **Unowned.** The chunk route reads the live receipt after its file write
-  and saves it back with the chunk added in a second lock section, so two chunks of
-  one recording that land at once on the multi-thread runtime can both start from the
-  same copy, and the later save drops the earlier one's chunk, in memory and in the
-  store. `reannounce` does the same with the copy it read before its inbox checks.
-  The upload heals: `complete` answers 409 with the chunk missing and the phone sends
-  it again. Swift's actor makes the read and the save one step. Where:
-  `receive_chunk` and `reannounce` in `crates/steno-handover/src/engine/recording.rs`.
-  Found: #207.
+- **Unowned.** The chunk route reads the live receipt after its file write and saves it
+  back with the chunk added in a second lock section, so two chunks of one recording
+  that land at once on the multi-thread runtime can both start from the same copy, and
+  the later save drops the earlier one's chunk, in memory and in the store. `reannounce`
+  does the same with the copy it read before its inbox checks. The upload heals:
+  `complete` answers 409 with the chunk missing and the phone sends it again. Swift's
+  actor makes the read and the save one step. Where: `receive_chunk` and `reannounce` in
+  `crates/steno-handover/src/engine/recording.rs`. Found: #207.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
@@ -1806,7 +1805,7 @@ PR off `main`.
 | A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
 | Each platform's own wording and shortcuts: the platform from the shell, the page's words and keys, the host's permissions and sentences, the vault the CLI named | `fix/desktop-platform-wording` | #204 | merged |
-| Every handover engine write in the order asked for: the revoke's delete, the pairing's save and the touch join the receipt saves (`steno-handover`) | `fix/rust-handover-device-writes` | #207 | open |
+| Every handover engine write in the order asked for: the revoke's delete, the pairing's save and the touch join the receipt saves (`steno-handover`) | `fix/rust-handover-device-writes` | #207 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
