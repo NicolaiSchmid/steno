@@ -848,15 +848,16 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
 fn a_pairing_during_a_revokes_discards_stays_paired() {
     // The phone pairs again while the computer's revoke, past its count
     // bump, discards the phone's unfinished uploads. The revoke took the
-    // delete's place in line under the guard of the bump, so the pairing,
-    // which read the bumped count, saves after the delete and stays. A
-    // place taken after the discards would let the save commit first and
-    // the delete remove the new pairing. The uploads keep the revoke in
-    // its discards long enough for a pairing spinning on the other worker
-    // to land among them. The pairing starts once the first partial is
-    // gone, after the bump, so the test cannot fail on the fixed code
-    // however the threads run.
-    const UNFINISHED: u64 = 75;
+    // delete's place in line under the same guard as the bump, so the
+    // pairing, which reads the bumped count, saves after the delete and
+    // stays. A place taken after the discards would let the save commit
+    // first and the delete remove the new pairing. The discards do not
+    // yield, so on `on_one_worker` nothing could run among them. Here the
+    // pairing spins on a second worker until the first partial is gone, so
+    // it usually lands among the discards. It always starts after the
+    // bump, so the test cannot fail on the fixed code however the threads
+    // run.
+    const UNFINISHED: u64 = 200;
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -873,6 +874,10 @@ fn a_pairing_during_a_revokes_discards_stays_paired() {
             }
             // The revoke discards in recording id order.
             let first = ids.into_iter().min().unwrap();
+            assert!(
+                test.service.engine.inbox.has_partial(first),
+                "the first upload has a partial before the revoke, so the pairing waits for its discard"
+            );
             let service = test.service.clone();
             let (device_id, name) = (phone.device.id, phone.device.name.clone());
             let (started, waiting) = tokio::sync::oneshot::channel();
