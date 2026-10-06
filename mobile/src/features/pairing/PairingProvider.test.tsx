@@ -77,6 +77,13 @@ async function mount() {
 	};
 }
 
+/** Holds the next keychain save until the test settles it. */
+function holdSave() {
+	const save = Promise.withResolvers<void>();
+	fake.save.mockReturnValueOnce(save.promise);
+	return save;
+}
+
 beforeEach(() => {
 	fake.loads.length = 0;
 	fake.load.mockClear();
@@ -120,19 +127,13 @@ describe("PairingProvider", () => {
 
 	it("runs a clear after a replace still saving", async () => {
 		const h = await mount();
-		let saved!: () => void;
-		fake.save.mockImplementationOnce(
-			() =>
-				new Promise<void>((resolve) => {
-					saved = resolve;
-				}),
-		);
+		const save = holdSave();
 		let cleared: Promise<void> | undefined;
 		await act(async () => {
 			void h.value.replace(pairing);
 			cleared = h.value.clear();
 		});
-		await act(async () => saved());
+		await act(async () => save.resolve());
 		await act(async () => cleared);
 		expect(fake.clear).toHaveBeenCalledTimes(1);
 		expect(h.value.pairing).toBeNull();
@@ -173,19 +174,6 @@ describe("PairingProvider", () => {
 		const second = { ...pairing, token: "second" };
 		const third = { ...pairing, token: "third" };
 
-		function holdSave() {
-			let saved!: () => void;
-			let failed!: (error: Error) => void;
-			fake.save.mockImplementationOnce(
-				() =>
-					new Promise<void>((resolve, reject) => {
-						saved = resolve;
-						failed = reject;
-					}),
-			);
-			return { saved: () => saved(), failed: (e: Error) => failed(e) };
-		}
-
 		it("is the new pairing's from the moment replace is called", async () => {
 			fake.loads.push(pairing);
 			const h = await mount();
@@ -197,9 +185,8 @@ describe("PairingProvider", () => {
 				expect(h.value.currentToken()).toBe("second");
 			});
 			expect(h.value.pairing).toEqual(pairing);
-			expect(h.value.currentToken()).toBe("second");
 			await act(async () => {
-				save.saved();
+				save.resolve();
 				await replaced;
 			});
 			expect(h.value.currentToken()).toBe("second");
@@ -214,7 +201,7 @@ describe("PairingProvider", () => {
 				replaced = h.value.replace(second);
 			});
 			await act(async () => {
-				save.failed(new Error("locked"));
+				save.reject(new Error("locked"));
 				await expect(replaced).rejects.toThrow("locked");
 			});
 			expect(h.value.currentToken()).toBe("tok");
@@ -229,11 +216,11 @@ describe("PairingProvider", () => {
 				void h.value.replace(second);
 				last = h.value.replace(third);
 			});
-			await act(async () => save.saved());
+			await act(async () => save.resolve());
 			expect(h.value.pairing).toEqual(second);
 			expect(h.value.currentToken()).toBe("third");
 			await act(async () => {
-				lastSave.saved();
+				lastSave.resolve();
 				await last;
 			});
 			expect(h.value.pairing).toEqual(third);
@@ -323,19 +310,13 @@ describe("PairingProvider", () => {
 		it("waits for a replace still saving, then compares with the new pairing", async () => {
 			fake.loads.push(pairing);
 			const h = await mount();
-			let saved!: () => void;
-			fake.save.mockImplementationOnce(
-				() =>
-					new Promise<void>((resolve) => {
-						saved = resolve;
-					}),
-			);
+			const save = holdSave();
 			let cleared: Promise<boolean> | undefined;
 			await act(async () => {
 				void h.value.replace(replacement);
 				cleared = h.value.clearIfCurrent("tok", async () => {});
 			});
-			await act(async () => saved());
+			await act(async () => save.resolve());
 			expect(await cleared).toBe(false);
 			expect(fake.clear).not.toHaveBeenCalled();
 			expect(h.value.pairing).toEqual(replacement);

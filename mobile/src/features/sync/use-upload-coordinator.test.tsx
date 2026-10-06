@@ -329,14 +329,12 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("refuses the next request of a tick already running", async () => {
-			let release!: () => void;
-			fake.holdDeviceName = new Promise((resolve) => {
-				release = resolve;
-			});
+			const deviceName = Promise.withResolvers<void>();
+			fake.holdDeviceName = deviceName.promise;
 			const h = await mount(queued("a"), A);
 			expect(fake.sent).toEqual([]);
 			fake.replacing = "token-b";
-			await act(async () => release());
+			await act(async () => deviceName.resolve());
 			await settle();
 			expect(fake.sent).toEqual([]);
 			expect(h.row("a")).toMatchObject({
@@ -346,16 +344,14 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("cancels a chunk whose task was still being created", async () => {
-			let release!: () => void;
-			fake.holdUpload = new Promise((resolve) => {
-				release = resolve;
-			});
+			const upload = Promise.withResolvers<void>();
+			fake.holdUpload = upload.promise;
 			await mount(queued("a"), A);
 			expect(fake.sent.at(-1)?.url).toBe(
 				"https://10.0.0.1:1/v1/recordings/a/chunks/0",
 			);
 			fake.replacing = "token-b";
-			await act(async () => release());
+			await act(async () => upload.resolve());
 			await settle();
 			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
 		});
