@@ -64,13 +64,18 @@ export class QueueError extends Error {
 	}
 }
 
-/** Legal `state` transitions. Same-state is always allowed (a patch). */
+/**
+ * Legal `state` transitions. Same-state is always allowed (a patch).
+ * `unpaired` -> `delivered` is the answer to a `complete` sent before an
+ * unpair: the Mac has the meeting, and the receipt it would recognise a
+ * second upload by went with the revoked device.
+ */
 const TRANSITIONS: Record<SyncState, readonly SyncState[]> = {
 	recording: ["queued", "failed"],
 	queued: ["uploading", "unpaired", "failed"],
 	uploading: ["queued", "delivered", "failed", "unpaired"],
 	failed: ["queued"],
-	unpaired: ["queued"],
+	unpaired: ["queued", "delivered"],
 	delivered: [],
 };
 

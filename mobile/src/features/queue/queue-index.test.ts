@@ -102,12 +102,18 @@ describe("state machine", () => {
 		expect(() => setState(queued, "a", "recording")).toThrow(QueueError);
 	});
 
-	it("allows failed and unpaired back to queued only", () => {
+	it("allows failed back to queued only, and unpaired back to queued or on to delivered", () => {
 		const failed = setState(queued, "a", "failed", { lastError: "422" });
 		expect(() => setState(failed, "a", "uploading")).toThrow(QueueError);
+		expect(() => setState(failed, "a", "delivered")).toThrow(QueueError);
 		expect(setState(failed, "a", "queued").recordings[0]?.state).toBe("queued");
 		const unpaired = setState(queued, "a", "unpaired");
-		expect(() => setState(unpaired, "a", "delivered")).toThrow(QueueError);
+		expect(() => setState(unpaired, "a", "uploading")).toThrow(QueueError);
+		expect(() => setState(unpaired, "a", "failed")).toThrow(QueueError);
+		// A `complete` sent before the unpair and answered after it.
+		expect(
+			setState(unpaired, "a", "delivered", { meetingID: "m" }).recordings[0],
+		).toMatchObject({ state: "delivered", meetingID: "m" });
 		expect(resetForUpload(unpaired, "a").recordings[0]).toMatchObject({
 			state: "queued",
 			attempts: 0,
@@ -144,7 +150,7 @@ describe("every transition", () => {
 		queued: ["uploading", "unpaired", "failed"],
 		uploading: ["queued", "delivered", "failed", "unpaired"],
 		failed: ["queued"],
-		unpaired: ["queued"],
+		unpaired: ["queued", "delivered"],
 		delivered: [],
 	};
 	/** A legal path from `recording` into every state. */

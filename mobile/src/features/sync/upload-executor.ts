@@ -209,6 +209,9 @@ export function createUploadExecutor(
 				try {
 					const result = await deps.client.complete(session, rec.recordingID);
 					if (result.kind === "complete") {
+						// Also when an unpair moved the row to `unpaired` while the
+						// request was out: the Mac admitted the meeting, so the phone
+						// keeps no copy to upload again after the next pairing.
 						await deps.update((current) =>
 							setState(current, rec.recordingID, "delivered", {
 								meetingID: result.meetingID,
