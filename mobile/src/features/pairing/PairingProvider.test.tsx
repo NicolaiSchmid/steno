@@ -175,7 +175,7 @@ describe("PairingProvider", () => {
 			expect(h.value.pairing).toBeNull();
 		});
 
-		it("treats a token nobody recorded as the pairing loaded at launch's", async () => {
+		it("treats a token nobody recorded as the one loaded at launch", async () => {
 			fake.loads.push(pairing);
 			const h = await mount();
 			await act(async () => {
