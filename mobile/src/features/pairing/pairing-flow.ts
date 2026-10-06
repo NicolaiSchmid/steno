@@ -7,7 +7,11 @@ import {
 } from "@modules/steno-link";
 import type { MacEndpoint } from "@modules/steno-link/native";
 
-import { type QueueIndex, resetForUpload } from "@/features/queue/queue-index";
+import {
+	type QueueIndex,
+	resetForUpload,
+	unpairPending,
+} from "@/features/queue/queue-index";
 import type { PairingPayload } from "./pairing-payload";
 import type { DeviceIdentity, Pairing } from "./pairing-store";
 
@@ -93,15 +97,38 @@ export async function commitPairing(
 	deps: PairingCommitDependencies,
 	pairing: Pairing,
 ): Promise<void> {
-	await Promise.all([
-		deps.replace(pairing),
-		deps
-			.cancelAllUploads()
-			.catch((error) => console.warn("[pairing] cancel failed", error)),
-	]);
+	await Promise.all([deps.replace(pairing), cancelAll(deps)]);
 	await deps.update((index) =>
 		index.recordings
 			.filter((r) => r.state === "unpaired")
 			.reduce((acc, r) => resetForUpload(acc, r.recordingID), index),
 	);
+}
+
+export type PairingForgetDependencies = Omit<
+	PairingCommitDependencies,
+	"replace"
+> & {
+	clear(): Promise<void>;
+};
+
+/**
+ * Forgets the pairing on the phone, then cancels the chunks still in the
+ * background session: the Mac may have been away when asked to revoke the
+ * token, and would take them when it comes back. The rows are `unpaired`
+ * before the cancel, so the cancelled chunks' failures leave them alone.
+ */
+export async function forgetPairing(
+	deps: PairingForgetDependencies,
+): Promise<void> {
+	await deps.clear();
+	await deps.update(unpairPending);
+	await cancelAll(deps);
+}
+
+/** A failed cancel is logged: the pairing change goes on without it. */
+function cancelAll(deps: Pick<PairingCommitDependencies, "cancelAllUploads">) {
+	return deps
+		.cancelAllUploads()
+		.catch((error) => console.warn("[pairing] cancel failed", error));
 }

@@ -8,6 +8,7 @@ import {
 } from "@/features/queue/queue-index";
 import {
 	commitPairing,
+	forgetPairing,
 	type PairingCommitDependencies,
 	type PairingDependencies,
 	PairingMismatchError,
@@ -196,5 +197,34 @@ describe("commitPairing", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+});
+
+describe("forgetPairing", () => {
+	it("forgets the pairing, marks the rows unpaired, then cancels the chunks in flight", async () => {
+		const calls: string[] = [];
+		let index = addRecording(EMPTY_INDEX, {
+			recordingID: "a",
+			fileName: "a.m4a",
+			startedAt: "2026-09-25T09:00:00.000Z",
+			durationSeconds: 60,
+			byteCount: 100,
+			sha256: Buffer.alloc(32, 9).toString("base64"),
+			chunkSize: 1024,
+		});
+		await forgetPairing({
+			clear: async () => {
+				calls.push("clear");
+			},
+			update: async (transform) => {
+				calls.push("update");
+				index = transform(index);
+			},
+			cancelAllUploads: async () => {
+				calls.push("cancel");
+			},
+		});
+		expect(calls).toEqual(["clear", "update", "cancel"]);
+		expect(index.recordings[0]?.state).toBe("unpaired");
 	});
 });

@@ -17,13 +17,12 @@ import {
 	useMacDiscovery,
 } from "@/features/discovery/use-mac-discovery";
 import { useQueue } from "@/features/queue/QueueProvider";
-import { unpairPending } from "@/features/queue/queue-index";
 import { cancelAllUploads } from "@/features/sync/recording-client";
 import { errorMessage } from "@/lib/error-message";
 import { DURATION_ENTRANCE, HIT_SLOP } from "@/lib/motion";
 import { usePairing } from "./PairingProvider";
 import { hello, pair, unpair } from "./pairing-client";
-import { commitPairing, performPairing } from "./pairing-flow";
+import { commitPairing, forgetPairing, performPairing } from "./pairing-flow";
 import { describePairingFailure, parsePairingPayload } from "./pairing-payload";
 import { deviceIdentity } from "./pairing-store";
 
@@ -111,8 +110,7 @@ export function PairingSheet() {
 			} catch {
 				// The Mac is away; forgetting locally is what the user asked for.
 			}
-			await clear();
-			await update(unpairPending);
+			await forgetPairing({ clear, cancelAllUploads, update });
 			navigation.goBack();
 		} finally {
 			busy.current = false;
