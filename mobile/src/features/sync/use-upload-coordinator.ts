@@ -90,7 +90,6 @@ export function useUploadCoordinator(): UploadCoordinator {
 	// Resolve the Mac once per appearance and pairing; forget it when the
 	// service goes.
 	useEffect(() => {
-		setResolved((s) => (s?.token === pairing?.token ? s : null));
 		if (!pairing || !serviceName) {
 			setResolved(null);
 			return;
