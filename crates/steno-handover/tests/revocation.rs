@@ -7,11 +7,11 @@
 //! the phone paired again meanwhile. A recording already admitted answers
 //! its meeting. A revoke and a pairing of the same phone commit in the
 //! order they were asked for: a revoke during a pairing's save leaves the
-//! device revoked, in the store too, and a pairing during a revoke's delete
-//! stays paired. A touch or a receipt save does not commit ahead of a
-//! revoke asked for before it. A revoke whose store delete fails still
-//! refuses the device, and a partial created again during a verify is never
-//! promoted.
+//! device revoked, in the store too, and a pairing during a revoke's
+//! discards or its delete stays paired. A touch or a receipt save does
+//! not commit ahead of a revoke asked for before it. A revoke whose store
+//! delete fails still refuses the device, and a partial created again
+//! during a verify is never promoted.
 
 #![allow(
     clippy::assert_is_empty,
@@ -27,7 +27,7 @@ mod common;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{EngineDevice, Phone, ScriptedIntake, StoreHold, TestService, chunks, seeded_bytes};
 use steno_core::{HandoverIntake, HandoverState, RecordingMetadata};
@@ -842,6 +842,74 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
             "the save commits"
         );
     });
+}
+
+#[test]
+fn a_pairing_during_a_revokes_discards_stays_paired() {
+    // The phone pairs again while the computer's revoke, past its count
+    // bump, discards the phone's unfinished uploads. The revoke took the
+    // delete's place in line under the guard of the bump, so the pairing,
+    // which read the bumped count, saves after the delete and stays. A
+    // place taken after the discards would let the save commit first and
+    // the delete remove the new pairing. The uploads keep the revoke in
+    // its discards long enough for a pairing spinning on the other worker
+    // to land among them. The pairing starts once the first partial is
+    // gone, after the bump, so the test cannot fail on the fixed code
+    // however the threads run.
+    const UNFINISHED: u64 = 75;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (test, phone, principal) = paired_with_a_window_open().await;
+            let mut ids = Vec::new();
+            for seed in 0..UNFINISHED {
+                let bytes = seeded_bytes(DIRECT_CHUNK_SIZE as usize, seed);
+                let metadata = phone.metadata(&bytes, DIRECT_CHUNK_SIZE);
+                assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
+                ids.push(metadata.recording_id);
+            }
+            // The revoke discards in recording id order.
+            let first = ids.into_iter().min().unwrap();
+            let service = test.service.clone();
+            let (device_id, name) = (phone.device.id, phone.device.name.clone());
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let pairing = tokio::spawn(async move {
+                started.send(()).unwrap();
+                let deadline = Instant::now() + common::SIGNAL_BOUND;
+                while service.engine.inbox.has_partial(first) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the revoke discards within {:?}",
+                        common::SIGNAL_BOUND
+                    );
+                    std::hint::spin_loop();
+                }
+                common::engine_pair_as(&service, principal, device_id, &name).await
+            });
+            common::signalled("the pairing waits on the other worker", waiting)
+                .await
+                .unwrap();
+            let (revoked, paired) = both(
+                "the revoke and the pairing",
+                test.service.revoke(device_id),
+                pairing,
+            )
+            .await;
+            revoked.unwrap();
+            let paired = paired.unwrap();
+            assert_eq!(paired.status.as_u16(), 200);
+            let token = paired.decode::<wire::PairResponse>().unwrap().token;
+            assert!(
+                test.store
+                    .paired_device_for_token_hash(&DeviceTokens::hash(&token))
+                    .unwrap()
+                    .is_some(),
+                "the save commits after the delete"
+            );
+        });
 }
 
 #[tokio::test]
