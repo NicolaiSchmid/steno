@@ -20,7 +20,6 @@ mod common;
 use std::sync::Arc;
 
 use common::{EngineDevice, ScriptedIntake, TestService, chunks, engine_hello, seeded_bytes};
-use steno_core::HandoverReceipt;
 use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
 use steno_handover::engine::{HandoverRequest, Principal, RequestHandling as _};
 use steno_handover::route::Route;
@@ -238,10 +237,9 @@ async fn announced(seed: u64) -> (TestService, EngineDevice, Uuid, Vec<Vec<u8>>)
 
 /// Runs `request` against the engine on a thread of its own, as a second
 /// worker of the listener's runtime would.
-fn on_another_thread<F>(request: F) -> std::thread::JoinHandle<u16>
-where
-    F: Future<Output = steno_handover::engine::HandoverResponse> + Send + 'static,
-{
+fn on_another_thread(
+    request: impl Future<Output = steno_handover::engine::HandoverResponse> + Send + 'static,
+) -> std::thread::JoinHandle<u16> {
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -261,7 +259,7 @@ fn chunk_sets(test: &TestService, recording_id: Uuid) -> (Vec<i64>, Vec<i64>) {
         .receipts_snapshot()
         .into_iter()
         .find(|receipt| receipt.recording_id == recording_id)
-        .map(|receipt: HandoverReceipt| receipt.received_chunks)
+        .map(|receipt| receipt.received_chunks)
         .expect("the receipt is in memory");
     let stored = test
         .store
@@ -283,11 +281,7 @@ async fn two_chunks_that_land_at_once_both_stay_in_the_receipt() {
     let (test, phone, id, chunks) = announced(63).await;
     let hold = test.clock.hold_next_read();
     let first = on_another_thread({
-        let other = EngineDevice {
-            service: test.service.clone(),
-            device: phone.device.clone(),
-        };
-        let chunk = chunks[0].clone();
+        let (other, chunk) = (phone.clone(), chunks[0].clone());
         async move { other.upload(id, 0, &chunk).await }
     });
     hold.reached();
@@ -311,13 +305,8 @@ async fn a_reannounce_keeps_a_chunk_that_lands_while_it_runs() {
         .load_metadata(id)
         .expect("the announce kept its metadata");
     let hold = test.clock.hold_next_read();
-    let reannounce = on_another_thread({
-        let other = EngineDevice {
-            service: test.service.clone(),
-            device: phone.device.clone(),
-        };
-        async move { other.announce(&metadata).await }
-    });
+    let other = phone.clone();
+    let reannounce = on_another_thread(async move { other.announce(&metadata).await });
     hold.reached();
     assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
     hold.release();

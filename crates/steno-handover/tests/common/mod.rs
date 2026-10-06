@@ -927,6 +927,7 @@ pub fn seeded_bytes(count: usize, seed: u64) -> Vec<u8> {
 // The engine driven directly, without the listener
 
 /// A paired device's recording calls, straight into the engine.
+#[derive(Clone)]
 pub struct EngineDevice {
     pub service: Arc<HandoverService>,
     pub device: PairedDevice,
