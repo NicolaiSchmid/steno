@@ -112,6 +112,8 @@ export function PairingSheet() {
 			}
 			await forgetPairing({ clear, cancelAllUploads, update });
 			navigation.goBack();
+		} catch (error) {
+			setPhase({ kind: "error", message: errorMessage(error) });
 		} finally {
 			busy.current = false;
 		}

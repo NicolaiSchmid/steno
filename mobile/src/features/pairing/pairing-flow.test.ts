@@ -273,4 +273,14 @@ describe("forgetPairing", () => {
 		h.cancel.resolve();
 		await done;
 	});
+
+	it("still cancels when the queue write fails, then rejects", async () => {
+		const h = held();
+		const done = forgetPairing(h.deps);
+		h.clear.resolve();
+		h.write.reject(new Error("disk full"));
+		h.cancel.resolve();
+		await expect(done).rejects.toThrow("disk full");
+		expect(h.calls).toEqual(["clear", "update", "cancel"]);
+	});
 });
