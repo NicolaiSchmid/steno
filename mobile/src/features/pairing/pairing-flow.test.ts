@@ -1,11 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+	addRecording,
+	EMPTY_INDEX,
+	type QueueIndex,
+	setState,
+} from "@/features/queue/queue-index";
+import {
+	commitPairing,
+	type PairingCommitDependencies,
 	type PairingDependencies,
 	PairingMismatchError,
 	performPairing,
 } from "./pairing-flow";
 import type { PairingPayload } from "./pairing-payload";
+import type { Pairing } from "./pairing-store";
 
 const payload: PairingPayload = {
 	macID: "0f8fad5b-d9cb-469f-a165-70867728950e",
@@ -99,5 +108,93 @@ describe("performPairing", () => {
 		});
 		await expect(performPairing(payload, d)).rejects.toThrow("not found");
 		expect(d.hello).not.toHaveBeenCalled();
+	});
+});
+
+describe("commitPairing", () => {
+	const next: Pairing = {
+		mac: {
+			macID: payload.macID,
+			macName: "Studio",
+			fingerprint: payload.fingerprint,
+			pairedAt: "2026-09-25T10:00:00.000Z",
+		},
+		token: "tok",
+	};
+
+	/** Each step resolves only when the test says so; `calls` is the order. */
+	function held() {
+		const calls: string[] = [];
+		const save = Promise.withResolvers<void>();
+		const cancel = Promise.withResolvers<void>();
+		let index = setState(
+			addRecording(EMPTY_INDEX, {
+				recordingID: "a",
+				fileName: "a.m4a",
+				startedAt: "2026-09-25T09:00:00.000Z",
+				durationSeconds: 60,
+				byteCount: 100,
+				sha256: Buffer.alloc(32, 9).toString("base64"),
+				chunkSize: 1024,
+			}),
+			"a",
+			"unpaired",
+		);
+		const deps: PairingCommitDependencies = {
+			replace: async () => {
+				calls.push("replace");
+				await save.promise;
+			},
+			cancelAllUploads: async () => {
+				calls.push("cancel");
+				await cancel.promise;
+			},
+			update: async (transform: (index: QueueIndex) => QueueIndex) => {
+				calls.push("update");
+				index = transform(index);
+			},
+		};
+		return { calls, save, cancel, deps, index: () => index };
+	}
+
+	it("starts the save, then the cancel, before either settles", async () => {
+		const h = held();
+		const done = commitPairing(h.deps, next);
+		await Promise.resolve();
+		expect(h.calls).toEqual(["replace", "cancel"]);
+
+		h.cancel.resolve();
+		await Promise.resolve();
+		expect(h.calls).toEqual(["replace", "cancel"]);
+		h.save.resolve();
+		await done;
+		expect(h.calls).toEqual(["replace", "cancel", "update"]);
+		expect(h.index().recordings[0]?.state).toBe("queued");
+	});
+
+	it("re-queues nothing when the save fails", async () => {
+		const h = held();
+		const done = commitPairing(h.deps, next);
+		h.save.reject(new Error("keychain locked"));
+		await expect(done).rejects.toThrow("keychain locked");
+		expect(h.calls).not.toContain("update");
+	});
+
+	it("goes on when the cancel fails", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const h = held();
+			const done = commitPairing(h.deps, next);
+			h.cancel.reject(new Error("no session"));
+			h.save.resolve();
+			await done;
+			expect(h.index().recordings[0]?.state).toBe("queued");
+			expect(warn).toHaveBeenCalledWith(
+				"[pairing] cancel failed",
+				expect.any(Error),
+			);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });

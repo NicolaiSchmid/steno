@@ -17,13 +17,13 @@ import {
 	useMacDiscovery,
 } from "@/features/discovery/use-mac-discovery";
 import { useQueue } from "@/features/queue/QueueProvider";
-import { resetForUpload, unpairPending } from "@/features/queue/queue-index";
+import { unpairPending } from "@/features/queue/queue-index";
 import { cancelAllUploads } from "@/features/sync/recording-client";
 import { errorMessage } from "@/lib/error-message";
 import { DURATION_ENTRANCE, HIT_SLOP } from "@/lib/motion";
 import { usePairing } from "./PairingProvider";
 import { hello, pair, unpair } from "./pairing-client";
-import { performPairing } from "./pairing-flow";
+import { commitPairing, performPairing } from "./pairing-flow";
 import { describePairingFailure, parsePairingPayload } from "./pairing-payload";
 import { deviceIdentity } from "./pairing-store";
 
@@ -86,20 +86,7 @@ export function PairingSheet() {
 					device: deviceIdentity,
 					now: () => new Date(),
 				});
-				// `replace` first: from the call on, the upload loop sends nothing
-				// under the old pairing. Chunks still in flight went out under it:
-				// the same Mac answers them 401, another Mac would take them.
-				// Cancel them; the retry backoff re-queues them.
-				await Promise.all([
-					replace(outcome),
-					cancelAllUploads().catch(() => {}),
-				]);
-				// Anything the old Mac revoked is eligible for the new one.
-				await update((index) =>
-					index.recordings
-						.filter((r) => r.state === "unpaired")
-						.reduce((acc, r) => resetForUpload(acc, r.recordingID), index),
-				);
+				await commitPairing({ replace, cancelAllUploads, update }, outcome);
 				setPhase({ kind: "paired", macName: outcome.mac.macName });
 			} catch (error) {
 				scanBlockedUntil.current = Date.now() + RESCAN_DELAY_MS;
