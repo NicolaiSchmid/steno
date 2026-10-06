@@ -209,8 +209,6 @@ fn drop_trailing_slash(bytes: &mut Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
 
     #[test]
@@ -392,11 +390,12 @@ mod tests {
 
     /// A lookup over `pairs`, as the process environment answers.
     fn lookup(pairs: Vec<(&str, OsString)>) -> impl Fn(&str) -> Option<OsString> {
-        let pairs: HashMap<String, OsString> = pairs
-            .into_iter()
-            .map(|(name, value)| (name.to_owned(), value))
-            .collect();
-        move |name| pairs.get(name).cloned()
+        move |name| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.clone())
+        }
     }
 
     #[test]
