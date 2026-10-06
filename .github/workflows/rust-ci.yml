@@ -159,9 +159,12 @@ jobs:
       # transport's tests run beside the shell's; on macOS for the smoke
       # only, and without the pnpm cache, whose upload from Forge costs more
       # than the install it saves.
+      # `dest` per job: the default `~/setup-pnpm` is shared by every runner
+      # on a self-hosted machine, and two concurrent installs collide there.
       - uses: pnpm/action-setup@v4
         if: matrix.name != 'windows'
         with:
+          dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: apps/macos/web/package.json
       - uses: actions/setup-node@v4
         if: matrix.name != 'windows'

@@ -44,15 +44,20 @@ fn main() {
             Command::Dev(command) => command.run().await,
         }
     });
-    match outcome {
-        Ok(()) => {}
-        Err(Failure::Usage(message)) => {
-            eprintln!("{message}");
-            std::process::exit(1);
-        }
-        Err(Failure::Runtime(message)) => {
-            eprintln!("{message}");
-            std::process::exit(2);
-        }
-    }
+    // Write out the queued log lines once the runtime is gone, since its
+    // tasks may log as they end, and before the failure message, so they
+    // come out ahead of it, as when lines were written at once. The shutdown
+    // waits a second at most: a worker parked in a blocking call would
+    // otherwise hold the exit, as the desktop's leaked runtime avoids.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    steno_services::flush_logs();
+    let Err(failure) = outcome else {
+        return;
+    };
+    let (code, message) = match failure {
+        Failure::Usage(message) => (1, message),
+        Failure::Runtime(message) => (2, message),
+    };
+    eprintln!("{message}");
+    std::process::exit(code);
 }

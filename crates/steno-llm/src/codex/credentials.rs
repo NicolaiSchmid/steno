@@ -1,7 +1,7 @@
 //! Reads and refreshes `$CODEX_HOME/auth.json` the way the Codex CLI does.
 //! Swift: `Sources/StenoLLM/Codex/CodexCredentialStore.swift`.
 
-use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -272,13 +272,12 @@ impl CodexCredentialStore {
         "invalid_grant",
     ];
 
-    /// `CODEX_HOME`, else `~/.codex`.
+    /// `CODEX_HOME` as `lookup` answers it (the process environment:
+    /// `|name| std::env::var_os(name)`), else `~/.codex`. A path that is not
+    /// Unicode is used as it is; an empty one is no override.
     #[must_use]
-    pub fn default_home(environment: &HashMap<String, String>) -> PathBuf {
-        if let Some(home) = environment
-            .get("CODEX_HOME")
-            .filter(|home| !home.is_empty())
-        {
+    pub fn default_home(lookup: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+        if let Some(home) = lookup("CODEX_HOME").filter(|home| !home.is_empty()) {
             return PathBuf::from(home);
         }
         std::env::home_dir()
@@ -289,11 +288,9 @@ impl CodexCredentialStore {
     /// The store over `home` with the real token endpoint and clock.
     ///
     /// ```
-    /// use std::collections::HashMap;
     /// use steno_llm::CodexCredentialStore;
     ///
-    /// let env: HashMap<String, String> = std::env::vars().collect();
-    /// let home = CodexCredentialStore::default_home(&env);
+    /// let home = CodexCredentialStore::default_home(|name| std::env::var_os(name));
     /// let store = CodexCredentialStore::new(&home);
     /// assert_eq!(store.file_path(), home.join("auth.json"));
     /// ```

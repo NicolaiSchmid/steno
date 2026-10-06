@@ -12,14 +12,25 @@ struct Run {
 }
 
 fn steno(args: &[&str], home: &Path) -> Run {
-    let output = Command::new(env!("CARGO_BIN_EXE_steno"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_steno"));
+    command
         .args(args)
         .env("HOME", home)
         .env("XDG_DATA_HOME", home.join("share"))
         .env("APPDATA", home.join("appdata"))
-        .env_remove("STENO_LLM_API_KEY")
-        .output()
-        .expect("the steno binary runs");
+        .env_remove("STENO_LLM_API_KEY");
+    // Every run on Unix carries a variable that is not Unicode, as a
+    // user's environment may: the secret overrides, which read every
+    // variable, must read past it (`std::env::vars()` would panic).
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        command.env(
+            "STENO_TEST_NOT_UNICODE",
+            std::ffi::OsStr::from_bytes(&[b'a', 0x80]),
+        );
+    }
+    let output = command.output().expect("the steno binary runs");
     Run {
         status: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -147,6 +158,10 @@ fn the_swift_cli_flow_runs_end_to_end_on_a_fresh_home() {
     );
     assert_eq!(decoded["meeting"]["state"], "ready");
     assert_eq!(decoded["meeting"]["source"], "macInPerson");
+    assert_eq!(
+        decoded["meeting"]["titleOrigin"], "user",
+        "--title is the user's title, so the app shows it as the export does"
+    );
     assert_eq!(
         decoded["meeting"]["title"], "Sweep",
         "no fake summarizer renames the meeting"
@@ -541,15 +556,12 @@ fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     };
     assert!(line.ends_with(expected.as_str()), "{line}");
 
-    let environment = [
-        ("HOME", home.to_path_buf()),
-        ("XDG_DATA_HOME", home.join("share")),
-        ("APPDATA", home.join("appdata")),
-    ]
-    .into_iter()
-    .map(|(key, value)| (key.to_owned(), value.to_string_lossy().into_owned()))
-    .collect();
-    let support = steno_core::StenoPaths::support_directory(&environment);
+    let support = steno_core::StenoPaths::support_directory(|name| match name {
+        "HOME" => Some(home.into()),
+        "XDG_DATA_HOME" => Some(home.join("share").into()),
+        "APPDATA" => Some(home.join("appdata").into()),
+        _ => None,
+    });
     std::fs::create_dir_all(&support).unwrap();
     std::fs::write(
         support.join("speech.json"),
