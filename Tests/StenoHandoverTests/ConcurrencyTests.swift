@@ -303,13 +303,15 @@ import Testing
 
   @Test(.timeLimit(.minutes(1)))
   func aCompleteOfARevokedPhoneStaysOutOfAnotherPhonesReceipt() async throws {
-    // The phone is revoked while its `complete` is held in the intake, and
-    // another phone pairs, announces the same recording id and sends chunk
-    // 0. The intake then answers, so the revoked phone's `complete` answers
-    // 200 with the meeting it admitted, and its `.complete` write finds the
-    // other phone's receipt in memory and changes nothing. Written into it,
-    // it would tell the other phone `complete` for a recording never
-    // admitted from it, and that phone would delete its copy.
+    // The phone is revoked while the intake holds its `complete`, another
+    // phone pairs, announces the same recording id and sends chunk 0, and
+    // the revoked phone pairs again under its device id, so its write would
+    // reach memory and the store. When the intake answers, the revoked
+    // phone's `complete` still answers 200 with the meeting the intake
+    // admitted, but its `.complete` write finds the other phone's receipt in
+    // memory and changes nothing: a device's write never changes a receipt
+    // another device announced. The phone paired again holds no receipt of
+    // that id, so its status request answers 404.
     let chunkSize = 64 * 1024
     let intake = HeldIntake(FakeHandoverIntake(meetingID: Self.meetingID))
     defer { intake.release() }
@@ -329,6 +331,8 @@ import Testing
       let other = try await EngineClient.paired(test, deviceName: "Other iPhone")
       #expect(try await other.announce(metadata).code == 201)
       #expect(await other.upload(id, chunk: 0, chunks[0]).code == 204)
+      _ = await test.service.engine.beginPairing()
+      #expect(try await EngineClient(test).pair(deviceID: phone.device.id).code == 200)
       intake.release()
       let completed = await completion.value
 
@@ -342,6 +346,7 @@ import Testing
         #expect(receipt.state == .receiving, "not `.complete` with the revoked phone's meeting")
         #expect(receipt.receivedChunks == [0])
       }
+      #expect(await phone.status(id).code == 404, "the other phone owns the recording id")
     }
   }
 
