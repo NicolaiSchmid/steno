@@ -37,8 +37,8 @@ impl StenoPaths {
         Self::support_directory(|name| std::env::var_os(name))
     }
 
-    /// The platform's support directory for the environment `variable`
-    /// looks up, which tests pass explicitly:
+    /// The platform's support directory for the environment `lookup`
+    /// answers, which tests pass explicitly:
     ///
     /// - macOS: `$HOME/Library/Application Support/Steno` (Swift's path;
     ///   `HOME` first because not every Foundation honours it otherwise)
@@ -49,10 +49,18 @@ impl StenoPaths {
     /// directory specification requires for `XDG_DATA_HOME`; `HOME` and
     /// `APPDATA` get the same treatment. A path that is not Unicode is used
     /// as it is: skipping it would open a second database elsewhere.
+    ///
+    /// ```
+    /// let directory = steno_core::StenoPaths::support_directory(|name| {
+    ///     (name == "HOME" || name == "XDG_DATA_HOME" || name == "APPDATA")
+    ///         .then(|| std::env::temp_dir().into_os_string())
+    /// });
+    /// assert!(directory.ends_with("Steno"));
+    /// ```
     #[must_use]
-    pub fn support_directory(variable: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    pub fn support_directory(lookup: impl Fn(&str) -> Option<OsString>) -> PathBuf {
         let absolute = |key: &str| {
-            variable(key)
+            lookup(key)
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute())
         };

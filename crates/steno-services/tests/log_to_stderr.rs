@@ -8,7 +8,8 @@ use std::time::Duration;
 const CHILD_FILTER: &str = "STENO_LOG_TO_STDERR_CHILD_FILTER";
 const NAME: &str = "lines_reach_stderr_from_warn_up_unless_rust_log_says_otherwise";
 
-/// Set in the child of the burst and the panic test.
+/// Set in the child of the burst and the panic tests, to the name of the
+/// test it runs.
 const CHILD: &str = "STENO_LOG_TO_STDERR_CHILD";
 
 /// The burst the burst test logs, within the queue's 4096.

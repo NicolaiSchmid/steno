@@ -107,7 +107,7 @@ impl FileSecretStore {
     }
 
     /// `secrets.json` under the support directory, reading the process
-    /// environment.
+    /// environment's Unicode variables (see `text_variables`).
     #[must_use]
     pub fn in_support_directory(support_directory: &Path) -> Self {
         Self::new(

@@ -272,12 +272,12 @@ impl CodexCredentialStore {
         "invalid_grant",
     ];
 
-    /// `CODEX_HOME` as `variable` looks it up (the process environment:
+    /// `CODEX_HOME` as `lookup` answers it (the process environment:
     /// `|name| std::env::var_os(name)`), else `~/.codex`. A path that is not
     /// Unicode is used as it is; an empty one is no override.
     #[must_use]
-    pub fn default_home(variable: impl Fn(&str) -> Option<OsString>) -> PathBuf {
-        if let Some(home) = variable("CODEX_HOME").filter(|home| !home.is_empty()) {
+    pub fn default_home(lookup: impl Fn(&str) -> Option<OsString>) -> PathBuf {
+        if let Some(home) = lookup("CODEX_HOME").filter(|home| !home.is_empty()) {
             return PathBuf::from(home);
         }
         std::env::home_dir()
