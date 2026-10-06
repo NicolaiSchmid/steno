@@ -109,26 +109,81 @@ impl StoreHold {
 }
 
 /// The one time source the service reads; tests move it to expire a
-/// pairing window or age a receipt.
+/// pairing window or age a receipt, or hold the service's next read of it
+/// ([`WallClock::hold_next_read`]).
 #[derive(Clone)]
-pub struct WallClock(Arc<Mutex<DateTime<Utc>>>);
+pub struct WallClock {
+    time: Arc<Mutex<DateTime<Utc>>>,
+    hold: Arc<Mutex<Option<HeldRead>>>,
+}
+
+/// The service's side of a [`ClockHold`].
+struct HeldRead {
+    reached: mpsc::Sender<()>,
+    released: mpsc::Receiver<()>,
+}
+
+/// The service's next clock read, held on the thread that makes it until
+/// [`ClockHold::release`].
+pub struct ClockHold {
+    reached: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+}
+
+impl ClockHold {
+    /// Returns once a request of the service is held at its clock read.
+    pub fn reached(&self) {
+        self.reached
+            .recv_timeout(SIGNAL_BOUND)
+            .expect("the service reads the clock");
+    }
+
+    /// Lets the held read return.
+    pub fn release(self) {
+        let _ = self.release.send(());
+    }
+}
 
 impl WallClock {
     pub fn new(start: DateTime<Utc>) -> Self {
-        WallClock(Arc::new(Mutex::new(start)))
+        WallClock {
+            time: Arc::new(Mutex::new(start)),
+            hold: Arc::default(),
+        }
     }
 
     pub fn now(&self) -> DateTime<Utc> {
-        *self.0.lock().unwrap()
+        *self.time.lock().unwrap()
     }
 
     pub fn advance(&self, duration: Duration) {
-        *self.0.lock().unwrap() += chrono::Duration::from_std(duration).unwrap();
+        *self.time.lock().unwrap() += chrono::Duration::from_std(duration).unwrap();
+    }
+
+    /// Holds the service's next read of the clock, on the thread that makes
+    /// it, until the hold is released, so a test stops a request at that
+    /// point while another one runs. Reads by the test itself go through.
+    pub fn hold_next_read(&self) -> ClockHold {
+        let (reached, reached_here) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *self.hold.lock().unwrap() = Some(HeldRead { reached, released });
+        ClockHold {
+            reached: reached_here,
+            release,
+        }
     }
 
     pub fn clock(&self) -> steno_handover::Clock {
         let clock = self.clone();
-        Arc::new(move || clock.now())
+        Arc::new(move || {
+            let held = clock.hold.lock().unwrap().take();
+            if let Some(held) = held {
+                let _ = held.reached.send(());
+                // A test that failed meanwhile drops the sender.
+                let _ = held.released.recv_timeout(SIGNAL_BOUND);
+            }
+            clock.now()
+        })
     }
 }
 

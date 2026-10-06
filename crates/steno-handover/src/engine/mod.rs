@@ -612,21 +612,74 @@ impl Engine {
     }
 
     /// One state change: the state, the chunk set when given, `updated_at`,
-    /// then persist. Callers that answer the phone whatever the write did
-    /// ignore the result deliberately: memory already holds the change and
-    /// the phone's next request re-reads.
+    /// then the save. The change is made to the receipt as memory holds it
+    /// when memory holds it, else to `receipt`, and `receipt` comes back as
+    /// changed: a chunk another request folded in since `receipt` was read
+    /// stays. Callers that answer the phone whatever the write did ignore
+    /// the result deliberately: memory already holds the change and the
+    /// phone's next request re-reads.
     pub(crate) async fn transition(
         &self,
         receipt: &mut HandoverReceipt,
         state: HandoverState,
         received_chunks: Option<Vec<i64>>,
     ) -> store::Result<()> {
-        receipt.state = state;
-        if let Some(received_chunks) = received_chunks {
-            receipt.received_chunks = received_chunks;
-        }
-        receipt.updated_at = (self.now)();
-        self.persist(receipt).await
+        let changed = self.change(receipt.recording_id, Some(receipt), |changed| {
+            changed.state = state;
+            if let Some(received_chunks) = received_chunks {
+                changed.received_chunks = received_chunks;
+            }
+        });
+        let (changed, place) = changed.expect("a fallback is given");
+        *receipt = changed.clone();
+        self.save(changed, place).await
+    }
+
+    /// Folds chunk `index` into the receipt as memory holds it, still in
+    /// `receiving`, and saves it. `None` when memory no longer holds a
+    /// receipt of `device_id` for `recording_id` (revoked, forgotten).
+    pub(crate) async fn add_chunk(
+        &self,
+        recording_id: Uuid,
+        device_id: Uuid,
+        index: i64,
+    ) -> Option<store::Result<()>> {
+        let (changed, place) = self
+            .change(recording_id, None, |changed| {
+                changed.state = HandoverState::Receiving;
+                changed.received_chunks.push(index);
+                changed.received_chunks.sort_unstable();
+                changed.received_chunks.dedup();
+            })
+            .filter(|(changed, _)| changed.device_id == device_id)?;
+        Some(self.save(changed, place).await)
+    }
+
+    /// Changes the receipt of `recording_id` as memory holds it, or
+    /// `fallback` when memory holds none, moves `updated_at`, keeps the
+    /// result in memory and takes the save's place in line, all under one
+    /// guard. Read and write as two steps, two requests on two threads
+    /// could both start from the same copy and the later one would drop
+    /// the other's change, in memory and in the store. The clock is read
+    /// before the guard, so a slow clock never holds the lock. Swift's
+    /// actor makes the read and the write one step the same way.
+    fn change(
+        &self,
+        recording_id: Uuid,
+        fallback: Option<&HandoverReceipt>,
+        change: impl FnOnce(&mut HandoverReceipt),
+    ) -> Option<(HandoverReceipt, InOrder)> {
+        let timestamp = (self.now)();
+        let mut state = self.state();
+        let mut changed = state
+            .active_receipts
+            .get(&recording_id)
+            .or(fallback)?
+            .clone();
+        change(&mut changed);
+        changed.updated_at = timestamp;
+        state.remember(&changed);
+        Some((changed, state.next_write()))
     }
 
     /// Writes the receipt and tells the observers. Memory is updated before
@@ -641,9 +694,13 @@ impl Engine {
             state.remember(receipt);
             state.next_write()
         };
-        let saved = receipt.clone();
+        self.save(receipt.clone(), place).await
+    }
+
+    /// Saves `receipt` in `place` and tells the observers.
+    async fn save(&self, receipt: HandoverReceipt, place: InOrder) -> store::Result<()> {
         let result = self
-            .in_order(place, move |store| store.save_handover_receipt(&saved))
+            .in_order(place, move |store| store.save_handover_receipt(&receipt))
             .await;
         self.publish_receipts();
         result
@@ -673,19 +730,6 @@ impl Engine {
         }
         state.remember(&stored);
         Ok(Some(stored))
-    }
-
-    /// The receipt as memory holds it now, for the re-read after a yield.
-    pub(crate) fn active_receipt(&self, recording_id: Uuid) -> Option<HandoverReceipt> {
-        self.state().active_receipts.get(&recording_id).cloned()
-    }
-
-    /// Replaces `receipt` with what memory holds after a yield, when another
-    /// request advanced it meanwhile.
-    pub(crate) fn refresh(&self, receipt: &mut HandoverReceipt) {
-        if let Some(current) = self.active_receipt(receipt.recording_id) {
-            *receipt = current;
-        }
     }
 
     /// The receipt when it belongs to the requesting device; the answer

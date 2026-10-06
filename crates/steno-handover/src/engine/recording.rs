@@ -227,22 +227,11 @@ impl Engine {
         // The write yielded: another chunk may have landed, or the device
         // may have been revoked. Fold this chunk into the receipt as it
         // stands now, never into the copy from before the write.
-        let Some(mut receipt) = self
-            .active_receipt(recording_id)
-            .filter(|current| current.device_id == device.id)
-        else {
-            return no_such_recording();
-        };
-        receipt.received_chunks.push(index);
-        receipt.received_chunks.sort_unstable();
-        receipt.received_chunks.dedup();
-        if let Err(error) = self
-            .transition(&mut receipt, HandoverState::Receiving, None)
-            .await
-        {
-            return HandoverResponse::internal_error("saving the receipt", &error);
+        match self.add_chunk(recording_id, device.id, index).await {
+            None => no_such_recording(),
+            Some(Err(error)) => HandoverResponse::internal_error("saving the receipt", &error),
+            Some(Ok(())) => HandoverResponse::empty(StatusCode::NO_CONTENT),
         }
-        HandoverResponse::empty(StatusCode::NO_CONTENT)
     }
 
     /// `POST /v1/recordings/{id}/complete`: 200 `{meetingID}` once every
@@ -408,7 +397,6 @@ impl Engine {
                 ));
             }
         };
-        self.refresh(receipt);
         if receiving_file::Identity::at(&partial).ok() != Some(identity) {
             return Verification::Answered(self.replaced_during_the_verify(receipt).await);
         }
@@ -495,7 +483,6 @@ impl Engine {
         let meeting_id = match self.intake.admit(file, metadata, device).await {
             Ok(meeting_id) => meeting_id,
             Err(error) => {
-                self.refresh(receipt);
                 let _ = self
                     .transition(
                         receipt,
@@ -506,7 +493,6 @@ impl Engine {
                 return HandoverResponse::internal_error("the intake", &error);
             }
         };
-        self.refresh(receipt);
         let _ = self
             .transition(receipt, HandoverState::Complete { meeting_id }, None)
             .await;

@@ -1,7 +1,10 @@
 //! Every store write, file write and hash is a yield, so another request
 //! runs while one awaits. These tests drive the engine directly, so two
 //! requests enter it in a known order and the races the loopback clients
-//! can only make likely are certain.
+//! can only make likely are certain. Two requests on two threads, as on two
+//! workers of the listener, meet where one is held at its clock read
+//! (`WallClock::hold_next_read`): a receipt change it makes after the read
+//! keeps what the other one changed meanwhile.
 
 #![allow(
     clippy::assert_is_empty,
@@ -16,7 +19,8 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{EngineDevice, ScriptedIntake, TestService, engine_hello, seeded_bytes};
+use common::{EngineDevice, ScriptedIntake, TestService, chunks, engine_hello, seeded_bytes};
+use steno_core::HandoverReceipt;
 use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
 use steno_handover::engine::{HandoverRequest, Principal, RequestHandling as _};
 use steno_handover::route::Route;
@@ -208,4 +212,116 @@ async fn the_gate_answers_while_a_whole_file_hash_runs() {
     let (completed, ()) = tokio::join!(completion, observed);
     assert_eq!(completed.status.as_u16(), 200);
     assert_eq!(test.intake.admissions.count(), 1);
+}
+
+/// A service that does not listen and a phone paired straight into the
+/// engine that announced a two-chunk recording, with its chunks.
+async fn announced(seed: u64) -> (TestService, EngineDevice, Uuid, Vec<Vec<u8>>) {
+    let chunk_size: i64 = 64 * 1024;
+    let test = TestService::with(common::Options {
+        chunk_size,
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * chunk_size as usize, seed);
+    let metadata = phone.metadata(&bytes, chunk_size);
+    assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
+    (
+        test,
+        phone,
+        metadata.recording_id,
+        chunks(&bytes, chunk_size),
+    )
+}
+
+/// Runs `request` against the engine on a thread of its own, as a second
+/// worker of the listener's runtime would.
+fn on_another_thread<F>(request: F) -> std::thread::JoinHandle<u16>
+where
+    F: Future<Output = steno_handover::engine::HandoverResponse> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(request)
+            .status
+            .as_u16()
+    })
+}
+
+/// The chunk set memory and the store hold for `recording_id`.
+fn chunk_sets(test: &TestService, recording_id: Uuid) -> (Vec<i64>, Vec<i64>) {
+    let in_memory = test
+        .service
+        .engine
+        .receipts_snapshot()
+        .into_iter()
+        .find(|receipt| receipt.recording_id == recording_id)
+        .map(|receipt: HandoverReceipt| receipt.received_chunks)
+        .expect("the receipt is in memory");
+    let stored = test
+        .store
+        .handover_receipt(recording_id)
+        .unwrap()
+        .expect("the receipt is stored")
+        .received_chunks;
+    (in_memory, stored)
+}
+
+#[tokio::test]
+async fn two_chunks_that_land_at_once_both_stay_in_the_receipt() {
+    // The phone keeps two chunks in flight, and the listener runs each on
+    // a worker of its own. Chunk 0 is held at its clock read, after its
+    // file write, while chunk 1 lands in full. Chunk 0 then folds into the
+    // receipt as memory holds it, with chunk 1 in it. A fold that read the
+    // receipt before the clock and wrote it back after would put back the
+    // copy without chunk 1, in memory and in the store.
+    let (test, phone, id, chunks) = announced(63).await;
+    let hold = test.clock.hold_next_read();
+    let first = on_another_thread({
+        let other = EngineDevice {
+            service: test.service.clone(),
+            device: phone.device.clone(),
+        };
+        let chunk = chunks[0].clone();
+        async move { other.upload(id, 0, &chunk).await }
+    });
+    hold.reached();
+    assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
+    hold.release();
+    assert_eq!(first.join().unwrap(), 204);
+
+    assert_eq!(chunk_sets(&test, id), (vec![0, 1], vec![0, 1]));
+}
+
+#[tokio::test]
+async fn a_reannounce_keeps_a_chunk_that_lands_while_it_runs() {
+    // The phone announces again (a retry after its own timeout) while its
+    // next chunk is in flight. The announce is held at its clock read,
+    // after it read the receipt, while chunk 1 lands. Its `receiving`
+    // write then changes the receipt as memory holds it, chunk 1 and all.
+    let (test, phone, id, chunks) = announced(64).await;
+    assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    let metadata = test
+        .inbox()
+        .load_metadata(id)
+        .expect("the announce kept its metadata");
+    let hold = test.clock.hold_next_read();
+    let reannounce = on_another_thread({
+        let other = EngineDevice {
+            service: test.service.clone(),
+            device: phone.device.clone(),
+        };
+        async move { other.announce(&metadata).await }
+    });
+    hold.reached();
+    assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
+    hold.release();
+    assert_eq!(reannounce.join().unwrap(), 200);
+
+    assert_eq!(chunk_sets(&test, id), (vec![0, 1], vec![0, 1]));
 }
