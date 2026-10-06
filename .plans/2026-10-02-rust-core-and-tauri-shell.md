@@ -1717,25 +1717,45 @@ request that fixes an item deletes it.
   `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
   `mobile/src/features/sync/recording-client.ts`. Found: #191.
 - **Unowned.** Swift's chunk route folds its chunk into the receipt memory holds after
-  the file write without checking for `complete`, so an older attempt of a resent
-  chunk whose write ends after the phone's `complete` admitted the recording puts the
-  receipt back to `receiving`, in memory and in the store; the phone's next `complete`
-  then starts over, and the upload after it becomes a second meeting. A first announce
-  whose store read found nothing replaces the receipt another first announce of the
-  same recording made meanwhile, and drops the chunks folded into it. Rust leaves a
-  `complete` receipt as it is and answers the late announce as a re-announce
-  (`Engine::change`). Where: `receiveChunk` and `announce` in
-  `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #208.
+  the file write without checking for `complete`, so an older attempt of a resent chunk
+  whose write ends after the phone's `complete` admitted the recording puts the receipt
+  back to `receiving`, in memory and in the store; the phone's next `complete` then
+  starts over, and the upload after it becomes a second meeting. A first announce whose
+  store read found nothing replaces the receipt another first announce of the same
+  recording made meanwhile, and drops the chunks folded into it. Swift's `complete`
+  writes the receipt memory holds once the intake answers without checking its device,
+  so a phone revoked meanwhile overwrites another phone's receipt of the same recording
+  id. Rust leaves a `complete` receipt and another device's receipt as they are and
+  answers the late announce as a re-announce (`Engine::change`). Where: `receiveChunk`,
+  `announce` and `admit` in `Sources/StenoHandover/Routing/RecordingHandler.swift`.
+  Found: #208.
 - **Unowned.** Two first announces of one recording that race both run `Inbox::begin`
   before the receipt is made, and `begin` keeps the partial but writes the metadata
-  sidecar each time, so the receipt is the one whose change ran first and the sidecar
-  is the one whose `begin` ran last. With the same metadata (the phone's retry) nothing
-  differs; with other metadata the late announce is refused with 409, but its sidecar,
-  `format` included, may stay and reach `promote` and the intake at `complete`. Running
-  `begin` only once the receipt is made moves the partial's creation behind the
+  sidecar each time, so the receipt is the one whose change ran first and the sidecar is
+  the one whose `begin` ran last. With the same metadata (the phone's retry) nothing
+  differs. With another device, byte count, hash or chunk size the late announce is
+  refused with 409, with another `format` alone it is answered 200; either way its
+  sidecar, `format` included, may stay and reach `promote` and the intake at `complete`.
+  Running `begin` only once the receipt is made moves the partial's creation behind the
   receipt and needs the place in line of a failed `begin` handled. Where: `announce` in
   `crates/steno-handover/src/engine/recording.rs` and `Inbox::begin` in
   `crates/steno-handover/src/upload/inbox.rs`. Found: #208.
+- **Unowned.** A `complete` refused for a revoke goes by the recording id alone:
+  `refusal` discards the inbox files and forgets the receipt,
+  `revoked_during_the_verify` discards the files. When another phone announced the same
+  recording id after the revoked phone's receipt read, that phone's receipt leaves
+  memory or its partial and sidecar go, and it is answered 404 "announce again" and
+  sends again. Discarding and forgetting only while memory holds no receipt of another
+  device closes it. Where: `refusal` and `revoked_during_the_verify` in
+  `crates/steno-handover/src/engine/recording.rs`. Found: #208.
+- **Unowned.** A re-announce that runs after the intake moved the verified file and
+  before the `complete` write finds no file, opens a new partial and sidecar and answers
+  200 `receiving` with no chunk listed; `admit` then removes only the sidecar, so an
+  empty partial stays after the admission until the sweep, and the phone may send every
+  chunk again while the recording is admitted. Discarding every file of the recording in
+  `admit` closes it, but the test intake keeps the verified file and the chunk upload
+  tests read it after `complete`, so they need an intake that moves it first. Where:
+  `admit` in `crates/steno-handover/src/engine/recording.rs`. Found: #208.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
@@ -1824,7 +1844,7 @@ PR off `main`.
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
 | Each platform's own wording and shortcuts: the platform from the shell, the page's words and keys, the host's permissions and sentences, the vault the CLI named | `fix/desktop-platform-wording` | #204 | merged |
 | Every handover engine write in the order asked for: the revoke's delete, the pairing's save and the touch join the receipt saves (`steno-handover`) | `fix/rust-handover-device-writes` | #207 | merged |
-| A receipt change is made to the copy memory holds, under the lock that takes its place in line: two chunks that land at once both stay, a `complete` receipt stays `complete` (`steno-handover`) | `fix/rust-handover-chunk-fold` | #208 | open |
+| A receipt change is made to the copy memory holds, under the lock that takes its place in line: two chunks that land at once both stay, a `complete` receipt stays `complete` (`steno-handover`) | `fix/rust-handover-chunk-fold` | #208 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
