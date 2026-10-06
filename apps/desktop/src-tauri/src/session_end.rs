@@ -46,6 +46,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tauri::Manager as _;
 use zbus::blocking::connection::Builder;
 use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::message::Type;
@@ -66,6 +67,9 @@ struct SessionApi {
     /// The interface of a registered client's object: the manager's
     /// signals to it and its answer (`EndSessionResponse`).
     client: &'static str,
+    /// Whether the client saves at `QueryEndSession` rather than at
+    /// `EndSession` (`client_step`).
+    saves_at_query: bool,
 }
 
 impl SessionApi {
@@ -74,12 +78,19 @@ impl SessionApi {
         path: "/org/gnome/SessionManager",
         manager: "org.gnome.SessionManager",
         client: "org.gnome.SessionManager.ClientPrivate",
+        // gnome-session asks before its confirmation dialog, which the user
+        // can still cancel, and gives a query one second.
+        saves_at_query: false,
     };
     const XFCE: Self = Self {
         name: "org.xfce.SessionManager",
         path: "/org/xfce/SessionManager",
         manager: "org.xfce.Session.Manager",
         client: "org.xfce.Session.Client",
+        // xfce4-session asks once the user chose to log out, waits up to a
+        // minute for the answer and seven seconds after `EndSession`, and
+        // on Wayland quits after the query without sending `EndSession`.
+        saves_at_query: true,
     };
     /// In the order the app looks for them on the bus.
     const ALL: [Self; 2] = [Self::GNOME, Self::XFCE];
@@ -141,8 +152,18 @@ pub fn watch(app: &tauri::AppHandle, startup_id: String) {
         let on_end = on_end.clone();
         spawn_client(
             "steno-session-client",
-            "a logout saves only when a signal reaches the app",
-            move || follow_session(&patient(Builder::session()?)?, &startup_id, &on_end),
+            "a logout saves only when a signal reaches the app or the display closes",
+            move || follow_session_end(&patient(Builder::session()?)?, &startup_id, &on_end),
+        );
+        let (busy, recording) = std::sync::mpsc::channel();
+        app.manage(LogoutInhibitor::new(busy));
+        spawn_client(
+            "steno-logout-inhibitor",
+            "a recording does not hold a logout back",
+            move || {
+                hold_logout_inhibitor(&patient(Builder::session()?)?, &recording);
+                Ok(())
+            },
         );
     }
     spawn_client(
@@ -206,9 +227,12 @@ enum ClientStep {
     Wait,
 }
 
-/// The step for the session manager's signal `member`.
-fn client_step(member: &str) -> ClientStep {
+/// The step for the session manager's signal `member` under `api`: the
+/// query is answered at once, or saved for first where the manager asks
+/// only once the session is ending (`SessionApi::saves_at_query`).
+fn client_step(api: SessionApi, member: &str) -> ClientStep {
     match member {
+        "QueryEndSession" if api.saves_at_query => ClientStep::SaveAnswerQuit,
         "QueryEndSession" => ClientStep::Answer,
         "EndSession" => ClientStep::SaveAnswerQuit,
         "Stop" => ClientStep::Quit,
@@ -216,34 +240,57 @@ fn client_step(member: &str) -> ClientStep {
     }
 }
 
-/// The first session manager of `SessionApi::ALL` on `session`, with the
-/// unique name that owns it. Asked of the bus (`GetNameOwner`), so asking
-/// starts none.
-fn session_manager(session: &Connection) -> zbus::Result<(SessionApi, OwnedUniqueName)> {
-    let bus = zbus::blocking::fdo::DBusProxy::builder(session)
+/// The bus's own proxy, which caches no property.
+fn bus(connection: &Connection) -> zbus::Result<zbus::blocking::fdo::DBusProxy<'_>> {
+    zbus::blocking::fdo::DBusProxy::builder(connection)
         .cache_properties(CacheProperties::No)
-        .build()?;
-    for api in SessionApi::ALL {
-        match bus.get_name_owner(BusName::try_from(api.name)?) {
-            Ok(owner) => return Ok((api, owner)),
-            Err(zbus::fdo::Error::NameHasNoOwner(_)) => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    Err(zbus::Error::Failure(
-        "no session manager on the bus".to_owned(),
-    ))
+        .build()
 }
 
-/// Registers the app with the session manager on `session` and follows
-/// its signals to this client until the session ends; an error when no
-/// manager is there or the bus goes away before the app quit.
-fn follow_session(
+/// The unique name that owns `name` on `connection`, none when no peer
+/// does. Asked of the bus (`GetNameOwner`), so asking starts none.
+fn owner_of(connection: &Connection, name: &str) -> zbus::Result<Option<OwnedUniqueName>> {
+    match bus(connection)?.get_name_owner(BusName::try_from(name)?) {
+        Ok(owner) => Ok(Some(owner)),
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The first session manager of `SessionApi::ALL` on `session`, with the
+/// unique name that owns it; none when neither runs.
+fn session_manager(session: &Connection) -> zbus::Result<Option<(SessionApi, OwnedUniqueName)>> {
+    for api in SessionApi::ALL {
+        if let Some(owner) = owner_of(session, api.name)? {
+            return Ok(Some((api, owner)));
+        }
+    }
+    Ok(None)
+}
+
+/// Follows the end of the session on `session`: as a client of its
+/// session manager when one runs (`follow_session`), else through the
+/// desktop portal's session monitor (`follow_portal`).
+fn follow_session_end(
     session: &Connection,
     startup_id: &str,
     on_end: &SaveAndQuit,
 ) -> zbus::Result<()> {
-    let (api, owner) = session_manager(session)?;
+    match session_manager(session)? {
+        Some(manager) => follow_session(session, manager, startup_id, on_end),
+        None => follow_portal(session, on_end),
+    }
+}
+
+/// Registers the app with `manager`, the session manager on `session`,
+/// and follows its signals to this client until the session ends; an
+/// error when the bus goes away before the app quit.
+fn follow_session(
+    session: &Connection,
+    (api, owner): (SessionApi, OwnedUniqueName),
+    startup_id: &str,
+    on_end: &SaveAndQuit,
+) -> zbus::Result<()> {
     // Subscribed before the app registers, so no signal falls between. The
     // rule names the manager's unique name, which zbus also checks on
     // every message it delivers, so a signal another peer sends straight
@@ -277,7 +324,7 @@ fn follow_session(
         let Some(member) = header.member() else {
             continue;
         };
-        match client_step(member.as_str()) {
+        match client_step(api, member.as_str()) {
             // A lost answer leaves the client following: the end may still
             // come.
             ClientStep::Answer => {
@@ -330,19 +377,277 @@ fn hold_shutdown_lock(system: &Connection, on_end: &SaveAndQuit) -> zbus::Result
     Err(zbus::Error::Failure("the system bus closed".to_owned()))
 }
 
+/// The desktop portal, its object, and the interfaces of its inhibitor
+/// and of the requests it hands out.
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const PORTAL_INHIBIT: &str = "org.freedesktop.portal.Inhibit";
+const PORTAL_REQUEST: &str = "org.freedesktop.portal.Request";
+
+/// The token of the app's session monitor, which names its request and
+/// its session (`portal_paths`).
+const MONITOR_TOKEN: &str = "steno_session_monitor";
+
+/// The `Logout` flag of the portal's `Inhibit`.
+const INHIBIT_LOGOUT: u32 = 1;
+
+/// The reason a logout inhibitor gives, which the desktop may show in its
+/// logout dialog.
+const INHIBIT_REASON: &str = "A meeting is being recorded";
+
+/// The objects the portal names after `sender`, the client's unique name,
+/// and `token`: the request of a call and the session it creates
+/// (`org.freedesktop.portal.Request`, `.Session`).
+fn portal_paths(sender: &str, token: &str) -> (String, String) {
+    let sender = sender.trim_start_matches(':').replace('.', "_");
+    (
+        format!("{PORTAL_PATH}/request/{sender}/{token}"),
+        format!("{PORTAL_PATH}/session/{sender}/{token}"),
+    )
+}
+
+/// What the monitor client does on a session state the portal reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MonitorStep {
+    /// The session is being asked to end (2, query-end): saves, then
+    /// answers (`QueryEndResponse`), then quits.
+    SaveAnswerQuit,
+    /// The session is ending (3): saves, then quits.
+    SaveQuit,
+    /// Running (1), unknown, or none.
+    Wait,
+}
+
+/// The step for the portal's `session-state`.
+fn monitor_step(state: Option<u32>) -> MonitorStep {
+    match state {
+        Some(2) => MonitorStep::SaveAnswerQuit,
+        Some(3) => MonitorStep::SaveQuit,
+        _ => MonitorStep::Wait,
+    }
+}
+
+/// Opens the desktop portal's session monitor (`CreateMonitor` on
+/// `org.freedesktop.portal.Inhibit`) and follows its `StateChanged` until
+/// the session ends: at the query or at the end it saves, answers a query
+/// after the save (`QueryEndResponse`, so the portal waits as long as it
+/// will) and quits. Started when needed (the portal is activated on
+/// demand); its signals are taken from its unique name only. An error when
+/// the portal is missing, refuses the monitor, or the bus goes away before
+/// the app quit.
+fn follow_portal(session: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()> {
+    let owner = if let Some(owner) = owner_of(session, PORTAL)? {
+        owner
+    } else {
+        bus(session)?.start_service_by_name(PORTAL.try_into()?, 0)?;
+        owner_of(session, PORTAL)?
+            .ok_or_else(|| zbus::Error::Failure("the portal did not start".to_owned()))?
+    };
+    let sender = session
+        .unique_name()
+        .ok_or_else(|| zbus::Error::Failure("no name on the session bus".to_owned()))?;
+    let (_, monitor) = portal_paths(sender.as_str(), MONITOR_TOKEN);
+    // Subscribed before the monitor is asked for, so no state falls
+    // between; the portal sends them to this client alone.
+    let rule = zbus::MatchRule::builder()
+        .msg_type(Type::Signal)
+        .sender(owner.as_str())?
+        .build();
+    let signals = MessageIterator::for_match_rule(rule, session, None)?;
+    let options = std::collections::HashMap::from([
+        ("handle_token", zbus::zvariant::Value::from(MONITOR_TOKEN)),
+        (
+            "session_handle_token",
+            zbus::zvariant::Value::from(MONITOR_TOKEN),
+        ),
+    ]);
+    let inhibit = proxy(session, owner.as_str(), PORTAL_PATH, PORTAL_INHIBIT)?;
+    let request: OwnedObjectPath = inhibit.call("CreateMonitor", &("", options))?;
+    for signal in signals {
+        let signal = signal?;
+        let header = signal.header();
+        let path = header.path().map(zbus::zvariant::ObjectPath::as_str);
+        match header.member().map(zbus::names::MemberName::as_str) {
+            Some("Response") if path == Some(request.as_str()) => {
+                let (response, _): (
+                    u32,
+                    std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+                ) = signal.body().deserialize()?;
+                if response != 0 {
+                    return Err(zbus::Error::Failure(format!(
+                        "the portal refused the session monitor ({response})"
+                    )));
+                }
+            }
+            Some("StateChanged")
+                if path == Some(PORTAL_PATH)
+                    && header.interface().map(zbus::names::InterfaceName::as_str)
+                        == Some(PORTAL_INHIBIT) =>
+            {
+                let (session_handle, state): (
+                    OwnedObjectPath,
+                    std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+                ) = signal.body().deserialize()?;
+                // Another monitor's.
+                if session_handle.as_str() != monitor {
+                    continue;
+                }
+                let state = state
+                    .get("session-state")
+                    .and_then(|state| u32::try_from(state).ok());
+                match monitor_step(state) {
+                    MonitorStep::SaveAnswerQuit => {
+                        (on_end.save)();
+                        let answered =
+                            inhibit.call::<_, _, ()>("QueryEndResponse", &(session_handle,));
+                        (on_end.quit)();
+                        return answered;
+                    }
+                    MonitorStep::SaveQuit => {
+                        (on_end.save)();
+                        (on_end.quit)();
+                        return Ok(());
+                    }
+                    MonitorStep::Wait => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(zbus::Error::Failure("the session bus closed".to_owned()))
+}
+
+/// Whether the recorder is busy, as the shell last told the inhibitor's
+/// client (`note_recording`), and the way to tell it. Managed state.
+pub struct LogoutInhibitor {
+    busy: std::sync::Mutex<(std::sync::mpsc::Sender<bool>, bool)>,
+}
+
+impl LogoutInhibitor {
+    fn new(busy: std::sync::mpsc::Sender<bool>) -> Self {
+        Self {
+            busy: std::sync::Mutex::new((busy, false)),
+        }
+    }
+
+    /// Tells the client `busy` when it changed; false when the client has
+    /// gone.
+    fn note(&self, busy: bool) -> bool {
+        let Ok(mut noted) = self.busy.lock() else {
+            return false;
+        };
+        if noted.1 == busy {
+            return true;
+        }
+        noted.1 = busy;
+        noted.0.send(busy).is_ok()
+    }
+}
+
+/// The recorder's state the shell follows (`bridge::emit`): the logout
+/// inhibitor is held while it is busy.
+pub fn note_recording(app: &tauri::AppHandle, state: crate::recording::RecordingState) {
+    use crate::recording::RecorderState as _;
+    if let Some(inhibitor) = app.try_state::<LogoutInhibitor>() {
+        inhibitor.note(state.is_busy());
+    }
+}
+
+/// Holds the portal's logout inhibitor (`Inhibit` with the `Logout` flag
+/// and `INHIBIT_REASON`) while the last state `busy` brought was busy, and
+/// releases it (`Close` on its request) when it turns idle. A desktop that
+/// honours it asks the user before a logout while a recording runs (GNOME,
+/// through gnome-session, even for `gnome-session-quit --no-prompt`);
+/// Plasma notes it for its session monitor; one that does not (the GTK
+/// portal off GNOME: Xfce, wlroots) refuses it. Either way the save at the
+/// end is the same. A call that fails is logged and tried again at the
+/// next recording; returns once `busy` has no sender.
+fn hold_logout_inhibitor(session: &Connection, busy: &std::sync::mpsc::Receiver<bool>) {
+    let mut held: Option<OwnedObjectPath> = None;
+    let mut calls = 0_u32;
+    for busy in busy {
+        match (busy, held.take()) {
+            (true, None) => {
+                calls += 1;
+                let options = std::collections::HashMap::from([
+                    (
+                        "handle_token",
+                        zbus::zvariant::Value::from(format!("steno_logout_{calls}")),
+                    ),
+                    ("reason", zbus::zvariant::Value::from(INHIBIT_REASON)),
+                ]);
+                match proxy(session, PORTAL, PORTAL_PATH, PORTAL_INHIBIT)
+                    .and_then(|inhibit| inhibit.call("Inhibit", &("", INHIBIT_LOGOUT, options)))
+                {
+                    Ok(request) => held = Some(request),
+                    Err(error) => tracing::info!(%error, "a recording does not hold a logout back"),
+                }
+            }
+            (false, Some(request)) => {
+                let closed = session.call_method(
+                    Some(PORTAL),
+                    request.as_str(),
+                    Some(PORTAL_REQUEST),
+                    "Close",
+                    &(),
+                );
+                if let Err(error) = closed {
+                    tracing::debug!(%error, "the logout inhibitor was gone already");
+                }
+            }
+            (_, kept) => held = kept,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{BufRead as _, Read as _};
     use std::sync::{Mutex, mpsc};
 
+    /// GNOME's query is answered at once, Xfce's saved for first; the end
+    /// saves on both.
     #[test]
     fn the_session_managers_signals_map_to_their_steps() {
-        assert_eq!(client_step("QueryEndSession"), ClientStep::Answer);
-        assert_eq!(client_step("EndSession"), ClientStep::SaveAnswerQuit);
-        assert_eq!(client_step("Stop"), ClientStep::Quit);
-        assert_eq!(client_step("CancelEndSession"), ClientStep::Wait);
-        assert_eq!(client_step("Unknown"), ClientStep::Wait);
+        assert_eq!(
+            client_step(GNOME_SESSION, "QueryEndSession"),
+            ClientStep::Answer
+        );
+        assert_eq!(
+            client_step(XFCE4_SESSION, "QueryEndSession"),
+            ClientStep::SaveAnswerQuit
+        );
+        for api in [GNOME_SESSION, XFCE4_SESSION] {
+            assert_eq!(client_step(api, "EndSession"), ClientStep::SaveAnswerQuit);
+            assert_eq!(client_step(api, "Stop"), ClientStep::Quit);
+            assert_eq!(client_step(api, "CancelEndSession"), ClientStep::Wait);
+            assert_eq!(client_step(api, "Unknown"), ClientStep::Wait);
+        }
+    }
+
+    /// The portal's query-end and end save; running, unknown and missing
+    /// states wait.
+    #[test]
+    fn the_portals_session_states_map_to_their_steps() {
+        assert_eq!(monitor_step(Some(2)), MonitorStep::SaveAnswerQuit);
+        assert_eq!(monitor_step(Some(3)), MonitorStep::SaveQuit);
+        for state in [None, Some(0), Some(1), Some(4)] {
+            assert_eq!(monitor_step(state), MonitorStep::Wait, "{state:?}");
+        }
+    }
+
+    /// The portal names a request and a session after the caller's unique
+    /// name, its dots and colon dropped, and the token.
+    #[test]
+    fn the_portal_names_its_objects_after_the_caller_and_the_token() {
+        assert_eq!(
+            portal_paths(":1.42", "steno"),
+            (
+                "/org/freedesktop/portal/desktop/request/1_42/steno".to_owned(),
+                "/org/freedesktop/portal/desktop/session/1_42/steno".to_owned()
+            )
+        );
     }
 
     /// A private bus: `dbus-daemon` on a socket of its own, ended with the
@@ -589,12 +894,14 @@ mod tests {
         path: "/org/gnome/SessionManager",
         manager: "org.gnome.SessionManager",
         client: "org.gnome.SessionManager.ClientPrivate",
+        saves_at_query: false,
     };
     const XFCE4_SESSION: SessionApi = SessionApi {
         name: "org.xfce.SessionManager",
         path: "/org/xfce/SessionManager",
         manager: "org.xfce.Session.Manager",
         client: "org.xfce.Session.Client",
+        saves_at_query: true,
     };
 
     /// A session manager under `api`'s names as far as one client goes, on
@@ -673,7 +980,7 @@ mod tests {
             );
             let (connection, on_end) = (daemon.connect(), noting(&steps));
             let client_name = connection.unique_name().unwrap().to_string();
-            let result = spawn(move || follow_session(&connection, "a-startup-id", &on_end));
+            let result = spawn(move || follow_session_end(&connection, "a-startup-id", &on_end));
             assert_eq!(
                 registrations.recv_timeout(WAIT).expect("registered"),
                 (APP_ID.to_owned(), "a-startup-id".to_owned())
@@ -710,6 +1017,18 @@ mod tests {
             assert_eq!(self.steps(), ["answered true"]);
         }
 
+        /// Asks the client whether the session may end, where the query
+        /// comes only once it ends: the client saves, answers and quits, in
+        /// that order.
+        fn query_ends(&self) {
+            self.emit(&self.client, "QueryEndSession");
+            self.result
+                .recv_timeout(WAIT)
+                .expect("the client ended")
+                .unwrap();
+            assert_eq!(self.steps(), ["saved", "answered true", "quit"]);
+        }
+
         /// Ends the session: the client saves, answers and quits, in that
         /// order, after the one query.
         fn end(&self) {
@@ -725,17 +1044,22 @@ mod tests {
         }
     }
 
-    /// The client registers with the app's id and its startup id, answers
-    /// a query at once without saving, ignores another client's signals,
-    /// and on the session's end saves, answers and quits, in that order.
+    /// The client registers with the app's id and its startup id, ignores
+    /// another client's signals, and saves, answers and quits, in that
+    /// order: on GNOME at the session's end, after a query it answered at
+    /// once without saving; on Xfce at the query.
     fn a_logout_saves_before_the_session_manager_is_answered(api: SessionApi) {
         let Some(daemon) = Daemon::start() else {
             return;
         };
         let session = Session::follow(&daemon, api);
         session.emit(&format!("{}/Client2", api.path), "EndSession");
-        session.query();
-        session.end();
+        if api.saves_at_query {
+            session.query_ends();
+        } else {
+            session.query();
+            session.end();
+        }
     }
 
     #[test]
@@ -841,7 +1165,352 @@ mod tests {
             save: Arc::new(|| panic!("saved")),
             quit: Arc::new(|| panic!("quit")),
         };
-        assert!(follow_session(&daemon.connect(), "", &on_end).is_err());
+        assert!(follow_session_end(&daemon.connect(), "", &on_end).is_err());
         assert!(hold_shutdown_lock(&daemon.connect(), &on_end).is_err());
+    }
+
+    /// What the fake portal was asked.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum PortalCall {
+        /// The caller's unique name and the monitor's two tokens.
+        CreateMonitor {
+            window: String,
+            sender: String,
+            handle_token: String,
+            session_handle_token: String,
+        },
+        /// The arguments, the reason and the request it handed out.
+        Inhibit {
+            window: String,
+            flags: u32,
+            reason: String,
+            request: String,
+        },
+        /// A request closed.
+        Closed(String),
+    }
+
+    type Options = std::collections::HashMap<String, zbus::zvariant::OwnedValue>;
+
+    fn option(options: &Options, key: &str) -> String {
+        options
+            .get(key)
+            .and_then(|value| <&str>::try_from(value).ok())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The desktop portal's inhibitor as far as the app goes: it notes the
+    /// monitors and inhibitors asked of it on `calls`, the answers to a
+    /// query in `steps` ("answered <session>"), and serves each inhibitor's request
+    /// until it is closed. The states and the responses are the test's to
+    /// send (`state`).
+    struct FakePortal {
+        calls: mpsc::Sender<PortalCall>,
+        steps: Steps,
+    }
+
+    impl FakePortal {
+        fn serve(daemon: &Daemon, steps: &Steps) -> (Connection, mpsc::Receiver<PortalCall>) {
+            let (calls, called) = mpsc::channel();
+            let portal = daemon
+                .builder()
+                .name(PORTAL)
+                .unwrap()
+                .serve_at(
+                    PORTAL_PATH,
+                    Self {
+                        calls,
+                        steps: steps.clone(),
+                    },
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            (portal, called)
+        }
+    }
+
+    // The interface macro hands every argument over by value.
+    #[allow(clippy::needless_pass_by_value)]
+    #[zbus::interface(name = "org.freedesktop.portal.Inhibit")]
+    impl FakePortal {
+        fn create_monitor(
+            &self,
+            window: String,
+            options: Options,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+        ) -> OwnedObjectPath {
+            let sender = header.sender().map(ToString::to_string).unwrap_or_default();
+            let token = option(&options, "handle_token");
+            let (request, _) = portal_paths(&sender, &token);
+            let _ = self.calls.send(PortalCall::CreateMonitor {
+                window,
+                sender,
+                handle_token: token,
+                session_handle_token: option(&options, "session_handle_token"),
+            });
+            OwnedObjectPath::try_from(request).unwrap()
+        }
+
+        fn query_end_response(&self, session_handle: OwnedObjectPath) {
+            let step = format!("answered {}", session_handle.as_str());
+            self.steps.lock().unwrap().push(step);
+        }
+
+        async fn inhibit(
+            &self,
+            window: String,
+            flags: u32,
+            options: Options,
+            #[zbus(header)] header: zbus::message::Header<'_>,
+            #[zbus(object_server)] server: &zbus::ObjectServer,
+        ) -> zbus::fdo::Result<OwnedObjectPath> {
+            let sender = header.sender().map(ToString::to_string).unwrap_or_default();
+            let (request, _) = portal_paths(&sender, &option(&options, "handle_token"));
+            server
+                .at(
+                    request.as_str(),
+                    FakeRequest {
+                        path: request.clone(),
+                        calls: self.calls.clone(),
+                    },
+                )
+                .await?;
+            let _ = self.calls.send(PortalCall::Inhibit {
+                window,
+                flags,
+                reason: option(&options, "reason"),
+                request: request.clone(),
+            });
+            Ok(OwnedObjectPath::try_from(request).unwrap())
+        }
+    }
+
+    /// One of the fake portal's requests, which notes its `Close`.
+    struct FakeRequest {
+        path: String,
+        calls: mpsc::Sender<PortalCall>,
+    }
+
+    #[zbus::interface(name = "org.freedesktop.portal.Request")]
+    impl FakeRequest {
+        async fn close(&self, #[zbus(object_server)] server: &zbus::ObjectServer) {
+            let _ = self.calls.send(PortalCall::Closed(self.path.clone()));
+            let _ = server.remove::<Self, _>(self.path.as_str()).await;
+        }
+    }
+
+    /// The portal's `session-state` for `session` to `client`, as the
+    /// portal sends it, from `from`.
+    fn state(from: &Connection, client: &str, session: &str, state: u32) {
+        let fields = std::collections::HashMap::from([
+            ("screensaver-active", zbus::zvariant::Value::from(false)),
+            ("session-state", zbus::zvariant::Value::from(state)),
+        ]);
+        from.emit_signal(
+            Some(client),
+            PORTAL_PATH,
+            PORTAL_INHIBIT,
+            "StateChanged",
+            &(OwnedObjectPath::try_from(session).unwrap(), fields),
+        )
+        .unwrap();
+    }
+
+    /// A monitor client following the fake portal, with no session
+    /// manager on the bus, once the portal answered its monitor with
+    /// `response`.
+    struct Monitor {
+        portal: Connection,
+        client: String,
+        session: String,
+        steps: Steps,
+        result: mpsc::Receiver<zbus::Result<()>>,
+    }
+
+    impl Monitor {
+        fn follow(daemon: &Daemon, response: u32) -> Self {
+            let steps = Steps::default();
+            let (portal, calls) = FakePortal::serve(daemon, &steps);
+            let (connection, on_end) = (daemon.connect(), noting(&steps));
+            let client = connection.unique_name().unwrap().to_string();
+            let result = spawn(move || follow_session_end(&connection, "", &on_end));
+            let asked = calls.recv_timeout(WAIT);
+            assert!(
+                asked.is_ok(),
+                "no monitor was asked for: {:?}",
+                result.try_recv()
+            );
+            assert_eq!(
+                asked.unwrap(),
+                PortalCall::CreateMonitor {
+                    window: String::new(),
+                    sender: client.clone(),
+                    handle_token: MONITOR_TOKEN.to_owned(),
+                    session_handle_token: MONITOR_TOKEN.to_owned(),
+                }
+            );
+            let (request, session) = portal_paths(&client, MONITOR_TOKEN);
+            let results = std::collections::HashMap::from([(
+                "session_handle",
+                zbus::zvariant::Value::from(session.as_str()),
+            )]);
+            portal
+                .emit_signal(
+                    Some(client.as_str()),
+                    request.as_str(),
+                    PORTAL_REQUEST,
+                    "Response",
+                    &(response, results),
+                )
+                .unwrap();
+            Self {
+                portal,
+                client,
+                session,
+                steps,
+                result,
+            }
+        }
+
+        fn steps(&self) -> Vec<String> {
+            self.steps.lock().unwrap().clone()
+        }
+
+        /// Nothing happened, for longer than a save takes.
+        fn waits(&self) {
+            std::thread::sleep(SAVE * 2);
+            assert!(self.steps().is_empty(), "{:?}", self.steps());
+            assert!(self.result.try_recv().is_err(), "the client ended");
+        }
+
+        fn ended(&self) -> zbus::Result<()> {
+            self.result.recv_timeout(WAIT).expect("the client ended")
+        }
+    }
+
+    /// Without a session manager the client opens the portal's session
+    /// monitor with its tokens, waits while the session runs and through
+    /// another monitor's states, and at the query saves, answers and
+    /// quits, in that order.
+    #[test]
+    fn a_portal_query_saves_before_it_is_answered_and_then_quits() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let monitor = Monitor::follow(&daemon, 0);
+        let (_, other) = portal_paths(":1.999", MONITOR_TOKEN);
+        state(&monitor.portal, &monitor.client, &monitor.session, 1);
+        state(&monitor.portal, &monitor.client, &other, 2);
+        state(&monitor.portal, &monitor.client, &other, 3);
+        monitor.waits();
+        state(&monitor.portal, &monitor.client, &monitor.session, 2);
+        monitor.ended().unwrap();
+        let answered = format!("answered {}", monitor.session);
+        assert_eq!(monitor.steps(), ["saved", answered.as_str(), "quit"]);
+    }
+
+    /// At the session's end the client saves and quits; there is no query
+    /// to answer.
+    #[test]
+    fn a_portal_end_saves_and_then_quits() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let monitor = Monitor::follow(&daemon, 0);
+        state(&monitor.portal, &monitor.client, &monitor.session, 3);
+        monitor.ended().unwrap();
+        assert_eq!(monitor.steps(), ["saved", "quit"]);
+    }
+
+    /// A peer other than the portal that sends the client a state is
+    /// ignored.
+    #[test]
+    fn a_session_state_from_another_peer_is_ignored() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let monitor = Monitor::follow(&daemon, 0);
+        let peer = daemon.connect();
+        state(&peer, &monitor.client, &monitor.session, 3);
+        monitor.waits();
+        state(&monitor.portal, &monitor.client, &monitor.session, 3);
+        monitor.ended().unwrap();
+        assert_eq!(monitor.steps(), ["saved", "quit"]);
+    }
+
+    /// A monitor the portal refuses ends the client with an error, and a
+    /// state after it saves nothing.
+    #[test]
+    fn a_refused_monitor_ends_the_client_with_an_error() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let monitor = Monitor::follow(&daemon, 2);
+        let ended = monitor.ended();
+        assert!(ended.is_err(), "{ended:?}");
+        state(&monitor.portal, &monitor.client, &monitor.session, 3);
+        std::thread::sleep(SAVE * 2);
+        assert!(monitor.steps().is_empty(), "{:?}", monitor.steps());
+    }
+
+    /// The inhibitor is taken once when the recorder turns busy, with the
+    /// `Logout` flag and the reason, released when it turns idle, and taken
+    /// anew for the next recording; a state that did not change asks for
+    /// nothing.
+    #[test]
+    fn the_logout_inhibitor_is_held_only_while_recording() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let (_portal, calls) = FakePortal::serve(&daemon, &Steps::default());
+        let client = daemon.connect();
+        let name = client.unique_name().unwrap().to_string();
+        let (busy, recording) = mpsc::channel();
+        let inhibitor = LogoutInhibitor::new(busy);
+        let result = spawn(move || {
+            hold_logout_inhibitor(&client, &recording);
+            Ok(())
+        });
+        let quiet = || {
+            std::thread::sleep(SAVE);
+            assert_eq!(calls.try_recv(), Err(mpsc::TryRecvError::Empty));
+        };
+        let taken = |call: usize| {
+            let (request, _) = portal_paths(&name, &format!("steno_logout_{call}"));
+            assert_eq!(
+                calls.recv_timeout(WAIT).expect("the inhibitor was taken"),
+                PortalCall::Inhibit {
+                    window: String::new(),
+                    flags: 1,
+                    reason: INHIBIT_REASON.to_owned(),
+                    request: request.clone(),
+                }
+            );
+            request
+        };
+        assert!(inhibitor.note(false));
+        quiet();
+        assert!(inhibitor.note(true));
+        let first = taken(1);
+        assert!(inhibitor.note(true));
+        quiet();
+        assert!(inhibitor.note(false));
+        assert_eq!(
+            calls
+                .recv_timeout(WAIT)
+                .expect("the inhibitor was released"),
+            PortalCall::Closed(first)
+        );
+        assert!(inhibitor.note(false));
+        quiet();
+        assert!(inhibitor.note(true));
+        taken(2);
+        drop(inhibitor);
+        result
+            .recv_timeout(WAIT)
+            .expect("the client ended")
+            .unwrap();
     }
 }
