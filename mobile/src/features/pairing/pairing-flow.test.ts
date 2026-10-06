@@ -112,6 +112,17 @@ describe("performPairing", () => {
 	});
 });
 
+/** One queued recording, "a". */
+const one = addRecording(EMPTY_INDEX, {
+	recordingID: "a",
+	fileName: "a.m4a",
+	startedAt: "2026-09-25T09:00:00.000Z",
+	durationSeconds: 60,
+	byteCount: 100,
+	sha256: Buffer.alloc(32, 9).toString("base64"),
+	chunkSize: 1024,
+});
+
 describe("commitPairing", () => {
 	const next: Pairing = {
 		mac: {
@@ -128,19 +139,7 @@ describe("commitPairing", () => {
 		const calls: string[] = [];
 		const save = Promise.withResolvers<void>();
 		const cancel = Promise.withResolvers<void>();
-		let index = setState(
-			addRecording(EMPTY_INDEX, {
-				recordingID: "a",
-				fileName: "a.m4a",
-				startedAt: "2026-09-25T09:00:00.000Z",
-				durationSeconds: 60,
-				byteCount: 100,
-				sha256: Buffer.alloc(32, 9).toString("base64"),
-				chunkSize: 1024,
-			}),
-			"a",
-			"unpaired",
-		);
+		let index = setState(one, "a", "unpaired");
 		const deps: PairingCommitDependencies = {
 			replace: async () => {
 				calls.push("replace");
@@ -203,15 +202,7 @@ describe("commitPairing", () => {
 describe("forgetPairing", () => {
 	it("forgets the pairing, marks the rows unpaired, then cancels the chunks in flight", async () => {
 		const calls: string[] = [];
-		let index = addRecording(EMPTY_INDEX, {
-			recordingID: "a",
-			fileName: "a.m4a",
-			startedAt: "2026-09-25T09:00:00.000Z",
-			durationSeconds: 60,
-			byteCount: 100,
-			sha256: Buffer.alloc(32, 9).toString("base64"),
-			chunkSize: 1024,
-		});
+		let index = one;
 		await forgetPairing({
 			clear: async () => {
 				calls.push("clear");
