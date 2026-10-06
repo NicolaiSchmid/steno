@@ -100,9 +100,11 @@ export function useUploadCoordinator(): UploadCoordinator {
 					async (session, recordingID, chunk, uri) => {
 						await startChunkUpload(session, recordingID, chunk, uri);
 						if (session.token !== currentToken()) {
-							await stenoLink().cancelUpload(
-								taskIDs.chunk(recordingID, chunk.index),
-							);
+							// Logged, not thrown: the task stays tracked until its
+							// `uploadFailed` arrives.
+							await stenoLink()
+								.cancelUpload(taskIDs.chunk(recordingID, chunk.index))
+								.catch((error) => console.warn("[sync] cancel failed", error));
 						}
 					},
 				),
