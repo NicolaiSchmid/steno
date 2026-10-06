@@ -311,11 +311,10 @@ import Testing
     // it would tell the other phone `complete` for a recording never
     // admitted from it, and that phone would delete its copy.
     let chunkSize = 64 * 1024
-    let fake = FakeHandoverIntake(meetingID: Self.meetingID)
-    let intake = HeldIntake(fake)
+    let intake = HeldIntake(FakeHandoverIntake(meetingID: Self.meetingID))
     defer { intake.release() }
     try await TestService.run(
-      chunkSize: chunkSize, intake: fake, customIntake: intake, start: false
+      chunkSize: chunkSize, intake: intake.fake, customIntake: intake, start: false
     ) { test in
       let phone = try await EngineClient.paired(test)
       let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 67)
@@ -335,7 +334,7 @@ import Testing
 
       #expect(completed.code == 200, "the intake admitted the revoked phone's recording")
       #expect(try completed.json(Wire.CompleteResponse.self).meetingID == Self.meetingID)
-      #expect(await fake.admissions.count == 1)
+      #expect(await test.intake.admissions.count == 1)
       let inMemory = try #require(await test.service.engine.activeReceipts[id])
       let stored = try #require(try await test.store.handoverReceipt(recordingID: id))
       for receipt in [inMemory, stored] {
