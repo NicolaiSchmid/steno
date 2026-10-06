@@ -56,10 +56,11 @@ export type ExecutorDependencies = {
 	deviceName(): Promise<string>;
 	update(transform: (index: QueueIndex) => QueueIndex): Promise<unknown>;
 	/**
-	 * A 401 answered a request sent with `token` (`null` when nobody recorded
-	 * it, which stands for the pairing loaded at launch). While `token` is
-	 * still the pairing's, the Mac revoked it: runs `unpairRows` (every
-	 * pending row becomes `unpaired`), forgets the pairing and resolves true.
+	 * A 401 answered a request sent with `token` (`null` when nobody
+	 * recorded it, which stands for the pairing read from the keychain).
+	 * While `token` is still the pairing's, the Mac revoked it: runs
+	 * `unpairRows` (every pending row becomes `unpaired`), forgets the
+	 * pairing and resolves true.
 	 * Resolves false for a pairing since replaced or cleared; the executor
 	 * then handles the 401 like any other failure of that request, except
 	 * that a refresh of the chunk sets stops there.
@@ -123,7 +124,7 @@ export function createUploadExecutor(
 		if (error instanceof HandoverError && error.kind === "unauthorized") {
 			if (await unauthorized(token)) return;
 			// A 401 to a pairing since replaced: not a revoke of this one.
-			message = "Paired again; retrying";
+			message = "Retrying";
 		}
 		await deps.update((current) => {
 			const rec = findRecording(current, recordingID);

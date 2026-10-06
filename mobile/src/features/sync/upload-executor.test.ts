@@ -564,7 +564,7 @@ describe("a 401 to a pairing since replaced keeps the new one", () => {
 		expect(h.row("a")).toMatchObject({
 			state: "queued",
 			attempts: 1,
-			lastError: "Paired again; retrying",
+			lastError: "Retrying",
 		});
 		expect(h.row("a")?.nextAttemptAt).not.toBeNull();
 		expect(h.row("bb")?.state).toBe("queued");
@@ -624,7 +624,7 @@ describe("a 401 to a pairing since replaced keeps the new one", () => {
 		expect(h.row("a")?.state).toBe("uploading");
 	});
 
-	it("stops refreshing the chunk sets at the first one", async () => {
+	it("while refreshing two chunk sets, and stops at the first", async () => {
 		const h = harness(
 			setState(setState(twoQueued(), "a", "uploading"), "bb", "uploading"),
 		);
