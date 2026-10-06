@@ -94,8 +94,8 @@ export type PairingCommitDependencies = {
  * Then anything the old Mac revoked is eligible for the new one.
  */
 export async function commitPairing(
-	deps: PairingCommitDependencies,
 	pairing: Pairing,
+	deps: PairingCommitDependencies,
 ): Promise<void> {
 	await Promise.all([deps.replace(pairing), cancelAll(deps)]);
 	await deps.update((index) =>

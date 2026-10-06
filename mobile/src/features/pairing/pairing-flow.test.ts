@@ -159,7 +159,7 @@ describe("commitPairing", () => {
 
 	it("starts the save, then the cancel, before either settles", async () => {
 		const h = held();
-		const done = commitPairing(h.deps, next);
+		const done = commitPairing(next, h.deps);
 		await Promise.resolve();
 		expect(h.calls).toEqual(["replace", "cancel"]);
 
@@ -174,7 +174,7 @@ describe("commitPairing", () => {
 
 	it("re-queues nothing when the save fails", async () => {
 		const h = held();
-		const done = commitPairing(h.deps, next);
+		const done = commitPairing(next, h.deps);
 		h.save.reject(new Error("keychain locked"));
 		await expect(done).rejects.toThrow("keychain locked");
 		expect(h.calls).not.toContain("update");
@@ -184,7 +184,7 @@ describe("commitPairing", () => {
 		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			const h = held();
-			const done = commitPairing(h.deps, next);
+			const done = commitPairing(next, h.deps);
 			h.cancel.reject(new Error("no session"));
 			h.save.resolve();
 			await done;

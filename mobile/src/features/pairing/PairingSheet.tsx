@@ -85,7 +85,7 @@ export function PairingSheet() {
 					device: deviceIdentity,
 					now: () => new Date(),
 				});
-				await commitPairing({ replace, cancelAllUploads, update }, outcome);
+				await commitPairing(outcome, { replace, cancelAllUploads, update });
 				setPhase({ kind: "paired", macName: outcome.mac.macName });
 			} catch (error) {
 				scanBlockedUntil.current = Date.now() + RESCAN_DELAY_MS;
