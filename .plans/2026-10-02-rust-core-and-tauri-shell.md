@@ -1718,6 +1718,15 @@ request that fixes an item deletes it.
   leaves two speech sidecars running (about 4.4 GB) until the retired job releases its
   own. Where: `CurrentPipeline::reload` in `crates/steno-services/src/pipeline.rs`.
   Found: #183.
+- **Unowned.** A `complete` the phone sent before an unpair and that is answered after
+  it is lost on the phone: the row is `unpaired` by then and cannot move to
+  `delivered`, so the write throws, and the failure handler leaves a row that is not
+  pending alone. The computer has the meeting, but the phone keeps the row and its
+  file, and a later pairing sends the recording again. The unpair's cancel does not
+  reach it, because `complete` is a pinned request, not a background upload. Allowing
+  `unpaired` to `delivered` closes it. Where: the `complete` answer in
+  `createUploadExecutor` (`mobile/src/features/sync/upload-executor.ts`), `TRANSITIONS`
+  in `mobile/src/features/queue/queue-index.ts`. Found: #200.
 - **Unowned.** A `complete` whose device was revoked while the intake admitted its
   recording removes the metadata sidecar afterwards whatever memory holds, so when
   another device announced the same recording id meanwhile, that device's sidecar
