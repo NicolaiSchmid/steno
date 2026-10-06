@@ -44,10 +44,12 @@ fn main() {
             Command::Dev(command) => command.run().await,
         }
     });
-    // The queued log lines, after the runtime, whose tasks may log as they
-    // end, and before a failure they led to, as when they were written at
-    // once.
-    drop(runtime);
+    // Write out the queued log lines once the runtime is gone, since its
+    // tasks may log as they end, and before the failure message, so they
+    // come out ahead of it, as when lines were written at once. The shutdown
+    // waits a second at most: a worker parked in a blocking call would
+    // otherwise hold the exit, as the desktop's leaked runtime avoids.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(1));
     steno_services::flush_logs();
     let Err(failure) = outcome else {
         return;
