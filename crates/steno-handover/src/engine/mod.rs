@@ -611,26 +611,29 @@ impl Engine {
         self.publish_receipts();
     }
 
-    /// One state change: the state, the chunk set when given, `updated_at`,
-    /// then the save. The change is made to the receipt as memory holds it
-    /// when memory holds it, else to `receipt`, and `receipt` comes back as
-    /// changed: a chunk another request folded in since `receipt` was read
-    /// stays. Callers that answer the phone whatever the write did ignore
-    /// the result deliberately: memory already holds the change and the
-    /// phone's next request re-reads.
+    /// One state change ([`Engine::change`]): the state and the chunk set
+    /// when given, then the save; `receipt` comes back as changed. Callers
+    /// that answer the phone whatever the write did ignore the result
+    /// deliberately: memory already holds the change and the phone's next
+    /// request re-reads.
     pub(crate) async fn transition(
         &self,
         receipt: &mut HandoverReceipt,
         state: HandoverState,
         received_chunks: Option<Vec<i64>>,
     ) -> store::Result<()> {
-        let changed = self.change(receipt.recording_id, Some(receipt), |changed| {
-            changed.state = state;
-            if let Some(received_chunks) = received_chunks {
-                changed.received_chunks = received_chunks;
-            }
-        });
-        let (changed, place) = changed.expect("a fallback is given");
+        let (changed, place) = self
+            .change(
+                receipt.recording_id,
+                |held| Some(held.unwrap_or(receipt).clone()),
+                |changed| {
+                    changed.state = state;
+                    if let Some(received_chunks) = received_chunks {
+                        changed.received_chunks = received_chunks;
+                    }
+                },
+            )
+            .expect("`receipt` stands in for memory");
         *receipt = changed.clone();
         self.save(changed, place).await
     }
@@ -644,38 +647,37 @@ impl Engine {
         device_id: Uuid,
         index: i64,
     ) -> Option<store::Result<()>> {
-        let (changed, place) = self
-            .change(recording_id, None, |changed| {
+        let (changed, place) = self.change(
+            recording_id,
+            |held| held.filter(|held| held.device_id == device_id).cloned(),
+            |changed| {
                 changed.state = HandoverState::Receiving;
                 changed.received_chunks.push(index);
                 changed.received_chunks.sort_unstable();
                 changed.received_chunks.dedup();
-            })
-            .filter(|(changed, _)| changed.device_id == device_id)?;
+            },
+        )?;
         Some(self.save(changed, place).await)
     }
 
-    /// Changes the receipt of `recording_id` as memory holds it, or
-    /// `fallback` when memory holds none, moves `updated_at`, keeps the
-    /// result in memory and takes the save's place in line, all under one
-    /// guard. Read and write as two steps, two requests on two threads
-    /// could both start from the same copy and the later one would drop
-    /// the other's change, in memory and in the store. The clock is read
-    /// before the guard, so a slow clock never holds the lock. Swift's
-    /// actor makes the read and the write one step the same way.
+    /// Changes the copy `pick` makes of the receipt memory holds for
+    /// `recording_id` (`None` when it holds none), moves `updated_at`,
+    /// keeps the result in memory and takes the save's place in line, all
+    /// under one guard; `None`, with nothing changed, when `pick` declines.
+    /// Read and write as two steps, two requests on two threads could
+    /// start from the same copy and the later one would drop the other's
+    /// change, in memory and in the store. The clock is read before the
+    /// guard, so a slow clock never holds the lock. Swift's actor makes the
+    /// read and the write one step the same way.
     fn change(
         &self,
         recording_id: Uuid,
-        fallback: Option<&HandoverReceipt>,
+        pick: impl FnOnce(Option<&HandoverReceipt>) -> Option<HandoverReceipt>,
         change: impl FnOnce(&mut HandoverReceipt),
     ) -> Option<(HandoverReceipt, InOrder)> {
         let timestamp = (self.now)();
         let mut state = self.state();
-        let mut changed = state
-            .active_receipts
-            .get(&recording_id)
-            .or(fallback)?
-            .clone();
+        let mut changed = pick(state.active_receipts.get(&recording_id))?;
         change(&mut changed);
         changed.updated_at = timestamp;
         state.remember(&changed);
