@@ -822,8 +822,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The Swift `steno process` stamped `startedAt` from `Date()` minus the duration; the
   Rust CLI does the same to the millisecond, so a `steno export` of a CLI-processed
   meeting differs only in the ids both sides mint at random.
-- Since #202 `steno process --title` stores the title as the user's
-  (`TitleOrigin::User`), so the app shows it and the summary keeps it. Swift's CLI
+- `steno process --title` stores the title as the user's
+  (`TitleOrigin::User`, #202), so the app shows it and the summary keeps it. Swift's CLI
   stores it as the default title, so the Swift app shows the date title while the
   export carries the given one, and a summary may rename the meeting; port to Swift
   only if it ships another release. Without `--title` both store the file name as the
@@ -1302,7 +1302,9 @@ item to settle before the Linux release:
   With the second bind run in the background instead
   (`pw-metadata -n default &`), so it outlives the pong, the monitor
   prints the set.
-- **`stop()` is bounded, except in `Gate::close`.** It closes the capture's gate to the sink, so
+- **`stop()` is bounded, except in `Gate::close`.** It closes the
+  capture's gate to the sink, waiting without a bound for a pass already
+  inside (a cycle's delivery, or a report and its handler), so
   no frame or report reaches the sink after it, and waits 2 s for the
   PipeWire thread; a thread that has not ended by then is logged with the
   system call it waits in and left behind, and the devices may stay open
