@@ -5,7 +5,7 @@ import type {
 	UploadFinished,
 	UploadSpec,
 } from "@modules/steno-link";
-import { act, useState } from "react";
+import { act, StrictMode, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,7 +27,7 @@ import { useUploadCoordinator } from "./use-upload-coordinator";
  * pinned request and background upload is recorded with its URL and
  * bearer. The real recording client and executor run on top. The pairing,
  * a re-pairing still saving (`replacing`) and the queue are plain state the
- * test drives.
+ * test drives. It renders under `StrictMode`, so every effect runs twice.
  */
 const fake = vi.hoisted(() => {
 	const listeners = new Map<string, Set<(event: unknown) => void>>();
@@ -35,6 +35,8 @@ const fake = vi.hoisted(() => {
 		listeners,
 		sent: [] as { url: string; auth: string | undefined }[],
 		cancelled: [] as string[],
+		/** When set, `cancelUpload` rejects. */
+		failCancel: false,
 		releaseMacB: null as (() => void) | null,
 		/**
 		 * When set, the next background upload, pinned request or device
@@ -89,6 +91,7 @@ const link = {
 	},
 	async cancelUpload(taskID: string) {
 		fake.cancelled.push(taskID);
+		if (fake.failCancel) throw new Error("no such task");
 	},
 	async request(request: PinnedRequest) {
 		fake.sent.push({ url: request.url, auth: request.headers.Authorization });
@@ -190,7 +193,13 @@ async function mount(initial: QueueIndex, pairing: Pairing) {
 		return null;
 	}
 	root = createRoot(document.createElement("div"));
-	await act(async () => root?.render(<Probe />));
+	await act(async () =>
+		root?.render(
+			<StrictMode>
+				<Probe />
+			</StrictMode>,
+		),
+	);
 	await settle();
 	return {
 		row: (id: string) => findRecording(latest, id),
@@ -242,6 +251,7 @@ beforeEach(() => {
 	fake.listeners.clear();
 	fake.sent.length = 0;
 	fake.cancelled.length = 0;
+	fake.failCancel = false;
 	fake.releaseMacB = null;
 	fake.holdUpload = null;
 	fake.holdRequest = null;
@@ -371,6 +381,30 @@ describe("useUploadCoordinator", () => {
 			await act(async () => upload.resolve());
 			await settle();
 			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 1)]);
+		});
+
+		it("keeps tracking that chunk when its cancel fails", async () => {
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				const upload = Promise.withResolvers<void>();
+				fake.holdUpload = upload.promise;
+				fake.failCancel = true;
+				const h = await mount(queued("a"), A);
+				fake.replacing = "token-b";
+				await act(async () => upload.resolve());
+				await settle();
+				expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
+				expect(warn).toHaveBeenCalledWith(
+					"[sync] cancel failed",
+					expect.any(Error),
+				);
+				expect(h.row("a")).toMatchObject({
+					state: "uploading",
+					lastError: null,
+				});
+			} finally {
+				warn.mockRestore();
+			}
 		});
 
 		it("refuses the status refresh under the old pairing", async () => {
