@@ -1,11 +1,15 @@
 # Mac cutover: the Tauri app replaces the Swift app
 
 Extended by `.plans/2026-10-07-stable-promotion.md` (2026-10-07), which
-replaces this plan's opening gate (every unticked parity line) with a
-blocking list, replaces steps 2 (the Sparkle handoff: every installed Swift
-build reads the `beta` channel, so a beta item stages nothing) and 3
-(distribution), and proposes answers to the open choices in steps 1 and 5.
-The inventory, steps 4, 6 and 7, the risks and the tests stand.
+replaces this plan's opening gate (every unticked parity line) with a blocking
+list, replaces steps 2 (the Sparkle handoff) and 3 (distribution), and proposes
+answers to the open choices in steps 1 and 5. The inventory, steps 4, 6 and 7,
+and the tests stand. No longer true here: publishing to the beta channel first
+stages nothing, because every installed Swift build is a release candidate
+that reads `beta` (and `v0.9.0-rc.1` reads `releases/latest/download/appcast.xml`,
+not the `appcast` branch); the two-login-items risk is moot if the Rust app
+keeps `SMAppService` (that plan's D4); and test 1's "a Swift release build
+reads no channel" does not hold for any installed build.
 
 Status: planned 2026-10-04, not started. WP9b, the second half of WP9 in
 `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP9a (signed, notarised

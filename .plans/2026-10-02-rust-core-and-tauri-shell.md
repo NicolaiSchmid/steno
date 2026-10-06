@@ -539,10 +539,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   (`apps/desktop/README.md`, "Checksums and OpenPGP signatures"); the Windows
   installers stay unsigned and the release notes say so. WP9b is the cutover:
   `.plans/2026-10-04-mac-cutover.md`.
-  The shell's gaps that must close before the cutover (WP9b) opens ("Open after the
-  port"): the tray's badge for pending speaker reviews; the QR encoder, a fake until a
-  QR crate draws the pairing code; the clip player, a fake with no audio output; and
-  the update schedule behind the host's `Updater`.
+  The shell's gaps ("Open after the port"): the tray's badge for pending speaker
+  reviews; the QR encoder, a fake until a QR crate draws the pairing code; the clip
+  player, a fake with no audio output; and the update schedule behind the host's
+  `Updater`. Which of them block the stable release is decided by the blocking list
+  in `.plans/2026-10-07-stable-promotion.md` (D3): the QR encoder and the update
+  schedule do, the badge and the clip player follow.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
@@ -704,10 +706,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   marked failed at launch, unfinished processing resumed at launch
   (`steno_services::App::launch`).
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
-  the host republishes `progress`; the tray (WP8) shows no badge for it; it must close
-  before the cutover (WP9b) opens.
-- [ ] Updates: Sparkle today, the Tauri updater after the cutover; must close before the
-  cutover (WP9b) opens: the `Updater` trait is still the services' fake, since WP8's
+  the host republishes `progress`; the tray (WP8) shows no badge for it; it follows the
+  stable release (`.plans/2026-10-07-stable-promotion.md`, D3).
+- [ ] Updates: Sparkle today, the Tauri updater after the cutover; blocks the stable
+  release (`.plans/2026-10-07-stable-promotion.md`, S4): the `Updater` trait is still the services' fake, since WP8's
   `updater` has no automatic-check or automatic-download flag and no last check time to
   report (see "Pipeline and services (WP6b)").
 - [x] Login item: registered on the first launch when the setting says so
@@ -997,7 +999,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   shell's `UpdateOutcome` stays beside the host's until then; (4) the QR encoder and
   the clip player are fakes, so the pairing code shows no QR image and a speaker's
   sample clip does not play: each needs new code (a QR crate, an audio output), not
-  wiring; both must close before the cutover (WP9b) opens.
+  wiring; the QR encoder blocks the stable release and the clip player follows it
+  (`.plans/2026-10-07-stable-promotion.md`, D3).
 - The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
   `App::launch` and runs whether or not a code is shown, where Swift ran it only while
   the Phones pane showed one.
@@ -1636,9 +1639,11 @@ the branch of a follow-up pull request, or **Unowned** (no package or release ha
 Then it says what is open, where it lives (pointing to this plan where the plan already
 covers it) and which pull requests found it. The pull request that fixes an item deletes it.
 
-- **WP9b.** The unticked lines of the parity list must all be ticked before the
-  cutover opens: the menu bar's queue and recent meetings, the detection prompt, the
-  auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
+- **WP9b.** The unticked lines of the parity list; which of them block the stable
+  release, and which follow it, is the blocking list of
+  `.plans/2026-10-07-stable-promotion.md` (D3), which replaces the rule that all must
+  be ticked before the cutover opens. The lines: the menu bar's queue and recent
+  meetings, the detection prompt, the auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
   bar's Record and Find Meetings items, and the "Where the speech sidecar runs
   Parakeet v3" line under "Speech" (its two items below). Several name WP5 or WP8,
   which merged without them. The two other unticked "Speech" lines, `SpeechSettings`
