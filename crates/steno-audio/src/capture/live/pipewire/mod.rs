@@ -1247,7 +1247,7 @@ impl CaptureBackend for LiveCaptureBackend {
         outcome
     }
 
-    /// Returns within [`STOP_TIMEOUT`] (2 s), plus the microseconds of a
+    /// Returns within `STOP_TIMEOUT` (2 s), plus the microseconds of a
     /// delivery inside the gate: no frame reaches the sink after it, and
     /// no report but one the gate let in before it closed, which `stop()`
     /// logs and leaves to reach the sink's handler late, as it leaves a
@@ -1418,14 +1418,14 @@ mod tests {
         let gate = Arc::new(Gate::new());
         let (release, passer) = hold_inside(&gate, Pass::Delivery);
         // The deadline has passed already: only the delivery holds it.
-        let (closed, closer) = close_on_a_thread(&gate, Instant::now());
+        let (returned, closer) = close_on_a_thread(&gate, Instant::now());
         assert_eq!(
-            closed.recv_timeout(Duration::from_millis(200)),
+            returned.recv_timeout(Duration::from_millis(200)),
             Err(RecvTimeoutError::Timeout),
             "close() returned while a delivery was inside"
         );
         release.send(()).unwrap();
-        assert_eq!(closed.recv_timeout(Duration::from_secs(10)), Ok(true));
+        assert_eq!(returned.recv_timeout(Duration::from_secs(10)), Ok(true));
         assert!(passer.join().unwrap(), "the delivery ran");
         closer.join().unwrap();
     }
@@ -1434,14 +1434,14 @@ mod tests {
     fn close_waits_for_a_report_that_leaves_before_its_deadline() {
         let gate = Arc::new(Gate::new());
         let (release, passer) = hold_inside(&gate, Pass::Report);
-        let (closed, closer) = close_on_a_thread(&gate, Instant::now() + Duration::from_secs(60));
+        let (returned, closer) = close_on_a_thread(&gate, Instant::now() + Duration::from_secs(60));
         assert_eq!(
-            closed.recv_timeout(Duration::from_millis(200)),
+            returned.recv_timeout(Duration::from_millis(200)),
             Err(RecvTimeoutError::Timeout),
             "close() returned while a report was inside, before its deadline"
         );
         release.send(()).unwrap();
-        assert_eq!(closed.recv_timeout(Duration::from_secs(10)), Ok(true));
+        assert_eq!(returned.recv_timeout(Duration::from_secs(10)), Ok(true));
         assert!(passer.join().unwrap());
         closer.join().unwrap();
     }
@@ -1451,9 +1451,9 @@ mod tests {
         let gate = Arc::new(Gate::new());
         let (release, passer) = hold_inside(&gate, Pass::Report);
         // Without the bound, close() would wait for the release below.
-        let (closed, closer) = close_on_a_thread(&gate, Instant::now());
+        let (returned, closer) = close_on_a_thread(&gate, Instant::now());
         assert_eq!(
-            closed.recv_timeout(Duration::from_secs(10)),
+            returned.recv_timeout(Duration::from_secs(10)),
             Ok(false),
             "close() returns at its deadline and says a report is inside"
         );
