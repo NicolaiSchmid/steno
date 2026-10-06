@@ -216,6 +216,7 @@ pub fn arm(app: &AppHandle) {
             stderr_line!(
                 "[steno-desktop] smoke: {SECONDS_VARIABLE} must be a positive number, got {value:?}"
             );
+            steno_services::flush_logs();
             process::exit(2);
         }
     };

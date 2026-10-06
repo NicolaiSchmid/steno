@@ -822,6 +822,12 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The Swift `steno process` stamped `startedAt` from `Date()` minus the duration; the
   Rust CLI does the same to the millisecond, so a `steno export` of a CLI-processed
   meeting differs only in the ids both sides mint at random.
+- `steno process --title` stores the title as the user's
+  (`TitleOrigin::User`, #202), so the app shows it and the summary keeps it. Swift's CLI
+  stores it as the default title, so the Swift app shows the date title while the
+  export carries the given one, and a summary may rename the meeting; port to Swift
+  only if it ships another release. Without `--title` both store the file name as the
+  default title; Rust does so for a blank `--title` too, as the intake treats one.
 - The CLI's secret store is the 0600 `secrets.json` under the support directory
   (`STENO_<KEY>` wins, as in Swift); the app's is the platform keyring on macOS and
   Windows, filed as the Swift app files it: service `uno.schmid.steno.mac`, account the
@@ -1296,17 +1302,21 @@ item to settle before the Linux release:
   With the second bind run in the background instead
   (`pw-metadata -n default &`), so it outlives the pong, the monitor
   prints the set.
-- **`stop()` is bounded, except behind a blocked log write.** It closes
-  the capture's gate to the sink, so no frame or report reaches the sink
-  after it, and waits 2 s for the PipeWire thread; a thread that has not
-  ended by then is logged with the system call it waits in and left
-  behind, and the devices may stay open until Steno quits. Such a hang was
-  seen once in testing, most likely in a log write: logs are written
-  synchronously, and a capture thread left behind in a later run was
-  blocked in `write(2)` to stderr, waiting on the disk's journal at idle
-  I/O priority. `stop()`'s own log of the hang waits for the same stderr
-  lock, so `stop()` then blocks too, past its bound. A non-blocking log
-  writer in the binaries closes this (under "Open after the port").
+- **`stop()` is bounded, except in `Gate::close`.** It closes the
+  capture's gate to the sink, waiting without a bound for a pass already
+  inside (a cycle's delivery, or a report and its handler), so
+  no frame or report reaches the sink after it, and waits 2 s for the
+  PipeWire thread; a thread that has not ended by then is logged with the
+  system call it waits in and left behind, and the devices may stay open
+  until Steno quits. Such a hang was seen once in testing, most likely in
+  a log write: logs were written synchronously then, a capture thread left
+  behind in a later run was blocked in `write(2)` to stderr, waiting on the
+  disk's journal at idle I/O priority, and `stop()`'s own log of the hang
+  waited for the same stderr lock. Since #202 the binaries queue log lines
+  for one writer thread and drop a line rather than wait
+  (`steno_services::logs`), so a stalled stderr holds neither the capture
+  thread nor `stop()`. Only log lines are queued: the shell's `stderr_line!`
+  and the CLI's progress lines still write to stderr directly.
 - **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
   names no Linux node, so a synced or copied settings file shows the input
   device as unavailable and the user picks again. A virtual source (a null
@@ -1592,7 +1602,8 @@ request that fixes an item deletes it.
   the cutover), the fixtures the Swift side owes, and the audio choices to settle at
   cutover (the WAV mixdown, the resampler, the sidecar's 2 ms lag, AAC priming, call
   mode without an output client). Where: "Store", "Adapters", "Handover", "LLM",
-  "Audio" and "Bridge" in the parity list. Found: #155, #165, #166, #167, #169, #190.
+  "Audio" and "Bridge" in the parity list, and the CLI's `--title` under "Pipeline
+  and services (WP6b)". Found: #155, #165, #166, #167, #169, #190.
 - **WP9b.** The Bonjour record is not published again after a network change, on
   every platform, where Swift's `NWListener` follows it; and the shell passes no
   computer name on any platform, so the Mac and Windows advertise `HOSTNAME`,
@@ -1626,7 +1637,8 @@ request that fixes an item deletes it.
   services (WP6b)". Found: #185, #203.
 - **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
   threads alive, the node and its links left in the graph) and was never reproduced;
-  the likely cause is a blocking log write (the **Unowned.** item on log writes).
+  the likely cause, a blocking log write, is gone since #202 queues log lines for one
+  writer thread.
   `stop()` now gives the thread `STOP_TIMEOUT` (2 s) and then leaves it behind the
   closed gate, and `Gate::close` itself waits without a bound for a pass to leave.
   Where: `crates/steno-audio/src/capture/live/pipewire/mod.rs`; the `stop()` item in
@@ -1706,13 +1718,6 @@ request that fixes an item deletes it.
   leaves two speech sidecars running (about 4.4 GB) until the retired job releases its
   own. Where: `CurrentPipeline::reload` in `crates/steno-services/src/pipeline.rs`.
   Found: #183.
-- **Unowned.** `build()` panics when any environment variable's name or value is not
-  valid Unicode, so the app and the CLI do not start; reading the few variables each
-  caller needs with `std::env::var_os` avoids it. Where: `std::env::vars()` in
-  `codex_store` (`crates/steno-services/src/llm.rs`, every platform), in
-  `FileSecretStore::in_support_directory` (`crates/steno-services/src/secrets.rs`) and
-  in `StenoPaths::default_support_directory` (`crates/steno-core/src/paths.rs`).
-  Found: on `main` on 2026-10-04 (no pull request names it).
 - **Unowned.** A `complete` whose device was revoked while the intake admitted its
   recording removes the metadata sidecar afterwards whatever memory holds, so when
   another device announced the same recording id meanwhile, that device's sidecar
@@ -1774,27 +1779,6 @@ request that fixes an item deletes it.
   calls, and in `steno-llm` the cleanup after a failed `auth.json` write and the detail
   that names a temporary file that could not be removed. Where:
   `crates/steno-pipeline/src/files.rs`, `crates/steno-llm`. Found: #167, #185.
-- **Unowned.** CI: the self-hosted macOS runners share one pnpm setup directory, so
-  `pnpm/action-setup` on one runner can break another's install (a rerun passes); it
-  needs a per-runner `PNPM_HOME` or a runner-local pnpm across the workflows. Where:
-  `pnpm/action-setup` in `.github/workflows/*.yml`. Found: #184.
-- **Unowned.** `steno process --title` stores the title with `TitleOrigin::Default`,
-  so the app shows the default date title while the export uses the given one. Swift's
-  CLI does the same, so a fix changes both or neither. Where:
-  `crates/steno-cli/src/commands/process.rs`. Found: #195 (whole-app smoke).
-- **Unowned.** The desktop shell and the CLI write their logs synchronously to stderr,
-  so a write that blocks (a stalled disk, a full pipe) stops the thread that logs: a
-  PipeWire capture thread then outlives `stop()`'s bound, and `stop()`'s own log of the
-  hang waits for the same stderr lock, so `stop()` blocks as well. The shell's `warn`
-  filter makes such writes rare, `RUST_LOG=debug` common. A non-blocking writer
-  (`tracing-appender`'s `non_blocking`, which drops lines rather than wait) bounds
-  both. Where: `log_to_stderr` in `crates/steno-services/src/lib.rs`, called by
-  `apps/desktop/src-tauri/src/main.rs` and `crates/steno-cli/src/main.rs`. Found:
-  #197.
-- **Unowned.** The headless PipeWire script fails when `TMPDIR` is long: its socket
-  path under the `mktemp` directory passes the 108-byte limit of a Unix socket path
-  ("File name too long"). A short base directory for the socket fixes it. Where:
-  `scripts/pipewire-headless.sh`. Found: #195 (whole-app smoke).
 
 ## Progress
 
@@ -1843,7 +1827,8 @@ PR off `main`.
 | Every handover engine write in the order asked for: the revoke's delete, the pairing's save and the touch join the receipt saves (`steno-handover`) | `fix/rust-handover-device-writes` | #207 | merged |
 | A receipt change is made to the copy memory holds, under the lock that takes its place in line: two chunks that land at once both stay, a `complete` receipt stays `complete` (`steno-handover`) | `fix/rust-handover-chunk-fold` | #208 | merged |
 | A `complete` receipt stays `complete`, a racing first announce answers as a re-announce, and a revoked device's late write leaves another device's receipt alone (Swift core, the counterpart of #208) | `fix/swift-handover-complete-stays` | #209 | merged |
-| Only a 401 to the current pairing's token unpairs the phone (`mobile/`) | `fix/mobile-current-pairing-401` | #200 | open |
+| Small fixes after the port: non-Unicode environment variables, `steno process --title` as the user's title, logs that never wait for stderr, the headless PipeWire script's socket paths, a pnpm setup directory per CI job | `fix/rust-small-after-port` | #202 | merged |
+| Only a 401 to the current pairing's token unpairs the phone (`mobile/`) | `fix/mobile-current-pairing-401` | #200 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -7,6 +7,7 @@
 //! `Sources/StenoCore/Testing/FileSecretStore.swift`.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -106,12 +107,12 @@ impl FileSecretStore {
     }
 
     /// `secrets.json` under the support directory, reading the process
-    /// environment.
+    /// environment's Unicode variables (see `text_variables`).
     #[must_use]
     pub fn in_support_directory(support_directory: &Path) -> Self {
         Self::new(
             support_directory.join("secrets.json"),
-            std::env::vars().collect(),
+            text_variables(std::env::vars_os()),
         )
     }
 
@@ -151,6 +152,20 @@ impl FileSecretStore {
         let data = serde_json::to_vec_pretty(&map).map_err(std::io::Error::other)?;
         replace_file(&self.path, &data, Access::OwnerOnly)
     }
+}
+
+/// The variables of `variables` whose name and value are both Unicode, as
+/// a secret override is text. `std::env::vars()` panics on the first one
+/// that is not, which would stop the app and the CLI from starting; the
+/// path variables are read with `var_os` and used as they are
+/// (`StenoPaths::support_directory`, `CodexCredentialStore::default_home`).
+fn text_variables(
+    variables: impl IntoIterator<Item = (OsString, OsString)>,
+) -> BTreeMap<String, String> {
+    variables
+        .into_iter()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+        .collect()
 }
 
 #[async_trait]
@@ -413,6 +428,34 @@ mod tests {
             )),
             "SecretKey.llmAPIKey is not {}",
             SecretKey::LLM_API_KEY
+        );
+    }
+
+    /// Text no platform reads as Unicode: a lone continuation byte on
+    /// Unix, an unpaired surrogate on Windows.
+    fn not_unicode() -> OsString {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(vec![b'a', 0x80])
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[u16::from(b'a'), 0xD800])
+        }
+    }
+
+    #[test]
+    fn a_variable_whose_name_or_value_is_not_unicode_is_skipped() {
+        let kept = text_variables([
+            (OsString::from("STENO_LLM_API_KEY"), OsString::from("sk-1")),
+            (not_unicode(), OsString::from("a value")),
+            (OsString::from("STENO_OTHER_KEY"), not_unicode()),
+        ]);
+        assert_eq!(
+            kept,
+            BTreeMap::from([("STENO_LLM_API_KEY".to_owned(), "sk-1".to_owned())])
         );
     }
 }

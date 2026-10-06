@@ -6,7 +6,7 @@
 //! an LLM endpoint. Swift: `Sources/steno/Commands/Process.swift`.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use chrono::{Duration, Utc};
 use clap::{Args, ValueEnum};
@@ -159,12 +159,7 @@ impl Process {
         };
 
         let now = Utc::now();
-        let title = self.title.clone().unwrap_or_else(|| {
-            self.input
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
+        let (title, title_origin) = title_and_origin(self.title.as_deref(), &self.input);
         // Whole milliseconds of a recording's length.
         #[allow(clippy::cast_possible_truncation)]
         let length = Duration::milliseconds((duration * 1000.0) as i64);
@@ -179,7 +174,7 @@ impl Process {
             tags: Vec::new(),
             state: MeetingState::Queued,
             end_reason: None,
-            title_origin: TitleOrigin::Default,
+            title_origin,
             template_id: self
                 .template
                 .clone()
@@ -280,6 +275,24 @@ pub fn remaining_text(remaining: f64) -> String {
     }
 }
 
+/// The meeting's title for `--title`, else the file name of `input`. A
+/// given title is the user's: the app shows it, as the export does, and
+/// the summary keeps it. Swift's CLI stores it as the default title (see
+/// the parity list). It is stored trimmed, and an empty or blank one is no
+/// title, as in the intake.
+fn title_and_origin(given: Option<&str>, input: &Path) -> (String, TitleOrigin) {
+    match given.map(str::trim) {
+        Some(title) if !title.is_empty() => (title.to_owned(), TitleOrigin::User),
+        _ => (
+            input
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            TitleOrigin::Default,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,5 +310,24 @@ mod tests {
         });
         assert_eq!(line, "transcribe      3% 1m 20s, lane 2 of 2");
         assert_eq!(remaining_text(3.2), "4s");
+    }
+
+    #[test]
+    fn a_given_title_is_the_users_unless_it_is_blank() {
+        let input = Path::new("/recordings/standup.wav");
+        for given in ["Sweep", " Sweep "] {
+            assert_eq!(
+                title_and_origin(Some(given), input),
+                ("Sweep".to_owned(), TitleOrigin::User),
+                "{given:?}"
+            );
+        }
+        for blank in [None, Some(""), Some("  \t")] {
+            assert_eq!(
+                title_and_origin(blank, input),
+                ("standup".to_owned(), TitleOrigin::Default),
+                "{blank:?}"
+            );
+        }
     }
 }

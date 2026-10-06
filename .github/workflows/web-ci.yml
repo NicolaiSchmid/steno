@@ -36,8 +36,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `dest` per job: the default `~/setup-pnpm` is shared by every runner
+      # on a self-hosted machine, and two concurrent installs collide there.
       - uses: pnpm/action-setup@v4
         with:
+          dest: ${{ runner.temp }}/setup-pnpm
           package_json_file: apps/macos/web/package.json
 
       - uses: actions/setup-node@v4
