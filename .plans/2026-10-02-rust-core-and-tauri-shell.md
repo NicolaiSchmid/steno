@@ -1722,9 +1722,11 @@ request that fixes an item deletes it.
   it is lost on the phone: the row is `unpaired` by then and cannot move to
   `delivered`, so the write throws, and the failure handler leaves a row that is not
   pending alone. The computer has the meeting, but the phone keeps the row and its
-  file, and a later pairing sends the recording again. The unpair's cancel does not
-  reach it, because `complete` is a pinned request, not a background upload. Allowing
-  `unpaired` to `delivered` closes it. Where: the `complete` answer in
+  file. After the phone pairs again it uploads the recording again, and the computer,
+  whose receipt went with the revoked device (`Store::delete_paired_device`), admits
+  it as a second meeting. The unpair's cancel does not reach it, because `complete` is
+  a pinned request, not a background upload. Allowing `unpaired` to `delivered`
+  closes it. Where: the `complete` answer in
   `createUploadExecutor` (`mobile/src/features/sync/upload-executor.ts`), `TRANSITIONS`
   in `mobile/src/features/queue/queue-index.ts`. Found: #200.
 - **Unowned.** A `complete` whose device was revoked while the intake admitted its
