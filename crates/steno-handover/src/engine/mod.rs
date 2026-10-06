@@ -654,13 +654,12 @@ impl Engine {
     /// receipt of it: those files are that phone's upload. Every discard of
     /// the engine goes through here, except the sweep before the listener
     /// starts. The check and the discard run under the files lock. A
-    /// recording's files are created
-    /// only by a request whose device's receipt memory holds by then (the
-    /// announce whose change made the receipt, or a re-announce of its
-    /// owner), and only under the same lock, so another phone's announce
-    /// either made its receipt before the check, and its files stay, or
-    /// opens them once the discard is over. Swift: the actor makes the
-    /// check and the discard one step.
+    /// recording's files are created only by a request whose device's
+    /// receipt memory holds by then (the announce whose change made the
+    /// receipt, or a re-announce of its owner), and only under the same
+    /// lock, so another phone's announce either made its receipt before the
+    /// check, and its files stay, or opens them once the discard is over.
+    /// Swift: the actor makes the check and the discard one step.
     pub(crate) fn discard_own(&self, recording_id: Uuid, device_id: Uuid, forget: bool) {
         let files = self.files();
         {
