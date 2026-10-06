@@ -14,8 +14,8 @@ final class StoreGate: Sendable {
   let store: MeetingStore
   /// The store's pool, for a test that changes the schema under it.
   let pool: DatabasePool
-  /// The next handover receipt read; the engine resumes with a receipt that
-  /// may no longer be in the store.
+  /// The next handover receipt read; the engine resumes with what the store
+  /// held when the read ran.
   let receiptRead = Hold(matching: "FROM \"handoverReceipt\"")
   /// The next save of an existing handover receipt, executed but not
   /// committed; every later write queues behind it.

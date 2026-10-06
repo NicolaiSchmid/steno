@@ -51,6 +51,9 @@ actor HandoverEngine: RequestHandling {
   /// Saves one receipt: `store.save`, or in a test a save it can hold on its
   /// way to the store, where two saves could change places.
   private let saveReceipt: @Sendable (HandoverReceipt) async throws -> Void
+  /// Writes one chunk into the partial: `ReceivingFile.write`, or in a test
+  /// a write it can hold after the bytes landed, before the engine resumes.
+  let writeChunk: @Sendable (Data, UInt64, URL) async throws -> Void
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -71,7 +74,8 @@ actor HandoverEngine: RequestHandling {
     intake: any HandoverIntake,
     receipts: Broadcast<[HandoverReceipt]>,
     now: @escaping @Sendable () -> Date,
-    saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil
+    saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil,
+    writeChunk: (@Sendable (Data, UInt64, URL) async throws -> Void)? = nil
   ) {
     self.configuration = configuration
     self.identity = identity
@@ -80,6 +84,7 @@ actor HandoverEngine: RequestHandling {
     self.receiptUpdates = receipts
     self.now = now
     self.saveReceipt = saveReceipt ?? { try await store.save($0) }
+    self.writeChunk = writeChunk ?? { try await ReceivingFile.write($0, at: $1, to: $2) }
     self.inbox = Inbox(directory: configuration.inboxDirectory)
   }
 
@@ -305,13 +310,31 @@ actor HandoverEngine: RequestHandling {
     }
   }
 
-  /// One state change: the state, the chunk set when given, `updatedAt`,
-  /// then `persist`. Callers that answer the phone whatever the write did
-  /// use `try?` deliberately: memory already holds the change and the
-  /// phone's next request re-reads.
+  /// One state change of the receipt memory holds, or of `receipt` when
+  /// memory holds none (a revoked device): the state, the chunk set when
+  /// given, `updatedAt`, then `persist`. `receipt` comes back changed.
+  ///
+  /// Two kinds of receipt in memory are left as they are, and nothing is
+  /// saved:
+  /// - Another device's. A device's write never changes a receipt another
+  ///   device announced; a late `complete` of a phone revoked during the
+  ///   intake meets one when another device announced the same recording id
+  ///   meanwhile. `receipt` comes back as the caller passed it.
+  /// - A `.complete` one. A request that read the receipt before the
+  ///   phone's `complete` admitted the recording must not put it back, or
+  ///   the phone's next `complete` would start over and admit it again.
+  ///   `receipt` comes back as memory holds it.
+  ///
+  /// Callers that answer the phone whatever the write did use `try?`
+  /// deliberately: memory already holds the change and the phone's next
+  /// request re-reads.
   func transition(
     _ receipt: inout HandoverReceipt, to state: HandoverState, receivedChunks: [Int]? = nil
   ) async throws {
+    let held = activeReceipts[receipt.recordingID]
+    if let held, held.deviceID != receipt.deviceID { return }
+    receipt = held ?? receipt
+    if held?.state.kind == .complete { return }
     receipt.state = state
     if let receivedChunks { receipt.receivedChunks = receivedChunks }
     receipt.updatedAt = now()

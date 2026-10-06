@@ -22,11 +22,15 @@ use crate::pinning::constant_time_equals;
 
 pub const READ_BLOCK: usize = 1024 * 1024;
 
-/// Creates an empty partial file (or leaves an existing one alone).
+/// Creates an empty partial file, or opens an existing one without
+/// truncating it: two `begin`s that race never empty a partial that holds
+/// a chunk.
 pub fn create(path: &Path) -> std::io::Result<()> {
-    if !path.exists() {
-        File::create(path)?;
-    }
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
     Ok(())
 }
 
