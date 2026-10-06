@@ -100,7 +100,8 @@ impl Engine {
     /// crash before the first chunk), with the same receipt and an empty
     /// chunk set; a verified file waiting for a second intake attempt keeps
     /// its chunk set, so the phone's retry (announce, then complete) sends no
-    /// chunk twice.
+    /// chunk twice. A receipt a `complete` admitted meanwhile stays
+    /// `complete` ([`Engine::update`]), and the answer says so.
     async fn reannounce(
         &self,
         mut receipt: HandoverReceipt,
@@ -350,8 +351,11 @@ impl Engine {
         let has_partial = self.inbox.has_partial(recording_id);
         if !every_chunk || !has_partial {
             if !has_partial {
-                let state = receipt.state.clone();
-                let _ = self.transition(receipt, state, Some(Vec::new())).await;
+                // The state stays as memory holds it: a re-announce or a
+                // chunk may have changed it since `complete` read it.
+                let _ = self
+                    .update(receipt, |edit| edit.received_chunks.clear())
+                    .await;
             }
             return Verification::Answered(HandoverResponse::json(
                 StatusCode::CONFLICT,

@@ -341,3 +341,94 @@ async fn a_late_chunk_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
 
     assert_eq!(chunk_sets(&test, id), (vec![], vec![]));
 }
+
+#[tokio::test]
+async fn a_reannounce_during_a_complete_leaves_the_receipt_complete() {
+    // The phone announces again (a retry after its own timeout) while its
+    // `complete` admits the recording. The announce is held at its clock
+    // read, after it read the receipt as `receiving`, while the `complete`
+    // runs to the end. Its `receiving` write then finds the receipt
+    // `complete` in memory, changes nothing and answers with that. Written
+    // back, `receiving` would send the phone's next `complete` back to the
+    // start, and the upload after it would become a second meeting.
+    let (test, phone, id, chunks) = announced_two_chunks(66).await;
+    for (index, chunk) in chunks.iter().enumerate() {
+        let uploaded = phone.upload(id, index as i64, chunk).await;
+        assert_eq!(uploaded.status.as_u16(), 204);
+    }
+    let metadata = test
+        .inbox()
+        .load_metadata(id)
+        .expect("the announce kept its metadata");
+    let hold = test.clock.hold_next_read();
+    let other = phone.clone();
+    let reannounce = on_another_thread(async move { other.announce(&metadata).await });
+    hold.reached();
+    let meeting_id = completed(&phone, id).await;
+    hold.release();
+    let reannounced = reannounce.join().unwrap();
+    assert_eq!(reannounced.status.as_u16(), 200);
+    assert_eq!(
+        reannounced.decode::<wire::RecordingStatus>().unwrap(),
+        wire::RecordingStatus {
+            state: HandoverStateKind::Complete,
+            received_chunks: vec![0, 1]
+        }
+    );
+
+    stays_complete(&test, &phone, id, meeting_id).await;
+}
+
+#[tokio::test]
+async fn a_chunk_that_lands_during_a_complete_leaves_the_receipt_complete() {
+    // The phone sent chunk 1 again after its own timeout while the first
+    // attempt was still in flight. That attempt is held at its clock read,
+    // after its file write, while the second one lands and the phone's
+    // `complete` runs to the end. Its fold then finds the receipt
+    // `complete` in memory and changes nothing, and the chunk is answered
+    // as received.
+    let (test, phone, id, chunks) = announced_two_chunks(67).await;
+    assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    let hold = test.clock.hold_next_read();
+    let first = on_another_thread({
+        let (other, chunk) = (phone.clone(), chunks[1].clone());
+        async move { other.upload(id, 1, &chunk).await }
+    });
+    hold.reached();
+    assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
+    let meeting_id = completed(&phone, id).await;
+    hold.release();
+    assert_eq!(first.join().unwrap().status.as_u16(), 204);
+
+    stays_complete(&test, &phone, id, meeting_id).await;
+}
+
+/// The meeting a `complete` of `recording_id` admitted.
+async fn completed(phone: &EngineDevice, recording_id: Uuid) -> Uuid {
+    let completed = phone.complete(recording_id).await;
+    assert_eq!(completed.status.as_u16(), 200);
+    completed
+        .decode::<wire::CompleteResponse>()
+        .unwrap()
+        .meeting_id
+}
+
+/// Memory and the store hold `recording_id` as `complete` with
+/// `meeting_id`, the intake admitted it once, and the phone's next
+/// `complete` answers that meeting again.
+async fn stays_complete(
+    test: &TestService,
+    phone: &EngineDevice,
+    recording_id: Uuid,
+    meeting_id: Uuid,
+) {
+    let (in_memory, stored) = receipts(test, recording_id);
+    let complete = HandoverState::Complete { meeting_id };
+    assert_eq!(
+        (in_memory.state, stored.state),
+        (complete.clone(), complete)
+    );
+    assert_eq!(test.intake.admissions.count(), 1);
+    assert_eq!(completed(phone, recording_id).await, meeting_id);
+    assert_eq!(test.intake.admissions.count(), 1);
+}
