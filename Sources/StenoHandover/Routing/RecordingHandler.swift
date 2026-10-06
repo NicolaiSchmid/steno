@@ -125,14 +125,17 @@ extension HandoverEngine {
       return .problem(.notFound, "no partial file; announce again")
     }
     do {
-      try await ReceivingFile.write(
-        request.body, at: UInt64(index) * UInt64(receipt.chunkSize), to: inbox.partial(recordingID))
+      try await writeChunk(
+        request.body, UInt64(index) * UInt64(receipt.chunkSize), inbox.partial(recordingID))
     } catch {
       return .internalError("writing the chunk", error)
     }
-    // The write suspended the actor: another chunk may have landed, or the
-    // device may have been revoked. Fold this chunk into the receipt as it
-    // stands now, never into the copy from before the write.
+    // The write suspended the actor: another chunk may have landed, the
+    // device may have been revoked, or the phone's `complete` may have
+    // admitted the recording (this was an older attempt of a chunk it sent
+    // again). Fold this chunk into the receipt as it stands now, never into
+    // the copy from before the write; a `.complete` one stays as it is
+    // (`transition`) and the chunk counts as received.
     guard let current = activeReceipts[recordingID], current.deviceID == device.id else {
       return .problem(.notFound, "no such recording")
     }
@@ -268,7 +271,6 @@ extension HandoverEngine {
     guard revocations[receipt.deviceID, default: 0] == revocation else {
       return .answered(Self.unauthorized)
     }
-    receipt = activeReceipts[recordingID] ?? receipt
     guard (try? ReceivingFile.identity(of: partial)) == identity else {
       // Gone or another file: the phone sends every chunk again.
       try? await transition(&receipt, to: .receiving, receivedChunks: [])
@@ -303,11 +305,9 @@ extension HandoverEngine {
     do {
       meetingID = try await intake.admit(file: file, metadata: metadata, device: device)
     } catch {
-      receipt = activeReceipts[recordingID] ?? receipt
       try? await transition(&receipt, to: .failed(Self.intakeRefused))
       return .internalError("the intake", error)
     }
-    receipt = activeReceipts[recordingID] ?? receipt
     try? await transition(&receipt, to: .complete(meetingID: meetingID))
     try? FileManager.default.removeItem(at: inbox.metadata(recordingID))
     return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
@@ -328,14 +328,15 @@ extension HandoverEngine {
   }
 
   /// The receipt from memory or the store, kept in memory (`remember`).
-  /// Another request may have loaded and advanced it while the store read
-  /// was awaited; memory wins then.
+  /// Another request may have made, loaded or advanced it while the store
+  /// read was awaited; memory wins then, also over a read that found none,
+  /// so a second first announce of a recording answers as a re-announce and
+  /// keeps the receipt the first one made, its chunks and a `.complete`.
   func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
     if let active = activeReceipts[recordingID] { return active }
-    guard let stored = try? await store.handoverReceipt(recordingID: recordingID) else {
-      return nil
-    }
+    let stored = try? await store.handoverReceipt(recordingID: recordingID)
     if let active = activeReceipts[recordingID] { return active }
+    guard let stored else { return nil }
     remember(stored)
     return stored
   }

@@ -141,4 +141,161 @@ import Testing
       #expect(await test.intake.admissions.count == 1)
     }
   }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aChunkThatLandsDuringACompleteLeavesTheReceiptComplete() async throws {
+    // The phone sent chunk 1 again after its own timeout while the first
+    // attempt was still in flight. That attempt is held after its file
+    // write while the second one lands and the phone's `complete` runs to
+    // the end. Its fold then finds the receipt `.complete` in memory and
+    // changes nothing, and the chunk is answered as received. Folded in,
+    // `.receiving` would send the phone's next `complete` back to the
+    // start, and the upload after it would become a second meeting.
+    let chunkSize = 64 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let held = HeldWrite()
+      let now = test.now
+      let engine = HandoverEngine(
+        configuration: test.service.configuration, identity: test.service.identity,
+        store: test.store, intake: test.intake, receipts: Broadcast(initial: []),
+        now: { now }, writeChunk: held.write)
+      _ = await engine.beginPairing()
+      let deviceID = UUID()
+      #expect(try await EngineClient(engine: engine).pair(deviceID: deviceID).code == 200)
+      let phone = EngineDevice(
+        engine: engine, device: try #require(try await test.store.pairedDevice(id: deviceID)))
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 63)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: chunkSize)
+      let id = metadata.recordingID
+      #expect(try await phone.announce(metadata).code == 201)
+      #expect(await phone.upload(id, chunk: 0, chunks[0]).code == 204)
+
+      held.arm()
+      let first = Task { await phone.upload(id, chunk: 1, chunks[1]) }
+      await held.held()
+      #expect(await phone.upload(id, chunk: 1, chunks[1]).code == 204)
+      let meetingID = try await Self.completed(phone, id)
+      held.release()
+      #expect(await first.value.code == 204, "the chunk counts as received")
+
+      try await Self.staysComplete(
+        phone, id, meetingID: meetingID, store: test.store, intake: test.intake)
+    }
+  }
+
+  /// A phone paired over an on-disk `StoreGate` store, so a test can hold an
+  /// announce's receipt read, with a two-chunk recording not yet announced.
+  private struct Gated {
+    static let chunkSize = 64 * 1024
+    let gate: StoreGate
+    let test: TestService
+    let phone: EngineDevice
+    let metadata: RecordingMetadata
+    let chunks: [Data]
+
+    init(seed: UInt64) async throws {
+      gate = try StoreGate()
+      test = try TestService.prepare(chunkSize: Self.chunkSize, store: gate.store)
+      phone = try await EngineClient.paired(test)
+      let bytes = Phone.seededBytes(count: 2 * Self.chunkSize, seed: seed)
+      metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
+      chunks = Phone.chunks(of: bytes, size: Self.chunkSize)
+    }
+
+    var id: UUID { metadata.recordingID }
+
+    /// Starts an announce whose receipt read is held, and returns once it
+    /// is: the read ran, and found no receipt.
+    func announceHeldAtItsRead() async -> Task<HandoverResponse, any Error> {
+      gate.receiptRead.arm()
+      let announcing = Task { [phone, metadata] in try await phone.announce(metadata) }
+      await gate.receiptRead.held()
+      return announcing
+    }
+
+    /// Releases the gate's holds and deletes both directories.
+    func remove() {
+      gate.remove()
+      try? FileManager.default.removeItem(at: test.directory)
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func anAnnounceThatFoundNoReceiptKeepsTheOneMadeMeanwhile() async throws {
+    // The phone announces a new recording twice at once (a retry after its
+    // own timeout). One announce is held in its receipt read, which found
+    // nothing, while the other one answers 201 and chunk 0 lands. The held
+    // one then finds that receipt in memory and answers as a re-announce,
+    // so chunk 0 stays. A fresh receipt would drop it, in memory and in the
+    // store.
+    let gated = try await Gated(seed: 64)
+    defer { gated.remove() }
+    let (phone, id) = (gated.phone, gated.id)
+
+    let second = await gated.announceHeldAtItsRead()
+    #expect(try await phone.announce(gated.metadata).code == 201)
+    #expect(await phone.upload(id, chunk: 0, gated.chunks[0]).code == 204)
+    gated.gate.receiptRead.release()
+    let reannounced = try await second.value
+
+    #expect(reannounced.code == 200, "answered as a re-announce")
+    #expect(
+      try reannounced.json(Wire.RecordingStatus.self)
+        == Wire.RecordingStatus(state: .receiving, receivedChunks: [0]))
+    #expect(await phone.engine.activeReceipts[id]?.receivedChunks == [0])
+    #expect(try await gated.test.store.handoverReceipt(recordingID: id)?.receivedChunks == [0])
+    #expect(!gated.gate.timedOut, "nothing waited on the held read")
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func anAnnounceThatFoundNoReceiptLeavesACompleteOneComplete() async throws {
+    // As above, but the other announce's upload runs to the end, `complete`
+    // and all, while the held one waits in its read. That one then answers
+    // with the `.complete` receipt and changes nothing. A fresh `.receiving`
+    // receipt would send the phone's next `complete` back to the start, and
+    // the upload after it would become a second meeting.
+    let gated = try await Gated(seed: 65)
+    defer { gated.remove() }
+    let (phone, id) = (gated.phone, gated.id)
+
+    let second = await gated.announceHeldAtItsRead()
+    #expect(try await phone.announce(gated.metadata).code == 201)
+    for (index, chunk) in gated.chunks.enumerated() {
+      #expect(await phone.upload(id, chunk: index, chunk).code == 204)
+    }
+    let meetingID = try await Self.completed(phone, id)
+    gated.gate.receiptRead.release()
+    let reannounced = try await second.value
+
+    #expect(reannounced.code == 200, "answered as a re-announce")
+    #expect(
+      try reannounced.json(Wire.RecordingStatus.self)
+        == Wire.RecordingStatus(state: .complete, receivedChunks: [0, 1]))
+    try await Self.staysComplete(
+      phone, id, meetingID: meetingID, store: gated.test.store, intake: gated.test.intake)
+    #expect(!gated.gate.timedOut, "nothing waited on the held read")
+  }
+
+  /// The meeting a `complete` of `recordingID` admitted.
+  private static func completed(_ phone: EngineDevice, _ recordingID: UUID) async throws -> UUID {
+    let completed = await phone.complete(recordingID)
+    try #require(completed.code == 200)
+    return try completed.json(Wire.CompleteResponse.self).meetingID
+  }
+
+  /// Memory and the store hold `recordingID` as `.complete` with
+  /// `meetingID`, the intake admitted it once, and the phone's next
+  /// `complete` answers that meeting again.
+  private static func staysComplete(
+    _ phone: EngineDevice, _ recordingID: UUID, meetingID: UUID, store: MeetingStore,
+    intake: FakeHandoverIntake
+  ) async throws {
+    let complete = HandoverState.complete(meetingID: meetingID)
+    #expect(await phone.engine.activeReceipts[recordingID]?.state == complete)
+    #expect(try await store.handoverReceipt(recordingID: recordingID)?.state == complete)
+    #expect(await intake.admissions.count == 1)
+    #expect(try await completed(phone, recordingID) == meetingID)
+    #expect(await intake.admissions.count == 1, "the next complete admits nothing new")
+  }
 }

@@ -51,6 +51,9 @@ actor HandoverEngine: RequestHandling {
   /// Saves one receipt: `store.save`, or in a test a save it can hold on its
   /// way to the store, where two saves could change places.
   private let saveReceipt: @Sendable (HandoverReceipt) async throws -> Void
+  /// Writes one chunk into the partial: `ReceivingFile.write`, or in a test
+  /// a write it can hold after the bytes landed, before the engine resumes.
+  let writeChunk: @Sendable (Data, UInt64, URL) async throws -> Void
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -71,7 +74,8 @@ actor HandoverEngine: RequestHandling {
     intake: any HandoverIntake,
     receipts: Broadcast<[HandoverReceipt]>,
     now: @escaping @Sendable () -> Date,
-    saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil
+    saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil,
+    writeChunk: (@Sendable (Data, UInt64, URL) async throws -> Void)? = nil
   ) {
     self.configuration = configuration
     self.identity = identity
@@ -80,6 +84,7 @@ actor HandoverEngine: RequestHandling {
     self.receiptUpdates = receipts
     self.now = now
     self.saveReceipt = saveReceipt ?? { try await store.save($0) }
+    self.writeChunk = writeChunk ?? { try await ReceivingFile.write($0, at: $1, to: $2) }
     self.inbox = Inbox(directory: configuration.inboxDirectory)
   }
 
@@ -305,17 +310,29 @@ actor HandoverEngine: RequestHandling {
     }
   }
 
-  /// One state change: the state, the chunk set when given, `updatedAt`,
-  /// then `persist`. Callers that answer the phone whatever the write did
-  /// use `try?` deliberately: memory already holds the change and the
-  /// phone's next request re-reads.
+  /// One state change of the receipt as memory holds it, or of `receipt`
+  /// when memory holds none (a revoked device): the state, the chunk set
+  /// when given, `updatedAt`, then `persist`; `receipt` comes back as memory
+  /// then holds it. A receipt memory holds as `.complete` stays as it is and
+  /// nothing is saved: a request that read it before the phone's `complete`
+  /// admitted the recording must not put it back, or the phone's next
+  /// `complete` would start over and admit it again. Callers that answer
+  /// the phone whatever the write did use `try?` deliberately: memory
+  /// already holds the change and the phone's next request re-reads.
   func transition(
     _ receipt: inout HandoverReceipt, to state: HandoverState, receivedChunks: [Int]? = nil
   ) async throws {
-    receipt.state = state
-    if let receivedChunks { receipt.receivedChunks = receivedChunks }
-    receipt.updatedAt = now()
-    try await persist(receipt)
+    let held = activeReceipts[receipt.recordingID]
+    if let held, held.state.kind == .complete {
+      receipt = held
+      return
+    }
+    var changed = held ?? receipt
+    changed.state = state
+    if let receivedChunks { changed.receivedChunks = receivedChunks }
+    changed.updatedAt = now()
+    receipt = changed
+    try await persist(changed)
   }
 
   /// Writes the receipt and tells the observers. Memory (`remember`) is
