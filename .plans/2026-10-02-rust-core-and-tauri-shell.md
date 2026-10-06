@@ -1327,21 +1327,32 @@ item to settle before the Linux release:
   With the second bind run in the background instead
   (`pw-metadata -n default &`), so it outlives the pong, the monitor
   prints the set.
-- **`stop()` is bounded, except in `Gate::close`.** It closes the
-  capture's gate to the sink, waiting without a bound for a pass already
-  inside (a cycle's delivery, or a report and its handler), so
-  no frame or report reaches the sink after it, and waits 2 s for the
-  PipeWire thread; a thread that has not ended by then is logged with the
-  system call it waits in and left behind, and the devices may stay open
-  until Steno quits. Such a hang was seen once in testing, most likely in
-  a log write: logs were written synchronously then, a capture thread left
-  behind in a later run was blocked in `write(2)` to stderr, waiting on the
-  disk's journal at idle I/O priority, and `stop()`'s own log of the hang
-  waited for the same stderr lock. Since #202 the binaries queue log lines
-  for one writer thread and drop a line rather than wait
-  (`steno_services::logs`), so a stalled stderr holds neither the capture
-  thread nor `stop()`. Only log lines are queued: the shell's `stderr_line!`
-  and the CLI's progress lines still write to stderr directly.
+- **`stop()` is bounded.** It closes the capture's gate to the sink and
+  joins the PipeWire thread, all within 2 s of its call. A cycle's
+  delivery already inside the gate is waited for without a bound: it takes
+  microseconds, and one still writing the rings once `stop()` returned
+  would write them beside the next backend's thread. A device-change
+  report inside, which runs the session's handler and so may wait for the
+  session mutex, is waited for until the 2 s are up, then logged and left
+  to finish. It reaches the session late, which ignores it unless
+  recording and otherwise rebuilds once more: it starts a rebuild, or
+  becomes the pending change of the one in progress (of the next
+  recording, if the stop ended one and another started meanwhile). A late
+  report that takes the sink's latch after the rebuild re-armed it holds
+  back the rebuilt backend's first report, but starts a rebuild itself. A
+  thread that has not ended by then is logged with the system call it
+  waits in and left behind, and the devices may stay open until Steno
+  quits. So once `stop()` returned no frame reaches the sink, and no
+  report but one the gate let in before it closed. A hang was seen once in
+  testing, most likely in a log write: logs were written synchronously
+  then, a capture thread left behind in a later run was blocked in
+  `write(2)` to stderr, waiting on the disk's journal at idle I/O
+  priority, and `stop()`'s own log of the hang waited for the same stderr
+  lock. Since #202 the binaries queue log lines for one writer thread and
+  drop a line rather than wait (`steno_services::logs`), so a stalled
+  stderr holds neither the capture thread nor `stop()`. Only log lines are
+  queued: the shell's `stderr_line!` and the CLI's progress lines still
+  write to stderr directly.
 - **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
   names no Linux node, so a synced or copied settings file shows the input
   device as unavailable and the user picks again. A virtual source (a null
@@ -1741,14 +1752,6 @@ it) and which pull requests found it. The pull request that fixes an item delete
   xfce4-session seven) or logind's (five) can be cut off. Where:
   `apps/desktop/src-tauri/src/session_end.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203.
-- **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
-  threads alive, the node and its links left in the graph) and was never reproduced;
-  the likely cause, a blocking log write, is gone since #202 queues log lines for one
-  writer thread.
-  `stop()` now gives the thread `STOP_TIMEOUT` (2 s) and then leaves it behind the
-  closed gate, and `Gate::close` itself waits without a bound for a pass to leave.
-  Where: `crates/steno-audio/src/capture/live/pipewire/mod.rs`; the `stop()` item in
-  the Linux list under "Audio". Found: #176, #197.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
