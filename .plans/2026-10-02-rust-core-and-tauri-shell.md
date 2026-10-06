@@ -1264,8 +1264,44 @@ item to settle before the Linux release:
 
 - **The system lane is the whole default sink.** The Mac's tap leaves out
   Steno's own process; the PipeWire backend records the default sink's
-  monitor, Steno's output included (Steno plays nothing while recording),
-  and only that sink: an app routed to another output is not in the lane.
+  monitor, Steno's output included, and only that sink: an app routed to
+  another output is not in the lane. Steno plays no audio today (no
+  playback in the Rust crates, no `<audio>` in the web UI), so nothing of
+  its own is in the lane. Leaving its output out was weighed and not done
+  (PIPEWIRE_PR); the measurements, on the private daemon with PipeWire
+  1.6.5 and WirePlumber 0.5.14:
+  - A playback node names its process only through its client: the node
+    carries `client.id`, and that client `application.process.id` (equal
+    to `pipewire.sec.pid` for a native client). A property Steno would set
+    on its own streams (`steno.own = true`, given to `pw-play -P`) shows on
+    the node.
+  - WirePlumber converts every stream to the sink's channels: a 5.1
+    `pw-play` into the stereo null sink had only `FL` and `FR` output
+    ports, each linked to the sink's input of the same channel. Channel
+    maps would match; the downmix stays in each stream's adapter.
+  - A stream's links go when it ends, and the sink falls from `running` to
+    `idle` (later `suspended`) once nothing plays; the monitor link keeps
+    it running today.
+  - Behind a filter the origin is gone: with a `pw-loopback` whose capture
+    side is a virtual sink and whose playback side goes into the default
+    sink, the node linked into the sink is the loopback's, in the
+    loopback's process, and what it carries is already mixed. An
+    equaliser, an echo-cancel sink or a combined sink as the default
+    output does the same, so an exclusion at the default sink cannot take
+    Steno's audio out of it.
+
+  Doing it would mean one link from each `Stream/Output/Audio` node
+  linked into the default sink (Steno's own excepted) to each of the
+  capture's system ports, created and destroyed from the PipeWire thread
+  as streams come, go and move between sinks (the registry's link globals
+  tracked to see where each stream goes; the input ports sum the links);
+  those links going must not read as a device gone, unlike Steno's links
+  today; and with no monitor link the sink no longer runs with the
+  capture, so a stream starting mid-call can move the capture's driver.
+  That is a second linking policy beside WirePlumber's, for audio Steno
+  does not play, still blind behind a filter. Revisit when Steno plays
+  audio while it records; pausing that playback, or sending it to a
+  device other than the default, may then be simpler.
 - **Latencies are the ports' `SPA_PARAM_Latency` lower bounds**: the
   microphone port's capture side plus the sink's first playback port's
   playback side, in frames of the first cycle. Null devices report zero, so
@@ -1753,7 +1789,8 @@ it) and which pull requests found it. The pull request that fixes an item delete
   `apps/desktop/src-tauri/src/session_end.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
-  system lane is the whole default sink (Steno's own output included), a Mac device
+  system lane is the whole default sink (Steno's own output included; leaving it out
+  was weighed and not done, see the note), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
   list and no meeting detection, the latencies are unmeasured on real hardware, and
   the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
