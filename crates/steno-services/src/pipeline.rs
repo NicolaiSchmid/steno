@@ -579,14 +579,18 @@ mod tests {
         .await;
     }
 
-    /// The children of every [`FakeSidecar`] of a test: alive now, the
-    /// most alive at once, started and stopped.
+    /// What every [`FakeSidecar`] of a test shares: the children (alive
+    /// now, the most alive at once, started and stopped) and the gate the
+    /// first transcription waits at for `open` after notifying `entered`.
     #[derive(Default)]
     struct Children {
         live: AtomicUsize,
         most: AtomicUsize,
         spawns: AtomicUsize,
         stops: AtomicUsize,
+        gated: AtomicBool,
+        entered: tokio::sync::Notify,
+        open: tokio::sync::Notify,
     }
 
     impl Children {
@@ -597,15 +601,11 @@ mod tests {
 
     /// A speech engine that runs a pretend child, as the sidecar engine
     /// does: `prepare` or `transcribe` starts it when none runs, `release`
-    /// stops it. The first transcription waits for `open` after notifying
-    /// `entered`.
+    /// stops it.
     struct FakeSidecar {
         inner: FakeSpeechEngine,
         children: Arc<Children>,
         child: std::sync::Mutex<bool>,
-        gated: AtomicBool,
-        entered: Arc<tokio::sync::Notify>,
-        open: Arc<tokio::sync::Notify>,
     }
 
     impl FakeSidecar {
@@ -641,9 +641,10 @@ mod tests {
             hint: Option<&LanguageTag>,
         ) -> BoundaryResult<Vec<RawSegment>> {
             self.start_child();
-            if !self.gated.swap(true, Ordering::SeqCst) {
-                self.entered.notify_one();
-                self.open.notified().await;
+            let gate = &self.children;
+            if !gate.gated.swap(true, Ordering::SeqCst) {
+                gate.entered.notify_one();
+                gate.open.notified().await;
             }
             self.inner.transcribe(audio, hint).await
         }
@@ -668,18 +669,11 @@ mod tests {
     async fn a_reload_while_a_job_transcribes_keeps_one_sidecar_child() {
         let (dir, store) = temp_store();
         let children = Arc::new(Children::default());
-        let entered = Arc::new(tokio::sync::Notify::new());
-        let open = Arc::new(tokio::sync::Notify::new());
         let builds = Arc::new(AtomicUsize::new(0));
         let engines = Arc::new(SpeechEngines::with_builder(
             crate::speech::testing::setup(dir.path(), steno_speech::SpeechSettings::default()),
             Box::new({
-                let (children, entered, open, builds) = (
-                    children.clone(),
-                    entered.clone(),
-                    open.clone(),
-                    builds.clone(),
-                );
+                let (children, builds) = (children.clone(), builds.clone());
                 move |runtime| -> Arc<dyn SpeechEngine> {
                     builds.fetch_add(1, Ordering::SeqCst);
                     match runtime {
@@ -687,9 +681,6 @@ mod tests {
                             inner: FakeSpeechEngine::default(),
                             children: children.clone(),
                             child: std::sync::Mutex::new(false),
-                            gated: AtomicBool::new(false),
-                            entered: entered.clone(),
-                            open: open.clone(),
                         }),
                         SpeechRuntime::CoreMlInProcess => Arc::new(FakeSpeechEngine::default()),
                     }
@@ -722,31 +713,23 @@ mod tests {
 
         let retired = current.current();
         let held = enqueue_call(dir.path(), &retired);
-        tokio::time::timeout(PATIENCE, entered.notified())
+        tokio::time::timeout(PATIENCE, children.entered.notified())
             .await
             .expect("the first job is transcribing");
 
         let in_process = switch_to(SpeechRuntime::CoreMlInProcess);
         assert!(
-            !in_process
-                .dependencies()
-                .speech_engine
-                .ptr_eq(&retired.dependencies().speech_engine),
+            !same_engine(&in_process, &retired),
             "another runtime, another engine"
         );
         let back = switch_to(SpeechRuntime::OnnxSidecar);
         assert!(
-            back.dependencies()
-                .speech_engine
-                .ptr_eq(&retired.dependencies().speech_engine),
+            same_engine(&back, &retired),
             "back in the sidecar: the engine the retired job runs on"
         );
         let unchanged = switch_to(SpeechRuntime::OnnxSidecar);
         assert!(
-            unchanged
-                .dependencies()
-                .speech_engine
-                .ptr_eq(&back.dependencies().speech_engine),
+            same_engine(&unchanged, &back),
             "a reload that keeps the runtime keeps the engine"
         );
         assert_eq!(builds.load(Ordering::SeqCst), 2, "one per runtime");
@@ -764,7 +747,7 @@ mod tests {
         // The reload's own wait took the retired job's handle, so
         // `retired.wait_until_idle` would return at once: wait for the
         // meeting and the child instead.
-        open.notify_one();
+        children.open.notify_one();
         eventually("the retired job finished and stopped the child", || {
             meeting_state(&store, held) == MeetingState::Ready
                 && children.stops.load(Ordering::SeqCst) == 1
@@ -787,6 +770,13 @@ mod tests {
 
     fn meeting_state(store: &Store, id: Uuid) -> MeetingState {
         store.meeting(id).unwrap().unwrap().state
+    }
+
+    /// Whether `a` and `b` run on the same speech engine and its claims.
+    fn same_engine(a: &ProcessingPipeline, b: &ProcessingPipeline) -> bool {
+        a.dependencies()
+            .speech_engine
+            .ptr_eq(&b.dependencies().speech_engine)
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
