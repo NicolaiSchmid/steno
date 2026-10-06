@@ -1665,11 +1665,6 @@ request that fixes an item deletes it.
   "Audio". Found: #197, #201.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
-- **First Linux release.** The exported folder note calls a call recorded on Windows
-  or Linux a "Mac call" (`FolderNoteRenderer.sourceLabel`, Swift's word); the app
-  says "Call". The golden notes in `Tests/Fixtures/snapshots/` are shared with the
-  Swift renderer, so a platform's own word needs a fixture per platform. Where:
-  `crates/steno-adapters/src/rendering/folder_note.rs`. Found: #204.
 - **First Linux release.** The pages keep the Mac's inset for the traffic lights (the
   sidebar's header-high spacer, onboarding's 52 px top) where Windows and Linux draw
   their own title bar above the page, so the top of each window has an empty band
