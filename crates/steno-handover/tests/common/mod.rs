@@ -179,8 +179,13 @@ impl WallClock {
             let held = clock.hold.lock().unwrap().take();
             if let Some(held) = held {
                 let _ = held.reached.send(());
-                // A test that failed meanwhile drops the sender.
-                let _ = held.released.recv_timeout(SIGNAL_BOUND);
+                match held.released.recv_timeout(SIGNAL_BOUND) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("the held clock read was not released within {SIGNAL_BOUND:?}")
+                    }
+                    // A test that failed meanwhile drops the sender.
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                }
             }
             clock.now()
         })
