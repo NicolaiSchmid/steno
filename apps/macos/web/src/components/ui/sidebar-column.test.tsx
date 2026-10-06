@@ -6,7 +6,7 @@ import { SidebarRow } from "./sidebar-row";
 describe("SidebarColumn", () => {
 	it("is an aside by default with the rows under a header-high spacer", () => {
 		render(
-			<SidebarColumn data-testid="column">
+			<SidebarColumn data-testid="column" titleBarInset>
 				<SidebarRow>All</SidebarRow>
 			</SidebarColumn>,
 		);
@@ -27,6 +27,7 @@ describe("SidebarColumn", () => {
 				as="nav"
 				className="w-64"
 				footer={<SidebarRow data-testid="footer">Settings</SidebarRow>}
+				titleBarInset
 			>
 				<SidebarRow>General</SidebarRow>
 			</SidebarColumn>,
@@ -36,5 +37,18 @@ describe("SidebarColumn", () => {
 		expect(nav).toHaveClass("w-64");
 		expect(nav.lastElementChild).toContainElement(screen.getByTestId("footer"));
 		expect(nav.lastElementChild).toHaveClass("mt-auto");
+	});
+
+	it("opens with the rows where the title bar sits above the page", () => {
+		render(
+			<SidebarColumn data-testid="column" titleBarInset={false}>
+				<SidebarRow>All</SidebarRow>
+			</SidebarColumn>,
+		);
+		const column = screen.getByTestId("column");
+		expect(column.querySelector('[aria-hidden="true"].h-13')).toBeNull();
+		expect(column.firstElementChild).toContainElement(
+			screen.getByRole("button", { name: "All" }),
+		);
 	});
 });

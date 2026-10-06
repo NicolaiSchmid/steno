@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 import { FooterBand, ScrollArea } from "@/components/ui";
+import { cn } from "@/lib/cn";
+import { usePlatform } from "@/lib/platform";
 
 export interface OnboardingPageProps {
 	step: 1 | 2;
@@ -16,10 +18,11 @@ export interface OnboardingPageProps {
 
 /**
  * The frame both onboarding pages share: the step caption, the title as the
- * window's only heading (there is no title bar), the intro, then the cards,
- * scrolling under a pinned footer band with the page's buttons (the dialog
- * footer). The 52 px top inset leaves the traffic lights their room and
- * keeps the step caption clear of the scroll fade.
+ * page's only heading, the intro, then the cards, scrolling under a pinned
+ * footer band with the page's buttons (the dialog footer). On the Mac the 52 px top inset leaves the traffic lights their
+ * room; elsewhere the native title bar sits above the page and the top is
+ * the sides' 24 px. Either keeps the step caption clear of the 1.5 rem
+ * scroll fade.
  */
 export function OnboardingPage({
 	step,
@@ -30,11 +33,15 @@ export function OnboardingPage({
 	testId,
 	children,
 }: OnboardingPageProps) {
+	const { titleBarInset } = usePlatform();
 	return (
 		<>
 			<ScrollArea className="min-h-0 flex-1" fade>
 				<div
-					className="flex flex-col gap-6 px-6 pt-13 pb-6"
+					className={cn(
+						"flex flex-col gap-6 px-6 pb-6",
+						titleBarInset ? "pt-13" : "pt-6",
+					)}
 					data-testid={testId}
 				>
 					<header className="flex flex-col gap-2">

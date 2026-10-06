@@ -282,8 +282,8 @@ function RecordControl({
 }
 
 /**
- * The 256 px column: a header-high spacer under the traffic lights, the
- * Record control, the filters with counts, the tags, then the paired iPhone
+ * The 256 px column: a header-high spacer under the traffic lights on the
+ * Mac, the Record control, the filters with counts, the tags, then the paired iPhone
  * and Settings at the foot.
  */
 export function Sidebar() {
@@ -343,6 +343,7 @@ export function Sidebar() {
 					</SidebarRow>
 				</>
 			}
+			titleBarInset={platform.titleBarInset}
 		>
 			<RecordControl recording={recording} />
 			<SectionLabel>Meetings</SectionLabel>

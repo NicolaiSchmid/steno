@@ -9,6 +9,7 @@ import {
 	platformFor,
 	SHORTCUTS,
 	type ShortcutEvent,
+	SWIFT_MAC,
 	shortcutLabel,
 	usePlatform,
 	useShortcut,
@@ -211,6 +212,13 @@ describe("words", () => {
 			loginKeychain: "a file only you can read",
 			codexSignInFile: "~/.codex/auth.json",
 		});
+	});
+
+	it("leave the traffic lights room on the Mac only", () => {
+		expect(SWIFT_MAC.titleBarInset).toBe(true);
+		expect(platformFor("macos").titleBarInset).toBe(true);
+		expect(platformFor("windows").titleBarInset).toBe(false);
+		expect(platformFor("linux").titleBarInset).toBe(false);
 	});
 
 	it("read the calendar on the Mac only", () => {

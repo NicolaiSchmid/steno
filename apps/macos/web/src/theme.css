@@ -340,8 +340,6 @@
 		background: var(--scrollbar-thumb-hover);
 	}
 
-	/* The traffic lights are native; the page must not be draggable text. */
-
 	@media (prefers-reduced-motion: reduce) {
 		*,
 		*::before,

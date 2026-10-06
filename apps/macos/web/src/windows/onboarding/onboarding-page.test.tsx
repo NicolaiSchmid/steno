@@ -1,7 +1,16 @@
-import { render, screen } from "@testing-library/react";
+import { render as renderPlain, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { describe, expect, it } from "vitest";
 import { Button } from "@/components/ui";
+import { PlatformProvider, SWIFT_MAC } from "@/lib/platform";
 import { OnboardingPage } from "./onboarding-page";
+
+/** The page reads the platform's title bar inset; the Mac's here. */
+function render(ui: ReactElement) {
+	return renderPlain(
+		<PlatformProvider platform={SWIFT_MAC}>{ui}</PlatformProvider>,
+	);
+}
 
 describe("OnboardingPage", () => {
 	it("names the step, title, intro and aside and pins the footer buttons", () => {

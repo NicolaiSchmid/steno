@@ -9,6 +9,7 @@ import {
 import { type ReactNode, useEffect, useState } from "react";
 import { useBridge, usePageReady } from "@/bridge/hooks";
 import { ContentColumn, SidebarColumn, SidebarRow } from "@/components/ui";
+import { usePlatform } from "@/lib/platform";
 import { ExportSection } from "./export-section";
 import { GeneralSection } from "./general-section";
 import { PhoneSection } from "./iphone-section";
@@ -41,6 +42,7 @@ export interface SettingsWindowProps {
  */
 export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 	const client = useBridge();
+	const platform = usePlatform();
 	const [section, setSection] = useState<SectionId>(routeSection ?? "general");
 	usePageReady(client);
 
@@ -91,7 +93,11 @@ export function SettingsWindow({ section: routeSection }: SettingsWindowProps) {
 			className="grid h-full min-h-0 grid-cols-[256px_minmax(0,1fr)] overflow-hidden bg-background text-foreground"
 			data-testid="settings-window"
 		>
-			<SidebarColumn aria-label="Settings sections" as="nav">
+			<SidebarColumn
+				aria-label="Settings sections"
+				as="nav"
+				titleBarInset={platform.titleBarInset}
+			>
 				{SECTIONS.map((info) => (
 					<SidebarRow
 						active={info.id === section}
