@@ -92,7 +92,7 @@ extension HandoverEngine {
   func receiveChunk(
     _ recordingID: UUID, index: Int, device: PairedDevice, _ request: HandoverRequest
   ) async -> HandoverResponse {
-    guard var receipt = await ownedReceipt(recordingID, device: device) else {
+    guard let receipt = await ownedReceipt(recordingID, device: device) else {
       return .problem(.notFound, "no such recording")
     }
     if receipt.state.kind == .complete {
@@ -136,12 +136,12 @@ extension HandoverEngine {
     // again). Fold this chunk into the receipt as it stands now, never into
     // the copy from before the write; a `.complete` one stays as it is
     // (`transition`) and the chunk counts as received.
-    guard let current = activeReceipts[recordingID], current.deviceID == device.id else {
+    guard var current = activeReceipts[recordingID], current.deviceID == device.id else {
       return .problem(.notFound, "no such recording")
     }
     do {
       try await transition(
-        &receipt, to: .receiving, receivedChunks: Set(current.receivedChunks + [index]).sorted())
+        &current, to: .receiving, receivedChunks: Set(current.receivedChunks + [index]).sorted())
     } catch {
       return .internalError("saving the receipt", error)
     }
@@ -241,6 +241,8 @@ extension HandoverEngine {
       byteCount: receipt.byteCount, chunkSize: receipt.chunkSize)
     guard receipt.receivedChunks == Array(0..<count), inbox.hasPartial(recordingID) else {
       if !inbox.hasPartial(recordingID) {
+        // Nothing suspended since `complete` read the receipt, so this is
+        // the state memory holds.
         try? await transition(&receipt, to: receipt.state, receivedChunks: [])
       }
       return .answered(.json(.conflict, Self.status(of: receipt)))
@@ -328,9 +330,10 @@ extension HandoverEngine {
 
   /// The receipt from memory or the store, kept in memory (`remember`).
   /// Another request may have made, loaded or advanced it while the store
-  /// read was awaited; memory wins then, also over a read that found none,
-  /// so of two first announces at once the later answers as a re-announce
-  /// and keeps the receipt the other made, chunks and `.complete` included.
+  /// read was awaited; memory wins then, also over a read that found none
+  /// or failed, so a first announce that raced another answers as a
+  /// re-announce and keeps the receipt the other made, chunks and
+  /// `.complete` included.
   func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
     if let active = activeReceipts[recordingID] { return active }
     let stored = try? await store.handoverReceipt(recordingID: recordingID)
