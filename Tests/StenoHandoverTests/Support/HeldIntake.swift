@@ -3,8 +3,9 @@ import StenoCore
 import Synchronization
 
 /// Core's `FakeHandoverIntake` with its first admission held after the fake
-/// recorded it and before it answers the engine, until `release()`; every
-/// later admission goes straight through. `fake` reads the admissions.
+/// recorded it and before the engine gets the meeting id, until
+/// `release()`; every later admission goes straight through. Pass `fake` as
+/// `TestService`'s `intake` too, so `test.intake.admissions` lists them.
 final class HeldIntake: HandoverIntake, Sendable {
   let fake: FakeHandoverIntake
   private let first = Atomic(true)

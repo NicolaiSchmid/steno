@@ -310,19 +310,24 @@ actor HandoverEngine: RequestHandling {
     }
   }
 
-  /// One state change: the state, the chunk set when given, `updatedAt`,
-  /// then `persist`, of the receipt memory holds (or of `receipt` when
-  /// memory holds none, a revoked device); `receipt` comes back changed.
-  /// Two receipts in memory stay as they are, nothing saved: another
-  /// device's, since a revoked phone's `complete` written into it would
-  /// tell the phone that announced the same id since `complete` for a
-  /// recording never admitted from it, and that phone would delete its copy
-  /// (`receipt` stays the caller's); and a `.complete` one, since a request
-  /// that read it before the phone's `complete` would put it back and the
-  /// next `complete` would admit it again (`receipt` comes back as memory
-  /// holds it). Callers that answer the phone whatever the write did use
-  /// `try?` deliberately: memory already holds the change and the phone's
-  /// next request re-reads.
+  /// One state change of the receipt memory holds, or of `receipt` when
+  /// memory holds none (a revoked device): the state, the chunk set when
+  /// given, `updatedAt`, then `persist`. `receipt` comes back changed.
+  ///
+  /// Two kinds of receipt in memory are left as they are, and nothing is
+  /// saved:
+  /// - Another device's. A device's write never changes a receipt another
+  ///   device announced; a late `complete` of a phone revoked during the
+  ///   intake meets one when another device announced the same recording id
+  ///   meanwhile. `receipt` comes back as the caller passed it.
+  /// - A `.complete` one. A request that read the receipt before the
+  ///   phone's `complete` admitted the recording must not put it back, or
+  ///   the phone's next `complete` would start over and admit it again.
+  ///   `receipt` comes back as memory holds it.
+  ///
+  /// Callers that answer the phone whatever the write did use `try?`
+  /// deliberately: memory already holds the change and the phone's next
+  /// request re-reads.
   func transition(
     _ receipt: inout HandoverReceipt, to state: HandoverState, receivedChunks: [Int]? = nil
   ) async throws {

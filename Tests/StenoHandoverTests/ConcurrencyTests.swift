@@ -11,7 +11,7 @@ import Testing
 /// only make likely are certain. Tests that need one request stopped at a
 /// chosen suspension point hold it there: a receipt save on its way to the
 /// store (`HeldSave`), a chunk write after its bytes landed (`HeldWrite`), a
-/// store read (`StoreGate`), an admission in the intake (`HeldIntake`).
+/// store read (`StoreGate`) and an admission in the intake (`HeldIntake`).
 @Suite struct ConcurrencyTests {
   static let meetingID = UUID(uuidString: "C0C0C0C0-0000-4000-8000-000000000001")!
 
@@ -246,7 +246,7 @@ import Testing
     // As above, but the other announce's upload runs to the end, `complete`
     // and all, while the held one waits in its read. That one then answers
     // with the `.complete` receipt and changes nothing. A fresh `.receiving`
-    // receipt would send the phone's next `complete` back to the start, and
+    // receipt would make the phone's next `complete` start over, and
     // the upload after it would become a second meeting.
     let gated = try await Gated(seed: 65)
     defer { gated.remove() }
