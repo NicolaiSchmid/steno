@@ -356,9 +356,9 @@ impl Engine {
     /// with no chunk listed: the hash must be of the file the intake gets.
     /// 401 when the device was revoked since `complete` took `revocation`,
     /// 200 with the meeting when another `complete` admitted the recording
-    /// since this one read the receipt. Nothing yields between that check and the intake call: an admission
-    /// past this check may still finish; the revoke's discard can also make
-    /// it fail.
+    /// since this one read the receipt. Nothing yields between that check
+    /// and the intake call: an admission past this check may still finish;
+    /// the revoke's discard can also make it fail.
     async fn verified_file(
         &self,
         receipt: &mut HandoverReceipt,
