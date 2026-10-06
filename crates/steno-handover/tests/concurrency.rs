@@ -24,7 +24,7 @@ use common::{
 use steno_core::{
     AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
 };
-use steno_handover::engine::{HandoverRequest, Principal, RequestHandling as _};
+use steno_handover::engine::{HandoverRequest, HandoverResponse, Principal, RequestHandling as _};
 use steno_handover::route::Route;
 use steno_handover::{HandoverConfiguration, wire};
 use uuid::Uuid;
@@ -582,4 +582,193 @@ async fn a_reannounce_during_an_admission_leaves_no_files_behind() {
 
     assert!(!inbox.has_partial(id), "the new partial went");
     assert!(inbox.load_metadata(id).is_none(), "the new sidecar went");
+}
+
+#[tokio::test]
+async fn a_complete_of_a_revoked_phone_leaves_another_phones_upload_alone() {
+    // The phone is revoked while its `complete` is in the intake, and
+    // another phone announces the same recording id, which opens a partial
+    // and a sidecar. The intake then answers, and the admission leaves
+    // those files alone: they are the other phone's upload, which goes on
+    // to its own admission. Removed, its `complete` would answer 404
+    // ("announce again") and the phone would send every chunk again.
+    let intake = ScriptedIntake::gated(meeting_id(), false);
+    let (test, phone, metadata, chunks) = uploaded_two_chunks(73, Some(intake.clone())).await;
+    let id = metadata.recording_id;
+    let inbox = test.inbox();
+
+    let completion = phone.complete(id);
+    let meanwhile = async {
+        intake.admitting().await;
+        test.service.revoke(phone.device.id).await.unwrap();
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+        intake.release();
+        other
+    };
+    let (answer, other) = tokio::join!(completion, meanwhile);
+    assert_eq!(answer.status.as_u16(), 200);
+    assert!(inbox.has_partial(id), "the other phone's partial stays");
+    assert_eq!(
+        inbox.load_metadata(id),
+        Some(metadata.clone()),
+        "and so does its sidecar"
+    );
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        assert_eq!(
+            other.upload(id, index as i64, chunk).await.status.as_u16(),
+            204
+        );
+    }
+    // The gated intake lets the other phone's admission through at once.
+    intake.release();
+    assert_eq!(completed(&other, id).await, meeting_id());
+    assert_eq!(intake.count(), 2);
+}
+
+/// Two first announces of one recording at once: the receipt's, of `phone`
+/// with `metadata`, and a late one of `late` with another `format`. Each
+/// is held at its clock read, after its receipt read found nothing, the
+/// receipt's first. The receipt's goes on first and makes the receipt, and
+/// the late one then finds it. Before, each had written its sidecar by its
+/// clock read, the late one last. Returns the two answers.
+fn racing_first_announces(
+    test: &TestService,
+    phone: &EngineDevice,
+    late: &EngineDevice,
+    metadata: &RecordingMetadata,
+) -> (HandoverResponse, HandoverResponse) {
+    let late_metadata = RecordingMetadata {
+        format: AudioFormat::Wav16kInt16,
+        device_name: late.device.name.clone(),
+        ..metadata.clone()
+    };
+    let (first_hold, first_thread) = common::held(test, {
+        let (phone, metadata) = (phone.clone(), metadata.clone());
+        async move { phone.announce(&metadata).await }
+    });
+    let (late_hold, late_thread) = common::held(test, {
+        let late = late.clone();
+        async move { late.announce(&late_metadata).await }
+    });
+    first_hold.release();
+    let first = first_thread.join().unwrap();
+    late_hold.release();
+    (first, late_thread.join().unwrap())
+}
+
+/// The sidecar is the metadata of the announce that made the receipt, and
+/// the phone's upload is admitted with it.
+async fn the_sidecar_is_the_receipts(
+    test: &TestService,
+    phone: &EngineDevice,
+    metadata: &RecordingMetadata,
+    chunks: &[Vec<u8>],
+) {
+    let id = metadata.recording_id;
+    assert_eq!(owners(test, id), (phone.device.id, phone.device.id));
+    assert_eq!(test.inbox().load_metadata(id).as_ref(), Some(metadata));
+    for (index, chunk) in chunks.iter().enumerate() {
+        assert_eq!(
+            phone.upload(id, index as i64, chunk).await.status.as_u16(),
+            204
+        );
+    }
+    completed(phone, id).await;
+    let admissions = test.intake.admissions.entries();
+    assert_eq!(admissions.len(), 1);
+    assert_eq!(&admissions[0].metadata, metadata);
+}
+
+#[tokio::test]
+async fn racing_first_announces_with_another_format_keep_the_receipts_sidecar() {
+    // The phone announces a new recording twice at once, the second time
+    // with another format. Only the announce that made the receipt opens
+    // the files; the late one answers as a re-announce and leaves the
+    // sidecar alone. Before, each announce wrote its sidecar before it made
+    // the receipt, so the late one's `format` reached the intake with the
+    // other one's receipt.
+    let (test, phone, metadata, chunks) = two_chunk_recording(75, None).await;
+    let (first, late) = racing_first_announces(&test, &phone, &phone, &metadata);
+    assert_eq!(first.status.as_u16(), 201);
+    assert_eq!(late.status.as_u16(), 200);
+
+    the_sidecar_is_the_receipts(&test, &phone, &metadata, &chunks).await;
+}
+
+#[tokio::test]
+async fn racing_first_announces_of_two_phones_keep_the_receipts_sidecar() {
+    // Two phones announce the same recording id at once, with other
+    // formats. The late one is refused as another device's recording and
+    // leaves the sidecar of the one that made the receipt alone.
+    let (test, phone, metadata, chunks) = two_chunk_recording(76, None).await;
+    let other = EngineDevice::paired(&test, "Other iPhone").await;
+    let (first, late) = racing_first_announces(&test, &phone, &other, &metadata);
+    assert_eq!(first.status.as_u16(), 201);
+    assert_eq!(late.status.as_u16(), 409);
+
+    the_sidecar_is_the_receipts(&test, &phone, &metadata, &chunks).await;
+}
+
+#[tokio::test]
+async fn an_announce_whose_files_cannot_be_opened_keeps_its_receipt() {
+    // Only the announce that made the receipt opens the files, once the
+    // receipt is made. When the opening fails, the receipt is saved anyway,
+    // at the place in line it took, and the answer is 500. The phone's
+    // retried announce finds the receipt and opens the files as a
+    // re-announce.
+    let (test, phone, metadata, chunks) = two_chunk_recording(78, None).await;
+    let id = metadata.recording_id;
+    let directory = test.inbox().directory.clone();
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::write(&directory, b"not a directory").unwrap();
+    assert_eq!(phone.announce(&metadata).await.status.as_u16(), 500);
+    let (in_memory, stored) = receipts(&test, id);
+    assert_eq!(
+        (in_memory.state, stored.state),
+        (HandoverState::Receiving, HandoverState::Receiving)
+    );
+
+    std::fs::remove_file(&directory).unwrap();
+    assert_eq!(phone.announce(&metadata).await.status.as_u16(), 200);
+    assert_eq!(test.inbox().load_metadata(id), Some(metadata.clone()));
+    for (index, chunk) in chunks.iter().enumerate() {
+        assert_eq!(
+            phone.upload(id, index as i64, chunk).await.status.as_u16(),
+            204
+        );
+    }
+    completed(&phone, id).await;
+    assert_eq!(test.intake.admissions.count(), 1);
+}
+
+#[tokio::test]
+async fn a_reannounce_during_the_intake_leaves_no_file_after_the_admission() {
+    // The intake took the verified file, as the real one does, and the
+    // phone announces again (a retry after its own timeout). The announce
+    // finds no file, opens a new partial and sidecar and answers. The
+    // admission then removes every file of the recording: an empty partial
+    // left behind would wait for the next start's sweep.
+    let intake = ScriptedIntake::gated(meeting_id(), false);
+    let (test, phone, metadata, _) = uploaded_two_chunks(77, Some(intake.clone())).await;
+    let id = metadata.recording_id;
+    let inbox = test.inbox();
+
+    let completion = phone.complete(id);
+    let meanwhile = async {
+        intake.admitting().await;
+        let reannounced = phone.announce(&metadata).await;
+        assert!(inbox.has_partial(id), "the announce opened a partial");
+        intake.release();
+        reannounced
+    };
+    let (answer, reannounced) = tokio::join!(completion, meanwhile);
+    assert_eq!(answer.status.as_u16(), 200);
+    assert_eq!(reannounced.status.as_u16(), 200);
+
+    assert!(
+        !inbox.recording_ids().contains(&id),
+        "no file of the recording is left"
+    );
 }

@@ -67,9 +67,6 @@ impl Engine {
             return self.reannounce(existing, device, &metadata).await;
         }
 
-        if let Err(error) = self.inbox.begin(&metadata) {
-            return HandoverResponse::internal_error("opening the partial file", &error);
-        }
         let timestamp = (self.now)();
         let fresh = HandoverReceipt {
             recording_id,
@@ -84,23 +81,32 @@ impl Engine {
         };
         // A first announce of the same recording on another thread may have
         // made its receipt since the read above, and a chunk may have landed
-        // in it. That receipt stays (`begin` left the partial alone), and
-        // this announce is answered as if the read had found it.
+        // in it. That receipt stays, and this announce is answered as if the
+        // read had found it, without touching the files the other one opens.
         let picked = self.change(
             recording_id,
             |held| held.map_or(Ok(fresh), |held| Err(Box::new(held.clone()))),
             |_| {},
         );
-        match picked {
-            Ok((receipt, place)) => {
-                if let Err(error) = self.save(receipt.clone(), place).await {
-                    self.inbox.discard(recording_id);
-                    return HandoverResponse::internal_error("saving the receipt", &error);
-                }
-                HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
-            }
-            Err(held) => self.reannounce(*held, device, &metadata).await,
+        let (receipt, place) = match picked {
+            Ok(picked) => picked,
+            Err(held) => return self.reannounce(*held, device, &metadata).await,
+        };
+        // Only the announce that made the receipt opens the files, so the
+        // sidecar is the metadata of the receipt memory holds. The place in
+        // line goes to the save whatever `open_files` did, and nothing
+        // between `change` and the save yields. A failed opening leaves the
+        // receipt saved without files, so the phone's retried announce
+        // reopens them as a re-announce.
+        let opened = self.open_files(&metadata);
+        if let Err(error) = self.save(receipt.clone(), place).await {
+            self.discard_own(recording_id, device.id, false);
+            return HandoverResponse::internal_error("saving the receipt", &error);
         }
+        if let Err(error) = opened {
+            return HandoverResponse::internal_error("opening the partial file", &error);
+        }
+        HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
     }
 
     /// A known recording announced again: 200 with the status, 409 when
@@ -136,16 +142,12 @@ impl Engine {
                 "metadata differs from the first announcement",
             );
         }
-        let mut received_chunks = None;
-        if !self.inbox.has_verified(recording_id, metadata.format)
-            && (!self.inbox.has_partial(recording_id)
-                || self.inbox.load_metadata(recording_id).is_none())
-        {
-            if let Err(error) = self.inbox.begin(metadata) {
+        let received_chunks = match self.reopen_missing_files(metadata) {
+            Ok(reopened) => reopened.then(Vec::new),
+            Err(error) => {
                 return HandoverResponse::internal_error("opening the partial file", &error);
             }
-            received_chunks = Some(Vec::new());
-        }
+        };
         if let Err(error) = self
             .transition(&mut receipt, HandoverState::Receiving, received_chunks)
             .await
@@ -156,7 +158,7 @@ impl Engine {
         // meanwhile: a stale `complete` would find them and verify an empty
         // partial.
         if receipt.state.kind() == HandoverStateKind::Complete {
-            self.inbox.discard(recording_id);
+            self.discard_own(recording_id, device.id, false);
         }
         HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt))
     }
@@ -294,7 +296,7 @@ impl Engine {
             // new. A 401 would make the phone keep the recording, and its
             // upload after pairing again would become a second meeting.
             if self.revoked_since(device, revocation) {
-                self.forget(recording_id);
+                self.forget_own(recording_id, device.id);
             }
             return HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id });
         }
@@ -327,7 +329,9 @@ impl Engine {
     /// 401 when the device was revoked since `complete` took `revocation`,
     /// also by a revoke that a pairing has since cleared from `revoked`.
     /// That revoke may have missed the receipt, so its files are discarded
-    /// and it leaves memory.
+    /// and it leaves memory, unless memory holds another device's receipt
+    /// of the recording id by then: another phone announced it after the
+    /// revoke, and the files are that phone's ([`Engine::discard_own`]).
     fn refusal(
         &self,
         recording_id: Uuid,
@@ -337,8 +341,7 @@ impl Engine {
         if !self.revoked_since(device, revocation) {
             return None;
         }
-        self.inbox.discard(recording_id);
-        self.forget(recording_id);
+        self.discard_own(recording_id, device.id, true);
         Some(Self::unauthorized())
     }
 
@@ -443,7 +446,7 @@ impl Engine {
             return Verification::Answered(self.replaced_during_the_verify(receipt).await);
         }
         if !verified {
-            self.inbox.discard(recording_id);
+            self.discard_own(recording_id, device.id, false);
             let _ = self
                 .transition(
                     receipt,
@@ -484,14 +487,15 @@ impl Engine {
     /// now was created after that. While `revoked` holds the device it can
     /// only be the revoked phone's (an announce that passed the gate before
     /// the revoke), and it goes. Once the device paired again it is the new
-    /// pairing's upload, and it stays.
+    /// pairing's upload, and it stays; so does another phone's upload of the
+    /// same recording id ([`Engine::discard_own`]).
     fn revoked_during_the_verify(
         &self,
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
         if self.state().revoked.contains(&device.id) {
-            self.inbox.discard(recording_id);
+            self.discard_own(recording_id, device.id, false);
         }
         Self::unauthorized()
     }
@@ -508,12 +512,17 @@ impl Engine {
 
     /// Hands the verified file to the intake. On success the receipt is
     /// `complete` and the answer is 200 whatever the receipt write did: the
-    /// real intake wrote this same receipt and deleted the file, a test
-    /// intake did neither. The metadata sidecar is ours to remove; a
-    /// replayed complete returns the same id through the early `complete`
-    /// check. On failure the verified file stays for the phone's retry and
-    /// the reason is fixed text, because the error may name the file's
-    /// path.
+    /// real intake wrote this same receipt and deleted the file. Then every
+    /// file of the recording goes: the verified file if the intake left it,
+    /// the metadata sidecar, and a partial and sidecar that a re-announce
+    /// opened during the intake. A replayed complete returns the same id
+    /// through the early `complete` check. When another device announced
+    /// the same recording id meanwhile (this one was revoked during the
+    /// intake), only the verified file goes, and the rest is that phone's
+    /// upload ([`Engine::discard_own`]); no other request creates the
+    /// verified file while this `complete` holds the `completing` mark. On
+    /// failure the verified file stays for the phone's retry and the reason
+    /// is fixed text, because the error may name the file's path.
     async fn admit(
         &self,
         file: &std::path::Path,
@@ -538,7 +547,8 @@ impl Engine {
         let _ = self
             .transition(receipt, HandoverState::Complete { meeting_id }, None)
             .await;
-        let _ = std::fs::remove_file(self.inbox.metadata(recording_id));
+        let _ = std::fs::remove_file(file);
+        self.discard_own(recording_id, device.id, false);
         HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id })
     }
 

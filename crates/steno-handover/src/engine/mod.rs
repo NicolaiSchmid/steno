@@ -5,9 +5,12 @@
 //! devices and the line of store writes, held for synchronous sections
 //! only, never across a store, file or intake call, so another request runs
 //! while one awaits. Even so, the store commits the engine's writes in the
-//! order they were asked for (`Engine::in_order`). The recording routes
-//! live in `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
-//! `Routing/HTTPMessages.swift`.
+//! order they were asked for (`Engine::in_order`). A second lock orders the
+//! creation of a recording's inbox files with the discards that leave
+//! another device's upload alone (`Engine::discard_own`); it is held across
+//! those file calls only, never across a yield, and taken before the state
+//! lock, never inside it. The recording routes live in `recording.rs`.
+//! Swift: `Routing/HandoverEngine.swift`, `Routing/HTTPMessages.swift`.
 
 mod recording;
 
@@ -19,7 +22,8 @@ use chrono::Duration;
 use http::{HeaderMap, StatusCode};
 use serde::Serialize;
 use steno_core::{
-    HandoverIntake, HandoverReceipt, HandoverState, HandoverStateKind, PairedDevice, Store, store,
+    HandoverIntake, HandoverReceipt, HandoverState, HandoverStateKind, PairedDevice,
+    RecordingMetadata, Store, store,
 };
 use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
@@ -226,6 +230,17 @@ impl State {
         self.revocations.get(&device_id).copied().unwrap_or(0)
     }
 
+    /// Whether memory holds a receipt of `recording_id` that belongs to a
+    /// device other than `device_id`: another phone announced the same
+    /// recording id after this device's receipt left memory (a revoke, a
+    /// refusal). A discard or forget by recording id on behalf of
+    /// `device_id` leaves that phone's upload alone then.
+    fn holds_another_devices(&self, recording_id: Uuid, device_id: Uuid) -> bool {
+        self.active_receipts
+            .get(&recording_id)
+            .is_some_and(|receipt| receipt.device_id != device_id)
+    }
+
     /// Keeps `receipt` as the live copy, unless its device was revoked.
     fn remember(&mut self, receipt: &HandoverReceipt) {
         if !self.revoked.contains(&receipt.device_id) {
@@ -259,6 +274,10 @@ pub struct Engine {
     pub inbox: Inbox,
     receipts: watch::Sender<Vec<HandoverReceipt>>,
     state: Mutex<State>,
+    /// Held while a recording's inbox files are created
+    /// ([`Engine::open_files`], [`Engine::reopen_missing_files`]) and while
+    /// [`Engine::discard_own`] checks memory and discards; see there.
+    files: Mutex<()>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -310,11 +329,17 @@ impl Engine {
             now,
             receipts,
             state: Mutex::default(),
+            files: Mutex::default(),
         }
     }
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The files lock; taken before the state lock, never inside it.
+    fn files(&self) -> MutexGuard<'_, ()> {
+        self.files.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// A store read on the blocking pool. Writes go through
@@ -419,15 +444,17 @@ impl Engine {
     }
 
     /// Forgets the device and drops what it was uploading: the files of its
-    /// receipts in memory. A `complete` in flight that has not reached the
-    /// intake answers 401 when it sees the revoke, and discards the files
-    /// when its receipt was only in the store, where the revoke does not
-    /// look. An admission past that check may still finish; the revoke's
-    /// discard can also make it fail. Its `complete` receipt stays out of
-    /// memory while the device is revoked and out of the store while the
-    /// device is gone from it; once the phone paired again it is written
-    /// like any other. Files of a receipt only in the store (not read since
-    /// start) wait for the next start's sweep.
+    /// receipts in memory, unless another phone announced the same
+    /// recording id once they left memory (`Engine::discard_own`). A
+    /// `complete` in flight that has not reached the intake answers 401
+    /// when it sees the revoke, and discards the files when its receipt was
+    /// only in the store, where the revoke does not look. An admission past
+    /// that check may still finish; the revoke's discard can also make it
+    /// fail. Its `complete` receipt stays out of memory while the device is
+    /// revoked and out of the store while the device is gone from it; once
+    /// the phone paired again it is written like any other. Files of a
+    /// receipt only in the store (not read since start) wait for the next
+    /// start's sweep.
     ///
     /// A failed store delete leaves the device paired in the store but
     /// revoked in memory: its recording routes answer 401 until it pairs
@@ -455,7 +482,7 @@ impl Engine {
             state.next_write()
         };
         for recording_id in unfinished {
-            self.inbox.discard(recording_id);
+            self.discard_own(recording_id, device_id, false);
         }
         let deleted = self
             .in_order(place, move |store| store.delete_paired_device(device_id))
@@ -605,11 +632,81 @@ impl Engine {
         self.receipts.send_replace(self.receipts_snapshot());
     }
 
-    /// Drops the receipt from memory and tells the observers; the store
-    /// row, if any, stays. Swift: `HandoverEngine.forget`.
-    pub(crate) fn forget(&self, recording_id: Uuid) {
-        self.state().active_receipts.remove(&recording_id);
+    /// Drops the receipt of `recording_id` from memory on behalf of
+    /// `device_id` and tells the observers, unless memory holds another
+    /// device's receipt of it ([`State::holds_another_devices`]); the store
+    /// row, if any, stays. Swift: `HandoverEngine.forget`, which goes by the
+    /// recording id alone.
+    pub(crate) fn forget_own(&self, recording_id: Uuid, device_id: Uuid) {
+        {
+            let mut state = self.state();
+            if state.holds_another_devices(recording_id, device_id) {
+                return;
+            }
+            state.active_receipts.remove(&recording_id);
+        }
         self.publish_receipts();
+    }
+
+    /// Discards every inbox file of `recording_id` on behalf of
+    /// `device_id`, and with `forget` drops its receipt from memory as
+    /// [`Engine::forget_own`] does, unless memory holds another device's
+    /// receipt of it: those files are that phone's upload. Every discard of
+    /// the engine goes through here, except the sweep before the listener
+    /// starts. The check and the discard run under the files lock. A
+    /// recording's files are created
+    /// only by a request whose device's receipt memory holds by then (the
+    /// announce whose change made the receipt, or a re-announce of its
+    /// owner), and only under the same lock, so another phone's announce
+    /// either made its receipt before the check, and its files stay, or
+    /// opens them once the discard is over. Swift: the actor makes the
+    /// check and the discard one step.
+    pub(crate) fn discard_own(&self, recording_id: Uuid, device_id: Uuid, forget: bool) {
+        let files = self.files();
+        {
+            let mut state = self.state();
+            if state.holds_another_devices(recording_id, device_id) {
+                return;
+            }
+            if forget {
+                state.active_receipts.remove(&recording_id);
+            }
+        }
+        self.inbox.discard(recording_id);
+        drop(files);
+        if forget {
+            self.publish_receipts();
+        }
+    }
+
+    /// Opens the files of a recording whose receipt this request just made:
+    /// an empty partial (or the one there, never truncated) and the
+    /// metadata sidecar, under the files lock ([`Engine::discard_own`]).
+    pub(crate) fn open_files(&self, metadata: &RecordingMetadata) -> std::io::Result<()> {
+        let _files = self.files();
+        self.inbox.begin(metadata)
+    }
+
+    /// Opens the files of a known recording again when they are gone (a
+    /// sweep, a crash before the first chunk, a refusal) and no verified
+    /// file waits for a second intake attempt; true when it opened them.
+    /// The check and the creation are one step under the files lock, so two
+    /// re-announces, or a re-announce and the announce that made the
+    /// receipt, never write the sidecar over a partial another one opened.
+    pub(crate) fn reopen_missing_files(
+        &self,
+        metadata: &RecordingMetadata,
+    ) -> std::io::Result<bool> {
+        let _files = self.files();
+        let recording_id = metadata.recording_id;
+        if self.inbox.has_verified(recording_id, metadata.format)
+            || (self.inbox.has_partial(recording_id)
+                && self.inbox.load_metadata(recording_id).is_some())
+        {
+            return Ok(false);
+        }
+        self.inbox.begin(metadata)?;
+        Ok(true)
     }
 
     /// One state change through [`Engine::update`]: the state and, when

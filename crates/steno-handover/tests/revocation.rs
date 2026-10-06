@@ -603,6 +603,86 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     assert_eq!(intake.count(), 1);
 }
 
+#[tokio::test]
+async fn a_revoke_during_the_verify_leaves_another_phones_upload_alone() {
+    // The revoke lands while `complete` writes `verifying`; it finds the
+    // receipt in memory and discards the files. Another phone announces the
+    // same recording id before the old `complete` goes on, which opens a
+    // partial and a sidecar. The old `complete` then sees the revoke after
+    // its hash while `revoked` still holds the device, and the files there
+    // are not the revoked phone's: memory holds the other phone's receipt,
+    // so they stay.
+    let intake = ScriptedIntake::new(Uuid::new_v4(), 0);
+    let (test, phone, metadata, bytes) = uploaded(Some(intake.clone()), 97).await;
+    let id = metadata.recording_id;
+    let inbox = test.inbox();
+
+    let hold = StoreHold::new(&test.store);
+    let saved = Woken::new();
+    let mut completing = pin!(unconstrained(phone.complete(id)));
+    saved.pending(completing.as_mut(), "complete waits on its verifying write");
+    let mut revoking = pin!(test.service.revoke(phone.device.id));
+    Woken::new().pending(revoking.as_mut(), "the revoke waits on its store delete");
+    hold.release();
+    common::signalled("the revoke returns", revoking)
+        .await
+        .unwrap();
+    saved.wait("the verifying write returns").await;
+    let other = EngineDevice::paired(&test, "Other iPhone").await;
+    assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+
+    let old = common::signalled("the old complete answers", completing).await;
+    assert_eq!(old.status.as_u16(), 401, "the old complete is refused");
+    assert!(inbox.has_partial(id), "the other phone's partial stays");
+    assert!(inbox.load_metadata(id).is_some(), "and so does its sidecar");
+    let receipts = test.service.engine.receipts_snapshot();
+    assert_eq!(
+        receipts.iter().map(|r| r.device_id).collect::<Vec<_>>(),
+        vec![other.device.id]
+    );
+    other.upload_all(&metadata, &bytes).await;
+    assert_eq!(other.complete(id).await.status.as_u16(), 200);
+    assert_eq!(intake.count(), 1);
+}
+
+#[tokio::test]
+async fn a_refused_complete_leaves_another_phones_announce_alone() {
+    // After a restart the receipt is only in the store, and a revoke lands
+    // while `complete` reads it. Another phone announces the same recording
+    // id, and its announce is held at its clock read, after its receipt
+    // read found nothing, while the old `complete` goes on and is refused:
+    // the refusal discards the files the revoke missed and forgets the
+    // receipt. The announce makes its receipt and opens its files only
+    // after that, so both stay. Before, the announce opened its files
+    // before it made its receipt, and the refusal discarded them.
+    let restarted = Restarted::new().await;
+    let id = restarted.id();
+    let (completing, _) = restarted.revoke_during_the_read(false).await;
+    let other =
+        EngineDevice::paired_on(&restarted.service, &restarted.first.store, "Other iPhone").await;
+    let announce = {
+        let (other, metadata) = (other.clone(), restarted.metadata.clone());
+        async move { other.announce(&metadata).await }
+    };
+    let (announced, refused) = common::held_while(&restarted.first, announce, completing).await;
+
+    assert_eq!(refused.status.as_u16(), 401, "the old complete is refused");
+    assert_eq!(announced.status.as_u16(), 201);
+    let inbox = restarted.first.inbox();
+    assert!(inbox.has_partial(id), "the other phone's partial stays");
+    assert!(inbox.load_metadata(id).is_some(), "and so does its sidecar");
+    let receipts = restarted.service.engine.receipts_snapshot();
+    assert_eq!(
+        receipts.iter().map(|r| r.device_id).collect::<Vec<_>>(),
+        vec![other.device.id]
+    );
+    other
+        .upload_all(&restarted.metadata, &restarted.bytes)
+        .await;
+    assert_eq!(other.complete(id).await.status.as_u16(), 200);
+    assert_eq!(restarted.intake.count(), 1);
+}
+
 /// What the bearer gate of the computer, started again over `test`'s
 /// store, makes of `token`. Memory starts empty, so only the store decides.
 async fn gate_after_a_restart(test: &TestService, token: &str) -> AuthOutcome {
