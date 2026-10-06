@@ -54,6 +54,26 @@ pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
         .unwrap_or_else(|_| panic!("{what} within {SIGNAL_BOUND:?}"))
 }
 
+/// Runs `test` as a task on a runtime with one worker and one blocking
+/// thread, so the order in which store calls reach the pool is fixed: the
+/// worker runs the task spawned last first (tokio's LIFO slot), and the one
+/// blocking thread runs the calls in the order they arrive. An `in_order`
+/// that does not wait for the write before it, or a write sent to the pool
+/// straight from the request while the write before it still sits in its
+/// task, then commits out of order every time instead of only when threads
+/// race. Catching the first relies on the LIFO slot of the tokio pinned in
+/// `Cargo.lock`: a tokio without it weakens the catch but cannot make the
+/// fixed code fail.
+pub fn on_one_worker(test: impl Future<Output = ()> + Send + 'static) {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { tokio::spawn(test).await.unwrap() });
+}
+
 /// Holds the store's one connection from another thread until
 /// [`StoreHold::release`], so a store call of the engine waits on it.
 pub struct StoreHold {

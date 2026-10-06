@@ -1320,8 +1320,8 @@ item to settle before the Linux release:
 
 ### Handover
 
-Rust fixes the Swift behaviours below except the network and service name lines; each
-fix is ported to Swift before cutover.
+Rust fixes the Swift behaviours below except the network, service name, write order and
+touch lines; each fix is ported to Swift before cutover.
 
 - Network, same as Swift: Rust refuses tunnels. On Linux and macOS that is every
   point-to-point interface, which most tunnels there are (`wg0`, `tun0`, `utun3`); on
@@ -1338,6 +1338,16 @@ fix is ported to Swift before cutover.
   the LAN. On Windows the hardware rule refuses a LAN address on a Hyper-V external
   switch's or a Network Bridge's vEthernet adapter, so a computer whose LAN address
   moved there is unreachable.
+- Write order: both apps commit every store write of the engine (receipt saves, the
+  revoke's delete, the pairing's save, the touch) in the order it was asked for: each
+  waits until the one asked for before it has returned, also when the request that
+  asked for it is gone (`Engine::in_order`, `HandoverEngine.inOrder`; Swift #205). So a
+  revoke during a pairing's save deletes after it and the phone stays revoked after a
+  restart, and a pairing during a revoke's delete saves after it and stays. Rust takes
+  the place in line under the state lock together with the memory the write stands
+  for (the revoke count, the pairing's read of it, the receipt); in Swift the actor
+  makes the two one step. The intake's own receipt saves (`RecordingIntake::admit`,
+  `RecordingIntake.admit`) run outside the line in both apps.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
@@ -1700,16 +1710,14 @@ request that fixes an item deletes it.
   re-pairing. Where: `onUnauthorized` is `clearPairing` in
   `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
   `mobile/src/features/sync/recording-client.ts`. Found: #191.
-- **Unowned.** The Rust handover engine orders only its receipt saves (the `saves`
-  turn); a revoke's device delete and a pairing's device save run on the blocking pool
-  outside it, so they can commit in either order. A phone that pairs again while a
-  revoke of it is still deleting can have the new pairing deleted after its save
-  commits: the user just paired it, and its next request is answered 401, so the phone
-  unpairs itself. The other way round, a revoke during a pairing's save whose delete
-  commits before the save leaves the revoked phone in the store: memory refuses it, but
-  after a restart it hands over again. Swift runs every engine write in the order asked
-  for (`HandoverEngine.inOrder`). Where: `revoke` and `pair` in
-  `crates/steno-handover/src/engine/mod.rs`. Found: #205.
+- **Unowned.** The chunk route reads the live receipt after its file write and saves it
+  back with the chunk added in a second lock section, so two chunks of one recording
+  that land at once on the multi-thread runtime can both start from the same copy, and
+  the later save drops the earlier one's chunk, in memory and in the store. `reannounce`
+  does the same with the copy it read before its inbox checks. The upload heals:
+  `complete` answers 409 with the chunk missing and the phone sends it again. Swift's
+  actor makes the read and the save one step. Where: `receive_chunk` and `reannounce` in
+  `crates/steno-handover/src/engine/recording.rs`. Found: #207.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
@@ -1797,6 +1805,7 @@ PR off `main`.
 | A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
 | Each platform's own wording and shortcuts: the platform from the shell, the page's words and keys, the host's permissions and sentences, the vault the CLI named | `fix/desktop-platform-wording` | #204 | merged |
+| Every handover engine write in the order asked for: the revoke's delete, the pairing's save and the touch join the receipt saves (`steno-handover`) | `fix/rust-handover-device-writes` | #207 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

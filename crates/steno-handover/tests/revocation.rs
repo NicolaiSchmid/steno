@@ -5,9 +5,13 @@
 //! read its device or receipt before the revoke brings neither back, and a
 //! `complete` that had not reached the intake yet admits nothing, also when
 //! the phone paired again meanwhile. A recording already admitted answers
-//! its meeting, and a pairing that a revoke overtakes leaves the device
-//! revoked. A revoke whose store delete fails still refuses the device, and
-//! a partial created again during a verify is never promoted.
+//! its meeting. A revoke and a pairing of the same phone commit in the
+//! order they were asked for: a revoke during a pairing's save leaves the
+//! device revoked, in the store too, and a pairing during a revoke's
+//! discards or its delete stays paired. A touch or a receipt save does
+//! not commit ahead of a revoke asked for before it. A revoke whose store
+//! delete fails still refuses the device, and a partial created again
+//! during a verify is never promoted.
 
 #![allow(
     clippy::assert_is_empty,
@@ -23,12 +27,15 @@ mod common;
 use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{EngineDevice, Phone, ScriptedIntake, StoreHold, TestService, chunks, seeded_bytes};
 use steno_core::{HandoverIntake, HandoverState, RecordingMetadata};
-use steno_handover::engine::HandoverResponse;
+use steno_handover::engine::{
+    AuthOutcome, Engine, HandoverResponse, Principal, RequestHandling as _,
+};
 use steno_handover::pairing::DeviceTokens;
+use steno_handover::route::Route;
 use steno_handover::{HandoverService, wire};
 use tokio::task::unconstrained;
 use uuid::Uuid;
@@ -548,8 +555,8 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     let id = metadata.recording_id;
     let inbox = test.inbox();
 
-    // `complete` waits on its `verifying` write and holds the turn of the
-    // receipt saves meanwhile.
+    // `complete` waits on its `verifying` write, which the held store keeps
+    // from returning.
     let hold = StoreHold::new(&test.store);
     let saved = Woken::new();
     let mut completing = pin!(unconstrained(phone.complete(id)));
@@ -558,22 +565,22 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     Woken::new().pending(revoking.as_mut(), "the revoke waits on its store delete");
     assert!(!inbox.has_partial(id), "the revoke discarded the partial");
     hold.release();
-    revoking.await.unwrap();
-    // Whichever of the `verifying` write and the delete ran first, no row is
-    // left once both returned; a write after the pairing's save would put
-    // the row back for the new pairing.
+    // The delete waits in line behind the `verifying` write, which returns
+    // on its own: the old `complete` is not polled until the end.
+    common::signalled("the revoke returns", revoking)
+        .await
+        .unwrap();
+    // The delete ran after the `verifying` write, so no row is left; a
+    // write after the pairing's save would put the row back for the new
+    // pairing.
     saved.wait("the verifying write returns").await;
     let again = phone.pair_again().await;
 
-    // The new announce creates the partial, then waits for the turn the old
-    // `complete` holds.
+    // The new announce creates the partial, then waits on its receipt save.
     let announced = Woken::new();
     let mut announcing = pin!(again.announce(&metadata));
     loop {
-        announced.pending(
-            announcing.as_mut(),
-            "the announce waits for the old complete's turn",
-        );
+        announced.pending(announcing.as_mut(), "the announce waits on its store calls");
         if inbox.has_partial(id) {
             break;
         }
@@ -596,12 +603,25 @@ async fn a_revoke_during_the_verify_leaves_the_new_pairings_upload_alone() {
     assert_eq!(intake.count(), 1);
 }
 
-#[tokio::test]
-async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
-    // The phone pairs again while the computer revokes it. The revoke
-    // started after the pairing read the count, so whichever of the save
-    // and the delete commits first, the device stays revoked until the
-    // next pairing.
+/// What the bearer gate of the computer, started again over `test`'s
+/// store, makes of `token`. Memory starts empty, so only the store decides.
+async fn gate_after_a_restart(test: &TestService, token: &str) -> AuthOutcome {
+    let restarted = HandoverService::new(
+        test.service.configuration.clone(),
+        test.store.clone(),
+        test.intake.clone(),
+        test.service.identity.clone(),
+        test.clock.clock(),
+    );
+    restarted
+        .engine
+        .authenticate(Route::Status(Uuid::new_v4()), Some(&common::bearer(token)))
+        .await
+}
+
+/// A service that does not listen, a phone paired straight into the engine
+/// and a second pairing window with the gate's answer for its secret.
+async fn paired_with_a_window_open() -> (TestService, EngineDevice, Principal) {
     let test = TestService::with(common::Options {
         start: false,
         ..common::Options::default()
@@ -610,35 +630,291 @@ async fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
     let phone = EngineDevice::paired(&test, "Direct iPhone").await;
     let payload = test.service.begin_pairing();
     let principal = common::pairing_principal(&test.service, &payload).await;
+    (test, phone, principal)
+}
 
-    let hold = StoreHold::new(&test.store);
-    let woken = Woken::new();
-    let mut pairing = pin!(common::engine_pair_as(
-        &test.service,
-        principal,
-        phone.device.id,
-        &phone.device.name,
-    ));
-    woken.pending(pairing.as_mut(), "the pairing waits on its save");
-    let mut revoking = pin!(test.service.revoke(phone.device.id));
-    woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
-    hold.release();
-    let (paired, revoked) = tokio::join!(pairing, revoking);
-    assert_eq!(paired.status.as_u16(), 200);
-    revoked.unwrap();
+/// `first` and `second` run to the end together, bounded by
+/// [`common::signalled`]; `what` names them.
+async fn both<A: Future, B: Future>(what: &str, first: A, second: B) -> (A::Output, B::Output) {
+    common::signalled(what, async { tokio::join!(first, second) }).await
+}
 
-    let unknown = Uuid::new_v4();
-    assert_eq!(
-        phone.complete(unknown).await.status.as_u16(),
-        401,
-        "the device is still revoked"
-    );
-    let again = phone.pair_again().await;
-    assert_eq!(
-        again.complete(unknown).await.status.as_u16(),
-        404,
-        "the next pairing clears it"
-    );
+#[test]
+fn a_revoke_during_a_pairings_save_keeps_the_device_revoked() {
+    // The phone pairs again while the computer revokes it. The revoke
+    // started after the pairing read the count, and its delete is asked
+    // for after the save, so it commits after it: the device stays
+    // revoked until the next pairing, in memory and in the store, so a
+    // restart does not let it back in.
+    common::on_one_worker(async {
+        let (test, phone, principal) = paired_with_a_window_open().await;
+        let woken = Woken::new();
+        let mut pairing = pin!(common::engine_pair_as(
+            &test.service,
+            principal,
+            phone.device.id,
+            &phone.device.name,
+        ));
+        woken.pending(pairing.as_mut(), "the pairing waits on its save");
+        let mut revoking = pin!(test.service.revoke(phone.device.id));
+        woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
+        let (paired, revoked) = both("the pairing and the revoke", pairing, revoking).await;
+        assert_eq!(paired.status.as_u16(), 200);
+        revoked.unwrap();
+        let token = paired.decode::<wire::PairResponse>().unwrap().token;
+
+        assert_eq!(
+            test.store.paired_device(phone.device.id).unwrap(),
+            None,
+            "the delete commits after the save"
+        );
+        assert_eq!(
+            gate_after_a_restart(&test, &token).await,
+            AuthOutcome::Rejected(Engine::unauthorized()),
+            "a restart does not let the revoked phone back in"
+        );
+        let unknown = Uuid::new_v4();
+        assert_eq!(
+            phone.complete(unknown).await.status.as_u16(),
+            401,
+            "the device is still revoked"
+        );
+        let again = phone.pair_again().await;
+        assert_eq!(
+            again.complete(unknown).await.status.as_u16(),
+            404,
+            "the next pairing clears it"
+        );
+    });
+}
+
+#[test]
+fn a_pairing_during_a_revokes_delete_stays_paired() {
+    // The computer revokes the phone, and the phone, told so, pairs again
+    // before the delete has returned. The pairing read the count after the
+    // revoke's bump, and its save is asked for after the delete, so it
+    // commits after it: the new pairing stays, in the store and after a
+    // restart, and its recording routes answer instead of a 401 that
+    // would make the phone unpair itself.
+    common::on_one_worker(async {
+        let (test, phone, principal) = paired_with_a_window_open().await;
+        let woken = Woken::new();
+        let mut revoking = pin!(test.service.revoke(phone.device.id));
+        woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
+        let mut pairing = pin!(common::engine_pair_as(
+            &test.service,
+            principal,
+            phone.device.id,
+            &phone.device.name,
+        ));
+        woken.pending(pairing.as_mut(), "the pairing waits on its save");
+        let (revoked, paired) = both("the revoke and the pairing", revoking, pairing).await;
+        revoked.unwrap();
+        assert_eq!(paired.status.as_u16(), 200);
+        let token = paired.decode::<wire::PairResponse>().unwrap().token;
+
+        let device = test
+            .store
+            .paired_device_for_token_hash(&DeviceTokens::hash(&token))
+            .unwrap()
+            .expect("the save commits after the delete");
+        assert_eq!(device.id, phone.device.id);
+        assert!(matches!(
+            gate_after_a_restart(&test, &token).await,
+            AuthOutcome::Allowed(Principal::Device(_))
+        ));
+        let again = EngineDevice {
+            service: test.service.clone(),
+            device,
+        };
+        assert_eq!(
+            again.status(Uuid::new_v4()).await.status.as_u16(),
+            404,
+            "the new pairing is not revoked"
+        );
+    });
+}
+
+#[test]
+fn a_touch_does_not_overtake_a_revoke_asked_for_before_it() {
+    // The gate refreshes `last_seen_at` of a device whose revoke is already
+    // on its way to the store. The touch takes its place in line behind the
+    // delete: a read asked for after both, which skips the line, finds
+    // neither committed, where a touch sent straight to the pool would have
+    // committed ahead of it. That the touch then waits for the delete is
+    // the order tests' part: the read reaches the pool before either task
+    // runs, so a line that does not wait passes here too. The read in
+    // between holds only on `on_one_worker`, where neither task runs before
+    // this one yields.
+    common::on_one_worker(async {
+        let test = TestService::with(common::Options {
+            start: false,
+            ..common::Options::default()
+        })
+        .await;
+        let payload = test.service.begin_pairing();
+        let device_id = Uuid::new_v4();
+        let paired = common::engine_pair(&test.service, &payload, device_id, "Direct iPhone").await;
+        let token = paired.decode::<wire::PairResponse>().unwrap().token;
+        let before = test.store.paired_device(device_id).unwrap().unwrap();
+        test.advance(Duration::from_secs(
+            Engine::LAST_SEEN_RESOLUTION_SECONDS as u64 + 1,
+        ));
+
+        let woken = Woken::new();
+        let mut revoking = pin!(test.service.revoke(device_id));
+        woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
+        let mut touching = pin!(
+            test.service
+                .engine
+                .touch(before.clone(), DeviceTokens::hash(&token))
+        );
+        woken.pending(touching.as_mut(), "the touch waits on the delete");
+        assert_eq!(
+            test.service.paired_devices().await.unwrap(),
+            vec![before],
+            "nothing reached the store ahead of the delete"
+        );
+        let (revoked, _) = both("the revoke and the touch", revoking, touching).await;
+        revoked.unwrap();
+        assert_eq!(test.service.paired_devices().await.unwrap(), Vec::new());
+    });
+}
+
+#[test]
+fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
+    // The computer revokes one phone while another announces its recording
+    // again. The announce finds the receipt in memory and goes to its save
+    // without a yield, so the save takes its place in line behind the
+    // delete: a read asked for after both, which skips the line, finds
+    // neither committed, where a save sent straight to the pool would have
+    // committed ahead of it. That the save then waits for the delete is the
+    // order tests' part. The task count and the reads in between hold only
+    // on `on_one_worker`, where neither task runs before this one yields.
+    common::on_one_worker(async {
+        let test = TestService::with(common::Options {
+            chunk_size: DIRECT_CHUNK_SIZE,
+            start: false,
+            ..common::Options::default()
+        })
+        .await;
+        let revoked = EngineDevice::paired(&test, "Direct iPhone").await;
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        let bytes = seeded_bytes(2 * DIRECT_CHUNK_SIZE as usize, 101);
+        let metadata = other.metadata(&bytes, DIRECT_CHUNK_SIZE);
+        let id = metadata.recording_id;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+        let before = test.store.handover_receipt(id).unwrap();
+        assert!(before.is_some());
+        test.advance(Duration::from_secs(1));
+
+        let woken = Woken::new();
+        let mut revoking = pin!(test.service.revoke(revoked.device.id));
+        woken.pending(revoking.as_mut(), "the revoke waits on its store delete");
+        let mut announcing = pin!(other.announce(&metadata));
+        woken.pending(
+            announcing.as_mut(),
+            "the announce waits on its receipt save",
+        );
+        assert_eq!(
+            tokio::runtime::Handle::current()
+                .metrics()
+                .num_alive_tasks(),
+            3,
+            "the delete and the save wait in their own tasks"
+        );
+        assert_eq!(
+            test.service.paired_devices().await.unwrap().len(),
+            2,
+            "the delete has not committed"
+        );
+        assert_eq!(
+            test.store.handover_receipt(id).unwrap(),
+            before,
+            "nothing reached the store ahead of the delete"
+        );
+        let (deleted, announced) = both("the revoke and the announce", revoking, announcing).await;
+        deleted.unwrap();
+        assert_eq!(announced.status.as_u16(), 200);
+        assert_ne!(
+            test.store.handover_receipt(id).unwrap(),
+            before,
+            "the save commits"
+        );
+    });
+}
+
+#[test]
+fn a_pairing_during_a_revokes_discards_stays_paired() {
+    // The phone pairs again while the computer's revoke, past its count
+    // bump, discards the phone's unfinished uploads. The revoke took the
+    // delete's place in line under the same guard as the bump, so the
+    // pairing, which reads the bumped count, saves after the delete and
+    // stays. A place taken after the discards would let the save commit
+    // first and the delete remove the new pairing. The discards do not
+    // yield, so on `on_one_worker` nothing could run among them. Here the
+    // pairing spins on a second worker until the first partial is gone, so
+    // it usually lands among the discards. It always starts after the
+    // bump, so the test cannot fail on the fixed code however the threads
+    // run.
+    const UNFINISHED: u64 = 200;
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (test, phone, principal) = paired_with_a_window_open().await;
+            let mut ids = Vec::new();
+            for seed in 0..UNFINISHED {
+                let bytes = seeded_bytes(DIRECT_CHUNK_SIZE as usize, seed);
+                let metadata = phone.metadata(&bytes, DIRECT_CHUNK_SIZE);
+                assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
+                ids.push(metadata.recording_id);
+            }
+            // The revoke discards in recording id order.
+            let first = ids.into_iter().min().unwrap();
+            assert!(
+                test.service.engine.inbox.has_partial(first),
+                "the first upload has a partial before the revoke, so the pairing waits for its discard"
+            );
+            let service = test.service.clone();
+            let (device_id, name) = (phone.device.id, phone.device.name.clone());
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let pairing = tokio::spawn(async move {
+                started.send(()).unwrap();
+                let deadline = Instant::now() + common::SIGNAL_BOUND;
+                while service.engine.inbox.has_partial(first) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the revoke discards within {:?}",
+                        common::SIGNAL_BOUND
+                    );
+                    std::hint::spin_loop();
+                }
+                common::engine_pair_as(&service, principal, device_id, &name).await
+            });
+            common::signalled("the pairing waits on the other worker", waiting)
+                .await
+                .unwrap();
+            let (revoked, paired) = both(
+                "the revoke and the pairing",
+                test.service.revoke(device_id),
+                pairing,
+            )
+            .await;
+            revoked.unwrap();
+            let paired = paired.unwrap();
+            assert_eq!(paired.status.as_u16(), 200);
+            let token = paired.decode::<wire::PairResponse>().unwrap().token;
+            assert!(
+                test.store
+                    .paired_device_for_token_hash(&DeviceTokens::hash(&token))
+                    .unwrap()
+                    .is_some(),
+                "the save commits after the delete"
+            );
+        });
 }
 
 #[tokio::test]
@@ -680,8 +956,8 @@ async fn a_partial_created_again_during_the_verify_is_not_promoted() {
     assert!(!inbox.has_partial(id), "the refusal discarded the partial");
 
     // The retried announce reads the receipt the refusal forgot from the
-    // store, creates the partial, then waits for the turn the new
-    // `complete` holds.
+    // store, creates the partial, then waits on its receipt save, in line
+    // behind the new `complete`'s `verifying` write.
     let announced = Woken::new();
     let mut announcing = pin!(unconstrained(again.announce(&restarted.metadata)));
     announced.pending(announcing.as_mut(), "the announce waits on its store read");
@@ -690,7 +966,7 @@ async fn a_partial_created_again_during_the_verify_is_not_promoted() {
         announced.wait("the announce's store read returns").await;
         announced.pending(
             announcing.as_mut(),
-            "the announce waits for the new complete's turn",
+            "the announce waits on its receipt save",
         );
     }
     let (completed, announce) = tokio::join!(completing, announcing);

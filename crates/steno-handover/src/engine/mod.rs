@@ -1,10 +1,12 @@
 //! The protocol core behind the listener: the auth gate and every route.
 //! Independent of the connection and of TLS, so [`Engine::handle`] is driven
 //! directly by the tests. Owned by the service; one lock around the pairing
-//! session, the live receipts, the completions in flight and the revoked
-//! devices, held for synchronous sections only, never across a store, file
-//! or intake call, so another request runs while one awaits. The recording
-//! routes live in `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
+//! session, the live receipts, the completions in flight, the revoked
+//! devices and the line of store writes, held for synchronous sections
+//! only, never across a store, file or intake call, so another request runs
+//! while one awaits. Even so, the store commits the engine's writes in the
+//! order they were asked for (`Engine::in_order`). The recording routes
+//! live in `recording.rs`. Swift: `Routing/HandoverEngine.swift`,
 //! `Routing/HTTPMessages.swift`.
 
 mod recording;
@@ -19,7 +21,7 @@ use serde::Serialize;
 use steno_core::{
     HandoverIntake, HandoverReceipt, HandoverState, HandoverStateKind, PairedDevice, Store, store,
 };
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use uuid::Uuid;
 
 use crate::configuration::{Clock, HandoverConfiguration};
@@ -198,13 +200,23 @@ struct State {
     /// stay out of `active_receipts` and the stream, also when a request
     /// that read one before the revoke writes it back, and their recording
     /// routes answer 401 before they read, also while the device is still
-    /// in the store (a failed delete, a pairing whose save a revoke
-    /// overtook).
+    /// in the store (a failed delete, or one not committed yet).
     revoked: BTreeSet<Uuid>,
     /// Revokes per device since start. A pairing never resets the count,
     /// so a `complete` from before the revoke still sees it after the phone
     /// pairs again under the same device id.
     revocations: BTreeMap<Uuid, u64>,
+    /// Closes once the store write asked for last has returned
+    /// ([`Engine::in_order`]).
+    last_write: Option<oneshot::Receiver<()>>,
+}
+
+/// A store write's place in line ([`State::next_write`]): `previous`
+/// closes once the write asked for before it has returned, and dropping
+/// `done` once this write has returned lets the next one go.
+struct InOrder {
+    previous: Option<oneshot::Receiver<()>>,
+    done: oneshot::Sender<()>,
 }
 
 impl State {
@@ -220,6 +232,21 @@ impl State {
                 .insert(receipt.recording_id, receipt.clone());
         }
     }
+
+    /// The next place in the line of store writes ([`Engine::in_order`]).
+    /// Taken under the same guard as the memory the write stands for (the
+    /// revoke count it bumps or reads, the receipt it saves), so the store
+    /// commits the writes in the order memory changed. The place must reach
+    /// [`Engine::in_order`] before any yield or panic: dropped on the way,
+    /// it lets the write behind it go at once, before the writes ahead of
+    /// it have returned.
+    fn next_write(&mut self) -> InOrder {
+        let (done, last) = oneshot::channel();
+        InOrder {
+            previous: self.last_write.replace(last),
+            done,
+        }
+    }
 }
 
 pub struct Engine {
@@ -231,12 +258,6 @@ pub struct Engine {
     pub inbox: Inbox,
     receipts: watch::Sender<Vec<HandoverReceipt>>,
     state: Mutex<State>,
-    /// Receipt saves run one after another, in the order they were asked
-    /// for: the blocking pool runs them in any order, and two saves of one
-    /// receipt committing out of order would leave the older chunk set in
-    /// the store. Swift: `HandoverEngine.inOrder`, which orders every store
-    /// write, not only the receipt saves.
-    saves: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -288,7 +309,6 @@ impl Engine {
             now,
             receipts,
             state: Mutex::default(),
-            saves: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -296,15 +316,43 @@ impl Engine {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// A store call on the blocking pool.
+    /// A store read on the blocking pool. Writes go through
+    /// [`Engine::in_order`].
     pub(crate) async fn with_store<T: Send + 'static>(
         &self,
         body: impl FnOnce(&Store) -> store::Result<T> + Send + 'static,
     ) -> store::Result<T> {
+        on_blocking_pool(self.store.clone(), body).await
+    }
+
+    /// Runs `write` on the blocking pool once the write asked for before it
+    /// has returned (`place`, from [`State::next_write`]). The pool runs
+    /// its calls in any order, so without the line an older receipt could
+    /// commit over a newer one, and a revoke's delete could remove the
+    /// pairing asked for after it or commit before the pairing's save asked
+    /// for before it, which leaves the revoked phone in the store. The
+    /// write runs in a task of its own, so it keeps its place, and the
+    /// writes behind it wait for it, also when the request that asked for
+    /// it is dropped. A failed write does not hold up the next; reads do
+    /// not wait. Swift: `HandoverEngine.inOrder`.
+    async fn in_order<T: Send + 'static>(
+        &self,
+        place: InOrder,
+        write: impl FnOnce(&Store) -> store::Result<T> + Send + 'static,
+    ) -> store::Result<T> {
         let store = self.store.clone();
-        tokio::task::spawn_blocking(move || body(&store))
-            .await
-            .map_err(|error| store::StoreError::Io(std::io::Error::other(error.to_string())))?
+        tokio::spawn(async move {
+            let InOrder { previous, done } = place;
+            if let Some(previous) = previous {
+                // Closed, not sent: the write before has returned.
+                let _ = previous.await;
+            }
+            let written = on_blocking_pool(store, write).await;
+            drop(done);
+            written
+        })
+        .await
+        .map_err(|error| join_error(&error))?
     }
 
     /// On start, drop inbox files no receipt accounts for (a crash between
@@ -387,9 +435,12 @@ impl Engine {
     /// cannot hand over is safer than one that can.
     pub async fn revoke(&self, device_id: Uuid) -> store::Result<()> {
         let mut unfinished = Vec::new();
-        {
+        let place = {
             // Before the first yield: a `complete` that starts or checks
-            // while the store delete runs must already see this revoke.
+            // while the store delete runs must already see this revoke. The
+            // delete's place in line goes with the count, so a pairing that
+            // read the count before the bump saves before the delete, and
+            // one that read it after saves after it.
             let mut state = self.state();
             state.revoked.insert(device_id);
             *state.revocations.entry(device_id).or_default() += 1;
@@ -400,12 +451,13 @@ impl Engine {
                 }
                 !owned
             });
-        }
+            state.next_write()
+        };
         for recording_id in unfinished {
             self.inbox.discard(recording_id);
         }
         let deleted = self
-            .with_store(move |store| store.delete_paired_device(device_id))
+            .in_order(place, move |store| store.delete_paired_device(device_id))
             .await;
         self.publish_receipts();
         deleted
@@ -413,11 +465,12 @@ impl Engine {
 
     // Auth gate
 
-    /// Refreshes `last_seen_at`, at most once a minute. The gate read
-    /// `device` before a yield, so the write is an `UPDATE` of the row that
-    /// still holds `token_hash`: a revoke that landed in between is not
-    /// undone, and the device is not re-inserted. Public for the tests,
-    /// which run it against a device revoked after its read.
+    /// Refreshes `last_seen_at`, at most once a minute, in line with the
+    /// other store writes. The gate read `device` before a yield, so the
+    /// write is an `UPDATE` of the row that still holds `token_hash`: a
+    /// revoke that landed in between is not undone, and the device is not
+    /// re-inserted. Public for the tests, which run it against a device
+    /// revoked after its read.
     pub async fn touch(&self, device: PairedDevice, token_hash: Vec<u8>) -> PairedDevice {
         let timestamp = (self.now)();
         if let Some(seen) = device.last_seen_at
@@ -428,8 +481,11 @@ impl Engine {
         let mut seen = device;
         seen.last_seen_at = Some(timestamp);
         let id = seen.id;
+        let place = self.state().next_write();
         let _ = self
-            .with_store(move |store| store.touch_paired_device(id, &token_hash, timestamp))
+            .in_order(place, move |store| {
+                store.touch_paired_device(id, &token_hash, timestamp)
+            })
             .await;
         seen
     }
@@ -491,9 +547,15 @@ impl Engine {
             last_seen_at: Some(timestamp),
         };
         let hash = DeviceTokens::hash(&token);
-        let revocation = self.state().revocation_count(device_id);
+        // The count and the save's place in line under one guard: a revoke
+        // counted here deletes before the save, one that starts later
+        // deletes after it and keeps the device revoked.
+        let (revocation, place) = {
+            let mut state = self.state();
+            (state.revocation_count(device_id), state.next_write())
+        };
         if let Err(error) = self
-            .with_store(move |store| store.save_paired_device(&device, &hash))
+            .in_order(place, move |store| store.save_paired_device(&device, &hash))
             .await
         {
             let mut state = self.state();
@@ -502,9 +564,8 @@ impl Engine {
             }
             return HandoverResponse::internal_error("saving the device", &error);
         }
-        // A revoke that started during the save keeps the device revoked,
-        // whichever of the save and its delete commits first; the next
-        // pairing clears it.
+        // A revoke that started during the save deletes the device after
+        // it and keeps it revoked; the next pairing clears it.
         {
             let mut state = self.state();
             if state.revocation_count(device_id) == revocation {
@@ -571,19 +632,19 @@ impl Engine {
     /// Writes the receipt and tells the observers. Memory is updated before
     /// the save runs: the phone keeps two chunks in flight, so the next
     /// request must already see this one's chunk or it would persist a stale
-    /// copy over it. The save itself writes the receipt as memory holds it
-    /// when the save's turn comes (`saves` is FIFO), so the last save of a
-    /// burst carries every chunk of the burst.
+    /// copy over it. The save takes its place in line under the same guard,
+    /// so the saves commit in the order memory changed and the store ends
+    /// with the copy memory held last.
     pub(crate) async fn persist(&self, receipt: &HandoverReceipt) -> store::Result<()> {
-        self.state().remember(receipt);
-        let result = {
-            let _turn = self.saves.lock().await;
-            let saved = self
-                .active_receipt(receipt.recording_id)
-                .unwrap_or_else(|| receipt.clone());
-            self.with_store(move |store| store.save_handover_receipt(&saved))
-                .await
+        let place = {
+            let mut state = self.state();
+            state.remember(receipt);
+            state.next_write()
         };
+        let saved = receipt.clone();
+        let result = self
+            .in_order(place, move |store| store.save_handover_receipt(&saved))
+            .await;
         self.publish_receipts();
         result
     }
@@ -657,6 +718,21 @@ impl Engine {
     }
 }
 
+/// `body` on the blocking pool; a panic there is an I/O error.
+async fn on_blocking_pool<T: Send + 'static>(
+    store: Arc<Store>,
+    body: impl FnOnce(&Store) -> store::Result<T> + Send + 'static,
+) -> store::Result<T> {
+    tokio::task::spawn_blocking(move || body(&store))
+        .await
+        .map_err(|error| join_error(&error))?
+}
+
+/// A task that panicked or was cancelled, as a store I/O error.
+fn join_error(error: &tokio::task::JoinError) -> store::StoreError {
+    store::StoreError::Io(std::io::Error::other(error.to_string()))
+}
+
 /// The `completing` mark, removed when the `complete` call returns.
 pub(crate) struct Completing<'a> {
     engine: &'a Engine,
@@ -722,9 +798,9 @@ impl RequestHandling for Engine {
             (_, None) => Self::unauthorized(),
             (Route::Unpair, Some(device)) => self.unpair(device).await,
             // A device revoked in memory may still pass the gate: its store
-            // delete failed or has not committed yet, or a pairing whose
-            // save the revoke overtook put it back. Its recording routes stop
-            // here; unpair stays open so the phone can still drop its pairing.
+            // delete failed or has not committed yet. Its recording routes
+            // stop here; unpair stays open so the phone can still drop its
+            // pairing.
             (_, Some(device)) if self.state().revoked.contains(&device.id) => Self::unauthorized(),
             (Route::Announce(recording_id), Some(device)) => {
                 self.announce(recording_id, device, &request.body).await
