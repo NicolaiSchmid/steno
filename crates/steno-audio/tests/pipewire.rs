@@ -24,7 +24,9 @@
 //! its link reported as the input gone (in person or during a call), a lost
 //! monitor link as the output gone, both links lost (the monitor's first)
 //! as the output gone, and the capture's connection closed from outside as
-//! the output gone (the input in person).
+//! the output gone (the input in person); a report stuck in its handler
+//! not holding `stop()` past its 2 s bound, with no frame after it and the
+//! capture torn down once the handler returns.
 //!
 //! A round the machine stretched past the coalescing delay is not held to
 //! the one-burst checks (the timing of its one report, or no report for a
@@ -52,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -80,6 +82,9 @@ const COALESCE_DELAY: Duration = LiveCaptureBackend::COALESCE_DELAY;
 /// The backend's private `COALESCE_LIMIT`: a burst that never settles is
 /// judged this long after its first change.
 const COALESCE_LIMIT: Duration = Duration::from_secs(2);
+/// The backend's private `STOP_TIMEOUT`: how long `stop()` waits for a
+/// report in its handler and for the capture thread.
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a test listens for a report that must not come: three
 /// coalescing delays, fixed so that a shorter delay cannot shorten it.
 const QUIET: Duration = Duration::from_millis(1_500);
@@ -442,7 +447,7 @@ fn reporting_sink(lanes: &[AudioLane]) -> (Arc<LaneFrameSink>, Receiver<Report>)
         Box::new(move |reason| {
             let _ = sender
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(PoisonError::into_inner)
                 .send((reason, Instant::now()));
         }),
     );
@@ -924,6 +929,70 @@ fn a_connection_closed_from_outside_in_person_is_reported_as_the_input_gone() {
         &[AudioLane::Mixed],
         destroy_own_client,
         DeviceChangeReason::InputDeviceGone,
+    );
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_report_stuck_in_its_handler_does_not_hold_stop() {
+    let lanes = CALL;
+    let (entered, handler_entered) = channel();
+    let (release, released) = channel::<()>();
+    let (entered, released) = (Mutex::new(entered), Mutex::new(released));
+    let sink = Arc::new(LaneFrameSink::with_handler(
+        &lanes,
+        SAMPLE_RATE,
+        2.0,
+        Box::new(move |reason| {
+            let _ = entered
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send(reason);
+            // Stuck, as a handler waiting for a lock, until the test lets go.
+            let _ = released
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .recv();
+        }),
+    ));
+    let backend = Arc::new(LiveCaptureBackend::new());
+    start(&backend, &lanes, None, &sink).expect("start");
+    destroy_capture_links_from(&[SINK]);
+    assert_eq!(
+        handler_entered
+            .recv_timeout(COALESCE_DELAY + Duration::from_secs(3))
+            .expect("a device-change report"),
+        DeviceChangeReason::OutputDeviceGone
+    );
+    let stopping = Instant::now();
+    stop(&backend);
+    let took = stopping.elapsed();
+    println!("stop() returned after {took:?} with a report in its handler");
+    assert!(
+        took >= STOP_TIMEOUT.saturating_sub(Duration::from_millis(100)),
+        "stop() waits for the report up to its bound, returned after {took:?}"
+    );
+    let after_stop = sink.available_to_read();
+    release.send(()).expect("the handler is still waiting");
+    let threads_gone =
+        || thread_named("data-loop").is_none() && thread_named("steno-pipewire").is_none();
+    assert!(
+        eventually(SETTLE, threads_gone),
+        "the capture's threads outlive the late report: {:?}",
+        threads()
+    );
+    assert!(
+        eventually(SETTLE, || node_id(CAPTURE_NODE).is_none()),
+        "{CAPTURE_NODE} is still in the graph after the late report"
+    );
+    assert!(
+        eventually(SETTLE, || Arc::strong_count(&sink) == 1),
+        "the capture thread let go of the sink"
+    );
+    assert_eq!(
+        sink.available_to_read(),
+        after_stop,
+        "no frame arrives after stop() returns"
     );
 }
 
