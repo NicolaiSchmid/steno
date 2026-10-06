@@ -146,16 +146,16 @@ impl Engine {
             }
             received_chunks = Some(Vec::new());
         }
-        let began = received_chunks.is_some();
         if let Err(error) = self
             .transition(&mut receipt, HandoverState::Receiving, received_chunks)
             .await
         {
             return HandoverResponse::internal_error("saving the receipt", &error);
         }
-        // The files `begin` just made are not wanted once the recording was
-        // admitted meanwhile.
-        if began && receipt.state.kind() == HandoverStateKind::Complete {
+        // The files `begin` just made go once the recording was admitted
+        // meanwhile: a stale `complete` would find them and verify an empty
+        // partial.
+        if receipt.state.kind() == HandoverStateKind::Complete {
             self.inbox.discard(recording_id);
         }
         HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt))
@@ -354,9 +354,9 @@ impl Engine {
     /// name. The partial stays open from before the `verifying` write to
     /// the promote, and a partial gone or replaced meanwhile answers 409
     /// with no chunk listed: the hash must be of the file the intake gets.
-    /// 401 when the device was revoked since `complete` took `revocation`,
     /// 200 with the meeting when another `complete` admitted the recording
-    /// since this one read the receipt. Nothing yields between that check
+    /// since this one read the receipt. 401 when the device was revoked
+    /// since `complete` took `revocation`; nothing yields between that check
     /// and the intake call: an admission past this check may still finish;
     /// the revoke's discard can also make it fail.
     async fn verified_file(
@@ -380,6 +380,12 @@ impl Engine {
                 let _ = self
                     .update(receipt, |edit| edit.received_chunks.clear())
                     .await;
+                if let Some(meeting_id) = receipt.state.meeting_id() {
+                    return Verification::Answered(HandoverResponse::json(
+                        StatusCode::OK,
+                        &wire::CompleteResponse { meeting_id },
+                    ));
+                }
             }
             return Verification::Answered(HandoverResponse::json(
                 StatusCode::CONFLICT,
