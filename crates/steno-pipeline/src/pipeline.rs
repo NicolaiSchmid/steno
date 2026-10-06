@@ -782,39 +782,56 @@ impl ProcessingPipeline {
     }
 
     /// Writes `Meeting(queued)` plus the asset in one transaction and starts
-    /// `process` in the background. The app (Mac recordings) and the phone
-    /// intake both call this. Fails when the asset or the meeting is
-    /// already in flight. Needs a `tokio` runtime. Once the pipeline
-    /// [quits](Self::quit), the meeting is saved and stays `queued` for the
-    /// next launch.
+    /// `process` in the background. The app (Mac recordings) calls this, the
+    /// phone intake [`ProcessingPipeline::enqueue_durably`]. Fails when the
+    /// asset or the meeting is already in flight. Needs a `tokio` runtime.
+    /// Once the pipeline [quits](Self::quit), the meeting is saved and stays
+    /// `queued` for the next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let starting = self.claim_start(meeting.id, asset.id).ok_or_else(|| {
+        let starting = self.claim_or_refuse(meeting, asset)?;
+        self.enqueue_claimed(meeting, asset, &starting, Store::save_meeting_with_asset)
+    }
+
+    /// [`ProcessingPipeline::enqueue`] whose meeting and asset are on the
+    /// disk when it returns ([`Store::save_meeting_with_asset_durably`]):
+    /// the phone intake's, because the phone deletes its copy once the
+    /// recording is admitted. Swift: `ProcessingPipeline.enqueueDurably`.
+    pub fn enqueue_durably(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
+        let starting = self.claim_or_refuse(meeting, asset)?;
+        self.enqueue_claimed(
+            meeting,
+            asset,
+            &starting,
+            Store::save_meeting_with_asset_durably,
+        )
+    }
+
+    /// [`ProcessingPipeline::claim_start`], refused as a failed `decode`.
+    fn claim_or_refuse(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<Starting> {
+        self.claim_start(meeting.id, asset.id).ok_or_else(|| {
             PipelineFailure::new(
                 PipelineStage::Decode,
                 format!("meeting {} is already being processed", meeting.id),
             )
-        })?;
-        self.enqueue_claimed(meeting, asset, &starting)
+        })
     }
 
     /// `enqueue` once the asset is claimed: the claim is held from the
     /// check to the run's start, so a second call cannot start a second
-    /// run.
+    /// run. `save` writes the meeting and its asset.
     fn enqueue_claimed(
         &self,
         meeting: &Meeting,
         asset: &AudioAsset,
         _starting: &Starting,
+        save: impl FnOnce(&Store, &Meeting, &AudioAsset) -> steno_core::store::Result<()>,
     ) -> Result<()> {
         let mut queued = meeting.clone();
         queued.state = MeetingState::Queued;
         queued.updated_at = self.now();
         let mut asset = asset.clone();
         asset.meeting_id = meeting.id;
-        attributing(
-            PipelineStage::Decode,
-            self.store().save_meeting_with_asset(&queued, &asset),
-        )?;
+        attributing(PipelineStage::Decode, save(self.store(), &queued, &asset))?;
         // Processed afresh: earlier runs that ended with the app no longer
         // count against it.
         RunCount::of(&asset).clear();
@@ -856,7 +873,12 @@ impl ProcessingPipeline {
             .claim_start(meeting_id, asset.id)
             .ok_or(ReprocessError::Busy(meeting_id))?;
         asset.expires_at = None;
-        Ok(self.enqueue_claimed(&meeting, &asset, &starting)?)
+        Ok(self.enqueue_claimed(
+            &meeting,
+            &asset,
+            &starting,
+            Store::save_meeting_with_asset,
+        )?)
     }
 
     /// Claims `asset_id` for a background run of `meeting_id`, until the

@@ -161,6 +161,21 @@ impl Store {
         })
     }
 
+    /// [`Store::save_meeting_with_asset`] on the disk when it returns
+    /// ([`Store::write_durably`]): the phone intake's meeting, whose rows
+    /// must outlive a power loss once the phone deleted its copy.
+    /// Swift: `MeetingStore.saveDurably(_:asset:)`.
+    pub fn save_meeting_with_asset_durably(
+        &self,
+        meeting: &Meeting,
+        asset: &AudioAsset,
+    ) -> Result<()> {
+        self.write_durably(|transaction| {
+            save(transaction, meeting)?;
+            assets::save(transaction, asset)
+        })
+    }
+
     /// The meeting and its participants in one transaction (recording
     /// start); every participant is re-pointed at the meeting.
     pub fn save_meeting_with_participants(
@@ -446,8 +461,8 @@ impl Store {
     /// The store commits with `synchronous = NORMAL`, so the delete need
     /// not be on disk when this returns: a power loss or OS crash can roll
     /// it back after the caller removed the files, as in the Swift app. A
-    /// delete that must be on disk first needs a commit with `FULL`, which
-    /// the store does not offer yet.
+    /// delete that must be on disk first would commit through
+    /// [`Store::write_durably`].
     pub fn delete_meeting(&self, id: Uuid) -> Result<DeletedMeeting> {
         self.write(|transaction| {
             let meeting = current(transaction, id)?;

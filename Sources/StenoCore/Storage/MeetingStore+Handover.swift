@@ -62,4 +62,11 @@ extension MeetingStore {
   public func save(_ receipt: HandoverReceipt) async throws {
     try await writer.write { db in try HandoverReceiptRow(receipt).save(db) }
   }
+
+  /// `save(_:)` on the disk when it returns (`writeDurably`): the phone
+  /// intake's `.complete` receipt, which the phone's deletion of its copy
+  /// depends on. Rust: `Store::save_handover_receipt_durably`.
+  public func saveDurably(_ receipt: HandoverReceipt) async throws {
+    try await writeDurably { db in try HandoverReceiptRow(receipt).save(db) }
+  }
 }

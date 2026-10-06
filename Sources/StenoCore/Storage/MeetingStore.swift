@@ -76,6 +76,52 @@ public final class MeetingStore: Sendable {
     }
   }
 
+  /// `save(_:asset:)` on the disk when it returns (`writeDurably`): the
+  /// phone intake's meeting, whose rows must outlive a power loss once the
+  /// phone deleted its copy; `ProcessingPipeline.enqueueDurably`.
+  /// Rust: `Store::save_meeting_with_asset_durably`.
+  public func saveDurably(_ meeting: Meeting, asset: AudioAsset) async throws {
+    try await writeDurably { db in
+      try MeetingRow(meeting).save(db)
+      try AudioAssetRow(asset).save(db)
+    }
+  }
+
+  /// One write transaction whose commit is on the disk when this returns,
+  /// for the commits an answer to another device depends on: the phone
+  /// intake's, before `complete` tells the phone to delete its copy. The
+  /// pool's writer commits under `synchronous = NORMAL`, which syncs the
+  /// WAL only at a checkpoint, so a power loss can roll a commit back.
+  /// This transaction runs under `synchronous = FULL` with `fullfsync` on,
+  /// so its commit syncs the WAL with `F_FULLFSYNC`, which also flushes the
+  /// drive's cache; the sync covers every earlier commit in the WAL too.
+  /// SQLite refuses to change `synchronous` inside a transaction, so the
+  /// levels are set before `BEGIN` and set back once the transaction has
+  /// committed or rolled back, in the same writer access: no other write
+  /// runs under them. Rust: `Store::write_durably`.
+  public func writeDurably<T: Sendable>(_ body: @escaping @Sendable (Database) throws -> T)
+    async throws -> T
+  {
+    try await writer.writeWithoutTransaction { db in
+      let synchronous = try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? 1
+      let fullfsync = try Bool.fetchOne(db, sql: "PRAGMA fullfsync") ?? false
+      // Neither pragma fails outside a transaction, and the transaction has
+      // ended by now.
+      defer {
+        try? db.execute(sql: "PRAGMA synchronous = \(synchronous)")
+        try? db.execute(sql: "PRAGMA fullfsync = \(fullfsync ? 1 : 0)")
+      }
+      try db.execute(sql: "PRAGMA synchronous = FULL")
+      try db.execute(sql: "PRAGMA fullfsync = ON")
+      var value: T?
+      try db.inTransaction(.immediate) {
+        value = try body(db)
+        return .commit
+      }
+      return value!
+    }
+  }
+
   /// The meeting and its participants in one transaction;
   /// `LocalRecordingIntake.begin`.
   public func save(_ meeting: Meeting, participants: [Participant]) async throws {

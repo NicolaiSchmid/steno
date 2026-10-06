@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension as _, params};
 use steno_core::store::convert::{DbDate, DbUuid};
 use steno_core::*;
 
-use common::{PERSON_ID, date, populated, uuid};
+use common::{MEETING_ID, PERSON_ID, date, populated, uuid};
 
 fn count(store: &Store, table: &str) -> i64 {
     store
@@ -714,4 +714,57 @@ fn processing_results_leave_the_template_and_a_typed_title_to_the_user() {
     assert_eq!(stored.template_id, "interview");
     assert_eq!(stored.title, "Typed by the user");
     assert_eq!(stored.title_origin, TitleOrigin::User);
+}
+
+/// `synchronous` and `fullfsync` as the connection has them now.
+fn sync_levels(connection: &rusqlite::Connection) -> steno_core::store::Result<(i64, bool)> {
+    let synchronous = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+    let fullfsync = connection.query_row("PRAGMA fullfsync", [], |row| row.get(0))?;
+    Ok((synchronous, fullfsync))
+}
+
+/// A durable write commits under `FULL` with `fullfsync` (2, on), and the
+/// connection is back at `NORMAL` (1, off) after a commit, a failed body
+/// and a panic in the body; a plain write never sees `FULL`. That the
+/// commit then survives a power loss is SQLite's and cannot be tested.
+#[test]
+fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+    let normal = (1, false);
+    assert_eq!(store.read(sync_levels).unwrap(), normal);
+
+    let inside = store
+        .write_durably(|transaction| {
+            transaction.execute("UPDATE setting SET value = value", [])?;
+            sync_levels(transaction)
+        })
+        .unwrap();
+    assert_eq!(inside, (2, true), "the transaction runs under FULL");
+    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a commit");
+    assert_eq!(
+        store.write(|transaction| sync_levels(transaction)).unwrap(),
+        normal,
+        "a plain write stays NORMAL"
+    );
+
+    let missing = uuid(MEETING_ID);
+    let error = store
+        .write_durably(|_| -> steno_core::store::Result<()> {
+            Err(StoreError::MeetingNotFound(missing))
+        })
+        .unwrap_err();
+    assert!(matches!(error, StoreError::MeetingNotFound(id) if id == missing));
+    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a failure");
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.write_durably(|_| -> steno_core::store::Result<()> { panic!("in the body") })
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a panic");
+    assert_eq!(
+        store.write(|transaction| sync_levels(transaction)).unwrap(),
+        normal,
+        "the lock the panic poisoned is reused at NORMAL"
+    );
 }

@@ -35,6 +35,15 @@ fn enqueue_through(pipeline: ProcessingPipeline) -> Enqueue {
     })
 }
 
+/// [`enqueue_through`] with [`ProcessingPipeline::enqueue_durably`]: the
+/// phone intake's.
+fn enqueue_durably_through(pipeline: ProcessingPipeline) -> Enqueue {
+    Arc::new(move |meeting, asset| {
+        let pipeline = pipeline.clone();
+        Box::pin(async move { pipeline.enqueue_durably(&meeting, &asset) })
+    })
+}
+
 /// "Phone recording 2026-09-24 11:00" in the given zone.
 #[must_use]
 pub fn phone_title(started_at: DateTime<Utc>, zone: FixedOffset) -> String {
@@ -71,7 +80,13 @@ pub fn default_title(
 /// the phone deletes its own copy once `complete` answers 200. This is
 /// deliberately stricter than Swift, whose `RecordingIntake` used
 /// `copyItem` and synced nothing, so a power loss after the answer lost
-/// the recording on both devices. Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
+/// the recording on both devices. For the same reason the `complete`
+/// receipt and the meeting commit durably ([`Store::write_durably`]),
+/// as in Swift: the receipt here, the meeting in the enqueue, which is
+/// [`ProcessingPipeline::enqueue_durably`] in [`RecordingIntake::over`]
+/// and must be in any other production `enqueue`. The `failed` receipt of
+/// a refused admission commits as usual: the phone keeps its copy then.
+/// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
 pub struct RecordingIntake {
     store: Arc<Store>,
     enqueue: Enqueue,
@@ -90,11 +105,12 @@ impl RecordingIntake {
         }
     }
 
-    /// The production wiring over `pipeline`.
+    /// The production wiring over `pipeline`, whose meeting commits
+    /// durably ([`ProcessingPipeline::enqueue_durably`]).
     #[must_use]
     pub fn over(store: Arc<Store>, pipeline: ProcessingPipeline, zone: FixedOffset) -> Self {
         let now = pipeline.dependencies().now.clone();
-        Self::new(store, enqueue_through(pipeline), now, zone)
+        Self::new(store, enqueue_durably_through(pipeline), now, zone)
     }
 }
 
@@ -172,7 +188,7 @@ impl HandoverIntake for RecordingIntake {
         receipt.updated_at = timestamp;
 
         let admitted: BoundaryResult<()> = async {
-            self.store.save_handover_receipt(&receipt)?;
+            self.store.save_handover_receipt_durably(&receipt)?;
             (self.enqueue)(meeting, asset).await?;
             Ok(())
         }
@@ -635,6 +651,175 @@ mod tests {
         );
         assert_eq!(store.all_meetings().unwrap(), []);
         assert!(!enqueued.load(Ordering::SeqCst));
+    }
+
+    /// A decoder and a dispatcher nothing reaches: the pipeline quits before
+    /// the admission, so nothing is processed.
+    struct Unreached;
+
+    #[async_trait]
+    impl steno_core::AudioDecoder for Unreached {
+        async fn decode(
+            &self,
+            _: &AudioAsset,
+            _: AudioLane,
+        ) -> BoundaryResult<steno_core::AudioBuffer16k> {
+            unreachable!("nothing is processed")
+        }
+
+        fn mixdown_format(&self) -> AudioFormat {
+            AudioFormat::Wav16kInt16
+        }
+
+        async fn mixdown(&self, _: &AudioAsset, _: &Path) -> BoundaryResult<()> {
+            unreachable!("nothing is processed")
+        }
+    }
+
+    #[async_trait]
+    impl steno_core::DeliveryDispatcher for Unreached {
+        async fn deliver_all(&self, _: Uuid) -> Vec<steno_core::Delivery> {
+            unreachable!("nothing is processed")
+        }
+    }
+
+    /// One write transaction as the store's commit probe saw it right
+    /// before its commit.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Commit {
+        /// `PRAGMA synchronous`: 1 is `NORMAL`, 2 is `FULL`.
+        synchronous: i64,
+        /// The recording's receipt state, if it has a receipt.
+        receipt: Option<String>,
+        /// Whether a phone meeting exists.
+        meeting: bool,
+    }
+
+    /// Every commit on `store` from now on, as [`Commit`]s about
+    /// `recording_id`.
+    fn commits_of(store: &Store, recording_id: Uuid) -> Arc<Mutex<Vec<Commit>>> {
+        let commits: Arc<Mutex<Vec<Commit>>> = Arc::default();
+        let seen = commits.clone();
+        store.probe_commits(move |connection| {
+            let commit = Commit {
+                synchronous: connection
+                    .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                    .unwrap(),
+                receipt: connection
+                    .query_row(
+                        "SELECT (SELECT state FROM handoverReceipt WHERE recordingID = ?1)",
+                        [steno_core::store::convert::DbUuid(recording_id)],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                meeting: connection
+                    .query_row(
+                        "SELECT count(*) > 0 FROM meeting WHERE source = 'phone'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+            };
+            seen.lock().unwrap().push(commit);
+        });
+        commits
+    }
+
+    /// `PRAGMA synchronous` on the store's connection outside a write.
+    fn synchronous(store: &Store) -> i64 {
+        store
+            .read(
+                |connection| Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?),
+            )
+            .unwrap()
+    }
+
+    /// The production intake commits the `complete` receipt and the
+    /// meeting under `synchronous = FULL`, each the first commit that holds
+    /// it, and leaves the connection at `NORMAL`. A power loss after the
+    /// commits cannot be tested; that they ran under `FULL` can.
+    #[tokio::test]
+    async fn the_production_intake_commits_its_receipt_and_meeting_durably() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_audio_folder(dir.path());
+        let now = Utc::now();
+        let pipeline = ProcessingPipeline::new(
+            crate::PipelineDependencies::new(
+                Arc::new(Unreached),
+                Arc::new(steno_core::testing::FakeSpeechEngine::default()),
+                Arc::new(steno_core::testing::FakeDiarizer::default()),
+                Arc::new(steno_core::testing::InMemorySpeakerMemory::new(Vec::new())),
+                Arc::new(Unreached),
+                store.clone(),
+                crate::MeetingEventBus::new(),
+            )
+            .with_now(Arc::new(move || now)),
+        );
+        // The meeting is saved and stays queued; nothing is processed.
+        pipeline.quit();
+        let intake =
+            RecordingIntake::over(store.clone(), pipeline, FixedOffset::east_opt(0).unwrap());
+        let (device, metadata) = paired_phone(&store, now);
+        let upload = dir.path().join("upload.m4a");
+        std::fs::write(&upload, b"aac bytes").unwrap();
+        assert_eq!(synchronous(&store), 1);
+        let commits = commits_of(&store, metadata.recording_id);
+
+        let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
+
+        let commits = commits.lock().unwrap().clone();
+        let receipt = commits
+            .iter()
+            .find(|commit| commit.receipt.as_deref() == Some("complete"))
+            .expect("a commit wrote the complete receipt");
+        assert_eq!(receipt.synchronous, 2, "the receipt commits under FULL");
+        let meeting = commits
+            .iter()
+            .find(|commit| commit.meeting)
+            .expect("a commit wrote the meeting");
+        assert_eq!(meeting.synchronous, 2, "the meeting commits under FULL");
+        assert_eq!(synchronous(&store), 1, "the connection is back at NORMAL");
+        assert!(store.meeting(meeting_id).unwrap().is_some());
+    }
+
+    /// A refused admission's `failed` receipt commits as usual, after the
+    /// `complete` one committed under `FULL`, and the connection is back
+    /// at `NORMAL`.
+    #[tokio::test]
+    async fn a_refused_admission_leaves_the_connection_at_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_audio_folder(dir.path());
+        let now = Utc::now();
+        let enqueue: Enqueue = Arc::new(|_, _| {
+            Box::pin(async { Err(PipelineFailure::new(PipelineStage::Decode, "no runtime")) })
+        });
+        let intake = RecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(move || now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let (device, metadata) = paired_phone(&store, now);
+        let upload = dir.path().join("upload.m4a");
+        std::fs::write(&upload, b"aac bytes").unwrap();
+        let commits = commits_of(&store, metadata.recording_id);
+
+        intake.admit(&upload, &metadata, &device).await.unwrap_err();
+
+        let levels: Vec<(i64, Option<String>)> = commits
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|commit| (commit.synchronous, commit.receipt.clone()))
+            .collect();
+        assert_eq!(
+            levels,
+            [
+                (2, Some("complete".to_owned())),
+                (1, Some("failed".to_owned())),
+            ]
+        );
+        assert_eq!(synchronous(&store), 1);
     }
 
     #[test]

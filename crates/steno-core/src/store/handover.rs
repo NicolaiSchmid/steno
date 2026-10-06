@@ -142,29 +142,39 @@ impl Store {
 
     /// Inserts or replaces the receipt (GRDB's `save`).
     pub fn save_handover_receipt(&self, receipt: &HandoverReceipt) -> Result<()> {
-        let kind = receipt.state.kind();
-        let failure_message = match &receipt.state {
-            HandoverState::Failed(message) => Some(message.as_str()),
-            _ => None,
-        };
-        self.write(|transaction| {
-            transaction.execute(
-                &upsert_sql("handoverReceipt", RECEIPT_COLUMNS),
-                params![
-                    DbUuid(receipt.recording_id),
-                    DbUuid(receipt.device_id),
-                    DbEnum(kind),
-                    receipt.state.meeting_id().map(DbUuid),
-                    failure_message,
-                    receipt.byte_count,
-                    receipt.sha256,
-                    receipt.chunk_size,
-                    DbJson(&receipt.received_chunks),
-                    DbDate(receipt.created_at),
-                    DbDate(receipt.updated_at),
-                ],
-            )?;
-            Ok(())
-        })
+        self.write(|transaction| save_receipt(transaction, receipt))
     }
+
+    /// [`Store::save_handover_receipt`] on the disk when it returns
+    /// ([`Store::write_durably`]): the phone intake's `complete` receipt,
+    /// which the phone's deletion of its copy depends on.
+    /// Swift: `MeetingStore.saveDurably(_:)`.
+    pub fn save_handover_receipt_durably(&self, receipt: &HandoverReceipt) -> Result<()> {
+        self.write_durably(|transaction| save_receipt(transaction, receipt))
+    }
+}
+
+fn save_receipt(connection: &Connection, receipt: &HandoverReceipt) -> Result<()> {
+    let kind = receipt.state.kind();
+    let failure_message = match &receipt.state {
+        HandoverState::Failed(message) => Some(message.as_str()),
+        _ => None,
+    };
+    connection.execute(
+        &upsert_sql("handoverReceipt", RECEIPT_COLUMNS),
+        params![
+            DbUuid(receipt.recording_id),
+            DbUuid(receipt.device_id),
+            DbEnum(kind),
+            receipt.state.meeting_id().map(DbUuid),
+            failure_message,
+            receipt.byte_count,
+            receipt.sha256,
+            receipt.chunk_size,
+            DbJson(&receipt.received_chunks),
+            DbDate(receipt.created_at),
+            DbDate(receipt.updated_at),
+        ],
+    )?;
+    Ok(())
 }

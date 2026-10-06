@@ -14,6 +14,14 @@ import Foundation
 /// removed and the receipt becomes `.failed(reason)`, so the handover
 /// service's retry with the same path admits again instead of finding the
 /// file gone or a second meeting created.
+///
+/// The `.complete` receipt and the meeting commit durably
+/// (`MeetingStore.writeDurably`), because the phone deletes its copy once
+/// `complete` answers 200: the receipt here, the meeting in `enqueue`,
+/// which is `ProcessingPipeline.enqueueDurably` in `init(pipeline:)` and
+/// must be in any other production `enqueue`. The `.failed` receipt of a
+/// refused admission commits as usual: the phone keeps its copy then. The
+/// copy itself is not synced (`copyItem`); the Rust intake syncs it.
 public struct RecordingIntake: HandoverIntake, Sendable {
   public typealias Enqueue = @Sendable (Meeting, AudioAsset) async throws -> Void
 
@@ -36,7 +44,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     self.now = now
   }
 
-  /// The production wiring: `enqueue` is `ProcessingPipeline.enqueue`.
+  /// The production wiring: `enqueue` is `ProcessingPipeline.enqueueDurably`.
   public init(
     store: MeetingStore,
     settings: SettingsStore,
@@ -45,7 +53,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
   ) {
     self.init(
       store: store, settings: settings,
-      enqueue: { meeting, asset in try await pipeline.enqueue(meeting, asset: asset) },
+      enqueue: { meeting, asset in try await pipeline.enqueueDurably(meeting, asset: asset) },
       now: now)
   }
 
@@ -104,7 +112,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     receipt.updatedAt = timestamp
 
     do {
-      try await store.save(receipt)
+      try await store.saveDurably(receipt)
       try await enqueue(meeting, asset)
     } catch {
       try? FileManager.default.removeItem(at: destination)

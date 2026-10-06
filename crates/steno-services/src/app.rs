@@ -238,7 +238,9 @@ fn make_dependencies(
 }
 
 /// The phone intake over whichever pipeline is current when a recording
-/// arrives, so a reload is not bypassed. Swift: `AppEnvironment.makeIntake`.
+/// arrives, so a reload is not bypassed. Its meeting commits durably
+/// ([`steno_pipeline::ProcessingPipeline::enqueue_durably`]), as
+/// `RecordingIntake::over`'s does. Swift: `AppEnvironment.makeIntake`.
 pub fn handover_intake(
     store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
@@ -249,7 +251,7 @@ pub fn handover_intake(
         store,
         Arc::new(move |meeting, asset| {
             let pipeline = pipeline.current();
-            Box::pin(async move { pipeline.enqueue(&meeting, &asset) })
+            Box::pin(async move { pipeline.enqueue_durably(&meeting, &asset) })
         }),
         now,
         zone,
@@ -778,7 +780,28 @@ mod tests {
             format: AudioFormat::Wav16kInt16,
             device_name: "Phone".to_owned(),
         };
+        // The level of each commit that holds a phone meeting: the first
+        // one is the intake's.
+        let levels: Arc<std::sync::Mutex<Vec<i64>>> = Arc::default();
+        let seen = levels.clone();
+        store.probe_commits(move |connection| {
+            let phone_meeting: bool = connection
+                .query_row(
+                    "SELECT count(*) > 0 FROM meeting WHERE source = 'phone'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if phone_meeting {
+                let level = connection
+                    .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                    .unwrap();
+                seen.lock().unwrap().push(level);
+            }
+        });
         let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
+        let first = levels.lock().unwrap().first().copied();
+        assert_eq!(first, Some(2), "the intake's meeting commits under FULL");
         // The retired pipeline never saw the meeting; the current one did.
         let current_pipeline = current.current();
         current_pipeline.wait_until_idle().await;

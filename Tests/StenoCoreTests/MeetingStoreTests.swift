@@ -665,6 +665,43 @@ import Testing
     #expect(try await reopened.meeting(id: SampleData.meetingID) == SampleData.meeting())
   }
 
+  /// `[synchronous, fullfsync]` as `db` has them now.
+  static func syncLevels(_ db: Database) throws -> [Int] {
+    [
+      try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? -1,
+      try Int.fetchOne(db, sql: "PRAGMA fullfsync") ?? -1,
+    ]
+  }
+
+  /// A durable write commits under `FULL` with `fullfsync` (2, 1), and the
+  /// pool's writer is back at `NORMAL` (1, 0) after a commit and after a
+  /// failed body; a plain write never sees `FULL`. That the commit then
+  /// survives a power loss is SQLite's and cannot be tested.
+  @Test func aDurableWriteCommitsUnderFullAndSetsNormalBack() async throws {
+    struct Boom: Error {}
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
+    let writerLevels = {
+      try await store.writer.writeWithoutTransaction { db in try Self.syncLevels(db) }
+    }
+    #expect(try await writerLevels() == [1, 0])
+
+    let inside = try await store.writeDurably { db in
+      try MeetingRow(SampleData.meeting()).save(db)
+      return try Self.syncLevels(db)
+    }
+    #expect(inside == [2, 1], "the transaction runs under FULL")
+    #expect(try await writerLevels() == [1, 0], "after a commit")
+    #expect(try await store.meeting(id: SampleData.meetingID) != nil)
+    #expect(try await store.writer.write { db in try Self.syncLevels(db) } == [1, 0])
+
+    await #expect(throws: Boom.self) {
+      try await store.writeDurably { _ in throw Boom() }
+    }
+    #expect(try await writerLevels() == [1, 0], "after a failure")
+  }
+
   @Test func derivedIDsAreStableDistinctAndWellFormed() {
     let a = UUID(derivedFrom: SampleData.meetingID, salt: "decision-0")
     #expect(a == UUID(derivedFrom: SampleData.meetingID, salt: "decision-0"))

@@ -23,6 +23,7 @@ mod tasks;
 mod timings;
 mod transcript;
 
+use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -142,7 +143,14 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// retryable.
 pub struct Store {
     connection: Mutex<Connection>,
+    /// [`Store::probe_commits`].
+    #[cfg(any(test, feature = "testing"))]
+    commit_probe: std::sync::OnceLock<CommitProbe>,
 }
+
+/// What [`Store::probe_commits`] runs inside each write transaction.
+#[cfg(any(test, feature = "testing"))]
+type CommitProbe = Box<dyn Fn(&Connection) + Send + Sync>;
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -158,7 +166,8 @@ impl Store {
     /// commit waits for an fsync only when it runs a checkpoint or is the
     /// first commit after one, so a power loss or OS crash can roll back
     /// commits that no checkpoint has copied into the database yet; an app
-    /// crash loses nothing.
+    /// crash loses nothing. A commit that must be on the disk when it
+    /// returns goes through [`Store::write_durably`].
     /// Swift: `MeetingStore.onDisk`, whose `DatabasePool` runs GRDB's
     /// `Database.setUpWALMode`.
     ///
@@ -202,6 +211,8 @@ impl Store {
         migrator::migrate(&mut connection)?;
         Ok(Store {
             connection: Mutex::new(connection),
+            #[cfg(any(test, feature = "testing"))]
+            commit_probe: std::sync::OnceLock::new(),
         })
     }
 
@@ -246,8 +257,48 @@ impl Store {
         let mut connection = self.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = body(&transaction)?;
+        self.before_commit(&transaction);
         transaction.commit()?;
         Ok(value)
+    }
+
+    /// [`Store::write`] whose commit is on the disk when it returns, for
+    /// the commits an answer to another device depends on: the phone
+    /// intake's, before `complete` tells the phone to delete its copy.
+    /// The transaction runs under `synchronous = FULL` with `fullfsync`
+    /// on, so its commit syncs the WAL (with `F_FULLFSYNC` on Apple
+    /// platforms, which also flushes the drive's cache) instead of leaving
+    /// that to the next checkpoint; the sync covers every earlier commit
+    /// in the WAL too. SQLite refuses to change `synchronous` inside a
+    /// transaction, so the levels are set before `BEGIN` and set back once
+    /// the transaction has ended, committed, rolled back or unwound by a
+    /// panic, all under one hold of the lock: no other write runs under
+    /// them. Swift: `MeetingStore.writeDurably`.
+    pub fn write_durably<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut connection = FullSync::hold(self.lock())?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let value = body(&transaction)?;
+        self.before_commit(&transaction);
+        transaction.commit()?;
+        Ok(value)
+    }
+
+    /// Runs `probe` inside every write transaction from now on, right
+    /// before it commits, so a test can read what the commit will write
+    /// and the connection's pragmas then. One probe per store; a second
+    /// call is ignored. `probe` must not call the store: the lock is held.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn probe_commits(&self, probe: impl Fn(&Connection) + Send + Sync + 'static) {
+        let _ = self.commit_probe.set(Box::new(probe));
+    }
+
+    fn before_commit(&self, transaction: &Transaction<'_>) {
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(probe) = self.commit_probe.get() {
+            probe(transaction);
+        }
+        #[cfg(not(any(test, feature = "testing")))]
+        let _ = transaction;
     }
 
     /// The migration identifiers recorded in `grdb_migrations`, in
@@ -290,6 +341,60 @@ fn set_up(connection: Connection) -> Result<Connection> {
     enable_wal(&connection)?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(connection)
+}
+
+/// The connection under `synchronous = FULL` and `fullfsync = ON` for as
+/// long as it is held; dropping it sets back the levels it found. A
+/// transaction borrows it, so the transaction has ended (a dropped one
+/// rolls back) before the levels go back, which SQLite requires.
+struct FullSync<'a> {
+    connection: MutexGuard<'a, Connection>,
+    synchronous: i64,
+    fullfsync: bool,
+}
+
+impl<'a> FullSync<'a> {
+    fn hold(connection: MutexGuard<'a, Connection>) -> Result<FullSync<'a>> {
+        let synchronous = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        let fullfsync = connection.pragma_query_value(None, "fullfsync", |row| row.get(0))?;
+        // Built before the first change, so a failing second pragma still
+        // sets the first one back.
+        let held = FullSync {
+            connection,
+            synchronous,
+            fullfsync,
+        };
+        held.connection.pragma_update(None, "synchronous", "FULL")?;
+        held.connection.pragma_update(None, "fullfsync", true)?;
+        Ok(held)
+    }
+}
+
+impl Drop for FullSync<'_> {
+    /// Neither pragma fails outside a transaction, and the transaction has
+    /// ended by now.
+    fn drop(&mut self) {
+        let _ = self
+            .connection
+            .pragma_update(None, "synchronous", self.synchronous);
+        let _ = self
+            .connection
+            .pragma_update(None, "fullfsync", self.fullfsync);
+    }
+}
+
+impl Deref for FullSync<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Connection {
+        &self.connection
+    }
+}
+
+impl DerefMut for FullSync<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.connection
+    }
 }
 
 /// `PRAGMA journal_mode = WAL`, checked: the pragma answers with the mode

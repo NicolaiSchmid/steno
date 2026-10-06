@@ -84,10 +84,22 @@ public actor ProcessingPipeline {
   var now: Date { dependencies.now() }
 
   /// Writes `Meeting(.queued)` plus the asset in one transaction and starts
-  /// `process` in the background. The app (Mac recordings) and
-  /// `RecordingIntake` (phone) both call this. Throws when the asset or the
-  /// meeting is already in flight.
+  /// `process` in the background. The app (Mac recordings) calls this,
+  /// `RecordingIntake` (phone) `enqueueDurably`. Throws when the asset or
+  /// the meeting is already in flight.
   public func enqueue(_ meeting: Meeting, asset: AudioAsset) async throws {
+    try await enqueue(meeting, asset: asset, durably: false)
+  }
+
+  /// `enqueue(_:asset:)` whose meeting and asset are on the disk when it
+  /// returns (`MeetingStore.saveDurably(_:asset:)`): the phone intake's,
+  /// because the phone deletes its copy once the recording is admitted.
+  /// Rust: `ProcessingPipeline::enqueue_durably`.
+  public func enqueueDurably(_ meeting: Meeting, asset: AudioAsset) async throws {
+    try await enqueue(meeting, asset: asset, durably: true)
+  }
+
+  private func enqueue(_ meeting: Meeting, asset: AudioAsset, durably: Bool) async throws {
     guard running[asset.id] == nil, !inFlight.contains(meeting.id) else {
       throw PipelineFailure(
         stage: .decode, reason: "meeting \(meeting.id) is already being processed")
@@ -97,7 +109,11 @@ public actor ProcessingPipeline {
     queued.updatedAt = now
     var asset = asset
     asset.meetingID = meeting.id
-    try await store.save(queued, asset: asset)
+    if durably {
+      try await store.saveDurably(queued, asset: asset)
+    } else {
+      try await store.save(queued, asset: asset)
+    }
     start(assetID: asset.id)
   }
 

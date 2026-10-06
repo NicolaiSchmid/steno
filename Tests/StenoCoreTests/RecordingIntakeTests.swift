@@ -148,6 +148,69 @@ import Testing
     #expect(!FileManager.default.fileExists(atPath: upload.path))
   }
 
+  /// The production intake over the real pipeline commits the `.complete`
+  /// receipt and the meeting under `synchronous = FULL`, each in the first
+  /// commit that writes it, and leaves the writer at `NORMAL`. A power loss
+  /// after the commits cannot be tested; that they ran under `FULL` can.
+  @Test func theProductionIntakeCommitsItsReceiptAndMeetingDurably() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
+    let harness = try await PipelineHarness(sharedStore: store)
+    defer { harness.cleanUp() }
+    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let upload = harness.directory.appendingPathComponent("upload.wav")
+    try FileManager.default.copyItem(
+      at: Fixtures.url("audio/conversation-two-lane-6s.wav"), to: upload)
+    var metadata = SampleData.recordingMetadata()
+    metadata.format = .wav16kInt16
+    let intake = RecordingIntake(
+      store: store, settings: harness.settingsStore, pipeline: harness.pipeline,
+      now: { PipelineHarness.now })
+    #expect(try await CommitLog.synchronous(of: store) == 1)
+    let log = try await CommitLog.install(on: store)
+
+    _ = try await intake.admit(file: upload, metadata: metadata, device: SampleData.pairedDevice())
+    await harness.pipeline.waitUntilIdle()
+
+    let commits = log.commits
+    let receipt = try #require(commits.first { $0.tables.contains("handoverReceipt") })
+    #expect(receipt.synchronous == 2, "the receipt commits under FULL")
+    let meeting = try #require(commits.first { $0.tables.contains("meeting") })
+    #expect(meeting.synchronous == 2, "the meeting commits under FULL")
+    #expect(meeting.tables.contains("audioAsset"))
+    #expect(try await CommitLog.synchronous(of: store) == 1, "the writer is back at NORMAL")
+  }
+
+  /// A refused admission's `.failed` receipt commits as usual, after the
+  /// `.complete` one committed under `FULL`, and the writer is back at
+  /// `NORMAL`.
+  @Test func aRefusedAdmissionLeavesTheWriterAtNormal() async throws {
+    struct Boom: Error {}
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
+    let settingsStore = SettingsStore(writer: store.writer)
+    var settings = Settings()
+    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
+    try await settingsStore.save(settings)
+    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let intake = RecordingIntake(
+      store: store, settings: settingsStore, enqueue: { _, _ in throw Boom() })
+    let upload = directory.appendingPathComponent("upload.bin")
+    try Data([1]).write(to: upload)
+    let log = try await CommitLog.install(on: store)
+
+    await #expect(throws: Boom.self) {
+      _ = try await intake.admit(
+        file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
+    }
+
+    let receipts = log.commits.filter { $0.tables.contains("handoverReceipt") }
+    #expect(receipts.map(\.synchronous) == [2, 1])
+    #expect(try await CommitLog.synchronous(of: store) == 1)
+  }
+
   @Test func aCompleteReceiptWhoseMeetingIsGoneIsAdmittedAgain() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
