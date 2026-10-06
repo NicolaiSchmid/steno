@@ -38,6 +38,8 @@ const fake = vi.hoisted(() => {
 		/** When set, the next background upload or device name waits for it. */
 		holdUpload: null as Promise<void> | null,
 		holdDeviceName: null as Promise<void> | null,
+		/** The chunks the Mac answers it has. */
+		receivedChunks: [] as number[],
 		pairing: null as unknown,
 		replacing: null as string | null,
 		index: null as unknown,
@@ -91,7 +93,10 @@ const link = {
 		return {
 			status: 200,
 			headers: {},
-			body: '{"state":"receiving","receivedChunks":[]}',
+			body: JSON.stringify({
+				state: "receiving",
+				receivedChunks: fake.receivedChunks,
+			}),
 		};
 	},
 };
@@ -198,20 +203,21 @@ async function settle() {
 	}
 }
 
+/** One-chunk recordings, oldest first. */
 function queued(...ids: string[]) {
-	return ids.reduce(
-		(index, id) =>
-			addRecording(index, {
-				recordingID: id,
-				fileName: `${id}.m4a`,
-				startedAt: "2026-09-25T09:00:00.000Z",
-				durationSeconds: 60,
-				byteCount: 100,
-				sha256: Buffer.alloc(32, 9).toString("base64"),
-				chunkSize: 1024,
-			}),
-		EMPTY_INDEX,
-	);
+	return ids.reduce((index, id) => withRecording(index, id, 100), EMPTY_INDEX);
+}
+
+function withRecording(index: QueueIndex, id: string, byteCount: number) {
+	return addRecording(index, {
+		recordingID: id,
+		fileName: `${id}.m4a`,
+		startedAt: "2026-09-25T09:00:00.000Z",
+		durationSeconds: 60,
+		byteCount,
+		sha256: Buffer.alloc(32, 9).toString("base64"),
+		chunkSize: 1024,
+	});
 }
 
 function finished(id: string): UploadFinished {
@@ -233,6 +239,7 @@ beforeEach(() => {
 	fake.releaseMacB = null;
 	fake.holdUpload = null;
 	fake.holdDeviceName = null;
+	fake.receivedChunks = [];
 	fake.replacing = null;
 });
 afterEach(() => {
@@ -290,6 +297,7 @@ describe("useUploadCoordinator", () => {
 		for (const request of sentSince) {
 			expect(request.auth).toBe("Bearer token-a2");
 		}
+		expect(fake.cancelled).toEqual([]);
 	});
 
 	it("sends nothing after Forget Mac", async () => {
@@ -346,14 +354,16 @@ describe("useUploadCoordinator", () => {
 		it("cancels a chunk whose task was still being created", async () => {
 			const upload = Promise.withResolvers<void>();
 			fake.holdUpload = upload.promise;
-			await mount(queued("a"), A);
+			// The Mac has chunk 0 of two, so the chunk in creation is chunk 1.
+			fake.receivedChunks = [0];
+			await mount(withRecording(EMPTY_INDEX, "a", 2000), A);
 			expect(fake.sent.at(-1)?.url).toBe(
-				"https://10.0.0.1:1/v1/recordings/a/chunks/0",
+				"https://10.0.0.1:1/v1/recordings/a/chunks/1",
 			);
 			fake.replacing = "token-b";
 			await act(async () => upload.resolve());
 			await settle();
-			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
+			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 1)]);
 		});
 
 		it("goes on under the old pairing when the save fails", async () => {
