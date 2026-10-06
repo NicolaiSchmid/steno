@@ -74,12 +74,12 @@ switch, off by default until G4 decides the default.
 
 ### When a change applies
 
-`build()` reads the speech settings once and `SpeechEngines` keeps the one sidecar engine
-built from them for the app's run, which is what guarantees one speech sidecar at a time
+`build()` reads the speech settings once, and `SpeechEngines` keeps the sidecar engine
+built from them for the app's run, which is what keeps one speech sidecar at a time
 (`crates/steno-services/src/speech.rs`). A change therefore applies at the next start:
-the row shows "Takes effect when Steno restarts." and a **Restart Steno** button while the
-stored value differs from the running one. Applying it live would need the services to
-swap their `SpeechEngines` only once no job runs; not proposed.
+while the stored value differs from the running one, the row shows "Takes effect when
+Steno restarts." and a **Restart Steno** button. Applying it live would mean swapping
+`SpeechEngines` once no job runs; not proposed.
 
 ## Bridge fields (names only)
 

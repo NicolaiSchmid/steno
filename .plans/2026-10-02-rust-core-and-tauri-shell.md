@@ -795,24 +795,22 @@ still has to draw the window side. `[ ]` is not ported yet.
   for the run (below). Rust only: Swift has no release.
 - A pipeline reload (a Settings save of the engine or of the summaries) keeps the
   speech engine while the stored engine id runs where the current one does
-  (`steno_services::speech::SpeechEngines`): the setup that shapes an engine (the
-  models directory, the speech settings, the sidecar binary and its options) is read
-  once at launch, so the runtime `SpeechSetup::runtime` gives the engine id is all
-  that tells two engines apart. The new pipeline gets the same engine and its claims
-  (`steno_pipeline::SharedSpeechEngine`): the claims and the warm-up's lock belong to
-  the engine, not to one pipeline, so a job on the new pipeline and one on the retired
-  pipeline still finishing never release the engine under each other
+  (`steno_services::speech::SpeechEngines`): the setup that shapes an engine (models
+  directory, speech settings, sidecar binary and options) is read once at launch, so
+  the runtime `SpeechSetup::runtime` gives the engine id alone tells two engines apart.
+  The claims and the warm-up's lock belong to the engine
+  (`steno_pipeline::SharedSpeechEngine`), not to one pipeline, so a job on the new
+  pipeline and one on the retired pipeline never release the engine under each other
   (`a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too`). The sidecar engine
-  is built at its first use and kept for the app's run; without a job it holds no
-  child, and as the app's only sidecar engine it never runs two children at once, also
-  when a reload on the Mac goes to `CoreML` and back while a retired job transcribes
+  is built at its first use and kept for the run; it holds a child only while a job
+  needs one and never runs two, also when a reload on the Mac goes to `CoreML` and back
+  while a retired job transcribes
   (`a_reload_while_a_job_transcribes_keeps_one_sidecar_child`,
   `a_reload_keeps_the_speech_engine_while_the_engine_id_runs_where_it_did`). So a save
   during a recording keeps the `CoreML` model the warm-up loaded. The `CoreML` engine is
-  kept while the pipelines ask for it: a reload to the sidecar lets it go, and it is
-  freed once the retired pipelines on it are idle; a reload back before then builds a
-  second one beside it until they are. Swift rebuilt the engine on every
-  `reloadPipeline`.
+  kept until a reload asks for the sidecar and freed once the retired pipelines on it
+  are idle; a reload back before then builds a second one beside it. Swift rebuilt the
+  engine on every `reloadPipeline`.
 - A recording's warm-up (Swift's `warmUpPipelineIfModelsInstalled`, gated on the
   same installed check) loads the speech engine only where it runs in the app's
   process, `CoreML` on the Mac, as Swift did; with Parakeet in the speech sidecar it
@@ -1974,8 +1972,8 @@ An abort inside the driver still ends the sidecar. A child that crashes, hangs o
 overruns the memory ceiling during a load or a request with DirectML in use
 switches DirectML off for the rest of the app's run: the switch is process-wide,
 so the sidecar engine `steno-services` keeps across pipeline reloads, and any other in
-the process, asks for the CPU too. A child that dies between requests is replaced on DirectML, as nothing ran on
-it since its last answer; one that overruns the ceiling between requests still
+the process, asks for the CPU too. A child that dies between requests is replaced on
+DirectML, as nothing ran on it since its last answer; one that overruns the ceiling between requests still
 switches DirectML off, as what it holds then is what its last request left, on the
 GPU too. Inside the probe such an end costs no job: no audio was sent yet, so the
 same call loads again in a new child on the CPU. Mid-run it costs that job. The
