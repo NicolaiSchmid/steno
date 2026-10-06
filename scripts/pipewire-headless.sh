@@ -35,20 +35,11 @@ for tool in pipewire wireplumber pw-cli pw-dump pw-link pw-metadata pw-play stdb
   fi
 done
 
-root="$(mktemp -d "${TMPDIR:-/tmp}/steno-pipewire.XXXXXX")"
-# The sockets (the bus, `pipewire-0-manager`) live in the runtime
-# directory, and a Unix socket path holds at most 107 bytes, so it gets a
-# short base of its own: TMPDIR while that leaves room (the longest socket
-# path is the base plus 35 bytes) and holds only characters a D-Bus
-# address takes unescaped, else /tmp. A nix-shell's or a CI runner's
-# TMPDIR can be far longer.
-runtime_base="${TMPDIR:-/tmp}"
-if [[ ${#runtime_base} -gt 64 ]] ||
-  LC_ALL=C grep -q '[^A-Za-z0-9/._-]' <<<"$runtime_base"; then
-  runtime_base=/tmp
-fi
-runtime="$(mktemp -d "$runtime_base/steno-pw.XXXXXX")"
-# The processes this script started, and only those, are the ones it ends.
+# The processes this script started, and only those, are the ones it ends,
+# and the directories it made, which the trap removes even when the second
+# `mktemp` fails.
+root=""
+runtime=""
 dbus_pid=""
 daemon_pids=()
 # Ends the given processes: a TERM, 2 s to go, then a KILL.
@@ -74,11 +65,30 @@ cleanup() {
   if [[ -n "$dbus_pid" ]]; then
     terminate "$dbus_pid"
   fi
-  command rm -rf "$root" "$runtime"
+  local directory
+  for directory in "${root:-}" "${runtime:-}"; do
+    if [[ -n "$directory" ]]; then
+      command rm -rf "$directory"
+    fi
+  done
 }
 # A signal ends the script but not the command it runs: send it to the
 # script's process group (as Ctrl-C and CI's cancel do), not to its PID.
 trap cleanup EXIT
+
+root="$(mktemp -d "${TMPDIR:-/tmp}/steno-pipewire.XXXXXX")"
+# The sockets (the bus, `pipewire-0-manager`) live in the runtime
+# directory, and a Unix socket path holds at most 107 bytes, so it gets a
+# short base of its own: TMPDIR while that leaves room (the longest socket
+# path is the base plus 35 bytes) and holds only characters a D-Bus
+# address takes unescaped, else /tmp. A nix-shell's or a CI runner's
+# TMPDIR can be far longer.
+runtime_base="${TMPDIR:-/tmp}"
+if [[ ${#runtime_base} -gt 64 ]] ||
+  LC_ALL=C grep -q '[^A-Za-z0-9/._-]' <<<"$runtime_base"; then
+  runtime_base=/tmp
+fi
+runtime="$(mktemp -d "$runtime_base/steno-pw.XXXXXX")"
 
 export XDG_RUNTIME_DIR="$runtime"
 export XDG_CONFIG_HOME="$root/config"
