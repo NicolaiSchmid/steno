@@ -217,7 +217,8 @@ impl HandoverServer {
     /// lingering after its last response, at once; one mid-request after
     /// its response; any still busy after [`STOP_GRACE`] by force) and
     /// withdraws the Bonjour record. No task of the listener outlives it,
-    /// except store writes already in line, which finish.
+    /// except store writes already in line, which finish unless the runtime
+    /// shuts down first.
     /// Swift: `HandoverServer.stop` (`group.shutdownGracefully()` closes the
     /// child channels).
     pub async fn stop(self) {
