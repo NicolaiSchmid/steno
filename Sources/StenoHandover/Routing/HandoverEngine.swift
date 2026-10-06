@@ -54,6 +54,10 @@ actor HandoverEngine: RequestHandling {
   /// Writes one chunk into the partial: `ReceivingFile.write`, or in a test
   /// a write it can hold after the bytes landed, before the engine resumes.
   let writeChunk: @Sendable (Data, UInt64, URL) async throws -> Void
+  /// Whether the partial hashes to the announced value:
+  /// `ReceivingFile.hashMatches`, or in a test a hash it can hold after it
+  /// ran, before the engine resumes.
+  let hashMatches: @Sendable (URL, Data) async throws -> Bool
 
   /// `lastSeenAt` is written at most this often per device.
   static let lastSeenResolution: TimeInterval = 60
@@ -75,7 +79,8 @@ actor HandoverEngine: RequestHandling {
     receipts: Broadcast<[HandoverReceipt]>,
     now: @escaping @Sendable () -> Date,
     saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil,
-    writeChunk: (@Sendable (Data, UInt64, URL) async throws -> Void)? = nil
+    writeChunk: (@Sendable (Data, UInt64, URL) async throws -> Void)? = nil,
+    hashMatches: (@Sendable (URL, Data) async throws -> Bool)? = nil
   ) {
     self.configuration = configuration
     self.identity = identity
@@ -85,6 +90,7 @@ actor HandoverEngine: RequestHandling {
     self.now = now
     self.saveReceipt = saveReceipt ?? { try await store.save($0) }
     self.writeChunk = writeChunk ?? { try await ReceivingFile.write($0, at: $1, to: $2) }
+    self.hashMatches = hashMatches ?? { try await ReceivingFile.hashMatches($0, expected: $1) }
     self.inbox = Inbox(directory: configuration.inboxDirectory)
   }
 

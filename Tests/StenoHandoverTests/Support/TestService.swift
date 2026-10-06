@@ -5,10 +5,10 @@ import Synchronization
 @testable import StenoHandover
 
 /// One `HandoverService` on loopback with the test identity, an in-memory
-/// store, core's `FakeHandoverIntake`, a wall clock the tests advance and a
-/// fresh temporary inbox. `advertise` is always false: nothing leaves
-/// 127.0.0.1. `run` starts it, hands it to the body and stops it, awaited,
-/// so no shutdown overlaps the next test.
+/// store, core's `FakeHandoverIntake` behind a `MovingIntake`, a wall clock
+/// the tests advance and a fresh temporary inbox. `advertise` is always
+/// false: nothing leaves 127.0.0.1. `run` starts it, hands it to the body
+/// and stops it, awaited, so no shutdown overlaps the next test.
 struct TestService {
   let service: HandoverService
   let store: MeetingStore
@@ -38,7 +38,8 @@ struct TestService {
       inboxDirectory: directory.appendingPathComponent("inbox", isDirectory: true),
       pairingWindow: .seconds(300), readTimeout: readTimeout)
     let service = HandoverService(
-      configuration: configuration, store: store, intake: customIntake ?? intake,
+      configuration: configuration, store: store,
+      intake: moving(customIntake ?? intake, into: directory),
       identity: try TestIdentity.load(), now: { clock.now })
     return TestService(
       service: service, store: store, intake: intake, directory: directory, now: now,
@@ -82,6 +83,19 @@ struct TestService {
       throw error
     }
     await test.stop()
+  }
+
+  /// `intake` behind a `MovingIntake` that takes the verified file into
+  /// this test's directory, for a service the test builds itself.
+  func moving(_ intake: any HandoverIntake) -> any HandoverIntake {
+    Self.moving(intake, into: directory)
+  }
+
+  private static func moving(_ intake: any HandoverIntake, into directory: URL)
+    -> any HandoverIntake
+  {
+    MovingIntake(
+      intake: intake, directory: directory.appendingPathComponent("admitted", isDirectory: true))
   }
 
   func stop() async {

@@ -167,7 +167,8 @@ import Testing
       let now = test.now
       after.intake = FakeHandoverIntake()
       after.service = HandoverService(
-        configuration: test.service.configuration, store: test.store, intake: after.intake,
+        configuration: test.service.configuration, store: test.store,
+        intake: test.moving(after.intake),
         identity: test.service.identity, now: { now })
       after.phone = EngineDevice(engine: after.service.engine, device: phone.device)
       return after

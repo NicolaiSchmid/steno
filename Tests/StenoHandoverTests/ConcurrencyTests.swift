@@ -11,7 +11,8 @@ import Testing
 /// only make likely are certain. Tests that need one request stopped at a
 /// chosen suspension point hold it there: a receipt save on its way to the
 /// store (`HeldSave`), a chunk write after its bytes landed (`HeldWrite`), a
-/// store read (`StoreGate`) and an admission in the intake (`HeldIntake`).
+/// store read (`StoreGate`), a whole-file hash after it ran (`HeldHash`)
+/// and an admission in the intake (`HeldIntake`).
 @Suite struct ConcurrencyTests {
   static let meetingID = UUID(uuidString: "C0C0C0C0-0000-4000-8000-000000000001")!
 
@@ -351,6 +352,130 @@ import Testing
   }
 
   @Test(.timeLimit(.minutes(1)))
+  func anAdmissionOfARevokedPhoneLeavesAnotherPhonesFilesAlone() async throws {
+    // The phone is revoked while the intake holds its `complete`, and
+    // another phone pairs, announces the same recording id and sends chunk
+    // 0. When the intake answers, the revoked phone's admission finds the
+    // other phone's receipt in memory and leaves the inbox as it is: that
+    // phone's partial and sidecar stay, and its upload completes. Without
+    // the sidecar, its `complete` would answer 404 and the phone would
+    // announce and send every chunk again.
+    let chunkSize = 64 * 1024
+    let intake = HeldIntake(FakeHandoverIntake(meetingID: Self.meetingID))
+    defer { intake.release() }
+    try await TestService.run(
+      chunkSize: chunkSize, intake: intake.fake, customIntake: intake, start: false
+    ) { test in
+      let phone = try await EngineClient.paired(test)
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 69)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: chunkSize)
+      let id = metadata.recordingID
+      let inbox = test.service.engine.inbox
+      try await phone.uploadAll(metadata, bytes)
+
+      let completion = Task { await phone.complete(id) }
+      await intake.held()
+      try await test.service.revoke(phone.device.id)
+      let other = try await EngineClient.paired(test, deviceName: "Other iPhone")
+      #expect(try await other.announce(metadata).code == 201)
+      #expect(await other.upload(id, chunk: 0, chunks[0]).code == 204)
+      intake.release()
+      #expect(await completion.value.code == 200, "the intake admitted the revoked phone's file")
+
+      #expect(inbox.hasPartial(id), "the other phone's partial stays")
+      #expect(inbox.loadMetadata(id) == metadata, "and so does its sidecar")
+      #expect(await other.upload(id, chunk: 1, chunks[1]).code == 204)
+      #expect(await other.complete(id).code == 200)
+      let admissions = await test.intake.admissions.entries
+      #expect(admissions.map(\.device.id) == [phone.device.id, other.device.id])
+      #expect(try Data(contentsOf: try #require(admissions.last?.file)) == bytes)
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aReAnnounceDuringTheIntakeLeavesNoFileOfTheAdmittedRecording() async throws {
+    // The phone announces again while the intake holds its `complete`,
+    // after the intake took the verified file. The announce finds no file,
+    // opens a new partial and sidecar and answers 200 with no chunk listed.
+    // Once the intake answers, the recording is admitted and no file of it
+    // stays in the inbox; the empty partial would otherwise wait there for
+    // the next start's sweep.
+    let chunkSize = 64 * 1024
+    let intake = HeldIntake(FakeHandoverIntake(meetingID: Self.meetingID))
+    defer { intake.release() }
+    try await TestService.run(
+      chunkSize: chunkSize, intake: intake.fake, customIntake: intake, start: false
+    ) { test in
+      let phone = try await EngineClient.paired(test)
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 70)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let id = metadata.recordingID
+      let inbox = test.service.engine.inbox
+      try await phone.uploadAll(metadata, bytes)
+
+      let completion = Task { await phone.complete(id) }
+      await intake.held()
+      #expect(!inbox.hasVerified(id, format: metadata.format), "the intake took the file")
+      let announced = try await phone.announce(metadata)
+      #expect(announced.code == 200)
+      #expect(
+        try announced.json(Wire.RecordingStatus.self)
+          == Wire.RecordingStatus(state: .receiving, receivedChunks: []))
+      #expect(inbox.hasPartial(id) && inbox.loadMetadata(id) == metadata)
+      intake.release()
+      #expect(await completion.value.code == 200)
+
+      #expect(!inbox.hasPartial(id), "the re-announce's partial goes")
+      #expect(inbox.loadMetadata(id) == nil, "and so does its sidecar")
+      #expect(inbox.recordingIDs().isEmpty, "no file of the recording is left")
+      try await Self.staysComplete(phone, id, meetingID: Self.meetingID, test: test)
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aRefusedCompleteOfARevokedPhoneLeavesAnotherPhonesUploadAlone() async throws {
+    // The phone's `complete` is held after its hash while the phone is
+    // revoked (its receipt and files go) and another phone pairs, announces
+    // the same recording id and sends chunk 0. The verify then answers 401
+    // and finds the other phone's receipt in memory, so its refusal keeps
+    // that receipt, its partial and its sidecar, and the other phone's
+    // upload completes. Gone, they would be answered 404 "announce again",
+    // and the other phone would send every chunk again.
+    let chunkSize = 64 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let held = HeldHash()
+      let engine = Self.engine(test, hashMatches: held.hashMatches)
+      let phone = try await EngineClient.paired(test, engine: engine)
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 71)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: chunkSize)
+      let id = metadata.recordingID
+      try await phone.uploadAll(metadata, bytes)
+
+      held.arm()
+      defer { held.release() }
+      let completion = Task { await phone.complete(id) }
+      await held.held()
+      try await engine.revoke(phone.device.id)
+      let other = try await EngineClient.paired(test, engine: engine, deviceName: "Other iPhone")
+      #expect(try await other.announce(metadata).code == 201)
+      #expect(await other.upload(id, chunk: 0, chunks[0]).code == 204)
+      held.release()
+      #expect(await completion.value.code == 401, "the phone learns it was unpaired")
+
+      #expect(await engine.activeReceipts[id]?.deviceID == other.device.id)
+      #expect(engine.inbox.hasPartial(id), "the other phone's partial stays")
+      #expect(engine.inbox.loadMetadata(id) == metadata, "and so does its sidecar")
+      #expect(await other.upload(id, chunk: 1, chunks[1]).code == 204)
+      #expect(await other.complete(id).code == 200)
+      let admissions = await test.intake.admissions.entries
+      #expect(admissions.map(\.device.id) == [other.device.id])
+      #expect(try Data(contentsOf: try #require(admissions.first?.file)) == bytes)
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
   func aLateChunkOfARevokedPhoneStaysOutOfAnotherPhonesReceipt() async throws {
     // Chunk 0 is held after its file write while the phone is revoked (its
     // receipt and partial go) and another phone pairs and announces the
@@ -390,17 +515,19 @@ import Testing
   }
 
   /// An engine beside `test`'s service, over its store and intake, that
-  /// saves receipts and writes chunks through the given seams.
+  /// saves receipts, writes chunks and hashes the partial through the given
+  /// seams.
   private static func engine(
     _ test: TestService,
     saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil,
-    writeChunk: (@Sendable (Data, UInt64, URL) async throws -> Void)? = nil
+    writeChunk: (@Sendable (Data, UInt64, URL) async throws -> Void)? = nil,
+    hashMatches: (@Sendable (URL, Data) async throws -> Bool)? = nil
   ) -> HandoverEngine {
     let now = test.now
     return HandoverEngine(
       configuration: test.service.configuration, identity: test.service.identity,
-      store: test.store, intake: test.intake, receipts: Broadcast(initial: []),
-      now: { now }, saveReceipt: saveReceipt, writeChunk: writeChunk)
+      store: test.store, intake: test.moving(test.intake), receipts: Broadcast(initial: []),
+      now: { now }, saveReceipt: saveReceipt, writeChunk: writeChunk, hashMatches: hashMatches)
   }
 
   /// The meeting a `complete` of `recordingID` admitted.

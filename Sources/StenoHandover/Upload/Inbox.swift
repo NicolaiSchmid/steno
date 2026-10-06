@@ -8,7 +8,8 @@ import StenoCore
 ///     <inbox>/<recordingID>.<ext>            verified, waiting for the intake
 ///
 /// The intake deletes the verified file once the meeting is enqueued; the
-/// inbox removes the metadata. `sweep` removes what no receipt accounts for.
+/// engine then discards what is left of the recording.
+/// `HandoverEngine.sweepOrphans` removes what no receipt accounts for.
 struct Inbox: Sendable {
   let directory: URL
 
