@@ -200,7 +200,7 @@ fn report_dropped(output: &mut impl Write, dropped: &AtomicUsize) {
 mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::spawn_writer;
 
@@ -229,10 +229,25 @@ mod tests {
         }
     }
 
+    /// An output whose every write takes 20 ms, once the test releases the
+    /// `Recorded` it writes to.
+    struct Slow(Recorded);
+
+    impl Write for Slow {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            std::thread::sleep(Duration::from_millis(20));
+            self.0.write(bytes)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// The thread that logs goes on while stderr is stuck: the queue fills,
     /// further lines are dropped and counted, a flush gives up at its
     /// bound, and once stderr moves again the queued lines come out in
-    /// order, then how many were dropped.
+    /// order, then how many were dropped, without a flush to ask for it.
     #[test]
     fn a_stalled_output_never_blocks_the_thread_that_logs() {
         let output = Recorded::default();
@@ -262,6 +277,15 @@ mod tests {
         assert!(!queue.flush_within(Duration::from_millis(50)));
 
         drop(stall);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !output
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("steno-log:"))
+        {
+            assert!(Instant::now() < deadline, "no report: {:?}", output.lines());
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert!(queue.flush_within(Duration::from_secs(10)));
         // The four queued lines and the one the writer held when it
         // stalled, if it had taken one by then; the rest were dropped.
@@ -277,6 +301,30 @@ mod tests {
         assert_eq!(
             report,
             format!("steno-log: {} lines dropped", 1000 - numbers.len())
+        );
+    }
+
+    /// A flush that joins the lines a stall queued answers only after the
+    /// count of the dropped ones, which an exit would otherwise lose: each
+    /// slow write gives the flush time to take the first free slot.
+    #[test]
+    fn a_flush_behind_dropped_lines_reports_them_before_it_answers() {
+        let output = Recorded::default();
+        let stall = output.0.lock().unwrap();
+        let queue = spawn_writer(Slow(output.clone()), 4);
+        for line in 0..10 {
+            (&queue)
+                .write_all(format!("line {line}\n").as_bytes())
+                .unwrap();
+        }
+        drop(stall);
+        assert!(queue.flush_within(Duration::from_secs(10)));
+        let mut lines = output.lines();
+        let report = lines.pop().unwrap();
+        assert!((4..=5).contains(&lines.len()), "{lines:?}");
+        assert_eq!(
+            report,
+            format!("steno-log: {} lines dropped", 10 - lines.len())
         );
     }
 
