@@ -8,30 +8,24 @@ import Synchronization
 /// engine resumes, until `release()`; every other write goes straight
 /// through.
 final class HeldWrite: Sendable {
-  private enum Phase {
-    case idle, armed, holding, done
-  }
-
-  private let phase = Mutex(Phase.idle)
+  private let armed = Mutex(false)
   private let (heldSignal, heldContinuation) = AsyncStream<Void>.makeStream()
   private let (released, releasing) = AsyncStream<Void>.makeStream()
 
   func write(_ data: Data, at offset: UInt64, to url: URL) async throws {
     try await ReceivingFile.write(data, at: offset, to: url)
-    let hold = phase.withLock { phase -> Bool in
-      guard case .armed = phase else { return false }
-      phase = .holding
-      return true
+    let hold = armed.withLock { armed in
+      defer { armed = false }
+      return armed
     }
     guard hold else { return }
     heldContinuation.yield()
     for await _ in released {}
-    phase.withLock { $0 = .done }
   }
 
   /// Holds the next write.
   func arm() {
-    phase.withLock { $0 = .armed }
+    armed.withLock { $0 = true }
   }
 
   /// Returns once the armed write landed and is held.

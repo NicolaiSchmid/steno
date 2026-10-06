@@ -78,16 +78,8 @@ import Testing
     let chunkSize = 64 * 1024
     try await TestService.run(chunkSize: chunkSize, start: false) { test in
       let held = HeldSave(store: test.store)
-      let now = test.now
-      let engine = HandoverEngine(
-        configuration: test.service.configuration, identity: test.service.identity,
-        store: test.store, intake: test.intake, receipts: Broadcast(initial: []),
-        now: { now }, saveReceipt: held.save)
-      _ = await engine.beginPairing()
-      let deviceID = UUID()
-      #expect(try await EngineClient(engine: engine).pair(deviceID: deviceID).code == 200)
-      let phone = EngineDevice(
-        engine: engine, device: try #require(try await test.store.pairedDevice(id: deviceID)))
+      let engine = Self.engine(test, saveReceipt: held.save)
+      let phone = try await EngineClient.paired(test, engine: engine)
       let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 62)
       let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
       let chunks = Phone.chunks(of: bytes, size: chunkSize)
@@ -154,16 +146,8 @@ import Testing
     let chunkSize = 64 * 1024
     try await TestService.run(chunkSize: chunkSize, start: false) { test in
       let held = HeldWrite()
-      let now = test.now
-      let engine = HandoverEngine(
-        configuration: test.service.configuration, identity: test.service.identity,
-        store: test.store, intake: test.intake, receipts: Broadcast(initial: []),
-        now: { now }, writeChunk: held.write)
-      _ = await engine.beginPairing()
-      let deviceID = UUID()
-      #expect(try await EngineClient(engine: engine).pair(deviceID: deviceID).code == 200)
-      let phone = EngineDevice(
-        engine: engine, device: try #require(try await test.store.pairedDevice(id: deviceID)))
+      let engine = Self.engine(test, writeChunk: held.write)
+      let phone = try await EngineClient.paired(test, engine: engine)
       let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 63)
       let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
       let chunks = Phone.chunks(of: bytes, size: chunkSize)
@@ -275,6 +259,20 @@ import Testing
     try await Self.staysComplete(
       phone, id, meetingID: meetingID, store: gated.test.store, intake: gated.test.intake)
     #expect(!gated.gate.timedOut, "nothing waited on the held read")
+  }
+
+  /// An engine beside `test`'s service, over its store and intake, that
+  /// saves receipts and writes chunks through the given seams.
+  private static func engine(
+    _ test: TestService,
+    saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil,
+    writeChunk: (@Sendable (Data, UInt64, URL) async throws -> Void)? = nil
+  ) -> HandoverEngine {
+    let now = test.now
+    return HandoverEngine(
+      configuration: test.service.configuration, identity: test.service.identity,
+      store: test.store, intake: test.intake, receipts: Broadcast(initial: []),
+      now: { now }, saveReceipt: saveReceipt, writeChunk: writeChunk)
   }
 
   /// The meeting a `complete` of `recordingID` admitted.
