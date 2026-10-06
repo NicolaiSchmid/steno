@@ -20,22 +20,19 @@ import { taskIDs } from "./upload-coordinator";
 import { useUploadCoordinator } from "./use-upload-coordinator";
 
 /**
- * The hook over a fake native module: Bonjour sees both Macs, `resolve` is
- * scripted per service (Mac B's answer is held until the test releases
- * it), and every pinned request and background upload is recorded with its
- * URL and bearer. The real recording client and executor run on top. The
- * pairing and the queue are plain state the test drives.
+ * The hook over a fake native module: Bonjour sees both Macs, Mac B's
+ * `resolve` answers only when the test releases it, and every pinned
+ * request and background upload is recorded with its URL and bearer. The
+ * real recording client and executor run on top. The pairing and the queue
+ * are plain state the test drives.
  */
 const fake = vi.hoisted(() => {
-	type Listener = (event: unknown) => void;
-	const listeners = new Map<string, Set<Listener>>();
-	const held = new Map<string, () => void>();
+	const listeners = new Map<string, Set<(event: unknown) => void>>();
 	return {
 		listeners,
-		held,
 		/** Every pinned request and background upload, in order. */
 		sent: [] as { url: string; auth: string | undefined }[],
-		holdResolve: new Set<string>(),
+		releaseMacB: null as (() => void) | null,
 		pairing: null as unknown,
 		index: null as unknown,
 		update: null as unknown,
@@ -58,19 +55,16 @@ const link = {
 		fake.listeners.set(event, set);
 		return { remove: () => set.delete(listener) };
 	},
-	startBrowsing() {},
-	stopBrowsing() {},
 	resolve(serviceName: string) {
-		const mac = { host: HOSTS[serviceName] ?? "", port: 1 };
-		if (!fake.holdResolve.has(serviceName)) return Promise.resolve(mac);
+		const mac = { host: HOSTS[serviceName], port: 1 };
+		if (serviceName !== "Mac B") return Promise.resolve(mac);
 		return new Promise((resolve) => {
-			fake.held.set(serviceName, () => resolve(mac));
+			fake.releaseMacB = () => resolve(mac);
 		});
 	},
 	async pendingUploads() {
 		return [];
 	},
-	async cancelUpload() {},
 	async startUpload(spec: UploadSpec) {
 		fake.sent.push({ url: spec.url, auth: spec.headers.Authorization });
 	},
@@ -201,9 +195,8 @@ function queued(...ids: string[]) {
 
 beforeEach(() => {
 	fake.listeners.clear();
-	fake.held.clear();
 	fake.sent.length = 0;
-	fake.holdResolve.clear();
+	fake.releaseMacB = null;
 });
 afterEach(() => {
 	act(() => root?.unmount());
@@ -212,7 +205,6 @@ afterEach(() => {
 
 describe("useUploadCoordinator", () => {
 	it("sends nothing with the old pairing's token or Mac after a re-pairing", async () => {
-		fake.holdResolve.add("Mac B");
 		const h = await mount(queued("a", "bb"), A);
 		expect(fake.sent).toContainEqual({
 			url: "https://10.0.0.1:1/v1/recordings/a",
@@ -223,16 +215,17 @@ describe("useUploadCoordinator", () => {
 		await h.repair(B);
 		const before = fake.sent.length;
 		// The chunk sent under A lands, which would plan `complete` next.
-		const finished: UploadFinished = {
-			taskID: taskIDs.chunk("a", 0),
-			status: 204,
-			body: "",
-		};
-		await act(async () => fake.emit("uploadFinished", finished));
+		await act(async () =>
+			fake.emit("uploadFinished", {
+				taskID: taskIDs.chunk("a", 0),
+				status: 204,
+				body: "",
+			} satisfies UploadFinished),
+		);
 		await settle();
 		expect(fake.sent.slice(before)).toEqual([]);
 
-		await act(async () => fake.held.get("Mac B")?.());
+		await act(async () => fake.releaseMacB?.());
 		await settle();
 		const after = fake.sent.slice(before);
 		expect(after).toContainEqual({
