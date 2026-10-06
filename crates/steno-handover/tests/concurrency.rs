@@ -544,3 +544,52 @@ async fn a_complete_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
         (HandoverState::Receiving, HandoverState::Receiving)
     );
 }
+
+#[tokio::test]
+async fn a_reannounce_during_an_admission_leaves_no_files_behind() {
+    // The intake moved the verified file, as the real one does, and the
+    // phone announces again. The announce finds no file, opens a new
+    // partial and sidecar, and is held at its clock read while the
+    // `complete` runs to the end. Its `receiving` write then finds the
+    // receipt `complete`, and the files it opened go: a stale `complete`
+    // would find them and start a verify of an empty partial.
+    let chunk_size: i64 = 64 * 1024;
+    let intake = ScriptedIntake::gated(meeting_id(), false);
+    let test = TestService::with(common::Options {
+        chunk_size,
+        intake: Some(intake.clone() as Arc<dyn steno_core::HandoverIntake>),
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * chunk_size as usize, 71);
+    let metadata = phone.metadata(&bytes, chunk_size);
+    phone.upload_all(&metadata, &bytes).await;
+    let id = metadata.recording_id;
+    let inbox = test.inbox();
+
+    let completion = {
+        let phone = phone.clone();
+        tokio::spawn(async move { phone.complete(id).await })
+    };
+    intake.admitting().await;
+    std::fs::remove_file(inbox.verified(id, metadata.format)).unwrap();
+    let reannounce = {
+        let (phone, metadata) = (phone.clone(), metadata.clone());
+        async move { phone.announce(&metadata).await }
+    };
+    let (reannounced, completed) = held_while(&test, reannounce, async {
+        intake.release();
+        completion.await.unwrap()
+    })
+    .await;
+    assert_eq!(completed.status.as_u16(), 200);
+    assert_eq!(
+        reannounced.decode::<wire::RecordingStatus>().unwrap().state,
+        HandoverStateKind::Complete
+    );
+
+    assert!(!inbox.has_partial(id), "the new partial went");
+    assert!(inbox.load_metadata(id).is_none(), "the new sidecar went");
+}

@@ -110,7 +110,7 @@ impl Engine {
     /// for a second intake attempt keeps its chunk set, so the phone's retry
     /// (announce, then complete) sends no chunk twice. A receipt a
     /// `complete` admitted meanwhile stays `complete` ([`Engine::update`]),
-    /// and the answer says so.
+    /// the answer says so, and the files this announce opened go.
     async fn reannounce(
         &self,
         mut receipt: HandoverReceipt,
@@ -146,11 +146,17 @@ impl Engine {
             }
             received_chunks = Some(Vec::new());
         }
+        let began = received_chunks.is_some();
         if let Err(error) = self
             .transition(&mut receipt, HandoverState::Receiving, received_chunks)
             .await
         {
             return HandoverResponse::internal_error("saving the receipt", &error);
+        }
+        // The files `begin` just made are not wanted once the recording was
+        // admitted meanwhile.
+        if began && receipt.state.kind() == HandoverStateKind::Complete {
+            self.inbox.discard(recording_id);
         }
         HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt))
     }
@@ -347,8 +353,9 @@ impl Engine {
     /// name. The partial stays open from before the `verifying` write to
     /// the promote, and a partial gone or replaced meanwhile answers 409
     /// with no chunk listed: the hash must be of the file the intake gets.
-    /// 401 when the device was revoked since `complete` took `revocation`.
-    /// Nothing yields between that check and the intake call: an admission
+    /// 401 when the device was revoked since `complete` took `revocation`,
+    /// 200 with the meeting when another `complete` admitted the recording
+    /// since this one read the receipt. Nothing yields between that check and the intake call: an admission
     /// past this check may still finish; the revoke's discard can also make
     /// it fail.
     async fn verified_file(
@@ -397,6 +404,14 @@ impl Engine {
         let _ = self
             .transition(receipt, HandoverState::Verifying, None)
             .await;
+        // A `complete` that read the receipt before another one admitted the
+        // recording finds it `complete` now, and answers with its meeting.
+        if let Some(meeting_id) = receipt.state.meeting_id() {
+            return Verification::Answered(HandoverResponse::json(
+                StatusCode::OK,
+                &wire::CompleteResponse { meeting_id },
+            ));
+        }
 
         let verified = match file.metadata() {
             Ok(opened) if i64::try_from(opened.len()) == Ok(receipt.byte_count) => {
