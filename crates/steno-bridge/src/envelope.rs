@@ -357,50 +357,20 @@ string_enum! {
     }
 }
 
-string_enum! {
-    /// The OS the host runs on, which decides the page's words ("this
-    /// Mac" or "this computer", Finder or File Explorer) and its shortcut
-    /// keys (⌘ or Ctrl). Not a message: the Tauri shell sets it as
-    /// `window.__STENO_PLATFORM__` before the page's scripts run, and a
-    /// page with nothing set is the Swift app's, always the Mac. The host
-    /// words its own sentences and lists the permissions for the same
-    /// value. Swift: none; the Swift app is the Mac.
-    pub enum Platform {
-        Macos = "macos",
-        Windows = "windows",
-        Linux = "linux",
-    }
-}
+/// The OS the host runs on, which decides the page's words ("this Mac" or
+/// "this computer", Finder or File Explorer) and its shortcut keys (⌘ or
+/// Ctrl). Not a message: the Tauri shell sets it as
+/// `window.__STENO_PLATFORM__` before the page's scripts run, and a page
+/// with nothing set is the Swift app's, always the Mac. The host words its
+/// own sentences and lists the permissions ([`PlatformPermissions`]) for the
+/// same value. Defined in `steno_core`, where the exported notes name the
+/// platform a call was recorded on with it. Swift: none; the Swift app is
+/// the Mac.
+pub use steno_core::Platform;
 
-impl Platform {
-    /// The OS this binary was built for; any other Unix counts as Linux.
-    pub const CURRENT: Platform = if cfg!(target_os = "macos") {
-        Platform::Macos
-    } else if cfg!(target_os = "windows") {
-        Platform::Windows
-    } else {
-        Platform::Linux
-    };
-
-    /// `mac` on the Mac, `elsewhere` on Windows and Linux: a label or
-    /// sentence that differs, kept whole so each reads as one string.
-    ///
-    /// ```
-    /// use steno_bridge::Platform;
-    ///
-    /// let machine = |platform: Platform| platform.mac_or("this Mac", "this computer");
-    /// assert_eq!(machine(Platform::Macos), "this Mac");
-    /// assert_eq!(machine(Platform::Windows), "this computer");
-    /// assert_eq!(machine(Platform::Linux), "this computer");
-    /// ```
-    #[must_use]
-    pub const fn mac_or(self, mac: &'static str, elsewhere: &'static str) -> &'static str {
-        match self {
-            Platform::Macos => mac,
-            Platform::Windows | Platform::Linux => elsewhere,
-        }
-    }
-
+/// The permissions a [`Platform`] has; a trait because the enum lives in
+/// `steno_core` and the permission kinds here.
+pub trait PlatformPermissions {
     /// The permissions the OS has, in onboarding's order. The Mac has all
     /// four. Windows has the microphone privacy switch and the firewall
     /// prompt for the phone's connection; it records system audio without
@@ -410,7 +380,11 @@ impl Platform {
     /// whether the list has the calendar, for the General section's
     /// calendar row; `tests/fixtures.rs` compares the two.
     #[must_use]
-    pub const fn permissions(self) -> &'static [PermissionKind] {
+    fn permissions(self) -> &'static [PermissionKind];
+}
+
+impl PlatformPermissions for Platform {
+    fn permissions(self) -> &'static [PermissionKind] {
         match self {
             Platform::Macos => PermissionKind::ALL,
             Platform::Windows => &[PermissionKind::Microphone, PermissionKind::LocalNetwork],
@@ -565,16 +539,6 @@ mod tests {
             json::to_compact_string(&event).unwrap(),
             r#"{"payload":{"version":"1"},"topic":"app"}"#
         );
-    }
-
-    #[test]
-    fn the_current_platform_is_the_build_target() {
-        let expected = match std::env::consts::OS {
-            "macos" => Platform::Macos,
-            "windows" => Platform::Windows,
-            _ => Platform::Linux,
-        };
-        assert_eq!(Platform::CURRENT, expected);
     }
 
     #[test]

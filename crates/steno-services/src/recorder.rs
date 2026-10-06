@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 
 use chrono::{FixedOffset, Utc};
 use steno_audio::{CaptureConfiguration, CaptureSession, LaneLevels as AudioLevels};
-use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
+use steno_bridge::{CaptureMode, PermissionKind, PlatformPermissions, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
 use steno_host::speech::ModelAsset;

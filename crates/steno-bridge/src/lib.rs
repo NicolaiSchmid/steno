@@ -28,7 +28,8 @@
 //! exception is a nested name Swift declares as a `typealias` of a
 //! `StenoCore` type: it keeps the core name and no topic word, so
 //! [`MeetingState`], [`RetentionMode`], [`SpeakerAssignmentKind`] and
-//! [`TaskPriority`]; the last two are `steno_core`'s own enums re-exported.
+//! [`TaskPriority`]; the last two are `steno_core`'s own enums re-exported,
+//! as is [`Platform`], whose permissions [`PlatformPermissions`] lists.
 //!
 //! To add a method: the variant and raw value in [`BridgeMethod`]
 //! (`envelope.rs`); its params or reply type in `commands.rs`; one line in

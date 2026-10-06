@@ -658,6 +658,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use steno_bridge::PlatformPermissions as _;
     use steno_core::{
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
         async_trait, paths::file_url, protocols::BoundaryResult,

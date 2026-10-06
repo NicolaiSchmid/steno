@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use steno_bridge::{PermissionKind, PermissionState, Platform, RetentionMode};
+use steno_bridge::{PermissionKind, PermissionState, Platform, PlatformPermissions, RetentionMode};
 use steno_core::paths::{file_url, file_url_path};
 use steno_core::{AudioRetention, Store};
 

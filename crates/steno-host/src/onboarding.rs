@@ -1,8 +1,9 @@
 //! Onboarding in two pages, after `Onboarding/OnboardingViewModel.swift`
 //! and `Web/OnboardingSnapshots.swift`. Page 1, permissions: microphone,
 //! system audio (both required), then calendar and local network
-//! (optional), as far as the platform has them (`Platform::permissions`:
-//! all four on the Mac, fewer on Windows and Linux). Page 2, "Summaries
+//! (optional), as far as the platform has them
+//! (`PlatformPermissions::permissions`: all four on the Mac, fewer on
+//! Windows and Linux). Page 2, "Summaries
 //! and export": the LLM endpoint and the Obsidian vault, both optional,
 //! written through the same view models the Settings sections use. The
 //! model owns the exit: Finish, or both rows handled on page 2, set the
@@ -15,7 +16,7 @@ use chrono::{DateTime, Utc};
 use steno_bridge::{
     OnboardingPage, OnboardingPermissionStep, OnboardingSetupStep, OnboardingSetupStepKind,
     OnboardingSetupStepState, OnboardingSnapshot, OnboardingVault, PermissionKind, PermissionState,
-    Platform,
+    Platform, PlatformPermissions,
 };
 use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, Settings, Store};
