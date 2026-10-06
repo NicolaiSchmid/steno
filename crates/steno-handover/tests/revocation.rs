@@ -789,7 +789,7 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
     // delete: a read asked for after both, which skips the line, finds
     // neither committed, where a save sent straight to the pool would have
     // committed ahead of it. That the save then waits for the delete is the
-    // order tests' part. The task count and the reads in between hold only
+    // order tests' part. The task count and the read in between hold only
     // on `on_one_worker`, where neither task runs before this one yields.
     common::on_one_worker(async {
         let test = TestService::with(common::Options {
@@ -823,14 +823,21 @@ fn a_receipt_save_does_not_overtake_a_revoke_asked_for_before_it() {
             3,
             "the delete and the save wait in their own tasks"
         );
+        // One read on the pool, asked for before either task ran: the one
+        // blocking thread runs it ahead of the delete and the save, and
+        // behind a save sent straight to the pool.
+        let store = test.store.clone();
+        let (devices, receipt) = tokio::task::spawn_blocking(move || {
+            (
+                store.paired_devices().unwrap().len(),
+                store.handover_receipt(id).unwrap(),
+            )
+        })
+        .await
+        .unwrap();
+        assert_eq!(devices, 2, "the delete has not committed");
         assert_eq!(
-            test.service.paired_devices().await.unwrap().len(),
-            2,
-            "the delete has not committed"
-        );
-        assert_eq!(
-            test.store.handover_receipt(id).unwrap(),
-            before,
+            receipt, before,
             "nothing reached the store ahead of the delete"
         );
         let (deleted, announced) = both("the revoke and the announce", revoking, announcing).await;

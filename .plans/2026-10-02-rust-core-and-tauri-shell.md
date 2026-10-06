@@ -1346,18 +1346,27 @@ touch lines; each fix is ported to Swift before cutover.
   restart, and a pairing during a revoke's delete saves after it and stays. Rust takes
   the place in line under the state lock together with the memory the write stands
   for (the revoke count, the pairing's read of it, the receipt); in Swift the actor
-  makes the two one step. The intake's own receipt saves (`RecordingIntake::admit`,
-  `RecordingIntake.admit`) run outside the line in both apps.
+  makes the two one step. Rust makes every receipt change to the copy memory holds
+  under that same lock (`Engine::change`), so two chunks that land at once on two
+  threads both stay, and so does a chunk that lands during a re-announce or during
+  another first announce of the same recording. In both apps a receipt memory holds
+  as `complete` stays `complete`, and a late write of a revoked device leaves another
+  device's receipt alone (`Engine::update`, `HandoverEngine.transition`; Swift #209).
+  In both, a first announce whose store read found nothing answers as a re-announce
+  when memory holds the receipt by then, so the chunks folded into it and a
+  `complete` stay (Swift's `RecordingHandler.receipt`). The intake's own receipt
+  saves (`RecordingIntake::admit`, `RecordingIntake.admit`) run outside the line in
+  both apps.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
 - Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt`
-  read with `try?`, so a failed read counts as no receipt: the sweep deletes a
-  resumable upload, a route answers 404, and an announce starts the recording over,
-  overwriting a `complete` receipt so that the next `complete` admits the meeting
-  twice. `HandoverEngine.authenticate` reads the device with `try?`, so a failed read
-  answers 401 and the phone unpairs. Rust keeps the files and answers 500
-  (`Engine::receipt`, the bearer gate).
+  read with `try?`, so a failed read, with no receipt in memory (after a restart),
+  counts as no receipt: the sweep deletes a resumable upload, a route answers 404, and
+  an announce starts the recording over, overwriting a `complete` receipt so that the
+  next `complete` admits the meeting twice. `HandoverEngine.authenticate` reads the
+  device with `try?`, so a failed read answers 401 and the phone unpairs. Rust keeps
+  the files and answers 500 (`Engine::receipt`, the bearer gate).
 - Pairing windows: Swift's `HandoverEngine.pair` checks only that a window is open,
   not that it is the one whose secret the head matched. The read timeout runs per
   silence, so a head whose body keeps trickling in pairs against a window opened after
@@ -1710,14 +1719,46 @@ request that fixes an item deletes it.
   re-pairing. Where: `onUnauthorized` is `clearPairing` in
   `mobile/src/features/sync/use-upload-coordinator.ts`; `cancelAllUploads` in
   `mobile/src/features/sync/recording-client.ts`. Found: #191.
-- **Unowned.** The chunk route reads the live receipt after its file write and saves it
-  back with the chunk added in a second lock section, so two chunks of one recording
-  that land at once on the multi-thread runtime can both start from the same copy, and
-  the later save drops the earlier one's chunk, in memory and in the store. `reannounce`
-  does the same with the copy it read before its inbox checks. The upload heals:
-  `complete` answers 409 with the chunk missing and the phone sends it again. Swift's
-  actor makes the read and the save one step. Where: `receive_chunk` and `reannounce` in
-  `crates/steno-handover/src/engine/recording.rs`. Found: #207.
+- **Unowned.** A `complete` whose device was revoked while the intake admitted its
+  recording removes the metadata sidecar afterwards whatever memory holds, so when
+  another device announced the same recording id meanwhile, that device's sidecar
+  goes: its `complete` answers 404 ("announce again"), and its re-announce opens a
+  new partial and sends every chunk again. Nothing is lost. Both apps. Where: `admit`
+  in `crates/steno-handover/src/engine/recording.rs` and in
+  `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #209.
+- **Unowned.** `IdempotencyTests.receiptsStreamReachesComplete` hangs past its time
+  limit when `complete` fails, because its collector task is never cancelled; the
+  failure shows as a timeout instead of the assertion. Swift only. Where:
+  `Tests/StenoHandoverTests/IdempotencyTests.swift`. Found: #209.
+- **Unowned.** Two first announces of one recording that race both run `Inbox::begin`
+  before the receipt is made, and `begin` keeps the partial but writes the metadata
+  sidecar each time, so the receipt is the one whose change ran first and the sidecar is
+  the one whose `begin` ran last. With the same metadata (the phone's retry) nothing
+  differs. With another device, byte count, hash or chunk size the late announce is
+  refused with 409, with another `format` alone it is answered 200; either way its
+  sidecar, `format` included, may stay and reach `promote` and the intake at `complete`.
+  Running `begin` only once the receipt is made moves the partial's creation behind the
+  receipt and needs the place in line of a failed `begin` handled. Where: `announce` in
+  `crates/steno-handover/src/engine/recording.rs` and `Inbox::begin` in
+  `crates/steno-handover/src/upload/inbox.rs`. Found: #208.
+- **Unowned.** A `complete` refused for a revoke goes by the recording id alone:
+  `refusal` discards the inbox files and forgets the receipt,
+  `revoked_during_the_verify` discards the files. When another phone announced the same
+  recording id after the revoked phone's receipt read, that phone's receipt leaves
+  memory or its partial and sidecar go, and it is answered 404 "announce again" and
+  sends again. Discarding and forgetting only while memory holds no receipt of another
+  device closes it. Where: `refusal` and `revoked_during_the_verify` in
+  `crates/steno-handover/src/engine/recording.rs`. Found: #208.
+- **Unowned.** A re-announce during the intake, after the intake moved the verified
+  file and before the `complete` write, finds no file, opens a new partial and sidecar
+  and answers 200 `receiving` with no chunk listed; `admit` then removes only the
+  sidecar, so an empty partial stays after the admission until the next start's sweep,
+  and the phone may send every chunk again while the recording is admitted. Both apps.
+  Discarding every file of the recording in `admit` closes it, but Rust's test intake
+  keeps the verified file and the chunk upload tests read it after `complete`, so they
+  need an intake that moves it first. Where: `admit` in
+  `crates/steno-handover/src/engine/recording.rs` and in
+  `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #208, #209.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
@@ -1806,6 +1847,8 @@ PR off `main`.
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
 | Each platform's own wording and shortcuts: the platform from the shell, the page's words and keys, the host's permissions and sentences, the vault the CLI named | `fix/desktop-platform-wording` | #204 | merged |
 | Every handover engine write in the order asked for: the revoke's delete, the pairing's save and the touch join the receipt saves (`steno-handover`) | `fix/rust-handover-device-writes` | #207 | merged |
+| A receipt change is made to the copy memory holds, under the lock that takes its place in line: two chunks that land at once both stay, a `complete` receipt stays `complete` (`steno-handover`) | `fix/rust-handover-chunk-fold` | #208 | merged |
+| A `complete` receipt stays `complete`, a racing first announce answers as a re-announce, and a revoked device's late write leaves another device's receipt alone (Swift core, the counterpart of #208) | `fix/swift-handover-complete-stays` | #209 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -64,20 +64,14 @@ impl Engine {
             Err(error) => return HandoverResponse::internal_error("reading the receipt", &error),
         };
         if let Some(existing) = existing {
-            if existing.device_id != device.id {
-                return HandoverResponse::problem(
-                    StatusCode::CONFLICT,
-                    "another device owns this recording",
-                );
-            }
-            return self.reannounce(existing, &metadata).await;
+            return self.reannounce(existing, device, &metadata).await;
         }
 
         if let Err(error) = self.inbox.begin(&metadata) {
             return HandoverResponse::internal_error("opening the partial file", &error);
         }
         let timestamp = (self.now)();
-        let receipt = HandoverReceipt {
+        let fresh = HandoverReceipt {
             recording_id,
             device_id: device.id,
             state: HandoverState::Receiving,
@@ -88,24 +82,47 @@ impl Engine {
             created_at: timestamp,
             updated_at: timestamp,
         };
-        if let Err(error) = self.persist(&receipt).await {
-            self.inbox.discard(recording_id);
-            return HandoverResponse::internal_error("saving the receipt", &error);
+        // A first announce of the same recording on another thread may have
+        // made its receipt since the read above, and a chunk may have landed
+        // in it. That receipt stays (`begin` left the partial alone), and
+        // this announce is answered as if the read had found it.
+        let picked = self.change(
+            recording_id,
+            |held| held.map_or(Ok(fresh), |held| Err(Box::new(held.clone()))),
+            |_| {},
+        );
+        match picked {
+            Ok((receipt, place)) => {
+                if let Err(error) = self.save(receipt.clone(), place).await {
+                    self.inbox.discard(recording_id);
+                    return HandoverResponse::internal_error("saving the receipt", &error);
+                }
+                HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
+            }
+            Err(held) => self.reannounce(*held, device, &metadata).await,
         }
-        HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
     }
 
-    /// A known recording announced again: 200 with the status, 409 when the
-    /// metadata changed. The partial is reopened when it is gone (a sweep, a
-    /// crash before the first chunk), with the same receipt and an empty
-    /// chunk set; a verified file waiting for a second intake attempt keeps
-    /// its chunk set, so the phone's retry (announce, then complete) sends no
-    /// chunk twice.
+    /// A known recording announced again: 200 with the status, 409 when
+    /// another device owns it or the metadata changed. The partial is
+    /// reopened when it is gone (a sweep, a crash before the first chunk),
+    /// with the same receipt and an empty chunk set; a verified file waiting
+    /// for a second intake attempt keeps its chunk set, so the phone's retry
+    /// (announce, then complete) sends no chunk twice. A receipt a
+    /// `complete` admitted meanwhile stays `complete` ([`Engine::update`]),
+    /// the answer says so, and the files this announce opened go.
     async fn reannounce(
         &self,
         mut receipt: HandoverReceipt,
+        device: &PairedDevice,
         metadata: &RecordingMetadata,
     ) -> HandoverResponse {
+        if receipt.device_id != device.id {
+            return HandoverResponse::problem(
+                StatusCode::CONFLICT,
+                "another device owns this recording",
+            );
+        }
         let recording_id = receipt.recording_id;
         if receipt.state.kind() == HandoverStateKind::Complete {
             return HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt));
@@ -134,6 +151,12 @@ impl Engine {
             .await
         {
             return HandoverResponse::internal_error("saving the receipt", &error);
+        }
+        // The files `begin` just made go once the recording was admitted
+        // meanwhile: a stale `complete` would find them and verify an empty
+        // partial.
+        if receipt.state.kind() == HandoverStateKind::Complete {
+            self.inbox.discard(recording_id);
         }
         HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt))
     }
@@ -224,25 +247,15 @@ impl Engine {
         {
             return HandoverResponse::internal_error("writing the chunk", &error);
         }
-        // The write yielded: another chunk may have landed, or the device
-        // may have been revoked. Fold this chunk into the receipt as it
-        // stands now, never into the copy from before the write.
-        let Some(mut receipt) = self
-            .active_receipt(recording_id)
-            .filter(|current| current.device_id == device.id)
-        else {
-            return no_such_recording();
-        };
-        receipt.received_chunks.push(index);
-        receipt.received_chunks.sort_unstable();
-        receipt.received_chunks.dedup();
-        if let Err(error) = self
-            .transition(&mut receipt, HandoverState::Receiving, None)
-            .await
-        {
-            return HandoverResponse::internal_error("saving the receipt", &error);
+        // The write yielded: another chunk may have landed, the device may
+        // have been revoked, or a `complete` may have admitted the
+        // recording. Fold this chunk into the receipt as it stands now,
+        // never into the copy from before the write.
+        match self.add_chunk(recording_id, device.id, index).await {
+            None => no_such_recording(),
+            Some(Err(error)) => HandoverResponse::internal_error("saving the receipt", &error),
+            Some(Ok(())) => HandoverResponse::empty(StatusCode::NO_CONTENT),
         }
-        HandoverResponse::empty(StatusCode::NO_CONTENT)
     }
 
     /// `POST /v1/recordings/{id}/complete`: 200 `{meetingID}` once every
@@ -341,10 +354,11 @@ impl Engine {
     /// name. The partial stays open from before the `verifying` write to
     /// the promote, and a partial gone or replaced meanwhile answers 409
     /// with no chunk listed: the hash must be of the file the intake gets.
-    /// 401 when the device was revoked since `complete` took `revocation`.
-    /// Nothing yields between that check and the intake call: an admission
-    /// past this check may still finish; the revoke's discard can also make
-    /// it fail.
+    /// 200 with the meeting when another `complete` admitted the recording
+    /// since this one read the receipt. 401 when the device was revoked
+    /// since `complete` took `revocation`; nothing yields between that check
+    /// and the intake call: an admission past this check may still finish;
+    /// the revoke's discard can also make it fail.
     async fn verified_file(
         &self,
         receipt: &mut HandoverReceipt,
@@ -361,8 +375,17 @@ impl Engine {
         let has_partial = self.inbox.has_partial(recording_id);
         if !every_chunk || !has_partial {
             if !has_partial {
-                let state = receipt.state.clone();
-                let _ = self.transition(receipt, state, Some(Vec::new())).await;
+                // The state stays as memory holds it: a re-announce or a
+                // chunk may have changed it since `complete` read it.
+                let _ = self
+                    .update(receipt, |edit| edit.received_chunks.clear())
+                    .await;
+                if let Some(meeting_id) = receipt.state.meeting_id() {
+                    return Verification::Answered(HandoverResponse::json(
+                        StatusCode::OK,
+                        &wire::CompleteResponse { meeting_id },
+                    ));
+                }
             }
             return Verification::Answered(HandoverResponse::json(
                 StatusCode::CONFLICT,
@@ -388,6 +411,14 @@ impl Engine {
         let _ = self
             .transition(receipt, HandoverState::Verifying, None)
             .await;
+        // A `complete` that read the receipt before another one admitted the
+        // recording finds it `complete` now, and answers with its meeting.
+        if let Some(meeting_id) = receipt.state.meeting_id() {
+            return Verification::Answered(HandoverResponse::json(
+                StatusCode::OK,
+                &wire::CompleteResponse { meeting_id },
+            ));
+        }
 
         let verified = match file.metadata() {
             Ok(opened) if i64::try_from(opened.len()) == Ok(receipt.byte_count) => {
@@ -408,7 +439,6 @@ impl Engine {
                 ));
             }
         };
-        self.refresh(receipt);
         if receiving_file::Identity::at(&partial).ok() != Some(identity) {
             return Verification::Answered(self.replaced_during_the_verify(receipt).await);
         }
@@ -495,7 +525,6 @@ impl Engine {
         let meeting_id = match self.intake.admit(file, metadata, device).await {
             Ok(meeting_id) => meeting_id,
             Err(error) => {
-                self.refresh(receipt);
                 let _ = self
                     .transition(
                         receipt,
@@ -506,7 +535,6 @@ impl Engine {
                 return HandoverResponse::internal_error("the intake", &error);
             }
         };
-        self.refresh(receipt);
         let _ = self
             .transition(receipt, HandoverState::Complete { meeting_id }, None)
             .await;
