@@ -29,7 +29,8 @@
 //! `StenoCore` type: it keeps the core name and no topic word, so
 //! [`MeetingState`], [`RetentionMode`], [`SpeakerAssignmentKind`] and
 //! [`TaskPriority`]; the last two are `steno_core`'s own enums re-exported,
-//! as is [`Platform`], whose permissions [`PlatformPermissions`] lists.
+//! as is [`Platform`], whose permissions
+//! [`PermissionKind::for_platform`] lists.
 //!
 //! To add a method: the variant and raw value in [`BridgeMethod`]
 //! (`envelope.rs`); its params or reply type in `commands.rs`; one line in

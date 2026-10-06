@@ -658,7 +658,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use steno_bridge::PlatformPermissions as _;
     use steno_core::{
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
         async_trait, paths::file_url, protocols::BoundaryResult,
@@ -763,11 +762,11 @@ mod tests {
             .iter()
             .map(|step| step["kind"].as_str().unwrap())
             .collect();
-        let expected: Vec<&str> = steno_bridge::Platform::CURRENT
-            .permissions()
-            .iter()
-            .map(|kind| kind.as_str())
-            .collect();
+        let expected: Vec<&str> =
+            steno_bridge::PermissionKind::for_platform(steno_bridge::Platform::CURRENT)
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect();
         assert_eq!(listed, expected);
     }
 

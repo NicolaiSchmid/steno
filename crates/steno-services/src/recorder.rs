@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 
 use chrono::{FixedOffset, Utc};
 use steno_audio::{CaptureConfiguration, CaptureSession, LaneLevels as AudioLevels};
-use steno_bridge::{CaptureMode, PermissionKind, PlatformPermissions, RecordingState};
+use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
 use steno_host::speech::ModelAsset;
@@ -432,8 +432,7 @@ fn denied_permissions(
     platform: steno_bridge::Platform,
     permissions: &dyn Permissions,
 ) -> Vec<PermissionKind> {
-    platform
-        .permissions()
+    PermissionKind::for_platform(platform)
         .iter()
         .copied()
         .filter(|kind| steno_host::services::permission_is_required(*kind))

@@ -362,17 +362,15 @@ string_enum! {
 /// Ctrl). Not a message: the Tauri shell sets it as
 /// `window.__STENO_PLATFORM__` before the page's scripts run, and a page
 /// with nothing set is the Swift app's, always the Mac. The host words its
-/// own sentences and lists the permissions ([`PlatformPermissions`]) for the
-/// same value. Defined in `steno_core`, where the exported notes name the
-/// platform a call was recorded on with it. Swift: none; the Swift app is
-/// the Mac.
+/// own sentences and lists the permissions
+/// ([`PermissionKind::for_platform`]) for the same value. Defined in
+/// `steno_core`, where the exported notes name the platform a call was
+/// recorded on with it. Swift: none; the Swift app is the Mac.
 pub use steno_core::Platform;
 
-/// The permissions a [`Platform`] has; a trait because the enum lives in
-/// `steno_core` and the permission kinds here.
-pub trait PlatformPermissions {
-    /// The permissions the OS has, in onboarding's order. The Mac has all
-    /// four. Windows has the microphone privacy switch and the firewall
+impl PermissionKind {
+    /// The permissions `platform` has, in onboarding's order. The Mac has
+    /// all four. Windows has the microphone privacy switch and the firewall
     /// prompt for the phone's connection; it records system audio without
     /// a permission and Steno reads no calendar there. Linux has the
     /// microphone (the portal asks inside a sandbox) and nothing else.
@@ -380,12 +378,8 @@ pub trait PlatformPermissions {
     /// whether the list has the calendar, for the General section's
     /// calendar row; `tests/fixtures.rs` compares the two.
     #[must_use]
-    fn permissions(self) -> &'static [PermissionKind];
-}
-
-impl PlatformPermissions for Platform {
-    fn permissions(self) -> &'static [PermissionKind] {
-        match self {
+    pub const fn for_platform(platform: Platform) -> &'static [PermissionKind] {
+        match platform {
             Platform::Macos => PermissionKind::ALL,
             Platform::Windows => &[PermissionKind::Microphone, PermissionKind::LocalNetwork],
             Platform::Linux => &[PermissionKind::Microphone],
@@ -544,7 +538,7 @@ mod tests {
     #[test]
     fn each_platform_lists_its_permissions_in_onboarding_order() {
         for platform in Platform::ALL {
-            let kinds = platform.permissions();
+            let kinds = PermissionKind::for_platform(*platform);
             assert_eq!(
                 kinds.first(),
                 Some(&PermissionKind::Microphone),
@@ -552,6 +546,9 @@ mod tests {
             );
             assert!(kinds.is_sorted(), "{platform}: {kinds:?}");
         }
-        assert_eq!(Platform::Macos.permissions(), PermissionKind::ALL);
+        assert_eq!(
+            PermissionKind::for_platform(Platform::Macos),
+            PermissionKind::ALL
+        );
     }
 }
