@@ -278,10 +278,11 @@ pub fn remaining_text(remaining: f64) -> String {
 /// The meeting's title for `--title`, else the file name of `input`. A
 /// given title is the user's: the app shows it, as the export does, and
 /// the summary keeps it. Swift's CLI stores it as the default title (see
-/// the parity list). An empty or blank one is no title, as in the intake.
+/// the parity list). It is stored trimmed, and an empty or blank one is no
+/// title, as in the intake.
 fn title_and_origin(given: Option<&str>, input: &Path) -> (String, TitleOrigin) {
-    match given {
-        Some(title) if !title.trim().is_empty() => (title.to_owned(), TitleOrigin::User),
+    match given.map(str::trim) {
+        Some(title) if !title.is_empty() => (title.to_owned(), TitleOrigin::User),
         _ => (
             input
                 .file_stem()
@@ -314,10 +315,13 @@ mod tests {
     #[test]
     fn a_given_title_is_the_users_unless_it_is_blank() {
         let input = Path::new("/recordings/standup.wav");
-        assert_eq!(
-            title_and_origin(Some("Sweep"), input),
-            ("Sweep".to_owned(), TitleOrigin::User)
-        );
+        for given in ["Sweep", " Sweep "] {
+            assert_eq!(
+                title_and_origin(Some(given), input),
+                ("Sweep".to_owned(), TitleOrigin::User),
+                "{given:?}"
+            );
+        }
         for blank in [None, Some(""), Some("  \t")] {
             assert_eq!(
                 title_and_origin(blank, input),
