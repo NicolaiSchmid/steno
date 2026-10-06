@@ -1,6 +1,7 @@
 // `react-dom` ships without types and `@types/react-dom` is not a dependency
 // of the app; the hook tests mount through `react-dom/client` under
-// happy-dom, one commits with `flushSync`, and they need only these members.
+// happy-dom, the coordinator test commits with `react-dom`'s `flushSync`, and
+// they need only these members.
 declare module "react-dom/client" {
 	import type { ReactNode } from "react";
 
