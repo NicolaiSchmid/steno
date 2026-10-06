@@ -310,29 +310,25 @@ actor HandoverEngine: RequestHandling {
     }
   }
 
-  /// One state change of the receipt as memory holds it, or of `receipt`
-  /// when memory holds none (a revoked device): the state, the chunk set
-  /// when given, `updatedAt`, then `persist`; `receipt` comes back as memory
-  /// then holds it. A receipt memory holds as `.complete` stays as it is and
-  /// nothing is saved: a request that read it before the phone's `complete`
-  /// admitted the recording must not put it back, or the phone's next
-  /// `complete` would start over and admit it again. Callers that answer
-  /// the phone whatever the write did use `try?` deliberately: memory
-  /// already holds the change and the phone's next request re-reads.
+  /// One state change of the receipt memory holds, or of `receipt` when
+  /// memory holds none (a revoked device): the state, the chunk set when
+  /// given, `updatedAt`, then `persist`. `receipt` comes back as memory then
+  /// holds it. A `.complete` receipt in memory stays as it is and nothing is
+  /// saved: a request that read it before the phone's `complete` admitted
+  /// the recording must not put it back, or the phone's next `complete`
+  /// would start over and admit it again. Callers that answer the phone
+  /// whatever the write did use `try?` deliberately: memory already holds
+  /// the change and the phone's next request re-reads.
   func transition(
     _ receipt: inout HandoverReceipt, to state: HandoverState, receivedChunks: [Int]? = nil
   ) async throws {
     let held = activeReceipts[receipt.recordingID]
-    if let held, held.state.kind == .complete {
-      receipt = held
-      return
-    }
-    var changed = held ?? receipt
-    changed.state = state
-    if let receivedChunks { changed.receivedChunks = receivedChunks }
-    changed.updatedAt = now()
-    receipt = changed
-    try await persist(changed)
+    receipt = held ?? receipt
+    if held?.state.kind == .complete { return }
+    receipt.state = state
+    if let receivedChunks { receipt.receivedChunks = receivedChunks }
+    receipt.updatedAt = now()
+    try await persist(receipt)
   }
 
   /// Writes the receipt and tells the observers. Memory (`remember`) is

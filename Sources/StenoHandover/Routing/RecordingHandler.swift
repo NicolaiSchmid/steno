@@ -139,10 +139,9 @@ extension HandoverEngine {
     guard let current = activeReceipts[recordingID], current.deviceID == device.id else {
       return .problem(.notFound, "no such recording")
     }
-    receipt = current
     do {
       try await transition(
-        &receipt, to: .receiving, receivedChunks: Set(receipt.receivedChunks + [index]).sorted())
+        &receipt, to: .receiving, receivedChunks: Set(current.receivedChunks + [index]).sorted())
     } catch {
       return .internalError("saving the receipt", error)
     }
@@ -330,8 +329,8 @@ extension HandoverEngine {
   /// The receipt from memory or the store, kept in memory (`remember`).
   /// Another request may have made, loaded or advanced it while the store
   /// read was awaited; memory wins then, also over a read that found none,
-  /// so a second first announce of a recording answers as a re-announce and
-  /// keeps the receipt the first one made, its chunks and a `.complete`.
+  /// so of two first announces at once the later answers as a re-announce
+  /// and keeps the receipt the other made, chunks and `.complete` included.
   func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
     if let active = activeReceipts[recordingID] { return active }
     let stored = try? await store.handoverReceipt(recordingID: recordingID)
