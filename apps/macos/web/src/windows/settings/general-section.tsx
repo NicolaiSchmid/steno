@@ -23,6 +23,7 @@ import {
 	Select,
 	Switch,
 } from "@/components/ui";
+import { usePlatform } from "@/lib/platform";
 import { SectionPage } from "./section-page";
 import { updateStatusText } from "./settings-format";
 
@@ -103,11 +104,12 @@ function AcknowledgementsDialog({
 
 /**
  * General: launch at login, meeting detection, the calendar permission that
- * names meetings, the default template, the update status and the
- * acknowledgements.
+ * names meetings (where the platform has one Steno reads), the default
+ * template, the update status and the acknowledgements.
  */
 export function GeneralSection() {
 	const client = useBridge();
+	const platform = usePlatform();
 	const general = useSnapshot("settings.general");
 	if (!general) {
 		return <SectionPage id="general" />;
@@ -178,15 +180,17 @@ export function GeneralSection() {
 			</FormCard>
 
 			<FormCard title="Meetings">
-				<PermissionRow
-					isRequesting={general.requestingCalendar}
-					kind="calendar"
-					onOpenSystemSettings={() =>
-						send(client, "system.openSystemSettings", { kind: "calendar" })
-					}
-					onRequest={() => send(client, "settings.general.requestCalendar")}
-					state={general.calendarPermission}
-				/>
+				{platform.readsCalendar ? (
+					<PermissionRow
+						isRequesting={general.requestingCalendar}
+						kind="calendar"
+						onOpenSystemSettings={() =>
+							send(client, "system.openSystemSettings", { kind: "calendar" })
+						}
+						onRequest={() => send(client, "settings.general.requestCalendar")}
+						state={general.calendarPermission}
+					/>
+				) : null}
 				<FormRow
 					control={
 						<Select

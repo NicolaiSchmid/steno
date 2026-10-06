@@ -35,11 +35,12 @@ struct EngineClient {
         body: try StenoJSON.encode(Wire.PairRequest(deviceID: deviceID, deviceName: deviceName))))
   }
 
-  /// Opens a window, pairs and returns the paired device's view.
-  static func paired(_ test: TestService, deviceName: String = "Direct iPhone") async throws
-    -> EngineDevice
-  {
-    let client = EngineClient(test)
+  /// Opens a window, pairs and returns the paired device's view. An
+  /// `engine` over `test.store` replaces the service's.
+  static func paired(
+    _ test: TestService, engine: HandoverEngine? = nil, deviceName: String = "Direct iPhone"
+  ) async throws -> EngineDevice {
+    let client = EngineClient(engine: engine ?? test.service.engine)
     _ = await client.engine.beginPairing()
     let deviceID = UUID()
     let response = try await client.pair(deviceID: deviceID, deviceName: deviceName)

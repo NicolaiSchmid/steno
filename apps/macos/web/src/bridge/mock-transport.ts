@@ -369,7 +369,7 @@ export function applyScenario(
 /**
  * The onboarding states: `onboarding-unknown` (a fresh install, nothing
  * asked yet), `onboarding-denied` (the microphone refused),
- * `onboarding-granted` (every permission granted, Done instead of Later),
+ * `onboarding-granted` (every permission granted, Continue instead of Later),
  * `onboarding-setup` (page 2 from `onboarding.setup`: Summaries saved, a
  * vault chosen but refused), `onboarding-setup-open` (page 2 with both rows
  * open), `onboarding-codex` (page 2 with ChatGPT chosen and its consent

@@ -33,7 +33,7 @@
     }
   ],
   "permissionsComplete" : true,
-  "retentionSentence" : "Each recording is deleted 30 days after it was processed and exported. Change this any time in Settings > Audio.",
+  "retentionSentence" : "Each recording is deleted 30 days after it was processed and exported. Change this any time in Settings > Recording.",
   "setup" : [
     {
       "kind" : "summaries",

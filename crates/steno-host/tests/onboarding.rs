@@ -12,8 +12,8 @@ use common::*;
 use serde_json::json;
 use steno_bridge::{
     BridgeErrorCode, BridgeHost, BridgeTopic, BridgeWindow, OnboardingSetupStepKind,
-    PermissionKind, PermissionKindParams, PermissionState, SetStringParams, SetupStepParams,
-    SummariesUpdateParams, WindowParams,
+    PermissionKind, PermissionKindParams, PermissionState, Platform, SetStringParams,
+    SetupStepParams, SummariesUpdateParams, WindowParams,
 };
 use steno_core::AudioRetention;
 use steno_host::onboarding::OnboardingViewModel;
@@ -47,7 +47,7 @@ fn the_retention_sentence_follows_the_stored_rule() {
         .to_owned();
     assert_eq!(
         sentence,
-        "Recordings are kept forever in audio. Change this any time in Settings > Audio."
+        "Recordings are kept until you delete them. Change this any time in Settings > Recording."
     );
     set_retention(&harness.store, AudioRetention::KeepDays(7));
     harness.host.onboarding_refresh().unwrap();
@@ -59,7 +59,7 @@ fn the_retention_sentence_follows_the_stored_rule() {
         sentence.contains("deleted 7 days after it was processed and exported"),
         "{sentence}"
     );
-    assert!(sentence.ends_with("Change this any time in Settings > Audio."));
+    assert!(sentence.ends_with("Change this any time in Settings > Recording."));
     set_retention(&harness.store, AudioRetention::DeleteAfterProcessing);
     harness.host.onboarding_refresh().unwrap();
     assert!(
@@ -737,7 +737,7 @@ fn should_open_follows_the_flag_and_the_required_permissions() {
 /// on the model alone.
 #[test]
 fn current_is_the_first_unhandled_step() {
-    let mut model = OnboardingViewModel::new();
+    let mut model = OnboardingViewModel::new(Platform::Macos);
     assert_eq!(model.current(), PermissionKind::Microphone);
     model.finish_request(PermissionKind::Microphone, PermissionState::Granted);
     assert_eq!(model.current(), PermissionKind::SystemAudio);

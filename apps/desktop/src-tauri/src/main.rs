@@ -14,8 +14,9 @@
 //! close and exit rules are in this file), launch at login (`autostart`),
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
-//! instance, and on a Wayland session the `XWayland` backend the panels
-//! need (`display`). Every one is a thin module over a Tauri plugin or an
+//! instance, on Linux the logout and shutdown clients (`session_end`), and
+//! on a Wayland session the `XWayland` backend the panels need
+//! (`display`). Every one is a thin module over a Tauri plugin or an
 //! OS API with its rules in plain functions the tests cover. Everything
 //! that is on the wire (errors, topics, windows, sections, params) is the
 //! `steno-bridge` crate's type; the shell adds only what it needs on top
@@ -36,11 +37,16 @@
 //! Windows, reach the run loop only as its last event, and an update's
 //! relaunch bypasses the request, so both run the same shutdown first
 //! (`shut_down_before_exit`). The one exception: a second SIGTERM or a
-//! second SIGINT ends the process at once, unsaved (`forced_exit`). Open:
-//! the Windows logoff is untested on hardware, and Windows' end-session
-//! timeout (about five seconds) is shorter than `SHUTDOWN_PATIENCE`
-//! (WP10); a Linux logout saves only when logind signals the app, which is
-//! untested (before the first Linux release; no work package yet).
+//! second SIGINT ends the process at once, unsaved (`forced_exit`). On
+//! Linux a logout on GNOME, and on Xfce under X11, and a system shutdown
+//! or reboot run the same shutdown before they let the app go, over D-Bus
+//! (`session_end`), and an exit that went through ends the process
+//! `EXIT_GRACE` later at the latest (`end_within`). Open: the Windows
+//! logoff is untested on hardware, and Windows' end-session timeout (about
+//! five seconds) is shorter than `SHUTDOWN_PATIENCE` (WP10); a logout on
+//! KDE Plasma, or on Xfce under Wayland, saves only when systemd signals
+//! the app (`session_end`), and none of the Linux paths is tested on a
+//! real desktop (before the first Linux release).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The fixture host leaves the real host's seams (the login item, the
@@ -78,7 +84,10 @@ mod navigation;
 mod panel_geometry;
 mod panels;
 mod permissions;
+mod platform;
 mod recording;
+#[cfg(target_os = "linux")]
+mod session_end;
 mod smoke;
 mod tray;
 mod updater;
@@ -92,6 +101,9 @@ fn main() {
     steno_services::log_to_stderr(steno_services::LOG_FILTER);
     #[cfg(target_os = "linux")]
     display::choose();
+    // Before the app is built: GTK unsets it when it starts.
+    #[cfg(target_os = "linux")]
+    let startup_id = session_end::startup_id();
     // The runtime the services graph runs on, beside Tauri's own: the
     // pipeline, the recorder's saves, the handover listener and the signal
     // listeners. Leaked, so it is never dropped: dropping a runtime waits,
@@ -119,7 +131,8 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(updater::plugin());
+        .plugin(updater::plugin())
+        .plugin(platform::plugin());
     #[cfg(target_os = "macos")]
     {
         // The menu bar's menu is the shell's own: Tauri's default one ends
@@ -143,7 +156,12 @@ fn main() {
             bridge::bridge_call,
             bridge::panel_call
         ])
-        .setup(move |app| setup(app.handle(), runtime))
+        .setup(move |app| {
+            setup(app.handle(), runtime)?;
+            #[cfg(target_os = "linux")]
+            session_end::watch(app.handle(), startup_id);
+            Ok(())
+        })
         .build(tauri::generate_context!())
         .expect("steno-desktop failed to build");
     app.run(on_event);
@@ -261,12 +279,14 @@ fn on_exit_signal(
 
 /// SIGTERM, SIGINT and SIGHUP ask for the exit Quit asks for, so the
 /// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
-/// terminal, systemd at a shutdown. A logout on Linux saves when logind
-/// ends the session's processes (with `KillUserProcesses=yes`, systemd
-/// stops the scope with SIGTERM, then SIGHUP). Otherwise nothing signals
-/// the app, and when the display connection closes first, GDK ends the
-/// process unsaved; untested (before the first Linux release; no work
-/// package yet). On macOS a logout goes through `RunEvent::Exit` instead.
+/// terminal, systemd at a shutdown. A logout on Linux saves here when
+/// logind ends the session's processes (with `KillUserProcesses=yes`,
+/// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME, and on
+/// Xfce under X11, the session manager's `EndSession` saves first
+/// (`session_end`). On KDE Plasma, or on Xfce under Wayland, without
+/// `KillUserProcesses`, nothing signals the app, and when the display
+/// connection closes first, GDK ends the process unsaved. On macOS a
+/// logout goes through `RunEvent::Exit` instead.
 /// Each signal quits the pipeline here, off the main thread, before it asks
 /// for the exit (`Host::quit_pipeline`), so a job a busy main thread would
 /// let fail first stays resumable. A second SIGTERM or a second SIGINT
@@ -317,8 +337,9 @@ fn exit_on_signals(app: &tauri::AppHandle, runtime: &tokio::runtime::Runtime) {
 /// Runs the shutdown for an exit no request held, on this thread's behalf,
 /// and returns once it ended (at most `SHUTDOWN_PATIENCE`), waiting for
 /// the one already running (a held request's, an earlier exit's) instead
-/// of starting one; at once when it already ran. `RunEvent::Exit` and the
-/// updater's relaunch call it.
+/// of starting one; at once when it already ran. `RunEvent::Exit`, the
+/// updater's relaunch and the Linux logout and shutdown clients
+/// (`session_end`) call it.
 ///
 /// Swift: the Dock's Quit and a logout reached `applicationShouldTerminate`
 /// as Quit did.
@@ -337,13 +358,19 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
         // (`exit_request`).
         tauri::RunEvent::ExitRequested { code, api, .. } => {
             let handle = app.clone();
-            if !exit_request(
+            if exit_request(
                 code,
                 || tray_at_close(app),
                 &app.state::<steno_services::app::ExitGate>(),
                 host::host(app).shutdown_action(),
                 move |code| handle.exit(code),
             ) {
+                #[cfg(target_os = "linux")]
+                if code != Some(tauri::RESTART_EXIT_CODE) {
+                    let code = code.unwrap_or(0);
+                    end_within(EXIT_GRACE, move || std::process::exit(code));
+                }
+            } else {
                 api.prevent_exit();
             }
         }
@@ -536,12 +563,41 @@ fn exits_on(code: Option<i32>, has_tray: impl FnOnce() -> bool) -> bool {
     code.is_some() || !has_tray()
 }
 
+/// How long the run loop may take to end on Linux once an exit went
+/// through, before the process ends anyway (`end_within`).
+#[cfg(target_os = "linux")]
+const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Calls `end` on a thread of its own `grace` from now, unless the process
+/// has ended by then. On Linux an exit that went through ends this way at
+/// the latest, with its code: the single-instance plugin releases its name
+/// on the session bus at `RunEvent::Exit` (before the shell's own handler
+/// runs) and waits for the bus's answer without a bound, so a frozen
+/// session bus would hold the exit. The bus drops the name with the
+/// connection anyway, and an exit goes through only once the shutdown
+/// ended or ran out of patience, so ending the teardown early loses
+/// nothing. An update's relaunch (`tauri::RESTART_EXIT_CODE`) is left to
+/// the teardown, which relaunches at its end.
+#[cfg(target_os = "linux")]
+fn end_within(grace: std::time::Duration, end: impl FnOnce() + Send + 'static) {
+    std::thread::spawn(move || {
+        std::thread::sleep(grace);
+        end();
+    });
+}
+
+/// Whether the session bus is named (`DBUS_SESSION_BUS_ADDRESS`): the
+/// shell treats a session without one as having none.
+fn session_bus_named() -> bool {
+    std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+}
+
 /// Whether the single-instance plugin can run: on Linux it holds a name on
 /// the session bus and panics without one (a headless CI run under
 /// `xvfb-run` has none), so it is skipped there; macOS and Windows need
 /// nothing.
 fn single_instance_available() -> bool {
-    !cfg!(target_os = "linux") || std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_some()
+    !cfg!(target_os = "linux") || session_bus_named()
 }
 
 #[cfg(test)]
@@ -832,6 +888,21 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success(), "{status}");
+    }
+
+    /// An exit that went through ends the process `EXIT_GRACE` later at the
+    /// latest, never sooner.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exit_ends_once_the_grace_has_passed() {
+        let grace = std::time::Duration::from_millis(100);
+        let started = std::time::Instant::now();
+        let (ended, seen) = std::sync::mpsc::channel();
+        end_within(grace, move || ended.send(started.elapsed()).unwrap());
+        let after = seen
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("ended");
+        assert!(after >= grace, "{after:?}");
     }
 
     #[test]

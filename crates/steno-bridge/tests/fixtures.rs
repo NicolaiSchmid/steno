@@ -265,6 +265,31 @@ fn contract_ts_shared_vocabulary_matches() {
     assert_eq!(top_level("listFilter"), raw(ListFilter::ALL));
     assert_eq!(top_level("detailTab"), raw(DetailTab::ALL));
     assert_eq!(top_level("retentionMode"), raw(RetentionMode::ALL));
+    assert_eq!(top_level("platform"), raw(Platform::ALL));
+}
+
+/// `READS_CALENDAR` in `src/lib/platform.tsx`, as Biome writes it,
+/// against whether `Platform::permissions` lists the calendar: the page
+/// shows General's calendar row by it.
+#[test]
+fn platform_tsx_reads_the_calendar_where_the_platform_lists_it() {
+    let path = repository_root().join("apps/macos/web/src/lib/platform.tsx");
+    let source = fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let entries: Vec<String> = Platform::ALL
+        .iter()
+        .map(|platform| {
+            let reads = platform.permissions().contains(&PermissionKind::Calendar);
+            format!("\t{platform}: {reads},")
+        })
+        .collect();
+    let record = format!(
+        "const READS_CALENDAR: Record<PlatformOS, boolean> = {{\n{}\n}};",
+        entries.join("\n")
+    );
+    assert!(
+        source.replace("\r\n", "\n").contains(&record),
+        "platform.tsx has no\n{record}"
+    );
 }
 
 /// The `z.enum` lists nested in a snapshot or params schema, against the

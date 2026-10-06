@@ -89,8 +89,8 @@ impl Store {
     /// Refreshes `lastSeenAt` of the device that still holds `token_hash`.
     /// An `UPDATE`, not a save: the engine reads the device and touches it
     /// after a yield, and a revoke in between must stay a revoke. A row that
-    /// is gone, or whose token changed, is left alone. New here; Swift
-    /// upserts (parity list).
+    /// is gone, or whose token changed, is left alone. Swift:
+    /// `MeetingStore.touchPairedDevice`.
     pub fn touch_paired_device(
         &self,
         id: Uuid,

@@ -147,7 +147,7 @@ fn dialog(
     app.dialog().message(message).title("Steno").kind(kind)
 }
 
-/// The tray's "Check for Updates…": checks, then asks before installing,
+/// The tray's Check for Updates: checks, then asks before installing,
 /// as Sparkle's standard driver does, and relaunches when the user agrees.
 /// The relaunch bypasses the exit request, so the shutdown runs first
 /// (`shut_down_before_exit`), as Sparkle's relaunch went through

@@ -2,16 +2,24 @@ import { CheckCircle2Icon, CircleIcon, XCircleIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import type { RecordingSettingsSnapshot } from "@/bridge/contract";
 import { Badge, Button, FormRow } from "@/components/ui";
+import { type PlatformWords, usePlatform } from "@/lib/platform";
 
 type Permission = RecordingSettingsSnapshot["permissions"][number];
 export type PermissionKind = Permission["kind"];
 export type PermissionState = Permission["state"];
 
-/** The permission's name and what Steno does with it; the onboarding's words. */
-export function permissionCopy(kind: PermissionKind): {
+/**
+ * The permission's name and what Steno does with it, the onboarding's
+ * words, with who asks and when where the platform asks at all.
+ */
+export function permissionCopy(
+	kind: PermissionKind,
+	{ computer, systemAudioPrompt, localNetworkPrompt }: PlatformWords,
+): {
 	title: string;
 	explanation: string;
 } {
+	const asks = (prompt: string | undefined) => (prompt ? `${prompt} ` : "");
 	switch (kind) {
 		case "microphone":
 			return {
@@ -22,8 +30,7 @@ export function permissionCopy(kind: PermissionKind): {
 		case "systemAudio":
 			return {
 				title: "System audio",
-				explanation:
-					"Steno records the other side from the apps playing audio on this Mac. macOS asks once, during a short test recording. Required.",
+				explanation: `Steno records the other side from the apps playing audio on this ${computer}. ${asks(systemAudioPrompt)}Required.`,
 			};
 		case "calendar":
 			return {
@@ -34,8 +41,7 @@ export function permissionCopy(kind: PermissionKind): {
 		case "localNetwork":
 			return {
 				title: "Local network",
-				explanation:
-					"The Steno iPhone app sends recordings over your Wi-Fi. macOS asks when you pair the first phone. Optional.",
+				explanation: `The Steno iPhone app sends recordings over your Wi-Fi. ${asks(localNetworkPrompt)}Optional.`,
 			};
 	}
 }
@@ -52,12 +58,15 @@ export interface PermissionRowProps {
 	skipped?: boolean;
 	/** Offers a ghost "Skip" beside the action (optional steps in onboarding). */
 	onSkip?: (() => void) | undefined;
-	/** Offers "Check again" beside "Open System Settings" once denied. */
+	/**
+	 * Offers "Check again" once denied, beside "Open System Settings" where
+	 * the platform has a place Steno can open.
+	 */
 	onCheckAgain?: (() => void) | undefined;
 	/**
-	 * The permission is granted by macOS later, not here (the local network
-	 * prompt comes with the first pairing): the one action is "Got it", which
-	 * skips the step.
+	 * The permission is granted by the system later, not here (the local
+	 * network prompt comes with the first pairing): the one action is "Got
+	 * it", which skips the step.
 	 */
 	acknowledgeOnly?: boolean;
 	/** The row's action is the page's main one (onboarding): a primary button. */
@@ -88,7 +97,8 @@ export function PermissionRow({
 	prominent = false,
 	requestDisabled = false,
 }: PermissionRowProps) {
-	const copy = permissionCopy(kind);
+	const { words } = usePlatform();
+	const copy = permissionCopy(kind, words);
 	let description: string | undefined;
 	if (state !== "granted" && !skipped) {
 		description = copy.explanation;
@@ -106,14 +116,18 @@ export function PermissionRow({
 	} else if (state === "denied") {
 		control = (
 			<>
-				<Button
-					data-testid={`permission-${kind}-open`}
-					onClick={onOpenSystemSettings}
-					size="sm"
-					variant={action}
-				>
-					Open System Settings
-				</Button>
+				{words.opensSystemSettings ? (
+					<Button
+						data-testid={`permission-${kind}-open`}
+						onClick={onOpenSystemSettings}
+						size="sm"
+						variant={action}
+					>
+						Open {words.systemSettings}
+					</Button>
+				) : (
+					<Badge variant="warning">Not allowed</Badge>
+				)}
 				{onCheckAgain ? (
 					<Button
 						data-testid={`permission-${kind}-check`}

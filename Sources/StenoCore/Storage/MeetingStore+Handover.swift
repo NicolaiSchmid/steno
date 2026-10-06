@@ -17,6 +17,18 @@ extension MeetingStore {
     try await writer.write { db in try PairedDeviceRow(device, tokenHash: tokenHash).save(db) }
   }
 
+  /// Refreshes `lastSeenAt` of the device that still holds `tokenHash`. An
+  /// update, never an insert: the engine touches a device it read before a
+  /// suspension, and a revoke or a new pairing in between must stand.
+  public func touchPairedDevice(id: UUID, tokenHash: Data, seenAt: Date) async throws {
+    _ = try await writer.write { db in
+      try PairedDeviceRow
+        .filter(PairedDeviceRow.Columns.id == id.uuidString)
+        .filter(PairedDeviceRow.Columns.tokenHash == tokenHash)
+        .updateAll(db, PairedDeviceRow.Columns.lastSeenAt.set(to: seenAt))
+    }
+  }
+
   public func device(forTokenHash tokenHash: Data) async throws -> PairedDevice? {
     try await writer.read { db in
       try PairedDeviceRow.filter(PairedDeviceRow.Columns.tokenHash == tokenHash).fetchOne(db)?

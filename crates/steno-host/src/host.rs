@@ -83,7 +83,7 @@ use steno_bridge::{
     AppPhone, AssetIdParams, BridgeError, BridgeEvent, BridgeHost, BridgeTopic, BridgeWindow,
     ChosenPathReply, ConfirmDestructiveParams, ConfirmReply, DeviceIdParams, EventSink,
     ExportUpdateParams, MeetingIdParams, OpenUrlParams, Outcome, PageLayoutParams, PermissionKind,
-    PermissionKindParams, RecordingState, SaveNotesParams, SelectSpeakerParams,
+    PermissionKindParams, Platform, RecordingState, SaveNotesParams, SelectSpeakerParams,
     SetAutomaticUpdatesParams, SetBoolParams, SetFilterParams, SetQueryParams, SetRetentionParams,
     SetStringParams, SetTabParams, SetTagFilterParams, SetTagsParams, SetTemplateParams,
     SettingsSection, SetupStepParams, SpeakerIdParams, SpeakerOption, SpeakerOptionKind,
@@ -119,6 +119,11 @@ pub struct HostConfig {
     pub version: String,
     /// The viewer's zone, for day groups and derived titles.
     pub zone: FixedOffset,
+    /// The OS the host runs on: which permissions onboarding and Settings
+    /// list, and whether the host's sentences say "this Mac" or "this
+    /// computer". The shell passes `Platform::CURRENT`; the parity tests
+    /// pass the Mac, whose words are Swift's.
+    pub platform: Platform,
 }
 
 impl Default for HostConfig {
@@ -126,6 +131,7 @@ impl Default for HostConfig {
         HostConfig {
             version: "0".to_owned(),
             zone: crate::labels::utc(),
+            platform: Platform::CURRENT,
         }
     }
 }
@@ -333,6 +339,10 @@ const SECTION_TOPICS: [BridgeTopic; 6] = [
 /// Swift: `MainWindowBridge.deleteMeetingMessage`.
 pub const DELETE_MEETING_MESSAGE: &str = "The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay.";
 
+/// [`DELETE_MEETING_MESSAGE`] on Windows and Linux: "this computer" for
+/// "this Mac".
+pub const DELETE_MEETING_MESSAGE_ELSEWHERE: &str = "The transcript, summary, tasks and the recording on this computer are removed. Files already exported to Obsidian stay. People stay.";
+
 /// Swift: `MainWindowBridge.deleteRecordingPrompt`.
 pub fn delete_recording_prompt() -> ConfirmDestructiveParams {
     ConfirmDestructiveParams {
@@ -378,8 +388,8 @@ impl Host {
         let mut phones = PhonesSettingsViewModel::new(&services);
         phones.load(&services);
         phones.refresh(&services);
-        let subtitles = overview::refresh(&store, &services, &config.version);
-        let mut onboarding = OnboardingViewModel::new();
+        let subtitles = overview::refresh(&store, &services, config.platform, &config.version);
+        let mut onboarding = OnboardingViewModel::new(config.platform);
         onboarding.load(&store, &services, secret);
         let mut list = MeetingListViewModel::new(config.zone);
         list.reload(&store);
@@ -539,6 +549,7 @@ impl Host {
                 &inner.app,
                 inner.has_meetings,
                 &self.shared.config.version,
+                self.shared.config.platform,
             )),
             BridgeTopic::Recording => to_value(main_snapshots::recording_snapshot(
                 &self.shared.services.recorder.status(),
@@ -577,6 +588,7 @@ impl Host {
             BridgeTopic::SettingsRecording => to_value(settings_snapshots::recording(
                 &inner.audio,
                 inner.subtitle(SettingsSection::Recording),
+                self.shared.config.platform,
             )),
             BridgeTopic::SettingsTranscription => to_value(settings_snapshots::transcription(
                 &inner.speech,
@@ -586,6 +598,7 @@ impl Host {
             BridgeTopic::SettingsSummaries => to_value(settings_snapshots::summaries(
                 &inner.llm,
                 inner.subtitle(SettingsSection::Summaries),
+                self.shared.config.platform,
             )),
             BridgeTopic::SettingsExport => to_value(settings_snapshots::export(
                 &inner.obsidian,
@@ -836,7 +849,11 @@ impl Host {
     /// Whether the onboarding window should open at launch.
     #[must_use]
     pub fn should_open_onboarding(&self) -> bool {
-        OnboardingViewModel::should_open(&self.shared.store, &self.shared.services)
+        OnboardingViewModel::should_open(
+            &self.shared.store,
+            &self.shared.services,
+            self.shared.config.platform,
+        )
     }
 
     /// The first launch registers the login item when the setting says so.
@@ -880,7 +897,7 @@ impl Host {
         .flatten();
         {
             let mut inner = self.lock();
-            let mut fresh = OnboardingViewModel::new();
+            let mut fresh = OnboardingViewModel::new(self.shared.config.platform);
             fresh.load(&self.shared.store, &self.shared.services, secret);
             inner.onboarding = fresh;
             inner.publisher.schedule(BridgeTopic::Onboarding);
@@ -960,6 +977,7 @@ impl Host {
         let next = overview::refresh(
             &self.shared.store,
             &self.shared.services,
+            self.shared.config.platform,
             &self.shared.config.version,
         );
         if next != inner.subtitles {
@@ -1392,7 +1410,12 @@ impl BridgeHost for Host {
                     "Delete “{}”?",
                     crate::labels::display_title(meeting, self.now(), self.shared.config.zone)
                 ),
-                message: DELETE_MEETING_MESSAGE.to_owned(),
+                message: self
+                    .shared
+                    .config
+                    .platform
+                    .mac_or(DELETE_MEETING_MESSAGE, DELETE_MEETING_MESSAGE_ELSEWHERE)
+                    .to_owned(),
                 confirm_title: "Delete".to_owned(),
             }
         };
@@ -1493,7 +1516,12 @@ impl BridgeHost for Host {
             .and_then(|export| export.audio.as_ref())
             .and_then(|asset| file_url_path(&asset.url))
             .filter(|_| detail.recording_files_exist)
-            .ok_or_else(|| BridgeError::not_found("The recording is no longer on this Mac."))?;
+            .ok_or_else(|| {
+                BridgeError::not_found(self.shared.config.platform.mac_or(
+                    "The recording is no longer on this Mac.",
+                    "The recording is no longer on this computer.",
+                ))
+            })?;
         self.shared.services.opener.reveal(&path);
         Ok(())
     }

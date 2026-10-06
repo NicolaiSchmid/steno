@@ -54,6 +54,26 @@ pub async fn signalled<T>(what: &str, signal: impl Future<Output = T>) -> T {
         .unwrap_or_else(|_| panic!("{what} within {SIGNAL_BOUND:?}"))
 }
 
+/// Runs `test` as a task on a runtime with one worker and one blocking
+/// thread, so the order in which store calls reach the pool is fixed: the
+/// worker runs the task spawned last first (tokio's LIFO slot), and the one
+/// blocking thread runs the calls in the order they arrive. An `in_order`
+/// that does not wait for the write before it, or a write sent to the pool
+/// straight from the request while the write before it still sits in its
+/// task, then commits out of order every time instead of only when threads
+/// race. Catching the first relies on the LIFO slot of the tokio pinned in
+/// `Cargo.lock`: a tokio without it weakens the catch but cannot make the
+/// fixed code fail.
+pub fn on_one_worker(test: impl Future<Output = ()> + Send + 'static) {
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .max_blocking_threads(1)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async { tokio::spawn(test).await.unwrap() });
+}
+
 /// Holds the store's one connection from another thread until
 /// [`StoreHold::release`], so a store call of the engine waits on it.
 pub struct StoreHold {
@@ -89,26 +109,88 @@ impl StoreHold {
 }
 
 /// The one time source the service reads; tests move it to expire a
-/// pairing window or age a receipt.
+/// pairing window or age a receipt, or hold the service's next read of it
+/// ([`WallClock::hold_next_read`]).
 #[derive(Clone)]
-pub struct WallClock(Arc<Mutex<DateTime<Utc>>>);
+pub struct WallClock {
+    time: Arc<Mutex<DateTime<Utc>>>,
+    hold: Arc<Mutex<Option<HeldRead>>>,
+}
+
+/// The service's side of a [`ClockHold`].
+struct HeldRead {
+    reached: mpsc::Sender<()>,
+    released: mpsc::Receiver<()>,
+}
+
+/// The service's next clock read, held on the thread that makes it until
+/// [`ClockHold::release`].
+pub struct ClockHold {
+    reached: mpsc::Receiver<()>,
+    release: mpsc::Sender<()>,
+}
+
+impl ClockHold {
+    /// Returns once a request of the service is held at its clock read.
+    pub fn reached(&self) {
+        self.reached
+            .recv_timeout(SIGNAL_BOUND)
+            .expect("the service reads the clock");
+    }
+
+    /// Lets the held read return.
+    pub fn release(self) {
+        let _ = self.release.send(());
+    }
+}
 
 impl WallClock {
     pub fn new(start: DateTime<Utc>) -> Self {
-        WallClock(Arc::new(Mutex::new(start)))
+        WallClock {
+            time: Arc::new(Mutex::new(start)),
+            hold: Arc::default(),
+        }
     }
 
     pub fn now(&self) -> DateTime<Utc> {
-        *self.0.lock().unwrap()
+        *self.time.lock().unwrap()
     }
 
     pub fn advance(&self, duration: Duration) {
-        *self.0.lock().unwrap() += chrono::Duration::from_std(duration).unwrap();
+        *self.time.lock().unwrap() += chrono::Duration::from_std(duration).unwrap();
+    }
+
+    /// Holds the service's next read of the clock, on the thread that makes
+    /// it, until the hold is released, so a test stops a request at that
+    /// point while another one runs. Reads by the test itself go through.
+    /// A read not released within [`SIGNAL_BOUND`] panics, so a clock read
+    /// moved under the state lock fails the test.
+    pub fn hold_next_read(&self) -> ClockHold {
+        let (reached, reached_here) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        *self.hold.lock().unwrap() = Some(HeldRead { reached, released });
+        ClockHold {
+            reached: reached_here,
+            release,
+        }
     }
 
     pub fn clock(&self) -> steno_handover::Clock {
         let clock = self.clone();
-        Arc::new(move || clock.now())
+        Arc::new(move || {
+            let held = clock.hold.lock().unwrap().take();
+            if let Some(held) = held {
+                let _ = held.reached.send(());
+                match held.released.recv_timeout(SIGNAL_BOUND) {
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        panic!("the held clock read was not released within {SIGNAL_BOUND:?}")
+                    }
+                    // A test that failed meanwhile drops the sender.
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+                }
+            }
+            clock.now()
+        })
     }
 }
 
@@ -852,6 +934,7 @@ pub fn seeded_bytes(count: usize, seed: u64) -> Vec<u8> {
 // The engine driven directly, without the listener
 
 /// A paired device's recording calls, straight into the engine.
+#[derive(Clone)]
 pub struct EngineDevice {
     pub service: Arc<HandoverService>,
     pub device: PairedDevice,

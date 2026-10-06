@@ -5,22 +5,25 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use steno_bridge::{PermissionKind, PermissionState, SettingsSection};
+use steno_bridge::{PermissionState, Platform, SettingsSection};
 use steno_core::{Settings, Store};
 
+use super::audio::recording_permissions;
 use super::llm::LlmPreset;
 use crate::services::{Services, UpdateOutcome};
 use crate::setup::llm_configured;
 use crate::speech::{ModelAsset, SpeechEngineId};
 
-/// The pure rule behind the subtitles. Swift: `SettingsOverviewViewModel.subtitles`.
+/// The pure rule behind the subtitles; `paired_count` is `None` while the
+/// handover is unavailable (Swift's `handoverAvailable` false). Swift:
+/// `SettingsOverviewViewModel.subtitles`.
 #[must_use]
 pub fn subtitles(
+    platform: Platform,
     settings: Option<&Settings>,
     recording_ready: bool,
     models_installed: bool,
-    paired_count: usize,
-    handover_available: bool,
+    paired_count: Option<usize>,
     update_outcome: &UpdateOutcome,
     version: &str,
 ) -> BTreeMap<SettingsSection, String> {
@@ -62,7 +65,7 @@ pub fn subtitles(
                         .clone()
                         .unwrap_or_else(|| "Custom server".to_owned())
                 } else {
-                    preset.title().to_owned()
+                    preset.title(platform).to_owned()
                 }
             }
             None => "Not set up".to_owned(),
@@ -86,14 +89,11 @@ pub fn subtitles(
     );
     result.insert(
         SettingsSection::Phone,
-        if handover_available {
-            match paired_count {
-                0 => "No iPhone paired".to_owned(),
-                1 => "1 iPhone paired".to_owned(),
-                count => format!("{count} iPhones paired"),
-            }
-        } else {
-            "Unavailable".to_owned()
+        match paired_count {
+            None => "Unavailable".to_owned(),
+            Some(0) => "No iPhone paired".to_owned(),
+            Some(1) => "1 iPhone paired".to_owned(),
+            Some(count) => format!("{count} iPhones paired"),
         },
     );
     result
@@ -105,6 +105,7 @@ pub fn subtitles(
 pub fn refresh(
     store: &Store,
     services: &Services,
+    platform: Platform,
     version: &str,
 ) -> BTreeMap<SettingsSection, String> {
     let settings = store.settings().ok();
@@ -120,14 +121,13 @@ pub fn refresh(
     let paired_count = services
         .handover
         .as_ref()
-        .and_then(|handover| handover.paired_devices().ok())
-        .map_or(0, |devices| devices.len());
+        .map(|handover| handover.paired_devices().map_or(0, |devices| devices.len()));
     subtitles(
+        platform,
         settings.as_ref(),
-        granted(PermissionKind::Microphone) && granted(PermissionKind::SystemAudio),
+        recording_permissions(platform).all(granted),
         models_installed,
         paired_count,
-        services.handover.is_some(),
         &services.updater.last_outcome(),
         version,
     )

@@ -532,7 +532,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   `latest.json`, copied to the rolling `desktop-beta` and `desktop-stable` releases
   that `updater.rs` reads, each only moving forward
   (`apps/desktop/scripts/updater-lanes.sh`). No desktop release is GitHub's "latest"
-  before the cutover. WP9b is the cutover: `.plans/2026-10-04-mac-cutover.md`.
+  before the cutover. Before the first desktop release, `feat/desktop-linux-signing`
+  added `SHA256SUMS` over every asset and detached OpenPGP signatures for it and the
+  Linux bundles, from a key whose public half is `apps/desktop/release-signing-key.asc`
+  (`apps/desktop/README.md`, "Checksums and OpenPGP signatures"); the Windows
+  installers stay unsigned and the release notes say so. WP9b is the cutover:
+  `.plans/2026-10-04-mac-cutover.md`.
   The shell's gaps that must close before the cutover (WP9b) opens ("Open after the
   port"): the tray's badge for pending speaker reviews; the QR encoder, a fake until a
   QR crate draws the pairing code; the clip player, a fake with no audio output; and
@@ -872,11 +877,33 @@ still has to draw the window side. `[ ]` is not ported yet.
     second SIGTERM or a second SIGINT ends the process at once, unsaved, and a SIGHUP
     never does; a signal the app inherited ignored (`nohup`, a background job's SIGINT)
     stays ignored.
-  - A logout on Linux saves when logind ends the session's processes (with
-    `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then SIGHUP).
-    Otherwise nothing signals the app, and when the display connection closes first, GDK
-    ends the process unsaved; untested (before the first Linux release; no work package
-    yet).
+  - A logout on GNOME, and on Xfce under X11, runs the shutdown before the session
+    ends: the shell registers with the first session manager on the session bus,
+    GNOME's `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager` (the same
+    client protocol under names of its own), answers `QueryEndSession` at once and
+    `EndSession` only after the save, then quits
+    (`apps/desktop/src-tauri/src/session_end.rs`). It finds the manager's unique name
+    with `GetNameOwner`, so it starts none, and takes the client signals from that name
+    only. After `EndSession` gnome-session waits about ten seconds for the answer
+    (older releases ninety) and xfce4-session seven, on current releases both no more
+    than `SHUTDOWN_PATIENCE`, so a save that needs all of its patience can be cut off
+    when the session ends. A system shutdown or reboot runs the shutdown while logind
+    waits: the shell holds logind's `shutdown` delay lock and releases it after the
+    save on `PrepareForShutdown(true)`; logind waits at most `InhibitDelayMaxSec` (five
+    seconds by default) and then goes ahead, and the SIGTERM that follows waits for the
+    save in progress. The display closes then too, and GDK ends the process when it
+    does, so a save that outlasts logind's wait can be cut off as well. logind has no
+    logout signal, and its session `Lock` is the screen lock, which, like sleep, does
+    not stop a recording. A logout on KDE Plasma, or on Xfce under Wayland, saves only
+    when systemd signals the app (with `KillUserProcesses=yes`, systemd stops the scope
+    with SIGTERM, then SIGHUP), and when the display connection closes first, GDK ends
+    the process unsaved: Plasma before 6.6 serves no session-manager client API on
+    D-Bus, and from 6.6 its portal's session monitor waits about 1.5 s at the query and
+    not at the end, too short for the save; xfce4-session on Wayland quits after the
+    save phase without sending `EndSession`. The logind lock works on both. Without a
+    session bus, a session manager or logind, or with the lock denied, a logout or a
+    shutdown saves only when a signal reaches the app. The tests run both clients
+    against fakes on a private `dbus-daemon`; none of it has run on a real desktop.
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -897,13 +924,23 @@ still has to draw the window side. `[ ]` is not ported yet.
   - The updater's relaunch bypasses the exit request and runs the shutdown before it
     relaunches; on Windows the installer's own exit runs it (`on_before_exit`), and an
     install that fails after it ends the app once its message is closed.
+  - On Linux an exit that went through ends the process two seconds later at the latest
+    (`end_within` in the shell's `main.rs`), with its code; an update's relaunch is left to
+    the teardown. `tauri-plugin-single-instance` 2.5 releases its bus name in its
+    `RunEvent::Exit` handler, which Tauri runs before the shell's, with zbus's
+    `release_name` on a connection without a method timeout, so a frozen session bus
+    would hold the exit without a bound (about 20 s in #172's run, past a minute under a
+    stopped private `dbus-daemon`); with the grace, the exit under that stopped bus takes
+    2.2 s. The bus drops the name with the connection anyway, and the shutdown has ended
+    before an exit goes through.
   - The services runtime is never dropped: dropping it waits, without a bound, for a
     transcription or a model load in progress.
   - Open: the Windows logoff is untested on hardware and can outlast the end-session
     timeout, and whether a logoff ends the speech sidecar before `RunEvent::Exit` quits
-    the pipeline (which would mark its meeting `failed`) is unverified (WP10); a Linux
-    logout saves only when logind signals the app, which is untested on GNOME and on KDE
-    (before the first Linux release; no work package yet).
+    the pipeline (which would mark its meeting `failed`) is unverified (WP10); the Linux
+    logout and shutdown are untested on a real desktop, and a logout on KDE Plasma, or on
+    Xfce under Wayland, saves only when systemd signals the app (before the first Linux
+    release).
 - The host emits under its `publishing` lock, the main thread can be waiting for a
   thread that holds it (a Stop from the tray joins the recorder's level thread, which
   publishes), and the tray's setters wait for the main thread when called from
@@ -1209,11 +1246,13 @@ item to settle before the Linux release:
   mode waits for an output client). The session holds its mutex across
   `backend.start()`, so its callers, `state()` included, wait as long: 1
   to 2 s for a Bluetooth sink, against the Mac's 200 ms at most.
-- **Device changes read differently.** A lost connection, stream or link
-  (one removed from outside included) reads as `OutputDeviceGone`
-  (`InputDeviceGone` in person), and so does a microphone that vanishes
-  during a call: the server removes Steno's link to it, and a lost link
-  takes both lanes. `SampleRateChanged` never fires: PipeWire's adapter
+- **Device changes read differently.** A lost connection or stream loses
+  both lanes and reads as `OutputDeviceGone` (`InputDeviceGone` in
+  person). A lost link (one removed from outside included) reads as the
+  device of the lane it serves gone, as the Mac reads each device's own
+  liveness: a monitor link as `OutputDeviceGone`, the microphone's link as
+  `InputDeviceGone`, so a microphone that vanishes during a call reads as
+  `InputDeviceGone`. `SampleRateChanged` never fires: PipeWire's adapter
   resamples whatever the graph runs at. A device destroyed and re-created
   under the same name and id (WirePlumber restarting, a USB device
   re-enumerated) reads as gone, by its `object.serial`; the defaults are
@@ -1223,11 +1262,40 @@ item to settle before the Linux release:
   so other apps' streams ending do not hold a report back, and a burst of
   changes is judged at most 2 s after its first.
 - **A default move can go unreported.** With WirePlumber 0.5.14 and
-  PipeWire 1.6.5, a client binding the `default` metadata while
-  WirePlumber moved a default kept the move from every client already
-  bound, Steno's capture included (seen when the live tests polled the
-  metadata with `pw-metadata`). Check it on the release's versions; a
-  periodic re-read of the defaults would cover it.
+  PipeWire 1.6.5, a client binding the `default` metadata holds its
+  events back from every client bound before it until WirePlumber answers
+  the bind, so a move made meanwhile never reaches Steno's capture (seen
+  when the live tests polled the metadata with `pw-metadata`). In
+  `src/modules/module-metadata/metadata.c`, `global_bind` pings
+  WirePlumber and raises `pending` (lines 189 and 190), and
+  `metadata_property` forwards an event only while `pending` is 0 or to a
+  binder still waiting for its pong (line 53). `global_unbind` (line 106)
+  never calls `remove_pending` (line 122), so after a binder leaves before
+  its pong, `default` events stop for every client, later binders
+  included once their own pong is answered, until WirePlumber restarts;
+  restarting Steno does not help. Steno's own start can leave a bind
+  unanswered: if WirePlumber stalls past `START_TIMEOUT` (3 s),
+  `Capture::open` drops the connection with the pong outstanding, and
+  each retry of the rebuild adds another. The metadata proxy keeps no
+  copy to read again. #201 tried a periodic re-read (a fresh bind every
+  3 s) and dropped it: its own binds caused the same miss for the other
+  clients (pipewire-pulse, the desktop's sound settings) and could stop
+  their events for good. Reproduced on the private daemon, in a shell
+  under `scripts/pipewire-headless.sh bash`, with `$wp` set to
+  WirePlumber's `application.process.id` from `pw-dump`:
+
+  ```sh
+  pw-metadata -m -n default &             # bound first; prints every event
+  kill -STOP "$wp"                        # no pong from now on
+  timeout 1 pw-metadata -n default        # a second bind, gone before its pong
+  kill -CONT "$wp"
+  pw-metadata -n default 0 steno.after 1  # the monitor never prints it
+  pw-metadata -n default                  # a fresh bind lists it
+  ```
+
+  With the second bind run in the background instead
+  (`pw-metadata -n default &`), so it outlives the pong, the monitor
+  prints the set.
 - **`stop()` is bounded, except behind a blocked log write.** It closes
   the capture's gate to the sink, so no frame or report reaches the sink
   after it, and waits 2 s for the PipeWire thread; a thread that has not
@@ -1252,8 +1320,8 @@ item to settle before the Linux release:
 
 ### Handover
 
-Rust fixes the Swift behaviours below except the network and service name lines; each
-fix is ported to Swift before cutover.
+Rust fixes the Swift behaviours below except the network, service name, write order and
+touch lines; each fix is ported to Swift before cutover.
 
 - Network, same as Swift: Rust refuses tunnels. On Linux and macOS that is every
   point-to-point interface, which most tunnels there are (`wg0`, `tun0`, `utun3`); on
@@ -1270,17 +1338,35 @@ fix is ported to Swift before cutover.
   the LAN. On Windows the hardware rule refuses a LAN address on a Hyper-V external
   switch's or a Network Bridge's vEthernet adapter, so a computer whose LAN address
   moved there is unreachable.
-- Touch: `HandoverEngine.touch` should run an `UPDATE` of the row that still holds the
-  token (a new `MeetingStore` method), as the Rust engine does
-  (`Store::touch_paired_device`); today `store.save(seen, tokenHash:)` upserts the
-  device the gate read before a yield, so a revoke in between resurrects it.
+- Write order: both apps commit every store write of the engine (receipt saves, the
+  revoke's delete, the pairing's save, the touch) in the order it was asked for: each
+  waits until the one asked for before it has returned, also when the request that
+  asked for it is gone (`Engine::in_order`, `HandoverEngine.inOrder`; Swift #205). So a
+  revoke during a pairing's save deletes after it and the phone stays revoked after a
+  restart, and a pairing during a revoke's delete saves after it and stays. Rust takes
+  the place in line under the state lock together with the memory the write stands
+  for (the revoke count, the pairing's read of it, the receipt); in Swift the actor
+  makes the two one step. Rust makes every receipt change to the copy memory holds
+  under that same lock (`Engine::change`), so two chunks that land at once on two
+  threads both stay, and so does a chunk that lands during a re-announce or during
+  another first announce of the same recording. In both apps a receipt memory holds
+  as `complete` stays `complete`, and a late write of a revoked device leaves another
+  device's receipt alone (`Engine::update`, `HandoverEngine.transition`; Swift #209).
+  In both, a first announce whose store read found nothing answers as a re-announce
+  when memory holds the receipt by then, so the chunks folded into it and a
+  `complete` stay (Swift's `RecordingHandler.receipt`). The intake's own receipt
+  saves (`RecordingIntake::admit`, `RecordingIntake.admit`) run outside the line in
+  both apps.
+- Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
+  (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
+  commits between the gate's read and its touch stands.
 - Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt`
-  read with `try?`, so a failed read counts as no receipt: the sweep deletes a
-  resumable upload, a route answers 404, and an announce starts the recording over,
-  overwriting a `complete` receipt so that the next `complete` admits the meeting
-  twice. `HandoverEngine.authenticate` reads the device with `try?`, so a failed read
-  answers 401 and the phone unpairs. Rust keeps the files and answers 500
-  (`Engine::receipt`, the bearer gate).
+  read with `try?`, so a failed read, with no receipt in memory (after a restart),
+  counts as no receipt: the sweep deletes a resumable upload, a route answers 404, and
+  an announce starts the recording over, overwriting a `complete` receipt so that the
+  next `complete` admits the meeting twice. `HandoverEngine.authenticate` reads the
+  device with `try?`, so a failed read answers 401 and the phone unpairs. Rust keeps
+  the files and answers 500 (`Engine::receipt`, the bearer gate).
 - Pairing windows: Swift's `HandoverEngine.pair` checks only that a window is open,
   not that it is the one whose secret the head matched. The read timeout runs per
   silence, so a head whose body keeps trickling in pairs against a window opened after
@@ -1339,6 +1425,23 @@ fix is ported to Swift before cutover.
   the approval state becomes unreachable.
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
   Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
+  The page answers the shortcuts it shows itself (`useShortcut` in
+  `apps/macos/web/src/lib/platform.tsx`): ⌘F and ⇧⌘E in both apps, ⌘⇧R in the
+  Tauri shell only, where no Record menu owns it.
+- Each platform's words and keys: the shell tells every page its platform before the
+  page runs (`apps/desktop/src-tauri/src/platform.rs`, `window.__STENO_PLATFORM__`),
+  the page words itself from one table (`apps/macos/web/src/lib/platform.tsx`: "this
+  computer", "Show in File Explorer", "Show in folder", Ctrl+F) and the host from
+  `HostConfig::platform` ("this computer" in its sentences, and only the permissions
+  the OS has: all four on the Mac, the microphone and local network on Windows, the
+  microphone on Linux). The tray says "Settings" and "Check for Updates" without the
+  ellipsis off the Mac and "Exit Steno" on Windows, and shows shortcut hints on the
+  Mac only. The Swift app sets no platform and keeps the Mac's words. Three changes
+  reach both apps: a vault the CLI named reads "Obsidian (<vault folder>)" in the
+  footer, onboarding page 1's button says Continue, and the retention sentence says
+  "Recordings are kept until you delete them" and points at Settings > Recording. The
+  page now answers ⌘F and ⇧⌘E in the Swift app too, where their hints showed but
+  nothing answered.
 - Linux on a Wayland session runs under XWayland: `main` allows GDK only its `x11`
   backend (inside the process, so nothing it starts inherits it) when
   `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
@@ -1484,13 +1587,6 @@ request that fixes an item deletes it.
   does not show yet. It blocks the first Linux release too. Where: `display_name`,
   `source_repo` and `expected_bytes` in `crates/steno-services/src/speech.rs`; the
   Settings > General item under "Pipeline and services (WP6b)". Found: #164, #183.
-- **WP9b.** The Swift `touch` upsert: `HandoverEngine.touch`
-  (`Sources/StenoHandover/Routing/HandoverEngine.swift`) records a phone's last-seen
-  time with `store.save(seen, tokenHash:)`, which writes back the whole device row it
-  read before a suspension, so a revoke that commits in between puts the revoked phone
-  back. The Rust store runs an `UPDATE` of the row that still holds the token
-  (`Store::touch_paired_device`). Needed only if the Swift app ships another release.
-  Where: the "Touch" line under "Handover". Found: #169, #191.
 - **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
   Swift defects (each ported to Swift if it ships another release, otherwise closed by
   the cutover), the fixtures the Swift side owes, and the audio choices to settle at
@@ -1513,11 +1609,21 @@ request that fixes an item deletes it.
   Linux or Windows release, is the first run of the `publish` job against GitHub and
   the first MSI built for an `-rc.N` version. Where:
   `.github/workflows/desktop-release.yml`. Found: #184.
-- **First Linux release.** A Linux logout saves the recording only when logind ends
-  the session's processes with a signal; when nothing signals the app, or the display
-  connection closes first, GDK ends the process unsaved. Untested on GNOME and KDE.
-  Where: `apps/desktop/src-tauri/src/main.rs`; the shutdown items under "Pipeline and
-  services (WP6b)". Found: #185.
+- **First Linux release.** A logout on KDE Plasma, or on Xfce under Wayland, saves
+  the recording only when systemd ends the session's processes with a signal; when
+  nothing signals the app, or the display connection closes first, GDK ends the
+  process unsaved. Plasma before 6.6 serves no session-manager client API on D-Bus,
+  and from 6.6 its portal's session monitor waits about 1.5 s at the query and not at
+  the end, too short for the save; xfce4-session on Wayland quits after the save phase
+  without sending `EndSession`. Ways to close the gap: the portal's session monitor
+  (`CreateMonitor`), perhaps with a logout inhibitor held while recording; XSMP, which
+  GTK 3 does not speak; or a handler for the lost X connection that saves before GDK's
+  ends the process. The GNOME and Xfce logout and the logind shutdown lock
+  (`session_end.rs`) ran only against fakes on a private bus, not on a real desktop,
+  and a save that outlasts the session manager's wait (gnome-session ten seconds,
+  xfce4-session seven) or logind's (five) can be cut off. Where:
+  `apps/desktop/src-tauri/src/session_end.rs`; the shutdown items under "Pipeline and
+  services (WP6b)". Found: #185, #203.
 - **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
   threads alive, the node and its links left in the graph) and was never reproduced;
   the likely cause is a blocking log write (the **Unowned.** item on log writes).
@@ -1528,25 +1634,26 @@ request that fixes an item deletes it.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
-  list and no meeting detection, the latencies are unmeasured on real hardware, a
-  default move can go unreported when another client binds the `default` metadata at
-  the same moment, and the decoder reads a whole lane into memory (1.4 GB for a
-  two-hour 48 kHz lane). Where: the Linux items under "Audio". Found: #166, #176,
-  #197.
-- **First Linux release.** With a frozen session bus the single-instance plugin waits
-  about 20 s at exit to release its bus name (measured with #172; upstream behaviour),
-  and WebKitGTK leaks a file descriptor per destroyed webview (issue #160). Where:
-  `apps/desktop/src-tauri/src/main.rs`, `apps/desktop/README.md`. Found: #172.
-- **First Linux release.** The web UI speaks Mac on every platform: "Reveal in
-  Finder", "on this Mac", "menu bar item" and ⌘ shortcuts show on Linux (and on
-  Windows), seen in the Linux smoke under Xvfb. The platform's wording has to come
-  from the shell (the host's platform in a snapshot), not from the web app. Where:
-  `apps/macos/web/src` (`windows/main/meeting-detail.tsx`,
-  `windows/main/meeting-list.tsx`, `windows/main/processing-card.tsx`,
-  `windows/onboarding/setup-page.tsx`, `windows/onboarding/permissions-page.tsx`,
-  `windows/settings/`, `components/codex-consent-card.tsx`,
-  `components/permission-row.tsx`, `components/ui/menu.tsx`). Found: #195
-  (whole-app smoke).
+  list and no meeting detection, the latencies are unmeasured on real hardware, and
+  the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
+  Where: the Linux items under "Audio". Found: #166, #176.
+- **First Linux release.** A default move can go unreported (PipeWire 1.6.5 with
+  WirePlumber 0.5.14): report it to PipeWire upstream and check it on the release's
+  versions. Where: "A default move can go unreported" in the Linux list under
+  "Audio". Found: #197, #201.
+- **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
+  (issue #160). Where: `apps/desktop/README.md`. Found: #172.
+- **First Linux release.** The exported folder note calls a call recorded on Windows
+  or Linux a "Mac call" (`FolderNoteRenderer.sourceLabel`, Swift's word); the app
+  says "Call". The golden notes in `Tests/Fixtures/snapshots/` are shared with the
+  Swift renderer, so a platform's own word needs a fixture per platform. Where:
+  `crates/steno-adapters/src/rendering/folder_note.rs`. Found: #204.
+- **First Linux release.** The pages keep the Mac's inset for the traffic lights (the
+  sidebar's header-high spacer, onboarding's 52 px top) where Windows and Linux draw
+  their own title bar above the page, so the top of each window has an empty band
+  there. Where: `apps/macos/web/src/components/ui/sidebar-column.tsx`,
+  `apps/macos/web/src/windows/onboarding/onboarding-page.tsx`,
+  `apps/desktop/src-tauri/src/windows.rs`. Found: #204.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
   `directmlOnWindows` stays off by default (`SpeechSettings` in
@@ -1577,6 +1684,12 @@ request that fixes an item deletes it.
 - **First Windows release.** The `.msi` and NSIS installers are not code-signed (no
   certificate), so SmartScreen asks before the first install. Where:
   `.github/workflows/desktop-release.yml`, the WP9a paragraph. Found: #184.
+- **First Windows release.** WebView2 keeps its own browser keys: on the pages that
+  do not bind them (Settings, onboarding) Ctrl+Shift+R reloads the page and Ctrl+F
+  opens WebView2's find bar. Tauri 2.12 does not expose wry's switch for them
+  (`AreBrowserAcceleratorKeysEnabled`); untested on Windows. Where:
+  `apps/desktop/src-tauri/src/windows.rs`, `apps/macos/web/src/lib/platform.tsx`.
+  Found: #204.
 - **Unowned.** The CoreML backend still has its own chunker, merge and decoder
   configuration; moving it onto the shared chunker settles the unticked items of the
   WP4 integration notes (decode loop, merge, recovery, chunking, names). Each backend
@@ -1600,6 +1713,46 @@ request that fixes an item deletes it.
   `FileSecretStore::in_support_directory` (`crates/steno-services/src/secrets.rs`) and
   in `StenoPaths::default_support_directory` (`crates/steno-core/src/paths.rs`).
   Found: on `main` on 2026-10-04 (no pull request names it).
+- **Unowned.** A `complete` whose device was revoked while the intake admitted its
+  recording removes the metadata sidecar afterwards whatever memory holds, so when
+  another device announced the same recording id meanwhile, that device's sidecar
+  goes: its `complete` answers 404 ("announce again"), and its re-announce opens a
+  new partial and sends every chunk again. Nothing is lost. Both apps. Where: `admit`
+  in `crates/steno-handover/src/engine/recording.rs` and in
+  `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #209.
+- **Unowned.** `IdempotencyTests.receiptsStreamReachesComplete` hangs past its time
+  limit when `complete` fails, because its collector task is never cancelled; the
+  failure shows as a timeout instead of the assertion. Swift only. Where:
+  `Tests/StenoHandoverTests/IdempotencyTests.swift`. Found: #209.
+- **Unowned.** Two first announces of one recording that race both run `Inbox::begin`
+  before the receipt is made, and `begin` keeps the partial but writes the metadata
+  sidecar each time, so the receipt is the one whose change ran first and the sidecar is
+  the one whose `begin` ran last. With the same metadata (the phone's retry) nothing
+  differs. With another device, byte count, hash or chunk size the late announce is
+  refused with 409, with another `format` alone it is answered 200; either way its
+  sidecar, `format` included, may stay and reach `promote` and the intake at `complete`.
+  Running `begin` only once the receipt is made moves the partial's creation behind the
+  receipt and needs the place in line of a failed `begin` handled. Where: `announce` in
+  `crates/steno-handover/src/engine/recording.rs` and `Inbox::begin` in
+  `crates/steno-handover/src/upload/inbox.rs`. Found: #208.
+- **Unowned.** A `complete` refused for a revoke goes by the recording id alone:
+  `refusal` discards the inbox files and forgets the receipt,
+  `revoked_during_the_verify` discards the files. When another phone announced the same
+  recording id after the revoked phone's receipt read, that phone's receipt leaves
+  memory or its partial and sidecar go, and it is answered 404 "announce again" and
+  sends again. Discarding and forgetting only while memory holds no receipt of another
+  device closes it. Where: `refusal` and `revoked_during_the_verify` in
+  `crates/steno-handover/src/engine/recording.rs`. Found: #208.
+- **Unowned.** A re-announce during the intake, after the intake moved the verified
+  file and before the `complete` write, finds no file, opens a new partial and sidecar
+  and answers 200 `receiving` with no chunk listed; `admit` then removes only the
+  sidecar, so an empty partial stays after the admission until the next start's sweep,
+  and the phone may send every chunk again while the recording is admitted. Both apps.
+  Discarding every file of the recording in `admit` closes it, but Rust's test intake
+  keeps the verified file and the chunk upload tests read it after `complete`, so they
+  need an intake that moves it first. Where: `admit` in
+  `crates/steno-handover/src/engine/recording.rs` and in
+  `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #208, #209.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
@@ -1625,11 +1778,6 @@ request that fixes an item deletes it.
   `pnpm/action-setup` on one runner can break another's install (a rerun passes); it
   needs a per-runner `PNPM_HOME` or a runner-local pnpm across the workflows. Where:
   `pnpm/action-setup` in `.github/workflows/*.yml`. Found: #184.
-- **Unowned.** After a delivery to a vault the CLI named (`steno deliver --vault`),
-  the meeting footer shows the raw destination id `obsidian-folder@<path>` on every
-  platform: `destination_display_name` names only the stored Obsidian destination's id
-  and shows any other id as it is. Where: `crates/steno-host/src/labels.rs`,
-  `crates/steno-cli/src/commands/deliver.rs`. Found: #195 (whole-app smoke).
 - **Unowned.** `steno process --title` stores the title with `TitleOrigin::Default`,
   so the app shows the default date title while the export uses the given one. Swift's
   CLI does the same, so a fix changes both or neither. Where:
@@ -1691,6 +1839,10 @@ PR off `main`.
 | #154 ported: the room fallback for a call whose tap carried nothing (`steno-pipeline`) | `fix/rust-port-154-room-fallback` | #181 | merged |
 | A phone revoked mid-upload cannot complete it (Swift core, the counterpart of #190) | `fix/handover-revoke-race-swift` | #191 | merged |
 | The stop-waits-for-start session test forces its interleaving (`steno-audio`) | `fix/rust-session-race-test` | #194 | merged |
+| Each platform's own wording and shortcuts: the platform from the shell, the page's words and keys, the host's permissions and sentences, the vault the CLI named | `fix/desktop-platform-wording` | #204 | merged |
+| Every handover engine write in the order asked for: the revoke's delete, the pairing's save and the touch join the receipt saves (`steno-handover`) | `fix/rust-handover-device-writes` | #207 | merged |
+| A receipt change is made to the copy memory holds, under the lock that takes its place in line: two chunks that land at once both stay, a `complete` receipt stays `complete` (`steno-handover`) | `fix/rust-handover-chunk-fold` | #208 | merged |
+| A `complete` receipt stays `complete`, a racing first announce answers as a re-announce, and a revoked device's late write leaves another device's receipt alone (Swift core, the counterpart of #208) | `fix/swift-handover-complete-stays` | #209 | merged |
 | Only a 401 to the current pairing's token unpairs the phone (`mobile/`) | `fix/mobile-current-pairing-401` | #200 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
@@ -1735,21 +1887,25 @@ microphone's first output port and the default sink's front monitor ports.
 Every graph cycle brings all lanes in one interleaved buffer, which goes
 through `deliver_slices`, the safe form of the `deliver` the Mac's IOProc
 calls (the view type it shares with WP10a's stream bodies); the stream's `process`
-runs on PipeWire's data-loop thread. Default device moves, a node or port
-the capture reads going away, a failed or removed link and a lost
-connection are coalesced for 500 ms (2 s at most from the first) and
-judged with `DeviceSnapshot::difference` against the devices the targets
-resolved to, as on the Mac. The proof: `tests/realtime.rs` counts
-the process body on every OS, and `tests/pipewire.rs` runs against a
-private headless daemon with WirePlumber and null devices
+runs on PipeWire's data-loop thread. Default device moves, a node or
+port the capture reads going away, a failed or removed link (lost for
+the lane it serves) and a lost connection or stream (lost for both) are
+coalesced for 500 ms (2 s at most from the first) and judged with
+`DeviceSnapshot::difference` against the devices the targets resolved
+to, as on the Mac. The proof: `tests/realtime.rs` counts the process
+body on every OS, and `tests/pipewire.rs` runs against a private
+headless daemon with WirePlumber and null devices
 (`scripts/pipewire-headless.sh`, a step of the Linux CI job): each lane
 carries its own tone, PipeWire's data-loop thread makes zero allocations
 over a second of cycles, `stop()` leaves no thread, no node and no frame
 behind, the device changes are reported once per burst, no sooner than
 the coalescing delay and also while other apps' streams keep coming and
-going, the rebuild's restart runs, a link removed from outside reads as the
-output gone, and changes that settle back or touch other nodes are not
-reported.
+going, the rebuild's restart runs, a monitor link removed from outside
+reads as the output gone and so do both links removed (the monitor's
+first), the microphone's link removed from outside or a microphone that
+vanishes during a call reads as the input gone, the capture's connection
+closed from outside reads as the output gone (the input in person), and
+changes that settle back or touch other nodes are not reported.
 Linux items: the list after the Swift defects above.
 WP6b is `crates/steno-pipeline`, `crates/steno-cli` and `crates/steno-services`,
 and `apps/desktop` on the real host. It sits on `main` with every parent merged,

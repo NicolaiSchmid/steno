@@ -9,7 +9,8 @@ name: Desktop release
 #            the Developer ID certificate from a throwaway keychain
 #            (signing-keychain.sh) and notarises the `.app`;
 #            notarize-dmg.sh then notarises the image.
-#   Linux    `.deb` and `.AppImage`, x86_64.
+#   Linux    `.deb` and `.AppImage`, x86_64. A detached OpenPGP signature
+#            (`.asc`) beside each.
 #   Windows  `.msi` and NSIS `-setup.exe`, x86_64. Not code-signed: there
 #            is no Windows certificate. The MSI version comes from
 #            wix-version.sh, since WiX takes numbers only.
@@ -23,12 +24,26 @@ name: Desktop release
 # three platforms and publishes; a manual run builds the platforms it is
 # given and publishes nothing.
 #
-# Publishing writes one GitHub release per tag with every bundle, the
-# updater artifacts' `.sig` files and `latest.json`, then updates the
-# rolling `desktop-beta` and `desktop-stable` lanes that `updater.rs` reads
-# (updater-lanes.sh decides which). Every release here is a pre-release and
-# never "latest": until the Mac cutover (.plans/2026-10-04-mac-cutover.md)
-# the "latest release" belongs to the Swift app.
+# `assets` then gathers every bundle into one directory (release-assets.sh),
+# checks the updater signatures, writes `latest.json`, and checksums and
+# signs the lot (release-signatures.sh): `SHA256SUMS` over every asset, and
+# a detached OpenPGP signature (`.asc`) for it and for each Linux bundle
+# with the release signing key (LINUX_GPG_PRIVATE_KEY), verified against
+# the committed apps/desktop/release-signing-key.asc. On a tag the result
+# is the `desktop-release-assets` artifact, which `publish` uploads. A
+# manual run signs and verifies too, which proves the key and its
+# passphrase, but keeps only `SHA256SUMS` and what was verified
+# (`desktop-release-checksums`), so no signature for an unpublished build
+# leaves the runner. Only `assets`
+# signs; `plan` learns only whether the two secrets are set, and neither the
+# bundle jobs nor `publish` sees them.
+#
+# Publishing writes one GitHub release per tag with those assets, then
+# updates the rolling `desktop-beta` and `desktop-stable` lanes that
+# `updater.rs` reads (updater-lanes.sh decides which). Every release here
+# is a pre-release and never "latest": until the Mac cutover
+# (.plans/2026-10-04-mac-cutover.md) the "latest release" belongs to the
+# Swift app.
 #
 # `cargo deny check` (deny.toml) must pass before any bundle builds. The
 # bundles carry the real host; the opt-in `fixture-host` feature stays out.
@@ -62,10 +77,21 @@ jobs:
     timeout-minutes: 5
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
+      platforms: ${{ steps.plan.outputs.platforms }}
       version: ${{ steps.version.outputs.version }}
       wix_version: ${{ steps.version.outputs.wix_version }}
     steps:
       - uses: actions/checkout@v4
+
+      # The assets job's secrets, named here so a missing one fails before
+      # any bundle is built; each bundle job checks its own. Only whether
+      # each is set reaches this job, never the secret.
+      - name: Check secrets
+        env:
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY != '' && 'set' || '' }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE != '' && 'set' || '' }}
+        run: apps/desktop/scripts/require-secrets.sh LINUX_GPG_PRIVATE_KEY LINUX_GPG_PASSPHRASE
+
       - id: version
         run: |
           set -euo pipefail
@@ -88,6 +114,7 @@ jobs:
           set -euo pipefail
           matrix="$(apps/desktop/scripts/release-matrix.sh)"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "platforms=$(jq -r '.include | map(.name) | join(" ")' <<< "$matrix")" >> "$GITHUB_OUTPUT"
           echo "$matrix"
 
   deny:
@@ -178,9 +205,12 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
+      # `dest` per job: the default `~/setup-pnpm` is shared by every runner
+      # on a self-hosted machine, and two concurrent installs collide there.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
           package_json_file: apps/macos/web/package.json
+          dest: ${{ runner.temp }}/setup-pnpm
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -312,12 +342,129 @@ jobs:
           apps/desktop/scripts/signing-keychain.sh remove "$KEYCHAIN_PATH"
           rm -f "$RUNNER_TEMP"/AuthKey_*.p8
 
+  # Runs on every run: the release as `publish` would upload it (see the
+  # top of this file). The only job that signs with the release signing key.
+  assets:
+    name: assets
+    needs: [plan, bundle]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      PLATFORMS: ${{ needs.plan.outputs.platforms }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Each artifact in its own directory, dist/steno-desktop-<platform>.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: steno-desktop-*
+          path: dist
+
+      # Each platform's files from its own artifact only, so no other
+      # bundle job can put a `.deb` or `.AppImage` up for signing; the
+      # macOS archive gets the version in its name.
+      - name: Gather the assets
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # one argument per platform
+          apps/desktop/scripts/release-assets.sh "$VERSION" dist assets $PLATFORMS
+          ls -l assets
+
+      # Every signature against the public key the installed apps verify
+      # with, so a secret that is not the config key's other half fails
+      # here and not on every user's next update. Two updater artifacts per
+      # platform on Linux and Windows, one on macOS.
+      - name: Verify the updater signatures
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends minisign >/dev/null
+          pubkey="$(jq -r '.plugins.updater.pubkey' apps/desktop/src-tauri/tauri.conf.json | base64 --decode)"
+          printf '%s\n' "$pubkey" > "$RUNNER_TEMP/updater.pub"
+          expected=0
+          for platform in $PLATFORMS; do
+            case "$platform" in macos) expected=$((expected + 1)) ;; *) expected=$((expected + 2)) ;; esac
+          done
+          count=0
+          for sig in assets/*.sig; do
+            base64 --decode "$sig" > "$RUNNER_TEMP/signature.minisig"
+            asset="${sig#assets/}"
+            minisign -V -q -p "$RUNNER_TEMP/updater.pub" -x "$RUNNER_TEMP/signature.minisig" -m "${sig%.sig}" \
+              || { echo "::error::$asset does not verify ${asset%.sig} against plugins.updater.pubkey"; exit 1; }
+            count=$((count + 1))
+          done
+          test "$count" -eq "$expected" || { echo "::error::expected $expected updater signatures for $PLATFORMS, found $count"; exit 1; }
+          echo "verified $count updater signatures"
+
+      # The URLs name the tag a release of this version is published under,
+      # on a manual run too.
+      - name: Updater manifest
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # one argument per platform
+          apps/desktop/scripts/updater-manifest.sh "$VERSION" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/desktop-v$VERSION" assets $PLATFORMS \
+            > assets/latest.json
+          cat assets/latest.json
+
+      # Last, so the checksums cover latest.json too. Fails the run when a
+      # signature does not verify against the committed public key. The
+      # script's log (which files it signed and verified, the fingerprint)
+      # is a manual run's proof.
+      - name: Checksums and signatures
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          apps/desktop/scripts/release-signatures.sh assets apps/desktop/release-signing-key.asc 2>&1 \
+            | tee "$RUNNER_TEMP/signatures.txt"
+          cat assets/SHA256SUMS
+
+      # The notes publish will write, in the run's summary.
+      - name: Release notes
+        run: |
+          set -euo pipefail
+          apps/desktop/scripts/release-notes.sh "$VERSION" "desktop-v$VERSION" assets \
+            apps/desktop/release-signing-key.asc >> "$GITHUB_STEP_SUMMARY"
+
+      # Kept a few days, so a failed publish can be re-run
+      # (apps/desktop/README.md, When a run fails).
+      - name: Upload the release assets
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-assets
+          path: assets/
+          if-no-files-found: error
+          retention-days: 5
+          overwrite: true
+
+      # A manual run's proof, without the signatures: each would be a valid
+      # one on a build that is never published.
+      - name: Checksums and what was verified
+        if: github.event_name != 'push'
+        run: |
+          set -euo pipefail
+          mkdir -p checksums
+          cp assets/SHA256SUMS "$RUNNER_TEMP/signatures.txt" checksums/
+      - name: Upload the checksums
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-checksums
+          path: checksums/
+          if-no-files-found: error
+          retention-days: 3
+          overwrite: true
+
   # Only a pushed tag publishes, one run at a time, so two tags never write
   # the lanes at once.
   publish:
     name: publish
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [plan, bundle]
+    needs: [plan, assets]
     concurrency:
       group: desktop-publish
       cancel-in-progress: false
@@ -334,67 +481,25 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: steno-desktop-*
-          path: dist
-          merge-multiple: true
+          name: desktop-release-assets
+          path: assets
 
-      # One flat directory of release assets. The macOS updater archive is
-      # `Steno.app.tar.gz` on every version; it gets the version and the
-      # architecture the other assets carry (its signature covers the
-      # bytes, not the name).
-      - name: Assets
-        run: |
-          set -euo pipefail
-          mkdir -p assets
-          find dist -type f -exec mv -t assets {} +
-          if [ -f assets/Steno.app.tar.gz ]; then
-            mv assets/Steno.app.tar.gz "assets/Steno_${VERSION}_aarch64.app.tar.gz"
-            [ -f assets/Steno.app.tar.gz.sig ] \
-              || { echo "::error::Steno.app.tar.gz came without Steno.app.tar.gz.sig"; exit 1; }
-            mv assets/Steno.app.tar.gz.sig "assets/Steno_${VERSION}_aarch64.app.tar.gz.sig"
-          fi
-          ls -l assets
-
-      # Every signature against the public key the installed apps verify
-      # with, so a secret that is not the config key's other half fails
-      # here and not on every user's next update.
-      - name: Verify the updater signatures
-        run: |
-          set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends minisign >/dev/null
-          pubkey="$(jq -r '.plugins.updater.pubkey' apps/desktop/src-tauri/tauri.conf.json | base64 --decode)"
-          printf '%s\n' "$pubkey" > "$RUNNER_TEMP/updater.pub"
-          count=0
-          for sig in assets/*.sig; do
-            base64 --decode "$sig" > "$RUNNER_TEMP/signature.minisig"
-            asset="${sig#assets/}"
-            minisign -V -q -p "$RUNNER_TEMP/updater.pub" -x "$RUNNER_TEMP/signature.minisig" -m "${sig%.sig}" \
-              || { echo "::error::$asset does not verify ${asset%.sig} against plugins.updater.pubkey"; exit 1; }
-            count=$((count + 1))
-          done
-          test "$count" -eq 5 || { echo "::error::expected five updater signatures, found $count"; exit 1; }
-          echo "verified $count updater signatures"
-
-      - name: Updater manifest
-        run: |
-          set -euo pipefail
-          apps/desktop/scripts/updater-manifest.sh "$VERSION" \
-            "https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG" assets > assets/latest.json
-          cat assets/latest.json
-
+      # The notes say how to check a download against the signatures the
+      # assets job made (release-notes.sh).
       - name: Publish the release
         run: |
           set -euo pipefail
-          notes="Steno desktop $VERSION: macOS (Apple silicon, signed and notarised), Linux (.deb, AppImage) and Windows (.msi, NSIS -setup.exe; not code-signed, so SmartScreen asks before the first install). The Mac app on the Swift releases stays the one to install on macOS until the cutover."
+          apps/desktop/scripts/release-notes.sh "$VERSION" "$TAG" assets apps/desktop/release-signing-key.asc \
+            > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "release $TAG exists; replacing assets"
           else
             gh release create "$TAG" --draft --prerelease --latest=false \
-              --verify-tag --title "Steno desktop $VERSION" --notes "$notes"
+              --verify-tag --title "Steno desktop $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
           fi
           gh release upload "$TAG" assets/* --clobber
-          gh release edit "$TAG" --draft=false --prerelease --latest=false
+          gh release edit "$TAG" --draft=false --prerelease --latest=false --notes-file "$RUNNER_TEMP/notes.md"
           gh release view "$TAG" --json url --jq .url
 
       # After the release is public, so the manifest's URLs resolve. Each

@@ -129,7 +129,7 @@ pub fn end_reason_sentence(reason: &RecordingEndReason) -> Option<String> {
     }
 }
 
-/// What the rule does to the files, as Settings > Audio says it under the
+/// What the rule does to the files, as Settings > Recording says it under the
 /// picker. Swift: `AudioRetention.footnote`.
 #[must_use]
 pub fn retention_footnote(retention: AudioRetention) -> String {
@@ -154,14 +154,26 @@ pub fn retention_footnote(retention: AudioRetention) -> String {
 /// `ObsidianFolderDestination.destinationID`.
 pub const OBSIDIAN_DESTINATION_ID: &str = "obsidian-folder";
 
-/// The destination as the footer names it; a destination this app does not
-/// know is shown by its id. Swift: `Delivery.destinationDisplayName`.
+/// The destination as the footer names it: "Obsidian" for the stored
+/// vault, "Obsidian (Notes)" for a vault `steno deliver --vault` named
+/// (its id is `obsidian-folder@<vault path>`, the vault's folder in the
+/// brackets), and any other destination by its id, the only name this app
+/// has for it. Swift: `Delivery.destinationDisplayName`.
 #[must_use]
 pub fn destination_display_name(delivery: &Delivery) -> String {
-    if delivery.destination_id == OBSIDIAN_DESTINATION_ID {
-        "Obsidian".to_owned()
-    } else {
-        delivery.destination_id.clone()
+    let id = delivery.destination_id.as_str();
+    if id == OBSIDIAN_DESTINATION_ID {
+        return "Obsidian".to_owned();
+    }
+    match id
+        .strip_prefix(OBSIDIAN_DESTINATION_ID)
+        .and_then(|rest| rest.strip_prefix('@'))
+    {
+        Some(vault) => std::path::Path::new(vault).file_name().map_or_else(
+            || "Obsidian".to_owned(),
+            |name| format!("Obsidian ({})", name.to_string_lossy()),
+        ),
+        None => id.to_owned(),
     }
 }
 
@@ -214,6 +226,30 @@ mod tests {
         assert_eq!(file_size(1_500_000), "1.5 MB");
         assert_eq!(file_size(734_003_200), "734 MB");
         assert_eq!(file_size(4_200), "4 KB");
+    }
+
+    #[test]
+    fn obsidian_ids_read_as_names_and_other_ids_as_they_are() {
+        let named = |id: &str| {
+            destination_display_name(&Delivery {
+                id: uuid::Uuid::nil(),
+                meeting_id: uuid::Uuid::nil(),
+                destination_id: id.to_owned(),
+                status: steno_core::DeliveryStatus::Pending,
+                last_attempt_at: None,
+                receipt: None,
+            })
+        };
+        assert_eq!(named("obsidian-folder"), "Obsidian");
+        assert_eq!(named("obsidian-folder@/home/me/Notes"), "Obsidian (Notes)");
+        assert_eq!(named("obsidian-folder@/home/me/Notes/"), "Obsidian (Notes)");
+        assert_eq!(named("obsidian-folder@/"), "Obsidian");
+        assert_eq!(named("obsidian-folderish"), "obsidian-folderish");
+        assert_eq!(
+            named("notion"),
+            "notion",
+            "an unknown destination has only its id"
+        );
     }
 
     #[test]

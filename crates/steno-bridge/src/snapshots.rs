@@ -558,7 +558,7 @@ pub struct OnboardingVault {
 pub struct OnboardingSnapshot {
     pub page: OnboardingPage,
     pub permissions: Vec<OnboardingPermissionStep>,
-    /// Every required permission granted: page 1 offers Done instead of Later.
+    /// Every required permission granted: page 1 offers Continue instead of Later.
     pub permissions_complete: bool,
     pub setup: Vec<OnboardingSetupStep>,
     pub can_save_summaries: bool,

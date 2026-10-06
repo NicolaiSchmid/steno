@@ -159,6 +159,13 @@ export const meetingState = z.enum([
 export const captureMode = z.enum(["call", "inPerson"]);
 export const listFilter = z.enum(["all", "processing", "ready", "failed"]);
 export const detailTab = z.enum(["summary", "transcript", "tasks", "notes"]);
+/**
+ * The OS the host runs on. Not a message: the Tauri shell sets it as
+ * `window.__STENO_PLATFORM__` before the page's scripts run, and the Swift
+ * app sets nothing (`src/lib/platform.tsx`).
+ */
+export const platform = z.enum(["macos", "windows", "linux"]);
+export type PlatformOS = z.infer<typeof platform>;
 
 // ─── Envelope ─────────────────────────────────────────────────────────────
 

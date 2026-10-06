@@ -7,9 +7,9 @@ import {
 import type { SummariesSettingsSnapshot } from "@/bridge/contract";
 import { send, useBridge, useSnapshot } from "@/bridge/hooks";
 import {
-	CODEX_CONSENT,
 	CodexConsentCard,
 	type CodexState,
+	codexConsent,
 } from "@/components/codex-consent-card";
 import { DraftField } from "@/components/draft-field";
 import {
@@ -25,11 +25,13 @@ import {
 	FormRow,
 	Select,
 } from "@/components/ui";
+import { usePlatform } from "@/lib/platform";
 import { SectionPage } from "./section-page";
 
 /** The consent card until confirmed, then the account line and the model. */
 function CodexFields({ codex }: { codex: CodexState }) {
 	const client = useBridge();
+	const { words } = usePlatform();
 
 	if (!codex.confirmed) {
 		return (
@@ -57,9 +59,7 @@ function CodexFields({ codex }: { codex: CodexState }) {
 						data-testid="codex-unavailable"
 						icon={<CircleAlertIcon aria-hidden="true" />}
 						size="sm"
-						title={
-							codex.signInDetail ?? "No ChatGPT sign-in was found on this Mac."
-						}
+						title={codex.signInDetail ?? codexConsent(words).noSignIn}
 						variant="warning"
 					/>
 				</FormRow>
@@ -166,6 +166,7 @@ function statusOf(summaries: SummariesSettingsSnapshot): {
  */
 export function SummariesSection() {
 	const client = useBridge();
+	const { words } = usePlatform();
 	const summaries = useSnapshot("settings.summaries");
 	if (!summaries) {
 		return <SectionPage id="summaries" />;
@@ -188,9 +189,9 @@ export function SummariesSection() {
 				footer={
 					codex
 						? codex.confirmed
-							? CODEX_CONSENT.usageFootnote
+							? codexConsent(words).usageFootnote
 							: undefined
-						: "Stored in your login keychain and sent only to the server above."
+						: `Stored in ${words.loginKeychain} and sent only to the server above.`
 				}
 			>
 				<SummariesEndpointForm

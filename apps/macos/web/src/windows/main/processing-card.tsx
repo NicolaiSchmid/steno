@@ -3,6 +3,7 @@ import type {
 	ProgressSnapshot,
 } from "@/bridge/contract";
 import { Card, ProgressBar } from "@/components/ui";
+import { usePlatform } from "@/lib/platform";
 import { format } from "./format";
 
 export type ProgressEntry = ProgressSnapshot["entries"][number];
@@ -18,6 +19,7 @@ export interface ProcessingCardProps {
  * progress event the bar is indeterminate and the title says so.
  */
 export function ProcessingCard({ state, entry }: ProcessingCardProps) {
+	const { words } = usePlatform();
 	const title = entry
 		? entry.title
 		: state === "queued"
@@ -55,7 +57,8 @@ export function ProcessingCard({ state, entry }: ProcessingCardProps) {
 				value={entry ? entry.fraction : null}
 			/>
 			<p className="my-0 text-faint text-xs">
-				Audio stays on this Mac. This usually takes a minute or two.
+				Audio stays on this {words.computer}. This usually takes a minute or
+				two.
 			</p>
 		</Card>
 	);

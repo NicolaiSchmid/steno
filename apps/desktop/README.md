@@ -49,11 +49,31 @@ exits reach the shutdown these ways:
   ends the process at once, unsaved; a SIGHUP never does. A signal the
   app inherited ignored (`nohup`, a background job's SIGINT) stays
   ignored.
-- A logout on Linux saves when logind ends the session's processes (with
-  `KillUserProcesses=yes`, systemd stops the scope with SIGTERM, then
-  SIGHUP). Otherwise nothing signals the app, and when the display
-  connection closes first, GDK ends the process unsaved; untested (before
-  the first Linux release; no work package yet).
+- A logout on GNOME, and on Xfce under X11, saves before the session
+  ends: the app registers with the session manager on the session bus
+  (GNOME's `org.gnome.SessionManager`, else Xfce's
+  `org.xfce.SessionManager`, which serves the same protocol under names
+  of its own) and answers its `EndSession` only after the save
+  (`session_end.rs`). gnome-session waits about ten seconds for that
+  answer and xfce4-session seven, both no more than the shutdown's
+  patience, so a save that needs all of it can be cut off when the
+  session ends.
+- A system shutdown or reboot on Linux saves while logind waits: the app
+  holds logind's `shutdown` delay lock and releases it after the save.
+  logind waits for the lock at most five seconds by default
+  (`InhibitDelayMaxSec`), then goes ahead, and the SIGTERM that follows
+  waits for the save in progress. The display closes then too, and GDK
+  ends the process when it does, so a save that outlasts logind's wait
+  can be cut off as well. Sleep and the screen lock do not stop a
+  recording.
+- A logout on KDE Plasma, or on Xfce under Wayland, saves only when
+  systemd signals the app (with `KillUserProcesses=yes`, systemd stops
+  the scope with SIGTERM, then SIGHUP), and when the display connection
+  closes first, GDK ends the process unsaved. Plasma before 6.6 serves
+  no session-manager client API on D-Bus, and from 6.6 its portal's
+  session monitor waits about 1.5 s at the query and not at the end, too
+  short for the save; xfce4-session on Wayland quits after the save
+  phase without sending `EndSession`.
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
@@ -67,6 +87,15 @@ exits reach the shutdown these ways:
   the speech sidecar, a console process, before `RunEvent::Exit` quits
   the pipeline, so its job could leave the meeting failed; unverified
   (WP10).
+
+None of the Linux paths above has been tested on a real desktop (before
+the first Linux release); the tests run the session client and the
+logind lock against fakes on a private bus.
+
+On Linux an exit that went through ends the process two seconds later at
+the latest (`end_within` in `main.rs`): the single-instance plugin
+releases its bus name at the run loop's end and waits for the bus
+without a bound, so a frozen session bus would hold the exit.
 
 The speech sidecar ignores SIGINT, SIGTERM and SIGHUP on Linux and
 macOS: Ctrl-C, a closed terminal and systemd signal it with the app, and
@@ -82,6 +111,10 @@ setters wait for the main thread when called from another.
 The tray menu is the Swift menu bar popover's controls: Record (Stop
 recording while recording, with the recorder's words between), Record in
 person, Open Steno, Settings, Launch at login, Check for Updates, Quit.
+Each platform names them its own way (`MenuAction::label_on`): the Mac's
+"Settings…", "Check for Updates…" and "Quit Steno", the first two
+without the ellipsis on Windows and Linux, "Exit Steno" on Windows; only
+the Mac's menu shows shortcut hints.
 Recorder commands are bridge methods sent through the main window
 (`actions.rs`), so the shell has no recorder logic of its own; it follows
 the recorder off the `recording` snapshots the host publishes to that
@@ -100,6 +133,14 @@ AppIndicator extension brings the tray back. An `XEmbed`-only tray is not
 asked for, so there closing main also ends the app, the safe side. On macOS
 the menu bar carries the shell's own menu (`menu.rs`): Quit goes through
 the run loop, the Edit menu gives the pages their copy and paste shortcuts.
+
+Every webview gets the platform before its page runs: `platform.rs` adds
+`window.__STENO_PLATFORM__ = "linux"` (or `"macos"`, `"windows"`) as an
+initialization script, and the page words itself and binds its keys for
+it (`apps/macos/web/src/lib/platform.tsx`: "Show in File Explorer" for
+"Show in Finder", "this computer" for "this Mac", Ctrl+F for ⌘F). The
+host words its own sentences and lists the permissions for the same
+value (`HostConfig::platform`).
 
 The panels are the web app's `#/panel/bubble` and `#/panel/prompt` routes
 (`apps/macos/web/src/windows/panels/`), two webviews that hang from one
@@ -306,10 +347,14 @@ publishes; the version must be the one under `[workspace.package]` in
 `Cargo.toml`, which Tauri stamps into the bundles, or the run fails before
 it builds. So does a version the MSI cannot carry: WiX takes numbers only,
 so `scripts/wix-version.sh` accepts `X.Y.Z` and `X.Y.Z-<label>.<N>` alone.
-A manual run builds, signs and notarises the platforms it is given
-and keeps the bundles as workflow artifacts; it publishes nothing. The
-`desktop-v` prefix keeps these tags apart from the Swift app's `v*`
-(`release.yml`) and the mobile build tags `ios-fp-*` (`mobile-cd.yml`).
+A manual run builds, signs and notarises the platforms it is given and
+keeps the bundles as workflow artifacts. It checksums and OpenPGP-signs
+them as a tag would, but keeps none of the `.asc` files, only
+`SHA256SUMS` and the log of what verified (see Checksums and OpenPGP
+signatures). It publishes nothing.
+The `desktop-v` prefix keeps these tags apart from the Swift
+app's `v*` (`release.yml`) and the mobile build tags `ios-fp-*`
+(`mobile-cd.yml`).
 `cargo deny check` (`deny.toml`: the licence allow list, the MPL-2.0
 crates by name, advisories, sources) runs first and stops the run on any
 finding.
@@ -320,6 +365,9 @@ finding.
    secrets in the table below are set, and a manual run on the branch
    passes:
    `gh workflow run desktop-release.yml --ref <branch> -f platforms=linux,windows,macos`.
+   Its `desktop-release-checksums` artifact proves the checksums and
+   signatures (see Checksums and OpenPGP signatures), and the run's
+   summary holds the notes.
 1. On `main`, set `[workspace.package] version` in `Cargo.toml`, run
    `cargo check` so `Cargo.lock` follows (CI builds with `--locked`), and
    merge both. A hyphen (`0.2.0-rc.1`) means the beta lane only.
@@ -359,13 +407,42 @@ new assets until **Update lanes** finishes.
   error in that step's output.
 - **Check the bundles**: the `::error::` names the file or the check that
   failed.
+- **Gather the assets** (in `assets`): an artifact holds a file its
+  platform does not build or whose name has a character other than
+  A-Z a-z 0-9 . _ + -, two files share a name, or a platform's artifact is
+  missing; the `::error::` names it
+  (`scripts/release-assets.sh`). Fix the bundle job, delete the tag and
+  tag again.
+- **Verify the updater signatures** (in `assets`):
+  `TAURI_SIGNING_PRIVATE_KEY` is not the secret half of
+  `plugins.updater.pubkey`, or a platform lacks a `.sig`; fix the secret,
+  delete the tag and tag again (re-running only `assets` reuses the same
+  bundles).
+- **Checksums and signatures** (in `assets`): `LINUX_GPG_PRIVATE_KEY` is
+  not the secret half of `release-signing-key.asc`, `LINUX_GPG_PASSPHRASE`
+  is not its passphrase, or the key has expired; the `::error::` says
+  which file did not sign or verify, or when the key expired. Fix the
+  secret and re-run the failed jobs. An expired key needs a new commit,
+  since a re-run checks out the tag's public key: extend the key (see
+  Checksums and OpenPGP signatures), merge the new public key, then delete
+  the tag and tag the new commit.
 - **A job that timed out or lost its runner**: `notarize-dmg.sh` gives up
   after 45 minutes, but the bundler's own notarisation of the `.app` waits
   until the job's 90-minute timeout. Check `xcrun notarytool history` with
   the App Store Connect key, then re-run the failed jobs.
 - **publish**, also one cancelled while it waited (a third tag): re-run it.
+  It uploads what `assets` left in the run's `desktop-release-assets`
+  artifact, which is kept 5 days; after that, re-run the `assets` job
+  instead, which signs the same bundles again and runs publish after it:
+
+  ```sh
+  gh run view <run id> --json jobs --jq '.jobs[] | select(.name == "assets") | .databaseId'
+  gh run rerun --job <that job id>
+  ```
+
   An existing release is reused and its assets replaced; the lanes move as
-  on the first run.
+  on the first run. GitHub allows re-runs for 30 days; after that, delete
+  the tag and tag again.
 
 ### A bad release
 
@@ -395,15 +472,18 @@ version, whose tag moves the lanes as usual.
 | `ASC_KEY_ID` | macOS Bundle, `notarize-dmg.sh` | The App Store Connect API key's id |
 | `ASC_ISSUER_ID` | macOS Bundle, `notarize-dmg.sh` | The key's issuer id |
 | `ASC_PRIVATE_KEY` | macOS Bundle, `notarize-dmg.sh` | The key itself, the `.p8` contents |
+| `LINUX_GPG_PRIVATE_KEY` | `plan`'s Check secrets, `assets`' Checksums and signatures | The armored OpenPGP secret key of `release-signing-key.asc`, passphrase-protected |
+| `LINUX_GPG_PASSPHRASE` | `plan`'s Check secrets, `assets`' Checksums and signatures | Its passphrase |
 
 `scripts/require-secrets.sh` names every missing one before anything is
-built.
+built: the `plan` job checks the two OpenPGP secrets, each bundle job its
+own.
 
 Installed apps verify updates only with the `pubkey` they were built with.
 To rotate the updater key, publish one release (no hyphen, and at or
 above what both lanes serve, so both move to it) whose `tauri.conf.json`
-carries the new public key, signed with the old private key. Publish
-checks the signatures against the config's key, so on that release's
+carries the new public key, signed with the old private key. The `assets`
+job checks the signatures against the config's key, so on that release's
 commit the `pubkey=` line of **Verify the updater signatures**
 (`desktop-release.yml`) is set to the old key,
 `pubkey="$(base64 --decode <<< '<the old plugins.updater.pubkey value>')"`,
@@ -467,19 +547,104 @@ before it builds the image and the updater archive from it, and
 `scripts/notarize-dmg.sh` notarises and staples the image.
 `check-bundle.sh --signed` checks the Developer ID authority, the runtime
 flag, the timestamp and the team on all three items, the entitlements,
-the ticket and Gatekeeper's verdict. Linux packages are not signed beyond
-the updater signature. Windows installers are not code-signed, since there
-is no Windows certificate: SmartScreen asks before the first install, and
-updates install without asking again.
+the ticket and Gatekeeper's verdict. The Linux bundles have no signature
+of their own format (no signed apt repository, no AppImage-embedded
+signature); a detached OpenPGP signature beside each covers them instead
+(below). Windows installers are not code-signed yet, since there is no
+Windows certificate: SmartScreen warns before the first install, which the
+release notes say, and updates install without asking again.
+
+### Checksums and OpenPGP signatures
+
+Every release also carries `SHA256SUMS`, the SHA-256 of every other file
+in it but the OpenPGP signatures (`.asc`): all three platforms, the
+updater `.sig` files and `latest.json`. `SHA256SUMS` and each Linux `.deb`
+and `.AppImage` have a detached armored OpenPGP signature (`<file>.asc`).
+The key is the
+Steno release signing key, an ed25519 key whose public half is
+[`apps/desktop/release-signing-key.asc`](release-signing-key.asc):
+
+```text
+Steno release signing (github.com/NicolaiSchmid/steno)
+048B 5279 50E4 F609 B90E  6349 5F88 10A6 E6D4 DB46
+expires 2029-10-04
+```
+
+To check a download, put `SHA256SUMS`, `SHA256SUMS.asc` and the files in
+one directory and run these commands there. The release notes give the
+`gpg --verify` line for each Linux bundle, and `wget` fetches the key
+where `curl` is missing:
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/NicolaiSchmid/steno/desktop-v<version>/apps/desktop/release-signing-key.asc
+gpg --import release-signing-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+gpg --verify steno-desktop_<version>_amd64.deb.asc steno-desktop_<version>_amd64.deb
+```
+
+Each `gpg --verify` must report "Good signature" from the fingerprint
+above, and `sha256sum` must print OK for every file you downloaded; the
+warning that the key is not certified by a trusted signature is expected.
+On Windows, in PowerShell,
+`(Get-FileHash .\<installer>).Hash -eq '<its hash in SHA256SUMS>'` must
+print `True`.
+
+Only the `assets` job holds the secret key (`LINUX_GPG_PRIVATE_KEY`,
+`LINUX_GPG_PASSPHRASE`): `plan` learns only whether the two secrets are
+set, and the bundle jobs and `publish` never see them.
+`scripts/release-assets.sh` first gathers each platform's files from its
+own artifact only, so no other bundle job can put a `.deb` or `.AppImage`
+up for signing. `scripts/release-signatures.sh` imports the key into a
+throwaway `GNUPGHOME` under `$RUNNER_TEMP`, passes the passphrase through
+a file there (loopback pinentry), signs with the committed key's
+fingerprint only, and removes the directory and its agent on exit. It then
+verifies every signature with `gpgv` against a keyring holding only the
+committed public key; a signature that does not verify fails the run
+before anything is published. An expired key fails the run before
+anything is signed, and the script warns 90 days before.
+`scripts/release-notes.sh` writes the release notes with the fingerprint
+and the commands above.
+
+On a tag the signed set is the `desktop-release-assets` artifact (kept 5
+days) that `publish` uploads. A manual run signs and verifies the same
+way, but its `desktop-release-checksums` artifact (kept 3 days) holds only
+`SHA256SUMS` and `signatures.txt`, the script's log of what it signed and
+verified: a signature on a build that is never published stays on the
+runner.
+
+Before the key expires, extend it where the secret key is kept, then
+commit the new public key and the new date in the block above, and
+replace the secret:
+
+```sh
+gpg --quick-set-expire 048B527950E4F609B90E63495F8810A6E6D4DB46 3y
+gpg --armor --export 048B527950E4F609B90E63495F8810A6E6D4DB46 > apps/desktop/release-signing-key.asc
+gpg --armor --export-secret-keys 048B527950E4F609B90E63495F8810A6E6D4DB46 | gh secret set LINUX_GPG_PRIVATE_KEY
+```
+
+The fingerprint stays, so old releases still verify. To replace the key
+(lost or compromised), generate a new one
+(`gpg --quick-generate-key 'Steno release signing (github.com/NicolaiSchmid/steno)' ed25519 sign 3y`),
+commit its public half and the new fingerprint here and in
+`scripts/release-notes.test.sh`, replace both secrets, and say in the
+next release's notes that the key changed; for a compromised key, also
+publish its revocation certificate. Releases signed with the old key keep
+verifying against its public half in the history at their tag.
 
 ### Publishing, on a tag
 
 One GitHub release per tag carries every bundle, the `.sig` of each
 updater artifact (`.app.tar.gz`, `.AppImage`, `.deb`, `.msi`,
-`-setup.exe`) and `latest.json` (`scripts/updater-manifest.sh`). Each
-signature is checked against `plugins.updater.pubkey` first, so a signing
-key that is not the config key's other half fails the release instead of
-every user's next update. The manifest then goes to the rolling release of
+`-setup.exe`), `latest.json` (`scripts/updater-manifest.sh`),
+`SHA256SUMS` and the `.asc` signatures. The `assets` job assembles them on
+every run, a manual one included: it gathers each platform's artifact
+(`scripts/release-assets.sh`) and checks each `.sig` against
+`plugins.updater.pubkey`, so a signing key that is not the config key's
+other half fails the release instead of every user's next update. It
+then writes the manifest, the checksums and the OpenPGP signatures (see
+above). `publish` uploads that set with the notes from
+`scripts/release-notes.sh`. The manifest then goes to the rolling release of
 each lane, `desktop-stable` and `desktop-beta`, and the lane's tag moves to
 the release commit. Each lane only moves forward: the stable lane takes a
 release (no hyphen), the beta lane every version, each only when the
@@ -597,8 +762,9 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
-| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session) |
-| `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items, the recorder state the shell follows |
+| `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client and logind's shutdown lock |
+| `apps/desktop/src-tauri/src/tray.rs`, `menu.rs`, `actions.rs`, `recording.rs` | The tray menu and icon, the macOS menu bar, the actions behind their items and their words per platform, the recorder state the shell follows |
+| `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
 | `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
@@ -608,9 +774,10 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
-| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
+| `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
 | `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check |
-| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json` and the lanes a release moves (each `.sh` with a `.test.sh` is tested in Rust CI) |
+| `apps/desktop/scripts/signing-keychain.sh`, `notarize-dmg.sh`, `require-secrets.sh`, `wix-version.sh`, `updater-manifest.sh`, `updater-lanes.sh`, `release-assets.sh`, `release-signatures.sh`, `release-notes.sh` | The release job's macOS keychain, the image's notarisation, the secrets guard, the MSI version, `latest.json`, the lanes a release moves, the assets gathered from each platform's artifact, `SHA256SUMS` and the OpenPGP signatures, and the release notes (each `.sh` with a `.test.sh` is tested in Rust CI) |
+| `apps/desktop/release-signing-key.asc` | The public half of the release signing key that signs `SHA256SUMS` and the Linux bundles (see Checksums and OpenPGP signatures) |
 
 ## Not here yet
 

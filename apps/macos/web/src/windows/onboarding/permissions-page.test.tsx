@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { OnboardingWindow } from "./onboarding-window";
-import { PERMISSIONS_INTRO } from "./permissions-page";
 
 describe("PermissionsPage", () => {
 	it("shows every permission in its state with the retention sentence", async () => {
@@ -16,7 +15,7 @@ describe("PermissionsPage", () => {
 			"Welcome to Steno",
 		);
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
-			PERMISSIONS_INTRO,
+			"A few permissions, then where summaries come from and where meetings go. Audio never leaves this Mac.",
 		);
 		expect(screen.getByTestId("onboarding-retention")).toHaveTextContent(
 			/^Each recording is deleted 30 days/,
@@ -50,7 +49,7 @@ describe("PermissionsPage", () => {
 		expect(
 			screen.queryByTestId("permission-localNetwork-skip"),
 		).not.toBeInTheDocument();
-		// Not every required permission is granted: Later, not Done.
+		// Not every required permission is granted: Later, not Continue.
 		expect(screen.getByTestId("onboarding-later")).toBeInTheDocument();
 		expect(screen.queryByTestId("onboarding-done")).not.toBeInTheDocument();
 	});
@@ -104,12 +103,13 @@ describe("PermissionsPage", () => {
 		expect(callsTo(harness.transport, "onboarding.refresh")).toHaveLength(1);
 	});
 
-	it("offers Done once every required permission is granted", async () => {
+	it("offers Continue once every required permission is granted", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=onboarding-granted");
 		renderWithBridge(<OnboardingWindow />, harness);
 		expect(screen.queryByTestId("onboarding-later")).not.toBeInTheDocument();
 		expect(screen.getAllByText("Allowed")).toHaveLength(4);
+		expect(screen.getByTestId("onboarding-done")).toHaveTextContent("Continue");
 		await user.click(screen.getByTestId("onboarding-done"));
 		expect(callsTo(harness.transport, "onboarding.advance")).toHaveLength(1);
 	});

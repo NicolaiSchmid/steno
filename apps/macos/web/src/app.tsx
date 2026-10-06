@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { TooltipProvider } from "@/components/ui";
+import { detectPlatform, PlatformProvider } from "@/lib/platform";
 import { StoriesPage } from "@/stories/stories-page";
 import { MainWindow } from "@/windows/main/main-window";
 import { OnboardingWindow } from "@/windows/onboarding/onboarding-window";
@@ -17,9 +18,10 @@ import { SettingsWindow } from "@/windows/settings/settings-window";
  * `#/onboarding`, the Tauri shell's floating panels `#/panel/bubble` and
  * `#/panel/prompt?app=<name>&seconds=<n>&raised=<n>`
  * (`src/windows/panels/`), and `#/stories` (every component). Query flags:
- * `dark`; for the main window `menu` and `picker` open the actions menu and
- * the speaker picker on mount, and the mock bridge reads `scenario` and
- * `tab` (`src/bridge/mock-transport.ts`).
+ * `dark`; `platform=macos|windows|linux` words the page for that OS where
+ * the shell set none (`src/lib/platform.tsx`); for the main window `menu`
+ * and `picker` open the actions menu and the speaker picker on mount, and
+ * the mock bridge reads `scenario` and `tab` (`src/bridge/mock-transport.ts`).
  * A hash change re-renders the page in place; nothing reloads.
  */
 
@@ -79,6 +81,8 @@ export function App() {
 	const prefersDark = usePrefersDark();
 	useDocumentScheme(route.params.has("dark") || prefersDark);
 	usePanelDocument(isPanelRoute(route.path));
+	const flag = route.params.get("platform");
+	const platform = useMemo(() => detectPlatform(window, flag), [flag]);
 
 	let page: React.ReactNode;
 	if (route.path === "/stories") {
@@ -87,9 +91,11 @@ export function App() {
 		// The pill alone on the transparent canvas: no page background, no
 		// full-height root, so the shell's window shows nothing around it.
 		return (
-			<TooltipProvider delay={400}>
-				<PanelWindow params={route.params} route={route.path} />
-			</TooltipProvider>
+			<PlatformProvider platform={platform}>
+				<TooltipProvider delay={400}>
+					<PanelWindow params={route.params} route={route.path} />
+				</TooltipProvider>
+			</PlatformProvider>
 		);
 	} else if (route.path === "/onboarding") {
 		page = <OnboardingWindow />;
@@ -109,10 +115,12 @@ export function App() {
 	}
 
 	return (
-		<TooltipProvider delay={400}>
-			<div className="h-full bg-background" data-ready="true">
-				{page}
-			</div>
-		</TooltipProvider>
+		<PlatformProvider platform={platform}>
+			<TooltipProvider delay={400}>
+				<div className="h-full bg-background" data-ready="true">
+					{page}
+				</div>
+			</TooltipProvider>
+		</PlatformProvider>
 	);
 }

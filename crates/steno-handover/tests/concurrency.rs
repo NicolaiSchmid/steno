@@ -1,7 +1,9 @@
 //! Every store write, file write and hash is a yield, so another request
 //! runs while one awaits. These tests drive the engine directly, so two
 //! requests enter it in a known order and the races the loopback clients
-//! can only make likely are certain.
+//! can only make likely are certain. Tests that need two requests on two
+//! threads, as on two workers of the listener, hold one at its clock read
+//! (`WallClock::hold_next_read`) while the other runs.
 
 #![allow(
     clippy::assert_is_empty,
@@ -16,9 +18,11 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{EngineDevice, ScriptedIntake, TestService, engine_hello, seeded_bytes};
-use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
-use steno_handover::engine::{HandoverRequest, Principal, RequestHandling as _};
+use common::{EngineDevice, ScriptedIntake, TestService, chunks, engine_hello, seeded_bytes};
+use steno_core::{
+    AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
+};
+use steno_handover::engine::{HandoverRequest, HandoverResponse, Principal, RequestHandling as _};
 use steno_handover::route::Route;
 use steno_handover::{HandoverConfiguration, wire};
 use uuid::Uuid;
@@ -208,4 +212,396 @@ async fn the_gate_answers_while_a_whole_file_hash_runs() {
     let (completed, ()) = tokio::join!(completion, observed);
     assert_eq!(completed.status.as_u16(), 200);
     assert_eq!(test.intake.admissions.count(), 1);
+}
+
+/// A service that does not listen, a phone paired straight into the engine,
+/// and the metadata and chunks of a two-chunk recording of that phone.
+type Recording = (TestService, EngineDevice, RecordingMetadata, Vec<Vec<u8>>);
+
+/// A [`Recording`] the phone has not announced yet, with `intake` in
+/// place of the fake one when given.
+async fn two_chunk_recording(seed: u64, intake: Option<Arc<ScriptedIntake>>) -> Recording {
+    let chunk_size: i64 = 64 * 1024;
+    let test = TestService::with(common::Options {
+        chunk_size,
+        intake: intake.map(|intake| intake as Arc<dyn steno_core::HandoverIntake>),
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(2 * chunk_size as usize, seed);
+    let metadata = phone.metadata(&bytes, chunk_size);
+    (test, phone, metadata, chunks(&bytes, chunk_size))
+}
+
+/// A [`Recording`] the phone announced.
+async fn announced_two_chunks(seed: u64) -> Recording {
+    let recording = two_chunk_recording(seed, None).await;
+    let (_, phone, metadata, _) = &recording;
+    assert_eq!(phone.announce(metadata).await.status.as_u16(), 201);
+    recording
+}
+
+/// A [`Recording`] the phone announced and sent in full, with `intake` in
+/// place of the fake one when given.
+async fn uploaded_two_chunks(seed: u64, intake: Option<Arc<ScriptedIntake>>) -> Recording {
+    let recording = two_chunk_recording(seed, intake).await;
+    let (_, phone, metadata, chunks) = &recording;
+    phone.upload_all(metadata, &chunks.concat()).await;
+    recording
+}
+
+/// Runs `request` against the engine on a thread of its own, as a second
+/// worker of the listener's runtime would, holds it at its clock read
+/// ([`common::WallClock::hold_next_read`]) while `meanwhile` runs, then
+/// lets it finish. Returns the held request's answer and what `meanwhile`
+/// returned.
+async fn held_while<T>(
+    test: &TestService,
+    request: impl Future<Output = HandoverResponse> + Send + 'static,
+    meanwhile: impl Future<Output = T>,
+) -> (HandoverResponse, T) {
+    let hold = test.clock.hold_next_read();
+    let thread = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(request)
+    });
+    hold.reached();
+    let during = meanwhile.await;
+    hold.release();
+    (thread.join().unwrap(), during)
+}
+
+/// The receipt memory and the store hold for `recording_id`.
+fn receipts(test: &TestService, recording_id: Uuid) -> (HandoverReceipt, HandoverReceipt) {
+    let in_memory = test
+        .service
+        .engine
+        .receipts_snapshot()
+        .into_iter()
+        .find(|receipt| receipt.recording_id == recording_id)
+        .expect("the receipt is in memory");
+    let stored = test
+        .store
+        .handover_receipt(recording_id)
+        .unwrap()
+        .expect("the receipt is stored");
+    (in_memory, stored)
+}
+
+/// The chunk set memory and the store hold for `recording_id`.
+fn chunk_sets(test: &TestService, recording_id: Uuid) -> (Vec<i64>, Vec<i64>) {
+    let (in_memory, stored) = receipts(test, recording_id);
+    (in_memory.received_chunks, stored.received_chunks)
+}
+
+/// The device memory and the store hold `recording_id` for.
+fn owners(test: &TestService, recording_id: Uuid) -> (Uuid, Uuid) {
+    let (in_memory, stored) = receipts(test, recording_id);
+    (in_memory.device_id, stored.device_id)
+}
+
+/// The meeting a `complete` of `recording_id` admitted.
+async fn completed(phone: &EngineDevice, recording_id: Uuid) -> Uuid {
+    let completed = phone.complete(recording_id).await;
+    assert_eq!(completed.status.as_u16(), 200);
+    completed
+        .decode::<wire::CompleteResponse>()
+        .unwrap()
+        .meeting_id
+}
+
+/// Memory and the store hold `recording_id` as `complete` with
+/// `meeting_id`, the intake admitted it once, and the phone's next
+/// `complete` answers that meeting again.
+async fn stays_complete(
+    test: &TestService,
+    phone: &EngineDevice,
+    recording_id: Uuid,
+    meeting_id: Uuid,
+) {
+    let (in_memory, stored) = receipts(test, recording_id);
+    let complete = HandoverState::Complete { meeting_id };
+    assert_eq!(
+        (in_memory.state, stored.state),
+        (complete.clone(), complete)
+    );
+    assert_eq!(test.intake.admissions.count(), 1);
+    assert_eq!(completed(phone, recording_id).await, meeting_id);
+    assert_eq!(test.intake.admissions.count(), 1);
+}
+
+#[tokio::test]
+async fn two_chunks_that_land_at_once_both_stay_in_the_receipt() {
+    // The phone keeps two chunks in flight, and the listener runs each on
+    // a worker of its own. Chunk 0 is held at its clock read, after its
+    // file write, while chunk 1 lands in full. Chunk 0 then folds into the
+    // receipt as memory holds it, with chunk 1 in it. A fold that read the
+    // receipt before the clock and wrote it back after would put back the
+    // copy without chunk 1, in memory and in the store.
+    let (test, phone, metadata, chunks) = announced_two_chunks(63).await;
+    let id = metadata.recording_id;
+    let first = {
+        let (phone, chunk) = (phone.clone(), chunks[0].clone());
+        async move { phone.upload(id, 0, &chunk).await }
+    };
+    let (first, second) = held_while(&test, first, phone.upload(id, 1, &chunks[1])).await;
+    assert_eq!(second.status.as_u16(), 204);
+    assert_eq!(first.status.as_u16(), 204);
+
+    assert_eq!(chunk_sets(&test, id), (vec![0, 1], vec![0, 1]));
+}
+
+#[tokio::test]
+async fn a_reannounce_keeps_a_chunk_that_lands_while_it_runs() {
+    // The phone announces again (a retry after its own timeout) while its
+    // next chunk is in flight. The announce is held at its clock read,
+    // after it read the receipt, while chunk 1 lands. Its `receiving`
+    // write then changes the receipt as memory holds it, chunk 1 and all.
+    let (test, phone, metadata, chunks) = announced_two_chunks(64).await;
+    let id = metadata.recording_id;
+    assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    let reannounce = {
+        let phone = phone.clone();
+        async move { phone.announce(&metadata).await }
+    };
+    let (reannounced, uploaded) =
+        held_while(&test, reannounce, phone.upload(id, 1, &chunks[1])).await;
+    assert_eq!(uploaded.status.as_u16(), 204);
+    assert_eq!(reannounced.status.as_u16(), 200);
+
+    assert_eq!(chunk_sets(&test, id), (vec![0, 1], vec![0, 1]));
+}
+
+#[tokio::test]
+async fn a_late_chunk_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
+    // Chunk 0 is held at its clock read, after its file write, while the
+    // phone is revoked (its receipt goes) and another phone announces the
+    // same recording id. The fold then finds a receipt of another device
+    // and changes nothing: 404, and the new receipt lists no chunk.
+    let (test, phone, metadata, chunks) = announced_two_chunks(65).await;
+    let id = metadata.recording_id;
+    let late = {
+        let (phone, chunk) = (phone.clone(), chunks[0].clone());
+        async move { phone.upload(id, 0, &chunk).await }
+    };
+    let (late, ()) = held_while(&test, late, async {
+        test.service.revoke(phone.device.id).await.unwrap();
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+    })
+    .await;
+    assert_eq!(late.status.as_u16(), 404);
+
+    assert_eq!(chunk_sets(&test, id), (vec![], vec![]));
+}
+
+#[tokio::test]
+async fn a_reannounce_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
+    // The partial went (a sweep), so the phone's announce opens a new one
+    // and empties the chunk set. It is held at its clock read while the
+    // phone is revoked and another phone announces the same recording id
+    // and sends chunk 0. Its `receiving` write then finds a receipt of
+    // another device and changes nothing, so that phone's chunk stays.
+    let (test, phone, metadata, chunks) = announced_two_chunks(72).await;
+    let id = metadata.recording_id;
+    std::fs::remove_file(test.inbox().partial(id)).unwrap();
+    let reannounce = {
+        let (phone, metadata) = (phone.clone(), metadata.clone());
+        async move { phone.announce(&metadata).await }
+    };
+    let (reannounced, other) = held_while(&test, reannounce, async {
+        test.service.revoke(phone.device.id).await.unwrap();
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+        assert_eq!(other.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+        other
+    })
+    .await;
+    assert_eq!(reannounced.status.as_u16(), 200);
+
+    assert_eq!(owners(&test, id), (other.device.id, other.device.id));
+    assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
+}
+
+#[tokio::test]
+async fn a_reannounce_during_a_complete_leaves_the_receipt_complete() {
+    // The phone announces again (a retry after its own timeout) while its
+    // `complete` admits the recording. The announce is held at its clock
+    // read, after it read the receipt as `receiving`, while the `complete`
+    // runs to the end. Its `receiving` write then finds the receipt
+    // `complete` in memory, changes nothing and answers with that. Written
+    // back, `receiving` would send the phone's next `complete` back to the
+    // start, and the upload after it would become a second meeting.
+    let (test, phone, metadata, _) = uploaded_two_chunks(66, None).await;
+    let id = metadata.recording_id;
+    let reannounce = {
+        let phone = phone.clone();
+        async move { phone.announce(&metadata).await }
+    };
+    let (reannounced, meeting_id) = held_while(&test, reannounce, completed(&phone, id)).await;
+    assert_eq!(reannounced.status.as_u16(), 200);
+    assert_eq!(
+        reannounced.decode::<wire::RecordingStatus>().unwrap(),
+        wire::RecordingStatus {
+            state: HandoverStateKind::Complete,
+            received_chunks: vec![0, 1]
+        }
+    );
+
+    stays_complete(&test, &phone, id, meeting_id).await;
+}
+
+#[tokio::test]
+async fn a_chunk_that_lands_during_a_complete_leaves_the_receipt_complete() {
+    // The phone sent chunk 1 again after its own timeout while the first
+    // attempt was still in flight. That attempt is held at its clock read,
+    // after its file write, while the second one lands and the phone's
+    // `complete` runs to the end. Its fold then finds the receipt
+    // `complete` in memory and changes nothing, and the chunk is answered
+    // as received.
+    let (test, phone, metadata, chunks) = announced_two_chunks(67).await;
+    let id = metadata.recording_id;
+    assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    let first = {
+        let (phone, chunk) = (phone.clone(), chunks[1].clone());
+        async move { phone.upload(id, 1, &chunk).await }
+    };
+    let (first, meeting_id) = held_while(&test, first, async {
+        assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
+        completed(&phone, id).await
+    })
+    .await;
+    assert_eq!(first.status.as_u16(), 204);
+
+    stays_complete(&test, &phone, id, meeting_id).await;
+}
+
+#[tokio::test]
+async fn an_announce_that_found_no_receipt_keeps_the_one_made_meanwhile() {
+    // The phone announces a new recording twice at once (a retry after its
+    // own timeout). One announce is held at its clock read, after its
+    // receipt read found nothing and it opened the partial, while the other
+    // one answers 201 and chunk 0 lands. The held one then finds that
+    // receipt in memory and answers as a re-announce, so chunk 0 stays.
+    let (test, phone, metadata, chunks) = two_chunk_recording(68, None).await;
+    let id = metadata.recording_id;
+    let second = {
+        let (phone, metadata) = (phone.clone(), metadata.clone());
+        async move { phone.announce(&metadata).await }
+    };
+    let (reannounced, ()) = held_while(&test, second, async {
+        assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
+        assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    })
+    .await;
+    assert_eq!(reannounced.status.as_u16(), 200);
+    assert_eq!(
+        reannounced.decode::<wire::RecordingStatus>().unwrap(),
+        wire::RecordingStatus {
+            state: HandoverStateKind::Receiving,
+            received_chunks: vec![0]
+        }
+    );
+
+    assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
+}
+
+#[tokio::test]
+async fn an_announce_of_another_phone_that_found_no_receipt_is_refused() {
+    // Two phones announce the same recording id at once. Phone B's announce
+    // is held at its clock read, after its receipt read found nothing,
+    // while phone A's announce answers 201 and chunk 0 lands. B's then finds
+    // A's receipt in memory and is refused as a re-announce of another
+    // device's recording, and the receipt stays A's.
+    let (test, phone, metadata, chunks) = two_chunk_recording(69, None).await;
+    let id = metadata.recording_id;
+    let other = EngineDevice::paired(&test, "Other iPhone").await;
+    let second = {
+        let metadata = metadata.clone();
+        async move { other.announce(&metadata).await }
+    };
+    let (refused, ()) = held_while(&test, second, async {
+        assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
+        assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    })
+    .await;
+    assert_eq!(refused.status.as_u16(), 409);
+
+    assert_eq!(owners(&test, id), (phone.device.id, phone.device.id));
+    assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
+}
+
+#[tokio::test]
+async fn a_complete_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
+    // The phone is revoked while its `complete` is in the intake, and
+    // another phone announces the same recording id. The intake then
+    // answers, and the `complete` write finds a receipt of another device
+    // in memory and changes nothing. Written into it, it would tell the
+    // other phone `complete` for a recording never admitted from it, and
+    // that phone would delete its copy.
+    let intake = ScriptedIntake::gated(meeting_id(), false);
+    let (test, phone, metadata, _) = uploaded_two_chunks(70, Some(intake.clone())).await;
+    let id = metadata.recording_id;
+
+    let completion = phone.complete(id);
+    let meanwhile = async {
+        intake.admitting().await;
+        test.service.revoke(phone.device.id).await.unwrap();
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+        intake.release();
+        other
+    };
+    let (answer, other) = tokio::join!(completion, meanwhile);
+    assert_eq!(answer.status.as_u16(), 200);
+
+    assert_eq!(owners(&test, id), (other.device.id, other.device.id));
+    let (in_memory, stored) = receipts(&test, id);
+    assert_eq!(
+        (in_memory.state, stored.state),
+        (HandoverState::Receiving, HandoverState::Receiving)
+    );
+}
+
+#[tokio::test]
+async fn a_reannounce_during_an_admission_leaves_no_files_behind() {
+    // The intake moved the verified file, as the real one does, and the
+    // phone announces again. The announce finds no file, opens a new
+    // partial and sidecar, and is held at its clock read while the
+    // `complete` runs to the end. Its `receiving` write then finds the
+    // receipt `complete`, and the files it opened go: a stale `complete`
+    // would find them and start a verify of an empty partial.
+    let intake = ScriptedIntake::gated(meeting_id(), false);
+    let (test, phone, metadata, _) = uploaded_two_chunks(71, Some(intake.clone())).await;
+    let id = metadata.recording_id;
+    let inbox = test.inbox();
+
+    let completion = {
+        let phone = phone.clone();
+        tokio::spawn(async move { phone.complete(id).await })
+    };
+    intake.admitting().await;
+    std::fs::remove_file(inbox.verified(id, metadata.format)).unwrap();
+    let reannounce = {
+        let phone = phone.clone();
+        async move { phone.announce(&metadata).await }
+    };
+    let (reannounced, answer) = held_while(&test, reannounce, async {
+        intake.release();
+        completion.await.unwrap()
+    })
+    .await;
+    assert_eq!(answer.status.as_u16(), 200);
+    assert_eq!(
+        reannounced.decode::<wire::RecordingStatus>().unwrap().state,
+        HandoverStateKind::Complete
+    );
+
+    assert!(!inbox.has_partial(id), "the new partial went");
+    assert!(inbox.load_metadata(id).is_none(), "the new sidecar went");
 }

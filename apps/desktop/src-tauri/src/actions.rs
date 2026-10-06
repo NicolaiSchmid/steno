@@ -12,6 +12,7 @@
 
 use serde_json::{Value, json};
 pub use steno_bridge::CaptureMode;
+use steno_bridge::Platform;
 use tauri::{
     AppHandle, Manager, WebviewWindow, Wry,
     menu::{MenuEvent, MenuId, MenuItem},
@@ -40,17 +41,29 @@ steno_core::string_enum! {
 }
 
 impl MenuAction {
-    /// The item's text at rest; `record_label` replaces the first while
-    /// the recorder is busy.
+    /// The item's text at rest on this platform ([`Self::label_on`]);
+    /// `record_label` replaces the first while the recorder is busy.
     pub const fn label(self) -> &'static str {
+        self.label_on(Platform::CURRENT)
+    }
+
+    /// The item's text on `platform`: the Mac's "Settings…", "Check for
+    /// Updates…" and "Quit Steno", Windows' "Exit Steno", and on Windows
+    /// and Linux "Settings" and "Check for Updates" without the ellipsis,
+    /// which there marks an item that asks for more input before it acts;
+    /// both of these act at once (the update dialog is the check's result).
+    pub const fn label_on(self, platform: Platform) -> &'static str {
         match self {
             Self::Record => "Record",
             Self::RecordInPerson => "Record in person",
             Self::OpenMain => "Open Steno",
-            Self::OpenSettings => "Settings…",
+            Self::OpenSettings => platform.mac_or("Settings…", "Settings"),
             Self::LaunchAtLogin => "Launch at login",
-            Self::CheckForUpdates => "Check for Updates…",
-            Self::Quit => "Quit Steno",
+            Self::CheckForUpdates => platform.mac_or("Check for Updates…", "Check for Updates"),
+            Self::Quit => match platform {
+                Platform::Windows => "Exit Steno",
+                Platform::Macos | Platform::Linux => "Quit Steno",
+            },
         }
     }
 
@@ -183,6 +196,33 @@ mod tests {
             assert_ne!(action.label(), "");
         }
         assert!("about".parse::<MenuAction>().is_err());
+    }
+
+    #[test]
+    fn each_platform_names_settings_updates_and_quit_its_own_way() {
+        let labels = |platform| {
+            (
+                MenuAction::OpenSettings.label_on(platform),
+                MenuAction::CheckForUpdates.label_on(platform),
+                MenuAction::Quit.label_on(platform),
+            )
+        };
+        assert_eq!(
+            labels(Platform::Macos),
+            ("Settings…", "Check for Updates…", "Quit Steno")
+        );
+        assert_eq!(
+            labels(Platform::Windows),
+            ("Settings", "Check for Updates", "Exit Steno")
+        );
+        assert_eq!(
+            labels(Platform::Linux),
+            ("Settings", "Check for Updates", "Quit Steno")
+        );
+        assert_eq!(
+            MenuAction::Quit.label(),
+            MenuAction::Quit.label_on(Platform::CURRENT)
+        );
     }
 
     /// The tray's login item tells the host what Settings tells it, in the

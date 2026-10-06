@@ -29,6 +29,12 @@ import {
 	SplitButton,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import {
+	type PlatformWords,
+	SHORTCUTS,
+	usePlatform,
+	useShortcut,
+} from "@/lib/platform";
 import { useCountdownSeconds, useElapsedSeconds } from "@/lib/use-now";
 import { format } from "./format";
 
@@ -42,28 +48,37 @@ const FILTERS: readonly { id: Filter; label: string; icon: ReactNode }[] = [
 	{ id: "failed", label: "Failed", icon: <CircleAlertIcon /> },
 ];
 
-/** What a denied permission stops Steno from doing, and what allows it. */
-const DENIED_COPY: Record<
-	PermissionKind,
-	{ title: string; description: string }
-> = {
-	microphone: {
-		title: "Steno can't use the microphone.",
-		description: "Allow it in System Settings to record.",
-	},
-	systemAudio: {
-		title: "Steno can't hear the other side of calls.",
-		description: "Allow system audio recording in System Settings.",
-	},
-	calendar: {
-		title: "Steno can't see your calendar.",
-		description: "Allow calendar access in System Settings.",
-	},
-	localNetwork: {
-		title: "Steno can't reach your iPhone.",
-		description: "Allow local network access in System Settings.",
-	},
-};
+/**
+ * What a denied permission stops Steno from doing, and what allows it, in
+ * the platform's name for the place its privacy switches live.
+ */
+function deniedCopy(
+	kind: PermissionKind,
+	{ systemSettings }: PlatformWords,
+): { title: string; description: string } {
+	switch (kind) {
+		case "microphone":
+			return {
+				title: "Steno can't use the microphone.",
+				description: `Allow it in ${systemSettings} to record.`,
+			};
+		case "systemAudio":
+			return {
+				title: "Steno can't hear the other side of calls.",
+				description: `Allow system audio recording in ${systemSettings}.`,
+			};
+		case "calendar":
+			return {
+				title: "Steno can't see your calendar.",
+				description: `Allow calendar access in ${systemSettings}.`,
+			};
+		case "localNetwork":
+			return {
+				title: "Steno can't reach your iPhone.",
+				description: `Allow local network access in ${systemSettings}.`,
+			};
+	}
+}
 
 /** The Record control: one primary button whose words follow the recorder. */
 function RecordButton({
@@ -213,18 +228,21 @@ function RecorderMessage({
 /** A permission the recorder needs and does not have. */
 function DeniedPermission({ kind }: { kind: PermissionKind }) {
 	const client = useBridge();
-	const copy = DENIED_COPY[kind];
+	const { words } = usePlatform();
+	const copy = deniedCopy(kind, words);
 	return (
 		<Callout
 			actions={
-				<Button
-					data-testid={`fix-${kind}`}
-					onClick={() => send(client, "system.openSystemSettings", { kind })}
-					size="sm"
-					variant="outline"
-				>
-					Fix in System Settings
-				</Button>
+				words.opensSystemSettings ? (
+					<Button
+						data-testid={`fix-${kind}`}
+						onClick={() => send(client, "system.openSystemSettings", { kind })}
+						size="sm"
+						variant="outline"
+					>
+						Fix in {words.systemSettings}
+					</Button>
+				) : undefined
 			}
 			data-testid={`denied-${kind}`}
 			description={copy.description}
@@ -270,6 +288,12 @@ function RecordControl({
  */
 export function Sidebar() {
 	const client = useBridge();
+	const platform = usePlatform();
+	useShortcut(
+		SHORTCUTS.record,
+		() => send(client, "recording.toggle"),
+		platform.bindsRecordShortcut,
+	);
 	const app = useSnapshot("app");
 	const recording = useSnapshot("recording");
 	const list = useSnapshot("meetings.list");
