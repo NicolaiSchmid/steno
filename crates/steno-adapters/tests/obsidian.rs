@@ -15,7 +15,8 @@ use steno_core::content_hash::sha256;
 use steno_core::json::uuid_string;
 use steno_core::paths::{file_url, file_url_path};
 use steno_core::{
-    DeliveryReceipt, FileOwnership, MeetingExport, ObsidianSettings, Person, SpeakerAssignment,
+    DeliveryReceipt, FileOwnership, MeetingExport, ObsidianSettings, Person, Platform,
+    SpeakerAssignment,
 };
 
 struct Vault {
@@ -61,7 +62,8 @@ impl Vault {
 }
 
 /// A destination on `vault_path` as every test configures it: Berlin time,
-/// the fixture's `task` tag, the rest as given.
+/// the fixture's `task` tag, the Mac (the Swift goldens' platform), the
+/// rest as given.
 fn destination_at(
     vault_path: &Path,
     include_audio: bool,
@@ -76,6 +78,7 @@ fn destination_at(
         },
         BERLIN,
     )
+    .with_platform(Platform::Macos)
 }
 
 fn meeting_files(slug: &str) -> Vec<String> {
@@ -1130,6 +1133,43 @@ fn a_person_page_that_is_not_utf8_is_left_alone_and_reported() {
         vault.list(FOLDER),
         without_audio(meeting_files(FOLDER_SLUG))
     );
+}
+
+#[test]
+fn the_folder_note_names_the_platform_the_app_runs_on() {
+    let vault = Vault::new();
+    let settings = vault
+        .destination_with(false, Some("People"))
+        .settings()
+        .clone();
+    let destination = ObsidianFolderDestination::new(settings.clone(), BERLIN);
+    assert_eq!(
+        destination.platform(),
+        Platform::CURRENT,
+        "the app's calls were recorded where it runs"
+    );
+    deliver(&destination, &export(), None);
+    assert_matches_golden(
+        &vault.text(&format!("{FOLDER}/{FOLDER_SLUG}.md")),
+        &folder_note_golden(Platform::CURRENT, "wikilink-berlin"),
+    );
+
+    for &platform in Platform::ALL {
+        let other = Vault::new();
+        let destination = ObsidianFolderDestination::new(
+            ObsidianSettings {
+                vault_path: other.root.to_string_lossy().into_owned(),
+                ..settings.clone()
+            },
+            BERLIN,
+        )
+        .with_platform(platform);
+        deliver(&destination, &export(), None);
+        assert_matches_golden(
+            &other.text(&format!("{FOLDER}/{FOLDER_SLUG}.md")),
+            &folder_note_golden(platform, "wikilink-berlin"),
+        );
+    }
 }
 
 #[test]
