@@ -19,7 +19,9 @@ mod common;
 use std::sync::Arc;
 
 use common::{EngineDevice, ScriptedIntake, TestService, chunks, engine_hello, seeded_bytes};
-use steno_core::{AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind};
+use steno_core::{
+    AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
+};
 use steno_handover::engine::{HandoverRequest, HandoverResponse, Principal, RequestHandling as _};
 use steno_handover::route::Route;
 use steno_handover::{HandoverConfiguration, wire};
@@ -212,9 +214,12 @@ async fn the_gate_answers_while_a_whole_file_hash_runs() {
     assert_eq!(test.intake.admissions.count(), 1);
 }
 
-/// A service that does not listen and a phone paired straight into the
-/// engine that announced a two-chunk recording, with its chunks.
-async fn announced_two_chunks(seed: u64) -> (TestService, EngineDevice, Uuid, Vec<Vec<u8>>) {
+/// A service that does not listen, a phone paired straight into the engine,
+/// and the metadata and chunks of a two-chunk recording of that phone.
+type Recording = (TestService, EngineDevice, RecordingMetadata, Vec<Vec<u8>>);
+
+/// A [`Recording`] the phone has not announced yet.
+async fn two_chunk_recording(seed: u64) -> Recording {
     let chunk_size: i64 = 64 * 1024;
     let test = TestService::with(common::Options {
         chunk_size,
@@ -225,27 +230,39 @@ async fn announced_two_chunks(seed: u64) -> (TestService, EngineDevice, Uuid, Ve
     let phone = EngineDevice::paired(&test, "Direct iPhone").await;
     let bytes = seeded_bytes(2 * chunk_size as usize, seed);
     let metadata = phone.metadata(&bytes, chunk_size);
-    assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
-    (
-        test,
-        phone,
-        metadata.recording_id,
-        chunks(&bytes, chunk_size),
-    )
+    (test, phone, metadata, chunks(&bytes, chunk_size))
+}
+
+/// A [`Recording`] the phone announced.
+async fn announced_two_chunks(seed: u64) -> Recording {
+    let recording = two_chunk_recording(seed).await;
+    let (_, phone, metadata, _) = &recording;
+    assert_eq!(phone.announce(metadata).await.status.as_u16(), 201);
+    recording
 }
 
 /// Runs `request` against the engine on a thread of its own, as a second
-/// worker of the listener's runtime would.
-fn on_another_thread(
+/// worker of the listener's runtime would, holds it at its clock read
+/// ([`common::WallClock::hold_next_read`]) while `meanwhile` runs, then
+/// lets it finish. Returns the held request's answer and what `meanwhile`
+/// returned.
+async fn held_while<T>(
+    test: &TestService,
     request: impl Future<Output = HandoverResponse> + Send + 'static,
-) -> std::thread::JoinHandle<HandoverResponse> {
-    std::thread::spawn(move || {
+    meanwhile: impl Future<Output = T>,
+) -> (HandoverResponse, T) {
+    let hold = test.clock.hold_next_read();
+    let thread = std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
             .block_on(request)
-    })
+    });
+    hold.reached();
+    let during = meanwhile.await;
+    hold.release();
+    (thread.join().unwrap(), during)
 }
 
 /// The receipt memory and the store hold for `recording_id`.
@@ -279,16 +296,15 @@ async fn two_chunks_that_land_at_once_both_stay_in_the_receipt() {
     // receipt as memory holds it, with chunk 1 in it. A fold that read the
     // receipt before the clock and wrote it back after would put back the
     // copy without chunk 1, in memory and in the store.
-    let (test, phone, id, chunks) = announced_two_chunks(63).await;
-    let hold = test.clock.hold_next_read();
-    let first = on_another_thread({
+    let (test, phone, metadata, chunks) = announced_two_chunks(63).await;
+    let id = metadata.recording_id;
+    let first = {
         let (other, chunk) = (phone.clone(), chunks[0].clone());
         async move { other.upload(id, 0, &chunk).await }
-    });
-    hold.reached();
-    assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
-    hold.release();
-    assert_eq!(first.join().unwrap().status.as_u16(), 204);
+    };
+    let (first, second) = held_while(&test, first, phone.upload(id, 1, &chunks[1])).await;
+    assert_eq!(second.status.as_u16(), 204);
+    assert_eq!(first.status.as_u16(), 204);
 
     assert_eq!(chunk_sets(&test, id), (vec![0, 1], vec![0, 1]));
 }
@@ -299,19 +315,17 @@ async fn a_reannounce_keeps_a_chunk_that_lands_while_it_runs() {
     // next chunk is in flight. The announce is held at its clock read,
     // after it read the receipt, while chunk 1 lands. Its `receiving`
     // write then changes the receipt as memory holds it, chunk 1 and all.
-    let (test, phone, id, chunks) = announced_two_chunks(64).await;
+    let (test, phone, metadata, chunks) = announced_two_chunks(64).await;
+    let id = metadata.recording_id;
     assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
-    let metadata = test
-        .inbox()
-        .load_metadata(id)
-        .expect("the announce kept its metadata");
-    let hold = test.clock.hold_next_read();
-    let other = phone.clone();
-    let reannounce = on_another_thread(async move { other.announce(&metadata).await });
-    hold.reached();
-    assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
-    hold.release();
-    assert_eq!(reannounce.join().unwrap().status.as_u16(), 200);
+    let reannounce = {
+        let other = phone.clone();
+        async move { other.announce(&metadata).await }
+    };
+    let (reannounced, uploaded) =
+        held_while(&test, reannounce, phone.upload(id, 1, &chunks[1])).await;
+    assert_eq!(uploaded.status.as_u16(), 204);
+    assert_eq!(reannounced.status.as_u16(), 200);
 
     assert_eq!(chunk_sets(&test, id), (vec![0, 1], vec![0, 1]));
 }
@@ -322,22 +336,19 @@ async fn a_late_chunk_of_a_revoked_phone_stays_out_of_another_phones_receipt() {
     // phone is revoked (its receipt goes) and another phone announces the
     // same recording id. The fold then finds a receipt of another device
     // and changes nothing: 404, and the new receipt lists no chunk.
-    let (test, phone, id, chunks) = announced_two_chunks(65).await;
-    let metadata = test
-        .inbox()
-        .load_metadata(id)
-        .expect("the announce kept its metadata");
-    let hold = test.clock.hold_next_read();
-    let late = on_another_thread({
+    let (test, phone, metadata, chunks) = announced_two_chunks(65).await;
+    let id = metadata.recording_id;
+    let late = {
         let (other, chunk) = (phone.clone(), chunks[0].clone());
         async move { other.upload(id, 0, &chunk).await }
-    });
-    hold.reached();
-    test.service.revoke(phone.device.id).await.unwrap();
-    let other = EngineDevice::paired(&test, "Other iPhone").await;
-    assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
-    hold.release();
-    assert_eq!(late.join().unwrap().status.as_u16(), 404);
+    };
+    let (late, ()) = held_while(&test, late, async {
+        test.service.revoke(phone.device.id).await.unwrap();
+        let other = EngineDevice::paired(&test, "Other iPhone").await;
+        assert_eq!(other.announce(&metadata).await.status.as_u16(), 201);
+    })
+    .await;
+    assert_eq!(late.status.as_u16(), 404);
 
     assert_eq!(chunk_sets(&test, id), (vec![], vec![]));
 }
@@ -351,22 +362,17 @@ async fn a_reannounce_during_a_complete_leaves_the_receipt_complete() {
     // `complete` in memory, changes nothing and answers with that. Written
     // back, `receiving` would send the phone's next `complete` back to the
     // start, and the upload after it would become a second meeting.
-    let (test, phone, id, chunks) = announced_two_chunks(66).await;
+    let (test, phone, metadata, chunks) = announced_two_chunks(66).await;
+    let id = metadata.recording_id;
     for (index, chunk) in chunks.iter().enumerate() {
         let uploaded = phone.upload(id, index as i64, chunk).await;
         assert_eq!(uploaded.status.as_u16(), 204);
     }
-    let metadata = test
-        .inbox()
-        .load_metadata(id)
-        .expect("the announce kept its metadata");
-    let hold = test.clock.hold_next_read();
-    let other = phone.clone();
-    let reannounce = on_another_thread(async move { other.announce(&metadata).await });
-    hold.reached();
-    let meeting_id = completed(&phone, id).await;
-    hold.release();
-    let reannounced = reannounce.join().unwrap();
+    let reannounce = {
+        let other = phone.clone();
+        async move { other.announce(&metadata).await }
+    };
+    let (reannounced, meeting_id) = held_while(&test, reannounce, completed(&phone, id)).await;
     assert_eq!(reannounced.status.as_u16(), 200);
     assert_eq!(
         reannounced.decode::<wire::RecordingStatus>().unwrap(),
@@ -387,18 +393,19 @@ async fn a_chunk_that_lands_during_a_complete_leaves_the_receipt_complete() {
     // `complete` runs to the end. Its fold then finds the receipt
     // `complete` in memory and changes nothing, and the chunk is answered
     // as received.
-    let (test, phone, id, chunks) = announced_two_chunks(67).await;
+    let (test, phone, metadata, chunks) = announced_two_chunks(67).await;
+    let id = metadata.recording_id;
     assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
-    let hold = test.clock.hold_next_read();
-    let first = on_another_thread({
+    let first = {
         let (other, chunk) = (phone.clone(), chunks[1].clone());
         async move { other.upload(id, 1, &chunk).await }
-    });
-    hold.reached();
-    assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
-    let meeting_id = completed(&phone, id).await;
-    hold.release();
-    assert_eq!(first.join().unwrap().status.as_u16(), 204);
+    };
+    let (first, meeting_id) = held_while(&test, first, async {
+        assert_eq!(phone.upload(id, 1, &chunks[1]).await.status.as_u16(), 204);
+        completed(&phone, id).await
+    })
+    .await;
+    assert_eq!(first.status.as_u16(), 204);
 
     stays_complete(&test, &phone, id, meeting_id).await;
 }
@@ -440,28 +447,17 @@ async fn an_announce_that_found_no_receipt_keeps_the_one_made_meanwhile() {
     // receipt read found nothing and it opened the partial, while the other
     // one answers 201 and chunk 0 lands. The held one then finds that
     // receipt in memory and answers as a re-announce, so chunk 0 stays.
-    let chunk_size: i64 = 64 * 1024;
-    let test = TestService::with(common::Options {
-        chunk_size,
-        start: false,
-        ..common::Options::default()
-    })
-    .await;
-    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
-    let bytes = seeded_bytes(2 * chunk_size as usize, 68);
-    let metadata = phone.metadata(&bytes, chunk_size);
+    let (test, phone, metadata, chunks) = two_chunk_recording(68).await;
     let id = metadata.recording_id;
-    let chunks = chunks(&bytes, chunk_size);
-    let hold = test.clock.hold_next_read();
-    let second = on_another_thread({
+    let second = {
         let (other, metadata) = (phone.clone(), metadata.clone());
         async move { other.announce(&metadata).await }
-    });
-    hold.reached();
-    assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
-    assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
-    hold.release();
-    let reannounced = second.join().unwrap();
+    };
+    let (reannounced, ()) = held_while(&test, second, async {
+        assert_eq!(phone.announce(&metadata).await.status.as_u16(), 201);
+        assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
+    })
+    .await;
     assert_eq!(reannounced.status.as_u16(), 200);
     assert_eq!(
         reannounced.decode::<wire::RecordingStatus>().unwrap(),
