@@ -615,7 +615,8 @@ impl Engine {
     /// One state change through [`Engine::update`]: the state and, when
     /// given, the chunk set, then the save. Callers that answer the phone
     /// whatever the write did ignore the result deliberately: memory
-    /// already holds the change and the phone's next request re-reads.
+    /// already holds the change, or the newer receipt that declined it, and
+    /// the phone's next request re-reads.
     /// Swift: `HandoverEngine.transition`, where the actor makes the read
     /// and the write one step.
     pub(crate) async fn transition(
@@ -637,11 +638,11 @@ impl Engine {
     /// `edit` changes the copy memory holds, or `receipt` when memory holds
     /// none (a revoked device), and `receipt` comes back as changed. When
     /// memory holds another device's receipt (a revoked phone paired
-    /// again), nothing changes. A receipt memory holds as `complete` stays
-    /// as it is, nothing is saved and `receipt` comes back as memory holds
-    /// it: a request that read it before the phone's `complete` admitted
-    /// the recording must not put it back, or the phone's next `complete`
-    /// would start over and admit it again.
+    /// again), nothing changes, `receipt` included. A receipt memory holds
+    /// as `complete` stays as it is, nothing is saved and `receipt` comes
+    /// back as memory holds it: a request that read it before the phone's
+    /// `complete` admitted the recording must not put it back, or the
+    /// phone's next `complete` would start over and admit it again.
     async fn update(
         &self,
         receipt: &mut HandoverReceipt,
