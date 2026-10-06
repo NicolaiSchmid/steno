@@ -144,8 +144,9 @@ import Testing
     // write while the second one lands and the phone's `complete` runs to
     // the end. Its fold then finds the receipt `.complete` in memory and
     // changes nothing, and the chunk is answered as received. Folded in,
-    // `.receiving` would send the phone's next `complete` back to the
-    // start, and the upload after it would become a second meeting.
+    // the chunk would put the receipt back to `.receiving`, the phone's
+    // next `complete` would start over, and the upload after it would
+    // become a second meeting.
     let chunkSize = 64 * 1024
     try await TestService.run(chunkSize: chunkSize, start: false) { test in
       let held = HeldWrite()
@@ -159,6 +160,7 @@ import Testing
       #expect(await phone.upload(id, chunk: 0, chunks[0]).code == 204)
 
       held.arm()
+      defer { held.release() }
       let first = Task { await phone.upload(id, chunk: 1, chunks[1]) }
       await held.held()
       #expect(await phone.upload(id, chunk: 1, chunks[1]).code == 204)
@@ -191,8 +193,9 @@ import Testing
 
     var id: UUID { metadata.recordingID }
 
-    /// Starts `request` with its receipt read held, and returns once it is:
-    /// the read ran, and found what the store held then.
+    /// Starts `request` and returns once its receipt read is held: the read
+    /// ran and found what the store held then. Only that read is held; the
+    /// request goes on at `gate.receiptRead.release()`.
     func heldAtItsRead(
       _ request: @escaping @Sendable () async throws -> HandoverResponse
     ) async -> Task<HandoverResponse, any Error> {
@@ -269,13 +272,14 @@ import Testing
   }
 
   @Test(.timeLimit(.minutes(1)))
-  func aReadThatFoundAnOlderReceiptKeepsTheOneAdvancedMeanwhile() async throws {
+  func aRequestThatReadAnOlderReceiptKeepsTheOneAdvancedMeanwhile() async throws {
     // Memory holds no receipt (as after a restart), so a status request
     // reads chunk 0's receipt from the store and is held there while chunk
-    // 1 lands. Memory then holds both chunks and wins over the older row,
-    // so the status lists both and nothing is lost. Remembered over memory,
-    // the row would drop chunk 1, or put a `.complete` receipt back to
-    // `.receiving`, and the upload after it would become a second meeting.
+    // 1 lands. The held request then finds both chunks in memory and
+    // answers with them. Had it remembered the row it read, memory would
+    // lose chunk 1 and the next save would drop it from the store; over a
+    // `.complete` receipt, the row would put back `.receiving`, and the
+    // upload after it would become a second meeting.
     let gated = try await Gated(seed: 66)
     defer { gated.remove() }
     let (phone, id) = (gated.phone, gated.id)
