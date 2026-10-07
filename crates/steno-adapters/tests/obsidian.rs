@@ -563,39 +563,93 @@ fn first_delivery_appends_the_block_to_a_person_page_the_user_already_wrote() {
     );
 }
 
+/// The clock the destinations below date a copy beside an edited note
+/// with: 2026-10-07, also in Berlin.
+fn october_seventh() -> chrono::DateTime<chrono::Utc> {
+    steno_core::json::parse_date("2026-10-07T10:00:00.000Z").unwrap()
+}
+
 #[test]
-fn reexport_rewrites_owned_notes_and_recreates_a_deleted_one() {
+fn reexport_keeps_an_edited_note_writes_the_new_one_beside_it_and_recreates_a_deleted_one() {
     let vault = Vault::new();
     let export = vault.export_with_audio();
-    let destination = vault.destination();
+    let destination = vault.destination().with_now(october_seventh);
     let first = deliver(&destination, &export, None);
     let note = format!("{FOLDER}/{FOLDER_SLUG}.md");
     let original = vault.read(&note);
+    let edited = format!("{}\nMy addition.\n", vault.text(&note));
 
-    fs::write(
-        vault.path(&note),
-        format!("{}\nMy addition.\n", vault.text(&note)),
-    )
-    .unwrap();
+    fs::write(vault.path(&note), &edited).unwrap();
     fs::remove_file(vault.path(&format!("{FOLDER}/transcript.vtt"))).unwrap();
 
     let second = deliver(&destination, &export, Some(&first));
 
+    assert_eq!(vault.text(&note), edited, "the edited note is left alone");
+    let beside = format!("{FOLDER}/{FOLDER_SLUG} (Steno 2026-10-07).md");
     assert_eq!(
-        vault.read(&note),
+        vault.read(&beside),
         original,
-        "an owned note is rewritten from the model"
+        "the new render goes beside it"
     );
-    assert_eq!(
-        vault.list(FOLDER),
-        meeting_files(FOLDER_SLUG),
-        "transcript.vtt is back"
-    );
+    let mut expected = meeting_files(FOLDER_SLUG);
+    expected.push(format!("{FOLDER_SLUG} (Steno 2026-10-07).md"));
+    expected.sort();
+    assert_eq!(vault.list(FOLDER), expected, "transcript.vtt is back");
     assert_matches_golden(
         &vault.text(&format!("{FOLDER}/transcript.vtt")),
         "snapshots/obsidian/transcript.vtt",
     );
-    assert_eq!(second, first);
+    assert_eq!(
+        second.warnings,
+        [format!(
+            "{note} was edited in the vault, so it was kept; the new version is {beside}."
+        )]
+    );
+    let hash = |receipt: &DeliveryReceipt, path: &str| {
+        receipt
+            .files
+            .iter()
+            .find(|file| file.relative_path == path)
+            .map(|file| file.sha256.clone())
+    };
+    assert_eq!(
+        hash(&second, &note),
+        hash(&first, &note),
+        "the receipt keeps the note's delivered hash, so the next delivery sees the edit too"
+    );
+    assert_eq!(hash(&second, &beside), Some(sha256(&original)));
+
+    // The next delivery writes the same copy while it is unedited.
+    let third = deliver(&destination, &export, Some(&second));
+    assert_eq!(vault.text(&note), edited);
+    assert_eq!(vault.list(FOLDER), expected, "no second copy");
+    assert_eq!(third.warnings, second.warnings);
+
+    // A copy the user edited too is kept, and a numbered one is written.
+    fs::write(vault.path(&beside), b"my copy\n").unwrap();
+    let fourth = deliver(&destination, &export, Some(&third));
+    assert_eq!(vault.text(&beside), "my copy\n");
+    let numbered = format!("{FOLDER}/{FOLDER_SLUG} (Steno 2026-10-07 2).md");
+    assert_eq!(vault.read(&numbered), original);
+    assert_eq!(vault.text(&note), edited);
+    assert!(
+        fourth.warnings[0].ends_with(&format!("{numbered}.")),
+        "{:?}",
+        fourth.warnings
+    );
+}
+
+/// A delivery that finds every note as it wrote it has nothing to warn
+/// about, and its receipt encodes without a `warnings` key, as Swift's.
+#[test]
+fn an_unedited_reexport_has_no_warnings_and_no_warnings_key() {
+    let vault = Vault::new();
+    let export = vault.export_with_audio();
+    let destination = vault.destination();
+    let first = deliver(&destination, &export, None);
+    let second = deliver(&destination, &export, Some(&first));
+    assert_eq!(second.warnings, Vec::<String>::new());
+    assert!(!serde_json::to_string(&second).unwrap().contains("warnings"));
 }
 
 #[test]
@@ -1227,9 +1281,12 @@ fn another_spelling_of_the_vault_path_is_the_same_root() {
     renamed.meeting.title = "Neuer Titel".to_owned();
 
     let root = vault.root.to_string_lossy().into_owned();
+    // Each delivery hands on the receipt of the one before, as the store
+    // does: a stale receipt would make the notes it wrote since look edited.
+    let mut previous = first.clone();
     for spelling in [format!("{root}/"), format!("{root}/./Meetings/..")] {
         let destination = destination_at(Path::new(&spelling), true, Some("People"));
-        let second = deliver(&destination, &renamed, Some(&first));
+        let second = deliver(&destination, &renamed, Some(&previous));
         assert_eq!(second.folder, first.folder, "{spelling}");
         assert_eq!(paths(&second), paths(&first), "{spelling}");
         assert_eq!(
@@ -1247,6 +1304,7 @@ fn another_spelling_of_the_vault_path_is_the_same_root() {
             [FOLDER_SLUG],
             "{spelling}: no second folder"
         );
+        previous = second;
     }
 }
 
