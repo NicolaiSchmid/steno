@@ -21,26 +21,23 @@ use uuid::Uuid;
 use crate::pipeline::{Now, PipelineFailure, ProcessingPipeline};
 
 /// Hands a queued meeting and its asset to the pipeline. The production
-/// wiring is [`ProcessingPipeline::enqueue`]; tests pass a counting closure.
+/// wiring is [`ProcessingPipeline::enqueue`] for the local intake and
+/// [`ProcessingPipeline::enqueue_durably`] for the phone's; tests pass a
+/// counting closure.
 pub type Enqueue = Arc<
     dyn Fn(Meeting, AudioAsset) -> Pin<Box<dyn Future<Output = Result<(), PipelineFailure>> + Send>>
         + Send
         + Sync,
 >;
 
-fn enqueue_through(pipeline: ProcessingPipeline) -> Enqueue {
+/// `enqueue` (one of [`ProcessingPipeline`]'s enqueues) on `pipeline`.
+fn enqueue_through(
+    pipeline: ProcessingPipeline,
+    enqueue: fn(&ProcessingPipeline, &Meeting, &AudioAsset) -> Result<(), PipelineFailure>,
+) -> Enqueue {
     Arc::new(move |meeting, asset| {
         let pipeline = pipeline.clone();
-        Box::pin(async move { pipeline.enqueue(&meeting, &asset) })
-    })
-}
-
-/// [`enqueue_through`] with [`ProcessingPipeline::enqueue_durably`]: the
-/// phone intake's.
-fn enqueue_durably_through(pipeline: ProcessingPipeline) -> Enqueue {
-    Arc::new(move |meeting, asset| {
-        let pipeline = pipeline.clone();
-        Box::pin(async move { pipeline.enqueue_durably(&meeting, &asset) })
+        Box::pin(async move { enqueue(&pipeline, &meeting, &asset) })
     })
 }
 
@@ -110,7 +107,12 @@ impl RecordingIntake {
     #[must_use]
     pub fn over(store: Arc<Store>, pipeline: ProcessingPipeline, zone: FixedOffset) -> Self {
         let now = pipeline.dependencies().now.clone();
-        Self::new(store, enqueue_durably_through(pipeline), now, zone)
+        Self::new(
+            store,
+            enqueue_through(pipeline, ProcessingPipeline::enqueue_durably),
+            now,
+            zone,
+        )
     }
 }
 
@@ -259,7 +261,12 @@ impl LocalRecordingIntake {
     #[must_use]
     pub fn over(store: Arc<Store>, pipeline: ProcessingPipeline, zone: FixedOffset) -> Self {
         let now = pipeline.dependencies().now.clone();
-        Self::new(store, enqueue_through(pipeline), now, zone)
+        Self::new(
+            store,
+            enqueue_through(pipeline, ProcessingPipeline::enqueue),
+            now,
+            zone,
+        )
     }
 
     /// Writes the `recording` meeting and its `them` participants in one
