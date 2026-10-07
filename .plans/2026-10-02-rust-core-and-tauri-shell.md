@@ -133,8 +133,8 @@ default and the feature is opt-in, for UI work without a database.
 
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
-`SecretStore` (Keychain and the Windows credential store via `keyring`; a 0600 file on
-Linux until a Secret Service backend is chosen), `Updater` (Tauri updater on every
+`SecretStore` (Keychain and the Windows credential store via `keyring`; the Secret
+Service over `zbus` on Linux, a 0600 file where no provider runs), `Updater` (Tauri updater on every
 platform; Sparkle retires at cutover).
 
 ## Transition
@@ -921,8 +921,12 @@ still has to draw the window side. `[ ]` is not ported yet.
   sources), so the Rust app reads the API key the Swift app stored. The `keyring`
   crate sets no label, where Swift wrote "Steno <key>"; lookups ignore it. The CLI and
   the app do not read each other on macOS and Windows, as Keychain and the file did
-  not. On Linux the app uses the same file, so the two share it; a write is atomic
-  under a lock.
+  not. On Linux the app keeps its secrets in the Secret Service (`SecretServiceStore`:
+  attributes `service` and `username`, label "Steno <key>"). On first use it moves what
+  the file holds into the service and deletes the file, so from then on the CLI reads
+  `STENO_<KEY>` or a file of its own, as on the Mac. With no provider on the session
+  bus, or a keyring the user leaves locked, the app keeps every secret in the file for
+  that run, and the two share it (a write is atomic under a lock).
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
@@ -2845,9 +2849,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `RecordingIntake::admit` in `crates/steno-pipeline/src/intake.rs` and
   `RecordingIntake.admit` in `Sources/StenoCore/Storage/RecordingIntake.swift`; the
   Store item on `RecordingIntake.admit`. Found: #213.
-- **Unowned.** Linux keeps secrets in the 0600 `secrets.json` under the support
-  directory, not in the Secret Service. Where: `crates/steno-services/src/secrets.rs`.
-  Found: #173.
 - **Unowned.** The speech settings (`onnxSidecarOnMac`, `directmlOnWindows`,
   `modelsMirror`) live only in `speech.json`, which nothing writes, and the bridge has
   no field for them; `.plans/2026-10-07-speech-settings-ui.md` proposes where they
@@ -3010,8 +3011,8 @@ in the app's process until #183 moved it into the speech sidecar; the
 `CoreML` engine leaves `language` unset (#163), and
 `LanguageTaggingEngine` in the services crate runs `steno_speech`'s tagger after it,
 as `ParakeetMapping` did in Swift. Secrets: the platform keyring on macOS and
-Windows, the 0600 `secrets.json` on Linux (the kernel keyring does not survive a
-reboot; the Secret Service, which needs D-Bus, has no work package yet).
+Windows, the Secret Service on Linux when a provider runs on the session bus, else the
+0600 `secrets.json` (the kernel keyring does not survive a reboot).
 Parity items: the Pipeline and services list above.
 
 WP10a is the Windows half of `crates/steno-audio`: the WASAPI live backend
