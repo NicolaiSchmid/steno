@@ -103,6 +103,9 @@ impl SessionApi {
         // xfce4-session asks once the user chose to log out, waits up to a
         // minute for the answer and seven seconds after `EndSession`, and
         // on Wayland quits after the query without sending `EndSession`.
+        // Another client can still call the logout off after the query
+        // (XSMP's interact-cancel); the app has then stopped the recording,
+        // saved it and quit.
         saves_at_query: true,
     };
     /// In the order the app looks for them on the bus.
@@ -152,9 +155,9 @@ pub fn startup_id() -> String {
     std::env::var("DESKTOP_AUTOSTART_ID").unwrap_or_default()
 }
 
-/// Starts both clients, the session's only with a session bus (the
-/// definition the single instance uses, `session_bus_named`); `startup_id`
-/// is what `startup_id` read at launch.
+/// Starts the three clients, the session's two only with a session bus
+/// (the definition the single instance uses, `session_bus_named`);
+/// `startup_id` is what `startup_id` read at launch.
 pub fn watch(app: &tauri::AppHandle, startup_id: String) {
     let on_end = SaveAndQuit::of(app);
     if crate::session_bus_named() {
@@ -207,8 +210,8 @@ fn spawn_client(
     }
 }
 
-/// A proxy that caches no property: neither client reads one, and the
-/// cache would ask the bus for them.
+/// A proxy that caches no property: no client reads one, and the cache
+/// would ask the bus for them.
 fn proxy<'a>(
     connection: &Connection,
     destination: &'a str,
@@ -226,7 +229,8 @@ fn proxy<'a>(
 /// What a session client does on one of the session manager's signals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientStep {
-    /// Answers yes at once: a recording does not hold a logout back.
+    /// Answers yes at once: the query comes before the user confirmed; the
+    /// logout inhibitor is what asks the user.
     Answer,
     /// Saves, answers, then quits: the session ends.
     SaveAnswerQuit,
@@ -237,8 +241,8 @@ enum ClientStep {
 }
 
 /// The step for the session manager's signal `member` under `api`: the
-/// query is answered at once, or saved for first where the manager asks
-/// only once the session is ending (`SessionApi::saves_at_query`).
+/// query is answered at once or, where the manager asks only once the user
+/// chose to log out (`SessionApi::saves_at_query`), after the save.
 fn client_step(api: SessionApi, member: &str) -> ClientStep {
     match member {
         "QueryEndSession" if api.saves_at_query => ClientStep::SaveAnswerQuit,
@@ -529,30 +533,36 @@ fn follow_portal(session: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()>
     Err(zbus::Error::Failure("the session bus closed".to_owned()))
 }
 
-/// Whether the recorder is busy, as the shell last told the inhibitor's
-/// client (`note_recording`), and the way to tell it. Managed state.
-pub struct LogoutInhibitor {
-    busy: Mutex<(mpsc::Sender<bool>, bool)>,
+/// The shell's side of the logout inhibitor's client
+/// (`hold_logout_inhibitor`): whether the recorder is busy, as the shell
+/// last told the client (`note_recording`), and the way to tell it.
+/// Managed state.
+pub struct LogoutInhibitor(Mutex<Told>);
+
+/// What `LogoutInhibitor` holds.
+struct Told {
+    /// The client's end of the channel.
+    tell: mpsc::Sender<bool>,
+    /// What the client was last told.
+    busy: bool,
 }
 
 impl LogoutInhibitor {
-    fn new(busy: mpsc::Sender<bool>) -> Self {
-        Self {
-            busy: Mutex::new((busy, false)),
-        }
+    fn new(tell: mpsc::Sender<bool>) -> Self {
+        Self(Mutex::new(Told { tell, busy: false }))
     }
 
     /// Tells the client `busy` when it changed; false when the client has
     /// gone.
     fn note(&self, busy: bool) -> bool {
-        let Ok(mut noted) = self.busy.lock() else {
+        let Ok(mut told) = self.0.lock() else {
             return false;
         };
-        if noted.1 == busy {
+        if told.busy == busy {
             return true;
         }
-        noted.1 = busy;
-        noted.0.send(busy).is_ok()
+        told.busy = busy;
+        told.tell.send(busy).is_ok()
     }
 }
 
@@ -1162,8 +1172,8 @@ mod tests {
         assert_eq!(session.steps(), ["answered true"]);
     }
 
-    /// No session manager and no logind on the bus: both clients end with
-    /// an error, and neither saves nor quits.
+    /// No session manager, portal or logind on the bus: both clients end
+    /// with an error, and neither saves nor quits.
     #[test]
     fn without_the_services_neither_client_saves_nor_quits() {
         let Some(daemon) = Daemon::start() else {
@@ -1208,9 +1218,9 @@ mod tests {
 
     /// The desktop portal's inhibitor as far as the app goes: it notes the
     /// monitors and inhibitors asked of it on `calls`, the answers to a
-    /// query in `steps` ("answered <session>"), and serves each inhibitor's request
-    /// until it is closed. The states and the responses are the test's to
-    /// send (`state`).
+    /// query in `steps` ("answered <session>"), and serves each
+    /// inhibitor's request until it is closed. The states and the
+    /// responses are the test's to send (`state`).
     struct FakePortal {
         calls: mpsc::Sender<PortalCall>,
         steps: Steps,
