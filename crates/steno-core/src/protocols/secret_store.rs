@@ -39,6 +39,16 @@ impl fmt::Display for SecretKey {
     }
 }
 
+/// Where a store keeps its secrets, for the settings' wording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretPlace {
+    /// The platform keyring: the Keychain, the Windows credential store,
+    /// the Secret Service.
+    Keyring,
+    /// A file only the user can read.
+    File,
+}
+
 /// Where the API key lives: read, set, remove.
 #[async_trait]
 pub trait SecretStore: Send + Sync {
@@ -46,4 +56,11 @@ pub trait SecretStore: Send + Sync {
 
     /// `None` removes the secret.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()>;
+
+    /// Where the secrets are kept; `None` when the store does not say or
+    /// has not decided yet. No Swift counterpart (the Swift app keeps them
+    /// in the Keychain only).
+    fn place(&self) -> Option<SecretPlace> {
+        None
+    }
 }

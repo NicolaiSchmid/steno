@@ -66,7 +66,7 @@ pub use platform::Platform;
 pub use protocols::{
     AudioDecoder, BoundaryResult, BoxError, DEFAULT_MATCH_MARGIN, DeliveryDispatcher, Destination,
     Diarizer, EchoCanceller, HandoverIntake, LanguageModel, MeetingSummarizer, SecretKey,
-    SecretStore, SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
+    SecretPlace, SecretStore, SpeakerMemory, SpeechEngine, TranscriptCleaner, async_trait,
 };
 pub use recording_layout::RecordingLayout;
 pub use store::{DeletedMeeting, ExpiredAsset, SearchHit, StageRateRow, Store, StoreError};

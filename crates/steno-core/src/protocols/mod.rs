@@ -112,7 +112,7 @@ pub use echo_canceller::EchoCanceller;
 pub use handover_intake::HandoverIntake;
 pub use language_model::LanguageModel;
 pub use meeting_summarizer::MeetingSummarizer;
-pub use secret_store::{SecretKey, SecretStore};
+pub use secret_store::{SecretKey, SecretPlace, SecretStore};
 pub use speaker_memory::{DEFAULT_MATCH_MARGIN, SpeakerMemory};
 pub use speech_engine::SpeechEngine;
 pub use transcript_cleaner::TranscriptCleaner;
