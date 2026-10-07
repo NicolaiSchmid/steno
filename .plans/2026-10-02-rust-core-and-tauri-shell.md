@@ -1082,24 +1082,23 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The pipeline's `decode` streams a lane (see "The decoder streams" under Audio);
   the one buffer alive at a time rule holds, and the buffer is the 16 kHz lane
   (460 MB for two hours) plus a working set under a megabyte, as in Swift.
-- Launch recovery stops resuming a meeting whose processing keeps ending the app.
-  Swift resumed every unfinished meeting at every launch. Each background run is
-  counted in the meeting's folder (`.processing-runs`, `crates/steno-pipeline/src/runs.rs`)
-  and the count settled when the process sees the run end (its return, a panic
-  unwinding through it, the exit, which takes back its own run); after three runs
-  that ended with the process (an abort, an out-of-memory kill), `resume_unfinished`
-  marks the meeting failed ("Steno closed unexpectedly 3 times while processing this
-  recording, so it was not tried again. The recording is kept."), clears any
-  retention stamp so the sweep keeps the audio, and `enqueue` or `reprocess` starts
-  the count afresh. A file, not a column, so no migration.
-- There is no "Process again" action yet: `ProcessingPipeline::reprocess` is its
-  entry point, and the bridge method, host, web UI and Swift side are their own
-  item. Until then a Mac call's lanes can be processed again as a new meeting with
-  `steno process <audio folder>/<MEETING-UUID>/mic.wav --system-lane
-  <audio folder>/<MEETING-UUID>/system.wav --source mac-call` (an in-person
-  recording: `steno process <audio folder>/<MEETING-UUID>/mixed.wav`); a phone
-  recording (`recording.m4a`) has no such path, since `steno process` takes 16 kHz
-  WAV only.
+- Launch recovery stops resuming a meeting whose processing keeps ending the app
+  (`crates/steno-pipeline/src/crash_loop.rs`); Swift resumed every unfinished
+  meeting at every launch. What is counted: each background run adds one to
+  `.processing-runs` in the meeting's folder before it starts, and every end the
+  app lives through takes it off again (a return, ready or failed, and a panic clear
+  the count; the exit takes back each run still going, on the current pipeline and
+  the retired ones). What is left is the runs that ended with the app: an abort, an
+  out-of-memory kill, a power loss. When it gives up: after three such runs,
+  `resume_unfinished` marks the meeting failed and clears any retention stamp, so
+  the sweep keeps the audio. What the user sees: "Steno closed unexpectedly 3 times
+  while processing this recording and stopped trying; the recording is kept." How
+  to start over: `enqueue` or `reprocess` clears the count. A file, not a column, so
+  no migration.
+- "Process again": its pipeline entry point, `ProcessingPipeline::reprocess`, has
+  landed (refused with a typed `ReprocessError` when the meeting is unfinished, in
+  flight or its master is gone); the bridge method, its button and
+  `steno process --meeting` are P9 in `.plans/2026-10-07-stable-promotion.md`.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
   under 5 % of the mic lane's speech and under ten seconds is diarized on the mic lane
   (`pipeline::diarized_lane_after_transcription`, `tap_carried_no_conversation`); the
@@ -1167,28 +1166,40 @@ parity item until a plan says otherwise:
   small AAC encoder (`fdk-aac` is non-free; `ffmpeg` is too large), accept
   WAV for the optional export, or encode through the platform (AudioToolbox
   on the Mac, Media Foundation on Windows) behind a `cfg`.
-- **The decoder streams, as the AVFoundation codec's 32 768-frame chunks
-  did.** A CAF master is read 32 768 frames at a time through the crate's
-  CAF chunk walk, other files a packet at a time through symphonia, the
-  sidecar a block at a time; each block is resampled as it arrives
+- **A shape change mid-file is resampled per shape; otherwise the decoder
+  streams as the AVFoundation codec's 32 768-frame chunks did.** A rate or
+  channel count that changes mid-file finishes what came before at its own
+  rate and appends the rest, so the lane keeps all of the file, as Swift's one
+  `AVAudioFile` decode did (the whole-file decoder before it dropped the
+  earlier samples). A CAF master is read 32 768 frames at a time through the
+  crate's CAF chunk walk, other files a packet at a time through symphonia,
+  the sidecar a block at a time; each block is resampled as it arrives
   (`LaneResampler` in `crates/steno-audio/src/codec/resample.rs`), and the
-  mixdown writes as it goes. Measured on a synthetic two-hour two-lane 48 kHz
-  master (2.8 GB on disk; `STENO_CODEC_MEMORY_SECONDS=7200` in
+  mixdown writes as it goes. A length the container declares reserves at
+  most five hours at 16 kHz; a CAF's frame count, measured from the file, is
+  reserved whole. The decoder's bound, measured on a synthetic two-hour
+  two-lane 48 kHz master (2.8 GB on disk; `STENO_CODEC_MEMORY_SECONDS=7200` in
   `crates/steno-audio/tests/codec_memory.rs`): a lane's decode peaks at
   0.63 MiB beyond its 439 MiB (460 MB) 16 kHz output, the mixdown at
   0.74 MiB, where the whole-file decoder held the file and every channel
   (about 5.5 GB). The samples are the whole-file decoder's bit for bit
-  (`tests/codec_streaming.rs`, which keeps it as the reference). One
-  difference from that decoder, and from Swift: a rate or channel count
-  that changes mid-file starts the lane again at the change.
-- **A sidecar is taken only when it is as long as the master.** Swift's
-  codec took any non-empty sidecar. The Rust `decode` reads the master
-  CAF's frame count from its header and decodes the master when the
-  sidecar is not exactly a third of it: the sidecar's 32-bit size fields
-  wrap after 37.3 hours (a wrapped header can still parse and claim a
-  short lane), and a sidecar that missed the master's last frame on a full
-  disk would lose it. A master that is not the writer's CAF leaves the
-  sidecar trusted.
+  (`tests/codec_streaming.rs`, which keeps it as the reference).
+  The soak's bound, for each of R5's commands in
+  `.plans/2026-10-07-stable-promotion.md` (`steno` and its children
+  together): 6 GiB. Measured on atlas with `steno dev bakeoff` (ONNX Parakeet,
+  four threads) on mono 16 kHz FLEURS speech: a peak of 3.0 GiB at 10 minutes
+  and 3.2 GiB at 40, about 9 MiB more per minute of audio, so about 3.9 GiB
+  at two hours. The rest leaves room for the speech sidecar's copy of the
+  lane, the diarizer and the Mac's ONNX peak, and a whole-file decode (5.5 GB
+  more) still fails it.
+- **A sidecar is taken only when it is the master's length at 16 kHz.**
+  Swift's codec took any non-empty sidecar. The Rust `decode` reads the
+  master CAF's frame count from its header and decodes the master when the
+  sidecar disagrees with it: the sidecar's 32-bit size fields wrap after
+  37.3 hours (a wrapped header can still parse and claim a short lane), and
+  a sidecar that missed the master's last frame on a full disk would lose
+  it. A master that then fails to decode falls back to that sidecar, and a
+  master that is not the writer's CAF leaves the sidecar trusted.
 - **Resampling.** 48 kHz masters go through the writer's exact 3:1 FIR
   with its group delay dropped, so the decode is zero-phase on the master's
   time; other rates (the phone's 44.1 kHz) through a 64-tap, 128-phase

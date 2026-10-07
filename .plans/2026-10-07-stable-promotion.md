@@ -147,8 +147,9 @@ Forge and atlas.
   through its own mDNS responder (`mdns-sd`). A firewall that blocks incoming TCP
   hides it from the phone; `ufw` admits mDNS by default.
 - **The Rust app has no "Process again".** "Try again" re-runs only the summary
-  and is off without a transcript; neither the pipeline, the bridge nor the CLI
-  can process a meeting again, and the CLI reads WAV only. P9 adds it.
+  and is off without a transcript. The pipeline can process a meeting again
+  (`ProcessingPipeline::reprocess`), but neither the bridge nor the CLI calls it
+  yet, and the CLI reads WAV only. P9 adds them.
 - **A recording ended by a kill is marked failed at the next launch**
   (`fail_interrupted_recordings`), and nothing salvages its CAF yet (P3).
 - **Omarchy 4** (Arch with Hyprland, Wayland):
