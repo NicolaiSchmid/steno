@@ -134,9 +134,9 @@ platform; Sparkle retires at cutover).
 Parallel build. The Swift app ships from `main` throughout. The Rust app is usable on
 Linux first (no Swift app competes there), then on the Mac once the parity list is
 empty, then on Windows once its capture backend passes the capture tests. Cutover on
-the Mac is a release that ships the Tauri app under the same bundle id, reading the
-same database and settings, with Sparkle pointing at the last Swift build's appcast
-entry for the handoff.
+the Mac is a release that ships the Tauri app as an ordinary Sparkle update, reading the
+same database and settings; `.plans/2026-10-07-stable-promotion.md` gives it the new
+identifier `com.nicolaischmid.steno` (its D5).
 
 Parity list (kept at the end of this file): every user-visible behaviour of the Swift
 app, ticked when the Rust app matches it on the Mac. Feature PRs on the Swift app add a
@@ -512,7 +512,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   installer bundles, and `.github/workflows/desktop-release.yml`: a manual run that
   builds the bundles on the three platforms, unsigned, as workflow artifacts.
 - **WP9 Mac cutover and signed releases.** The blocking list of
-  `.plans/2026-10-07-stable-promotion.md` (D3) closed, same bundle id, Sparkle handoff, Swift app removed, web
+  `.plans/2026-10-07-stable-promotion.md` (D3) closed, the identifier `com.nicolaischmid.steno` (its D5), Sparkle handoff, Swift app removed, web
   app moved to `apps/web`, Swift rows removed from `AGENTS.md`; `cargo deny` with a
   licence allow list in CI; the signing key for the updater artifacts, notarisation,
   and the tag-triggered release workflow that publishes the bundles and the updater
@@ -1513,8 +1513,9 @@ touch lines; each fix is ported to Swift before cutover.
 - Launch at login is a Launch Agent through `tauri-plugin-autostart`, where the Swift
   app registers with `SMAppService`; the `requiresApproval` state never occurs on the
   Rust side. On macOS the cutover moves the Rust app onto `SMAppService.mainApp` too,
-  so the Swift registration carries over and the approval copy stays reachable
-  (`.plans/2026-10-07-stable-promotion.md`, D4).
+  so the approval copy stays reachable; with the new identifier the app registers
+  itself, and the Swift entry is handled as `.plans/2026-10-07-stable-promotion.md`
+  (D4, S6) says.
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
   Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
   The page answers the shortcuts it shows itself (`useShortcut` in
@@ -1638,6 +1639,8 @@ release**, **First Windows release** (WP10's hardware checks and the unsigned in
 the branch of a follow-up pull request, or **Unowned** (no package or release has it yet).
 Then it says what is open, where it lives (pointing to this plan where the plan already
 covers it) and which pull requests found it. The pull request that fixes an item deletes it.
+Whatever its owner, an item that can lose a recording, a transcript, a note or a pairing
+blocks the stable release (`.plans/2026-10-07-stable-promotion.md`, D3).
 
 - **WP9b.** The unticked lines of the parity list; which of them block the stable
   release, and which follow it, is the blocking list of
