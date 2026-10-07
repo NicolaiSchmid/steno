@@ -408,7 +408,7 @@ impl Graph {
 
     /// The source a capture asked for `uid` would record now: the chosen
     /// one while it can be recorded, else the default. The snapshot reads
-    /// it, so a capture standing in with the default follows default moves,
+    /// it, so a capture on the fallback follows default moves,
     /// and the chosen source coming back reads as `DefaultInputChanged`,
     /// whose rebuild records it again.
     fn followed_source(&self, uid: Option<&str>) -> Option<(u32, &NodeEntry)> {
@@ -416,8 +416,10 @@ impl Graph {
     }
 
     /// The microphone a capture that resolved `targets` asked for `uid`
-    /// records, named as [`Self::inputs`] names it; a fallback when `uid`
-    /// names no source the lane can record.
+    /// records, named by its `node.description`, else `node.nick`, and
+    /// `None` without either ([`Self::inputs`] then lists it by its
+    /// `node.name`); a fallback when `uid` names no source the lane can
+    /// record.
     pub fn input(&self, targets: &Targets, uid: Option<&str>) -> Option<CaptureInput> {
         let mic = targets.mic.as_ref()?;
         Some(CaptureInput {

@@ -35,8 +35,9 @@ impl AudioDevices {
     /// `default` metadata, and a bind dropped before the session manager
     /// answered its ping stops the metadata's events for every client of
     /// the daemon on PipeWire before 1.6.9 (see "A default move can go
-    /// unreported" in the plan's Linux list), a capture standing in with
-    /// the default source included. Settings does not show the default.
+    /// unreported" in the plan's Linux list). That includes a capture
+    /// recording the default source as the fallback. Settings does not
+    /// show the default.
     ///
     /// PipeWire's objects are single-threaded, so the connection lives on a
     /// thread of its own for the call: it connects, waits one roundtrip
