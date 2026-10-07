@@ -20,6 +20,8 @@ fn a_panic_leaves_a_crash_log_and_still_reaches_the_previous_hook() {
         .unwrap()
         .join();
     assert!(caught.is_err());
+    // The assertions below report through the default hook again.
+    drop(std::panic::take_hook());
 
     let logs: Vec<_> = std::fs::read_dir(&folder)
         .unwrap()
@@ -33,7 +35,8 @@ fn a_panic_leaves_a_crash_log_and_still_reaches_the_previous_hook() {
     );
     let text = std::fs::read_to_string(&logs[0]).unwrap();
     assert!(text.contains("the meeting list ran out of rows"), "{text}");
-    assert!(text.contains("tests/crash_log.rs:"), "{text}");
+    // `tests\crash_log.rs` on Windows.
+    assert!(text.contains("crash_log.rs:"), "{text}");
     assert!(text.contains("on thread 'steno-crash-test'"), "{text}");
     assert!(text.contains("backtrace:"), "{text}");
     assert!(previous_ran.load(std::sync::atomic::Ordering::SeqCst));
