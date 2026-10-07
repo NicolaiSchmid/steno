@@ -685,7 +685,7 @@ impl Watch {
 /// of its capture streams is linked from a source and running, Steno's own
 /// capture, filters and level meters left out. One PipeWire thread per
 /// source, started by the first call and ended by the drop, serves every
-/// `changes()` receiver; the `detection::pipewire` module doc says why.
+/// `changes()` receiver, because PipeWire's objects are single-threaded.
 pub struct LiveProcessAudioActivity {
     shared: Arc<Shared>,
     watch: Mutex<Option<Watch>>,
@@ -919,6 +919,39 @@ mod tests {
             "the node's pid over the client's credentials; the name without a binary"
         );
         assert!(processes[0].is_running_input);
+    }
+
+    /// A browser call (A8): Firefox's input stream reaches PipeWire
+    /// through the compatibility layer, so the node names the browser and
+    /// its pid, and the process holds the microphone while it runs linked.
+    #[test]
+    fn a_browser_s_compatibility_stream_names_the_browser() {
+        let mut graph = desktop();
+        stream(&mut graph, 31, "Stream/Input/Audio", "21", &[]);
+        graph.node_info(
+            31,
+            Some(true),
+            Some(props(&[
+                ("application.process.id", "4300"),
+                ("application.process.binary", "firefox"),
+                ("application.name", "Firefox"),
+                ("media.name", "AudioCallbackDriver"),
+            ])),
+        );
+        assert_eq!(
+            running(&graph),
+            vec![(4300, false, false)],
+            "not linked yet"
+        );
+        link(&mut graph, 41, MIC, 31);
+        let processes = graph.processes();
+        assert_eq!(
+            (processes[0].pid, processes[0].bundle_id.as_deref()),
+            (4300, Some("firefox"))
+        );
+        assert!(processes[0].is_running_input);
+        graph.node_info(31, Some(false), NO_PROPS);
+        assert_eq!(running(&graph), vec![(4300, false, false)], "suspended");
     }
 
     #[test]
