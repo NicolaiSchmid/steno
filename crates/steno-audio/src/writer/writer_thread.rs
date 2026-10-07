@@ -28,6 +28,7 @@ use std::time::Duration;
 use steno_core::AudioLane;
 
 use super::recording_writer::{LaneFrames, RecordingWriting};
+use crate::FRAMES_PER_SECOND;
 use crate::capture::{CaptureError, LaneLevels};
 use crate::realtime::{FrameRelay, LevelSlot};
 
@@ -45,7 +46,7 @@ const MAX_LANES: usize = AudioLane::ALL.len();
 /// ([`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]).
 ///
 /// [`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]: crate::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES
-pub const SYNC_INTERVAL_FRAMES: usize = 500;
+pub const SYNC_INTERVAL_FRAMES: usize = 5 * FRAMES_PER_SECOND;
 
 struct Worker {
     relay: Arc<FrameRelay>,

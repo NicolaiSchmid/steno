@@ -6,11 +6,11 @@
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use chrono::{FixedOffset, Utc};
 use steno_audio::{
-    CaptureConfiguration, CaptureSession, CaptureStatistics, LaneLevels as AudioLevels,
+    CaptureConfiguration, CaptureSession, CaptureStatistics, FRAMES_PER_SECOND,
+    LaneLevels as AudioLevels,
 };
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
@@ -436,7 +436,7 @@ fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Optio
         .copied()
         .unwrap_or(0);
     if dropped > 0 {
-        let seconds = dropped.div_ceil(CaptureSession::gap_frames(Duration::from_secs(1)));
+        let seconds = dropped.div_ceil(FRAMES_PER_SECOND);
         lines.push(if seconds == 1 {
             "About 1 second of the recording is missing.".to_owned()
         } else {

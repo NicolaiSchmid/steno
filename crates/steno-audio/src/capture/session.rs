@@ -113,7 +113,7 @@ use crate::realtime::{
     FrameRelay, LaneFrameSink, LevelSlot, ProcessingConfiguration, ProcessingThread,
 };
 use crate::writer::{RecordingWriter, RecordingWriting, WriterThread};
-use crate::{FRAME_SIZE, SAMPLE_RATE};
+use crate::{FRAME_SIZE, FRAMES_PER_SECOND, SAMPLE_RATE};
 
 /// Opens the files for one recording; [`RecordingWriter::new`] in
 /// production, a failure-injecting wrapper in tests.
@@ -243,7 +243,7 @@ impl CaptureSession {
     /// that stalls for seconds (a slow sync, a sleeping external drive)
     /// loses nothing. The rings round up to 2^20 samples, 4 MiB per written
     /// channel, allocated at start. Rust only: Swift's relay held 2 s.
-    pub const DEFAULT_WRITER_HEADROOM_FRAMES: usize = 2_000;
+    pub const DEFAULT_WRITER_HEADROOM_FRAMES: usize = 20 * FRAMES_PER_SECOND;
 
     /// The production session: the live backend, Speex when the
     /// configuration cancels echo, the wall clock.

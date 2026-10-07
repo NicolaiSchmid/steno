@@ -122,6 +122,8 @@ pub const SAMPLE_RATE: f64 = 48_000.0;
 /// One processing frame: 10 ms at 48 kHz. The echo canceller, the level
 /// meter and the writer all work in this unit.
 pub const FRAME_SIZE: usize = 480;
+/// Processing frames a second: 48 000 samples in frames of [`FRAME_SIZE`].
+pub const FRAMES_PER_SECOND: usize = 100;
 /// The echo canceller's tail: 200 ms at 48 kHz.
 pub const ECHO_TAIL_LENGTH: usize = 9_600;
 
