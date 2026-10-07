@@ -7,7 +7,7 @@
 //! app takes no lock and ships no further release; the shell refuses to
 //! start beside it (it looks for its bundle id), but a Swift app started
 //! after the Rust app is not kept out (the launch reconciliation leaves a
-//! recording alone while its master is still growing).
+//! recording alone while its master is still growing, #233).
 //!
 //! The lock is an advisory, exclusive lock per database: on the file
 //! beside it with the extension `lock` (`<support>/steno.lock` for the
@@ -18,7 +18,9 @@
 //! A lock file this user cannot write (left by `sudo steno`) is opened
 //! read-only and locked all the same: both calls lock a read handle. A
 //! filesystem without locks answers [`DatabaseLockError::Unsupported`],
-//! and the app then runs without the lock and says so in its log.
+//! and the app then runs without the lock and says so in its log. Some
+//! network filesystems accept the lock without enforcing it (`WebDAV` on the
+//! Mac, measured), so there two processes can still both hold it.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::ErrorKind;
@@ -36,8 +38,8 @@ pub enum DatabaseLockError {
     /// on the same database. The payload is the lock file.
     #[error("Another Steno holds {}", .0.display())]
     Held(PathBuf),
-    /// The filesystem does not lock files (`ENOLCK`, or the call is not
-    /// supported), so no process can hold the database.
+    /// The filesystem does not lock files (`ENOLCK`, `ENOTSUP`, or the call
+    /// is not supported), so no process can hold the database.
     #[error("{} cannot be locked on this filesystem: {source}", .path.display())]
     Unsupported {
         path: PathBuf,
@@ -135,9 +137,11 @@ fn open(path: &Path) -> std::io::Result<File> {
 }
 
 /// Whether the filesystem, not another process, refused the lock.
+/// `ENOTSUP` goes by number: on the Mac it is not `EOPNOTSUPP` and the
+/// standard library gives it no kind (on Linux the two are one number).
 fn is_unsupported(error: &std::io::Error) -> bool {
     #[cfg(unix)]
-    if error.raw_os_error() == Some(libc::ENOLCK) {
+    if matches!(error.raw_os_error(), Some(libc::ENOLCK | libc::ENOTSUP)) {
         return true;
     }
     error.kind() == ErrorKind::Unsupported
@@ -252,9 +256,9 @@ mod tests {
             ErrorKind::Unsupported
         )));
         #[cfg(unix)]
-        assert!(is_unsupported(&std::io::Error::from_raw_os_error(
-            libc::ENOLCK
-        )));
+        for code in [libc::ENOLCK, libc::ENOTSUP] {
+            assert!(is_unsupported(&std::io::Error::from_raw_os_error(code)));
+        }
         assert!(!is_unsupported(&std::io::Error::from(
             ErrorKind::PermissionDenied
         )));

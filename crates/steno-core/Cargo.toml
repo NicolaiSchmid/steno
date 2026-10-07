@@ -31,7 +31,7 @@ unicode-normalization.workspace = true
 uuid.workspace = true
 zmij.workspace = true
 
-# `ENOLCK`: a filesystem without locks (`database_lock`).
+# `ENOLCK` and `ENOTSUP`: a filesystem without locks (`database_lock`).
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
