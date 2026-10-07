@@ -238,6 +238,8 @@ fn setup(
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);
+    #[cfg(target_os = "linux")]
+    autostart::keep_stop_timeout_at_launch(handle);
     #[cfg(unix)]
     exit_on_signals(handle, runtime);
     Ok(true)
