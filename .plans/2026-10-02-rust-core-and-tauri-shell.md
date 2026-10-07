@@ -1646,15 +1646,18 @@ touch lines; each fix is ported to Swift before cutover.
     a `recording` row. Crash recovery hashes and queues these rows, and fails one with
     no file of 1 KiB or more. The upload planner skips a row with no hash, and Retry
     is offered only for a failed row with one.
-  - Recorder files. Each `recording-<UUID>.m4a` in `Documents/ExpoAudio/` that no
-    `recording` row names, left by a crash before its row was saved, moves into the
-    queue as `<uuid>.m4a` without replacing a file (`recorderFilesToMove`).
-  - Crash recovery (`recorder/recovery-files.ts`). It finds a row's recorder file by
-    the file name of its `sourceUri` in the current `Documents/ExpoAudio/`, never by
-    the stored absolute path, since iOS moves the app's container to a new path on an
-    update or a restore. It replaces only a queue file read as below 1 KiB. A queue
-    file whose size cannot be read (expo reads it as null on iOS) counts as present:
-    recovery leaves its row in `recording`, and a later launch tries again.
+  - Recorder files. Each `recording-<UUID>.m4a` of 1 KiB or more in
+    `Documents/ExpoAudio/` that no `recording` row names, left by a crash before its
+    row was saved, moves into the queue as `<uuid>.m4a` without replacing a file
+    (`recorderFilesToMove`).
+  - Crash recovery (`recorder/recovery.ts` and `recorder/recovery-files.ts`). It
+    finds a row's recorder file by the file name of its `sourceUri` in the current
+    `Documents/ExpoAudio/`, never by the stored absolute path, since iOS moves the
+    app's container to a new path on an update or a restore. It replaces only a
+    queue file read as below 1 KiB, and when it refuses, it reads the queue file
+    again and goes by that size. A queue file whose size cannot be read (expo reads
+    it as null on iOS) counts as present: recovery leaves its row in `recording`
+    with a note that it tries again at the next launch, and a later launch does.
   - One file per recording. The recorder prepares expo-audio with the recording
     preset (`use-recorder.ts`), which builds a new recorder at a fresh
     `recording-<UUID>.m4a`, so a failed recording's file is not overwritten by the
