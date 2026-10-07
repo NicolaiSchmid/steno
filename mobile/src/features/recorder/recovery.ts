@@ -12,10 +12,11 @@ import { MIN_RECORDING_BYTES } from "./recording-options";
  * While recording, expo-audio writes to its own directory, so the row carries
  * that `sourceUri`: recovery moves the file into the queue directory, hashes
  * it and queues it (the duration is estimated from the bit rate). A row with
- * no file of `MIN_RECORDING_BYTES` or more, in the queue or at its
- * `sourceUri`, is marked failed so the user sees why nothing arrived. A row
- * whose queue file exists but whose size cannot be read is left as it is, so
- * nothing replaces that file and a later launch tries again. The queue
+ * no file of `MIN_RECORDING_BYTES` or more, in the queue or, under its
+ * `sourceUri`'s file name, in `Documents/ExpoAudio/`, is marked failed so the
+ * user sees why nothing arrived. A row whose queue file exists but whose size
+ * cannot be read stays `recording`, with a note for the user, so nothing
+ * replaces that file and a later launch tries again. The queue
  * storage adds rows in the same state for recording files the index did not
  * list (`adoptRecordingFiles`), so they are hashed and queued here too.
  *
@@ -47,11 +48,19 @@ export type RecoveryPatch =
 			sha256: string;
 			durationSeconds: number;
 	  }
-	| { recordingID: string; kind: "failed"; lastError: string };
+	| { recordingID: string; kind: "failed"; lastError: string }
+	| { recordingID: string; kind: "unreadable" };
 
-/** Shown on a row whose recording no file holds. */
+/** Shown on a row with no file that holds its audio. */
 export const INTERRUPTED_MESSAGE =
 	"Recording was interrupted before it was saved";
+
+/**
+ * Shown on a row left in `recording` because its queue file's size cannot
+ * be read, so the row does not look like a recording still running.
+ */
+export const UNREADABLE_MESSAGE =
+	"Steno could not read this recording yet; it tries again at the next launch";
 
 /** Mono AAC at 64 kbps: bytes per second of audio. */
 const ESTIMATED_BYTES_PER_SECOND = 64_000 / 8;
@@ -72,14 +81,20 @@ export async function planRecovery(
 		) {
 			try {
 				await files.adopt(rec.sourceUri, rec.fileName);
-				byteCount = sizeOrUnknown(files, rec.fileName);
 			} catch {
-				byteCount = 0;
+				// The recorder's file is missing, or `adopt` refused because the
+				// queue file's size went unknown or reached `MIN_RECORDING_BYTES`
+				// since the read above. Both files stay; the size read below decides.
 			}
+			byteCount = sizeOrUnknown(files, rec.fileName);
 		}
 		// The file is there but its size is unknown: hashing it would queue a
-		// wrong byte count, and failing it would leave it behind.
-		if (byteCount === null) continue;
+		// wrong byte count, and failing it would tell the user that a
+		// recording still on disk was lost.
+		if (byteCount === null) {
+			patches.push({ recordingID, kind: "unreadable" });
+			continue;
+		}
 		if (byteCount < MIN_RECORDING_BYTES) {
 			patches.push({
 				recordingID,
@@ -131,13 +146,18 @@ export function applyRecovery(
 			next = setState(next, patch.recordingID, "failed", {
 				lastError: patch.lastError,
 			});
+		} else if (patch.kind === "unreadable") {
+			next = patchRecording(next, patch.recordingID, {
+				lastError: UNREADABLE_MESSAGE,
+			});
 		} else {
 			next = patchRecording(next, patch.recordingID, {
 				byteCount: patch.byteCount,
 				sha256: patch.sha256,
 				durationSeconds: patch.durationSeconds,
 			});
-			next = setState(next, patch.recordingID, "queued");
+			// An earlier launch's `UNREADABLE_MESSAGE` no longer applies.
+			next = setState(next, patch.recordingID, "queued", { lastError: null });
 		}
 	}
 	return next;

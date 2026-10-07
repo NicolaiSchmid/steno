@@ -5,13 +5,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * which `moveContainer` moves the way iOS does on an app update or a restore.
  * As on iOS, `move` throws for a source outside the current container or
  * missing, and without `overwrite` when the target exists; `size` is null
- * for a missing file and for the paths in `sizeUnreadable`.
+ * for a missing file and for the paths in `sizeUnreadable`, and throws for
+ * the paths in `sizeThrows`.
  */
 const fs = vi.hoisted(() => ({
 	files: new Map<string, string>(),
 	dirs: new Set<string>(),
 	container: "",
 	sizeUnreadable: new Set<string>(),
+	sizeThrows: new Set<string>(),
 }));
 
 vi.mock("expo-file-system", () => {
@@ -58,6 +60,7 @@ vi.mock("expo-file-system", () => {
 			return fs.files.has(this.uri);
 		}
 		get size() {
+			if (fs.sizeThrows.has(this.uri)) throw new Error("stat failed");
 			if (fs.sizeUnreadable.has(this.uri)) return null;
 			return fs.files.get(this.uri)?.length ?? null;
 		}
@@ -132,7 +135,12 @@ import {
 	MIN_RECORDING_BYTES,
 	recordingFileName,
 } from "./recording-options";
-import { applyRecovery, INTERRUPTED_MESSAGE, planRecovery } from "./recovery";
+import {
+	applyRecovery,
+	INTERRUPTED_MESSAGE,
+	planRecovery,
+	UNREADABLE_MESSAGE,
+} from "./recovery";
 import { expoRecoveryFiles } from "./recovery-files";
 
 const STARTED = "2026-10-01T10:00:00.000Z";
@@ -203,6 +211,7 @@ beforeEach(() => {
 	fs.files.clear();
 	fs.dirs.clear();
 	fs.sizeUnreadable.clear();
+	fs.sizeThrows.clear();
 	fs.container = OLD;
 });
 
@@ -233,24 +242,30 @@ describe("crash recovery over expo's files", () => {
 		}
 	}
 
-	it("keeps a queue file whose size cannot be read until a later launch reads it", async () => {
-		fs.files.set(
-			queuePath("index.json"),
-			serializeQueueIndex(interrupted("recording")),
-		);
-		fs.files.set(queuePath(QUEUE_NAME), AUDIO);
-		fs.files.set(recorderPath(RECORDER_NAME), "h".repeat(2_000));
-		fs.sizeUnreadable.add(queuePath(QUEUE_NAME));
+	for (const unreadable of ["null", "a throw"] as const) {
+		it(`keeps a queue file whose size reads as ${unreadable} until a later launch reads it`, async () => {
+			fs.files.set(
+				queuePath("index.json"),
+				serializeQueueIndex(interrupted("recording")),
+			);
+			fs.files.set(queuePath(QUEUE_NAME), AUDIO);
+			fs.files.set(recorderPath(RECORDER_NAME), "h".repeat(2_000));
+			const sizes = unreadable === "null" ? fs.sizeUnreadable : fs.sizeThrows;
+			sizes.add(queuePath(QUEUE_NAME));
 
-		expect(await launch()).toMatchObject([{ state: "recording" }]);
-		expect(fs.files.get(queuePath(QUEUE_NAME))).toBe(AUDIO);
+			expect(await launch()).toMatchObject([
+				{ state: "recording", lastError: UNREADABLE_MESSAGE },
+			]);
+			expect(fs.files.get(queuePath(QUEUE_NAME))).toBe(AUDIO);
+			expect(fs.files.has(recorderPath(RECORDER_NAME))).toBe(true);
 
-		fs.sizeUnreadable.clear();
-		expect(await launch()).toMatchObject([
-			{ state: "queued", byteCount: AUDIO.length },
-		]);
-		expect(fs.files.get(queuePath(QUEUE_NAME))).toBe(AUDIO);
-	});
+			sizes.clear();
+			expect(await launch()).toMatchObject([
+				{ state: "queued", byteCount: AUDIO.length, lastError: null },
+			]);
+			expect(fs.files.get(queuePath(QUEUE_NAME))).toBe(AUDIO);
+		});
+	}
 });
 
 describe("expoRecoveryFiles", () => {
@@ -260,23 +275,27 @@ describe("expoRecoveryFiles", () => {
 		expect(expoRecoveryFiles.size(QUEUE_NAME)).toBe(AUDIO.length);
 		fs.sizeUnreadable.add(queuePath(QUEUE_NAME));
 		expect(expoRecoveryFiles.size(QUEUE_NAME)).toBeNull();
+		fs.sizeUnreadable.clear();
+		fs.sizeThrows.add(queuePath(QUEUE_NAME));
+		expect(expoRecoveryFiles.size(QUEUE_NAME)).toBeNull();
 	});
 
 	it("replaces a queue file only when it read as holding no meaningful audio", async () => {
 		const source = `${OLD}/ExpoAudio/${RECORDER_NAME}`;
 		fs.files.set(recorderPath(RECORDER_NAME), "h".repeat(2_000));
 		for (const [kept, unreadable] of [
-			["q".repeat(MIN_RECORDING_BYTES), false],
-			["q".repeat(10), true],
+			["q".repeat(MIN_RECORDING_BYTES), null],
+			["q".repeat(10), fs.sizeUnreadable],
+			["q".repeat(10), fs.sizeThrows],
 		] as const) {
 			fs.files.set(queuePath(QUEUE_NAME), kept);
-			if (unreadable) fs.sizeUnreadable.add(queuePath(QUEUE_NAME));
+			unreadable?.add(queuePath(QUEUE_NAME));
 			await expect(expoRecoveryFiles.adopt(source, QUEUE_NAME)).rejects.toThrow(
 				/not replaced/,
 			);
 			expect(fs.files.get(queuePath(QUEUE_NAME))).toBe(kept);
+			unreadable?.clear();
 		}
-		fs.sizeUnreadable.clear();
 		fs.files.set(queuePath(QUEUE_NAME), "ftyp header");
 		await expoRecoveryFiles.adopt(source, QUEUE_NAME);
 		expect(fs.files.get(queuePath(QUEUE_NAME))).toBe("h".repeat(2_000));
