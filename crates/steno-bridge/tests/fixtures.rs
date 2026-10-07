@@ -50,6 +50,10 @@ const FIXTURES: &[(&str, Reencode)] = &[
         "settings.summaries.codex",
         reencode::<SummariesSettingsSnapshot>,
     ),
+    (
+        "settings.summaries.fileKey",
+        reencode::<SummariesSettingsSnapshot>,
+    ),
     ("settings.export", reencode::<ExportSettingsSnapshot>),
     ("settings.iphone", reencode::<PhoneSettingsSnapshot>),
     ("settings.iphone.pairing", reencode::<PhoneSettingsSnapshot>),
@@ -357,6 +361,13 @@ fn contract_ts_nested_enums_match() {
             "signIn: z.enum(["
         ]),
         raw(SummariesCodexSignIn::ALL)
+    );
+    assert_eq!(
+        nested(&[
+            "export const summariesSettingsSnapshot = z",
+            "keyStore: z.enum(["
+        ]),
+        raw(SummariesKeyStore::ALL)
     );
     assert_eq!(
         nested(&[

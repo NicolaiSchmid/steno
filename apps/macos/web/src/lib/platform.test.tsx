@@ -3,10 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import { platform as platformSchema } from "@/bridge/contract";
 import {
 	detectPlatform,
+	keyHome,
 	matchesShortcut,
 	type PlatformOS,
 	PlatformProvider,
 	platformFor,
+	SECRETS_FILE_WORDS,
 	SHORTCUTS,
 	type ShortcutEvent,
 	SWIFT_MAC,
@@ -208,8 +210,8 @@ describe("words", () => {
 			codexSignInFile: "%USERPROFILE%\\.codex\\auth.json",
 		});
 		expect(where("linux")).toEqual({
-			keychain: "a file only you can read",
-			loginKeychain: "a file only you can read",
+			keychain: "your keyring",
+			loginKeychain: "your keyring",
 			codexSignInFile: "~/.codex/auth.json",
 		});
 	});
@@ -219,6 +221,25 @@ describe("words", () => {
 		expect(platformFor("macos").titleBarInset).toBe(true);
 		expect(platformFor("windows").titleBarInset).toBe(false);
 		expect(platformFor("linux").titleBarInset).toBe(false);
+	});
+
+	it("name the keyring on Linux only when the host keeps the key there", () => {
+		const file = { short: SECRETS_FILE_WORDS, full: SECRETS_FILE_WORDS };
+		expect(keyHome(platformFor("linux"), "keyring")).toEqual({
+			short: "your keyring",
+			full: "your keyring",
+		});
+		expect(keyHome(platformFor("linux"), "file")).toEqual(file);
+		expect(keyHome(platformFor("linux"), undefined)).toEqual(file);
+		expect(keyHome(platformFor("macos"), undefined)).toEqual({
+			short: "your keychain",
+			full: "your login keychain",
+		});
+		expect(keyHome(platformFor("windows"), "keyring")).toEqual({
+			short: "Credential Manager",
+			full: "Windows Credential Manager",
+		});
+		expect(SECRETS_FILE_WORDS).toBe("a file only you can read");
 	});
 
 	it("read the calendar on the Mac only", () => {

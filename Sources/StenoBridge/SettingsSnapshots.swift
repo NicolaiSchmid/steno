@@ -345,13 +345,23 @@ public struct SummariesSettingsSnapshot: Codable, Sendable, Equatable {
   public var codex: Codex?
   public var error: String?
   public var errorDetails: String?
+  /// Where a saved key lives; the Rust host says, the Swift app (whose key
+  /// is always in the Keychain) leaves it out.
+  public var keyStore: KeyStore?
+
+  /// Where the host keeps a saved API key: the platform keyring, or the
+  /// owner-only secrets file (Linux without a keyring).
+  public enum KeyStore: String, Codable, Sendable, CaseIterable {
+    case keyring
+    case file
+  }
 
   public init(
     subtitle: String, presets: [Preset], presetID: String, baseURL: String, model: String,
     contextTokens: String, defaultContextTokens: Int = 32_000, hasAPIKey: Bool,
     isConfigured: Bool, isTesting: Bool, testResult: TestResult? = nil,
     validationMessage: String? = nil, codex: Codex? = nil, error: String? = nil,
-    errorDetails: String? = nil
+    errorDetails: String? = nil, keyStore: KeyStore? = nil
   ) {
     self.subtitle = subtitle
     self.presets = presets
@@ -368,6 +378,7 @@ public struct SummariesSettingsSnapshot: Codable, Sendable, Equatable {
     self.codex = codex
     self.error = error
     self.errorDetails = errorDetails
+    self.keyStore = keyStore
   }
 }
 

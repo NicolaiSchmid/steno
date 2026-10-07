@@ -30,6 +30,7 @@ fixtures![
     "settings.transcription",
     "settings.summaries",
     "settings.summaries.codex",
+    "settings.summaries.fileKey",
     "settings.export",
     "settings.iphone",
     "settings.iphone.pairing",
@@ -192,6 +193,7 @@ mod tests {
         for key in [
             "recording.live",
             "settings.summaries.codex",
+            "settings.summaries.fileKey",
             "settings.iphone.pairing",
             "onboarding.setup",
         ] {

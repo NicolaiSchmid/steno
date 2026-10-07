@@ -356,11 +356,13 @@ export function applyScenario(
 	applySettingsScenario(result, snapshots, scenario);
 	applyOnboardingScenario(result, snapshots, scenario);
 
-	// `recording.live`, `settings.summaries.codex`, `settings.iphone.pairing`
-	// and `onboarding.setup` are fixtures, not topics; the page never sees
-	// them by those names.
+	// `recording.live`, `settings.summaries.codex`,
+	// `settings.summaries.fileKey`, `settings.iphone.pairing` and
+	// `onboarding.setup` are fixtures, not topics; the page never sees them
+	// by those names.
 	delete result["recording.live"];
 	delete result["settings.summaries.codex"];
+	delete result["settings.summaries.fileKey"];
 	delete result["settings.iphone.pairing"];
 	delete result["onboarding.setup"];
 	return result;
@@ -481,6 +483,9 @@ function applyOnboardingScenario(
  * details, a login item awaiting approval, an update available),
  * `download-failed` (the speech model's download failed), `summaries-connected`
  * and `summaries-failed` (a configured OpenAI endpoint with its test result),
+ * `summaries-key-in-file` (a saved key the host keeps in the secrets file,
+ * from `settings.summaries.fileKey`) and `summaries-key-in-keyring` (the
+ * same key in the keyring),
  * `codex` (ChatGPT confirmed, from `settings.summaries.codex`), `codex-consent`
  * (ChatGPT chosen, not yet confirmed), `export-on` (a vault chosen and saved),
  * `pairing` (a code open and a transfer arriving, from
@@ -566,6 +571,19 @@ function applySettingsScenario(
 						message:
 							"HTTP 401 from the service's models list: Incorrect API key provided.",
 					},
+		} satisfies SummariesSettingsSnapshot;
+	}
+
+	const fileKey = snapshots["settings.summaries.fileKey"] as
+		| SummariesSettingsSnapshot
+		| undefined;
+	if (scenario === "summaries-key-in-file" && fileKey) {
+		result["settings.summaries"] = fileKey;
+	}
+	if (scenario === "summaries-key-in-keyring" && fileKey) {
+		result["settings.summaries"] = {
+			...fileKey,
+			keyStore: "keyring",
 		} satisfies SummariesSettingsSnapshot;
 	}
 

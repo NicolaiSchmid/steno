@@ -610,6 +610,11 @@ export const summariesSettingsSnapshot = z
 			.strict()
 			.optional(),
 		...errorFields,
+		/**
+		 * Where a saved key lives; the Rust host says, the Swift app leaves
+		 * it out (its key is always in the Keychain).
+		 */
+		keyStore: z.enum(["keyring", "file"]).optional(),
 	})
 	.strict();
 export type SummariesSettingsSnapshot = z.infer<
@@ -934,6 +939,7 @@ export const fixtureSchemas = {
 	...topicSchemas,
 	"recording.live": recordingSnapshot,
 	"settings.summaries.codex": summariesSettingsSnapshot,
+	"settings.summaries.fileKey": summariesSettingsSnapshot,
 	"settings.iphone.pairing": phoneSettingsSnapshot,
 	"onboarding.setup": onboardingSnapshot,
 	"envelope.request": bridgeRequest,

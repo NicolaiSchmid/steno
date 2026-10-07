@@ -268,6 +268,17 @@ pub struct SummariesTestResult {
 }
 
 string_enum! {
+    /// Where the host keeps a saved API key: the platform keyring (the
+    /// Keychain, the Windows credential store, the Secret Service) or the
+    /// owner-only secrets file (Linux without a keyring).
+    /// Swift: `SummariesSettingsSnapshot.KeyStore`.
+    pub enum SummariesKeyStore {
+        Keyring = "keyring",
+        File = "file",
+    }
+}
+
+string_enum! {
     /// Swift: `SummariesSettingsSnapshot.Codex.SignIn`.
     pub enum SummariesCodexSignIn {
         NotChecked = "notChecked",
@@ -330,6 +341,11 @@ pub struct SummariesSettingsSnapshot {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_details: Option<String>,
+    /// Where a saved key lives; absent when the host does not say (the
+    /// Swift app) or has not decided yet (the Linux keyring still asking
+    /// for its password).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_store: Option<SummariesKeyStore>,
 }
 
 impl Snapshot for SummariesSettingsSnapshot {

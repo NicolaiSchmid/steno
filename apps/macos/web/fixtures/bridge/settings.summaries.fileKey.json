@@ -1,0 +1,35 @@
+{
+  "baseURL" : "",
+  "contextTokens" : "32000",
+  "defaultContextTokens" : 32000,
+  "hasAPIKey" : true,
+  "isConfigured" : true,
+  "isTesting" : false,
+  "keyStore" : "file",
+  "model" : "gpt-4.1-mini",
+  "presetID" : "openAI",
+  "presets" : [
+    {
+      "id" : "lmStudio",
+      "modelPlaceholder" : "the model loaded in LM Studio",
+      "needsAPIKey" : false,
+      "showsServerField" : true,
+      "title" : "LM Studio on this Mac"
+    },
+    {
+      "id" : "codex",
+      "modelPlaceholder" : "pick a model",
+      "needsAPIKey" : false,
+      "showsServerField" : false,
+      "title" : "ChatGPT (Codex)"
+    },
+    {
+      "id" : "openAI",
+      "modelPlaceholder" : "gpt-4.1-mini",
+      "needsAPIKey" : true,
+      "showsServerField" : false,
+      "title" : "OpenAI"
+    }
+  ],
+  "subtitle" : "OpenAI"
+}
