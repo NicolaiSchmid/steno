@@ -750,6 +750,15 @@ corners render black there; a desktop shows them rounded. Xvfb has no
 tray host either; a smoke run stands in for one, so the built tray counts
 and the run checks the close rule a desktop with a tray gets.
 
+`scripts/pipewire-headless.sh apps/desktop/scripts/lost-display-linux.sh
+[binary] [seconds]` checks the save before a lost display end to end: it
+starts the shell on an Xvfb server of its own with a fresh `HOME`,
+starts a recording with the record shortcut (xdotool), ends the server
+after `seconds` (4 by default) and fails unless the app logged its save
+and the store holds the meeting `queued` with a duration. CI's Linux job
+runs it after the smoke; outside CI it needs `Xvfb`, `xdotool` and
+`python3` on the `PATH` besides the smoke's setup.
+
 `apps/desktop/scripts/smoke-macos.sh [binary] [seconds]` runs the smoke on
 a Mac, in the logged-in session (the windows show on its screen for those
 seconds) and with a fresh `HOME`; CI's macOS job runs it. A panel there is
@@ -815,6 +824,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/fixtures.rs` (and `host.rs` under the feature) | With `--features fixture-host`, the fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
+| `apps/desktop/scripts/lost-display-linux.sh` | The lost display under a recording, which CI's Linux job requires saved |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
 | `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check |

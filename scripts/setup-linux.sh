@@ -25,9 +25,11 @@ packages=(
   libxdo-dev
   pkg-config
   wget
-  # The headless smoke: a virtual X server and `import` for the screenshots.
+  # The headless smoke: a virtual X server and `import` for the screenshots;
+  # the lost-display check: xdotool to start a recording.
   xvfb
   imagemagick
+  xdotool
   # steno-audio's PipeWire backend: headers and bindgen's libclang.
   libclang-dev
   libpipewire-0.3-dev
