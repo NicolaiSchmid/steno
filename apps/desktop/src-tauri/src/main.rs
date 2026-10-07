@@ -574,13 +574,15 @@ fn then(
 /// The host's shutdown (`Host::shutdown_action`), which every exit runs,
 /// logging how long it took once it ends, so a machine's log shows how
 /// long a save takes against the waits it has to fit in: systemd's stop
-/// timeout, the session manager's, logind's delay. A shutdown cut off at
-/// `SHUTDOWN_PATIENCE` logs the gate's warning instead.
+/// timeout, the session manager's, logind's delay. At `warn`, so the
+/// default filter (`LOG_FILTER`) keeps the line. A shutdown cut off at
+/// `SHUTDOWN_PATIENCE` logs the gate's warning first, and this line only
+/// if the save ends before the process does.
 fn timed(shutdown: impl FnOnce() + Send + 'static) -> impl FnOnce() + Send + 'static {
     move || {
         let started = std::time::Instant::now();
         shutdown();
-        tracing::info!(elapsed = ?started.elapsed(), "the shutdown ended");
+        tracing::warn!(elapsed = ?started.elapsed(), "the shutdown ended");
     }
 }
 
