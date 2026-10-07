@@ -118,7 +118,9 @@ pub fn open(
     }
     // The Swift windows hide their title bar and let the page paint up to the
     // top edge, leaving the traffic lights their inset; the same look here.
-    // Linux and Windows keep their native title bar.
+    // Linux and Windows keep their native title bar. The page's
+    // `TITLE_BAR_INSET` (`apps/macos/web/src/lib/platform.tsx`) follows this
+    // `cfg`.
     #[cfg(target_os = "macos")]
     {
         builder = builder
