@@ -7,7 +7,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use super::io_error;
+use super::{durable, io_error};
 use crate::capture::CaptureError;
 
 /// Streams 16 kHz mono Int16 PCM into a RIFF/WAVE file: header with zero
@@ -93,6 +93,16 @@ impl WavStreamWriter {
         Ok(())
     }
 
+    /// Makes every sample written so far durable with `File::sync_data`,
+    /// as [`CafStreamWriter::sync`](super::CafStreamWriter::sync) does for
+    /// the master. Nothing after `finish`. Rust only: Swift synced at the
+    /// close alone.
+    pub fn sync(&mut self) -> std::io::Result<()> {
+        self.file
+            .as_ref()
+            .map_or(Ok(()), |file| durable::sync(file, File::sync_data))
+    }
+
     /// Patches the sizes, syncs and closes; once.
     pub fn finish(&mut self) -> Result<(), CaptureError> {
         let Some(mut file) = self.file.take() else {
@@ -102,7 +112,7 @@ impl WavStreamWriter {
             .map_err(|e| io_error(&self.path, &e))?;
         file.write_all(&Self::header(self.sample_rate, self.samples_written))
             .map_err(|e| io_error(&self.path, &e))?;
-        file.sync_all().map_err(|e| io_error(&self.path, &e))?;
+        durable::sync(&file, File::sync_all).map_err(|e| io_error(&self.path, &e))?;
         Ok(())
     }
 

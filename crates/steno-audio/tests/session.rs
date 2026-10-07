@@ -30,13 +30,16 @@ use steno_audio::capture::{
     CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult,
     CaptureSession, CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
 };
-use steno_audio::realtime::LaneFrameSink;
+use steno_audio::realtime::{FrameRelay, LaneFrameSink};
 use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::testing::{ManualClock, SyntheticCaptureBackend, SyntheticLane};
 use steno_audio::writer::{
     CafFile, LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile,
 };
-use steno_audio::{Clock, EchoMetrics, PassthroughEchoCanceller, SAMPLE_RATE, SystemClock};
+use steno_audio::{
+    Clock, EchoMetrics, FRAME_SIZE, FRAMES_PER_SECOND, PassthroughEchoCanceller, SAMPLE_RATE,
+    SystemClock,
+};
 use steno_core::paths::file_url_path;
 use steno_core::{AudioFormat, AudioLane, AudioRetention, EchoCanceller, RecordingLayout};
 use uuid::Uuid;
@@ -308,6 +311,162 @@ fn a_silent_system_lane_is_reported_in_statistics_and_levels() {
     let master = master_of(&result);
     assert!(master.channels[1].iter().all(|s| *s == 0.0));
     assert!(master.channels[0].iter().any(|s| *s != 0.0));
+}
+
+/// The default relay rides out a writer stalled for 20 s: every frame of
+/// three channels (two lanes and the raw microphone) fits with nothing
+/// draining it, so a slow sync or a sleeping disk drops nothing.
+#[test]
+fn the_default_relay_holds_twenty_seconds_with_the_writer_stalled() {
+    let relay = FrameRelay::new(
+        3,
+        FRAME_SIZE,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+    );
+    let zeros = vec![0.0f32; FRAME_SIZE];
+    for frame in 0..20 * FRAMES_PER_SECOND {
+        assert!(relay.begin_frame(), "frame {frame} refused");
+        for channel in 0..3 {
+            relay.write(channel, &zeros);
+        }
+        relay.end_frame();
+    }
+    assert_eq!(relay.dropped_frames(), [0, 0, 0]);
+}
+
+/// The real writer on a filesystem where every periodic sync fails, the
+/// plain `fsync` the Mac falls back to as well; with `close_too` the
+/// close's sync fails too, after the real close has written everything.
+struct SyncRefused {
+    writer: RecordingWriter,
+    close_too: bool,
+}
+
+impl RecordingWriting for SyncRefused {
+    fn files(&self) -> RecordingFiles {
+        self.writer.files()
+    }
+    fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+        self.writer.write(frames)
+    }
+    fn sync(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+        let files = self.writer.finish()?;
+        if self.close_too {
+            return Err(CaptureError::WriterFailed("the close's sync failed".into()));
+        }
+        Ok(files)
+    }
+}
+
+/// A session over [`SyncRefused`] writers.
+fn sync_refused_session(
+    mode: CaptureMode,
+    directory: &Path,
+    backend: Arc<SyntheticCaptureBackend>,
+    clock: Arc<dyn Clock>,
+    close_too: bool,
+) -> CaptureSession {
+    CaptureSession::with_writer_factory(
+        configuration(mode, directory, false),
+        backend,
+        passthrough(),
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        clock,
+        Arc::new(move |layout, lanes, keep_raw| {
+            Ok(Box::new(SyncRefused {
+                writer: RecordingWriter::new(layout, lanes, keep_raw)?,
+                close_too,
+            }) as Box<dyn RecordingWriting>)
+        }),
+    )
+    .unwrap()
+}
+
+/// A sync that always fails cuts nothing short: 8 s delivered (past the
+/// first sync, at 5 s) are all in the master, and the stop hands the
+/// recording back. With nothing else ending the recording it ends `Failed`
+/// with that recording on the first sync's error, since what was written
+/// may not be on disk; a close that fails as well comes first.
+#[test]
+fn a_failing_sync_keeps_the_whole_recording_and_says_so() {
+    for (close_too, expected) in [(false, "unsupported"), (true, "the close's sync failed")] {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+            &[AudioLane::Mixed],
+            8.0,
+        )));
+        let session = sync_refused_session(
+            CaptureMode::InPerson,
+            directory.path(),
+            backend.clone(),
+            Arc::new(SystemClock::new()),
+            close_too,
+        );
+        let states = session.states();
+        session.start(Uuid::new_v4()).unwrap();
+        backend.wait_until_finished();
+        let result = session.stop().unwrap();
+        let seen = collect_states(&states, until_failed);
+        match seen.last() {
+            Some(CaptureState::Failed {
+                error: CaptureError::WriterFailed(detail),
+                recording,
+            }) => {
+                assert!(detail.ends_with(expected), "{detail}");
+                assert_eq!(recording.as_deref(), Some(&result));
+            }
+            _ => panic!("expected Failed(WriterFailed): {:?}", kinds(&seen)),
+        }
+        assert_eq!(master_of(&result).frame_count(), 800 * FRAME_SIZE);
+        assert!(
+            result.statistics.dropped_frames.values().all(|n| *n == 0),
+            "{:?}",
+            result.statistics.dropped_frames
+        );
+    }
+}
+
+/// A failed sync never stands in for what ended the recording: syncs
+/// refused from the first one, at 5 s, then a device lost for good at 6 s
+/// end `DeviceLost`, with all 6 s in the master.
+#[test]
+fn refused_syncs_then_a_device_loss_end_device_lost() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 10.0)
+            .change_device_after(6.0)
+            .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS),
+    ));
+    let session = sync_refused_session(
+        CaptureMode::Call,
+        directory.path(),
+        backend,
+        clock.clone(),
+        false,
+    );
+    let states = session.states();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
+    let seen = collect_states(&states, until_failed);
+    let result = session.stop().unwrap();
+    assert_eq!(
+        *seen.last().unwrap(),
+        CaptureState::Failed {
+            error: CaptureError::DeviceLost,
+            recording: Some(Box::new(result.clone()))
+        }
+    );
+    assert!(result.statistics.ended_on_device_loss);
+    assert_eq!(master_of(&result).frame_count(), 600 * FRAME_SIZE);
 }
 
 /// One frame of relay headroom against a backend that delivers two seconds
@@ -700,6 +859,9 @@ impl RecordingWriting for FaultyWriter {
         }
         self.inner.write(frames)
     }
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.inner.sync()
+    }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
         let files = self.inner.finish()?;
         if self.fail_finish {
@@ -910,6 +1072,9 @@ fn a_writer_thread_that_died_ends_failed_and_the_session_starts_again() {
             self.1 += 1;
             assert!(self.1 < 10, "writer panics on purpose");
             self.0.write(frames)
+        }
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.0.sync()
         }
         fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
             self.0.finish()
@@ -2043,6 +2208,12 @@ impl RecordingWriting for FullFrom {
         }
         self.0.write(frames)
     }
+    fn sync(&mut self) -> std::io::Result<()> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err(std::io::ErrorKind::StorageFull.into());
+        }
+        self.0.sync()
+    }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
         self.0.finish()
     }
@@ -2109,9 +2280,10 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
     }
 }
 
-/// In production the relay holds two seconds; a gap wider than that waits
-/// for the writer in 5 ms steps on the clock, and every frame of silence
-/// still arrives: 1.75 s of gap through a one-second relay. The old
+/// A gap wider than the relay waits for the writer in 5 ms steps on the
+/// clock, and every frame of silence still arrives: 1.75 s of gap through
+/// a one-second relay (production's holds 20 s, more than `MAXIMUM_GAP`,
+/// so there only a stalled writer makes a gap wait). The old
 /// device's half second fits the relay however late the writer runs; only
 /// a writer stalled for longer than the relay could refuse the new
 /// device's frames, and those are counted as dropped.
@@ -2309,6 +2481,9 @@ impl RecordingWriting for HeldWrites {
             let _ = self.release.recv_timeout(RECV);
         }
         self.inner.write(frames)
+    }
+    fn sync(&mut self) -> std::io::Result<()> {
+        self.inner.sync()
     }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
         self.inner.finish()

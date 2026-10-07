@@ -175,10 +175,12 @@ pub enum CaptureState {
     },
     /// `stop` is tearing down.
     Stopping,
-    /// `recording` is `None` when the start produced nothing, and the
+    /// `recording` is `None` when the start produced nothing, the
     /// finalised partial recording when a device stayed lost or the writer
-    /// failed mid-meeting; `stop()` returns the same value or fails when it
-    /// is `None`.
+    /// failed mid-meeting, and the whole recording when a close failed or,
+    /// with nothing else ending the recording, a sync failed while
+    /// recording; `stop()` returns the same value or fails when it is
+    /// `None`.
     Failed {
         /// What ended the recording.
         error: CaptureError,
@@ -281,8 +283,9 @@ pub enum CaptureNotice {
 pub struct CaptureStatistics {
     /// Seconds of audio written to the master.
     pub duration: f64,
-    /// Frames lost per lane to ring overruns or a stalled writer; should be
-    /// empty.
+    /// Frames lost per lane: ring overruns, a stalled writer's full relay,
+    /// whole frames a stop left undrained in the rings and, on Windows,
+    /// clock-drift slips; should be empty.
     pub dropped_frames: BTreeMap<AudioLane, usize>,
     /// True when the tap never exceeded [`LaneLevel::SILENT_PEAK_LINEAR`].
     pub system_lane_silent: bool,

@@ -2,7 +2,8 @@
 //! Swift: `Sources/StenoAudio/Capture/CaptureSession.swift`.
 //!
 //! `Idle → Starting → Recording → Stopping → Idle`, or `Failed` when a
-//! device stays lost or the writer fails. Owns the sink, the processing
+//! device stays lost, a write or the close fails, or a sync failed while
+//! recording. Owns the sink, the processing
 //! thread, the relay, the writer thread and the [`RecordingWriting`]
 //! implementation; `stop()` tears them down in order (an in-flight rebuild,
 //! the backend, processing, writer, files; see Threads) and returns the
@@ -22,10 +23,11 @@
 //! Only when every restart fails does the recording end in
 //! `Failed(DeviceLost)`.
 //!
-//! A recording cut short (device loss, writer failure, a full disk while
-//! closing) is finalised and travels in the state: `Failed { error,
-//! recording }`; `stop()` returns the same result, or fails when the
-//! failure left no recording.
+//! A recording cut short (device loss, a failed write) is finalised and
+//! travels in the state: `Failed { error, recording }`. So does the whole
+//! recording when the close failed (a full disk while closing) or, with
+//! nothing else ending it, a sync failed while recording. `stop()` returns
+//! the same result, or fails when the failure left no recording.
 //!
 //! A writer failure and a device loss finalise on their own threads (the
 //! writer failure's and the rebuild's) and hold `Stopping` meanwhile. A
@@ -113,7 +115,7 @@ use crate::realtime::{
     FrameRelay, LaneFrameSink, LevelSlot, ProcessingConfiguration, ProcessingThread,
 };
 use crate::writer::{RecordingWriter, RecordingWriting, WriterThread};
-use crate::{FRAME_SIZE, SAMPLE_RATE};
+use crate::{FRAME_SIZE, FRAMES_PER_SECOND, SAMPLE_RATE};
 
 /// Opens the files for one recording; [`RecordingWriter::new`] in
 /// production, a failure-injecting wrapper in tests.
@@ -239,8 +241,11 @@ impl CaptureSession {
     /// zeros.
     pub const MAXIMUM_GAP: Duration = Duration::from_secs(10);
     /// Frames the writer may fall behind the processing thread before
-    /// frames are dropped and counted: 200 (2 s) by default.
-    pub const DEFAULT_WRITER_HEADROOM_FRAMES: usize = 200;
+    /// frames are dropped and counted: 2000 (20 s) by default, so a disk
+    /// that stalls for seconds (a slow sync, a sleeping external drive)
+    /// loses nothing. The rings round up to 2^20 samples, 4 MiB per written
+    /// channel, allocated at start. Rust only: Swift's relay held 2 s.
+    pub const DEFAULT_WRITER_HEADROOM_FRAMES: usize = 20 * FRAMES_PER_SECOND;
 
     /// The production session: the live backend, Speex when the
     /// configuration cancels echo, the wall clock.
@@ -398,9 +403,11 @@ impl CaptureSession {
     /// failure or a device loss is finalising, waits for it and answers from
     /// its outcome; `InvalidState` when a `start()` came in first. A write or
     /// close that fails during the teardown leaves the state `Failed` with the
-    /// recording that is returned. Fails with `WriterFailed`, and leaves the
-    /// state `Failed`, when the master is gone from disk or the writer thread
-    /// died.
+    /// recording that is returned, and so does a sync that failed while
+    /// recording: the recording is whole, part of it may not have reached the
+    /// disk, and a sync failure is reported only when nothing else ended the
+    /// recording. Fails with `WriterFailed`, and leaves the state `Failed`,
+    /// when the master is gone from disk or the writer thread died.
     pub fn stop(&self) -> Result<CaptureResult, CaptureError> {
         self.core.stop()
     }
@@ -720,7 +727,9 @@ impl Core {
     /// drained, files closed, asset built. The asset is built even when
     /// closing the files fails (its paths are fixed at start and the
     /// duration is what the master holds); the failure comes back beside
-    /// it. `WriterFailed` with no asset when there is nothing to hand out:
+    /// it: a failed write or close, else the device loss that ended the
+    /// recording, else a sync that failed while recording.
+    /// `WriterFailed` with no asset when there is nothing to hand out:
     /// the writer thread died and took the writer with it, or the master is
     /// gone from disk (its folder deleted while recording; an unlinked file
     /// still writes and closes without an error). The caller has set the
@@ -758,8 +767,10 @@ impl Core {
         writer_thread.stop();
         // A write that failed during this drain went to `writer_failed`,
         // which ignores it once the state is `Stopping`; it comes back
-        // beside the asset instead, as a failed close does.
+        // beside the asset instead, as a failed close does. A sync that
+        // failed while recording is kept apart, behind both.
         let write_failure = writer_thread.take_error();
+        let sync_failure = writer_thread.take_sync_error();
         let mut writer = writer_thread.take_writer().ok_or_else(writer_lost)?;
         // Read before `clear()`, which zeroes the ring overrun counts. Whole
         // frames still in the rings never reached the relay: a restarted
@@ -769,7 +780,15 @@ impl Core {
         let undrained = active.sink.available_to_read() / FRAME_SIZE;
         active.sink.clear();
         let closing = writer.finish().err();
-        let failure = write_failure.or(closing).map(as_writer_failure);
+        let failure = write_failure
+            .or(closing)
+            .map(as_writer_failure)
+            .or_else(|| {
+                active
+                    .ended_on_device_loss
+                    .then_some(CaptureError::DeviceLost)
+            })
+            .or(sync_failure);
         let files = writer.files();
         if matches!(files.master.try_exists(), Ok(false)) {
             return Err(CaptureError::WriterFailed(format!(
@@ -1252,6 +1271,9 @@ mod tests {
         }
         fn write(&mut self, _frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
             Err(CaptureError::WriterFailed("DiskFull".into()))
+        }
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.inner.sync()
         }
         fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
             // Bounded, so a failed test cannot hang its session's drop.

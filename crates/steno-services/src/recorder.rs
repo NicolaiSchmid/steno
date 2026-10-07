@@ -8,7 +8,10 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 
 use chrono::{FixedOffset, Utc};
-use steno_audio::{CaptureConfiguration, CaptureSession, LaneLevels as AudioLevels};
+use steno_audio::{
+    CaptureConfiguration, CaptureSession, CaptureStatistics, FRAMES_PER_SECOND,
+    LaneLevels as AudioLevels,
+};
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
@@ -289,6 +292,7 @@ impl CaptureRecorder {
         let intake = self.intake();
         let outcome = match active.session.stop() {
             Ok(result) => {
+                log_dropped_frames(active.meeting_id, &result.statistics);
                 let duration = result.statistics.duration;
                 let statistics = result.statistics.clone();
                 let completed = block_on(
@@ -304,22 +308,7 @@ impl CaptureRecorder {
                     ),
                 );
                 match completed {
-                    Ok(_) => {
-                        let mut warning = None;
-                        if active.mode == CaptureMode::Call && statistics.system_lane_silent {
-                            warning = Some(
-                                "The system audio lane stayed silent. Check the system audio permission."
-                                    .to_owned(),
-                            );
-                        }
-                        if statistics.ended_on_device_loss {
-                            warning = Some(
-                                "An audio device disappeared; the partial recording was kept."
-                                    .to_owned(),
-                            );
-                        }
-                        Ok(warning)
-                    }
+                    Ok(_) => Ok(recording_warning(active.mode, &statistics)),
                     Err(error) => Err(format!("Recording could not be saved: {error}")),
                 }
             }
@@ -425,6 +414,58 @@ impl Recorder for CaptureRecorder {
     }
 }
 
+/// What a saved recording warns about, every line that applies joined
+/// into one: a device that disappeared, frames that never reached the
+/// files (in seconds of the lane that lost most, rounded to the nearest
+/// second, so from half a second on: a lone 10 ms drift slip is not worth
+/// a warning, and the log line keeps every count), and a call whose system
+/// audio stayed silent. The dropped frames name no
+/// cause, since the count holds several: the relay full behind a slow
+/// disk, ring overruns while the computer was too busy, frames a stop left
+/// undrained and, on Windows, the slips that absorb clock drift. Swift:
+/// `RecordingController.stop`, where a device loss replaced the silent-lane
+/// line and that line reads "The system audio lane stayed silent"; the
+/// joining and the dropped frames are Rust only.
+fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Option<String> {
+    let mut lines = Vec::new();
+    if statistics.ended_on_device_loss {
+        lines.push("An audio device disappeared; the partial recording was kept.".to_owned());
+    }
+    let dropped = statistics
+        .dropped_frames
+        .values()
+        .max()
+        .copied()
+        .unwrap_or(0);
+    let seconds = (dropped + FRAMES_PER_SECOND / 2) / FRAMES_PER_SECOND;
+    if seconds > 0 {
+        lines.push(if seconds == 1 {
+            "About 1 second of the recording is missing.".to_owned()
+        } else {
+            format!("About {seconds} seconds of the recording are missing.")
+        });
+    }
+    if mode == CaptureMode::Call && statistics.system_lane_silent {
+        lines.push(
+            "Steno heard nothing from the call's audio. Check the system audio permission."
+                .to_owned(),
+        );
+    }
+    (!lines.is_empty()).then(|| lines.join(" "))
+}
+
+/// A `warn` line when a recording lost frames, with the meeting's id and
+/// the count per lane (counts only, the log's privacy rule). Rust only.
+fn log_dropped_frames(meeting_id: Uuid, statistics: &CaptureStatistics) {
+    if statistics.dropped_frames.values().any(|frames| *frames > 0) {
+        tracing::warn!(
+            meeting = %meeting_id,
+            dropped = ?statistics.dropped_frames,
+            "the recording lost frames"
+        );
+    }
+}
+
 /// The required permissions `permissions` reports denied, among the ones
 /// `platform` has: off the Mac, system audio has no switch of its own
 /// (Windows' is the microphone's), so it is never reported denied there.
@@ -450,6 +491,9 @@ mod tests {
     use crate::testing::{
         PATIENCE, eventually, fake_dependencies, on_own_thread, synthetic_capture, temp_store,
     };
+    use steno_audio::CaptureError;
+    use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
+    use steno_core::AudioLane;
     use steno_core::paths::file_url;
     use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
     use steno_host::fakes::{FakePermissions, FakeSpeechModels};
@@ -931,6 +975,184 @@ mod tests {
         assert_eq!(
             denied_permissions(Platform::Macos, &system_audio),
             [PermissionKind::SystemAudio]
+        );
+    }
+
+    fn statistics() -> CaptureStatistics {
+        CaptureStatistics {
+            duration: 60.0,
+            dropped_frames: std::collections::BTreeMap::new(),
+            system_lane_silent: false,
+            ended_on_device_loss: false,
+            device_changes: 0,
+            gap_seconds: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_clean_recording_warns_about_nothing() {
+        assert_eq!(recording_warning(CaptureMode::Call, &statistics()), None);
+    }
+
+    /// Lost frames are a warning, in seconds of the lane that lost most,
+    /// rounded to the nearest second: 2.5 s reads 3.
+    #[test]
+    fn dropped_frames_warn_with_the_seconds_missing() {
+        let mut dropped = statistics();
+        dropped.dropped_frames.insert(AudioLane::Mic, 250);
+        dropped.dropped_frames.insert(AudioLane::System, 200);
+        assert_eq!(
+            recording_warning(CaptureMode::Call, &dropped).as_deref(),
+            Some("About 3 seconds of the recording are missing.")
+        );
+        dropped.dropped_frames.clear();
+        dropped.dropped_frames.insert(AudioLane::Mixed, 50);
+        assert_eq!(
+            recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
+            Some("About 1 second of the recording is missing.")
+        );
+    }
+
+    /// Under half a second lost is no warning: one 10 ms slip, as Windows'
+    /// drift correction makes, or 490 ms.
+    #[test]
+    fn under_half_a_second_lost_warns_about_nothing() {
+        for frames in [1, 49] {
+            let mut dropped = statistics();
+            dropped.dropped_frames.insert(AudioLane::Mic, frames);
+            assert_eq!(recording_warning(CaptureMode::InPerson, &dropped), None);
+        }
+    }
+
+    /// Every warning that applies is kept: a device loss no longer hides a
+    /// silent system lane or missing audio.
+    #[test]
+    fn every_warning_that_applies_is_joined() {
+        let mut all = statistics();
+        all.ended_on_device_loss = true;
+        all.system_lane_silent = true;
+        all.dropped_frames.insert(AudioLane::Mic, 100);
+        let warning = recording_warning(CaptureMode::Call, &all).unwrap();
+        assert_eq!(
+            warning,
+            "An audio device disappeared; the partial recording was kept. \
+             About 1 second of the recording is missing. \
+             Steno heard nothing from the call's audio. Check the system audio permission."
+        );
+        // In person there is no system lane to warn about.
+        assert!(
+            !recording_warning(CaptureMode::InPerson, &all)
+                .unwrap()
+                .contains("call's audio")
+        );
+    }
+
+    /// A recording that lost frames leaves a `warn` line with the meeting
+    /// and the counts per lane; a clean one leaves none.
+    #[test]
+    fn dropped_frames_are_logged_with_the_meeting_and_the_counts() {
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
+        let clean = Uuid::new_v4();
+        log_dropped_frames(clean, &statistics());
+        let lossy = Uuid::new_v4();
+        let mut dropped = statistics();
+        dropped.dropped_frames.insert(AudioLane::Mic, 250);
+        dropped.dropped_frames.insert(AudioLane::System, 0);
+        log_dropped_frames(lossy, &dropped);
+        let text = log.text();
+        assert!(!text.contains(&clean.to_string()), "{text}");
+        let line = text
+            .lines()
+            .find(|line| line.contains(&lossy.to_string()))
+            .unwrap_or_else(|| panic!("no line for the meeting: {text}"));
+        assert!(line.contains("Mic: 250, System: 0"), "{line}");
+    }
+
+    /// The real writer whose first write waits for `go`, so a backend that
+    /// delivers meanwhile overflows a one-frame relay.
+    struct Stalled {
+        inner: RecordingWriter,
+        go: Option<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl RecordingWriting for Stalled {
+        fn files(&self) -> RecordingFiles {
+            self.inner.files()
+        }
+        fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+            if let Some(go) = self.go.take() {
+                let _ = go.recv_timeout(PATIENCE);
+            }
+            self.inner.write(frames)
+        }
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.inner.sync()
+        }
+        fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+            self.inner.finish()
+        }
+    }
+
+    /// A stop whose recording lost frames logs them with the meeting: a
+    /// backend delivers two seconds at once while the writer is stalled
+    /// behind a one-frame relay.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_that_lost_frames_logs_them() {
+        use steno_audio::testing::SyntheticCaptureBackend;
+        use steno_audio::testing::synthetic::SyntheticOptions;
+
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
+        let harness = harness(&[]);
+        let (go, stalled) = std::sync::mpsc::channel();
+        let stalled = Arc::new(Mutex::new(Some(stalled)));
+        let backend = Arc::new(SyntheticCaptureBackend::new(SyntheticOptions::tones(
+            &[AudioLane::Mixed],
+            &[(AudioLane::Mixed, 440.0)],
+            2.0,
+        )));
+        let make: MakeCaptureSession = {
+            let backend = backend.clone();
+            Arc::new(move |configuration| {
+                let stalled = stalled.clone();
+                CaptureSession::with_writer_factory(
+                    configuration,
+                    backend.clone(),
+                    None,
+                    1,
+                    Arc::new(steno_audio::SystemClock::new()),
+                    Arc::new(move |layout, lanes, keep_raw| {
+                        Ok(Box::new(Stalled {
+                            inner: RecordingWriter::new(layout, lanes, keep_raw)?,
+                            go: stalled.lock().unwrap().take(),
+                        }) as Box<dyn RecordingWriting>)
+                    }),
+                )
+                .map_err(|error| error.to_string())
+            })
+        };
+        let recorder = Arc::new(CaptureRecorder::new(
+            harness.store.clone(),
+            harness.recorder.pipeline.clone(),
+            make,
+            Arc::new(FakePermissions::all_granted()),
+            harness.recorder.speech_models.clone(),
+            FixedOffset::east_opt(0).unwrap(),
+            tokio::runtime::Handle::current(),
+        ));
+        start(&recorder).await;
+        let meeting_id = recorder.status().meeting_id.unwrap();
+        let finished = backend.clone();
+        tokio::task::spawn_blocking(move || finished.wait_until_finished())
+            .await
+            .unwrap();
+        go.send(()).unwrap();
+        stop(&recorder).await;
+        let text = log.text();
+        assert!(
+            text.lines()
+                .any(|line| line.contains(&meeting_id.to_string())
+                    && line.contains("the recording lost frames")),
+            "{text}"
         );
     }
 }

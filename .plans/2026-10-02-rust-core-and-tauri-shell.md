@@ -1192,6 +1192,30 @@ parity item until a plan says otherwise:
   skips). Whether a GUI session also loses its first seconds is
   unchecked. Check on the Swift app before cutover; a plan decides any
   remedy.
+- **The files are synced while recording, the relay holds 20 s, and the
+  warnings are joined** (stable plan rows P21 and P23,
+  `.plans/2026-10-07-stable-promotion.md`). The writer thread syncs every
+  file, the master, the 16 kHz sidecars and the raw microphone when kept
+  (`File::sync_data`, `F_FULLFSYNC` on the Mac), after every 500 frames
+  written, so a power loss loses about the last 5 s, more while the writer
+  is behind, and a recovered recording's sidecars, which its transcript is
+  decoded from, are as long as its master. A sidecar costs little beside
+  the master: 16 kHz Int16 is about a sixth of a lane's bytes in it. On the Mac every sync, periodic or at the close, falls
+  back to a plain `fsync` when the filesystem refuses `F_FULLFSYNC` (a
+  WebDAV mount answers ENOTTY), as SQLite does (`writer::durable`). A
+  periodic sync that fails even so is logged once, tried again at the next
+  interval and handed back at the stop beside the whole recording; a sync
+  failure is reported only when nothing else ended the recording (a failed
+  write or close, a device loss), and only a failed write cuts the
+  recording short. A close whose sync fails is a failure too. The relay
+  between the processing thread and the writer holds 2000 frames (20 s)
+  instead of 200. A recording that lost half a second or more on its
+  worst lane says how many seconds are missing, rounded to the nearest
+  second (a lone 10 ms drift slip on Windows does not warn), beside the
+  other warnings, which are now joined (a device loss no
+  longer hides a silent call), and logs the counts per lane at `warn`.
+  Swift synced at the close alone, with a plain `fsync`, its relay held
+  2 s and it showed one warning.
 
 What the Windows backend (WP10a, `capture::live::wasapi`) does differently
 from the macOS one, each a parity item until a Windows machine has checked

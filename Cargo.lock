@@ -4739,6 +4739,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation",
  "pipewire",
+ "rustix",
  "serde",
  "serde_json",
  "steno-core",
