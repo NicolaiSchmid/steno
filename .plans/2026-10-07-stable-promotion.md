@@ -155,7 +155,7 @@ Forge and atlas.
     with SIGTERM while Hyprland still runs, so the app's signal handler saves;
     reboot and poweroff go through logind, whose delay lock Omarchy sets to 15 s,
     and Omarchy kills the user manager 5 s into its stop, so at a reboot the
-    save must end within the delay;
+    save must end within logind's 15 s delay;
   - systemd's XDG autostart generator gives the autostarted app's unit
     `TimeoutStopSec=5s`, so a save longer than five seconds is killed; this
     holds on every systemd desktop that runs XDG autostart through it;
@@ -213,7 +213,7 @@ Forge and atlas.
 |---|---|---|---|
 | D1 | `v*` tags | as recommended | Confirmed |
 | D2 | 0.11.0 | as recommended | Confirmed |
-| D3 | the blocking list gates data loss, core flows and silent failures | "we should never loose any data" | Changed: every data-loss path blocks (P1 to P37) |
+| D3 | the blocking list gates data loss, core flows and silent failures | "we should never loose any data" | Changed: every data-loss path blocks (P1 to P38) |
 | D4 | `SMAppService`, the Swift registration carrying over | as recommended | Confirmed; with D5 the app registers itself (S6) |
 | D5 | `uno.schmid.steno.mac` on the Mac, `uno.schmid.steno.desktop` elsewhere | "it should be com.nicolaischmid.steno" | Changed; directories and iOS availability **To confirm** |
 | D6 | Linux and Windows listed once gated | "also omarchy and nixos users" | Changed: GNOME, Omarchy and NixOS, X1 to X8 |
@@ -378,15 +378,15 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | The new identifier, `SUPublicEDKey`, the import, the login item | The handoff itself | S6 |
 | Build number, `v*` tags, the handoff item, `release.yml`'s concurrency | The release itself | S7 |
 
-**No data lost, on every platform listed (D3):**
+**No data lost, on every platform the release publishes (D3):**
 
 | ID | What can be lost, and the fix | Owner |
 |---|---|---|
 | P1 | A recording: the intake's receipt and meeting commits run under `synchronous = NORMAL`, so a power loss after `complete` can roll back the meeting while the phone has deleted its copy (#213) | handover (#213) |
 | P2 | A recording, or a second meeting: a `complete` answer that never reaches the phone. A `handoverAdmission` table answers the retry "delivered", also for a recording whose meeting was deleted; the Rust migrator ignores later migrations and shows a dialog instead of panicking; the backfill runs on every open (`fix/handover-lost-complete-answer`, D11) | handover |
-| P3 | A recording ended by a kill, a crash or a power loss: salvage the CAF at launch into a meeting that processes, instead of marking it failed | capture and recovery (`wp-cap-*`) |
+| P3 | A recording ended by a kill, a crash or a power loss: salvage the CAF at launch into a meeting that processes, instead of leaving it failed and unprocessed. The salvaged meeting keeps the existing end reason `failed`, so the Swift app still decodes the row during the rollback window (a new value in a stored enum column would break that); a recovered meeting is told apart additively, by a log line now and, if the UI needs it, a nullable column in a later add-only migration | capture and recovery (`wp-cap-*`) (`fix/recording-recovery`) |
 | P4 | A recording's stop: a `stop()` that waited behind a writer failure's or a device loss's finalise returns that recording, as Swift's actor did | capture and recovery (`wp-cap-*`) |
-| P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s (the generator's unit under uwsm and Plasma; GNOME starts autostart apps in its own `app-gnome-*` scope, which gets a drop-in too if its stop timeout is under 20 s) (in the `.deb`, the AUR and Nix packages, and written by the app for the AppImage), and the save logs its duration; on Windows, `ShutdownBlockReasonCreate` while recording | Linux desktop (with #220) |
+| P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s, in the `.deb`, the AUR and Nix packages and written by the app for the AppImage (for the generator's `app-Steno@autostart.service` under uwsm and Plasma; GNOME starts autostart apps in its own `app-gnome-Steno-<pid>.scope`, which gets a drop-in too if its stop timeout is under 20 s); the save logs its duration; on Windows, `ShutdownBlockReasonCreate` while recording | Linux desktop (with #220) |
 | P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux | Linux desktop |
 | P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
 | P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221 | audio (with #221) |
@@ -400,7 +400,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
 | P17 | A local recording's folder: a failed enqueue saves the asset row, so the folder is not orphaned; the recorder's rebuild thread survives a panic | capture and recovery (`wp-cap-*`) |
 | P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
-| P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform: on Linux in #222; on the Mac and Windows in a package of its own, where today a restart with the chosen device fails with `InputDeviceUnavailable` and the recording ends in `DeviceLost` | audio (#222 and its own package) |
+| P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform, on Linux in #222 and on the Mac and Windows in a pull request of its own; today a restart with the chosen device there fails with `InputDeviceUnavailable` and the recording ends in `DeviceLost` | audio (#222 and its own pull request) |
 | P20 | A recording that fills the disk: a free-space check before and during recording, with a warning | capture and recovery (`wp-cap-*`) |
 | P21 | The unsynced tail of a recording: periodic `sync_data` on the master | capture and recovery (`wp-cap-*`) |
 | P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`) | capture and recovery (`wp-cap-*`) |
@@ -419,6 +419,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P35 | Pairings: the pairing writes are durable and the intake runs in one transaction (beyond #213, which makes the receipt and meeting commits durable); the identity-fingerprint guard gets a macOS test and its Swift mirror | handover |
 | P36 | Secrets and files on Windows: credentials persist, and renames are durable | handover |
 | P37 | A recording through a cancelled logout: the save that a logout started is undone cleanly when the logout is cancelled (#220) | Linux desktop (#220) |
+| P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The panic hook appends to `crash.log` in the support directory on every platform | capture and recovery (`wp-cap-*`) |
 
 **The final audio path (D9), on every platform:**
 
@@ -442,7 +443,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | X2 | Panels under Hyprland: a `GDK_BACKEND` list keeps the panels on XWayland; the panels get distinct titles ("Steno bubble", "Steno prompt"); the README and the AUR package ship the Lua window rules (`float`, `pin`, `no_initial_focus`) | Omarchy, NixOS with Hyprland |
 | X3 | The tray: every tray action is in its menu, since a left click cannot be relied on; on GNOME without the AppIndicator extension there is no tray, and closing the main window quits and saves | all |
 | X4 | The handover behind a firewall: a fixed default port on Linux (configurable, `0` as the fallback with a warning); a `ufw` profile in the AUR package; the NixOS module opens the port | Omarchy, NixOS |
-| X5 | Packaged installs: `STENO_DISTRIBUTION=aur|nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names the wrapper's path, never `current_exe()`; with `STENO_LOGIN_ITEM=managed` the app leaves launch at login to the system | Omarchy, NixOS |
+| X5 | Packaged installs: `STENO_DISTRIBUTION=aur` or `=nix`, read at build time (Nix) or from the environment (the AUR wrapper), turns the in-app updater off and Settings says updates come from the package manager; the autostart entry names a stable path (`/usr/bin/steno-desktop`, or the Nix profile's), never `current_exe()` or a store path; with `STENO_LOGIN_ITEM=managed`, which the NixOS module sets, the app leaves launch at login to the system | Omarchy, NixOS |
 | X6 | The AUR package `steno-desktop-bin` | Omarchy |
 | X7 | The flake's Linux package and NixOS module | NixOS |
 | X8 | The Linux gate on each target | each |
@@ -470,8 +471,7 @@ after the port".
 ## Work packages
 
 Each package lands in one or more pull requests off `main`, reviewed and merged
-by merge commit; a pull request may close several rows (#213: P1; #220: P5, P37
-and X1; #222: A7, A8 and P19's Linux half).
+by merge commit; a pull request may close several rows (#220: P5, P37 and X1; #222: A7, A8 and P19's Linux half).
 Steps marked **Nicolai** need him: secrets, settings on GitHub and App Store
 Connect, his machines and the phone. The letters: S for the Mac and the release,
 A for the audio path, P for the other data-loss fixes, X for the Linux targets.
@@ -563,8 +563,8 @@ Every package is written in parallel except where a dependency is named:
     `AGENTS.md` change (D10), and adds `security-framework`, `plist` and the
     PKCS#12 crate to `[workspace.dependencies]`.
   - **The import, in two halves** (macOS only, in `steno-services`). It sets
-    `steno.swiftImportRan` in `preferences.json` when both halves are done, and
-    never runs again. Its sources (the defaults domain and the keychain) are
+    `steno.swiftImportRan` in `preferences.json` once both halves are done (or
+    the second is skipped), and never runs again. Its sources (the defaults domain and the keychain) are
     traits. It is skipped under `STENO_SMOKE_SECONDS` and whenever `HOME` is not
     the account's home.
     - **At launch,** first in the shell's `setup`, before `Host::real` builds the
@@ -583,7 +583,9 @@ Every package is written in parallel except where a dependency is named:
       the import pending, since a desktop-id build files its key under the same
       service and account; the step reads a key only when it is the Swift one
       (labelled `Steno llm-api-key`, an attribute query that does not prompt).
-    - **On an onboarding step,** shown first at that launch: the step says that
+    - **On an onboarding step,** shown first at that launch while the import is
+      pending (without a Swift certificate there is no step, and the second half
+      counts as done): the step says that
       macOS will ask for the login password once for each item it finds (at most
       twice) so the new Steno can read
       what the old one stored, and that the user should choose Always Allow.
@@ -677,9 +679,12 @@ Each lands before `0.11.0-rc.1`.
   - **Nicolai**, on his Mac in a GUI session with every permission granted, with
     the Rust app built from A9's branch and speakers, not headphones: start a
     call recording while no app plays audio, and play a short tone at 10 s.
-    Pass when the tone's onset in the system channel and its acoustic copy in
-    the mic channel lie within 50 ms, and the log shows the tap's first callback
-    within 100 ms of the start. Otherwise the remedy becomes an A-package before
+    Pass when the tone's onset in the system channel and its residual in the
+    echo-cancelled mic channel lie within 50 ms, and the tap's first callback
+    falls within 100 ms of the start. A9 adds that callback's time as an `info`
+    line, stored by the IOProc in an atomic and logged off the audio thread, and
+    Nicolai runs the build as `RUST_LOG=info ~/Applications/Steno.app/Contents/MacOS/steno-desktop
+    2> ~/a9.log` from Terminal. Otherwise the remedy becomes an A-package before
     the first candidate.
 
 ### P: no data lost (D3)
@@ -692,9 +697,9 @@ The table above names each package and its owner. Their tests:
   second meeting; the schema parity test covers v5; a v6 migration applied to a
   copy is ignored with a warning.
 - **P3.** An integration test runs the recorder over a fake capture source in a
-  child process and kills it (SIGKILL, `TerminateProcess` on Windows) after the
-  first frame, mid-recording, and while `stop()` is held at a gate, in
-  `rust-ci.yml` on all three platforms. The next launch lists the meeting with
+  child process with a fake speech engine and kills it (SIGKILL,
+  `TerminateProcess` on Windows) after the first flush, mid-recording, and while
+  `stop()` is held at a gate, in `rust-ci.yml` on all three platforms. The next launch lists the meeting with
   audio up to the last flush and processes it. A kill before the first flush
   leaves a meeting marked failed, not a missing one. Each flush is followed by
   `sync_data` (P21), asserted through a counting file.
@@ -713,12 +718,14 @@ The table above names each package and its owner. Their tests:
 
 - **X1 to X5** are the rows above.
 - **X6 The AUR package `steno-desktop-bin`** (`packaging/aur/`). The PKGBUILD
-  extracts the release `.deb`, verifies it against its `.asc` with
+  extracts the release `.deb` (moving the binary and its sidecar to
+  `/usr/lib/steno-desktop/`), verifies it against its `.asc` with
   `validpgpkeys` set to the release key
   (`048B527950E4F609B90E63495F8810A6E6D4DB46`), depends on `webkit2gtk-4.1`,
   `gtk3`, `glib2`, `libsoup3`, `libayatana-appindicator`, `pipewire` and
   `dbus`, and ships P5's drop-in, X4's `ufw` profile and a `/usr/bin` wrapper
-  that sets X5's flag and the path the autostart entry names. The first stable push is by hand; then **Nicolai** adds
+  that sets X5's flag and the path the autostart entry names. The first stable
+  push is by hand; then **Nicolai** adds
   `AUR_SSH_PRIVATE_KEY`, and `publish` pushes from the second stable release
   on. A candidate is installed with `makepkg -si` from `packaging/aur/`, with
   `pkgver` in pacman form (`0.11.0rc1`, which `vercmp` ranks below `0.11.0`).
@@ -728,13 +735,15 @@ The table above names each package and its owner. Their tests:
   `ORT_PREFER_DYNAMIC_LINK=1`, the sidecar staged by `stage-sidecar.sh`, the
   tray library's `dlopen` path patched, `STENO_DISTRIBUTION=nix`, and P5's
   drop-in, built from `self` with every hash in the tree, so any tag builds as
-  it is; the package's wrapper sets `STENO_LOGIN_ITEM=managed` only under the
-  module and otherwise names the wrapper as the autostart path. Because this
-  links a different ONNX Runtime build, the PR re-runs
+  it is. Without the module, the autostart entry names the user's profile path
+  (`~/.nix-profile/bin/steno-desktop`), never a store path. Because this links a
+  different ONNX Runtime build, the PR re-runs
   FLEURS against pyke's build and states both word error rates. It also gains
   `nixosModules.default` (`programs.steno.enable`): the package, a systemd user
   service started with the graphical session (`TimeoutStopSec=20s`,
-  `STENO_LOGIN_ITEM=managed`), X4's firewall port, PipeWire on, a Secret
+  `STENO_LOGIN_ITEM=managed`) that runs the stable profile path the module
+  picks, `/run/current-system/sw/bin/steno-desktop` for a system install or
+  `/etc/profiles/per-user/<user>/bin/steno-desktop` for a per-user one, X4's firewall port, PipeWire on, a Secret
   Service provider (`services.gnome.gnome-keyring.enable` unless one is set),
   and an opt-in raise of logind's `InhibitDelayMaxSec`. The macOS output stays
   as it is. A candidate is built from its tag
@@ -760,9 +769,10 @@ Before any bundle is built, `plan` fails if the number is not above the highest
 
 **Migrations add, never change.** From 0.11.0 on, a migration only adds tables
 or columns (a new column has a default or allows null) and never alters, drops
-or constrains an existing one. Every build since 0.11.0 carries P2's migrator,
-which ignores migrations it does not know, so each still opens a later
-database, and the add-only rule lets it keep writing. A rollback to a desktop-id build from before P2
+or constrains an existing one, and never writes a new value into an existing
+enum column (an older build's decoder would refuse the row). Every build since
+0.11.0 carries P2's migrator, which ignores migrations it does not know, so each
+still opens a later database, and the add-only rule lets it keep writing. A rollback to a desktop-id build from before P2
 (`desktop-v0.1.0-rc.*`) is the one exception: it refuses a v5 database, so such
 an install needs a newer build installed by hand (Rollback).
 
@@ -1125,8 +1135,8 @@ except case e.
        keychain prompts appear, each asking for the login password, one for the
        API key and one to export the handover key (record each prompt's
        wording); Always Allow is chosen on both;
-     - no keychain prompt appears before the step, and the phone finds no Steno
-       until the step ends;
+     - no keychain prompt appears before the step, and until the step ends
+       `dns-sd -B _steno._tcp` on the Mac shows no Steno;
      - onboarding then opens on its permissions page, and each of microphone,
        system audio and calendar prompts once;
      - after that, a summary runs with the stored key and no prompt, and the
@@ -1170,7 +1180,7 @@ except case e.
      `HOME=~/steno-handoff/soak-home` (the models copied into its
      `Library/Application Support/Steno/Models/`, no API key, no destination),
      with `steno` and `steno-speech-sidecar` built from the tag into one
-     directory and the default four ONNX threads, each under `/usr/bin/time -l`:
+     directory and the default four ONNX threads:
      - `steno process mic.wav --system-lane system.wav --source mac-call
        --engine parakeet-v3` on a two-hour two-lane FLEURS recording
        (generated, never committed);
@@ -1178,13 +1188,12 @@ except case e.
        two-channel 48 kHz Float32 CAF without sidecars, each in its own
        directory.
 
-     Pass: for each command, the peak of the sum of `steno`'s and the
-     sidecar's resident memory, sampled once a second with `ps -o rss= -p
-     <steno>,<sidecar>`, stays under A1's soak bound, and the transcripts are
-     complete.
+     Pass: for each command, the peak of the resident memory of `steno` plus its
+     children (each second, the sum of `ps -o rss=` over `steno` and `pgrep -P
+     <steno>`) stays under A1's soak bound, and the transcripts are complete.
 - **R6 Rollback drill** (**Nicolai**, R3's account; the database is v5 by now).
   1. Save the Tauri app's requirement without its prefix
-     (`codesign -d -r- ~/Applications/Steno.app 2>/dev/null | sed -n 's/^designated => //p' > tauri-dr.txt`)
+     (`codesign -d -r- ~/Applications/Steno.app 2>/dev/null | sed -n 's/^designated => //p' > ~/steno-r6/tauri-dr.txt`)
      and keep the app as an archive, so no second copy is registered
      (`ditto -c -k --keepParent ~/Applications/Steno.app ~/steno-r6/Steno.zip`).
   2. **To Swift.** Quit Steno, remove `~/Applications/Steno.app`, and `ditto` the
@@ -1196,8 +1205,8 @@ except case e.
      - with launch at login on, as R3 left it, Login Items shows what R3
        recorded, and Steno starts once at login.
   3. **Back to Tauri.** Quit, remove the bundle, and `ditto -x -k
-     ~/steno-r6/Steno.zip ~/Applications/`. Pass when `codesign --verify
-     -R="=$(cat tauri-dr.txt)"` passes on it, it lists the meeting the Swift app
+     ~/steno-r6/Steno.zip ~/Applications/`. Pass when `codesign --verify -R
+     "=$(cat ~/steno-r6/tauri-dr.txt)" ~/Applications/Steno.app` passes, it lists the meeting the Swift app
      received in step 2, and the phone uploads a new recording without pairing.
   4. **To the previous candidate.** Install the previous candidate's DMG the same
      way. Pass when it opens the database, lists every meeting, and its own
@@ -1254,9 +1263,10 @@ except case e.
 
 ### The Linux gates
 
-Each runs on Nicolai's own machine, in a new user account, on the last
-candidate, before the site lists the target; on `v0.11.0`, R8 repeats its
-install step and one recording. The status query used throughout
+Each runs on Nicolai's own machine, in a new user account, before the site lists
+the target: steps start from the previous candidate, the upgrade step moves to
+the candidate under test, and the rest of the gate runs on it; on `v0.11.0`, R8
+repeats the install step and one recording. The status query used throughout
 (`sqlite3`, or `nix-shell -p sqlite` on NixOS):
 
 ```sh
@@ -1265,9 +1275,10 @@ q() { sqlite3 ~/.local/share/Steno/steno.sqlite \
 ```
 
 Good: the newest meeting is `queued` or later, with a duration near the time
-recorded; after a logout, a reboot or a compositor exit, its `endReason` is the
-session end, not P3's salvage. Bad: `recording` with 0.0 s before a relaunch, or
-`failed` "Recording was interrupted" after one. On the GNOME machine,
+recorded; after a logout, a reboot or a compositor exit, its `endReason` is
+`quit` (the save at session end), never `failed` (P3's salvage). Bad:
+`recording` with 0.0 s before a relaunch, or `failed` "Recording was
+interrupted" after one. On the GNOME machine,
 `systemd-coredump` is installed before the gate, so crashes show in
 `coredumpctl list`.
 
@@ -1281,16 +1292,18 @@ session end, not P3's salvage. Bad: `recording` with 0.0 s before a relaunch, or
      record it, with the floating panel on top; stop; the meeting has a
      microphone lane and a system lane, and is transcribed, diarized and
      exported.
-  5. Turn on launch at login; log out and in; `cat /proc/$(pidof -s
-     steno-desktop)/cgroup` names the unit that holds Steno, and `systemctl
-     --user show <that unit> -p TimeoutStopUSec` is at least 20 s (P5).
+  5. Turn on launch at login; log out and in; the last path component of `cat
+     /proc/$(pidof -s steno-desktop)/cgroup` names the unit that holds Steno, and
+     `systemctl --user show '<that unit>' -p TimeoutStopUSec` (single-quoted) is
+     at least 20 s (P5).
   6. Record for at least an hour, then log out: after logging back in, `q` shows
-     the meeting with its full length and the session end as `endReason`, it
-     processes, and `journalctl --user -b 0 --since '<logout time>'` for that
-     unit shows the SIGTERM, the save's logged duration and "Main process
-     exited", not "timed out. Killing" (P5). Record, then reboot: the same, with
-     `journalctl --user -b -1`. Record, then `kill -9` the app: at the next launch the
-     meeting is recovered and processes (P3).
+     the meeting with its full length and `quit` as `endReason`, it processes,
+     and `journalctl --user -b 0 --since '<logout time>' -u 'app-*Steno*'` shows
+     the save's logged duration before the app exits and no "timed out.
+     Killing"; on a service (Omarchy, the NixOS module) it also shows "Main
+     process exited" (P5). Record, then reboot: the same, with `journalctl
+     --user -b -1`. Record, then `kill -9` the app: at the next launch the
+     meeting is recovered with `failed` as `endReason` and processes (P3).
   7. Quit the `.deb`'s Steno; the AppImage starts (`pgrep -a steno-desktop`
      shows only its path) and finds the same meetings.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
@@ -1310,7 +1323,8 @@ session end, not P3's salvage. Bad: `recording` with 0.0 s before a relaunch, or
      shows the bubble as `xwayland: true`, floating and pinned; it did not take
      focus (`hyprctl activewindow`); a drag moves it, and the place survives a
      restart (X2).
-  4. Secrets: set an API key, pair the phone, then reboot. Pass when no keyring
+  4. Secrets: save a password in Chromium, set an API key, pair the phone, then
+     reboot. Pass when no keyring
      prompt appears at boot; `journalctl -b | grep -i 'unrecognized format'` is
      empty; `secret-tool search --all service uno.schmid.steno.mac` lists
      `llm-api-key` and `handover-identity`; `~/.local/share/Steno/secrets.json`
@@ -1318,29 +1332,31 @@ session end, not P3's salvage. Bad: `recording` with 0.0 s before a relaunch, or
   5. The phone uploads a recording through the firewall (X4).
   6. Steps 4 to 6 of the GNOME gate, with the call in Chromium and the logout
      through the system menu, which is `uwsm stop`. Also `hyprctl dispatch exit`
-     while recording: after logging back in, the meeting is saved with the
-     session end as `endReason` (X1).
+     while recording: after logging back in, the meeting is saved with `quit` as
+     `endReason` (X1).
   7. In the Steno that a login started, Settings says updates come from the
-     package manager (X5), and `~/.config/autostart/steno-desktop.desktop`'s
-     `Exec` names `/usr/bin/steno-desktop`; installing the next candidate with
-     `makepkg -si` keeps the meetings and the pairing.
+     package manager (X5), and `~/.config/autostart/Steno.desktop`'s `Exec`
+     names `/usr/bin/steno-desktop`. Install the candidate under test with
+     `makepkg -si`: the meetings and the pairing are kept.
 - **NixOS** (x86_64-linux, GNOME, and Hyprland with `withUWSM = true` if
   Nicolai runs it).
-  1. Point a flake input at the candidate's tag
-     (`github:NicolaiSchmid/steno/v0.11.0-rc.N`), set `programs.steno.enable =
-     true`, and `nixos-rebuild switch`.
-  2. Steps 2 to 4 and 6 of the GNOME gate, with the phone through the firewall
-     the module opened.
+  1. Point a flake input at the previous candidate's tag
+     (`github:NicolaiSchmid/steno/v0.11.0-rc.N`), add
+     `steno.nixosModules.default` to the system's modules, set
+     `programs.steno.enable = true`, and `nixos-rebuild switch`.
+  2. Steps 2 to 4 and 6 of the GNOME gate, the unit being the module's user
+     service, with the phone through the firewall the module opened.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's
      schemas).
-  4. Launch at login: the module's user service starts Steno once after a log
-     in; `nixos-rebuild switch` to the next candidate, `sudo nix-collect-garbage
-     -d`, log out and in: Steno starts once, from the new store path.
+  4. Launch at login: point the input at the candidate under test,
+     `nixos-rebuild switch`, `sudo nix-collect-garbage -d`, log out and in:
+     Steno autostarts once, from the profile path, as the new version.
   5. Settings says updates come from the package manager.
-  6. A package-only install (`nix profile install
-     github:NicolaiSchmid/steno/<tag>#steno`, the module off) with launch at
-     login on: after `sudo nix-collect-garbage -d` and a login, Steno starts
-     once, and its file chooser opens.
+  6. A package-only install (the module off): `nix profile install
+     github:NicolaiSchmid/steno/v0.11.0-rc.N#steno` for the previous candidate,
+     launch at login on, `nix profile upgrade` to the candidate under test,
+     `nix-collect-garbage -d` as that user, log out and in: Steno starts once,
+     as the new version, and its file chooser opens.
 
 **The Windows gate** (before the site lists Windows): a Windows machine runs the
 `--ignored` WASAPI tests, one real call, a logoff during a recording of at least
@@ -1352,8 +1368,9 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
    app's Mac availability, D9's final choices, D12 and D13. The call-mode row of
    D9 closes from A9's check in step 2.
 2. **Every package is written,** in parallel except for the dependencies under
-   "Work packages": S1 to S7, A1 to A9, P1 to P37, X1 to X7. Any further gap the
-   data-loss audit finds joins the P table before G1.
+   "Work packages": S1 to S7, A1 to A9, P1 to P38, X1 to X7. Any further gap the
+   data-loss audit finds joins the P table: before G1 it lands with the others;
+   after G1 it lands as a new candidate (G2).
 3. **Gate G1.** Every S, A and P row and X1 to X7 are closed, the pull requests
    under "Also landing before the first candidate" are merged, and the audio
    path is final (D9). X8 runs in G2.
@@ -1365,8 +1382,7 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
      version, and R5, R6 and the dogfood pass on N+1, in that order.
    - The Linux gate of each target to be listed passes.
    - The R5 soak and the stability count start only on a candidate built after
-     the last P package, including any the audit adds later (D9: the audio path
-     is final).
+     the last P package, including any the audit adds after G1 (D3).
    - **The stability count** (D12): R5's soak passes, and ten real meetings on
      the Mac and five on each Linux target to be listed are recorded, processed
      and exported without a failure. The deliberate kills, logouts and reboots
@@ -1375,14 +1391,15 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
      - a recording more than 10 s shorter than the time from start to stop;
      - a lane with no transcript segment while it carried speech;
      - a job that fails and is not fixed by Process again (P9);
-     - a crash: any `steno-desktop` or `steno-speech-sidecar` report in
-       `~/Library/Logs/DiagnosticReports` or in `coredumpctl list`, or a
-       "panicked at" in the user journal.
+     - a crash: a line in `crash.log` in the support directory (P38), or any
+       `steno-desktop` or `steno-speech-sidecar` report in
+       `~/Library/Logs/DiagnosticReports` or in `coredumpctl list`.
 
      Nicolai keeps the tally (meeting, platform, candidate, result) in one
      GitHub issue.
    - A fix becomes a new candidate. The steps it touches run again, and a fix to
-     the audio path restarts the stability count.
+     the audio path or a new P package restarts the R5 soak and the stability
+     count.
 6. **Before the stable tag, Nicolai:**
    - creates the `appcast` environment, with himself as required reviewer,
      "Prevent self-review" off and deployment tags `v*`; `gh api
@@ -1463,8 +1480,8 @@ removed.
 - **`.plans/2026-10-02-rust-core-and-tauri-shell.md`.**
   - The status line, the WP9b progress row and the owner sentence of "Open after
     the port" point here, and that sentence says that an item that can lose data
-    blocks the stable release whatever its owner, and that an item one of this
-    plan's tables names belongs to that package.
+    blocks the stable release whatever its owner, and that an item a row of this
+    plan's tables names belongs to that row's package.
   - These places now point at this plan: the Transition paragraph and WP9's
     opening line (the new identifier); WP9's cutover paragraph; the "Updates"
     and "Pending speaker reviews" lines under "Beyond the bridge"; seam (4); the
