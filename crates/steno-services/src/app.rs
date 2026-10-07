@@ -732,7 +732,8 @@ mod tests {
     use crate::testing::{PATIENCE, built, fake_dependencies, on_own_thread, temp_store};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_phone_intake_enqueues_durably_through_the_pipeline_current_at_admission() {
+    async fn the_phone_intake_commits_durably_and_enqueues_through_the_pipeline_current_at_admission()
+     {
         let (dir, store) = temp_store();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
@@ -781,33 +782,42 @@ mod tests {
             format: AudioFormat::Wav16kInt16,
             device_name: "Phone".to_owned(),
         };
-        // The level of each commit that holds a phone meeting: the first
-        // one is the intake's.
-        let levels: Arc<std::sync::Mutex<Vec<i64>>> = Arc::default();
-        let seen = levels.clone();
+        // The level and the meeting's state of each commit that holds a
+        // phone meeting. The intake's commit is the first, and the only one
+        // with the meeting `queued`: the enqueue writes nothing.
+        let commits: Arc<std::sync::Mutex<Vec<(i64, String)>>> = Arc::default();
+        let seen = commits.clone();
         store.probe_commits(move |connection| {
-            let phone_meeting: bool = connection
+            let state: Option<String> = connection
                 .query_row(
-                    "SELECT count(*) > 0 FROM meeting WHERE source = 'phone'",
+                    "SELECT (SELECT state FROM meeting WHERE source = 'phone')",
                     [],
                     |row| row.get(0),
                 )
                 .unwrap();
-            if phone_meeting {
+            if let Some(state) = state {
                 let level = connection
                     .query_row("PRAGMA synchronous", [], |row| row.get(0))
                     .unwrap();
-                seen.lock().unwrap().push(level);
+                seen.lock().unwrap().push((level, state));
             }
         });
         let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
-        let first = levels.lock().unwrap().first().copied();
-        assert_eq!(first, Some(2), "the intake's meeting commits under FULL");
         // The retired pipeline never saw the meeting; the current one did.
         let current_pipeline = current.current();
         current_pipeline.wait_until_idle().await;
         let meeting = store.meeting(meeting_id).unwrap().unwrap();
         assert_ne!(meeting.state.kind(), steno_core::MeetingStateKind::Queued);
+        let commits = commits.lock().unwrap().clone();
+        let queued: Vec<_> = commits
+            .iter()
+            .filter(|(_, state)| state == "queued")
+            .collect();
+        assert_eq!(
+            queued,
+            [&(2, "queued".to_owned())],
+            "the intake's commit under FULL is the only one with the meeting queued: {commits:?}"
+        );
         assert_eq!(
             store
                 .stage_rates()
