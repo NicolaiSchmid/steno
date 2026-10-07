@@ -1405,14 +1405,11 @@ mod tests {
             let (connection, on_end) = (daemon.connect(), noting(&steps));
             let client = connection.unique_name().unwrap().to_string();
             let result = spawn(move || follow_session_end(&connection, "", false, &on_end));
-            let asked = calls.recv_timeout(WAIT);
-            assert!(
-                asked.is_ok(),
-                "no monitor was asked for: {:?}",
-                result.try_recv()
-            );
+            let asked = calls
+                .recv_timeout(WAIT)
+                .unwrap_or_else(|_| panic!("no monitor was asked for: {:?}", result.try_recv()));
             assert_eq!(
-                asked.unwrap(),
+                asked,
                 PortalCall::CreateMonitor {
                     window: String::new(),
                     sender: client.clone(),
@@ -1444,10 +1441,10 @@ mod tests {
             self.steps.lock().unwrap().clone()
         }
 
-        /// Nothing happened, for longer than a save takes.
-        fn waits(&self) {
+        /// Nothing happened beyond `steps`, for longer than a save takes.
+        fn waits(&self, steps: &[&str]) {
             std::thread::sleep(SAVE * 2);
-            assert!(self.steps().is_empty(), "{:?}", self.steps());
+            assert_eq!(self.steps(), steps);
             assert!(self.result.try_recv().is_err(), "the client ended");
         }
 
@@ -1496,15 +1493,13 @@ mod tests {
         let elsewhere = format!("{PORTAL_PATH}/elsewhere");
         state_on(portal, client, (&elsewhere, PORTAL_INHIBIT), session, 3);
         state_on(portal, client, (PORTAL_PATH, PORTAL_REQUEST), session, 3);
-        monitor.waits();
+        monitor.waits(&[]);
         state(portal, client, session, 2);
         let answered = format!("answered {session}");
         monitor.reaches(&[answered.as_str()]);
         // The logout was called off: the session runs again.
         state(portal, client, session, 1);
-        std::thread::sleep(SAVE * 2);
-        assert_eq!(monitor.steps(), [answered.as_str()]);
-        assert!(monitor.result.try_recv().is_err(), "the client ended");
+        monitor.waits(&[answered.as_str()]);
         state(portal, client, session, 3);
         monitor.ended().unwrap();
         assert_eq!(monitor.steps(), [answered.as_str(), "saved", "quit"]);
@@ -1533,7 +1528,7 @@ mod tests {
         let monitor = Monitor::follow(&daemon, 0);
         let peer = daemon.connect();
         state(&peer, &monitor.client, &monitor.session, 3);
-        monitor.waits();
+        monitor.waits(&[]);
         state(&monitor.portal, &monitor.client, &monitor.session, 3);
         monitor.ended().unwrap();
         assert_eq!(monitor.steps(), ["saved", "quit"]);
