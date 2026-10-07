@@ -208,7 +208,9 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
 /// taken, so a copy another process sets aside in the same second is never
 /// replaced; the old name is removed after. Where no hard link can be made
 /// the move is a rename, which replaces a taken name, so a check that the
-/// name is free comes first and is all that guards it there.
+/// name is free comes first and is all that guards it there. If the old
+/// name cannot be removed after the link, the error is returned and both
+/// names hold the bytes.
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -232,8 +234,9 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
             // No hard link here (FAT, some network shares, a Linux that
-            // protects links to files of other users): a rename, which
-            // fails as well for any other cause.
+            // protects links to files of other users), so fall back to a
+            // rename; where the link failed for another reason (a
+            // read-only folder), the rename fails the same way.
             Err(_) => match candidate.symlink_metadata() {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     std::fs::rename(path, &candidate)?;

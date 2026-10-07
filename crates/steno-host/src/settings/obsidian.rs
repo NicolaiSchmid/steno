@@ -67,7 +67,8 @@ impl ObsidianSettingsViewModel {
     /// The typed settings as entered; `None` when disabled. Fields this
     /// build does not know come from the stored value, so a draft nobody
     /// edited equals it and [`commit`](Self::commit) saves nothing; the
-    /// save itself takes them from the value stored then.
+    /// save takes them again from the value stored at that moment, since
+    /// another writer may have added some.
     #[must_use]
     pub fn draft(&self) -> Option<ObsidianSettings> {
         if !self.enabled {

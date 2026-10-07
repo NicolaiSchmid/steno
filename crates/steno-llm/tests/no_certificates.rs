@@ -15,10 +15,10 @@ use steno_llm::{
 use url::Url;
 
 const CHILD: &str = "STENO_LLM_TEST_NO_CERTIFICATES";
-const NAME: &str = "without_ca_certificates_the_clients_fail_their_calls_instead_of_panicking";
+const NAME: &str = "without_root_certificates_the_clients_fail_their_calls_instead_of_panicking";
 
 #[tokio::test]
-async fn without_ca_certificates_the_clients_fail_their_calls_instead_of_panicking() {
+async fn without_root_certificates_the_clients_fail_their_calls_instead_of_panicking() {
     if std::env::var_os(CHILD).is_some() {
         child().await;
         return;
