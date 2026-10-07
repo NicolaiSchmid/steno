@@ -694,6 +694,34 @@ impl steno_core::TranscriptCleaner for MeddlingCleaner {
     }
 }
 
+/// A pipeline over the world whose cleaner is a [`MeddlingCleaner`] with
+/// `meddle`, and whose summarizer is `summarizer`.
+fn meddling(
+    world: &World,
+    meddle: fn(&Store, &steno_core::CleanupInput),
+    summarizer: Arc<dyn steno_core::MeetingSummarizer>,
+) -> ProcessingPipeline {
+    let cleaner = MeddlingCleaner {
+        store: world.store.clone(),
+        meddle,
+    };
+    ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_llm(Some(Arc::new(cleaner)), Some(summarizer)),
+    )
+}
+
+/// The speaker of `speakers` labelled `label`.
+fn speaker<'a>(speakers: &'a [steno_core::Speaker], label: &str) -> &'a steno_core::Speaker {
+    speakers
+        .iter()
+        .find(|speaker| speaker.cluster_label == label)
+        .unwrap_or_else(|| panic!("no speaker {label}"))
+}
+
 /// A summarizer that keeps the speakers each call saw and answers as
 /// [`FakeSummarizer`] does.
 #[derive(Default)]
@@ -721,58 +749,35 @@ impl steno_core::MeetingSummarizer for SpeakerRecordingSummarizer {
 async fn a_speaker_named_during_cleanup_stays_named() {
     let world = world(false, None, AudioRetention::KeepForever);
     let summarizer = Arc::new(SpeakerRecordingSummarizer::default());
-    let dependencies = world.pipeline.dependencies().clone().with_llm(
-        Some(Arc::new(MeddlingCleaner {
-            store: world.store.clone(),
-            // Confirms "Speaker 1" as Anna and clears the clip of
-            // "Speaker 2", as the retention sweep can.
-            meddle: |store, input| {
-                let speaker = |label: &str| {
-                    input
-                        .speakers
-                        .iter()
-                        .find(|speaker| speaker.cluster_label == label)
-                        .expect("a diarized speaker")
-                };
-                let anna = sample_data::person(0, "Anna");
-                store
-                    .confirm_speaker(speaker("Speaker 1").id, &anna)
-                    .unwrap();
-                let second = speaker("Speaker 2");
-                assert!(second.sample_clip_url.is_some());
-                store
-                    .clear_sample_clips(second.meeting_id, &[second.id])
-                    .unwrap();
-            },
-        })),
-        Some(summarizer.clone()),
+    let pipeline = meddling(
+        &world,
+        // Confirms "Speaker 1" as Anna and clears the clip of "Speaker 2",
+        // as the retention sweep can.
+        |store, input| {
+            let anna = sample_data::person(0, "Anna");
+            store
+                .confirm_speaker(speaker(&input.speakers, "Speaker 1").id, &anna)
+                .unwrap();
+            let second = speaker(&input.speakers, "Speaker 2");
+            assert!(second.sample_clip_url.is_some());
+            store
+                .clear_sample_clips(second.meeting_id, &[second.id])
+                .unwrap();
+        },
+        summarizer.clone(),
     );
-    let pipeline = ProcessingPipeline::new(dependencies);
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
 
-    assert_eq!(
-        world.store.meeting(meeting.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
-    let export = world.store.export(meeting.id).unwrap();
-    let speaker = |label: &str| {
-        export
-            .speakers
-            .iter()
-            .find(|speaker| speaker.cluster_label == label)
-            .unwrap()
-            .clone()
-    };
-    let first = speaker("Speaker 1");
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    let export = world.store.export(meeting).unwrap();
+    let first = speaker(&export.speakers, "Speaker 1");
     let anna = steno_core::SpeakerAssignment::Confirmed {
         person_id: sample_data::person(0, "Anna").id,
     };
     assert_eq!(first.assignment, anna);
     assert_eq!(
-        speaker("Speaker 2").sample_clip_url,
+        speaker(&export.speakers, "Speaker 2").sample_clip_url,
         None,
         "the speakers are not written again"
     );
@@ -805,22 +810,19 @@ async fn a_speaker_named_during_cleanup_stays_named() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_typed_while_processing_is_kept() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let dependencies = world.pipeline.dependencies().clone().with_llm(
-        Some(Arc::new(MeddlingCleaner {
-            store: world.store.clone(),
-            meddle: |store, input| {
-                store
-                    .rename(
-                        input.segments[0].meeting_id,
-                        "Typed while processing",
-                        sample_data::started_at(),
-                    )
-                    .unwrap();
-            },
-        })),
-        Some(Arc::new(FakeSummarizer::default())),
+    let pipeline = meddling(
+        &world,
+        |store, input| {
+            store
+                .rename(
+                    input.segments[0].meeting_id,
+                    "Typed while processing",
+                    sample_data::started_at(),
+                )
+                .unwrap();
+        },
+        Arc::new(FakeSummarizer::default()),
     );
-    let pipeline = ProcessingPipeline::new(dependencies);
     let mut meeting = call_meeting(world.now);
     // No calendar event, so the summary would replace a default title.
     meeting.calendar_event_id = None;
@@ -850,11 +852,6 @@ async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
     assert_eq!(summarized.tasks.len(), 1);
     assert_eq!(summarized.decisions.len(), 1);
     // The fake summarizer guesses no names; a model's guess, stored.
-    let speaker = summarized
-        .speakers
-        .iter()
-        .find(|speaker| speaker.cluster_label == "Speaker 1")
-        .unwrap();
     let decisions: Vec<String> = summarized
         .decisions
         .iter()
@@ -867,7 +864,7 @@ async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
             &summarized.tasks,
             &decisions,
             &[steno_core::SpeakerNameSuggestion {
-                speaker_id: speaker.id,
+                speaker_id: speaker(&summarized.speakers, "Speaker 1").id,
                 name: Some("Ben".to_owned()),
                 confidence: 0.7,
                 evidence: "was greeted by name".to_owned(),
@@ -877,12 +874,10 @@ async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
     let suggestions = world.store.name_suggestions(meeting.id).unwrap();
     assert_eq!(suggestions.len(), 1);
 
-    let pipeline =
-        ProcessingPipeline::new(world.pipeline.dependencies().clone().with_llm(None, None));
-    let stored = world.store.meeting(meeting.id).unwrap().unwrap();
-    let stored_asset = world.store.asset(meeting.id).unwrap().unwrap();
-    pipeline.enqueue(&stored, &stored_asset).unwrap();
-    pipeline.wait_until_idle().await;
+    ProcessingPipeline::new(world.pipeline.dependencies().clone().with_llm(None, None))
+        .process(asset.id)
+        .await
+        .unwrap();
 
     let again = world.store.export(meeting.id).unwrap();
     assert_eq!(again.meeting.state, MeetingState::Ready);
@@ -901,27 +896,24 @@ async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_template_picked_while_processing_is_kept_and_used() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let dependencies = world.pipeline.dependencies().clone().with_llm(
-        Some(Arc::new(MeddlingCleaner {
-            store: world.store.clone(),
-            // Picks another template, as the user's `meeting.setTemplate`
-            // can while the meeting is in flight.
-            meddle: |store, input| {
-                store
-                    .update_meeting(
-                        input.segments[0].meeting_id,
-                        sample_data::started_at(),
-                        |meeting| {
-                            "interview".clone_into(&mut meeting.template_id);
-                            Ok(())
-                        },
-                    )
-                    .unwrap();
-            },
-        })),
-        Some(Arc::new(FakeSummarizer::default())),
+    let pipeline = meddling(
+        &world,
+        // Picks another template, as the user's `meeting.setTemplate` can
+        // while the meeting is in flight.
+        |store, input| {
+            store
+                .update_meeting(
+                    input.segments[0].meeting_id,
+                    sample_data::started_at(),
+                    |meeting| {
+                        "interview".clone_into(&mut meeting.template_id);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+        },
+        Arc::new(FakeSummarizer::default()),
     );
-    let pipeline = ProcessingPipeline::new(dependencies);
     let meeting = call_meeting(world.now);
     assert_eq!(meeting.template_id, "default");
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
@@ -941,23 +933,21 @@ async fn a_template_picked_while_processing_is_kept_and_used() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_summary_rerun_leaves_a_later_pick_alone() {
     let world = world(true, None, AudioRetention::KeepForever);
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    let meeting = enqueue_call(&world, &world.pipeline);
     world.pipeline.wait_until_idle().await;
     world
         .store
-        .update_meeting(meeting.id, world.now, |stored| {
+        .update_meeting(meeting, world.now, |stored| {
             "interview".clone_into(&mut stored.template_id);
             Ok(())
         })
         .unwrap();
     world
         .pipeline
-        .rerun_summary(meeting.id, "daily-standup")
+        .rerun_summary(meeting, "daily-standup")
         .await
         .unwrap();
-    let stored = world.store.meeting(meeting.id).unwrap().unwrap();
+    let stored = world.store.meeting(meeting).unwrap().unwrap();
     assert_eq!(stored.template_id, "interview");
     assert_eq!(stored.summary.unwrap().template_id, "daily-standup");
 }
@@ -1675,6 +1665,16 @@ async fn a_failing_stage_marks_the_meeting_failed_with_its_name() {
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
+/// A pipeline over the world whose diarizer fails with `reason`.
+fn with_failing_diarizer(world: &World, reason: &str) -> ProcessingPipeline {
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.diarizer = Arc::new(FakeDiarizer {
+        failure: Some(reason.to_owned()),
+        ..FakeDiarizer::default()
+    });
+    ProcessingPipeline::new(dependencies)
+}
+
 /// A diarizer that fails costs the speaker labels, not the transcript:
 /// the meeting is ready, the mic lane stays "me" and the tap's segments
 /// all go to one unknown speaker, without an embedding, that the user can
@@ -1682,39 +1682,28 @@ async fn a_failing_stage_marks_the_meeting_failed_with_its_name() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failing_diarizer_keeps_the_transcript_with_one_room_speaker() {
     let world = world(true, None, AudioRetention::KeepForever);
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.diarizer = Arc::new(FakeDiarizer {
-        failure: Some("no model".to_owned()),
-        ..FakeDiarizer::default()
-    });
-    let pipeline = ProcessingPipeline::new(dependencies);
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    let pipeline = with_failing_diarizer(&world, "no model");
+    let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
 
-    let stored = world.store.meeting(meeting.id).unwrap().unwrap();
+    let stored = world.store.meeting(meeting).unwrap().unwrap();
     assert_eq!(stored.state, MeetingState::Ready);
     assert!(stored.summary.is_some(), "the later stages ran");
-    let export = world.store.export(meeting.id).unwrap();
+    let export = world.store.export(meeting).unwrap();
     assert_eq!(labels(&export), ["Me", "Speaker 1"]);
-    let room = export
-        .speakers
-        .iter()
-        .find(|speaker| speaker.cluster_label == "Speaker 1")
-        .unwrap();
+    let room = speaker(&export.speakers, "Speaker 1");
     assert_eq!(room.assignment.kind(), SpeakerAssignmentKind::Unknown);
     assert_eq!(room.embedding, None);
     assert_ne!(
         room.id,
-        steno_core::derived_uuid(meeting.id, "speaker-Speaker 1"),
+        steno_core::derived_uuid(meeting, "speaker-Speaker 1"),
         "a later run that diarizes does not inherit its confirmation"
     );
     assert_eq!(export.segments.len(), 12);
     for segment in &export.segments {
         let expected = match segment.lane {
             AudioLane::System => Some(room.id),
-            _ => Some(LaneMerger::me_speaker_id(meeting.id)),
+            _ => Some(LaneMerger::me_speaker_id(meeting)),
         };
         assert_eq!(segment.speaker_id, expected, "{:?}", segment.lane);
     }
@@ -1742,16 +1731,11 @@ async fn a_failing_speaker_match_keeps_the_speakers_unknown() {
     let mut dependencies = world.pipeline.dependencies().clone();
     dependencies.speaker_memory = Arc::new(BrokenSpeakerMemory);
     let pipeline = ProcessingPipeline::new(dependencies);
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
 
-    assert_eq!(
-        world.store.meeting(meeting.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
-    let export = world.store.export(meeting.id).unwrap();
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    let export = world.store.export(meeting).unwrap();
     assert_eq!(labels(&export), ["Me", "Speaker 1", "Speaker 2"]);
     assert!(
         export
@@ -1781,16 +1765,11 @@ async fn a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_laun
         result
     }));
     let pipeline = ProcessingPipeline::new(dependencies);
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
 
-    assert_eq!(
-        world.store.meeting(meeting.id).unwrap().unwrap().state,
-        MeetingState::Processing
-    );
-    assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Processing);
+    assert_eq!(world.store.segments(meeting).unwrap(), Vec::new());
 }
 
 /// A re-run whose diarizer fails keeps the speakers the first run stored:
@@ -1804,27 +1783,16 @@ async fn a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers() {
     world.pipeline.enqueue(&meeting, &asset).unwrap();
     world.pipeline.wait_until_idle().await;
     let first = world.store.export(meeting.id).unwrap();
-    let speaker = first
-        .speakers
-        .iter()
-        .find(|speaker| speaker.cluster_label == "Speaker 1")
-        .unwrap()
-        .clone();
+    let confirmed = speaker(&first.speakers, "Speaker 1");
     let anna = sample_data::person(0, "Anna");
-    world.store.confirm_speaker(speaker.id, &anna).unwrap();
+    world.store.confirm_speaker(confirmed.id, &anna).unwrap();
     let voice = world.store.person(anna.id).unwrap().unwrap();
     assert_eq!(voice.sample_count, 1);
 
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.diarizer = Arc::new(FakeDiarizer {
-        failure: Some("no model".to_owned()),
-        ..FakeDiarizer::default()
-    });
-    let pipeline = ProcessingPipeline::new(dependencies);
-    let stored = world.store.meeting(meeting.id).unwrap().unwrap();
-    let stored_asset = world.store.asset(meeting.id).unwrap().unwrap();
-    pipeline.enqueue(&stored, &stored_asset).unwrap();
-    pipeline.wait_until_idle().await;
+    with_failing_diarizer(&world, "no model")
+        .process(asset.id)
+        .await
+        .unwrap();
 
     let again = world.store.export(meeting.id).unwrap();
     assert_eq!(again.meeting.state, MeetingState::Ready);
@@ -1832,14 +1800,14 @@ async fn a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers() {
     let kept = again
         .speakers
         .iter()
-        .find(|kept| kept.id == speaker.id)
+        .find(|kept| kept.id == confirmed.id)
         .expect("the confirmed speaker is kept");
     assert_eq!(
         kept.assignment,
         steno_core::SpeakerAssignment::Confirmed { person_id: anna.id }
     );
-    assert_eq!(kept.embedding, speaker.embedding);
-    assert_eq!(kept.sample_clip_url, speaker.sample_clip_url);
+    assert_eq!(kept.embedding, confirmed.embedding);
+    assert_eq!(kept.sample_clip_url, confirmed.sample_clip_url);
     assert_eq!(world.store.person(anna.id).unwrap().unwrap(), voice);
     assert_eq!(again.segments.len(), first.segments.len());
     for (segment, before) in again.segments.iter().zip(&first.segments) {
@@ -1858,16 +1826,14 @@ async fn a_failing_diarizer_on_the_mic_lane_makes_it_the_room() {
         None,
         AudioRetention::KeepForever,
         engine_deaf_to_silence(),
-        FakeDiarizer {
-            failure: Some("no model".to_owned()),
-            ..FakeDiarizer::default()
-        },
+        FakeDiarizer::default(),
     );
+    let pipeline = with_failing_diarizer(&world, "no model");
     let meeting = call_meeting(world.now);
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
     silence_the_tap(&asset);
-    world.pipeline.enqueue(&meeting, &asset).unwrap();
-    world.pipeline.wait_until_idle().await;
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
 
     let export = world.store.export(meeting.id).unwrap();
     assert_eq!(export.meeting.state, MeetingState::Ready);
@@ -1890,12 +1856,7 @@ async fn a_diarizer_failure_warns_with_its_stage_not_its_reason() {
     let log = steno_pipeline::fixtures::CapturedLog::warnings();
     let world = world(false, None, AudioRetention::KeepForever);
     let reason = "cannot read /Users/someone/Audio/meeting/system.caf";
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.diarizer = Arc::new(FakeDiarizer {
-        failure: Some(reason.to_owned()),
-        ..FakeDiarizer::default()
-    });
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = with_failing_diarizer(&world, reason);
     // An id of its own picks this run's line out.
     let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
@@ -1916,7 +1877,7 @@ async fn a_diarizer_failure_warns_with_its_stage_not_its_reason() {
 struct PanickingOnceReady {
     store: Arc<Store>,
     meeting_id: Uuid,
-    ticks: Mutex<f64>,
+    ticks: TickingClock,
 }
 
 impl MonotonicClock for PanickingOnceReady {
@@ -1927,9 +1888,7 @@ impl MonotonicClock for PanickingOnceReady {
             .unwrap()
             .is_some_and(|meeting| meeting.state == MeetingState::Ready);
         assert!(!ready, "the clock broke after the ready write");
-        let mut ticks = self.ticks.lock().unwrap();
-        *ticks += 1.0;
-        *ticks
+        self.ticks.seconds()
     }
 }
 
@@ -1939,24 +1898,22 @@ impl MonotonicClock for PanickingOnceReady {
 async fn a_panic_after_the_ready_write_leaves_the_meeting_ready() {
     let world = world(false, None, AudioRetention::KeepForever);
     let meeting = call_meeting(world.now);
-    let dependencies =
+    let clock = PanickingOnceReady {
+        store: world.store.clone(),
+        meeting_id: meeting.id,
+        ticks: TickingClock(Mutex::new(0.0)),
+    };
+    let pipeline = ProcessingPipeline::new(
         world
             .pipeline
             .dependencies()
             .clone()
-            .with_clock(Arc::new(PanickingOnceReady {
-                store: world.store.clone(),
-                meeting_id: meeting.id,
-                ticks: Mutex::new(0.0),
-            }));
-    let pipeline = ProcessingPipeline::new(dependencies);
+            .with_clock(Arc::new(clock)),
+    );
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
     pipeline.enqueue(&meeting, &asset).unwrap();
     pipeline.wait_until_idle().await;
-    assert_eq!(
-        world.store.meeting(meeting.id).unwrap().unwrap().state,
-        MeetingState::Ready
-    );
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
 }
 
 /// A failed background run is logged at warn with its asset and stage
@@ -2181,18 +2138,16 @@ async fn a_run_that_panics_fails_its_meeting() {
         &world,
         Arc::new(PanickingEngine(std::collections::BTreeSet::new())),
     ));
-    let meeting = call_meeting(world.now);
-    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    let meeting = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
     assert_eq!(
-        world.store.meeting(meeting.id).unwrap().unwrap().state,
+        meeting_state(&world, meeting),
         MeetingState::Failed {
             reason: format!("transcribe: {}", steno_pipeline::OPERATION_PANICKED)
         }
     );
     assert_eq!(pipeline.resume_unfinished().unwrap(), Vec::<Uuid>::new());
-    world.store.delete_meeting(meeting.id).unwrap();
+    world.store.delete_meeting(meeting).unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
