@@ -1178,15 +1178,18 @@ still has to draw the window side. `[ ]` is not ported yet.
     still call an Xfce logout off after the query, after which xfce4-session sends
     the shell nothing, so the recording goes on until the end comes. gnome-session
     waits about ten seconds for the answer at the end, xfce4-session seven. `Stop`
-    quits only once a query was answered: xfce4-session also sends it when a
-    checkpoint (Save Session), or a query whose answer it refused, has waited a
-    minute, with no logout to follow. On Wayland xfce4-session quits right after the
+    saves and quits: xfce4-session sends it for Quit Program (Session settings) and
+    kills the process 15 s later. It also sends it to a client it has just dropped
+    (`StateChanged` to disconnected) when a checkpoint (Save Session), or a query
+    whose answer it refused, has waited a minute, with no logout to follow and no
+    kill; that client records on and registers again (`Phase::Dropped`), so a later
+    logout still reaches it. On Wayland xfce4-session quits right after the
     query, without `EndSession` and with no cancel to follow, so there the shell
     saves at the query, answers and ends with the display
     (`SessionApi::query_ends_on_wayland`). It tells Wayland from X11 by
     `XDG_SESSION_TYPE`, else by a `WAYLAND_DISPLAY` whose socket exists; should the
-    session go on 30 s after that save (an X11 session taken for Wayland's), the
-    shell tells the user and relaunches, so a recorder runs again.
+    session go on 30 s after that save (an X11 session taken for a Wayland one), the
+    shell tells the user and relaunches, so the user can record again.
   - Where no session manager runs (KDE Plasma, wlroots desktops), the shell opens
     the desktop portal's session monitor (`CreateMonitor` on
     `org.freedesktop.portal.Inhibit`), answers query-end at once
@@ -1214,7 +1217,8 @@ still has to draw the window side. `[ ]` is not ported yet.
     So a save that outlasts a session manager's or logind's wait still ends, at
     most `SHUTDOWN_PATIENCE` after it began, unless the process is killed first
     (systemd's `SIGKILL` once a stop has waited out the unit's `TimeoutStopSec`,
-    90 s unless the unit sets another, or a second SIGTERM). On KDE Plasma this is
+    90 s unless the unit sets another, xfce4-session's `SIGKILL` 15 s after its
+    `Stop`, which the save's ten seconds fit in, or a second SIGTERM). On KDE Plasma this is
     the save: ksmserver speaks XSMP to X11 clients, which GTK 3 does not, and KWin
     closes only native Wayland windows at a logout, not the shell's, which run
     under XWayland.
@@ -1230,8 +1234,8 @@ still has to draw the window side. `[ ]` is not ported yet.
     monitor and inhibitor and the lock are tested against fakes on a private
     `dbus-daemon`; the lost display under Xvfb (in CI too:
     `apps/desktop/scripts/lost-display-linux.sh`) and headless sway with a recording
-    running; a real xfce4-session 4.20.4 logout on X11 and on Wayland (labwc 0.9.7)
-    in a container.
+    running; a real xfce4-session 4.20.4 logout on X11 and on Wayland (labwc 0.9.7),
+    and its Quit Program and Save Session under a recording on X11, in a container.
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -2926,7 +2930,7 @@ PR off `main`.
 | The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
 | On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
 | Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
-| A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
+| A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
