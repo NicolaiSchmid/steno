@@ -1716,8 +1716,7 @@ impl ProcessingPipeline {
     /// replaced by the model's. Without a summarizer only the meeting's
     /// processing columns are persisted: the summary, tasks, decisions and
     /// suggestions an earlier run wrote stay. Rust only: Swift clears them.
-    /// The template is not stored: the user's pick is, before a re-run
-    /// starts, and the summary's `template_id` records which one made it.
+    /// The template is not stored (see [`Meeting::apply_processing_results`]).
     async fn summarize(
         &self,
         meeting: Meeting,
