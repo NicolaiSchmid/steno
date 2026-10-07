@@ -751,8 +751,7 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
 
     let inside = store
         .write_durably(|transaction| {
-            // A change of a page, so the commit writes a frame to the WAL;
-            // an update to the same value would write none.
+            // A change of a page, so the commit writes a frame to the WAL.
             transaction.execute_batch("CREATE TABLE probe(x)")?;
             sync_levels(transaction)
         })

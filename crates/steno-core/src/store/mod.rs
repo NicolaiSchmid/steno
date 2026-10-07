@@ -329,8 +329,8 @@ impl Store {
         if wal_frames < 0 {
             return Ok(());
         }
-        // A commit that changes no page (an update to the same value)
-        // writes no frame and leaves the WAL as it is.
+        // A commit that changes no page writes no frame and leaves the WAL
+        // as it is; creating a table always changes one.
         self.commit_on(&mut full.connection, |transaction| {
             transaction
                 .execute_batch("CREATE TABLE stenoWalRestart(x); DROP TABLE stenoWalRestart;")?;

@@ -138,8 +138,8 @@ public final class MeetingStore: Sendable {
       try Self.underFullSync(db) {
         let (walFrameCount, _) = try db.checkpoint(.restart)
         guard walFrameCount >= 0 else { return }
-        // A commit that changes no page (an update to the same value)
-        // writes no frame and leaves the WAL as it is.
+        // A commit that changes no page writes no frame and leaves the WAL
+        // as it is; creating a table always changes one.
         try db.inTransaction(.immediate) {
           try db.execute(sql: "CREATE TABLE stenoWalRestart(x); DROP TABLE stenoWalRestart")
           return .commit
