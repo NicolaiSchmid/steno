@@ -323,22 +323,22 @@ pub mod stop_timeout {
     /// a slow bus holds nothing. Without a user manager on the bus the
     /// drop-in takes effect when the next one starts, at the next login.
     fn reload_user_manager() {
-        std::thread::spawn(|| {
-            let reloaded = zbus::blocking::Connection::session().and_then(|bus| {
-                bus.call_method(
+        use crate::session_end::{patient, spawn_client};
+        spawn_client(
+            "steno-reload",
+            "the autostart unit's stop timeout waits for the next login",
+            || {
+                patient(zbus::blocking::connection::Builder::session()?)?.call_method(
                     Some("org.freedesktop.systemd1"),
                     "/org/freedesktop/systemd1",
                     Some("org.freedesktop.systemd1.Manager"),
                     "Reload",
                     &(),
-                )
-                .map(drop)
-            });
-            match reloaded {
-                Ok(()) => tracing::debug!("the systemd user manager reloaded its units"),
-                Err(error) => tracing::debug!(%error, "the systemd user manager did not reload"),
-            }
-        });
+                )?;
+                tracing::debug!("the systemd user manager reloaded its units");
+                Ok(())
+            },
+        );
     }
 }
 

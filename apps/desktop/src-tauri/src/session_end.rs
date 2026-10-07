@@ -321,13 +321,13 @@ fn wayland_session_of(
 
 /// The connection `builder` makes, whose method calls wait `CALL_PATIENCE`
 /// at most.
-fn patient(builder: Builder<'_>) -> zbus::Result<Connection> {
+pub fn patient(builder: Builder<'_>) -> zbus::Result<Connection> {
     builder.method_timeout(CALL_PATIENCE).build()
 }
 
 /// Runs `client` on a thread named `name`; an error ends it with `gap`,
 /// what the app is left without, in the log.
-fn spawn_client(
+pub fn spawn_client(
     name: &'static str,
     gap: &'static str,
     client: impl FnOnce() -> zbus::Result<()> + Send + 'static,
