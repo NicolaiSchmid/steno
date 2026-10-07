@@ -23,14 +23,14 @@ import {
  * rename removes `index.json` before it moves, so the temp file can be the
  * only index left, and a load reads it when `index.json` is missing.
  *
- * Every load also lists the directory and adds a row for each recording file
- * no row names, so an index that was lost, torn or written stale never
- * strands a recording on disk (`adoptRecordingFiles`). Before that it settles
- * the rows that were never hashed: one whose file is still on disk goes back
- * to crash recovery, any other pending one fails (`settleUnhashedRows`). Then
- * it moves in the recordings the recorder's directory holds with no row to
- * recover them, left by a crash before the row was saved
- * (`recorderFilesToMove`).
+ * Every load then works through three steps in order. It settles the rows
+ * that were never hashed: one whose file is still on disk goes back to crash
+ * recovery, any other pending one fails (`settleUnhashedRows`). It moves in
+ * the recordings the recorder's directory holds with no row to recover them,
+ * left by a crash before the row was saved (`recorderFilesToMove`). And it
+ * lists the queue directory and adds a row for each recording file no row
+ * names, so an index that was lost, torn or written stale never strands a
+ * recording on disk (`adoptRecordingFiles`).
  *
  * A load that cannot read the index persists nothing and leaves every file
  * where it was; `queue-store.ts` then refuses to save until a load succeeds.
@@ -226,7 +226,8 @@ function fileNameOf(uri: string): string {
  * `index` with every row that was never hashed settled before crash recovery
  * runs, apart from a `recording` one, which recovery handles anyway. A row
  * whose file holds audio, in the queue (`queueEntries`) or as its own
- * `sourceUri` in the recorder's directory (`recorderEntries`), goes back to
+ * recorder file (`recorderEntries`, matched by the file name of its
+ * `sourceUri`, since iOS moves the app's container on an update), goes back to
  * `recording` with its attempts and error cleared, so recovery hashes and
  * queues it under its own id; without this its recorder file would become a
  * second row beside it. A `failed` row without such a file stays as it is.
@@ -260,7 +261,7 @@ export function settleUnhashedRows(
 			inRecorder.has(name) && sources.filter((n) => n === name).length === 1
 		);
 	};
-	const restart = (
+	const withState = (
 		r: QueuedRecording,
 		state: SyncState,
 		lastError: string | null,
@@ -276,9 +277,11 @@ export function settleUnhashedRows(
 			r.sha256 === null && r.state !== "recording" && r.state !== "delivered";
 		if (!unhashed) return r;
 		if (inQueue.has(r.fileName) || ownRecorderFile(r)) {
-			return restart(r, "recording", null);
+			return withState(r, "recording", null);
 		}
-		return r.state === "failed" ? r : restart(r, "failed", INTERRUPTED_MESSAGE);
+		return r.state === "failed"
+			? r
+			: withState(r, "failed", INTERRUPTED_MESSAGE);
 	};
 	const recordings = index.recordings.map(settle);
 	return recordings.every((r, i) => r === index.recordings[i])
@@ -296,7 +299,7 @@ export type RecorderAdoption = {
 /**
  * The recordings in the recorder's directory (`recorderEntries`) that no
  * crash recovery will move: a file is left in place when it is not named
- * like an expo-audio recording, is below `MIN_RECORDING_BYTES` (no audio;
+ * like an expo-audio recording, is below `MIN_RECORDING_BYTES` (no meaningful audio;
  * the recorder's file for the next recording starts as a header), or a
  * `recording` row names it as its `sourceUri` (`planRecovery` moves it under
  * that row). Every other one, a crash before its row was saved, becomes a new
@@ -337,8 +340,9 @@ function join(directory: string, name: string): string {
  * `recorderDirectory` is expo-audio's directory (`Documents/ExpoAudio/`);
  * null leaves it alone. `now` names the copies set aside, in milliseconds
  * since the epoch. Loads run only while nothing records: the recorder
- * starts only once the queue is loaded (`RecorderScreen`), and a file of a
- * process that died has no writer left.
+ * starts only once the queue is loaded (`RecorderScreen`), a loaded store
+ * never loads again (`queue-store.ts`), and a file of a process that died
+ * has no writer left.
  */
 export function createQueueStorage(
 	files: QueueFileAPI,

@@ -569,8 +569,11 @@ const Z = "88888888-8888-4888-8888-888888888888";
 const C_STARTED = "2026-10-01T11:00:00.000Z";
 
 /**
- * Crash recovery over the memory files: moves by the source's file name and
- * replaces the queue file, as `RecorderScreen`'s adopt does.
+ * Crash recovery over the memory files. `adopt` takes the row's full
+ * `sourceUri`, finds the file by its name in `REC` and replaces the queue
+ * file, as `expoRecoveryFiles` does when the queue file holds no meaningful
+ * audio (recovery-files.test.ts runs that one over expo's file API, also
+ * after the app's container moved).
  */
 function recoveryFiles(files: ReturnType<typeof memoryFiles>) {
 	return {
@@ -712,7 +715,7 @@ describe("recordings left in the recorder's directory", () => {
 	});
 });
 
-describe("rows that failed before they were hashed", () => {
+describe("rows that were never hashed", () => {
 	it("go through crash recovery again under their own id, so no second row appears and no upload stalls", async () => {
 		const logs: string[] = [];
 		// R failed with its file still in the recorder's directory; A is
