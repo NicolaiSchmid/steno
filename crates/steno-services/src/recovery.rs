@@ -79,15 +79,14 @@ pub fn master_path(audio_folder: &Path, meeting_id: Uuid) -> PathBuf {
     RecordingLayout::new(audio_folder, meeting_id).master(AudioFormat::Caf48kFloat32)
 }
 
-/// The recording the master of meeting `meeting_id`, recorded from
-/// `source`, holds in `audio_folder`, as its capture
-/// would have handed it over: the asset rebuilt from the master's header
-/// alone (whole frames only), the lanes of the meeting's source, the
-/// default retention (`retention` is set by `complete`), and the end reason
-/// `failed`. A sidecar whose writer died is finished from its length
-/// ([`WavStreamWriter::recover`]) and listed when it holds samples; one
-/// that cannot be is left out, and the decoder rebuilds that lane from the
-/// master.
+/// The recording the master of `meeting_id` in `audio_folder` holds, as
+/// its capture would have handed it over: the asset rebuilt from the
+/// master's header alone (whole frames only) with the lanes `source`
+/// records, the default retention (`complete` sets the real one), and the
+/// end reason `failed`. A sidecar whose writer died is finished from its
+/// length ([`WavStreamWriter::recover`]) and listed when it holds samples;
+/// one that cannot be is left out, and the decoder rebuilds that lane
+/// from the master.
 pub fn salvage(
     audio_folder: &Path,
     meeting_id: Uuid,

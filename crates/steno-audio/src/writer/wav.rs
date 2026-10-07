@@ -127,11 +127,12 @@ impl WavStreamWriter {
     /// Finishes a sidecar whose writer died before [`Self::finish`]: the
     /// sizes come from the file's length, whole samples only (a sample cut
     /// short at the end is cut off), and the file is synced. Only a file
-    /// whose header is this writer's at 16 kHz, sizes aside, is touched (the
-    /// rate every sidecar has, and [`WavFile::read_16k_mono`] demands); a finished
-    /// one is written back as it was. Returns the samples it holds. Crash
-    /// recovery calls it, so the lane reads from its sidecar rather than
-    /// being rebuilt from the master. Rust only: Swift had no recovery.
+    /// whose header is this writer's at 16 kHz, sizes aside, is touched
+    /// (every sidecar's rate, which [`WavFile::read_16k_mono`] demands); a
+    /// finished one is written back as it was. Returns the samples it
+    /// holds. Crash recovery calls it, so the lane reads from its sidecar
+    /// rather than being rebuilt from the master. Rust only: Swift had no
+    /// recovery.
     pub fn recover(path: &Path) -> Result<usize, WavReadError> {
         let io = |e: std::io::Error| WavReadError::Io(format!("{}: {e}", path.display()));
         let mut file = OpenOptions::new()
@@ -140,10 +141,10 @@ impl WavStreamWriter {
             .open(path)
             .map_err(io)?;
         let length = file.metadata().map_err(io)?.len();
-        let mut header = [0u8; Self::HEADER_SIZE];
         if length < Self::HEADER_SIZE as u64 {
             return Err(WavReadError::Malformed("shorter than its header".into()));
         }
+        let mut header = [0u8; Self::HEADER_SIZE];
         file.read_exact(&mut header).map_err(io)?;
         let sample_rate = 16_000;
         let expected = Self::header(sample_rate, 0);
