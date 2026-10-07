@@ -281,9 +281,11 @@ mod tests {
             return;
         }
         let preferences = FilePreferences::new(&path);
+        // Writable again: only the failed move aside keeps the file from
+        // being written.
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         preferences.set_flag("onboarded", true);
         assert!(preferences.flag("onboarded"), "the run still has its flag");
-        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"seen\": tr");
         assert_eq!(names(&folder), vec!["preferences.json"]);
     }
