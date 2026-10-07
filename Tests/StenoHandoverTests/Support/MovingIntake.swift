@@ -8,6 +8,15 @@ import StenoCore
 /// leaves it. On a failure the file goes back, where the real intake leaves
 /// it for the phone's retry. Every test service's intake sits behind one
 /// (`TestService.moving`).
+///
+/// The real intake copies the file and removes it only when it returns, so
+/// in the app a re-announce during the intake still finds the verified file
+/// and keeps its chunk set, and a revoke during the intake can remove it
+/// before the intake copied it (the intake then fails, and the phone keeps
+/// its recording). Here the file is gone for the whole intake: a
+/// re-announce or a revoke during a held intake meets the inbox as the real
+/// intake leaves it once it returned, which is the state the tests of a
+/// revoke during the intake check.
 struct MovingIntake: HandoverIntake {
   let intake: any HandoverIntake
   let directory: URL
