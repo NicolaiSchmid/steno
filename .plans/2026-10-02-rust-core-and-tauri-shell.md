@@ -2731,7 +2731,7 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   (X11, and Wayland under labwc); GNOME's logout dialog for the inhibitor is read from
   gnome-session's source only. Where: `apps/desktop/src-tauri/src/session_end.rs`,
   `apps/desktop/src-tauri/src/display_lost.rs`; the shutdown items under "Pipeline and
-  services (WP6b)". Found: #185, #203, #XXX.
+  services (WP6b)". Found: #185, #203, #220.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included; leaving it out
   was weighed and not done, see the note).
