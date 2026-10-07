@@ -140,14 +140,15 @@ pub fn general(
 }
 
 /// The picker's name for a chosen microphone the device list lacks.
-pub const UNAVAILABLE_INPUT: &str = "Microphone not connected";
+pub const DISCONNECTED_INPUT: &str = "Microphone not connected";
 
 /// The picker's devices: the list, then the chosen device when the list
 /// lacks it (unplugged, or a UID saved on another computer), named
-/// [`UNAVAILABLE_INPUT`], so the picker shows it as unavailable rather than
-/// as a bare UID; a recording then records the default input on Linux (see
-/// `capture::live::pipewire` in `steno-audio`). Rust only: the Swift
-/// picker shows no entry for it.
+/// [`DISCONNECTED_INPUT`], so the picker shows it as not connected rather
+/// than as a bare UID; a recording then records the default input on every
+/// platform (see `CaptureBackend::start` in `steno-audio`). After a failed
+/// list nothing is known to be connected, so no entry is added. Rust only:
+/// the Swift picker shows no entry for it.
 fn recording_devices(audio: &AudioSettingsViewModel) -> Vec<RecordingDevice> {
     let mut devices: Vec<RecordingDevice> = audio
         .devices
@@ -158,11 +159,12 @@ fn recording_devices(audio: &AudioSettingsViewModel) -> Vec<RecordingDevice> {
         })
         .collect();
     if let Some(uid) = &audio.input_device_uid
+        && !audio.devices_failed
         && !devices.iter().any(|device| &device.uid == uid)
     {
         devices.push(RecordingDevice {
             uid: uid.clone(),
-            name: UNAVAILABLE_INPUT.to_owned(),
+            name: DISCONNECTED_INPUT.to_owned(),
         });
     }
     devices

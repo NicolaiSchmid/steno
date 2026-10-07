@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use steno_bridge::{PermissionKind, PermissionState, Platform, RetentionMode};
 use steno_core::paths::{file_url, file_url_path};
+use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, Store};
 
 use super::{SectionError, update_settings};
@@ -41,6 +42,9 @@ pub const DAY_RANGE: std::ops::RangeInclusive<i64> = 1..=3650;
 #[derive(Debug)]
 pub struct AudioSettingsViewModel {
     pub devices: Vec<InputDevice>,
+    /// The last list failed, so `devices` says nothing about which are
+    /// connected.
+    pub devices_failed: bool,
     pub input_device_uid: Option<String>,
     pub audio_folder: PathBuf,
     pub folder_usage: FolderUsageState,
@@ -58,6 +62,7 @@ impl AudioSettingsViewModel {
     pub fn new() -> Self {
         AudioSettingsViewModel {
             devices: Vec::new(),
+            devices_failed: false,
             input_device_uid: None,
             audio_folder: PathBuf::new(),
             folder_usage: FolderUsageState::Measuring,
@@ -119,7 +124,14 @@ impl AudioSettingsViewModel {
     }
 
     pub fn refresh_devices(&mut self, services: &Services) {
-        match services.audio_devices.inputs() {
+        self.apply_devices(services.audio_devices.inputs());
+    }
+
+    /// A device list's outcome, for a caller that listed without holding
+    /// the host's lock (on Linux a list may wait seconds for `PipeWire`).
+    pub fn apply_devices(&mut self, listed: BoundaryResult<Vec<InputDevice>>) {
+        self.devices_failed = listed.is_err();
+        match listed {
             Ok(devices) => self.devices = devices,
             Err(error) => {
                 self.devices = Vec::new();

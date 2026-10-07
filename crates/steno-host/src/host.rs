@@ -1729,8 +1729,10 @@ impl BridgeHost for Host {
     }
 
     fn settings_recording_refresh_devices(&self) -> Outcome<()> {
+        // Listed before the lock: on Linux a list may wait for PipeWire.
+        let listed = self.shared.services.audio_devices.inputs();
         self.settings_command(BridgeTopic::SettingsRecording, |inner| {
-            inner.audio.refresh_devices(&self.shared.services);
+            inner.audio.apply_devices(listed);
         });
         Ok(())
     }

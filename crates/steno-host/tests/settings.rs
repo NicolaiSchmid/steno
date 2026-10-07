@@ -613,10 +613,10 @@ fn refresh_devices_rereads_the_inputs() {
 }
 
 /// A chosen microphone the list lacks (unplugged, or a UID from another
-/// computer) stays selected and is listed as not connected; once it is
-/// back, its own name replaces that.
+/// computer) stays selected and is listed as not connected, unless the list
+/// itself failed; once it is back, its own name replaces that.
 #[test]
-fn a_chosen_microphone_that_is_not_connected_is_listed_as_unavailable() {
+fn a_chosen_microphone_that_is_not_connected_is_listed_as_not_connected() {
     let harness = Harness::builder().build();
     harness
         .host
@@ -630,6 +630,19 @@ fn a_chosen_microphone_that_is_not_connected_is_listed_as_unavailable() {
         recording["devices"],
         json!([{"name": "Microphone not connected", "uid": "BuiltInMicrophoneDevice"}])
     );
+    harness
+        .fakes
+        .audio_devices
+        .fail_listing(Some("PipeWire did not list the devices"));
+    harness.host.settings_recording_refresh_devices().unwrap();
+    let recording = harness.sink.last(BridgeTopic::SettingsRecording).unwrap();
+    assert_eq!(
+        recording["devices"],
+        json!([]),
+        "nothing is known to be connected"
+    );
+    assert_eq!(recording["error"], "Microphones could not be listed.");
+    harness.fakes.audio_devices.fail_listing(None);
     harness
         .fakes
         .audio_devices
