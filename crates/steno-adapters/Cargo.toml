@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# `ObsidianFolderDestination::with_step_hook`: the tests stop a delivery at a
+# chosen step to run a race in a fixed order.
+testing = []
+
 [dependencies]
 steno-core = { path = "../steno-core" }
 
@@ -23,6 +28,7 @@ uuid.workspace = true
 [dev-dependencies]
 # The doctests render the core's sample export.
 steno-core = { path = "../steno-core", features = ["testing"] }
+steno-adapters = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 tokio.workspace = true
 

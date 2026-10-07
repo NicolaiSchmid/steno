@@ -1,9 +1,11 @@
 //! The Obsidian vault folder destination.
 //! Swift: `Sources/StenoAdapters/Obsidian/ObsidianFolderDestination.swift`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, TryLockError};
 
 use chrono_tz::Tz;
 use steno_core::paths::file_url_path;
@@ -37,6 +39,49 @@ pub enum ObsidianError {
     AudioUnavailable,
 }
 
+/// A point inside [`ObsidianFolderDestination::deliver_meeting`] that a
+/// test can stop a delivery at, so a race with a second delivery (or with
+/// another process, played by the test) runs in a chosen order instead of
+/// by luck. Production code never installs a hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryStep<'a> {
+    /// Another delivery in this process holds the vault; this one waits for
+    /// it before touching anything.
+    WaitingForVault,
+    /// A first delivery is about to claim this meeting folder by creating
+    /// it.
+    ClaimingFolder(&'a str),
+    /// The person page at this path has been read (or found missing) and
+    /// is about to be written with this meeting's line merged in.
+    PersonPageRead(&'a str),
+}
+
+/// The hook a test installs with
+/// [`ObsidianFolderDestination::with_step_hook`] (feature `testing`).
+#[derive(Clone)]
+struct StepHook(Arc<dyn Fn(DeliveryStep<'_>) + Send + Sync>);
+
+impl std::fmt::Debug for StepHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StepHook")
+    }
+}
+
+/// The lock every delivery into the vault at `vault_path` holds from start
+/// to end, one per vault in the process: two meetings finishing at once, or
+/// a delivery and a redeliver, read and merge a shared person page, claim
+/// meeting folders and sweep temp files one after the other. The key is the
+/// canonical path, so two spellings of one vault share a lock; the
+/// configured path when it cannot be resolved. Another process on the same
+/// vault (the Swift app, a second CLI) is not covered; the folder claim
+/// holds across processes, the rest does not.
+fn vault_lock(vault_path: &str) -> Arc<Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = LazyLock::new(Mutex::default);
+    let key = fs::canonicalize(vault_path).unwrap_or_else(|_| PathBuf::from(vault_path));
+    let mut locks = LOCKS.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(locks.entry(key).or_default())
+}
+
 /// The Obsidian vault folder destination: `Meetings/<date>-<slug>/` with the
 /// folder note, transcript, tasks, `transcript.vtt`, `meeting.json`, the
 /// optional audio copy, and one managed block per person page. A person page
@@ -45,7 +90,8 @@ pub enum ObsidianError {
 /// and keeps everything else. The policy (which receipt applies, what may be
 /// written, what the receipt says) is [`DeliveryLedger`]'s; this type
 /// renders, asks the ledger and writes through [`LocalFolderSink`]. Nothing
-/// is deleted but the writer's own temp files.
+/// is deleted but the writer's own temp files. Deliveries into one vault
+/// run one at a time in a process (`vault_lock`).
 #[derive(Debug, Clone)]
 pub struct ObsidianFolderDestination {
     /// [`ObsidianFolderDestination::DESTINATION_ID`] for the app's stored
@@ -62,6 +108,8 @@ pub struct ObsidianFolderDestination {
     /// recorded every call it stores; tests pin it.
     platform: Platform,
     sink: LocalFolderSink,
+    /// The tests' [`DeliveryStep`] hook; `None` outside them.
+    steps: Option<StepHook>,
 }
 
 impl ObsidianFolderDestination {
@@ -103,6 +151,7 @@ impl ObsidianFolderDestination {
             time_zone,
             platform: Platform::CURRENT,
             sink,
+            steps: None,
         }
     }
 
@@ -112,6 +161,24 @@ impl ObsidianFolderDestination {
     pub fn with_platform(mut self, platform: Platform) -> Self {
         self.platform = platform;
         self
+    }
+
+    /// The same destination calling `hook` at every [`DeliveryStep`] it
+    /// reaches; the hook may block to hold the delivery there.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn with_step_hook(
+        mut self,
+        hook: impl Fn(DeliveryStep<'_>) + Send + Sync + 'static,
+    ) -> Self {
+        self.steps = Some(StepHook(Arc::new(hook)));
+        self
+    }
+
+    fn reached(&self, step: DeliveryStep<'_>) {
+        if let Some(StepHook(hook)) = &self.steps {
+            hook(step);
+        }
     }
 
     #[must_use]
@@ -143,17 +210,38 @@ impl ObsidianFolderDestination {
     }
 
     /// [`Destination::deliver`] without the boundary error wrapper; the CLI
-    /// calls it directly.
+    /// calls it directly. Blocks while another delivery into the same vault
+    /// runs in this process (`vault_lock`).
     pub fn deliver_meeting(
+        &self,
+        meeting: &MeetingExport,
+        previous: Option<&DeliveryReceipt>,
+    ) -> Result<DeliveryReceipt, ObsidianError> {
+        let lock = vault_lock(&self.settings.vault_path);
+        // A delivery that panicked leaves nothing behind the lock to
+        // repair, so a poisoned lock is taken as it is.
+        let _vault = match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                self.reached(DeliveryStep::WaitingForVault);
+                lock.lock().unwrap_or_else(PoisonError::into_inner)
+            }
+        };
+        self.deliver_holding_vault(meeting, previous)
+    }
+
+    fn deliver_holding_vault(
         &self,
         meeting: &MeetingExport,
         previous: Option<&DeliveryReceipt>,
     ) -> Result<DeliveryReceipt, ObsidianError> {
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
-        let folder = ledger
-            .pinned_folder()
-            .map_or_else(|| self.resolve_folder(meeting), str::to_owned);
+        let folder = match ledger.pinned_folder() {
+            Some(folder) => folder.to_owned(),
+            None => self.claim_folder(meeting)?,
+        };
         // Swift's `lastPathComponent`: a pinned `Meetings/x/` still names `x`.
         let slug = Path::new(&folder).file_name().map_or_else(
             || folder.clone(),
@@ -216,7 +304,9 @@ impl ObsidianFolderDestination {
             let path = format!("{people_folder}/{}", page.file_name);
             rendered.insert(path.clone());
             let mut data = page.page.into_bytes();
-            if let Some(existing) = self.reading(&path, || self.sink.read(&path))? {
+            let existing = self.reading(&path, || self.sink.read(&path))?;
+            self.reached(DeliveryStep::PersonPageRead(&path));
+            if let Some(existing) = existing {
                 // A page that is not UTF-8 text cannot be merged without
                 // changing bytes outside the block, so it is left as it
                 // is and reported.
@@ -318,25 +408,46 @@ impl ObsidianFolderDestination {
     }
 
     /// The folder of a first delivery: the scope's path with the ledger's
-    /// collision rule, fed by the two things only this destination knows.
-    pub(crate) fn resolve_folder(&self, meeting: &MeetingExport) -> String {
-        DeliveryLedger::resolve_folder(
-            &MeetingFolder::path(&meeting.meeting, self.time_zone),
+    /// collision rule ([`DeliveryLedger::claim_folder`]), each candidate
+    /// claimed by creating it under `Meetings/` (created as needed). A
+    /// candidate that is already there, made by another delivery or
+    /// another process a moment ago, is taken unless it holds this
+    /// meeting's `meeting.json`.
+    fn claim_folder(&self, meeting: &MeetingExport) -> Result<String, ObsidianError> {
+        let base = MeetingFolder::path(&meeting.meeting, self.time_zone);
+        self.writing(MeetingFolder::ROOT, || {
+            self.sink.create_directory(MeetingFolder::ROOT)
+        })?;
+        DeliveryLedger::claim_folder(
+            &base,
             meeting.meeting.id,
-            |folder| self.sink.exists(folder),
-            |folder| {
-                let data = self
-                    .sink
-                    .read(&format!("{folder}/{}", MeetingFolder::JSON))
-                    .ok()
-                    .flatten()?;
-                let probe: serde_json::Value = serde_json::from_slice(&data).ok()?;
-                probe
-                    .pointer("/meeting/id")?
-                    .as_str()
-                    .and_then(|id| Uuid::parse_str(id).ok())
+            |candidate| {
+                self.reached(DeliveryStep::ClaimingFolder(candidate));
+                match self.sink.create_new_directory(candidate) {
+                    Ok(()) => Ok(true),
+                    Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
+                    Err(error) => Err(ObsidianError::WriteFailed {
+                        path: self.absolute(candidate),
+                        underlying: error.to_string(),
+                    }),
+                }
             },
+            |folder| self.meeting_of(folder),
         )
+    }
+
+    /// The meeting whose `meeting.json` is in `folder`, if any.
+    fn meeting_of(&self, folder: &str) -> Option<Uuid> {
+        let data = self
+            .sink
+            .read(&format!("{folder}/{}", MeetingFolder::JSON))
+            .ok()
+            .flatten()?;
+        let probe: serde_json::Value = serde_json::from_slice(&data).ok()?;
+        probe
+            .pointer("/meeting/id")?
+            .as_str()
+            .and_then(|id| Uuid::parse_str(id).ok())
     }
 
     /// An `audio` or `audio.<ext>` file in the meeting folder, listed in the

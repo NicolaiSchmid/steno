@@ -6,10 +6,14 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, mpsc};
+use std::time::Duration;
 
 use common::*;
 use steno_adapters::fs::AtomicFileWriter;
-use steno_adapters::obsidian::{ManagedBlock, ObsidianError, ObsidianFolderDestination};
+use steno_adapters::obsidian::{
+    DeliveryStep, ManagedBlock, ObsidianError, ObsidianFolderDestination,
+};
 use steno_adapters::rendering::ArtifactRenderer;
 use steno_core::content_hash::sha256;
 use steno_core::json::uuid_string;
@@ -1186,4 +1190,125 @@ fn the_sample_clip_url_round_trips_as_a_file_url() {
         Some(PathBuf::from("/tmp/a b/ü.wav"))
     );
     assert_eq!(file_url_path("https://example.com/x"), None);
+}
+
+/// How long a race test waits for the other side to reach its step before
+/// it fails; a safety net against a hang, never part of the ordering.
+const STEP_LIMIT: Duration = Duration::from_secs(60);
+
+const ANNA_PAGE: &str = "People/Anna Müller.md";
+
+/// What the second delivery of a race did first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Second {
+    WaitedForTheVault,
+    Finished,
+}
+
+#[test]
+fn two_meetings_delivered_at_once_both_keep_their_line_on_a_shared_person_page() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let one = export();
+    let mut two = one.clone();
+    two.meeting.id = uuid(2);
+    two.meeting.started_at = one.meeting.started_at + chrono::Duration::hours(3);
+
+    // The first delivery stops after it read Anna's page; the second runs
+    // until it either waits for the vault or finishes. Only then does the
+    // first go on, so without the vault lock the second's line is written
+    // between the first's read and its write, every time.
+    let (paused, first_paused) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let first = destination.clone().with_step_hook(move |step| {
+        if step == DeliveryStep::PersonPageRead(ANNA_PAGE) {
+            let _ = paused.send(());
+            let _ = released.lock().unwrap().recv();
+        }
+    });
+    let (events, second_events) = mpsc::channel();
+    let waiting = events.clone();
+    let second = destination.with_step_hook(move |step| {
+        if step == DeliveryStep::WaitingForVault {
+            let _ = waiting.send(Second::WaitedForTheVault);
+        }
+    });
+
+    let (receipt_one, receipt_two, second_first) = std::thread::scope(|scope| {
+        let release = release;
+        let first_run = scope.spawn(|| first.deliver_meeting(&one, None));
+        first_paused
+            .recv_timeout(STEP_LIMIT)
+            .expect("the first delivery reaches the page");
+        let second_run = scope.spawn(|| {
+            let receipt = second.deliver_meeting(&two, None);
+            let _ = events.send(Second::Finished);
+            receipt
+        });
+        let second_first = second_events
+            .recv_timeout(STEP_LIMIT)
+            .expect("the second delivery waits or finishes");
+        release.send(()).unwrap();
+        (
+            first_run.join().unwrap().unwrap(),
+            second_run.join().unwrap().unwrap(),
+            second_first,
+        )
+    });
+
+    let anna = vault.text(ANNA_PAGE);
+    assert!(
+        anna.contains(&ManagedBlock::marker(one.meeting.id)),
+        "the first meeting's line"
+    );
+    assert!(
+        anna.contains(&ManagedBlock::marker(two.meeting.id)),
+        "the second meeting's line survives the first's write"
+    );
+    assert_eq!(
+        second_first,
+        Second::WaitedForTheVault,
+        "the second delivery waits for the first"
+    );
+    assert_eq!(receipt_one.folder, FOLDER);
+    assert_eq!(receipt_two.folder, format!("{FOLDER}-2"));
+}
+
+#[test]
+fn a_folder_another_writer_claims_first_is_never_shared() {
+    let vault = Vault::new();
+    let ours = export();
+    let mut theirs = ours.clone();
+    theirs.meeting.id = uuid(99);
+    let their_json = ArtifactRenderer::new().render_json(&theirs).unwrap();
+
+    // Another process (the Swift app, a second CLI) creates the same
+    // folder and writes its meeting.json between this delivery's lookup
+    // and its claim.
+    let root = vault.root.clone();
+    let json = their_json.clone();
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            let folder = root.join(FOLDER);
+            if step == DeliveryStep::ClaimingFolder(FOLDER) && !folder.exists() {
+                fs::create_dir_all(&folder).unwrap();
+                fs::write(folder.join("meeting.json"), &json).unwrap();
+                fs::write(folder.join("notes.md"), b"theirs\n").unwrap();
+            }
+        });
+    let receipt = deliver(&destination, &ours, None);
+
+    assert_eq!(receipt.folder, format!("{FOLDER}-2"));
+    assert_eq!(vault.list(FOLDER), ["meeting.json", "notes.md"]);
+    assert_eq!(
+        vault.read(&format!("{FOLDER}/meeting.json")),
+        their_json,
+        "the other writer's meeting.json is untouched"
+    );
+    assert_eq!(
+        vault.list(&format!("{FOLDER}-2")),
+        without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
+    );
 }

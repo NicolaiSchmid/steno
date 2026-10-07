@@ -74,7 +74,17 @@ impl LocalFolderSink {
         AtomicFileWriter::write(data, &self.path(relative))
     }
 
+    /// Creates the folder and every missing parent; an existing folder is
+    /// no error.
     pub fn create_directory(&self, relative: &str) -> std::io::Result<()> {
         fs::create_dir_all(self.path(relative))
+    }
+
+    /// Creates the folder, whose parent must exist, and fails with
+    /// `AlreadyExists` when anything is already at that path. The one step
+    /// that claims a folder: of two writers creating the same path, in this
+    /// process or another, exactly one succeeds.
+    pub fn create_new_directory(&self, relative: &str) -> std::io::Result<()> {
+        fs::create_dir(self.path(relative))
     }
 }

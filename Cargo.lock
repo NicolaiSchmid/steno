@@ -4719,6 +4719,7 @@ dependencies = [
  "chrono-tz",
  "iana-time-zone",
  "serde_json",
+ "steno-adapters",
  "steno-core",
  "tempfile",
  "thiserror 2.0.21",

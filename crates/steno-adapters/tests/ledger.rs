@@ -227,6 +227,51 @@ fn the_collision_rule_suffixes_taken_folders_and_reuses_a_crashed_attempt() {
 }
 
 #[test]
+fn claiming_a_folder_tries_each_candidate_once_and_stops_at_a_failed_claim() {
+    let ours = uuid(1);
+    let base = LEDGER_FOLDER;
+    let two = format!("{base}-2");
+    let mut tried = Vec::new();
+    let claimed = DeliveryLedger::claim_folder(
+        base,
+        ours,
+        |candidate| {
+            tried.push(candidate.to_owned());
+            Ok::<_, String>(candidate == two)
+        },
+        |_| None,
+    );
+    assert_eq!(
+        claimed,
+        Ok(two.clone()),
+        "the first candidate that is created"
+    );
+    assert_eq!(tried, [base.to_owned(), two.clone()]);
+
+    let reused = DeliveryLedger::claim_folder(
+        base,
+        ours,
+        |_| Ok::<_, String>(false),
+        |folder| (folder == base).then_some(ours),
+    );
+    assert_eq!(reused, Ok(base.to_owned()), "a crashed attempt of ours");
+
+    let failed = DeliveryLedger::claim_folder(
+        base,
+        ours,
+        |candidate| {
+            if candidate == base {
+                Ok(false)
+            } else {
+                Err(format!("{candidate}: denied"))
+            }
+        },
+        |_| Some(uuid(2)),
+    );
+    assert_eq!(failed, Err(format!("{two}: denied")));
+}
+
+#[test]
 fn folder_path_joins_root_and_folder() {
     let receipt = receipt("/vault/", &[]);
     assert_eq!(
