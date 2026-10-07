@@ -5,6 +5,7 @@ import {
 	recordingFileName,
 	recordingIDFromFileName,
 } from "@/features/recorder/recording-options";
+import { INTERRUPTED_MESSAGE } from "@/features/recorder/recovery";
 import {
 	addRecording,
 	EMPTY_INDEX,
@@ -18,20 +19,25 @@ import {
 /**
  * Persistence for the queue index through an injected file API, so vitest
  * can make `rename` throw (plan P4). Writes go to `index.json.tmp` first and
- * are renamed over `index.json`; a rename failure leaves the previous index
- * untouched and removes the temp file.
+ * are renamed over `index.json`. A failed rename keeps the temp file: expo's
+ * rename removes `index.json` before it moves, so the temp file can be the
+ * only index left, and a load reads it when `index.json` is missing.
  *
  * Every load also lists the directory and adds a row for each recording file
  * no row names, so an index that was lost, torn or written stale never
- * strands a recording on disk (`adoptRecordingFiles`). Before that it sends
- * the rows that failed before they were hashed, with their file still on
- * disk, back to crash recovery (`reopenUnhashedRows`), and moves in the
- * recordings the recorder's directory holds with no row to recover them, left
- * by a crash before the row was saved (`adoptRecorderFiles`).
+ * strands a recording on disk (`adoptRecordingFiles`). Before that it settles
+ * the rows that were never hashed: one whose file is still on disk goes back
+ * to crash recovery, any other pending one fails (`settleUnhashedRows`). Then
+ * it moves in the recordings the recorder's directory holds with no row to
+ * recover them, left by a crash before the row was saved
+ * (`recorderFilesToMove`).
  *
  * A load that cannot read the index persists nothing and leaves every file
  * where it was; `queue-store.ts` then refuses to save until a load succeeds.
- * An index whose bytes are not text is corrupt instead, and set aside.
+ * An index whose bytes are not text is corrupt instead. A corrupt index, and
+ * a temp file that cannot be read, are set aside under a name of their own
+ * (`index.corrupt-<ms>.json`, `index.unreadable-<ms>.json`), so no later
+ * copy replaces an earlier one.
  */
 export type QueueFileAPI = {
 	/**
@@ -41,12 +47,13 @@ export type QueueFileAPI = {
 	readText(path: string): Promise<string | null>;
 	/** Creates or truncates. */
 	writeText(path: string, text: string): Promise<void>;
-	/** Replaces `to` if it exists. */
+	/**
+	 * Replaces `to` if it exists. expo removes `to` before it moves, so a
+	 * failed move can leave nothing at `to`.
+	 */
 	rename(from: string, to: string): Promise<void>;
-	/** Throws when `to` exists, so a move never replaces a recording. */
+	/** Throws when `to` exists, so a move never replaces a file. */
 	move(from: string, to: string): Promise<void>;
-	/** No-op when missing. */
-	remove(path: string): Promise<void>;
 	/** The files directly in `directory`; none when it does not exist. */
 	list(directory: string): Promise<QueueDirectoryEntry[]>;
 };
@@ -166,9 +173,9 @@ function tryParse(
 /**
  * `index` plus a row for every recording file in `entries` that no row names
  * by id or file name, oldest first; a file below `MIN_RECORDING_BYTES` holds
- * no audio and is left out. A row the index has keeps its state, so a file
- * left behind by a `delivered` row is not uploaded again. A new row is
- * `recording` with no size and no hash, the state crash recovery
+ * no meaningful audio and is left out. A row the index has keeps its state,
+ * so a file left behind by a `delivered` row is not uploaded again. A new row
+ * is `recording` with no size and no hash, the state crash recovery
  * (`planRecovery` in `src/features/recorder/recovery.ts`) picks up at launch:
  * it hashes the file and queues it. `startedAt` is the file's creation time,
  * which is when expo-audio opened it for the recording; the move into the
@@ -216,18 +223,23 @@ function fileNameOf(uri: string): string {
 }
 
 /**
- * `index` with the rows that were never hashed back in `recording`, so crash
- * recovery hashes and queues them under their own id: a `failed` row whose
- * file holds audio in the queue (`queueEntries`) or, by its `sourceUri`, in
- * the recorder's directory (`recorderEntries`), and every `queued` one, which
- * only a Retry of an earlier app version made and the upload planner skips
- * (recovery marks it failed again when its file is gone). Without this a
- * failed row's file in the recorder's directory would become a second row
- * beside it. A recorder file that another row also names stays with that
- * row: an earlier app version wrote every recording of one run to the same
- * file. Attempts and the error start over.
+ * `index` with every row that was never hashed settled before crash recovery
+ * runs, apart from a `recording` one, which recovery handles anyway. A row
+ * whose file holds audio, in the queue (`queueEntries`) or as its own
+ * `sourceUri` in the recorder's directory (`recorderEntries`), goes back to
+ * `recording` with its attempts and error cleared, so recovery hashes and
+ * queues it under its own id; without this its recorder file would become a
+ * second row beside it. A `failed` row without such a file stays as it is.
+ * A pending one without (only a Retry of an earlier app version made it
+ * `queued`, and an unpair `unpaired`) fails as interrupted: the upload
+ * planner skips a row with no hash, and Retry is not offered for it.
+ *
+ * A recorder file that more than one row names is no row's own: an earlier
+ * app version wrote every recording of one run to the same file, which holds
+ * the last of them. Recovery moves it under the `recording` row that names
+ * it, and with none `recorderFilesToMove` makes it a row of its own.
  */
-export function reopenUnhashedRows(
+export function settleUnhashedRows(
 	index: QueueIndex,
 	queueEntries: readonly QueueDirectoryEntry[],
 	recorderEntries: readonly QueueDirectoryEntry[],
@@ -248,26 +260,30 @@ export function reopenUnhashedRows(
 			inRecorder.has(name) && sources.filter((n) => n === name).length === 1
 		);
 	};
-	const reopens = (r: QueuedRecording) =>
-		r.sha256 === null &&
-		(r.state === "queued" ||
-			(r.state === "failed" &&
-				(inQueue.has(r.fileName) || ownRecorderFile(r))));
-	if (!index.recordings.some(reopens)) return index;
-	return {
-		version: 1,
-		recordings: index.recordings.map((r) =>
-			reopens(r)
-				? {
-						...r,
-						state: "recording",
-						attempts: 0,
-						nextAttemptAt: null,
-						lastError: null,
-					}
-				: r,
-		),
+	const restart = (
+		r: QueuedRecording,
+		state: SyncState,
+		lastError: string | null,
+	): QueuedRecording => ({
+		...r,
+		state,
+		attempts: 0,
+		nextAttemptAt: null,
+		lastError,
+	});
+	const settle = (r: QueuedRecording): QueuedRecording => {
+		const unhashed =
+			r.sha256 === null && r.state !== "recording" && r.state !== "delivered";
+		if (!unhashed) return r;
+		if (inQueue.has(r.fileName) || ownRecorderFile(r)) {
+			return restart(r, "recording", null);
+		}
+		return r.state === "failed" ? r : restart(r, "failed", INTERRUPTED_MESSAGE);
 	};
+	const recordings = index.recordings.map(settle);
+	return recordings.every((r, i) => r === index.recordings[i])
+		? index
+		: { version: 1, recordings };
 }
 
 /** A recording file to move from the recorder's directory into the queue. */
@@ -287,7 +303,7 @@ export type RecorderAdoption = {
  * queue file named after the UUID in the recorder's name, unless a row or a
  * queue file already has that name.
  */
-export function adoptRecorderFiles(
+export function recorderFilesToMove(
 	index: QueueIndex,
 	queueEntries: readonly QueueDirectoryEntry[],
 	recorderEntries: readonly QueueDirectoryEntry[],
@@ -319,7 +335,8 @@ function join(directory: string, name: string): string {
 
 /**
  * `recorderDirectory` is expo-audio's directory (`Documents/ExpoAudio/`);
- * null leaves it alone. Loads run only while nothing records: the recorder
+ * null leaves it alone. `now` names the copies set aside, in milliseconds
+ * since the epoch. Loads run only while nothing records: the recorder
  * starts only once the queue is loaded (`RecorderScreen`), and a file of a
  * process that died has no writer left.
  */
@@ -328,11 +345,24 @@ export function createQueueStorage(
 	directory: string,
 	log: (message: string) => void = () => {},
 	recorderDirectory: string | null = null,
+	now: () => number = Date.now,
 ): QueueStorage {
 	const indexPath = join(directory, "index.json");
 	const tempPath = join(directory, "index.json.tmp");
-	const corruptPath = join(directory, "index.corrupt.json");
-	const unreadableTempPath = join(directory, "index.unreadable.json");
+
+	/**
+	 * Moves the corrupt index or the unreadable temp file to
+	 * `index.<kind>-<ms>.json` without replacing a file, so an earlier copy
+	 * is never lost. Best effort: a failure is logged.
+	 */
+	const setAside = async (file: "index" | "temp index") => {
+		const [from, kind] =
+			file === "index" ? [indexPath, "corrupt"] : [tempPath, "unreadable"];
+		const to = join(directory, `index.${kind}-${now()}.json`);
+		await files.move(from, to).catch((error) => {
+			log(`queue ${file} not set aside: ${String(error)}`);
+		});
+	};
 
 	/** Null when missing; bytes that are not text parse as corrupt. */
 	const readParsed = async (path: string) => {
@@ -348,15 +378,13 @@ export function createQueueStorage(
 	/**
 	 * The temp file, parsed. One that cannot be read at all is set aside, so
 	 * the next save, which writes the temp file, does not replace rows it may
-	 * hold; best effort, like setting the index aside.
+	 * hold.
 	 */
 	const readTemp = async () => {
 		try {
 			return await readParsed(tempPath);
 		} catch (error) {
-			await files.rename(tempPath, unreadableTempPath).catch((renameError) => {
-				log(`queue temp index not set aside: ${String(renameError)}`);
-			});
+			await setAside("temp index");
 			return { ok: false as const, reason: String(error) };
 		}
 	};
@@ -374,16 +402,13 @@ export function createQueueStorage(
 			const outcome = fromTemp?.ok
 				? "using the temp file"
 				: "rebuilding it from the recording files";
-			log(`queue index unreadable, ${outcome}: ${parsed.reason}`);
-			// Best effort, and never a reason to fail the load: the rename
-			// replaces an older corrupt copy, and when it fails the next save
-			// writes over the unreadable index.
-			await files.rename(indexPath, corruptPath).catch((error) => {
-				log(`queue index not set aside: ${String(error)}`);
-			});
+			log(`queue index corrupt, ${outcome}: ${parsed.reason}`);
+			// Never a reason to fail the load: when the move fails, the next
+			// save writes over the corrupt index.
+			await setAside("index");
 		} else if (fromTemp && !fromTemp.ok) {
 			log(
-				`queue temp index unreadable, rebuilding the index from the recording files: ${fromTemp.reason}`,
+				`queue temp index not usable, rebuilding the index from the recording files: ${fromTemp.reason}`,
 			);
 		}
 		return fromTemp?.ok ? fromTemp.value : EMPTY_INDEX;
@@ -441,20 +466,28 @@ export function createQueueStorage(
 				return loaded;
 			}
 			const recorderEntries = await listRecorderDirectory();
-			const reopened = reopenUnhashedRows(loaded, entries, recorderEntries);
-			const reopenedCount = reopened.recordings.filter(
-				(r, i) => r !== loaded.recordings[i],
-			).length;
-			if (reopenedCount > 0) {
+			const settled = settleUnhashedRows(loaded, entries, recorderEntries);
+			const changed = (state: SyncState) =>
+				settled.recordings.filter(
+					(r, i) => r !== loaded.recordings[i] && r.state === state,
+				).length;
+			const reopened = changed("recording");
+			if (reopened > 0) {
 				log(
-					`${reopenedCount} recording(s) never hashed go through crash recovery again`,
+					`${reopened} recording(s) never hashed go through crash recovery again`,
+				);
+			}
+			const failed = changed("failed");
+			if (failed > 0) {
+				log(
+					`${failed} recording(s) never hashed have no file of their own, marked failed`,
 				);
 			}
 			const moved = await moveRecorderFiles(
-				adoptRecorderFiles(reopened, entries, recorderEntries),
+				recorderFilesToMove(settled, entries, recorderEntries),
 			);
-			const adopted = adoptRecordingFiles(reopened, [...entries, ...moved]);
-			const count = adopted.recordings.length - reopened.recordings.length;
+			const adopted = adoptRecordingFiles(settled, [...entries, ...moved]);
+			const count = adopted.recordings.length - settled.recordings.length;
 			if (count > 0) {
 				log(
 					`queue index had no row for ${count} recording file(s), adopted them`,
@@ -465,12 +498,8 @@ export function createQueueStorage(
 
 		async save(index) {
 			await files.writeText(tempPath, serializeQueueIndex(index));
-			try {
-				await files.rename(tempPath, indexPath);
-			} catch (error) {
-				await files.remove(tempPath).catch(() => {});
-				throw error;
-			}
+			// A failed rename keeps the temp file (module doc).
+			await files.rename(tempPath, indexPath);
 		},
 	};
 }

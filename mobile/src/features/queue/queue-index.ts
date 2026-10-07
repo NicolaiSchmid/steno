@@ -299,8 +299,9 @@ function isDue(rec: QueuedRecording, now: Date): boolean {
  * The oldest pending recording whose backoff has elapsed, or null. Oldest
  * first so a long meeting never starves behind a newer short one. A row
  * with no hash cannot be announced and is skipped, so it never holds up the
- * rows behind it; the next load sends it through crash recovery
- * (`reopenUnhashedRows` in `queue-storage.ts`).
+ * rows behind it; the next load sends it through crash recovery when its
+ * file is still on disk, and fails it otherwise (`settleUnhashedRows` in
+ * `queue-storage.ts`).
  */
 export function nextUploadable(
 	index: QueueIndex,

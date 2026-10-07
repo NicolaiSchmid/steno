@@ -5,7 +5,11 @@ import {
 	MIN_RECORDING_BYTES,
 	recordingFileName,
 } from "@/features/recorder/recording-options";
-import { applyRecovery, planRecovery } from "@/features/recorder/recovery";
+import {
+	applyRecovery,
+	INTERRUPTED_MESSAGE,
+	planRecovery,
+} from "@/features/recorder/recovery";
 import { planNext } from "@/features/sync/upload-coordinator";
 import {
 	addRecording,
@@ -27,9 +31,11 @@ import { createQueueStore, QUEUE_NOT_LOADED_MESSAGE } from "./queue-store";
  * In-memory file API; `failNextRename` makes the next rename or move throw
  * once and `failReads` the next that many reads; reads of `unreadable` paths
  * throw, and `undecodable` paths read as bytes that are not text. `move`
- * throws when the target exists. `list` returns every file under the
- * directory, its creation time from `created` by file name (0 when absent)
- * and its size from the text's length.
+ * throws when the target exists. After `renameLikeExpo` a rename removes the
+ * target before it moves, as expo's does, so a failed rename leaves nothing
+ * there. `list` returns every file under the directory, its creation time
+ * from `created` by file name (0 when absent) and its size from the text's
+ * length.
  */
 function memoryFiles(
 	initial: Record<string, string> = {},
@@ -40,6 +46,7 @@ function memoryFiles(
 	const undecodable = new Set<string>();
 	const unreadable = new Set<string>();
 	let failRename = false;
+	let removeBeforeRename = false;
 	let failReads = 0;
 	const api: QueueFileAPI = {
 		async readText(path) {
@@ -60,6 +67,7 @@ function memoryFiles(
 		},
 		async rename(from, to) {
 			calls.push(`rename ${from} -> ${to}`);
+			if (removeBeforeRename) store.delete(to);
 			if (failRename) {
 				failRename = false;
 				throw new Error("EIO rename");
@@ -80,10 +88,6 @@ function memoryFiles(
 			if (store.has(to)) throw new Error(`exists ${to}`);
 			store.delete(from);
 			store.set(to, text);
-		},
-		async remove(path) {
-			calls.push(`remove ${path}`);
-			store.delete(path);
 		},
 		async list(directory) {
 			calls.push(`list ${directory}`);
@@ -111,7 +115,25 @@ function memoryFiles(
 		failReads(count: number) {
 			failReads = count;
 		},
+		renameLikeExpo() {
+			removeBeforeRename = true;
+		},
 	};
+}
+
+/** The texts set aside as `index.<kind>-<ms>.json`, oldest first. */
+function setAside(
+	files: ReturnType<typeof memoryFiles>,
+	kind: "corrupt" | "unreadable",
+): string[] {
+	const name = new RegExp(`/index\\.${kind}-(\\d+)\\.json$`);
+	return [...files.store.entries()]
+		.flatMap(([path, text]) => {
+			const ms = name.exec(path)?.[1];
+			return ms === undefined ? [] : [{ ms: Number(ms), text }];
+		})
+		.sort((a, b) => a.ms - b.ms)
+		.map((copy) => copy.text);
 }
 
 /** A recording's bytes: `label`, padded to the smallest file the queue adopts. */
@@ -193,6 +215,24 @@ describe("createQueueStorage", () => {
 		});
 		files.failNextRename();
 		await expect(storage.save(two)).rejects.toThrow("EIO rename");
+		// The temp file stays; a load prefers the index next to it.
+		expect(files.store.get("file:///docs/queue/index.json.tmp")).toBe(
+			serializeQueueIndex(two),
+		);
+		expect(await storage.load()).toEqual(one);
+	});
+
+	it("keeps the temp file when expo's rename removed the index and then failed", async () => {
+		const files = memoryFiles();
+		files.renameLikeExpo();
+		const storage = createQueueStorage(files.api, "file:///docs/queue");
+		await storage.save(EMPTY_INDEX);
+		files.failNextRename();
+		await expect(storage.save(one)).rejects.toThrow("EIO rename");
+		expect(files.store.has("file:///docs/queue/index.json")).toBe(false);
+		// The next load reads the temp file instead of starting empty.
+		expect(await storage.load()).toEqual(one);
+		await storage.save(one);
 		expect(files.store.has("file:///docs/queue/index.json.tmp")).toBe(false);
 		expect(await storage.load()).toEqual(one);
 	});
@@ -212,9 +252,7 @@ describe("createQueueStorage", () => {
 			logs.push(m),
 		);
 		expect(await storage.load()).toEqual(EMPTY_INDEX);
-		expect(files.store.get("file:///docs/queue/index.corrupt.json")).toBe(
-			"{oops",
-		);
+		expect(setAside(files, "corrupt")).toEqual(["{oops"]);
 		expect(files.store.has("file:///docs/queue/index.json")).toBe(false);
 		expect(logs[0]).toMatch(/not JSON/);
 	});
@@ -243,7 +281,7 @@ describe("createQueueStorage", () => {
 			logs.push(m),
 		);
 		expect(await storage.load()).toEqual(one);
-		expect(files.store.get("file:///docs/queue/index.corrupt.json")).toBe(torn);
+		expect(setAside(files, "corrupt")).toEqual([torn]);
 		expect(files.store.has("file:///docs/queue/index.json")).toBe(false);
 		expect(logs[0]).toMatch(/using the temp file/);
 		// The next save writes a fresh index over the temp file as usual.
@@ -251,23 +289,44 @@ describe("createQueueStorage", () => {
 		expect(await storage.load()).toEqual(one);
 	});
 
-	it("sets a schema-invalid index aside, replacing an older copy", async () => {
+	it("sets a schema-invalid index aside, keeping an older copy", async () => {
 		const invalid = serializeQueueIndex(one).replace('"queued"', '"paused"');
 		const files = memoryFiles({
 			"file:///docs/queue/index.json": invalid,
-			"file:///docs/queue/index.corrupt.json": "older",
+			"file:///docs/queue/index.corrupt-1.json": "older",
 		});
 		const storage = createQueueStorage(files.api, "file:///docs/queue");
 		expect(await storage.load()).toEqual(EMPTY_INDEX);
-		expect(files.store.get("file:///docs/queue/index.corrupt.json")).toBe(
-			invalid,
-		);
+		expect(setAside(files, "corrupt")).toEqual(["older", invalid]);
 		// A save after setting it aside writes a fresh index that loads back.
 		await storage.save(one);
 		expect(await storage.load()).toEqual(one);
-		expect(files.store.get("file:///docs/queue/index.corrupt.json")).toBe(
-			invalid,
+		expect(setAside(files, "corrupt")).toEqual(["older", invalid]);
+	});
+
+	it("never replaces a copy set aside, even one of the same millisecond", async () => {
+		const logs: string[] = [];
+		const files = memoryFiles({ "file:///docs/queue/index.json": "{torn-1" });
+		let clock = 5;
+		const storage = createQueueStorage(
+			files.api,
+			"file:///docs/queue",
+			(m) => logs.push(m),
+			null,
+			() => clock,
 		);
+		await storage.load();
+		files.store.set("file:///docs/queue/index.json", "{torn-2");
+		await storage.load();
+		// The second copy stays where it was, and the first is kept.
+		expect(setAside(files, "corrupt")).toEqual(["{torn-1"]);
+		expect(files.store.get("file:///docs/queue/index.json")).toBe("{torn-2");
+		expect(logs[logs.length - 1]).toBe(
+			"queue index not set aside: Error: exists file:///docs/queue/index.corrupt-5.json",
+		);
+		clock = 6;
+		await storage.load();
+		expect(setAside(files, "corrupt")).toEqual(["{torn-1", "{torn-2"]);
 	});
 
 	it("rebuilds from the files when only a corrupt temp file is left and there is no index to set aside", async () => {
@@ -278,9 +337,7 @@ describe("createQueueStorage", () => {
 		);
 		await expect(storage.load()).resolves.toEqual(EMPTY_INDEX);
 		expect(logs).toHaveLength(1);
-		expect(files.store.has("file:///docs/queue/index.corrupt.json")).toBe(
-			false,
-		);
+		expect(setAside(files, "corrupt")).toEqual([]);
 	});
 
 	it("keeps delivered rows with their meeting id across save and load", async () => {
@@ -364,10 +421,10 @@ describe("a load with recording files the index does not list", () => {
 			recordings: [adopted(A, A_STARTED), adopted(B, B_STARTED)],
 		});
 		// The corrupt index is kept aside, never deleted, and no file is removed.
-		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("{oops");
+		expect(setAside(files, "corrupt")).toEqual(["{oops"]);
 		expect(files.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
 		expect(logs).toEqual([
-			"queue index unreadable, rebuilding it from the recording files: QueueError: index is not JSON",
+			"queue index corrupt, rebuilding it from the recording files: QueueError: index is not JSON",
 			"queue index had no row for 2 recording file(s), adopted them",
 		]);
 
@@ -414,7 +471,7 @@ describe("a load with recording files the index does not list", () => {
 			version: 1,
 			recordings: [adopted(A, A_STARTED)],
 		});
-		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("{oops");
+		expect(setAside(files, "corrupt")).toEqual(["{oops"]);
 		expect(files.store.has(`${Q}/${recordingFileName(A)}`)).toBe(true);
 		expect(logs[0]).toMatch(/rebuilding it from the recording files/);
 	});
@@ -423,18 +480,18 @@ describe("a load with recording files the index does not list", () => {
 		const logs: string[] = [];
 		const files = memoryFiles({
 			[`${Q}/index.json`]: "{oops",
-			[`${Q}/index.corrupt.json`]: "older",
+			[`${Q}/index.corrupt-1.json`]: "older",
 			[`${Q}/notes.m4a`]: "not a recording",
 			// A header with no audio after it.
 			[`${Q}/${recordingFileName(A)}`]: "ftyp header",
 		});
 		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m));
 		expect(await storage.load()).toEqual(EMPTY_INDEX);
-		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("{oops");
+		expect(setAside(files, "corrupt")).toEqual(["older", "{oops"]);
 		expect(files.store.get(`${Q}/notes.m4a`)).toBe("not a recording");
 		expect(files.store.get(`${Q}/${recordingFileName(A)}`)).toBe("ftyp header");
 		expect(logs).toEqual([
-			"queue index unreadable, rebuilding it from the recording files: QueueError: index is not JSON",
+			"queue index corrupt, rebuilding it from the recording files: QueueError: index is not JSON",
 		]);
 	});
 
@@ -512,13 +569,16 @@ const R = "77777777-7777-4777-8777-777777777777";
 const Z = "88888888-8888-4888-8888-888888888888";
 const C_STARTED = "2026-10-01T11:00:00.000Z";
 
-/** Crash recovery over the memory files: moves by the source's file name. */
+/**
+ * Crash recovery over the memory files: moves by the source's file name and
+ * replaces the queue file, as `RecorderScreen`'s adopt does.
+ */
 function recoveryFiles(files: ReturnType<typeof memoryFiles>) {
 	return {
 		size: (fileName: string) =>
 			files.store.get(`${Q}/${fileName}`)?.length ?? 0,
 		adopt: (sourceUri: string, fileName: string) =>
-			files.api.move(
+			files.api.rename(
 				`${REC}/${sourceUri.slice(sourceUri.lastIndexOf("/") + 1)}`,
 				`${Q}/${fileName}`,
 			),
@@ -657,7 +717,8 @@ describe("rows that failed before they were hashed", () => {
 	it("go through crash recovery again under their own id, so no second row appears and no upload stalls", async () => {
 		const logs: string[] = [];
 		// R failed with its file still in the recorder's directory; A is
-		// queued behind it; Z was queued by a Retry with no hash and no file.
+		// queued behind it; Z was queued by a Retry with no hash and no file;
+		// U was queued by a Retry and then unpaired, its file in the queue.
 		const index = withRows(
 			{
 				...started(R, A_STARTED, recorderName(C)),
@@ -676,35 +737,44 @@ describe("rows that failed before they were hashed", () => {
 				state: "queued",
 				attempts: 2,
 			},
+			{
+				...started(D, C_STARTED, recorderName(D)),
+				sourceUri: null,
+				state: "unpaired",
+			},
 		);
 		const files = memoryFiles(
 			{
 				[`${Q}/index.json`]: serializeQueueIndex(index),
 				[`${Q}/${recordingFileName(A)}`]: audio("A"),
+				[`${Q}/${recordingFileName(D)}`]: audio("U"),
 				[`${REC}/${recorderName(C)}`]: audio("R"),
 			},
 			{ [recorderName(C)]: Date.parse(A_STARTED) },
 		);
 		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m), REC);
 		const loaded = await storage.load();
-		const [r, a, z] = index.recordings as [
+		const [r, a, z, u] = index.recordings as [
+			QueuedRecording,
 			QueuedRecording,
 			QueuedRecording,
 			QueuedRecording,
 		];
 		expect(loaded).toEqual(
-			withRows({ ...r, state: "recording", lastError: null }, a, {
-				...z,
-				state: "recording",
-				attempts: 0,
-			}),
+			withRows(
+				{ ...r, state: "recording", lastError: null },
+				a,
+				{ ...z, state: "failed", attempts: 0, lastError: INTERRUPTED_MESSAGE },
+				{ ...u, state: "recording" },
+			),
 		);
 		expect(files.store.get(`${REC}/${recorderName(C)}`)).toBe(audio("R"));
 		expect(logs).toEqual([
 			"2 recording(s) never hashed go through crash recovery again",
+			"1 recording(s) never hashed have no file of their own, marked failed",
 		]);
 
-		// Recovery moves R's file under R and queues it; Z has no file.
+		// Recovery moves R's file under R and queues it, and queues U.
 		const recovered = applyRecovery(
 			loaded,
 			await planRecovery(loaded, recoveryFiles(files)),
@@ -717,6 +787,7 @@ describe("rows that failed before they were hashed", () => {
 			},
 			{ recordingID: A, state: "queued" },
 			{ recordingID: Z, state: "failed" },
+			{ recordingID: D, state: "queued" },
 		]);
 		expect(files.store.get(`${Q}/${recordingFileName(R)}`)).toBe(audio("R"));
 		expect([...files.store.keys()].filter((k) => k.startsWith(REC))).toEqual(
@@ -779,9 +850,74 @@ describe("rows that failed before they were hashed", () => {
 		]);
 		expect(files.store.get(`${REC}/${recorderName(E)}`)).toBe(audio("E"));
 	});
+	it("fail when pending and sharing a recorder file, which goes to the recording row, in either order", async () => {
+		// An earlier app version recorded A, which failed and was Retried
+		// into `queued`, and then C into the same file; the app died during C.
+		const shared = recorderName(E);
+		const a: QueuedRecording = {
+			...started(A, A_STARTED, shared),
+			state: "queued",
+		};
+		const c = started(C, C_STARTED, shared);
+		for (const index of [withRows(a, c), withRows(c, a)]) {
+			const files = memoryFiles({
+				[`${Q}/index.json`]: serializeQueueIndex(index),
+				[`${REC}/${shared}`]: audio("C"),
+			});
+			const loaded = await createQueueStorage(
+				files.api,
+				Q,
+				() => {},
+				REC,
+			).load();
+			const recovered = applyRecovery(
+				loaded,
+				await planRecovery(loaded, recoveryFiles(files)),
+			);
+			const byID = new Map(recovered.recordings.map((r) => [r.recordingID, r]));
+			expect(byID.get(A)).toMatchObject({
+				state: "failed",
+				sha256: null,
+				lastError: INTERRUPTED_MESSAGE,
+			});
+			expect(byID.get(C)).toMatchObject({
+				state: "queued",
+				startedAt: C_STARTED,
+				sha256: `sha(${recordingFileName(C)})`,
+			});
+			expect(files.store.get(`${Q}/${recordingFileName(C)}`)).toBe(audio("C"));
+			expect(files.store.has(`${Q}/${recordingFileName(A)}`)).toBe(false);
+		}
+	});
+
+	it("recover their recorder file under their own row when the queue file holds only a header", async () => {
+		const index = withRows({
+			...started(R, A_STARTED, recorderName(C)),
+			state: "failed",
+			lastError: "Recording error",
+		});
+		const files = memoryFiles({
+			[`${Q}/index.json`]: serializeQueueIndex(index),
+			[`${Q}/${recordingFileName(R)}`]: "ftyp header",
+			[`${REC}/${recorderName(C)}`]: audio("R"),
+		});
+		const storage = createQueueStorage(files.api, Q, () => {}, REC);
+		const loaded = await storage.load();
+		const recovered = applyRecovery(
+			loaded,
+			await planRecovery(loaded, recoveryFiles(files)),
+		);
+		expect(recovered.recordings).toMatchObject([
+			{ recordingID: R, state: "queued", byteCount: MIN_RECORDING_BYTES },
+		]);
+		expect(files.store.get(`${Q}/${recordingFileName(R)}`)).toBe(audio("R"));
+		// The next load finds no file without a row: no second meeting.
+		await storage.save(recovered);
+		expect(await storage.load()).toEqual(recovered);
+	});
 });
 
-describe("a queue load that fails", () => {
+describe("a load that cannot read every file", () => {
 	it("does not fail when the corrupt index cannot be set aside", async () => {
 		const logs: string[] = [];
 		const files = memoryFiles(
@@ -791,16 +927,13 @@ describe("a queue load that fails", () => {
 			},
 			CREATED,
 		);
-		files.api.remove = async () => {
-			throw new Error("EPERM remove");
-		};
 		files.failNextRename();
 		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m));
 		expect(await storage.load()).toEqual({
 			version: 1,
 			recordings: [adopted(A, A_STARTED)],
 		});
-		expect(logs[1]).toBe("queue index not set aside: Error: EIO rename");
+		expect(logs[1]).toBe("queue index not set aside: Error: EIO move");
 	});
 
 	it("rebuilds from the files when the temp file cannot be read, and keeps it aside", async () => {
@@ -825,11 +958,11 @@ describe("a queue load that fails", () => {
 			loadError: null,
 		});
 		// Nothing a save writes later replaces what it may hold.
-		expect(files.store.get(`${Q}/index.unreadable.json`)).toBe(temp);
+		expect(setAside(files, "unreadable")).toEqual([temp]);
 		expect(files.store.has(`${Q}/index.json.tmp`)).toBe(false);
-		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("{oops");
+		expect(setAside(files, "corrupt")).toEqual(["{oops"]);
 		expect(logs).toEqual([
-			"queue index unreadable, rebuilding it from the recording files: QueueError: index is not JSON",
+			"queue index corrupt, rebuilding it from the recording files: QueueError: index is not JSON",
 			"queue index had no row for 1 recording file(s), adopted them",
 		]);
 	});
@@ -848,12 +981,14 @@ describe("a queue load that fails", () => {
 		files.undecodable.add(`${Q}/index.json.tmp`);
 		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m));
 		expect(await storage.load()).toEqual(withRows(adopted(A, A_STARTED)));
-		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("\uFFFD");
+		expect(setAside(files, "corrupt")).toEqual(["\uFFFD"]);
 		expect(logs[0]).toBe(
-			`queue index unreadable, rebuilding it from the recording files: UndecodableTextError: ${Q}/index.json is not text: not UTF-8`,
+			`queue index corrupt, rebuilding it from the recording files: UndecodableTextError: ${Q}/index.json is not text: not UTF-8`,
 		);
 	});
+});
 
+describe("createQueueStore", () => {
 	it("saves nothing until a load succeeds, so the index keeps every row", async () => {
 		const two = addRecording(one, {
 			recordingID: B,

@@ -48,6 +48,8 @@ describe("recording preset", () => {
 			"index.json",
 			"index.json.tmp",
 			"index.corrupt.json",
+			"index.corrupt-1767225600000.json",
+			"index.unreadable-1767225600000.json",
 			"abc.m4a",
 			`${id}.m4a.tmp`,
 			`${id}xm4a`,

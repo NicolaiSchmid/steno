@@ -51,10 +51,6 @@ export const expoQueueFiles: QueueFileAPI = {
 		// Without `overwrite` the move throws when `to` exists.
 		await new File(from).move(new File(to));
 	},
-	async remove(path) {
-		const file = new File(path);
-		if (file.exists) file.delete();
-	},
 	async list(path) {
 		const directory = new Directory(path);
 		if (!directory.exists) return [];
