@@ -469,13 +469,11 @@ impl Shared {
     /// again is a change: a capture recording the fallback then returns to
     /// it. Other types are not kept.
     fn add_object<'a>(&self, kind: &ObjectType, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
-        let mut graph = self.graph.borrow_mut();
         let chosen = match kind {
-            ObjectType::Node => graph.add_node(id, props),
-            ObjectType::Port => graph.add_port(id, props),
+            ObjectType::Node => self.graph.borrow_mut().add_node(id, props),
+            ObjectType::Port => self.graph.borrow_mut().add_port(id, props),
             _ => false,
         };
-        drop(graph);
         if chosen {
             self.changed();
         }
