@@ -121,6 +121,15 @@ import Testing
     return upload
   }
 
+  /// The files in the meeting folders under `audio`.
+  static func copies(in audio: URL) throws -> [URL] {
+    guard FileManager.default.fileExists(atPath: audio.path) else { return [] }
+    return try FileManager.default.contentsOfDirectory(at: audio, includingPropertiesForKeys: nil)
+      .flatMap { folder in
+        try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+      }
+  }
+
   /// Makes every meeting insert fail, as a full disk or a busy store would
   /// fail the admission's commit; with `failedReceiptsToo`, the save of a
   /// `.failed` receipt fails as well.
@@ -166,12 +175,7 @@ import Testing
     #expect(try await store.meetings().isEmpty)
     #expect(await enqueued.calls.isEmpty)
     #expect(FileManager.default.fileExists(atPath: upload.path), "the retry finds its file")
-    let copies = try FileManager.default.contentsOfDirectory(atPath: audio.path)
-      .flatMap { folder in
-        try FileManager.default.contentsOfDirectory(
-          atPath: audio.appendingPathComponent(folder).path)
-      }
-    #expect(copies.isEmpty, "the copy is removed with the failed admission")
+    #expect(try Self.copies(in: audio).isEmpty, "the copy is removed with the failed admission")
 
     // The retry succeeds and completes the same receipt.
     try await store.writer.write { db in try db.execute(sql: "DROP TRIGGER refuseMeetings") }
@@ -216,15 +220,6 @@ import Testing
     let copies = try Self.copies(in: audio)
     #expect(copies.count == 1, "the copy stays")
     #expect(try copies.first.map { try Data(contentsOf: $0) } == Data([1]))
-  }
-
-  /// The files in the meeting folders under `audio`.
-  static func copies(in audio: URL) throws -> [URL] {
-    guard FileManager.default.fileExists(atPath: audio.path) else { return [] }
-    return try FileManager.default.contentsOfDirectory(at: audio, includingPropertiesForKeys: nil)
-      .flatMap { folder in
-        try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
-      }
   }
 
   /// A receipt of another phone under the same recording id is never
@@ -384,12 +379,7 @@ import Testing
     }
     #expect(!log.all.contains("enqueue"))
     #expect(try await store.handoverReceipt(recordingID: SampleData.uuid(91)) == nil)
-    let copies = try FileManager.default.contentsOfDirectory(atPath: audio.path)
-      .flatMap { folder in
-        try FileManager.default.contentsOfDirectory(
-          atPath: audio.appendingPathComponent(folder).path)
-      }
-    #expect(copies.isEmpty, "the unsynced copy is removed")
+    #expect(try Self.copies(in: audio).isEmpty, "the unsynced copy is removed")
     #expect(FileManager.default.fileExists(atPath: upload.path))
   }
 
