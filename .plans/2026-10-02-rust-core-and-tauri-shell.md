@@ -2336,9 +2336,9 @@ folder, enqueue) arrived with WP6b as `RecordingIntake` in
 `HandoverIntake::admit` returns. The intake syncs the copy and its folder first
 (`steno_pipeline::files::copy_durably`), and its receipt and meeting commits run
 under `FULL` in both apps (the `RecordingIntake.admit` line under Store). Pairing and
-revoke commits stay `NORMAL`,
-as in Swift: a power loss right after one can forget a pairing (the phone gets 401
-and unpairs, and the user pairs it again) or bring a revoked device back.
+revoke commits stay `NORMAL`, as in Swift: a power loss right after one can forget a
+pairing (the phone gets 401 and unpairs, and the user pairs it again) or bring a
+revoked device back.
 
 WP5b is the Linux `LiveCaptureBackend`, `crates/steno-audio/src/capture/live/pipewire/`:
 one PipeWire capture stream (48 kHz `f32`, one `AUXn` channel per linked
