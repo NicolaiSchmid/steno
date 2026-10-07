@@ -747,6 +747,14 @@ async fn a_first_announce_of_a_phone_revoked_during_its_read_opens_no_files() {
     assert!(!inbox.has_partial(id), "no partial is opened");
     assert!(inbox.load_metadata(id).is_none(), "and no sidecar");
     assert!(test.service.engine.receipts_snapshot().is_empty());
+    assert_eq!(
+        test.store
+            .handover_receipt(id)
+            .unwrap()
+            .map(|receipt| receipt.device_id),
+        Some(phone.device.id),
+        "the receipt is saved at the place in line its change took"
+    );
 }
 
 /// What the bearer gate of the computer, started again over `test`'s

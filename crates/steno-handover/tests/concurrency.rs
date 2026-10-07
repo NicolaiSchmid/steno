@@ -284,7 +284,7 @@ fn owners(test: &TestService, recording_id: Uuid) -> (Uuid, Uuid) {
 }
 
 /// Sends every chunk of `recording_id`, each answered 204.
-async fn sent(phone: &EngineDevice, recording_id: Uuid, chunks: &[Vec<u8>]) {
+async fn send_all(phone: &EngineDevice, recording_id: Uuid, chunks: &[Vec<u8>]) {
     for (index, chunk) in chunks.iter().enumerate() {
         let response = phone.upload(recording_id, index as i64, chunk).await;
         assert_eq!(response.status.as_u16(), 204, "chunk {index}");
@@ -623,7 +623,7 @@ async fn a_complete_of_a_revoked_phone_leaves_another_phones_upload_alone() {
         "and so does its sidecar"
     );
 
-    sent(&other, id, &chunks).await;
+    send_all(&other, id, &chunks).await;
     // Released ahead, the gated intake lets the other phone's admission
     // through without waiting.
     intake.release();
@@ -631,11 +631,11 @@ async fn a_complete_of_a_revoked_phone_leaves_another_phones_upload_alone() {
     assert_eq!(intake.count(), 2);
 }
 
-/// Two first announces of one recording at once: the receipt's, of `phone`
+/// Two first announces of one recording at once: the first, of `phone`
 /// with `metadata`, and a late one of `late` with another `format`. Each
-/// is held at its clock read, after its receipt read found nothing, the
-/// receipt's first. The receipt's goes on first and makes the receipt, and
-/// the late one then finds it. Returns the two answers.
+/// is held at its clock read, after its receipt read found nothing. The
+/// first is released first and makes the receipt, and the late one then
+/// finds it. Returns the two answers.
 fn racing_first_announces(
     test: &TestService,
     phone: &EngineDevice,
@@ -672,7 +672,7 @@ async fn the_sidecar_is_the_receipts(
     let id = metadata.recording_id;
     assert_eq!(owners(test, id), (phone.device.id, phone.device.id));
     assert_eq!(test.inbox().load_metadata(id).as_ref(), Some(metadata));
-    sent(phone, id, chunks).await;
+    send_all(phone, id, chunks).await;
     completed(phone, id).await;
     let admissions = test.intake.admissions.entries();
     assert_eq!(admissions.len(), 1);
@@ -730,7 +730,7 @@ async fn an_announce_whose_files_cannot_be_opened_keeps_its_receipt() {
     std::fs::remove_file(&directory).unwrap();
     assert_eq!(phone.announce(&metadata).await.status.as_u16(), 200);
     assert_eq!(test.inbox().load_metadata(id), Some(metadata.clone()));
-    sent(&phone, id, &chunks).await;
+    send_all(&phone, id, &chunks).await;
     completed(&phone, id).await;
     assert_eq!(test.intake.admissions.count(), 1);
 }
