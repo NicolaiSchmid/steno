@@ -101,6 +101,26 @@ import Testing
     #expect(AudioFormat.wav16kInt16.fileExtension == "wav")
   }
 
+  /// A settings store over `store` whose audio folder is `audio` in
+  /// `directory`, with `SampleData.pairedDevice()` paired, and that folder.
+  static func audioFolder(in directory: URL, for store: MeetingStore) async throws
+    -> (SettingsStore, URL)
+  {
+    let settingsStore = SettingsStore(writer: store.writer)
+    var settings = Settings()
+    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
+    try await settingsStore.save(settings)
+    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    return (settingsStore, settings.audioFolder)
+  }
+
+  /// A one-byte upload in `directory`.
+  static func upload(in directory: URL) throws -> URL {
+    let upload = directory.appendingPathComponent("upload.bin")
+    try Data([1]).write(to: upload)
+    return upload
+  }
+
   /// Makes every meeting insert fail, as a full disk or a busy store would
   /// fail the admission's commit; with `failedReceiptsToo`, the save of a
   /// `.failed` receipt fails as well.
@@ -124,17 +144,12 @@ import Testing
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
-    let settingsStore = SettingsStore(writer: store.writer)
-    var settings = Settings()
-    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
-    try await settingsStore.save(settings)
-    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let (settingsStore, audio) = try await Self.audioFolder(in: directory, for: store)
     let enqueued = Enqueued()
     let intake = RecordingIntake(
       store: store, settings: settingsStore,
       enqueue: { meeting, asset in await enqueued.record(meeting, asset) })
-    let upload = directory.appendingPathComponent("upload.bin")
-    try Data([1]).write(to: upload)
+    let upload = try Self.upload(in: directory)
     try await Self.refuseWrites(store)
 
     await #expect(throws: (any Error).self) {
@@ -151,10 +166,10 @@ import Testing
     #expect(try await store.meetings().isEmpty)
     #expect(await enqueued.calls.isEmpty)
     #expect(FileManager.default.fileExists(atPath: upload.path), "the retry finds its file")
-    let copies = try FileManager.default.contentsOfDirectory(atPath: settings.audioFolder.path)
+    let copies = try FileManager.default.contentsOfDirectory(atPath: audio.path)
       .flatMap { folder in
         try FileManager.default.contentsOfDirectory(
-          atPath: settings.audioFolder.appendingPathComponent(folder).path)
+          atPath: audio.appendingPathComponent(folder).path)
       }
     #expect(copies.isEmpty, "the copy is removed with the failed admission")
 
@@ -179,17 +194,12 @@ import Testing
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
-    let settingsStore = SettingsStore(writer: store.writer)
-    var settings = Settings()
-    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
-    try await settingsStore.save(settings)
-    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let (settingsStore, _) = try await Self.audioFolder(in: directory, for: store)
     var verifying = SampleData.handoverReceipt()
     verifying.state = .verifying
     try await store.save(verifying)
     let intake = RecordingIntake(store: store, settings: settingsStore, enqueue: { _, _ in })
-    let upload = directory.appendingPathComponent("upload.bin")
-    try Data([1]).write(to: upload)
+    let upload = try Self.upload(in: directory)
     try await Self.refuseWrites(store, failedReceiptsToo: true)
 
     await #expect(throws: (any Error).self) {
@@ -215,15 +225,11 @@ import Testing
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
-    let settingsStore = SettingsStore(writer: store.writer)
-    var settings = Settings()
-    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
-    try await settingsStore.save(settings)
+    let (settingsStore, _) = try await Self.audioFolder(in: directory, for: store)
     let device = SampleData.pairedDevice()
     let other = PairedDevice(
       id: SampleData.uuid(92), name: "Other phone", pairedAt: device.pairedAt,
       lastSeenAt: nil)
-    try await store.save(device, tokenHash: Data(repeating: 1, count: 32))
     var theirs = SampleData.handoverReceipt()
     theirs.deviceID = other.id
     theirs.state = .receiving
@@ -259,8 +265,7 @@ import Testing
     } else {
       try takeover()
     }
-    let upload = directory.appendingPathComponent("upload.bin")
-    try Data([1]).write(to: upload)
+    let upload = try Self.upload(in: directory)
 
     await #expect(throws: MeetingStoreError.receiptOfAnotherDevice(SampleData.uuid(91))) {
       _ = try await intake.admit(
@@ -282,15 +287,10 @@ import Testing
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
-    let settingsStore = SettingsStore(writer: store.writer)
-    var settings = Settings()
-    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
-    try await settingsStore.save(settings)
-    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let (settingsStore, _) = try await Self.audioFolder(in: directory, for: store)
     let intake = RecordingIntake(
       store: store, settings: settingsStore, enqueue: { _, _ in throw Boom() })
-    let upload = directory.appendingPathComponent("upload.bin")
-    try Data([1]).write(to: upload)
+    let upload = try Self.upload(in: directory)
 
     let meetingID = try await intake.admit(
       file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
@@ -328,19 +328,13 @@ import Testing
     let directory = try Fixtures.temporaryDirectory().standardizedFileURL
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
-    let settingsStore = SettingsStore(writer: store.writer)
-    var settings = Settings()
-    let audio = directory.appendingPathComponent("audio", isDirectory: true)
-    settings.audioFolder = audio
-    try await settingsStore.save(settings)
-    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let (settingsStore, audio) = try await Self.audioFolder(in: directory, for: store)
     let log = SyncLog()
     var intake = RecordingIntake(
       store: store, settings: settingsStore,
       enqueue: { _, _ in log.record("enqueue") })
     intake.syncs = log.syncs()
-    let upload = directory.appendingPathComponent("upload.bin")
-    try Data([1]).write(to: upload)
+    let upload = try Self.upload(in: directory)
 
     let meetingID = try await intake.admit(
       file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
@@ -362,18 +356,13 @@ import Testing
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
-    let settingsStore = SettingsStore(writer: store.writer)
-    var settings = Settings()
-    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
-    try await settingsStore.save(settings)
-    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let (settingsStore, audio) = try await Self.audioFolder(in: directory, for: store)
     let log = SyncLog()
     var intake = RecordingIntake(
       store: store, settings: settingsStore,
       enqueue: { _, _ in log.record("enqueue") })
     intake.syncs = log.syncs(failingFile: true)
-    let upload = directory.appendingPathComponent("upload.bin")
-    try Data([1]).write(to: upload)
+    let upload = try Self.upload(in: directory)
 
     await #expect(throws: (any Error).self) {
       _ = try await intake.admit(
@@ -381,10 +370,10 @@ import Testing
     }
     #expect(!log.all.contains("enqueue"))
     #expect(try await store.handoverReceipt(recordingID: SampleData.uuid(91)) == nil)
-    let copies = try FileManager.default.contentsOfDirectory(atPath: settings.audioFolder.path)
+    let copies = try FileManager.default.contentsOfDirectory(atPath: audio.path)
       .flatMap { folder in
         try FileManager.default.contentsOfDirectory(
-          atPath: settings.audioFolder.appendingPathComponent(folder).path)
+          atPath: audio.appendingPathComponent(folder).path)
       }
     #expect(copies.isEmpty, "the unsynced copy is removed")
     #expect(FileManager.default.fileExists(atPath: upload.path))
@@ -438,14 +427,9 @@ import Testing
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
-    let settingsStore = SettingsStore(writer: store.writer)
-    var settings = Settings()
-    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
-    try await settingsStore.save(settings)
-    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let (settingsStore, _) = try await Self.audioFolder(in: directory, for: store)
     let intake = RecordingIntake(store: store, settings: settingsStore, enqueue: { _, _ in })
-    let upload = directory.appendingPathComponent("upload.bin")
-    try Data([1]).write(to: upload)
+    let upload = try Self.upload(in: directory)
     try await Self.refuseWrites(store)
     let log = try await CommitLog.install(on: store)
 
