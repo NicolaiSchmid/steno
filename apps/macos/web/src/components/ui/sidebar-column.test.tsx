@@ -39,7 +39,7 @@ describe("SidebarColumn", () => {
 		expect(nav.lastElementChild).toHaveClass("mt-auto");
 	});
 
-	it("opens with the rows where the title bar sits above the page", () => {
+	it("opens with the rows under a native title bar", () => {
 		render(
 			<SidebarColumn data-testid="column" titleBarInset={false}>
 				<SidebarRow>All</SidebarRow>

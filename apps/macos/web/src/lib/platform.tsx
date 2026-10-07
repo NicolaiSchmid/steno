@@ -14,8 +14,8 @@ import { type PlatformOS, platform as platformSchema } from "@/bridge/contract";
  * no window is open, the shortcut keys (⌘F on the Mac, Ctrl+F elsewhere),
  * and whether the window's title bar lies over the page. Call sites read
  * `usePlatform()` and never branch on the OS themselves; every word that
- * differs lives in `WORDS` below, every layout difference in the records
- * beside it.
+ * differs lives in `WORDS` below, every other difference in the records
+ * beside it (`READS_CALENDAR`, `TITLE_BAR_INSET`).
  *
  * Where the value comes from, first match wins:
  * - `window.__STENO_PLATFORM__`, which the Tauri shell sets before the
