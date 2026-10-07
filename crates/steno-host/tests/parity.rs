@@ -745,6 +745,31 @@ fn onboarding_permissions() {
     );
 }
 
+/// `onboarding.import` has no Swift sample (the Swift app has no import
+/// step); it is written in the recorder's format, and this proves the host
+/// produces it: the step after a denied export, on a fresh install.
+#[test]
+fn onboarding_import() {
+    let harness = Harness::builder()
+        .with_swift_import(1)
+        .seed(|store, fakes| {
+            set_retention(store, AudioRetention::KeepDays(30));
+            for kind in PermissionKind::ALL {
+                fakes.permissions.set_state(*kind, PermissionState::Unknown);
+            }
+        })
+        .build();
+    harness.fakes.swift_import.as_ref().unwrap().deny_export(
+        "macOS did not let Steno read this Mac's phone pairing. Choose Try again, then Always Allow.",
+    );
+    harness.host.onboarding_import().unwrap();
+    assert_parity(
+        "onboarding.import",
+        &harness.snapshot(BridgeTopic::Onboarding),
+        &[],
+    );
+}
+
 #[test]
 fn onboarding_setup() {
     let harness = Harness::builder()

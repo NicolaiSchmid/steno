@@ -740,7 +740,7 @@ export const onboardingSnapshot = z
 		// update from the Swift app. The Tauri shell alone sends it.
 		swiftImport: z
 			.object({
-				state: z.enum(["ready", "importing", "waiting", "done"]),
+				state: z.enum(["pending", "importing", "waiting", "done"]),
 				prompts: z.number(),
 				error: z.string().optional(),
 			})

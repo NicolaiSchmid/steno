@@ -522,7 +522,7 @@ fn import_snapshot(model: &OnboardingViewModel) -> Option<OnboardingImport> {
         OnboardingImportState::Importing
     } else {
         match status.stage {
-            SwiftImportStage::Pending => OnboardingImportState::Ready,
+            SwiftImportStage::Pending => OnboardingImportState::Pending,
             SwiftImportStage::Waiting => OnboardingImportState::Waiting,
             SwiftImportStage::Done => OnboardingImportState::Done,
         }
@@ -530,7 +530,7 @@ fn import_snapshot(model: &OnboardingViewModel) -> Option<OnboardingImport> {
     Some(OnboardingImport {
         state,
         prompts: i64::from(status.prompts),
-        error: status.failure.clone(),
+        error: status.error.clone(),
     })
 }
 

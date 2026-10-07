@@ -405,7 +405,7 @@ function applyOnboardingScenario(
 	if (scenario === "onboarding-import" && importing) {
 		result.onboarding = {
 			...importing,
-			swiftImport: { state: "ready", prompts: 2 },
+			swiftImport: { state: "pending", prompts: 2 },
 		} satisfies OnboardingSnapshot;
 	}
 	const untouched = onboarding.permissions.map((step) => ({

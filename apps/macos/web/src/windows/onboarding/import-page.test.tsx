@@ -7,14 +7,14 @@ import { callsTo, createBridgeHarness, renderWithBridge } from "@/test/bridge";
 import { OnboardingWindow } from "./onboarding-window";
 
 describe("ImportPage", () => {
-	it("names both prompts and Always Allow, then runs the import", async () => {
+	it("counts the prompts and names Always Allow, then runs the import", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness("scenario=onboarding-import");
 		renderWithBridge(<OnboardingWindow />, harness);
 		expect(screen.getByTestId("onboarding-import")).toBeInTheDocument();
 		expect(screen.queryByTestId("onboarding-step")).not.toBeInTheDocument();
 		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
-			"macOS asks for your login password twice, once for each.",
+			"macOS asks for your login password up to twice, once for each item.",
 		);
 		expect(screen.getByTestId("import-always-allow")).toHaveTextContent(
 			"Choose Always Allow in each prompt.",
@@ -45,6 +45,23 @@ describe("ImportPage", () => {
 		expect(screen.getByTestId("import-skip")).toBeDisabled();
 	});
 
+	it("counts a beta's leftover items as prompts", async () => {
+		const harness = await createBridgeHarness("scenario=onboarding-import");
+		renderWithBridge(<OnboardingWindow />, harness);
+		const importing = (await loadFixtureSnapshots())[
+			"onboarding.import"
+		] as OnboardingSnapshot;
+		act(() => {
+			harness.transport.emit("onboarding", {
+				...importing,
+				swiftImport: { state: "pending", prompts: 3 },
+			} satisfies OnboardingSnapshot);
+		});
+		expect(screen.getByTestId("onboarding-intro")).toHaveTextContent(
+			"macOS asks for your login password up to three times, once for each item.",
+		);
+	});
+
 	it("offers Try again after a denied export, with one prompt left", async () => {
 		const user = userEvent.setup();
 		const harness = await createBridgeHarness(
@@ -58,7 +75,7 @@ describe("ImportPage", () => {
 			"macOS did not let Steno read this Mac's phone pairing. Choose Try again, then Always Allow.",
 		);
 		expect(screen.getByTestId("import-skip")).toHaveTextContent(
-			"Continue without phones",
+			"Continue for now",
 		);
 		await user.click(screen.getByTestId("import-run"));
 		expect(screen.getByTestId("import-run")).toHaveTextContent("Try again");

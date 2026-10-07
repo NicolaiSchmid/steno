@@ -46,7 +46,7 @@ with its details, a login item awaiting approval, an update available),
 `onboarding-setup-open`, `onboarding-codex` (the consent card),
 `onboarding-vault-saved`, `onboarding-import` (the import step, not run
 yet) and `onboarding-import-waiting` (the step after a denied export, from
-`onboarding.import`, the one fixture the Rust bridge writes alone). Interactive elements carry the
+`onboarding.import`, the one fixture with no Swift sample). Interactive elements carry the
 `data-testid` the SwiftUI views exposed as accessibility identifiers
 (`sidebar-record`, `nav-all`, `meeting-<uuid>`, `tab-summary`,
 `speaker-picker-<uuid>`, `processing-card`, `empty-detail-title`, …) so the

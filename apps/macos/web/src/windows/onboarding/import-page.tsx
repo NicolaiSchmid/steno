@@ -5,13 +5,24 @@ import { Button, Callout } from "@/components/ui";
 import { OnboardingPage } from "./onboarding-page";
 
 /**
- * What the step brings over and the prompts that come with it: two with
- * the API key, one with the phone pairing alone.
+ * What the step brings over and the prompts that come with it: one per
+ * keychain item the host counted (the API key, the phone pairing, and an
+ * older copy of either that a beta left behind).
  */
 function importIntro(prompts: number): string {
-	return prompts > 1
-		? "Steno brings over your API key for summaries and this Mac's phone pairing from the previous version. macOS asks for your login password twice, once for each."
-		: "Steno brings over this Mac's phone pairing from the previous version, so your phone keeps uploading without pairing again. macOS asks for your login password once.";
+	const what =
+		"Steno brings over this Mac's phone pairing from the previous version, so your phone keeps uploading without pairing again, and your API key for summaries if the previous version kept one.";
+	if (prompts < 1) {
+		return what;
+	}
+	const count =
+		prompts === 2
+			? "twice"
+			: prompts === 3
+				? "three times"
+				: `${prompts} times`;
+	const times = prompts === 1 ? "once" : `up to ${count}, once for each item`;
+	return `${what} macOS asks for your login password ${times}.`;
 }
 
 /**
@@ -19,8 +30,9 @@ function importIntro(prompts: number): string {
  * from the previous Steno: it says which keychain prompts come and that
  * Always Allow is the answer, then Continue runs the import. A denied or
  * failed export leaves the step open with the reason and Try again; phone
- * uploads wait until then. Not now (and Continue without phones once it
- * failed) goes on to page 1, and the step returns at the next launch.
+ * uploads wait until then. Not now (Continue for now once it failed) goes on
+ * to page 1, or to page 2 when the permissions are already granted, and the
+ * step returns at the next launch.
  */
 export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 	const client = useBridge();
@@ -42,7 +54,7 @@ export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 						onClick={skip}
 						variant="outline"
 					>
-						{waiting ? "Continue without phones" : "Not now"}
+						{waiting ? "Continue for now" : "Not now"}
 					</Button>
 					<Button
 						data-testid="import-run"
@@ -64,7 +76,7 @@ export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 		>
 			<Callout
 				data-testid="import-always-allow"
-				description="Then Steno reads what the previous version stored without asking again. Your meetings and settings are already here."
+				description="Then Steno reads what the previous version stored without asking again. Your meetings and settings are already here. Not now leaves phone uploads waiting, and summaries without the API key, until this step comes back at the next launch."
 				icon={<KeyRoundIcon aria-hidden="true" />}
 				title="Choose Always Allow in each prompt."
 				variant="info"
@@ -72,7 +84,7 @@ export function ImportPage({ onboarding }: { onboarding: OnboardingSnapshot }) {
 			{waiting ? (
 				<Callout
 					data-testid="import-waiting"
-					description="Until then, your phone cannot upload to this Mac."
+					description="Until it comes over, your phone cannot upload to this Mac."
 					icon={<TriangleAlertIcon aria-hidden="true" />}
 					title={
 						step.error ?? "This Mac's phone pairing has not been brought over."

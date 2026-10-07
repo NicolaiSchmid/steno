@@ -1100,7 +1100,7 @@ impl FakeSwiftImport {
         let status = |stage| SwiftImportStatus {
             stage,
             prompts,
-            failure: None,
+            error: None,
         };
         FakeSwiftImport {
             status: Mutex::new(status(SwiftImportStage::Pending)),
@@ -1110,11 +1110,11 @@ impl FakeSwiftImport {
         }
     }
 
-    /// A run leaves the identity behind with `failure`.
-    pub fn deny_export(&self, failure: &str) {
+    /// A run leaves the identity behind with `error`.
+    pub fn deny_export(&self, error: &str) {
         let mut outcome = lock(&self.run_outcome);
         outcome.stage = SwiftImportStage::Waiting;
-        outcome.failure = Some(failure.to_owned());
+        outcome.error = Some(error.to_owned());
     }
 }
 

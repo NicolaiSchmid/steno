@@ -504,7 +504,7 @@ string_enum! {
     /// Where the import step stands. Rust only.
     pub enum OnboardingImportState {
         /// Not run yet: the step explains the prompts and offers Continue.
-        Ready = "ready",
+        Pending = "pending",
         /// The keychain prompts are up.
         Importing = "importing",
         /// The export was denied, failed or skipped: phone handover waits
@@ -523,8 +523,8 @@ string_enum! {
 #[serde(rename_all = "camelCase")]
 pub struct OnboardingImport {
     pub state: OnboardingImportState,
-    /// How many prompts the step brings up: two with the old app's API
-    /// key, one with the handover identity alone.
+    /// How many login-password prompts the step may bring up, one per
+    /// keychain item it reads.
     pub prompts: i64,
     /// Why the last export did not bring the identity over, in a sentence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -608,11 +608,7 @@ pub struct OnboardingSnapshot {
     pub retention_sentence: Option<String>,
     /// The import step, present while [`OnboardingPage::Import`] is or
     /// was current. Rust only.
-    #[serde(
-        default,
-        rename = "swiftImport",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub swift_import: Option<OnboardingImport>,
     /// Set once onboarding is over; the page closes the window.
     pub finished: bool,

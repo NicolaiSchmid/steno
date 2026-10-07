@@ -790,7 +790,7 @@ fn the_import_step_comes_first_and_moves_on_once_the_identity_came_over() {
     assert_eq!(onboarding["page"], "import");
     assert_eq!(
         onboarding["swiftImport"],
-        json!({"state": "ready", "prompts": 2})
+        json!({"state": "pending", "prompts": 2})
     );
 
     harness.host.onboarding_import().unwrap();

@@ -33,7 +33,7 @@
     }
   ],
   "permissionsComplete" : false,
-  "retentionSentence" : "Each recording is deleted 30 days after it was processed and exported. Change this any time in Settings > Recording.",
+  "retentionSentence" : "Each recording is deleted 30 days after it was processed and exported. Transcripts, summaries and exports are never deleted by this rule. Change this any time in Settings > Recording.",
   "setup" : [
     {
       "kind" : "summaries",

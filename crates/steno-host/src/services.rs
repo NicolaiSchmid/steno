@@ -592,12 +592,12 @@ pub enum SwiftImportStage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwiftImportStatus {
     pub stage: SwiftImportStage,
-    /// The keychain prompts a run brings up: one per item it reads (the
-    /// API key when it is the Swift app's and has not been read, then the
-    /// handover identity).
+    /// The keychain prompts a run may bring up: one per item it reads (the
+    /// API key until it was read, the handover identity until its export
+    /// got through, and the stored identity it replaces).
     pub prompts: u8,
     /// Why the last run left the identity behind, for the step's line.
-    pub failure: Option<String>,
+    pub error: Option<String>,
 }
 
 /// The second half of the import of the Swift app's API key and handover
