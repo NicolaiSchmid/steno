@@ -969,7 +969,24 @@ fn a_report_stuck_in_its_handler_does_not_hold_stop() {
         took >= STOP_TIMEOUT.saturating_sub(Duration::from_millis(100)),
         "stop() waits for the report up to its bound, returned after {took:?}"
     );
+    assert!(
+        took < STOP_TIMEOUT + Duration::from_secs(1),
+        "stop() returns at its bound, returned after {took:?}"
+    );
+    // The stream runs on while the handler holds the PipeWire thread, so
+    // cycles keep coming: wait for several, short of the ring's headroom.
     let after_stop = sink.available_to_read();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        sink.available_to_read(),
+        after_stop,
+        "a frame arrived after stop() returned"
+    );
+    assert!(
+        sink.dropped_samples().is_empty(),
+        "samples dropped after stop() returned: {:?}",
+        sink.dropped_samples()
+    );
     release.send(()).expect("the handler is still waiting");
     let threads_gone =
         || thread_named("data-loop").is_none() && thread_named("steno-pipewire").is_none();

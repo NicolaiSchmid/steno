@@ -17,12 +17,12 @@
 //! before `start` took the answer. `stop()` closes the capture's `Gate` to
 //! the sink, sends a quit through a `pipewire::channel` and joins the
 //! thread, all within `STOP_TIMEOUT` (2 s) of its call: a device-change
-//! report still in the sink's handler then, or a thread that has not
-//! ended, is logged (the thread with where it waits) and left behind, and
-//! `stop()` returns. Only a cycle's delivery already inside the gate is
+//! report still in the sink's handler then (with the thread it runs on),
+//! or a thread that has not ended (with where it waits), is logged and
+//! left behind, and `stop()` returns. Only a cycle's delivery already inside the gate is
 //! waited for without a bound (microseconds; see `Gate`). So once `stop()`
 //! returned no frame reaches the sink, and no report but one the gate let
-//! in before it closed, which reaches the handler late. Logs go through
+//! in before it closed, which reaches the session late. Logs go through
 //! the subscriber the binary installed, synchronously unless it buffers
 //! them: a log write that blocks (stderr on a stalled disk) can hold the
 //! thread past `STOP_TIMEOUT`, and then holds `stop()` too, in its own log
@@ -152,8 +152,9 @@ const STREAM_NODE_NAME: &str = "steno-capture";
 ///   and waited for on a condition variable, until the deadline `close` is
 ///   given. It runs the sink's handler, which may block (the session's
 ///   takes the session mutex), and a late one costs at most a spurious
-///   rebuild: the session ignores a report unless recording, and keeps
-///   one that comes during a rebuild for the next.
+///   rebuild (possibly of the next recording): the session ignores a
+///   report unless recording, and keeps one that comes during a rebuild
+///   for the next.
 ///
 /// Once `close` returned, no cycle reaches the sink, and a report only if
 /// the gate let it in before it closed and `close` gave up waiting for it.
@@ -195,21 +196,23 @@ impl Gate {
     /// does; whether it ran. Locks: not for the data-loop thread.
     fn report(&self, work: impl FnOnce()) -> bool {
         {
-            let mut inside = self.reports();
+            let mut inside = self.reporting();
             // Under the lock: a `close` that took it first stored `false`
             // before, so this load sees it.
             if !self.open.load(Ordering::SeqCst) {
                 return false;
             }
+            #[cfg(test)]
+            tests::before_a_report_counts_itself();
             *inside += 1;
         }
         work();
-        *self.reports() -= 1;
+        *self.reporting() -= 1;
         self.report_left.notify_all();
         true
     }
 
-    fn reports(&self) -> std::sync::MutexGuard<'_, usize> {
+    fn reporting(&self) -> std::sync::MutexGuard<'_, usize> {
         self.reporting
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -221,9 +224,10 @@ impl Gate {
     /// The session never holds its mutex across `backend.stop()`; it does
     /// across `backend.start()`, whose failure path closes the gate, but
     /// no report can begin before `start` took the thread's stream
-    /// ([`hand_over`]), and a failed `start` took none. A handler that
-    /// waits on the caller of `close` (one that stops this backend, or
-    /// drops the last owner of it) holds `close` until the deadline.
+    /// ([`hand_over`]), and a failed `start` took none, so the session's
+    /// own handler never waits on the caller of `close`. A handler that
+    /// does (one that stops this backend, or drops the last owner of it)
+    /// holds `close` until the deadline.
     fn close(&self, deadline: Instant) -> bool {
         self.open.store(false, Ordering::SeqCst);
         while self.delivering.load(Ordering::SeqCst) != 0 {
@@ -232,7 +236,7 @@ impl Gate {
         let wait = deadline.saturating_duration_since(Instant::now());
         let (inside, _) = self
             .report_left
-            .wait_timeout_while(self.reports(), wait, |inside| *inside != 0)
+            .wait_timeout_while(self.reporting(), wait, |inside| *inside != 0)
             .unwrap_or_else(PoisonError::into_inner);
         *inside == 0
     }
@@ -280,6 +284,14 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     // Release: `start` returns on seeing it, and the frames
     // `deliver_slices` wrote are then in the rings.
     rt.cycle_frames.store(view.frames, Ordering::Release);
+}
+
+/// `work` through a new open [`Gate`], as [`process`] puts a cycle through
+/// its capture's; whether it ran. For the allocation count in
+/// `tests/realtime.rs`, which cannot reach the gate.
+#[doc(hidden)]
+pub fn through_an_open_gate(work: impl FnOnce()) -> bool {
+    Gate::new().deliver(work)
 }
 
 /// The capture and playback latencies in frames at [`SAMPLE_RATE`], for a
@@ -1155,19 +1167,28 @@ impl LiveCaptureBackend {
     /// `limit` of the call (only a delivery inside the gate is waited for
     /// past it, see [`Gate`]): the stream, the links and the connection
     /// are gone when this returns, unless a report in the sink's handler
-    /// or the thread outlasts `limit`; each is then logged (the thread
-    /// with where it waits) and left behind the closed gate.
+    /// (with the thread it runs on) or the thread (with where it waits)
+    /// outlasts `limit`; it is then logged and left behind the closed
+    /// gate. A report that leaves just before the deadline leaves the join
+    /// almost no time, so the thread is logged as left behind and ends
+    /// unjoined a moment later: the bound stays `limit` rather than
+    /// growing a margin for a report that already held `end` for almost
+    /// all of it.
     fn end(active: Active, limit: Duration) {
         let deadline = Instant::now() + limit;
-        if !active.gate.close(deadline) {
+        let reports_left = active.gate.close(deadline);
+        let _ = active.quit.send(());
+        if !reports_left {
+            // The report runs on the thread, which cannot have ended.
             tracing::error!(
                 "a PipeWire device-change report is still in its handler {} s after \
-                 the capture's gate closed; it is left behind to finish, and the \
-                 session may act on it late",
+                 the capture's gate closed; it is left behind to finish, the session \
+                 may act on it late, and the capture thread, cut off from the \
+                 recording, ends once the report returns",
                 limit.as_secs_f32()
             );
+            return;
         }
-        let _ = active.quit.send(());
         match active
             .ended
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
@@ -1247,9 +1268,9 @@ impl CaptureBackend for LiveCaptureBackend {
         outcome
     }
 
-    /// Returns within `STOP_TIMEOUT` (2 s), plus the microseconds of a
-    /// delivery inside the gate; what it leaves behind then is in the
-    /// module doc.
+    /// Returns within `STOP_TIMEOUT` (2 s) once it has the backend (a
+    /// `start` in progress holds it), plus the microseconds of a delivery
+    /// inside the gate; what it leaves behind then is in the module doc.
     fn stop(&self) {
         let Some(active) = self.lock().take() else {
             return;
@@ -1266,9 +1287,23 @@ impl Drop for LiveCaptureBackend {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::sync::mpsc::TrySendError;
 
     use super::*;
+
+    thread_local! {
+        /// Run once by the thread's next [`Gate::report`], after it saw the
+        /// gate open and before it counts itself.
+        static BEFORE_A_REPORT_COUNTS_ITSELF: Cell<Option<Box<dyn FnOnce()>>> =
+            const { Cell::new(None) };
+    }
+
+    pub(super) fn before_a_report_counts_itself() {
+        if let Some(hook) = BEFORE_A_REPORT_COUNTS_ITSELF.take() {
+            hook();
+        }
+    }
 
     fn latency_pod(direction: u32, quantum: f32, rate: i32, ns: i64) -> Vec<u8> {
         use spa::pod::{Object, Property, PropertyFlags, Value};
@@ -1408,7 +1443,7 @@ mod tests {
         assert!(!gate.report(|| passed += 1), "the pass says it did not run");
         assert_eq!(passed, 2);
         assert_eq!(gate.delivering.load(Ordering::SeqCst), 0);
-        assert_eq!(*gate.reports(), 0);
+        assert_eq!(*gate.reporting(), 0);
     }
 
     #[test]
@@ -1459,7 +1494,41 @@ mod tests {
         assert!(!gate.report(|| ()), "the gate is closed");
         release.send(()).unwrap();
         assert!(passer.join().unwrap(), "the late report still ran");
-        assert_eq!(*gate.reports(), 0);
+        assert_eq!(*gate.reporting(), 0);
+    }
+
+    #[test]
+    fn close_waits_for_a_report_that_saw_the_gate_open_but_has_not_counted_itself() {
+        let gate = Arc::new(Gate::new());
+        let (paused, pause) = sync_channel(0);
+        let (resume, resumed) = sync_channel::<()>(0);
+        let ran = Arc::new(AtomicBool::new(false));
+        let reporter = std::thread::spawn({
+            let gate = Arc::clone(&gate);
+            let ran = Arc::clone(&ran);
+            move || {
+                BEFORE_A_REPORT_COUNTS_ITSELF.set(Some(Box::new(move || {
+                    paused.send(()).unwrap();
+                    resumed.recv().unwrap();
+                })));
+                gate.report(|| ran.store(true, Ordering::SeqCst))
+            }
+        });
+        pause.recv().unwrap();
+        let (returned, closer) = close_on_a_thread(&gate, Instant::now() + Duration::from_secs(60));
+        assert_eq!(
+            returned.recv_timeout(Duration::from_millis(200)),
+            Err(RecvTimeoutError::Timeout),
+            "close() returned before a report that saw the gate open counted itself"
+        );
+        resume.send(()).unwrap();
+        assert_eq!(returned.recv_timeout(Duration::from_secs(10)), Ok(true));
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "close() returned before the report ran"
+        );
+        assert!(reporter.join().unwrap());
+        closer.join().unwrap();
     }
 
     #[test]
@@ -1520,6 +1589,7 @@ mod tests {
 
     #[test]
     fn end_leaves_a_report_stuck_in_its_handler_and_its_thread_behind() {
+        const LIMIT: Duration = Duration::from_millis(300);
         let gate = Arc::new(Gate::new());
         let (quit, _quit_receiver) = pw::channel::channel();
         let (ending, ended) = sync_channel::<()>(0);
@@ -1541,14 +1611,18 @@ mod tests {
                     thread,
                     thread_id: Arc::new(AtomicU32::new(0)),
                 };
-                // The limit has passed as soon as `end` starts.
-                LiveCaptureBackend::end(active, Duration::ZERO);
-                returned.send(()).unwrap();
+                let started = Instant::now();
+                LiveCaptureBackend::end(active, LIMIT);
+                returned.send(started.elapsed()).unwrap();
             }
         });
-        end_returned
+        let took = end_returned
             .recv_timeout(Duration::from_secs(10))
             .expect("end() returns at its limit with the report still inside");
+        assert!(
+            (LIMIT..2 * LIMIT).contains(&took),
+            "end() waits for the report until its limit, then returns: took {took:?}"
+        );
         stopper.join().unwrap();
         assert!(!gate.report(|| ()), "the gate is closed");
         release.send(()).unwrap();
@@ -1557,7 +1631,52 @@ mod tests {
             Ok(true),
             "the report ran late, and the thread left behind then ended"
         );
-        assert_eq!(*gate.reports(), 0);
+        assert_eq!(*gate.reporting(), 0);
+    }
+
+    #[test]
+    fn end_gives_a_report_and_the_thread_one_deadline() {
+        const LIMIT: Duration = Duration::from_secs(1);
+        let gate = Arc::new(Gate::new());
+        let (quit, _quit_receiver) = pw::channel::channel();
+        let (ending, ended) = sync_channel::<()>(0);
+        // A report that leaves halfway through the limit, and a thread that
+        // does not end before the test lets go.
+        let (release, passer) = hold_inside(&gate, Pass::Report);
+        let (unstick, stuck) = sync_channel::<()>(0);
+        let thread = std::thread::spawn(move || {
+            let _ending = ending;
+            let _ = stuck.recv();
+        });
+        let (returned, end_returned) = sync_channel(1);
+        let stopper = std::thread::spawn({
+            let gate = Arc::clone(&gate);
+            move || {
+                let active = Active {
+                    quit,
+                    gate,
+                    ended,
+                    thread,
+                    thread_id: Arc::new(AtomicU32::new(0)),
+                };
+                let started = Instant::now();
+                LiveCaptureBackend::end(active, LIMIT);
+                returned.send(started.elapsed()).unwrap();
+            }
+        });
+        std::thread::sleep(LIMIT / 2);
+        release.send(()).unwrap();
+        assert!(passer.join().unwrap());
+        let took = end_returned
+            .recv_timeout(Duration::from_secs(10))
+            .expect("end() returns at its limit with the thread still running");
+        // The join given a limit of its own would take until 1.5 s.
+        assert!(
+            (LIMIT..LIMIT + LIMIT * 2 / 5).contains(&took),
+            "the report's wait and the join share one deadline: took {took:?}"
+        );
+        stopper.join().unwrap();
+        drop(unstick);
     }
 
     #[test]
