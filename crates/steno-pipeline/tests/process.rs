@@ -21,6 +21,7 @@ use steno_core::{
     paths::{file_url, file_url_path},
 };
 use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no_conversation};
+use steno_pipeline::runs::{MAX_UNSETTLED_RUNS, TOO_MANY_UNSETTLED_RUNS};
 use steno_pipeline::{
     LaneMerger, MeetingEventBus, MonotonicClock, PipelineDependencies, ProcessingPipeline,
     QuitLatch, RetentionSweep, SharedSpeechEngine, StageRates,
@@ -1574,11 +1575,20 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     pipeline.enqueue(&meeting, &asset).unwrap();
     engine.wait_until_entered().await;
 
+    let runs = RecordingLayout::from_asset(&asset)
+        .unwrap()
+        .processing_runs();
+    assert_eq!(
+        std::fs::read_to_string(&runs).unwrap(),
+        "1",
+        "the run is counted"
+    );
     pipeline.quit();
     engine.open.notify_one();
     pipeline.wait_until_idle().await;
     assert_eq!(engine.inner.transcriptions.count(), 1, "the job failed");
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Processing);
+    assert!(!runs.exists(), "a run the exit stopped does not count");
     assert!(
         !log.text().contains(&asset.id.to_string()),
         "debug only: {}",
@@ -2274,6 +2284,230 @@ async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
     assert!(enqueued.is_ok(), "the panicked run left its entry behind");
     pipeline.wait_until_idle().await;
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
+    assert!(
+        !RecordingLayout::from_asset(&asset)
+            .unwrap()
+            .processing_runs()
+            .exists(),
+        "a panic the process survives is not a run that ended with the app"
+    );
+}
+
+/// A launch whose run of the meeting never ends: the run is left
+/// mid-transcription, as a crash leaves it, and the pipeline is dropped.
+async fn launch_that_crashes(world: &World, first: Option<(&Meeting, &AudioAsset)>) -> Vec<Uuid> {
+    let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let pipeline = ProcessingPipeline::new(
+        with_engine(world, engine.clone()).with_quit_latch(QuitLatch::default()),
+    );
+    let resumed = match first {
+        Some((meeting, asset)) => {
+            pipeline.enqueue(meeting, asset).unwrap();
+            vec![meeting.id]
+        }
+        None => pipeline.resume_unfinished().unwrap(),
+    };
+    if !resumed.is_empty() {
+        engine.wait_until_entered().await;
+    }
+    resumed
+}
+
+/// Processing that takes the app down is not retried for ever: each run is
+/// counted in the meeting's folder, a run that ended with the app leaves
+/// its count, and once three have, launch recovery marks the meeting
+/// failed with a reason the user sees and keeps the audio. Processing the
+/// meeting again (`enqueue`) starts afresh, and a run that settles clears
+/// the count.
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_recovery_gives_up_on_a_meeting_whose_runs_ended_with_the_app() {
+    assert!(TOO_MANY_UNSETTLED_RUNS.contains(&MAX_UNSETTLED_RUNS.to_string()));
+    let world = world(false, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    let layout = RecordingLayout::from_asset(&asset).unwrap();
+    let runs = layout.processing_runs();
+
+    assert_eq!(
+        launch_that_crashes(&world, Some((&meeting, &asset))).await,
+        [meeting.id]
+    );
+    for count in 2..=MAX_UNSETTLED_RUNS {
+        assert_eq!(
+            launch_that_crashes(&world, None).await,
+            [meeting.id],
+            "launch {count}"
+        );
+        assert_eq!(std::fs::read_to_string(&runs).unwrap(), count.to_string());
+    }
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Processing);
+
+    assert_eq!(launch_that_crashes(&world, None).await, Vec::<Uuid>::new());
+    assert_eq!(
+        meeting_state(&world, meeting.id),
+        MeetingState::Failed {
+            reason: TOO_MANY_UNSETTLED_RUNS.to_owned()
+        }
+    );
+    assert!(!runs.exists(), "the count went with the meeting's run");
+    assert!(
+        file_url_path(&asset.url).unwrap().exists(),
+        "the audio is kept"
+    );
+    for sidecar in asset.sidecars_16k.values() {
+        assert!(
+            file_url_path(sidecar).unwrap().exists(),
+            "the sidecars are kept"
+        );
+    }
+
+    // Processed again: the count starts afresh and the run clears it.
+    std::fs::write(&runs, "7").unwrap();
+    world.pipeline.reprocess(meeting.id).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert!(!runs.exists());
+}
+
+/// `reprocess` takes a ready or failed meeting only, and one with its
+/// asset.
+#[tokio::test(flavor = "multi_thread")]
+async fn reprocess_refuses_a_meeting_that_is_not_settled_or_has_no_asset() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    let mut queued = meeting.clone();
+    queued.state = MeetingState::Queued;
+    world
+        .store
+        .save_meeting_with_asset(&queued, &asset)
+        .unwrap();
+    let refused = world.pipeline.reprocess(meeting.id).unwrap_err();
+    assert_eq!(refused.stage, PipelineStage::Decode);
+    assert!(refused.reason.contains("is queued"), "{}", refused.reason);
+
+    let mut orphan = sample_data::meeting();
+    orphan.id = Uuid::new_v4();
+    orphan.state = MeetingState::Failed {
+        reason: "x".to_owned(),
+    };
+    world.store.save_meeting(&orphan).unwrap();
+    let refused = world.pipeline.reprocess(orphan.id).unwrap_err();
+    assert!(
+        refused.reason.contains("no audio asset"),
+        "{}",
+        refused.reason
+    );
+    assert!(world.pipeline.reprocess(Uuid::new_v4()).is_err());
+}
+
+/// Runs below the limit are resumed, and a run that settles clears them.
+#[tokio::test(flavor = "multi_thread")]
+async fn launch_recovery_resumes_a_meeting_below_the_limit_and_clears_its_count() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    let mut processing = meeting.clone();
+    processing.state = MeetingState::Processing;
+    world
+        .store
+        .save_meeting_with_asset(&processing, &asset)
+        .unwrap();
+    let runs = RecordingLayout::from_asset(&asset)
+        .unwrap()
+        .processing_runs();
+    std::fs::write(&runs, (MAX_UNSETTLED_RUNS - 1).to_string()).unwrap();
+
+    assert_eq!(world.pipeline.resume_unfinished().unwrap(), [meeting.id]);
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert!(!runs.exists());
+}
+
+/// A count that cannot be read never blocks processing: a corrupt file
+/// counts as none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_corrupt_run_count_never_blocks_processing() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    let mut processing = meeting.clone();
+    processing.state = MeetingState::Processing;
+    world
+        .store
+        .save_meeting_with_asset(&processing, &asset)
+        .unwrap();
+    let runs = RecordingLayout::from_asset(&asset)
+        .unwrap()
+        .processing_runs();
+    std::fs::write(&runs, b"\xff not a count").unwrap();
+
+    assert_eq!(world.pipeline.resume_unfinished().unwrap(), [meeting.id]);
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert!(!runs.exists());
+}
+
+/// A meeting launch recovery gave up on keeps its audio through the
+/// retention sweep, even with an expired stamp an earlier run left on its
+/// asset; the same stamp on a ready meeting is swept, so the failure never
+/// makes the audio go sooner.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_meeting_given_up_on_keeps_its_audio_through_the_sweep() {
+    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+    let stamped = |id: Uuid, state: MeetingState| {
+        let mut meeting = call_meeting(world.now);
+        meeting.id = id;
+        meeting.state = state;
+        let mut asset = call_asset(&world.audio, id, AudioRetention::DeleteAfterProcessing);
+        asset.expires_at = Some(world.now - Duration::hours(1));
+        world
+            .store
+            .save_meeting_with_asset(&meeting, &asset)
+            .unwrap();
+        asset
+    };
+    let given_up = stamped(Uuid::new_v4(), MeetingState::Processing);
+    let ready = stamped(Uuid::new_v4(), MeetingState::Ready);
+    let runs = RecordingLayout::from_asset(&given_up)
+        .unwrap()
+        .processing_runs();
+    std::fs::write(&runs, MAX_UNSETTLED_RUNS.to_string()).unwrap();
+
+    assert_eq!(
+        world.pipeline.resume_unfinished().unwrap(),
+        Vec::<Uuid>::new()
+    );
+    assert!(matches!(
+        meeting_state(&world, given_up.meeting_id),
+        MeetingState::Failed { .. }
+    ));
+    assert_eq!(
+        world
+            .store
+            .asset(given_up.meeting_id)
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        None
+    );
+    let removed = RetentionSweep::new(world.store.clone())
+        .run(world.now + Duration::days(3_650))
+        .unwrap();
+    let ready_master = file_url_path(&ready.url).unwrap();
+    assert!(
+        removed.contains(&ready_master),
+        "the ready meeting's audio is swept"
+    );
+    assert!(!ready_master.exists());
+    let given_up_master = file_url_path(&given_up.url).unwrap();
+    assert!(
+        given_up_master.exists(),
+        "the given-up meeting keeps its master"
+    );
+    for sidecar in given_up.sidecars_16k.values() {
+        assert!(file_url_path(sidecar).unwrap().exists());
+    }
 }
 
 /// A run that panics fails its meeting, named by the stage it was in, so

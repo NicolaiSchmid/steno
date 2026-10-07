@@ -3,7 +3,8 @@
 //!
 //! `<audio folder>/<MEETING-UUID>/recording.caf`, one `<lane>.wav` sidecar
 //! per lane, `audio.<ext>` for the mixdown, `speakers/<SPEAKER-UUID>.wav`
-//! for the sample clips. The UUID folder is spelled as Swift's
+//! for the sample clips, and, while a meeting is processed, the
+//! pipeline's `.processing-runs`. The UUID folder is spelled as Swift's
 //! `uuidString`: uppercase, hyphenated.
 
 use std::path::{Path, PathBuf};
@@ -78,6 +79,13 @@ impl RecordingLayout {
     pub fn sample_clip(&self, speaker_id: Uuid) -> PathBuf {
         self.speakers_directory()
             .join(format!("{}.wav", uuid_string(speaker_id)))
+    }
+
+    /// `.processing-runs`, the pipeline's count of runs that ended with the
+    /// app before the meeting settled (`steno_pipeline::runs`). Rust only.
+    #[must_use]
+    pub fn processing_runs(&self) -> PathBuf {
+        self.directory.join(".processing-runs")
     }
 
     /// Creates `directory` (and `speakers/` when asked) if needed.
