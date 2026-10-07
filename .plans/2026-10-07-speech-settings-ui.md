@@ -56,10 +56,11 @@ switch, off by default until G4 decides the default.
 - Description: "Transcribes faster on most PCs with a recent graphics card. If the card has
   a problem, Steno goes back to the processor on its own."
 - State after a fallback in this run: a callout under the row, "The graphics card stopped
-  during a transcription. That meeting needs to be transcribed again. Steno uses the
-  processor until it restarts." (the process-wide switch `directml_switched_off` in
-  `crates/steno-speech/src/sidecar/client.rs`; a driver that aborts mid-run takes that job
-  with it, `SpeechSettings::directml_on_windows`).
+  working. Steno uses the processor until it restarts. If a meeting was being transcribed
+  then, transcribe it again." (the process-wide switch `directml_switched_off` in
+  `crates/steno-speech/src/sidecar/client.rs`, `SpeechSettings::directml_on_windows`). The
+  switch cannot tell which case turned it off: a driver that aborts mid-run takes that
+  job with it, while a failure in the probe or an overrun between requests costs none.
 - Details: "Only the first step of speech recognition runs on the graphics card; the rest
   stays on the processor. Needs a graphics card that supports DirectX 12."
 
@@ -78,15 +79,15 @@ switch, off by default until G4 decides the default.
 - Today the source covers the speech models only: the speaker recognition models keep
   their own hosts (`SpeechSettings::models_mirror`). Once the diarizer's models move onto
   the shared model store (the "One model store" item under "Speech" in
-  `.plans/2026-10-02-rust-core-and-tauri-shell.md`, which another change does), the
-  source covers them as well, and the label and Details above already fit.
+  `.plans/2026-10-02-rust-core-and-tauri-shell.md`), the source covers them as well, and
+  the label and Details above already fit.
 
 ### When a change applies
 
 `build()` reads the speech settings once, and `SpeechEngines` keeps the sidecar engine
 built from them for the app's run, which is what keeps one speech sidecar at a time
 (`crates/steno-services/src/speech.rs`). A change therefore applies at the next start:
-while the stored value differs from the running one, the row shows "Takes effect when
+while a stored value differs from the running one, the section shows "Takes effect when
 Steno restarts." and a **Restart Steno** button. Applying it live would mean swapping
 `SpeechEngines` once no job runs; not proposed.
 
@@ -112,8 +113,8 @@ param types:
   as an update's relaunch does, `tauri::RESTART_EXIT_CODE` in
   `apps/desktop/src-tauri/src/main.rs`)
 
-The host writes `speech.json` atomically (`steno_pipeline::files::replace_file`); the fixtures under
-`apps/macos/web/fixtures/bridge/` get one recorded snapshot per platform.
+The host writes `speech.json` atomically (`steno_pipeline::files::replace_file`); the
+fixtures under `apps/macos/web/fixtures/bridge/` get one recorded snapshot per platform.
 
 ## Open questions
 

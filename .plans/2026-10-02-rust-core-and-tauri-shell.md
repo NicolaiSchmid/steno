@@ -785,6 +785,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   `the_engine_is_released_after_the_last_lane_before_diarization`,
   `a_job_leaves_the_engine_loaded_while_another_still_transcribes`,
   `a_job_that_starts_during_a_release_prepares_again_after_it`,
+  `the_diarizer_warm_up_waits_for_a_release`,
+  `a_job_claimed_while_a_finisher_waits_on_a_warm_up_keeps_the_engine_loaded` (the
+  count is checked again under the lock),
+  `a_finisher_that_sees_another_claim_does_not_wait_on_a_warm_up`,
   `a_job_that_panics_gives_its_claim_on_the_engine_back`,
   `a_job_whose_lane_cannot_be_decoded_releases_the_engine_too`,
   `a_job_whose_warm_up_fails_releases_the_engine_too`, and against the real binary
@@ -801,10 +805,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   them in the same place. The claims and the warm-up's lock belong to the engine
   (`steno_pipeline::SharedSpeechEngine`), not to one pipeline, so a job on the new
   pipeline and one on the retired pipeline never release the engine under each other
-  (`a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too`). The sidecar engine
-  is built at its first use and kept for the run; it holds a child only while a job
-  needs one and never runs two, also when a reload on the Mac goes to `CoreML` and back
-  while a retired job transcribes
+  (`a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too`) nor prepare it
+  during the other's release
+  (`a_job_on_another_pipeline_that_starts_during_a_release_prepares_after_it`). Jobs
+  across a reload queue on the one diarizer, as jobs on one pipeline do. The sidecar
+  engine is built at its first use and kept for the run; it holds a child only while a
+  job needs one and never runs two, also when a reload on the Mac goes to `CoreML` and
+  back while a retired job transcribes
   (`a_reload_while_a_job_transcribes_keeps_one_sidecar_child`,
   `a_reload_keeps_the_speech_engine_while_the_engine_id_runs_where_it_did`). So a save
   during a recording keeps the `CoreML` model and the diarizer's models the warm-up
