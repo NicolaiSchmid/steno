@@ -23,7 +23,7 @@ use steno_core::{
 use steno_pipeline::crash_loop::{MAX_CRASHED_RUNS, TOO_MANY_CRASHED_RUNS};
 use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no_conversation};
 use steno_pipeline::{
-    LaneMerger, MeetingEventBus, MonotonicClock, PipelineClaims, PipelineDependencies,
+    ExportRetries, InFlight, LaneMerger, MeetingEventBus, MonotonicClock, PipelineDependencies,
     ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep, SharedSpeechEngine, StageRates,
 };
 use uuid::Uuid;
@@ -82,7 +82,8 @@ impl DeliveryDispatcher for FakeDispatcher {
 }
 
 struct World {
-    _dir: tempfile::TempDir,
+    /// Holds the store, the audio and `export-retries.json`.
+    dir: tempfile::TempDir,
     store: Arc<Store>,
     events: MeetingEventBus,
     pipeline: ProcessingPipeline,
@@ -166,7 +167,7 @@ fn world_with(
         pipeline: ProcessingPipeline::new(dependencies),
         decoder,
         diarizer,
-        _dir: dir,
+        dir,
         store,
         events,
         audio,
@@ -3185,64 +3186,179 @@ fn the_generated_fixtures_match_the_committed_files() {
 }
 
 /// What the app does after `resume_unfinished` at launch: an export a
-/// previous process left `pending` (it ended mid-delivery) or that failed
-/// before the launch is delivered again; a failure after the launch and a
-/// meeting that is not ready are left alone.
+/// previous process left `pending` (it ended mid-delivery), or one that
+/// failed a day or more before the launch or was never attempted (a Swift
+/// row), is re-exported; a failure within the day, a meeting that is not
+/// ready and an export that went through are left alone, and the count of
+/// a meeting exported since its last failure is dropped.
 #[tokio::test(flavor = "multi_thread")]
-async fn exports_left_unfinished_are_delivered_again_at_launch() {
+async fn exports_left_unfinished_are_re_exported_at_launch() {
     let world = world(
         false,
         Some(|vault| FakeDestination::new(vault)),
         AudioRetention::KeepForever,
     );
     let pipeline = &world.pipeline;
-    let ids: Vec<Uuid> = (0..4).map(|_| enqueue_call(&world, pipeline)).collect();
+    let ids: Vec<Uuid> = (0..7).map(|_| enqueue_call(&world, pipeline)).collect();
     pipeline.wait_until_idle().await;
-    let launch = world.now + Duration::minutes(5);
+    // The pipeline's clock reads the launch.
+    let (launch, day) = (world.now, ExportRetries::INTERVAL);
     let failed = || DeliveryStatus::Failed("the vault was offline".to_owned());
-    mark_delivery(&world, ids[0], DeliveryStatus::Pending, world.now);
-    mark_delivery(&world, ids[1], failed(), world.now);
-    mark_delivery(&world, ids[2], failed(), launch + Duration::seconds(1));
-    mark_delivery(&world, ids[3], DeliveryStatus::Pending, world.now);
+    mark_delivery(&world, ids[0], DeliveryStatus::Pending, Some(launch));
+    mark_delivery(
+        &world,
+        ids[1],
+        failed(),
+        Some(launch - day - Duration::seconds(1)),
+    );
+    mark_delivery(&world, ids[2], failed(), None);
+    mark_delivery(&world, ids[3], failed(), Some(launch - day));
+    mark_delivery(&world, ids[4], failed(), Some(launch - Duration::hours(1)));
+    mark_delivery(&world, ids[5], DeliveryStatus::Pending, Some(launch));
     world
         .store
-        .set_state(ids[3], MeetingState::Queued, world.now)
+        .set_state(ids[5], MeetingState::Queued, launch)
         .unwrap();
+    let exported = launch - day * 2;
+    mark_delivery(&world, ids[6], DeliveryStatus::Delivered, Some(exported));
+    write_retries(&world, ids[6], ExportRetries::LIMIT);
 
-    let mut started = pipeline.redeliver_unfinished(launch).unwrap();
-    started.sort();
-    let mut expected = vec![ids[0], ids[1]];
+    let retries = export_retries(&world);
+    let mut owed = pipeline.redeliver_unfinished(&retries).unwrap();
+    owed.sort();
+    let mut expected = ids[..3].to_vec();
     expected.sort();
-    assert_eq!(started, expected);
+    assert_eq!(owed, expected);
+    assert_eq!(retries.count(ids[6]), 0, "exported since its last failure");
     pipeline.wait_until_idle().await;
-    for id in &ids[..2] {
-        assert_eq!(
-            world.store.deliveries(*id).unwrap()[0].status,
-            DeliveryStatus::Delivered
-        );
+    for id in &ids[..3] {
+        assert_eq!(delivery(&world, *id).status, DeliveryStatus::Delivered);
+        assert_eq!(retries.count(*id), 0);
     }
-    assert!(matches!(
-        world.store.deliveries(ids[2]).unwrap()[0].status,
-        DeliveryStatus::Failed(_)
-    ));
-    assert_eq!(
-        world.store.deliveries(ids[3]).unwrap()[0].status,
-        DeliveryStatus::Pending
-    );
+    for id in &ids[3..5] {
+        assert_eq!(delivery(&world, *id).status, failed());
+    }
+    assert_eq!(delivery(&world, ids[5]).status, DeliveryStatus::Pending);
+    assert_eq!(delivery(&world, ids[6]).last_attempt_at, Some(exported));
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
+}
+
+/// The meeting's first delivery row.
+fn delivery(world: &World, id: Uuid) -> Delivery {
+    world.store.deliveries(id).unwrap().remove(0)
 }
 
 /// Stores the meeting's first delivery row as `status`, last attempted at
 /// `attempt`.
-fn mark_delivery(world: &World, id: Uuid, status: DeliveryStatus, attempt: DateTime<Utc>) {
-    let mut delivery = world.store.deliveries(id).unwrap().remove(0);
-    delivery.status = status;
-    delivery.last_attempt_at = Some(attempt);
-    world.store.save_delivery(&delivery).unwrap();
+fn mark_delivery(world: &World, id: Uuid, status: DeliveryStatus, attempt: Option<DateTime<Utc>>) {
+    let mut row = delivery(world, id);
+    row.status = status;
+    row.last_attempt_at = attempt;
+    world.store.save_delivery(&row).unwrap();
 }
 
-/// A meeting another operation holds is skipped at launch, and once the
-/// pipeline quits nothing is started.
+/// The world's `export-retries.json`, read as a launch reads it.
+fn export_retries(world: &World) -> Arc<ExportRetries> {
+    Arc::new(ExportRetries::new(retries_path(world)))
+}
+
+fn retries_path(world: &World) -> PathBuf {
+    world.dir.path().join(ExportRetries::FILE_NAME)
+}
+
+/// Writes `count` failed launch re-exports in a row for `id` alone.
+fn write_retries(world: &World, id: Uuid, count: u32) {
+    std::fs::write(retries_path(world), format!("{{\"{id}\": {count}}}")).unwrap();
+}
+
+/// A destination whose every delivery fails.
+fn offline(vault: &Path) -> FakeDestination {
+    FakeDestination {
+        deliver_failure: Some("the vault is offline".to_owned()),
+        ..FakeDestination::new(vault)
+    }
+}
+
+/// The world's pipeline as a launch at `at` builds it: its clock reads
+/// `at`, and its one destination, `destination`, stamps `at` on the row.
+fn launch_at(world: &World, at: DateTime<Utc>, destination: FakeDestination) -> ProcessingPipeline {
+    let mut dependencies = world
+        .pipeline
+        .dependencies()
+        .clone()
+        .with_now(Arc::new(move || at));
+    dependencies.dispatcher = Arc::new(FakeDispatcher {
+        store: world.store.clone(),
+        destinations: vec![Arc::new(destination)],
+        now: at,
+    });
+    ProcessingPipeline::new(dependencies)
+}
+
+/// A failed export is retried by one launch a day at most, and after
+/// three failed launches in a row it is left until the user exports it
+/// again (`reset`); an export left `pending` is finished still, and one
+/// that goes through starts the count from 0.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_export_is_retried_once_a_day_and_left_after_three_failed_launches() {
+    let world = world(false, Some(offline), AudioRetention::KeepForever);
+    let id = enqueue_call(&world, &world.pipeline);
+    world.pipeline.wait_until_idle().await;
+    assert!(matches!(
+        delivery(&world, id).status,
+        DeliveryStatus::Failed(_)
+    ));
+    let (day, hour) = (ExportRetries::INTERVAL, Duration::hours(1));
+    let retries = export_retries(&world);
+    let within_a_day = launch_at(&world, world.now + day - hour, offline(&world.vault));
+    assert_eq!(
+        within_a_day.redeliver_unfinished(&retries).unwrap(),
+        Vec::<Uuid>::new()
+    );
+
+    let mut at = world.now;
+    for failures in 1..=ExportRetries::LIMIT {
+        at += day + hour;
+        let launch = launch_at(&world, at, offline(&world.vault));
+        assert_eq!(launch.redeliver_unfinished(&retries).unwrap(), [id]);
+        launch.wait_until_idle().await;
+        assert_eq!(delivery(&world, id).last_attempt_at, Some(at));
+        assert_eq!(retries.count(id), failures);
+        assert_eq!(
+            launch.redeliver_unfinished(&retries).unwrap(),
+            Vec::<Uuid>::new(),
+            "once per launch"
+        );
+    }
+    let relaunched = export_retries(&world);
+    assert!(relaunched.stopped(id), "the count is on disk");
+    at += day * 10;
+    assert_eq!(
+        launch_at(&world, at, offline(&world.vault))
+            .redeliver_unfinished(&relaunched)
+            .unwrap(),
+        Vec::<Uuid>::new()
+    );
+
+    relaunched.reset(id);
+    let launch = launch_at(&world, at, offline(&world.vault));
+    assert_eq!(launch.redeliver_unfinished(&relaunched).unwrap(), [id]);
+    launch.wait_until_idle().await;
+    assert_eq!(relaunched.count(id), 1);
+
+    write_retries(&world, id, ExportRetries::LIMIT);
+    let stopped = export_retries(&world);
+    mark_delivery(&world, id, DeliveryStatus::Pending, Some(at));
+    at += hour;
+    let launch = launch_at(&world, at, FakeDestination::new(&world.vault));
+    assert_eq!(launch.redeliver_unfinished(&stopped).unwrap(), [id]);
+    launch.wait_until_idle().await;
+    assert_eq!(delivery(&world, id).status, DeliveryStatus::Delivered);
+    assert_eq!(export_retries(&world).count(id), 0);
+}
+
+/// A meeting another operation holds when its turn comes is skipped at
+/// launch, and once the pipeline quits nothing is started.
 #[tokio::test(flavor = "multi_thread")]
 async fn redelivering_at_launch_skips_a_meeting_in_flight_and_stops_once_quitting() {
     let world = world(
@@ -3253,41 +3369,96 @@ async fn redelivering_at_launch_skips_a_meeting_in_flight_and_stops_once_quittin
     let pipeline = &world.pipeline;
     let id = enqueue_call(&world, pipeline);
     pipeline.wait_until_idle().await;
-    mark_delivery(&world, id, DeliveryStatus::Pending, world.now);
-    let launch = world.now + Duration::minutes(5);
+    mark_delivery(&world, id, DeliveryStatus::Pending, Some(world.now));
+    let retries = export_retries(&world);
 
     let held = pipeline.claim_redeliver(id).unwrap();
-    assert_eq!(
-        pipeline.redeliver_unfinished(launch).unwrap(),
-        Vec::<Uuid>::new()
-    );
+    assert_eq!(pipeline.redeliver_unfinished(&retries).unwrap(), [id]);
+    pipeline.wait_until_idle().await;
+    assert_eq!(delivery(&world, id).status, DeliveryStatus::Pending);
     drop(held);
     pipeline.quit();
     assert_eq!(
-        pipeline.redeliver_unfinished(launch).unwrap(),
+        pipeline.redeliver_unfinished(&retries).unwrap(),
         Vec::<Uuid>::new()
     );
 }
 
-/// Pipelines over dependencies that share their claims (the services'
+/// A dispatcher that waits in `deliver_all` until released.
+#[derive(Default)]
+struct HeldDispatcher {
+    asked: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl DeliveryDispatcher for HeldDispatcher {
+    async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
+        self.asked.notify_one();
+        self.release.notified().await;
+        Vec::new()
+    }
+}
+
+/// `wait_until_idle` waits for the launch's re-exports too, so the app's
+/// reload and the CLI see them finished.
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_until_idle_waits_for_the_launch_re_exports() {
+    let world = world(
+        false,
+        Some(|vault| FakeDestination::new(vault)),
+        AudioRetention::KeepForever,
+    );
+    let id = enqueue_call(&world, &world.pipeline);
+    world.pipeline.wait_until_idle().await;
+    mark_delivery(&world, id, DeliveryStatus::Pending, Some(world.now));
+    let held = Arc::new(HeldDispatcher::default());
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.dispatcher = held.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+
+    assert_eq!(
+        pipeline
+            .redeliver_unfinished(&export_retries(&world))
+            .unwrap(),
+        [id]
+    );
+    held.asked.notified().await;
+    let waiter = tokio::spawn({
+        let pipeline = pipeline.clone();
+        async move { pipeline.wait_until_idle().await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!waiter.is_finished(), "returned while a re-export ran");
+    held.release.notify_one();
+    waiter.await.unwrap();
+    assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
+}
+
+/// Pipelines over dependencies that share their in-flight set (the services'
 /// reloads) refuse a meeting another of them holds, so a reload's new
 /// pipeline never runs a second operation on a meeting the retired one is
 /// still delivering.
 #[tokio::test(flavor = "multi_thread")]
-async fn pipelines_that_share_claims_refuse_each_others_meetings() {
+async fn pipelines_that_share_the_in_flight_set_refuse_each_others_meetings() {
     let world = world(false, None, AudioRetention::KeepForever);
     let id = enqueue_call(&world, &world.pipeline);
     world.pipeline.wait_until_idle().await;
-    let claims = PipelineClaims::default();
+    let in_flight = InFlight::default();
     let retired = ProcessingPipeline::new(
         world
             .pipeline
             .dependencies()
             .clone()
-            .with_claims(claims.clone()),
+            .with_in_flight(in_flight.clone()),
     );
-    let replacement =
-        ProcessingPipeline::new(world.pipeline.dependencies().clone().with_claims(claims));
+    let replacement = ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_in_flight(in_flight),
+    );
 
     let held = retired.claim_redeliver(id).unwrap();
     assert_eq!(replacement.in_flight(), vec![id]);
@@ -3303,32 +3474,36 @@ async fn pipelines_that_share_claims_refuse_each_others_meetings() {
     assert_eq!(replacement.in_flight(), Vec::<Uuid>::new());
 }
 
-/// A dispatcher that records the meeting's state when the export is
-/// announced and delivers nothing, as if the app ended right after
-/// `persist`.
-struct AnnouncedOnly {
+/// A dispatcher that records the meeting's state and its summary's
+/// template when the export is marked pending, and delivers nothing, as if
+/// the app ended right after.
+struct MarkedPendingOnly {
     store: Arc<Store>,
-    seen: Mutex<Vec<MeetingState>>,
+    seen: Mutex<Vec<(MeetingState, Option<String>)>>,
 }
 
 #[async_trait]
-impl DeliveryDispatcher for AnnouncedOnly {
+impl DeliveryDispatcher for MarkedPendingOnly {
     async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
         Vec::new()
     }
 
-    fn announce(&self, meeting_id: Uuid) {
-        let state = self.store.meeting(meeting_id).unwrap().unwrap().state;
-        self.seen.lock().unwrap().push(state);
+    fn mark_pending(&self, meeting_id: Uuid) {
+        let meeting = self.store.meeting(meeting_id).unwrap().unwrap();
+        self.seen.lock().unwrap().push((
+            meeting.state,
+            meeting.summary.map(|summary| summary.template_id),
+        ));
     }
 }
 
-/// `persist` announces the export before it marks the meeting ready, so
-/// an exit between the two leaves rows the next launch delivers again.
+/// `persist` marks the export pending before it marks the meeting ready,
+/// and a summary re-run once the new summary is saved, so an exit before
+/// the delivery leaves rows the next launch re-exports.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_export_is_announced_before_the_meeting_is_ready() {
-    let world = world(false, None, AudioRetention::KeepForever);
-    let dispatcher = Arc::new(AnnouncedOnly {
+async fn the_export_is_marked_pending_before_the_meeting_is_ready() {
+    let world = world(true, None, AudioRetention::KeepForever);
+    let dispatcher = Arc::new(MarkedPendingOnly {
         store: world.store.clone(),
         seen: Mutex::new(Vec::new()),
     });
@@ -3338,5 +3513,14 @@ async fn the_export_is_announced_before_the_meeting_is_ready() {
     let id = enqueue_call(&world, &pipeline);
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, id), MeetingState::Ready);
-    assert_eq!(*dispatcher.seen.lock().unwrap(), [MeetingState::Processing]);
+    assert_eq!(
+        *dispatcher.seen.lock().unwrap(),
+        [(MeetingState::Processing, Some("default".to_owned()))]
+    );
+
+    pipeline.rerun_summary(id, "daily-standup").await.unwrap();
+    assert_eq!(
+        dispatcher.seen.lock().unwrap().last(),
+        Some(&(MeetingState::Ready, Some("daily-standup".to_owned())))
+    );
 }

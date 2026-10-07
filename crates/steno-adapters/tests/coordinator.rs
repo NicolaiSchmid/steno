@@ -398,12 +398,15 @@ async fn the_stored_receipt_round_trips_into_the_real_destination() {
     assert_eq!(store.deliveries(meeting_id()).unwrap().len(), 1);
 }
 
-/// Announcing the export writes a `Pending` row per configured destination
-/// before the meeting is ready, keeping a stored receipt, so the launch
-/// finds the export owed if the app ends before `deliver_all`.
+/// Marking the export pending writes a `Pending` row per configured
+/// destination before the meeting is ready, keeping a stored receipt, so
+/// the launch finds the export owed if the app ends before `deliver_all`;
+/// with no destination configured it writes none.
 #[tokio::test]
-async fn announcing_an_export_leaves_a_pending_row_per_destination_and_keeps_the_receipt() {
+async fn marking_an_export_pending_leaves_a_row_per_destination_and_keeps_the_receipt() {
     let store = store();
+    coordinator(&store, Vec::new(), now()).mark_pending(meeting_id());
+    assert_eq!(store.deliveries(meeting_id()).unwrap(), []);
     let first = RecordingDestination::new("a-first", None);
     let second = RecordingDestination::new("b-second", None);
     let delivered = coordinator(&store, vec![as_destination(&first)], now())
@@ -415,7 +418,7 @@ async fn announcing_an_export_leaves_a_pending_row_per_destination_and_keeps_the
         now() + Duration::seconds(60),
     );
 
-    both.announce(meeting_id());
+    both.mark_pending(meeting_id());
 
     let rows = store.deliveries(meeting_id()).unwrap();
     assert_eq!(rows.len(), 2);

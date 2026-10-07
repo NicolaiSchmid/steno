@@ -114,7 +114,7 @@ impl DeliveryDispatcher for DeliveryCoordinator {
     /// A `Pending` row for each configured destination, keeping a stored
     /// row's receipt and last attempt. Settings that do not load write
     /// nothing: `deliver_all` fails the rows then.
-    fn announce(&self, meeting_id: Uuid) {
+    fn mark_pending(&self, meeting_id: Uuid) {
         let Ok(settings) = self.store.settings() else {
             return;
         };

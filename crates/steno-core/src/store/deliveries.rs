@@ -70,7 +70,7 @@ impl Store {
     /// The ready meetings with an export left unfinished, oldest first: a
     /// delivery still `pending` (the process ended while it ran) or one
     /// that `failed` with its last attempt before `attempted_before` (or
-    /// none). The launch delivers these again. Rust only: Swift retried a
+    /// none). The launch re-exports these. Rust only: Swift retried a
     /// failed export only when asked.
     pub fn meetings_with_unfinished_deliveries(
         &self,

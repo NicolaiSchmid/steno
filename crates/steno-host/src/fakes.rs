@@ -390,6 +390,8 @@ pub struct FakePipeline {
     pub reloads: Mutex<usize>,
     pub kept_forever: Mutex<i64>,
     pub failure: Mutex<Option<String>>,
+    /// The meetings `export_keeps_failing` answers yes for.
+    pub keeps_failing: Mutex<Vec<Uuid>>,
 }
 
 impl FakePipeline {
@@ -419,6 +421,10 @@ impl Pipeline for FakePipeline {
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
         lock(&self.redeliveries).push(meeting_id);
         self.outcome()
+    }
+
+    fn export_keeps_failing(&self, meeting_id: Uuid) -> bool {
+        lock(&self.keeps_failing).contains(&meeting_id)
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
