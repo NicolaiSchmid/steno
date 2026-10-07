@@ -4,7 +4,8 @@ import { cn } from "@/lib/cn";
 import { usePlatform } from "@/lib/platform";
 
 export interface OnboardingPageProps {
-	step: 1 | 2;
+	/** The page's place in the two steps; the import step before them has none. */
+	step?: 1 | 2 | undefined;
 	title: string;
 	/** The one sentence under the title. */
 	intro: string;
@@ -17,7 +18,7 @@ export interface OnboardingPageProps {
 }
 
 /**
- * The frame both onboarding pages share: the step caption, the title as the
+ * The frame the onboarding pages share: the step caption, the title as the
  * page's only heading, the intro, then the cards, scrolling under a pinned
  * footer band with the page's buttons (the dialog footer). On the Mac the
  * 52 px top inset leaves the traffic lights their room; elsewhere the
@@ -45,12 +46,14 @@ export function OnboardingPage({
 					data-testid={testId}
 				>
 					<header className="flex flex-col gap-2">
-						<p
-							className="m-0 text-muted-foreground text-xs"
-							data-testid="onboarding-step"
-						>
-							Step {step} of 2
-						</p>
+						{step ? (
+							<p
+								className="m-0 text-muted-foreground text-xs"
+								data-testid="onboarding-step"
+							>
+								Step {step} of 2
+							</p>
+						) : null}
 						<h1
 							className="m-0 font-semibold text-2xl leading-tight tracking-tight"
 							data-testid="onboarding-title"

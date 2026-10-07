@@ -166,6 +166,8 @@ export const scenarios = [
 	"onboarding-setup-open",
 	"onboarding-codex",
 	"onboarding-vault-saved",
+	"onboarding-import",
+	"onboarding-import-waiting",
 ] as const;
 
 /**
@@ -358,14 +360,15 @@ export function applyScenario(
 	applyOnboardingScenario(result, snapshots, scenario);
 
 	// `recording.live`, `settings.summaries.codex`,
-	// `settings.summaries.fileKey`, `settings.iphone.pairing` and
-	// `onboarding.setup` are fixtures, not topics; the page never sees them
-	// by those names.
+	// `settings.summaries.fileKey`, `settings.iphone.pairing`,
+	// `onboarding.setup` and `onboarding.import` are fixtures, not topics;
+	// the page never sees them by those names.
 	delete result["recording.live"];
 	delete result["settings.summaries.codex"];
 	delete result["settings.summaries.fileKey"];
 	delete result["settings.iphone.pairing"];
 	delete result["onboarding.setup"];
+	delete result["onboarding.import"];
 	return result;
 }
 
@@ -377,7 +380,9 @@ export function applyScenario(
  * vault chosen but refused), `onboarding-setup-open` (page 2 with both rows
  * open), `onboarding-codex` (page 2 with ChatGPT chosen and its consent
  * card), `onboarding-vault-saved` (page 2 with the vault saved and the
- * Summaries form open).
+ * Summaries form open), `onboarding-import` (the import step before page 1,
+ * not run yet, two prompts) and `onboarding-import-waiting` (the step after
+ * a denied export, from `onboarding.import`, with Try again).
  */
 function applyOnboardingScenario(
 	result: FixtureMap,
@@ -386,8 +391,22 @@ function applyOnboardingScenario(
 ) {
 	const onboarding = snapshots.onboarding as OnboardingSnapshot | undefined;
 	const setup = snapshots["onboarding.setup"] as OnboardingSnapshot | undefined;
+	const importing = snapshots["onboarding.import"] as
+		| OnboardingSnapshot
+		| undefined;
 	if (!onboarding || !setup) {
 		return;
+	}
+
+	if (scenario === "onboarding-import-waiting" && importing) {
+		result.onboarding = importing;
+	}
+
+	if (scenario === "onboarding-import" && importing) {
+		result.onboarding = {
+			...importing,
+			swiftImport: { state: "ready", prompts: 2 },
+		} satisfies OnboardingSnapshot;
 	}
 	const untouched = onboarding.permissions.map((step) => ({
 		...step,

@@ -124,6 +124,8 @@ export const bridgeMethods = [
 	"onboarding.saveVault",
 	"onboarding.skipSetup",
 	"onboarding.finish",
+	"onboarding.import",
+	"onboarding.skipImport",
 	"updates.check",
 	"system.openURL",
 	"system.openSystemSettings",
@@ -698,7 +700,7 @@ export type PhoneSettingsSnapshot = z.infer<typeof phoneSettingsSnapshot>;
 
 export const onboardingSnapshot = z
 	.object({
-		page: z.enum(["permissions", "setup"]),
+		page: z.enum(["import", "permissions", "setup"]),
 		permissions: z.array(
 			z
 				.object({
@@ -734,6 +736,16 @@ export const onboardingSnapshot = z
 			.strict()
 			.optional(),
 		retentionSentence: z.string().optional(),
+		// The import step before page 1, on the Mac's first launch after the
+		// update from the Swift app. The Tauri shell alone sends it.
+		swiftImport: z
+			.object({
+				state: z.enum(["ready", "importing", "waiting", "done"]),
+				prompts: z.number(),
+				error: z.string().optional(),
+			})
+			.strict()
+			.optional(),
 		finished: z.boolean(),
 	})
 	.strict();
@@ -915,6 +927,8 @@ export const methodParams = {
 	"onboarding.saveVault": null,
 	"onboarding.skipSetup": setupStepParams,
 	"onboarding.finish": null,
+	"onboarding.import": null,
+	"onboarding.skipImport": null,
 	"updates.check": null,
 	"system.openURL": openURLParams,
 	"system.openSystemSettings": permissionKindParams,
@@ -989,4 +1003,6 @@ export const fixtureSchemas = {
 	"params.ui.confirmDestructive": confirmDestructiveParams,
 	"reply.confirm": confirmReply,
 	"reply.chosenPath": chosenPathReply,
+	// Written by the Rust bridge alone (the Swift app has no import step).
+	"onboarding.import": onboardingSnapshot,
 } as const satisfies Record<string, z.ZodTypeAny>;
