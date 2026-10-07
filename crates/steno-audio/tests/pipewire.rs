@@ -120,8 +120,39 @@ fn show_logs() {
         .unwrap_or_else(|| "steno_audio=info".into());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
-        .with_test_writer()
+        .with_ansi(false)
+        .with_writer(|| LogTee)
         .try_init();
+}
+
+/// Every log line so far, for a test that checks which path in the
+/// backend reported a change when the report alone looks the same.
+static LOGS: Mutex<String> = Mutex::new(String::new());
+
+/// The log lines since `LOGS` was `from` bytes long.
+fn logs_since(from: usize) -> String {
+    LOGS.lock().unwrap()[from..].to_owned()
+}
+
+fn logs_so_far() -> usize {
+    LOGS.lock().unwrap().len()
+}
+
+/// Writes the logs into the test output (through `print!`, as the test
+/// writer does, so the harness captures them) and into [`LOGS`].
+struct LogTee;
+
+impl std::io::Write for LogTee {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(bytes);
+        print!("{text}");
+        LOGS.lock().unwrap().push_str(&text);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
@@ -164,9 +195,13 @@ fn stop(backend: &Arc<LiveCaptureBackend>) {
     within(Duration::from_secs(5), "stop", move || backend.stop());
 }
 
-/// Runs a PipeWire tool to completion; whether it succeeded.
+/// Runs a PipeWire tool to completion, for at most 10 s, so a daemon that
+/// stopped answering fails the test instead of hanging the suite; whether
+/// it succeeded.
 fn tool(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
+    Command::new("timeout")
+        .arg("10")
+        .arg(program)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -581,11 +616,16 @@ fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
     let backend = Arc::new(LiveCaptureBackend::new());
     let stream = start(&backend, &lanes, Some(LATER), &sink).expect("start");
     assert_eq!(stream.input, Some(test_mic_standing_in()));
+    let logged = logs_so_far();
     let later = TemporaryMic::create(LATER);
     assert_eq!(
         next_report(&reasons),
         DeviceChangeReason::DefaultInputChanged,
         "its arrival"
+    );
+    assert!(
+        logs_since(logged).contains("the chosen source's"),
+        "the announce of the chosen source marked the change, not other churn"
     );
     // The session's rebuild: stop, re-arm, start again.
     stop(&backend);

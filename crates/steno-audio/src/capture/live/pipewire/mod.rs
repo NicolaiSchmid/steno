@@ -476,6 +476,7 @@ impl Shared {
             _ => false,
         };
         if chosen {
+            tracing::info!("the chosen source's {kind:?} {id} was announced");
             self.changed();
         }
     }
