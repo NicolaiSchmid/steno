@@ -25,7 +25,7 @@ use steno_core::{
 use steno_diarize::{DiarizerConfig, ModelDiarizer};
 use steno_host::services::SpeechModels;
 use steno_host::speech::ModelAsset;
-use steno_pipeline::SharedSpeechEngine;
+use steno_pipeline::{SharedSpeechEngine, WeakSpeechEngine};
 use steno_speech::{
     LanguageTagger, ModelStore, OnnxSpeechEngine, SidecarConfig, SidecarSpeechEngine,
     SpeechRuntime, SpeechSettings,
@@ -286,26 +286,29 @@ fn engine_on(runtime: SpeechRuntime, setup: &SpeechSetup) -> Arc<dyn SpeechEngin
 /// app, a fake in the tests.
 pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine> + Send + Sync>;
 
-/// The speech engines the app's pipelines share, so a pipeline reload (a
-/// Settings save of the engine or of the summaries) keeps the current
-/// engine with its claims ([`SharedSpeechEngine`]): the `CoreML` model a
-/// recording's warm-up loaded stays loaded, and a job the reload retired
-/// and a job on the new pipeline share one speech sidecar child.
+/// The speech engines and the diarizer the app's pipelines share, so a
+/// pipeline reload (a Settings save of the engine or of the summaries)
+/// keeps the current engine with its claims ([`SharedSpeechEngine`]) and
+/// the diarizer: the `CoreML` model and the diarizer's models a
+/// recording's warm-up loaded stay loaded, and a job the reload retired
+/// and a job on the new pipeline share one speech sidecar child. Swift:
+/// none; `reloadPipeline` built a new engine and diarizer every time.
 ///
 /// The setup (the models directory, the speech settings, how the sidecar
-/// starts) is read once at launch and belongs to this value, so the
-/// runtime [`SpeechSetup::runtime`] gives the engine id is all that tells
-/// two engines apart: two ids that run in the same place get the same
-/// engine. A changed setup takes a new value, at the next launch.
+/// starts) is read once at launch and belongs to this value, so two
+/// engine ids share an engine exactly when [`SpeechSetup::runtime`] puts
+/// them in the same place. A changed setup takes a new value, at the next
+/// launch.
 ///
 /// The sidecar engine is built at its first use and kept for the app's
 /// run. It holds a child only while a job needs one, and as the only
 /// sidecar engine it never runs two at once, also when a reload on the
 /// Mac goes to `CoreML` and back while a retired pipeline still
-/// transcribes. The in-process engine (`CoreML` on the Mac) is kept until
-/// a reload asks for the sidecar; its model is freed once the retired
-/// pipelines on it are idle, and a reload back to `CoreML` before then
-/// builds a second one beside it.
+/// transcribes. The in-process engine (`CoreML` on the Mac) is kept only
+/// while a pipeline runs on it ([`WeakSpeechEngine`]): a reload back to it
+/// while a retired pipeline still transcribes gets the same engine, and
+/// its model is freed once no pipeline holds it. The diarizer, which
+/// depends on the models directory alone, is built with this value.
 ///
 /// ```no_run
 /// use steno_core::{Settings, StenoPaths};
@@ -321,6 +324,7 @@ pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine>
 pub struct SpeechEngines {
     setup: SpeechSetup,
     build: BuildEngine,
+    diarizer: Arc<dyn Diarizer>,
     kept: std::sync::Mutex<KeptEngines>,
 }
 
@@ -329,8 +333,8 @@ pub struct SpeechEngines {
 struct KeptEngines {
     /// For the app's run, once built.
     sidecar: Option<SharedSpeechEngine>,
-    /// While the pipelines ask for it.
-    in_process: Option<SharedSpeechEngine>,
+    /// While a pipeline holds it.
+    in_process: Option<WeakSpeechEngine>,
 }
 
 impl SpeechEngines {
@@ -344,6 +348,7 @@ impl SpeechEngines {
     /// Engines from `build` instead, for the tests.
     pub(crate) fn with_builder(setup: SpeechSetup, build: BuildEngine) -> Self {
         SpeechEngines {
+            diarizer: diarizer(&setup.models_directory),
             setup,
             build,
             kept: std::sync::Mutex::default(),
@@ -357,8 +362,7 @@ impl SpeechEngines {
     }
 
     /// The engine on `runtime` with its claims: the kept one, else a new
-    /// one, which is kept. Asking for the sidecar lets the in-process
-    /// engine go.
+    /// one, which is kept.
     #[must_use]
     pub fn engine(&self, runtime: SpeechRuntime) -> SharedSpeechEngine {
         let mut kept = self
@@ -367,12 +371,23 @@ impl SpeechEngines {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let build = || SharedSpeechEngine::new((self.build)(runtime));
         match runtime {
-            SpeechRuntime::OnnxSidecar => {
-                kept.in_process = None;
-                kept.sidecar.get_or_insert_with(build).clone()
+            SpeechRuntime::OnnxSidecar => kept.sidecar.get_or_insert_with(build).clone(),
+            SpeechRuntime::CoreMlInProcess => {
+                if let Some(engine) = kept.in_process.as_ref().and_then(WeakSpeechEngine::upgrade) {
+                    return engine;
+                }
+                let engine = build();
+                kept.in_process = Some(engine.downgrade());
+                engine
             }
-            SpeechRuntime::CoreMlInProcess => kept.in_process.get_or_insert_with(build).clone(),
         }
+    }
+
+    /// The diarizer every pipeline runs, built over the models directory
+    /// ([`diarizer`]).
+    #[must_use]
+    pub fn diarizer(&self) -> Arc<dyn Diarizer> {
+        self.diarizer.clone()
     }
 }
 
@@ -847,7 +862,7 @@ mod tests {
 
     /// The same runtime gets the same engine and claims; another runtime a
     /// new one. The sidecar engine is kept for the app's run, the
-    /// in-process one only until the sidecar is asked for.
+    /// in-process one only while something holds it.
     #[test]
     fn each_runtime_gets_the_engine_it_got_before_and_the_sidecar_s_is_kept_for_the_run() {
         let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -871,12 +886,16 @@ mod tests {
         assert!(in_process.ptr_eq(&engines.engine(SpeechRuntime::CoreMlInProcess)));
         assert_eq!(built(), 2);
 
-        // Back to the sidecar: the same engine, and the in-process one is
-        // let go, so asking for it again builds a new one.
+        // Back to the sidecar and to the in-process engine while a retired
+        // pipeline still holds it: the same engines.
         assert!(sidecar.ptr_eq(&engines.engine(SpeechRuntime::OnnxSidecar)));
+        assert!(in_process.ptr_eq(&engines.engine(SpeechRuntime::CoreMlInProcess)));
         assert_eq!(built(), 2);
-        let again = engines.engine(SpeechRuntime::CoreMlInProcess);
-        assert!(!again.ptr_eq(&in_process));
+
+        // Once nothing holds the in-process engine it is gone, and asking
+        // for it builds a new one; the sidecar's stays.
+        drop(in_process);
+        let _again = engines.engine(SpeechRuntime::CoreMlInProcess);
         assert_eq!(built(), 3);
         assert!(sidecar.ptr_eq(&engines.engine(SpeechRuntime::OnnxSidecar)));
         assert_eq!(built(), 3);

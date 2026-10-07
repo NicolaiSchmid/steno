@@ -25,7 +25,7 @@ use std::ops::Deref;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -162,11 +162,13 @@ impl QuitLatch {
 /// A speech engine with the jobs that claim it, shared by every pipeline
 /// built over it: a job claims the engine from its warm-up to its last
 /// lane, and the engine is released only once no job on any of those
-/// pipelines holds a claim. Its warm-ups and that release take one lock,
-/// so a warm-up never overlaps a release. Clones share the engine and its
-/// claims; [`new`](Self::new) starts with none. The services hand a
-/// clone to each pipeline a reload builds over the same engine. Rust
-/// only: Swift has no release.
+/// pipelines holds a claim. The pipelines' warm-ups (the diarizer's
+/// too) and that release take one lock, so a warm-up never overlaps a
+/// release. Clones share the engine and its claims; [`new`](Self::new)
+/// starts with none. The services hand a clone to each pipeline a reload
+/// builds over the same engine, and keep a [`WeakSpeechEngine`] to find
+/// it again while a pipeline still runs on it. Rust only: Swift has no
+/// release.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -203,7 +205,11 @@ struct SpeechClaims {
 }
 
 impl SharedSpeechEngine {
-    /// `engine` with no claims on it yet.
+    /// `engine` with no claims on it yet, shared with no other value: a
+    /// pipeline built over it releases the engine under the jobs of any
+    /// other pipeline on the same engine. Pipelines that run on one
+    /// engine share a clone instead; the app's come from
+    /// `steno_services::speech::SpeechEngines`.
     #[must_use]
     pub fn new(engine: Arc<dyn SpeechEngine>) -> Self {
         SharedSpeechEngine {
@@ -225,12 +231,57 @@ impl SharedSpeechEngine {
         Arc::ptr_eq(&self.claims, &other.claims)
     }
 
+    /// A handle that finds this engine and its claims again while a
+    /// clone of it is alive, without keeping them alive itself.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakSpeechEngine {
+        WeakSpeechEngine {
+            engine: Arc::downgrade(&self.engine),
+            claims: Arc::downgrade(&self.claims),
+        }
+    }
+
     /// The number of claims, under their lock.
     fn claim_count(&self) -> MutexGuard<'_, usize> {
         self.claims
             .count
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// A [`SharedSpeechEngine`] that does not keep the engine alive, from
+/// [`SharedSpeechEngine::downgrade`]: the services keep one for the
+/// in-process engine, so a reload back to it while a retired pipeline
+/// still runs on it gets the same engine and claims, and its model is
+/// freed once no pipeline holds it. Rust only.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use steno_core::testing::FakeSpeechEngine;
+/// use steno_pipeline::SharedSpeechEngine;
+///
+/// let engine = SharedSpeechEngine::new(Arc::new(FakeSpeechEngine::default()));
+/// let weak = engine.downgrade();
+/// assert!(weak.upgrade().is_some_and(|again| again.ptr_eq(&engine)));
+/// drop(engine);
+/// assert!(weak.upgrade().is_none());
+/// ```
+#[derive(Clone)]
+pub struct WeakSpeechEngine {
+    engine: Weak<dyn SpeechEngine>,
+    claims: Weak<SpeechClaims>,
+}
+
+impl WeakSpeechEngine {
+    /// The engine with its claims, while a clone of it is alive.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<SharedSpeechEngine> {
+        Some(SharedSpeechEngine {
+            engine: self.engine.upgrade()?,
+            claims: self.claims.upgrade()?,
+        })
     }
 }
 

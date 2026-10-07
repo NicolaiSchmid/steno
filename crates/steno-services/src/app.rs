@@ -135,12 +135,12 @@ fn api_key(
 
 /// The dependencies of one pipeline from the stored settings, the API key
 /// and `engines`, shared by the first build and every reload, with the
-/// speech engine they hold: the one `engines` keeps for the runtime of the
-/// stored engine id ([`SpeechEngines`]). The setup of `engines` is read
-/// once by [`build`] and also backs the model service, so the two agree on
-/// where each engine runs; the recorder's warm-up reads the engine from
-/// the pipeline. A secret store that cannot be read is logged and the
-/// passes are built without a key.
+/// speech engine and the diarizer `engines` keeps: the engine for the
+/// runtime of the stored engine id ([`SpeechEngines`]). The setup of
+/// `engines` is read once by [`build`] and also backs the model service,
+/// so the two agree on where each engine runs; the recorder's warm-up
+/// reads the engine from the pipeline. A secret store that cannot be read
+/// is logged and the passes are built without a key.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
@@ -162,7 +162,7 @@ pub fn pipeline_dependencies(
     let dependencies = PipelineDependencies::new(
         Arc::new(SymphoniaAudioCodec::new()),
         speech_engine.engine().clone(),
-        crate::speech::diarizer(&speech.models_directory),
+        engines.diarizer(),
         Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
         Arc::new(DeliveryCoordinator::new(store.clone())),
         store.clone(),
@@ -870,8 +870,9 @@ mod tests {
     /// switch to an engine id the sidecar runs too. On the Mac, where
     /// `parakeet-v3` runs on `CoreML` in this process and other ids in the
     /// sidecar, the switch builds the sidecar engine, and the switch back
-    /// a new `CoreML` one, as the first was let go. Nothing here starts a
-    /// sidecar: no job runs.
+    /// finds the first `CoreML` one, which the test still holds as a
+    /// retired pipeline would. Every reload keeps the diarizer. Nothing
+    /// here starts a sidecar: no job runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_keeps_the_speech_engine_while_the_engine_id_runs_where_it_did() {
         let dir = tempfile::tempdir().unwrap();
@@ -894,7 +895,9 @@ mod tests {
             app.pipeline.reload().unwrap();
             app.pipeline.current_with_engine().1.runtime
         };
+        let diarizer = || app.pipeline.current().dependencies().diarizer.clone();
         let first = engine();
+        let first_diarizer = diarizer();
         let first_runtime = app.pipeline.current_with_engine().1.runtime;
         app.pipeline.reload().unwrap();
         assert!(engine().ptr_eq(&first), "unchanged settings, same engine");
@@ -908,7 +911,8 @@ mod tests {
         assert!(engine().ptr_eq(&other), "both ids run in the sidecar");
 
         assert_eq!(reload_with("parakeet-v3"), first_runtime);
-        assert_eq!(engine().ptr_eq(&first), !in_process, "{first_runtime:?}");
+        assert!(engine().ptr_eq(&first), "back where the first ran");
+        assert!(Arc::ptr_eq(&diarizer(), &first_diarizer));
     }
 
     /// The shell's login item is the one the host reads and switches; the
