@@ -508,6 +508,31 @@ fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
     assert_eq!(voice(&store).sample_count, 0);
 }
 
+/// A re-run's transcript keeps the model's name suggestion for a speaker
+/// whose id comes back, so a run without a summarizer keeps it too; a
+/// speaker that does not come back takes its suggestion with it.
+#[test]
+fn replacing_the_transcript_keeps_the_name_suggestions_of_returning_speakers() {
+    let (store, meeting) = populated();
+    let speakers = common::speakers(meeting.id);
+    let before = store.name_suggestions(meeting.id).unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].speaker_id, speakers[1].id);
+    store
+        .replace_transcript(
+            &meeting,
+            &common::segments(meeting.id, &speakers),
+            &speakers,
+        )
+        .unwrap();
+    assert_eq!(store.name_suggestions(meeting.id).unwrap(), before);
+
+    store
+        .replace_transcript(&meeting, &[], &speakers[..1])
+        .unwrap();
+    assert_eq!(store.name_suggestions(meeting.id).unwrap(), Vec::new());
+}
+
 /// The cleanup pass's write: the text of each stored segment by id, the
 /// speakers and every other column as they are.
 #[test]

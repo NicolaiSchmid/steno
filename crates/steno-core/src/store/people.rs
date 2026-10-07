@@ -336,6 +336,27 @@ pub(super) fn replace_name_suggestions(
     Ok(())
 }
 
+/// The meeting's suggestions, at most one per speaker, in speaker id order.
+pub(super) fn name_suggestions_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<SpeakerNameSuggestion>> {
+    query_all(
+        connection,
+        "SELECT speakerID, name, confidence, evidence FROM speakerNameSuggestion \
+         WHERE meetingID = ?1 ORDER BY speakerID",
+        [DbUuid(meeting_id)],
+        |row| {
+            Ok(SpeakerNameSuggestion {
+                speaker_id: row.col::<DbUuid>("speakerID")?,
+                name: Some(row.get("name")?),
+                confidence: row.get("confidence")?,
+                evidence: row.get("evidence")?,
+            })
+        },
+    )
+}
+
 /// The meeting's participants by display name, ties by id: the order
 /// `meeting.json` lists them in.
 pub(super) fn participants_of_meeting(
@@ -584,22 +605,7 @@ impl Store {
     /// The model's guess who each speaker is, at most one per speaker, in
     /// speaker id order.
     pub fn name_suggestions(&self, meeting_id: Uuid) -> Result<Vec<SpeakerNameSuggestion>> {
-        self.read(|connection| {
-            query_all(
-                connection,
-                "SELECT speakerID, name, confidence, evidence FROM speakerNameSuggestion \
-                 WHERE meetingID = ?1 ORDER BY speakerID",
-                [DbUuid(meeting_id)],
-                |row| {
-                    Ok(SpeakerNameSuggestion {
-                        speaker_id: row.col::<DbUuid>("speakerID")?,
-                        name: Some(row.get("name")?),
-                        confidence: row.get("confidence")?,
-                        evidence: row.get("evidence")?,
-                    })
-                },
-            )
-        })
+        self.read(|connection| name_suggestions_of_meeting(connection, meeting_id))
     }
 }
 
