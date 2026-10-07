@@ -1694,8 +1694,9 @@ blocks the stable release (`.plans/2026-10-07-stable-promotion.md`, D3).
   mode without an output client). Where: "Store", "Adapters", "Handover", "LLM",
   "Audio" and "Bridge" in the parity list, and the CLI's `--title` under "Pipeline
   and services (WP6b)". `.plans/2026-10-07-stable-promotion.md` (D9) settles all of
-  them, the parity notes' other "before cutover" ports to Swift included; the stable
-  promotion's S7 deletes this item. Found: #155, #165, #166, #167, #169, #190.
+  them, the parity notes' other "before cutover" ports to Swift included, apart from call
+  mode, which its A9 checks; its S7 deletes this item, and A9 the call-mode part.
+  Found: #155, #165, #166, #167, #169, #190.
 - **WP9b.** The Bonjour record is not published again after a network change, on
   every platform, where Swift's `NWListener` follows it; and the shell passes no
   computer name on any platform, so the Mac and Windows advertise `HOSTNAME`,
