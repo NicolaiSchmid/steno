@@ -9,8 +9,9 @@
 //! id other than `parakeet-v3` runs in the sidecar on every platform.
 //! On Windows the speech setting `directmlOnWindows` lets the sidecar run
 //! the encoder on `DirectML` ([`SpeechSetup::sidecar`]). [`SpeechEngines`]
-//! keeps the engines the pipelines run on, so a pipeline reload keeps its
-//! engine and the app never runs two speech sidecars at once.
+//! keeps the engines and the diarizer the pipelines run on, so a pipeline
+//! reload keeps its engine and diarizer and the app never runs two speech
+//! sidecars at once.
 //! Swift: `makeSpeechEngine`, `makeDiarizer`, `ModelStore`,
 //! `Sources/StenoSpeech/Engines/SpeechEngineID.swift`.
 
@@ -865,41 +866,43 @@ mod tests {
     /// new one. The sidecar engine is kept for the app's run, the
     /// in-process one only while something holds it.
     #[test]
-    fn each_runtime_gets_the_engine_it_got_before_and_the_sidecar_s_is_kept_for_the_run() {
-        let builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fn each_runtime_gets_the_engine_it_got_before_and_the_sidecar_engine_is_kept_for_the_run() {
+        use SpeechRuntime::{CoreMlInProcess, OnnxSidecar};
+
+        // The runtime of each build, in order.
+        let builds = Arc::new(std::sync::Mutex::new(Vec::new()));
         let engines = SpeechEngines::with_builder(
             testing::setup(Path::new("/models"), SpeechSettings::default()),
             Box::new({
                 let builds = builds.clone();
-                move |_| {
-                    builds.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                move |runtime| {
+                    builds.lock().unwrap().push(runtime);
                     Arc::new(FakeSpeechEngine::default())
                 }
             }),
         );
-        let built = || builds.load(std::sync::atomic::Ordering::SeqCst);
-        let sidecar = engines.engine(SpeechRuntime::OnnxSidecar);
-        assert!(sidecar.ptr_eq(&engines.engine(SpeechRuntime::OnnxSidecar)));
-        assert_eq!(built(), 1);
+        let built = || builds.lock().unwrap().clone();
+        let sidecar = engines.engine(OnnxSidecar);
+        assert!(sidecar.ptr_eq(&engines.engine(OnnxSidecar)));
+        assert_eq!(built(), [OnnxSidecar]);
 
-        let in_process = engines.engine(SpeechRuntime::CoreMlInProcess);
+        let in_process = engines.engine(CoreMlInProcess);
         assert!(!in_process.ptr_eq(&sidecar));
-        assert!(in_process.ptr_eq(&engines.engine(SpeechRuntime::CoreMlInProcess)));
-        assert_eq!(built(), 2);
+        assert!(in_process.ptr_eq(&engines.engine(CoreMlInProcess)));
+        assert_eq!(built(), [OnnxSidecar, CoreMlInProcess]);
 
         // Back to the sidecar and to the in-process engine while a retired
         // pipeline still holds it: the same engines.
-        assert!(sidecar.ptr_eq(&engines.engine(SpeechRuntime::OnnxSidecar)));
-        assert!(in_process.ptr_eq(&engines.engine(SpeechRuntime::CoreMlInProcess)));
-        assert_eq!(built(), 2);
+        assert!(sidecar.ptr_eq(&engines.engine(OnnxSidecar)));
+        assert!(in_process.ptr_eq(&engines.engine(CoreMlInProcess)));
+        assert_eq!(built(), [OnnxSidecar, CoreMlInProcess]);
 
         // Once nothing holds the in-process engine it is gone, and asking
         // for it builds a new one; the sidecar's stays.
         drop(in_process);
-        let _again = engines.engine(SpeechRuntime::CoreMlInProcess);
-        assert_eq!(built(), 3);
-        assert!(sidecar.ptr_eq(&engines.engine(SpeechRuntime::OnnxSidecar)));
-        assert_eq!(built(), 3);
+        let _again = engines.engine(CoreMlInProcess);
+        assert!(sidecar.ptr_eq(&engines.engine(OnnxSidecar)));
+        assert_eq!(built(), [OnnxSidecar, CoreMlInProcess, CoreMlInProcess]);
     }
 
     #[test]

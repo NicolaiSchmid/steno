@@ -125,10 +125,10 @@ impl CurrentPipeline {
     /// Replaces the pipeline with one built from the stored settings and
     /// the secret store's API key. A failed build keeps the current
     /// pipeline and its engine. The app's builds keep the speech engine,
-    /// with its claims, while the stored engine id runs where it did
-    /// ([`SpeechEngines`](crate::speech::SpeechEngines)), so the retired
-    /// pipeline's jobs and the new one's share it and its one sidecar
-    /// child.
+    /// with its claims, while the stored engine id runs where it did, and
+    /// the diarizer ([`SpeechEngines`](crate::speech::SpeechEngines)), so
+    /// the retired pipeline's jobs and the new one's share them and the
+    /// one sidecar child.
     pub fn reload(&self) -> Result<(), BuildError> {
         let replacement = Current::new((self.make)()?, &self.quit_latch);
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
@@ -588,7 +588,7 @@ mod tests {
         most: AtomicUsize,
         spawns: AtomicUsize,
         stops: AtomicUsize,
-        gated: AtomicBool,
+        gate_used: AtomicBool,
         entered: tokio::sync::Notify,
         open: tokio::sync::Notify,
     }
@@ -640,7 +640,7 @@ mod tests {
         ) -> BoundaryResult<Vec<RawSegment>> {
             self.start_child();
             let gate = &self.children;
-            if !gate.gated.swap(true, Ordering::SeqCst) {
+            if !gate.gate_used.swap(true, Ordering::SeqCst) {
                 gate.entered.notify_one();
                 gate.open.notified().await;
             }
@@ -666,13 +666,14 @@ mod tests {
     async fn a_reload_while_a_job_transcribes_keeps_one_sidecar_child() {
         let (dir, store) = temp_store();
         let children = Arc::new(Children::default());
-        let builds = Arc::new(AtomicUsize::new(0));
+        // The runtime of each build, in order.
+        let builds = Arc::new(std::sync::Mutex::new(Vec::new()));
         let engines = Arc::new(SpeechEngines::with_builder(
             crate::speech::testing::setup(dir.path(), steno_speech::SpeechSettings::default()),
             Box::new({
                 let (children, builds) = (children.clone(), builds.clone());
                 move |runtime| -> Arc<dyn SpeechEngine> {
-                    builds.fetch_add(1, Ordering::SeqCst);
+                    builds.lock().unwrap().push(runtime);
                     match runtime {
                         SpeechRuntime::OnnxSidecar => Arc::new(FakeSidecar {
                             inner: FakeSpeechEngine::default(),
@@ -729,7 +730,11 @@ mod tests {
             same_engine(&unchanged, &back),
             "a reload that keeps the runtime keeps the engine"
         );
-        assert_eq!(builds.load(Ordering::SeqCst), 2, "one per runtime");
+        assert_eq!(
+            *builds.lock().unwrap(),
+            [SpeechRuntime::OnnxSidecar, SpeechRuntime::CoreMlInProcess],
+            "one per runtime, each on its own"
+        );
 
         let next = enqueue_call(dir.path(), &unchanged);
         unchanged.wait_until_idle().await;
