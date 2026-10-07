@@ -1,7 +1,7 @@
 //! `steno dev`: developer tools. Swift: `Sources/steno/Commands/Dev*.swift`.
 //! `capture-spike` and `audio-devices` need the platform's live capture and
-//! device enumeration, which exist on the Mac; elsewhere they parse their
-//! flags and report that the backend is not available yet.
+//! device enumeration (Core Audio, `PipeWire`, WASAPI); on other targets they
+//! parse their flags and report that the backend is not available.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -154,9 +154,33 @@ pub struct AudioDevices {
 }
 
 impl AudioDevices {
+    /// The input devices with their UIDs (what `--input-device` takes),
+    /// then every process with an audio stream and its flags. Swift prints
+    /// every HAL device, outputs included; the input list is what every
+    /// platform's backend gives.
     fn run(self) -> Outcome {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
+            println!("Input devices");
+            for device in
+                steno_audio::capture::live::AudioDevices::inputs().map_err(Failure::runtime)?
+            {
+                println!(
+                    "  {}\t{}\tin:{}\t{}\tuid={}{}",
+                    device.id,
+                    device.name,
+                    device.input_channels,
+                    device.transport_type,
+                    device.uid,
+                    if device.is_default_input {
+                        "\t[default-input]"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            println!();
+            println!("Processes");
             let source = steno_audio::detection::LiveProcessAudioActivity::new();
             let activity = steno_audio::ProcessAudioActivitySource::snapshot(&source)
                 .map_err(Failure::runtime)?;
@@ -174,11 +198,11 @@ impl AudioDevices {
             }
             Ok(())
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         {
             let _ = self.running_only;
             Err(Failure::runtime(
-                "audio-devices: device enumeration is only available on the Mac.",
+                "audio-devices: device enumeration needs macOS, Linux or Windows.",
             ))
         }
     }
@@ -327,6 +351,10 @@ impl CaptureSpike {
         configuration
             .input_device_uid
             .clone_from(&self.input_device_uid);
+        // The lanes as the devices delivered them, as Swift's spike records
+        // them: echo cancellation would take a click played through the
+        // speakers out of the microphone lane, and its onset with it.
+        configuration.echo_cancellation = false;
         configuration.lane_override = lane_override;
         let session = super::record::session(
             configuration,
