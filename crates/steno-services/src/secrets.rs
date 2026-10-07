@@ -161,8 +161,7 @@ impl FileSecretStore {
                 }
                 return Ok(());
             }
-            let data = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
-            replace_file(&self.path, &data, Access::OwnerOnly)
+            self.write(map)
         })
     }
 
@@ -187,9 +186,14 @@ impl FileSecretStore {
     fn update(&self, change: impl FnOnce(&mut BTreeMap<String, String>)) -> std::io::Result<()> {
         self.locked(|map| {
             change(map);
-            let data = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
-            replace_file(&self.path, &data, Access::OwnerOnly)
+            self.write(map)
         })
+    }
+
+    /// Replaces the file with `map`, owner-only.
+    fn write(&self, map: &BTreeMap<String, String>) -> std::io::Result<()> {
+        let data = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
+        replace_file(&self.path, &data, Access::OwnerOnly)
     }
 
     /// Runs `write` on the stored map under the advisory lock on
