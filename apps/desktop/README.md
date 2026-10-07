@@ -58,14 +58,17 @@ exits reach the shutdown these ways:
   confirmation dialog, another Xfce app; xfce4-session then tells the app
   nothing), so the app answers at once, records on, and saves at the end,
   which gnome-session waits about ten seconds for and xfce4-session
-  seven. xfce4-session also tells the app to leave when a checkpoint
-  (Session settings' Save Session) has waited a minute, with no logout to
-  follow; the app leaves only once a logout has asked. On Wayland
+  seven. When xfce4-session tells the app to leave (Session settings'
+  Quit Program), the app saves and quits, since xfce4-session kills it 15
+  seconds later. xfce4-session also tells a client to leave right after
+  it dropped it, when a checkpoint (Save Session) has waited a minute,
+  with no logout to follow and no kill; the app then records on and
+  registers again, so a later logout still reaches it. On Wayland
   xfce4-session quits right after it asked, with no end and no cancel to
   follow, so there the app saves when asked, answers, and ends with the
   display. Should the session go on after all (the app took it for a
   Wayland one wrongly), the app says so 30 seconds later and relaunches
-  once the message is closed, so a recorder runs again.
+  once the message is closed, so the user can record again.
 - Where no session manager runs (KDE Plasma, wlroots desktops), the app
   follows the desktop portal's session monitor. It answers the portal's
   query at once, since the user can still call the logout off then, and
@@ -83,7 +86,8 @@ exits reach the shutdown these ways:
   by GTK 3.24.52's wording; a GTK that rewords them ends the app unsaved
   again. Only a kill ends the save early: systemd's `SIGKILL` once a
   stop has waited out the unit's `TimeoutStopSec` (90 s unless the unit
-  sets another), or a second SIGTERM.
+  sets another), xfce4-session's `SIGKILL` 15 seconds after it told the
+  app to leave, which the save's ten seconds fit in, or a second SIGTERM.
 - While a recording runs the app holds the portal's logout inhibitor
   ("A meeting is being recorded") and releases it when the recording
   stops. GNOME then lists Steno in its logout dialog, also for
@@ -122,6 +126,7 @@ only a kill cuts it off on any of them:
 | GNOME (X11, Wayland) | `EndSession`, about ten seconds to answer; then the display closing holds the exit until the save has ended |
 | Xfce on X11 | `EndSession`, seven seconds to answer; then the display closing holds the exit until the save has ended |
 | Xfce on Wayland | `QueryEndSession`; xfce4-session quits at once, and the display closing holds the exit until the save has ended |
+| Xfce's Quit Program (Session settings) | `Stop`, 15 seconds before xfce4-session kills the app |
 | KDE Plasma 6.6 (Wayland, X11) | the display closing |
 | A desktop whose portal reports the end | the portal's ending state, then the display closing |
 | wlroots and others | the display closing |
@@ -130,7 +135,8 @@ only a kill cuts it off on any of them:
 The session clients, the portal's monitor and inhibitor and the logind
 lock are tested against fakes on a private bus. The lost display ran
 under Xvfb and headless sway with a recording in progress, and a real
-xfce4-session 4.20.4 logout ran on X11 and on Wayland under labwc; no
+xfce4-session 4.20.4 logout ran on X11 and on Wayland under labwc, and
+its Quit Program and Save Session under a recording on X11; no
 real GNOME or KDE Plasma session has run yet (before the first Linux
 release).
 
@@ -751,13 +757,13 @@ tray host either; a smoke run stands in for one, so the built tray counts
 and the run checks the close rule a desktop with a tray gets.
 
 `scripts/pipewire-headless.sh apps/desktop/scripts/lost-display-linux.sh
-[binary] [seconds]` checks the save before a lost display end to end: it
-starts the shell on an Xvfb server of its own with a fresh `HOME`,
-starts a recording with the record shortcut (xdotool), ends the server
-after `seconds` (4 by default) and fails unless the app logged its save
-and the store holds the meeting `queued` with a duration. CI's Linux job
-runs it after the smoke; outside CI it needs `Xvfb`, `xdotool` and
-`python3` on the `PATH` besides the smoke's setup.
+[binary] [seconds]` checks end to end that a recording is saved when the
+display goes away: it starts the shell on an Xvfb server of its own with
+a fresh `HOME`, starts a recording with the record shortcut (xdotool),
+ends the server after `seconds` (4 by default) and fails unless the app
+logged its save and the store holds the meeting `queued` with a
+duration. CI's Linux job runs it after the smoke; outside CI it needs
+`Xvfb`, `xdotool` and `python3` on the `PATH` besides the smoke's setup.
 
 `apps/desktop/scripts/smoke-macos.sh [binary] [seconds]` runs the smoke on
 a Mac, in the logged-in session (the windows show on its screen for those
@@ -824,7 +830,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/fixtures.rs` (and `host.rs` under the feature) | With `--features fixture-host`, the fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
 | `apps/desktop/src-tauri/src/navigation.rs` | Navigation policy: the app origin and, in a dev build, the Vite dev server; everything else is cancelled |
 | `apps/desktop/src-tauri/src/smoke.rs`, `apps/desktop/scripts/smoke-linux.sh`, `smoke-macos.sh` | The smoke CI runs under Xvfb on Linux and in the runner's session on macOS |
-| `apps/desktop/scripts/lost-display-linux.sh` | The lost display under a recording, which CI's Linux job requires saved |
+| `apps/desktop/scripts/lost-display-linux.sh` | Ends the display server under a recording and fails unless the app saved it first; CI's Linux job runs it |
 | `apps/desktop/src-tauri/capabilities/default.json`, `panels.json` | `core:event:allow-listen` and `allow-unlisten` for the three windows, the one core IPC the page uses; the panels get the same plus `core:window:allow-start-dragging` for `data-tauri-drag-region`; `bridge_call` and `panel_call` are app commands and native capabilities are reached through them |
 | `.github/workflows/desktop-release.yml`, `apps/desktop/scripts/release-matrix.sh` | The six bundles on the three platforms, signed and notarised on macOS, checksummed and, for Linux, OpenPGP-signed in the `assets` job, published with the updater manifests on a `desktop-v*` tag (see Release); the `platforms` input of a manual run is filtered by `release-matrix.sh` (tested in Rust CI by `release-matrix.test.sh`) |
 | `apps/desktop/src-tauri/tauri.release.conf.json`, `tauri.release.windows.conf.json`, `apps/desktop/scripts/stage-sidecar.sh`, `check-bundle.sh` | The sidecar as an `externalBin`, its staging, and the check that every bundle installs it beside the app (see Release); Rust CI bundles a `.deb` and runs the check |
