@@ -1369,15 +1369,15 @@ item to settle before the Linux release:
   reported against PipeWire 1.6.8 with WirePlumber 0.5.15 and fixed by
   06de0ed2 ("metadata: remove pending pong on unbind"), which calls
   `remove_pending` first thing in `global_unbind`. PipeWire 1.6.9
-  (2026-09-17) is the first release with it. `metadata.c` is the same
-  file, line for line, in 1.2.7, 1.4.11, the head of the `1.4` branch and
-  1.6.5 to 1.6.8, and has the same code at the same lines in 1.0.5: a
-  distribution on the 1.0 to 1.4 lines keeps the miss unless it carries
-  the fix. The reproduction still holds with the nix shell's
-  PipeWire 1.6.5 and WirePlumber 0.5.14 (both variants re-run); it was not
-  run against 1.6.9. Nothing is left to report for 1.6. What could still
-  be asked is a backport to 1.4; the text below is ready and not filed
-  (Nicolai files it if the Linux release targets a distribution on 1.4):
+  (2026-09-17) is the first release with it. `metadata.c` is identical
+  in 1.2.7, 1.4.11, the head of the `1.4` branch and 1.6.5 to 1.6.8, and
+  has the same code at the same lines in 1.0.5, so a distribution on 1.0
+  to 1.4 keeps the miss unless it carries the fix. Both variants of the
+  reproduction still hold with the nix shell's PipeWire 1.6.5 and
+  WirePlumber 0.5.14; neither was run against 1.6.9. Nothing is left to
+  report for 1.6. A backport to 1.4 could still be asked; the text below
+  is ready and not filed (Nicolai files it if the Linux release targets a
+  distribution on 1.4):
 
   > **metadata: backport "remove pending pong on unbind" (#5445) to 1.4**
   >
@@ -1398,31 +1398,31 @@ item to settle before the Linux release:
   > while a fresh `pw-metadata -n default` lists it. Could 06de0ed2 go
   > into 1.4?
 - **`stop()` is bounded.** It closes the capture's gate to the sink and
-  joins the PipeWire thread, all within 2 s of its call. A cycle's
-  delivery already inside the gate is waited for without a bound: it takes
+  joins the PipeWire thread, all within 2 s of its call; a device-change
+  report still inside the gate then is logged and left to finish, and a
+  thread that has not ended is logged with the system call it waits in
+  and left behind (the devices may stay open until Steno quits). Only a
+  cycle's delivery inside the gate is waited for without a bound: it takes
   microseconds, and one still writing the rings once `stop()` returned
-  would write them beside the next backend's thread. A device-change
-  report inside, which runs the session's handler and so may wait for the
-  session mutex, is waited for until the 2 s are up, then logged and left
-  to finish. It reaches the session late, which ignores it unless
-  recording and otherwise rebuilds once more: it starts a rebuild, or
-  becomes the pending change of the one in progress (of the next
-  recording, if the stop ended one and another started meanwhile). A late
-  report that takes the sink's latch after the rebuild re-armed it holds
-  back the rebuilt backend's first report, but starts a rebuild itself. A
-  thread that has not ended by then is logged with the system call it
-  waits in and left behind, and the devices may stay open until Steno
-  quits. So once `stop()` returned no frame reaches the sink, and no
-  report but one the gate let in before it closed. A hang was seen once in
-  testing, most likely in a log write: logs were written synchronously
-  then, a capture thread left behind in a later run was blocked in
-  `write(2)` to stderr, waiting on the disk's journal at idle I/O
-  priority, and `stop()`'s own log of the hang waited for the same stderr
-  lock. Since #202 the binaries queue log lines for one writer thread and
-  drop a line rather than wait (`steno_services::logs`), so a stalled
-  stderr holds neither the capture thread nor `stop()`. Only log lines are
-  queued: the shell's `stderr_line!` and the CLI's progress lines still
-  write to stderr directly.
+  would write them beside the next backend's thread. A report runs the
+  session's handler, which may wait for the session mutex; one left
+  behind reaches the session late, which ignores it unless recording and
+  otherwise rebuilds once more: it starts a rebuild, or becomes the
+  pending change of the one in progress (of the next recording, if the
+  stop ended one and another started meanwhile). A late report that takes
+  the sink's latch after the rebuild re-armed it holds back the rebuilt
+  backend's first report, but starts a rebuild itself. So once `stop()`
+  returned no frame reaches the sink, and no report but one the gate let
+  in before it closed. A hang was seen once in testing, most likely in a
+  log write: logs were written synchronously then, a capture thread left
+  behind in a later run was blocked in `write(2)` to stderr, waiting on
+  the disk's journal at idle I/O priority, and `stop()`'s own log of the
+  hang waited for the same stderr lock. Since #202 the binaries queue log
+  lines for one writer thread and drop a line rather than wait
+  (`steno_services::logs`), so a stalled stderr holds neither the capture
+  thread nor `stop()`. Only log lines are queued: the shell's
+  `stderr_line!` and the CLI's progress lines still write to stderr
+  directly.
 - **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
   names no Linux node, so a synced or copied settings file shows the input
   device as unavailable and the user picks again. A virtual source (a null
