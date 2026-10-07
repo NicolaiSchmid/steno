@@ -205,10 +205,11 @@ decision's own lines, the alternative says where.
 - **D10 A new crate, `steno-macos`, joins `AGENTS.md`'s `unsafe` list, and the
   list is brought in line with the code.**
   - Two packages call Mac frameworks that have no safe binding: the identity
-    export (`SecItemExport`, S6; the rest of S6's keychain calls have safe
-    wrappers in `security-framework`) and EventKit (S3). `steno-macos` holds
-    both, each in a safe wrapper with a comment on every invariant. S6 creates
-    the crate, and S3 rebases onto it.
+    export (`SecItemExport`, S6) and EventKit (S3); the import's other keychain
+    calls use `security-framework`'s safe wrappers. `steno-macos` holds both,
+    each in a safe wrapper with a comment on every invariant, and also the
+    keychain test's fixture calls (`SecItemImport` of SEC1, `SecItemUpdate`).
+    S6 creates the crate, and S3 rebases onto it.
   - The `AGENTS.md` change goes in the same PR: the Rust core row lists the
     crate, and the `unsafe` rule names it.
   - The rule also gains the modules that already hold `unsafe` today:
@@ -263,8 +264,9 @@ These do not block the stable release. Each keeps or gets an owner line in
 - The clip player (D3).
 - Importing the floating panel's anchor from Swift. The panel opens at its
   default place.
-- The whole-lane decode (1.4 GB for a two-hour 48 kHz lane). R5's soak measures
-  peak memory on the Mac, and if a 16 GB Mac would run short, it becomes
+- The whole-lane decode: the decoder reads every channel of a file whole, so a
+  two-hour two-channel 48 kHz master is several GB at its peak. R5's soak
+  measures it on the Mac, and if a 16 GB Mac would run short, it becomes
   blocking.
 - The **Unowned.** items in the Rust plan.
 
@@ -349,7 +351,7 @@ physical Mac for TCC prompts, and the phone. S1 to S7 are written in parallel.
   - Re-register the Bonjour record when the interfaces change, on every
     platform.
   - The shell sets `service_name` to the computer name through a safe route on
-    both platforms, for example `whoami::devicename()` (the computer name on
+    the Mac and Windows (Linux keeps the host name), for example `whoami::devicename()` (the computer name on
     macOS), or on the Mac `SCDynamicStore::get("Setup:/System")` serialised with
     `propertylist::create_data` and read with the `plist` crate.
   - Tests: a fake interface watcher triggers the re-registration.
@@ -365,7 +367,9 @@ physical Mac for TCC prompts, and the phone. S1 to S7 are written in parallel.
       app.
     - On macOS, `autostart.rs` uses `SMAppService.mainApp` (D4).
     - The desktop README's identifier paragraph follows the change.
-    - The PR creates `steno-macos` and makes the `AGENTS.md` change (D10).
+    - The PR creates `steno-macos` and makes the `AGENTS.md` change (D10), and
+      adds `security-framework`, `plist` and the PKCS#12 crate to
+      `[workspace.dependencies]`.
   - **`swift_import`.** A macOS-only import in `steno-services`:
     - It runs first in the shell's `setup`, before `Host::real` builds the
       graph, because `handover_listener` loads or mints `handover-identity`
@@ -385,12 +389,13 @@ physical Mac for TCC prompts, and the phone. S1 to S7 are written in parallel.
       (`/usr/bin/defaults export uno.schmid.steno.mac -`, parsed with the
       `plist` crate). It copies Sparkle's `SUEnableAutomaticChecks` and
       `SUAutomaticallyUpdate` into S4's flags, and drops the panel anchor.
-    - **The handover identity** (D5). It looks the certificate up by label and
-      calls `SecIdentityCreateWithCertificate`, then `SecItemExport` as
-      PKCS#12, through `steno-macos`. A PKCS#12 crate (a new workspace
-      dependency that `cargo deny` must allow; Apple wraps the key with legacy
-      PKCS#12 encryption) decodes it into the PEM entry `handover-identity`. It replaces a desktop-id identity. The Swift item
-      stays in place. If the export fails, the existing or a newly minted
+    - **The handover identity** (D5). It looks the certificate up by label,
+      calls `SecIdentityCreateWithCertificate` through `security-framework`,
+      then `SecItemExport` as PKCS#12 through `steno-macos`. A PKCS#12 crate
+      (for example `p12-keystore`, which reads Apple's legacy PKCS#12
+      encryption; `cargo deny` must allow it) decodes the export into the PEM
+      entry `handover-identity`. It replaces a desktop-id identity. The Swift
+      item stays in place. If the export fails, the existing or a newly minted
       identity stays, and the release notes say that phones pair again.
     - **Desktop-id leftovers.** It removes the Launch Agent a desktop-id build
       left behind, and registers `SMAppService` instead if that agent was
@@ -424,12 +429,12 @@ physical Mac for TCC prompts, and the phone. S1 to S7 are written in parallel.
     - a test that a pre-release does not bump the cask;
     - `rust-ci.yml` runs every `apps/desktop/scripts/*.test.sh` in a loop
       instead of by name;
-    - the pubDate rewrite's test parses the value back with Sparkle's format.
+    - the `pubDate` rewrite's test parses the value back with Sparkle's format.
   - The PR removes the three `StenoTests` that read `release.yml`
-    (`AppcastScriptsTests.swift` and two in `ReleaseScriptsTests.swift`). Their
-    still-relevant assertions move to a `desktop-release.yml` check: the release
-    is public before `publish-appcast.sh` runs, which is before the cask bump,
-    and `contents: write` is set. The PR touches `apps/macos/`, so `swift-ci`
+    (one in `AppcastScriptsTests.swift` and two in `ReleaseScriptsTests.swift`).
+    Their still-relevant assertions move to a `desktop-release.yml` check:
+    `publish` makes the release public and uploads `appcast.xml` before the cask
+    bump, `handoff` needs `publish`, and `contents: write` is set. The PR touches `apps/macos/`, so `swift-ci`
     runs on it.
   - A manual run on the branch with `platforms=macos` passes. It signs no
     handoff item, since manual runs sign nothing for unpublished builds, so
@@ -528,8 +533,8 @@ the `appcast` branch.
 
   Nicolai approves after R7 (Rehearsal). For a later release that fixes the
   handoff itself, the repository variable `HANDOFF_ITEM_REPLACE` is set to that
-  version before its tag is pushed, and the job-level `if` also runs when the
-  variable equals the version. Its item supersedes the old one (D8).
+  version before its tag is pushed, and the job-level `if` (with `plan` in the
+  job's `needs`) also lets the job run when the variable equals the version. Its item supersedes the old one (D8).
 - **`release-notes.sh`.**
   - The opening sentence loses "this macOS build is a preview" and the pointer
     to the latest release.
@@ -790,7 +795,7 @@ but Sparkle 2.9.0 removed it from the binary download.
   - Login Items shows one Steno;
   - the TCC prompts appear once each, at the second call;
   - one keychain prompt appears per item the desktop-id build created (D5):
-    `handover-identity` at launch, then the API key at the first summary.
+    `handover-identity` and the API key, both at launch.
     After Always Allow, no further prompt appears;
   - both calls are listed, transcribed and summarised.
 - **R2 Handoff mechanics** (Forge; the cutover plan's test 6).
@@ -866,13 +871,17 @@ but Sparkle 2.9.0 removed it from the binary download.
      progress.
   4. A five-minute call is transcribed, diarized and exported.
   5. On Forge, the CLI processes a two-hour two-lane recording made of FLEURS
-     speech (generated, never committed) under `/usr/bin/time -l`. It runs with
+     speech (generated, never committed) with the real engines, under
+     `/usr/bin/time -l`: `steno process mic.wav --system-lane system.wav
+     --source mac-call --engine parakeet-v3` (without `--engine` the CLI runs
+     fakes). It runs with
      the default four ONNX threads and `HOME=~/steno-handoff/soak-home`, with
      the models copied into its `Library/Application Support/Steno/Models/`,
      no API key and no destination. `steno process` hands the pipeline 16 kHz
-     sidecars, so the step also decodes, under `/usr/bin/time -l`, a two-hour
-     44.1 kHz m4a lane and a two-hour 48 kHz lane that have no sidecars (the
-     phone-upload path), for example through `steno dev bakeoff`. The CLI is
+     sidecars, so the step also decodes, under `/usr/bin/time -l` and each in its
+     own directory, a two-hour mono 44.1 kHz m4a (the phone-upload path) and a
+     two-hour two-channel 48 kHz Float32 CAF (the recorder's master, as when its
+     sidecar is missing), through `steno dev bakeoff`. The CLI is
      the candidate's `steno`, built from its tag. Record the larger peak
      resident memory and extrapolate to a 16 GB Mac (What follows).
 - **R6 Rollback drill** (**Nicolai**, R3's account).
@@ -880,14 +889,15 @@ but Sparkle 2.9.0 removed it from the binary download.
      `codesign -d -r- ~/Applications/Steno.app 2>/dev/null | sed -n 's/^designated => //p' > tauri-dr.txt`,
      and keep a copy of the app: `ditto ~/Applications/Steno.app ~/steno-r6/Steno.app`.
   2. Quit Steno, remove `~/Applications/Steno.app`, and `ditto` the
-     `v0.10.0-rc.2` app into its place.
+     `v0.10.0-rc.2` app from its DMG into its place.
   3. Pass when:
      - `codesign --verify -R="=$(cat tauri-dr.txt)"` passes on it;
      - it opens the same database and lists every meeting, including the ones
        the Tauri app recorded;
      - it reads the key;
      - the phone uploads;
-     - Login Items shows one Steno.
+     - Login Items shows one Steno;
+     - it records one short meeting.
   4. Quit, remove the bundle, and `ditto ~/steno-r6/Steno.app` back. Pass when
      it opens and lists the meetings the Swift app recorded during the drill.
 - **Dogfood** (**Nicolai**, his own account). After R1 to R6 pass:
@@ -897,8 +907,8 @@ but Sparkle 2.9.0 removed it from the binary download.
      If it does, the run also tests D5's rule that the Swift identity wins.
      Check too that `~/Library/Application Support/Steno/preferences.json`
      holds no `steno.swiftImportRan`; if it does, the dogfood does not test the
-     import, and R3 is its only proof. No desktop-id install in this account is
-     updated before the dogfood.
+     import or the preference copy, and R3 is their only proof. No desktop-id
+     install in this account is updated before the dogfood.
   3. His daily install takes the candidate through the local feed, as in R3,
      and the `SUFeedURL` default is deleted afterwards.
 
@@ -965,7 +975,7 @@ but Sparkle 2.9.0 removed it from the binary download.
    `branch_policy`.
 7. **Bump to `0.11.0` on a fresh commit and tag it.** This:
    - publishes the full release as "latest";
-   - creates `desktop-stable`;
+   - creates `desktop-stable` and moves `desktop-beta` to 0.11.0;
    - uploads `appcast.xml`;
    - puts the flake lines in the summary.
 
@@ -977,9 +987,8 @@ but Sparkle 2.9.0 removed it from the binary download.
    issues. Linux and Windows are listed on the site when their gates pass (D6).
 10. **S9**, the Swift removal.
 
-**The Linux gate**, on the last candidate or on `v0.11.0`:
-
-S1 and S5 also close Linux blockers.
+**The Linux gate**, on the last candidate or on `v0.11.0` (S1 and S5 also close
+Linux blockers):
 
 - **Nicolai**, in one GNOME session on hardware:
   - install the `.deb`;
@@ -1002,9 +1011,11 @@ candidate is handled as the desktop README's "A bad release" says for
 `desktop-beta`.
 
 **If R7 fails,** Nicolai rejects the `handoff` job and runs
-`gh release edit v0.11.0 --prerelease`. No Swift build has seen the item, the
-cask is not bumped yet, and no installed build reads `desktop-stable` yet. The
-fix ships as `0.11.1`.
+`gh release edit v0.11.0 --prerelease`. No Swift build has seen the item and the
+cask is not bumped yet. Candidate installs take 0.11.0 through `desktop-beta`,
+and a fresh download in that window reads `desktop-stable`; if the failure is in
+the bundle, put both lanes back as the desktop README's "A bad release" says.
+The fix ships as `0.11.1`.
 
 **A bad handoff item, while it rolls out:**
 
@@ -1033,9 +1044,11 @@ that README section.
 
 **As a last resort for one user:** quit Steno, then drag the `v0.10.0-rc.2` app
 from its DMG onto the Tauri app in Finder and choose Replace. It uses the same
-database and keychain (R6). Before relaunching it, either revert the item for
-everyone, or, for this user alone, turn off automatic updates in its Settings
-on first launch and choose Skip This Version when 0.11.0 is offered.
+database and keychain (R6). Then either revert the item for everyone before
+relaunching it, or, for this user alone, run `defaults write
+uno.schmid.steno.mac SUAutomaticallyUpdate -bool false` while it is still quit
+(its launch check is overdue and would otherwise install 0.11.0 silently), open
+it, and choose Skip This Version when 0.11.0 is offered.
 
 **The database.** Every migration until S9 is mirrored in `Migrations.swift`,
 and none merges in the window, so going back stays possible until the Swift app
@@ -1044,7 +1057,7 @@ is removed.
 ## Changes to other plans in this plan's PR
 
 - **`.plans/2026-10-04-mac-cutover.md`.** A note at the top says that this plan
-  extends it, which parts it replaces, and which details no longer hold.
+  extends it, where it changes it, and which details no longer hold.
 - **`.plans/2026-10-02-rust-core-and-tauri-shell.md`.**
   - The status line, the WP9b progress row and the owner sentence of "Open
     after the port" point here.
