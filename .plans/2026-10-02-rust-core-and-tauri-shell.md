@@ -939,19 +939,35 @@ still has to draw the window side. `[ ]` is not ported yet.
     panics after that write (`a_panic_after_the_ready_write_leaves_the_meeting_ready`).
     Swift has no counterpart. P13's resume guard is the crash-loop bullet under the
     services list (#228).
-- An export the app was writing when it ended is not left `pending` for good: after
-  `resume_unfinished`, the launch delivers again every ready meeting whose delivery is
-  still `pending`, or failed before the launch
-  (`ProcessingPipeline::redeliver_unfinished`, `Store::meetings_with_unfinished_deliveries`;
-  `exports_left_unfinished_are_delivered_again_at_launch`). `persist` announces the
-  export (`DeliveryDispatcher::announce`, a `pending` row per configured destination)
-  before it marks the meeting ready, so an exit between the two is found too
-  (`the_export_is_announced_before_the_meeting_is_ready`).
-  The pipelines a reload builds share one set of claims (`PipelineClaims`, as they share
-  the `QuitLatch`), so the new pipeline refuses a meeting the retired one still
-  processes or delivers
-  (`a_re_export_the_retired_pipeline_runs_holds_its_meeting_after_a_reload`). Rust only:
-  Swift retried a failed export only when asked, and its reload had the same gap.
+- An export the app was writing when it ended is finished at the next launch (P28 of
+  `.plans/2026-10-07-stable-promotion.md`, amended there to retry failed exports
+  too): after `resume_unfinished`, the launch re-exports, one meeting at a time, every
+  ready meeting whose delivery is still `pending`, or `failed` a day or more before
+  the launch or never attempted (`ProcessingPipeline::redeliver_unfinished`,
+  `Store::meetings_with_unfinished_deliveries`;
+  `exports_left_unfinished_are_re_exported_at_launch`,
+  `launch_re_exports_a_meeting_whose_export_was_left_pending`). After three failed
+  launch re-exports in a row it leaves the failed export alone, and the meeting's
+  export line says "Export to <destination> keeps failing: <reason>" until the
+  user's Export again resets the count (`ExportRetries`, `export-retries.json` in
+  the support directory;
+  `a_failed_export_is_retried_once_a_day_and_left_after_three_failed_launches`,
+  `export_again_resets_the_failed_launch_re_exports`). A launch re-export's failure
+  is logged, not shown as "Export again failed". `persist` marks the export pending
+  (`DeliveryDispatcher::mark_pending`, a `pending` row per configured destination)
+  before it marks the meeting ready, and a summary re-run once its summary is saved,
+  so an exit before the delivery is found too
+  (`the_export_is_marked_pending_before_the_meeting_is_ready`). Rust only: Swift
+  re-exported only when asked. After a rollback to Swift a `pending` row stays
+  `pending`, since Swift has no launch re-export, and the audio's expiry stays
+  deferred until the user exports again, as after a Swift crash mid-export; Swift
+  ignores `export-retries.json`. A meeting deleted while it is re-exported can
+  still get its note, as with Export again.
+- The pipelines a reload builds share one in-flight set (P16; `InFlight`, as they
+  share the `QuitLatch`), so the new pipeline refuses a meeting the retired one
+  still processes or re-exports
+  (`after_a_reload_a_meeting_the_retired_pipeline_re_exports_is_refused`). Swift
+  kept it per pipeline.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file
