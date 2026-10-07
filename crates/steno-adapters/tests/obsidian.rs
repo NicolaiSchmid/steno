@@ -103,6 +103,12 @@ fn without_audio(files: Vec<String>) -> Vec<String> {
     files.into_iter().filter(|f| f != "audio.m4a").collect()
 }
 
+/// The files a delivery without audio writes into `<FOLDER>-2`, the second
+/// folder of the slug.
+fn second_folder_files() -> Vec<String> {
+    without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
+}
+
 fn paths(receipt: &DeliveryReceipt) -> Vec<String> {
     receipt
         .files
@@ -646,10 +652,7 @@ fn a_second_meeting_on_the_same_day_gets_the_next_suffix_and_shares_the_person_p
         vault.list("Meetings"),
         [FOLDER_SLUG.to_owned(), format!("{FOLDER_SLUG}-2")]
     );
-    assert_eq!(
-        vault.list(&format!("{FOLDER}-2")),
-        without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
-    );
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
     for (path, data) in files_one
         .iter()
         .filter(|(path, _)| !path.starts_with("People/"))
@@ -1312,10 +1315,7 @@ fn a_folder_another_writer_claims_first_is_never_shared() {
         their_json,
         "the other writer's meeting.json is untouched"
     );
-    assert_eq!(
-        vault.list(&format!("{FOLDER}-2")),
-        without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
-    );
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
 }
 
 /// Every file directly in `folder` with its bytes, by name.
@@ -1349,10 +1349,7 @@ fn a_redelivery_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_
     let again = deliver(&destination, &ours, Some(&first));
 
     assert_eq!(again.folder, format!("{FOLDER}-2"));
-    assert_eq!(
-        vault.list(&format!("{FOLDER}-2")),
-        without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
-    );
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
     assert_eq!(
         contents(&vault, FOLDER),
         their_files,
@@ -1414,10 +1411,7 @@ fn a_redelivery_that_failed_after_claiming_a_folder_writes_that_folder_the_next_
         destination.deliver_meeting(&ours, Some(&first)),
         Err(ObsidianError::ReadFailed { .. })
     ));
-    assert_eq!(
-        vault.list(&two),
-        without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
-    );
+    assert_eq!(vault.list(&two), second_folder_files());
 
     // The page is fixed and the meeting changed; the receipt is still the
     // one pinned at the lost folder.
@@ -1426,7 +1420,7 @@ fn a_redelivery_that_failed_after_claiming_a_folder_writes_that_folder_the_next_
     let again = deliver(&destination, &changed, Some(&first));
 
     assert_eq!(again.folder, two);
-    let expected: Vec<String> = without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
+    let expected: Vec<String> = second_folder_files()
         .into_iter()
         .map(|name| format!("{two}/{name}"))
         .collect();
@@ -1533,7 +1527,7 @@ fn a_pinned_folder_whose_meeting_json_is_missing_or_names_no_meeting_gets_a_fold
         );
         assert_eq!(
             vault.list(&format!("{FOLDER}-2")),
-            without_audio(meeting_files(&format!("{FOLDER_SLUG}-2"))),
+            second_folder_files(),
             "{damage}"
         );
     }
