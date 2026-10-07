@@ -1779,6 +1779,36 @@ touch lines; each fix is ported to Swift before cutover.
 - Linux shows the tray only where a status notifier host runs (KDE, most desktop
   panels, GNOME with the AppIndicator extension); elsewhere closing the main window
   quits, where the Swift `NSStatusItem` is always in the menu bar.
+- One process per database (Rust only; the stable plan's P15). The app takes an
+  exclusive advisory lock on the database's own lock file, beside it with the extension
+  `lock` (`<support>/steno.lock` for the default `steno.sqlite`), before it opens it,
+  and holds it until it exits (`steno_core::DatabaseLock`, `flock` or `LockFileEx`,
+  which the OS drops when the process ends however it ends). An update's relaunch starts
+  the new process before the old one exits, so the app waits up to 5 s for a held lock
+  (`AppOptions::lock_patience`); the CLI does not wait. A lock file this user cannot
+  write (left by `sudo steno`) is locked through a read-only handle; on a filesystem
+  without locks the app runs without one and logs a warning, and some network
+  filesystems accept the lock without enforcing it (WebDAV on the Mac, measured). A
+  second app on the same database says "Steno is already running" and ends before it
+  opens a window (`refuse_to_start` in the shell's `main.rs`, which also ends the
+  process after 60 s should the alert never close): an app under the old identifier
+  beside one under the new, a Linux session without a bus (no single-instance guard
+  there), or a single-instance connect that failed. The CLI's commands that write
+  (`process`, `deliver`, `dev db`) refuse while another process holds the lock. The ones
+  that only read (`export`, and the settings reads of `dev models`, `dev llm` and
+  `bakeoff --cleanup`) take the lock when it is free, open the database as usual,
+  migrating included, and let go of the lock before they read, so a long read never
+  keeps the app out; beside the app they open it without migrating
+  (`Store::open_without_migrating`), so a newer CLI never changes the schema under an
+  older app, and refuse while the database lacks a migration the CLI would apply.
+  Without the lock each instance failed the other's live recording at launch, processed
+  the same meetings and ran its own retention sweep. The Swift app and the Swift `steno`
+  CLI take no lock, and the Swift app ships no further release, so on the Mac the Rust
+  app looks for it by bundle id (`NSRunningApplication`) and refuses to start while it
+  runs ("An older Steno is running"). A Swift app started after the Rust app is still
+  not kept out, and its launch can fail the Rust app's live recording;
+  `fix/recording-recovery` (#233) makes a Rust launch leave a `recording` row alone
+  while its master still grows.
 - Updates: Sparkle checks daily on its own (`SUEnableAutomaticChecks`,
   `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`); the shell checks only
   when asked (the tray's Check for Updates, `updates.check` from Settings).

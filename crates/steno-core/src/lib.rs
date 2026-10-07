@@ -24,6 +24,7 @@
 //! - [`platform`]: the OS the app runs on, which is also the OS its
 //!   calls were recorded on.
 //! - [`content_hash`]: the SHA-256 every receipt carries.
+//! - [`database_lock`]: the lock that keeps one process per database.
 //! - [`recording_layout`]: where one meeting's audio files live.
 //!
 //! Two rules hold the crate together. It depends on nothing else of ours
@@ -37,6 +38,7 @@
 //! sides; `migrations/README.md` has the procedure.
 
 pub mod content_hash;
+pub mod database_lock;
 pub mod json;
 pub mod model;
 pub mod paths;
@@ -49,6 +51,7 @@ pub mod summary;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use database_lock::{DatabaseLock, DatabaseLockError};
 pub use model::*;
 pub use paths::StenoPaths;
 pub use platform::Platform;

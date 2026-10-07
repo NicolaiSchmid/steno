@@ -123,7 +123,9 @@ fn main() {
     // the main window comes forward.
     if single_instance_available() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            actions::open(app, windows::BridgeWindow::Main);
+            if host::is_running(app) {
+                actions::open(app, windows::BridgeWindow::Main);
+            }
         }));
     }
     builder = builder
@@ -145,7 +147,11 @@ fn main() {
     let app = builder
         // One handler for every menu: the tray's on every platform and
         // the menu bar's on macOS reach the same listeners.
-        .on_menu_event(|app, event| actions::on_menu_event(app, &event))
+        .on_menu_event(|app, event| {
+            if host::is_running(app) {
+                actions::on_menu_event(app, &event);
+            }
+        })
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
@@ -157,9 +163,10 @@ fn main() {
             bridge::panel_call
         ])
         .setup(move |app| {
-            setup(app.handle(), runtime)?;
-            #[cfg(target_os = "linux")]
-            session_end::watch(app.handle(), startup_id);
+            if setup(app.handle(), runtime)? {
+                #[cfg(target_os = "linux")]
+                session_end::watch(app.handle(), startup_id);
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -168,13 +175,31 @@ fn main() {
 }
 
 /// Builds the host, the tray and the main window, opens onboarding when
-/// the host asks for it, and runs the launch sequence.
+/// the host asks for it, and runs the launch sequence. False when the
+/// Swift app runs or another process holds the database: this app then
+/// shows why and ends (`refuse_to_start`), with no host, tray or window.
 fn setup(
     handle: &tauri::AppHandle,
     runtime: &'static tokio::runtime::Runtime,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     #[cfg(not(feature = "fixture-host"))]
-    let host = host::Host::real(handle, runtime)?;
+    if let Some(refusal) = refusal_before_build(platform_app_running) {
+        refuse_to_start(
+            handle,
+            refusal,
+            &format_args!("{SWIFT_BUNDLE_ID} is running"),
+        );
+        return Ok(false);
+    }
+    #[cfg(not(feature = "fixture-host"))]
+    let host = match host::Host::real(handle, runtime) {
+        Ok(host) => host,
+        Err(error) if error.is_database_held() => {
+            refuse_to_start(handle, Refusal::DatabaseHeld, &error);
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
     #[cfg(feature = "fixture-host")]
     let host = host::Host::fixtures();
     let onboarding = host.should_open_onboarding();
@@ -192,7 +217,107 @@ fn setup(
     tray::note_login_item(handle);
     #[cfg(unix)]
     exit_on_signals(handle, runtime);
-    Ok(())
+    Ok(true)
+}
+
+/// The exit code of an app that refused to start (`refuse_to_start`).
+const REFUSED_CODE: i32 = 3;
+
+/// How long a refused app waits for its alert to be closed before it ends
+/// anyway (`refuse_to_start`).
+const REFUSED_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// The Swift app's bundle id. It takes no database lock
+/// (`steno_core::DatabaseLock`), so this app looks for it by name.
+const SWIFT_BUNDLE_ID: &str = "uno.schmid.steno.mac";
+
+/// Why this app refuses to start (`refuse_to_start`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// The Swift app runs: its launch and this one's would fail each
+    /// other's live recording, and it takes no lock to say so.
+    OlderSteno,
+    /// Another process holds the database: another app (an app under the
+    /// old identifier beside one under the new, one the single-instance
+    /// guard missed: Linux without a session bus, a failed connect on the
+    /// Mac), or a `steno` command.
+    DatabaseHeld,
+}
+
+impl Refusal {
+    fn title(self) -> &'static str {
+        match self {
+            Refusal::OlderSteno => "An older Steno is running",
+            Refusal::DatabaseHeld => "Steno is already running",
+        }
+    }
+
+    fn text(self) -> &'static str {
+        match self {
+            Refusal::OlderSteno => "Quit the older Steno app first, then open Steno again.",
+            Refusal::DatabaseHeld => {
+                "Another Steno is already open, or a steno command is running in a terminal. \
+                 Quit it, then open Steno again."
+            }
+        }
+    }
+}
+
+/// The refusal due before the host is built, with `running` answering
+/// whether an app with a bundle id runs ([`platform_app_running`] in the
+/// product): [`Refusal::OlderSteno`] while the Swift app runs. A Swift app
+/// started after this one is not kept out.
+#[cfg(not(feature = "fixture-host"))]
+fn refusal_before_build(running: impl FnOnce(&str) -> bool) -> Option<Refusal> {
+    running(SWIFT_BUNDLE_ID).then_some(Refusal::OlderSteno)
+}
+
+/// Whether an app with `bundle_id` runs on this Mac; always false
+/// elsewhere.
+#[cfg(not(feature = "fixture-host"))]
+fn platform_app_running(bundle_id: &str) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSRunningApplication;
+        use objc2_foundation::NSString;
+
+        NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(
+            bundle_id,
+        ))
+        .count()
+            != 0
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = bundle_id;
+        false
+    }
+}
+
+/// Says why this app does not start ([`Refusal`]) and ends with
+/// [`REFUSED_CODE`] once the alert is closed, before it opens a window or
+/// touches the database: two apps on one database would fail each other's
+/// recordings at launch. Its run loop has no host to shut down
+/// (`host::is_running`). Should the alert never show, or its callback never
+/// run, the process ends after [`REFUSED_PATIENCE`] all the same: it holds
+/// nothing to save. Rust only: the Swift app relied on macOS opening one
+/// copy per bundle id.
+fn refuse_to_start(handle: &tauri::AppHandle, refusal: Refusal, reason: &dyn std::fmt::Display) {
+    use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
+
+    stderr_line!("[steno-desktop] not starting: {reason}");
+    std::thread::spawn(|| {
+        std::thread::sleep(REFUSED_PATIENCE);
+        std::process::exit(REFUSED_CODE);
+    });
+    let app = handle.clone();
+    handle
+        .dialog()
+        .message(refusal.text())
+        .title(refusal.title())
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| app.exit(REFUSED_CODE));
 }
 
 /// A signal that asks for the exit Quit asks for (`exit_on_signals`).
@@ -353,8 +478,12 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
     steno_services::flush_logs();
 }
 
-/// One turn of the run loop.
+/// One turn of the run loop; nothing for an app that refused to start
+/// (`refuse_to_start`), which has no host and ends without a shutdown.
 fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    if !host::is_running(app) {
+        return;
+    }
     match event {
         // Quit from either menu, an exit signal, the smoke's exit, the
         // last window closing with no tray: the shutdown runs first
@@ -609,6 +738,27 @@ fn single_instance_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A running Swift app refuses the start before the host is built; with
+    /// none running the start goes on. Only the Swift app's bundle id is
+    /// asked about.
+    #[cfg(not(feature = "fixture-host"))]
+    #[test]
+    fn a_running_swift_app_refuses_the_start() {
+        assert_eq!(
+            refusal_before_build(|bundle_id| bundle_id == SWIFT_BUNDLE_ID),
+            Some(Refusal::OlderSteno)
+        );
+        assert_eq!(refusal_before_build(|_| false), None);
+        assert_eq!(Refusal::OlderSteno.title(), "An older Steno is running");
+    }
+
+    /// The Mac's query answers false for a bundle id no app carries.
+    #[cfg(all(target_os = "macos", not(feature = "fixture-host")))]
+    #[test]
+    fn an_app_that_is_not_running_reads_as_not_running() {
+        assert!(!platform_app_running("com.nicolaischmid.steno.no-such-app"));
+    }
 
     #[test]
     fn only_the_shells_own_exit_ends_the_process_while_a_tray_stands() {

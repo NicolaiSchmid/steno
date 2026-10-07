@@ -410,7 +410,7 @@ impl ModelsOptions {
         if let Some(directory) = &self.models_directory {
             return Ok(crate::wiring::standardized(directory));
         }
-        let store = self.database.open()?;
+        let store = self.database.open_to_read()?;
         let settings = store.settings().map_err(Failure::runtime)?;
         Ok(steno_services::speech::models_directory(
             &settings,
@@ -594,7 +594,7 @@ impl Bakeoff {
         std::fs::create_dir_all(&output).map_err(Failure::runtime)?;
         let decoder = steno_audio::SymphoniaAudioCodec::new();
         let cleaner: Option<Arc<dyn TranscriptCleaner>> = if self.cleanup {
-            let store = self.models.database.open()?;
+            let store = self.models.database.open_to_read()?;
             let settings = store.settings().map_err(Failure::runtime)?;
             crate::wiring::llm_passes(&settings)
                 .await?
@@ -957,7 +957,11 @@ pub struct EndpointOptions {
 impl EndpointOptions {
     /// The endpoint from the flags over the stored settings.
     fn endpoint(&self) -> Result<LlmEndpoint, Failure> {
-        let mut settings = self.database.open()?.settings().map_err(Failure::runtime)?;
+        let mut settings = self
+            .database
+            .open_to_read()?
+            .settings()
+            .map_err(Failure::runtime)?;
         if let Some(model) = &self.codex_model {
             settings.llm_provider = steno_core::LlmProvider::Codex;
             settings.codex_model = Some(model.clone());

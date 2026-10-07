@@ -76,14 +76,53 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     migrate_with(connection, MIGRATIONS)
 }
 
-/// [`migrate`] over an explicit list; tests pass one with a bad migration.
-fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
+/// Applies nothing: fails when the database records an identifier this
+/// build does not know ([`StoreError::UnknownMigration`], as [`migrate`]
+/// does) or lacks one this build would apply
+/// ([`StoreError::PendingMigration`], the first of them). For a process
+/// that must not migrate under another one; see
+/// [`Store::open_without_migrating`](super::Store::open_without_migrating).
+pub(crate) fn check(connection: &Connection) -> Result<()> {
+    check_with(connection, MIGRATIONS)
+}
+
+fn check_with(connection: &Connection, migrations: &[Migration]) -> Result<()> {
+    let has_table: bool = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'grdb_migrations'",
+        [],
+        |row| row.get::<_, i64>(0).map(|count| count > 0),
+    )?;
+    let applied = if has_table {
+        applied(connection)?
+    } else {
+        Vec::new()
+    };
+    refuse_unknown(&applied, migrations)?;
+    match migrations
+        .iter()
+        .find(|migration| !applied.iter().any(|a| a == migration.identifier))
+    {
+        Some(pending) => Err(StoreError::PendingMigration(pending.identifier.to_owned())),
+        None => Ok(()),
+    }
+}
+
+/// [`StoreError::UnknownMigration`] for the first of `applied` that
+/// `migrations` lacks: a newer build migrated the database.
+fn refuse_unknown(applied: &[String], migrations: &[Migration]) -> Result<()> {
+    let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
+    match applied.iter().find(|identifier| !known(identifier)) {
+        Some(unknown) => Err(StoreError::UnknownMigration(unknown.clone())),
+        None => Ok(()),
+    }
+}
+
+/// [`migrate`] over an explicit list; tests pass one with a bad migration,
+/// and `testing` the list without the newest.
+pub(crate) fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
     connection.execute_batch(MIGRATIONS_TABLE)?;
     let applied = applied(connection)?;
-    let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
-    if let Some(unknown) = applied.iter().find(|identifier| !known(identifier)) {
-        return Err(StoreError::UnknownMigration(unknown.clone()));
-    }
+    refuse_unknown(&applied, migrations)?;
     if applied.len() == migrations.len() {
         return Ok(());
     }
@@ -149,6 +188,79 @@ mod tests {
             sql: "INSERT INTO child (id, parentID) VALUES (1, 42), (2, 43);",
         },
     ];
+
+    /// The check applies nothing and names the first version missing, or
+    /// the first one this build does not know.
+    #[test]
+    fn the_check_names_what_is_missing_or_unknown_and_applies_nothing() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        assert!(matches!(
+            check_with(&connection, BROKEN),
+            Err(StoreError::PendingMigration(first)) if first == "v1"
+        ));
+        migrate_with(&mut connection, &BROKEN[..1]).unwrap();
+        assert!(matches!(
+            check_with(&connection, BROKEN),
+            Err(StoreError::PendingMigration(next)) if next == "v2"
+        ));
+        assert_eq!(applied(&connection).unwrap(), ["v1"], "nothing applied");
+        check_with(&connection, &BROKEN[..1]).unwrap();
+        connection
+            .execute("INSERT INTO grdb_migrations (identifier) VALUES ('v9')", [])
+            .unwrap();
+        assert!(matches!(
+            check_with(&connection, &BROKEN[..1]),
+            Err(StoreError::UnknownMigration(newer)) if newer == "v9"
+        ));
+    }
+
+    /// Opening without migrating reads a database at this build's version,
+    /// refuses one an older build left (naming the version it lacks) and
+    /// one a newer build migrated, and changes neither; a missing file is
+    /// not created.
+    #[test]
+    fn opening_without_migrating_applies_nothing() {
+        use crate::Store;
+        use crate::testing::{database_one_version_behind, recorded_migrations};
+
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current.sqlite");
+        drop(Store::open(&current).unwrap());
+        let store = Store::open_without_migrating(&current).unwrap();
+        assert_eq!(
+            store.applied_migrations().unwrap(),
+            ["v1", "v2", "v3", "v4"]
+        );
+
+        let behind = directory.path().join("behind.sqlite");
+        database_one_version_behind(&behind);
+        let error = Store::open_without_migrating(&behind).expect_err("an older schema is refused");
+        assert!(
+            matches!(error, StoreError::PendingMigration(ref id) if id == "v4"),
+            "{error}"
+        );
+        assert_eq!(
+            recorded_migrations(&behind),
+            ["v1", "v2", "v3"],
+            "nothing was migrated"
+        );
+
+        Connection::open(&current)
+            .unwrap()
+            .execute(
+                "INSERT INTO grdb_migrations (identifier) VALUES ('v99')",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            Store::open_without_migrating(&current),
+            Err(StoreError::UnknownMigration(ref id)) if id == "v99"
+        ));
+
+        let missing = directory.path().join("missing.sqlite");
+        assert!(Store::open_without_migrating(&missing).is_err());
+        assert!(!missing.exists(), "a missing database is not created");
+    }
 
     #[test]
     fn a_migration_breaking_a_foreign_key_rolls_back() {

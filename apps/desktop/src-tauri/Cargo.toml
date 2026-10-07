@@ -53,6 +53,9 @@ zbus.workspace = true
 tauri-nspanel.workspace = true
 objc2.workspace = true
 objc2-av-foundation.workspace = true
+# The Swift app's check (`platform_app_running` in `main.rs`).
+objc2-app-kit.workspace = true
+objc2-foundation.workspace = true
 block2.workspace = true
 
 # The work packages named here are in .plans/2026-10-02-rust-core-and-tauri-shell.md.

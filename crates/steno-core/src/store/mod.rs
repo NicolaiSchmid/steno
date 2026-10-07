@@ -79,6 +79,12 @@ pub enum StoreError {
     /// wrote it, and this one must not touch it.
     #[error("the database was migrated by a newer version ({0})")]
     UnknownMigration(String),
+    /// [`Store::open_without_migrating`] only: the database lacks a
+    /// migration this build would apply (the payload, the first of them),
+    /// so an older app still runs on it, or the app is still migrating it.
+    /// Rust only.
+    #[error("the database lacks migration {0}, which this version would apply")]
+    PendingMigration(String),
     /// GRDB's check before a migration commits: its rows no longer satisfy
     /// the foreign keys, so it was rolled back and the database is as it
     /// was. `count` is every violating row, `table` the one the first of
@@ -164,11 +170,26 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(path)?;
-        connection.busy_timeout(BUSY_TIMEOUT)?;
-        enable_wal(&connection)?;
-        connection.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::new(connection)
+        Self::new(set_up(Connection::open(path)?)?)
+    }
+
+    /// Opens the existing database at `path` as [`Store::open`] does, but
+    /// applies no migration: for a process that runs beside the app that
+    /// holds the database (`steno export` while Steno runs), which must
+    /// not change the schema under it. Fails when the file is missing, and
+    /// when the database records a migration this build does not know
+    /// ([`StoreError::UnknownMigration`]) or lacks one it would apply
+    /// ([`StoreError::PendingMigration`]). Rust only: the Swift CLI always
+    /// migrated.
+    pub fn open_without_migrating(path: impl AsRef<Path>) -> Result<Store> {
+        use rusqlite::OpenFlags;
+        let flags = OpenFlags::default().difference(OpenFlags::SQLITE_OPEN_CREATE);
+        let connection = set_up(Connection::open_with_flags(path, flags)?)?;
+        connection.pragma_update(None, "foreign_keys", true)?;
+        migrator::check(&connection)?;
+        Ok(Store {
+            connection: Mutex::new(connection),
+        })
     }
 
     /// A private in-memory database; tests use this.
@@ -260,6 +281,15 @@ impl Store {
             Ok(())
         })
     }
+}
+
+/// The file connection set up as [`Store::open`] says: the busy timeout,
+/// WAL mode and `synchronous = NORMAL`.
+fn set_up(connection: Connection) -> Result<Connection> {
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    enable_wal(&connection)?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(connection)
 }
 
 /// `PRAGMA journal_mode = WAL`, checked: the pragma answers with the mode

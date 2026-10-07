@@ -527,6 +527,20 @@ pub enum ShellHostError {
     Host(#[from] steno_host::host::HostError),
 }
 
+#[cfg(not(feature = "fixture-host"))]
+impl ShellHostError {
+    /// Whether another process holds the database (`steno_core::DatabaseLock`):
+    /// another Steno app, or a `steno` command.
+    pub fn is_database_held(&self) -> bool {
+        matches!(
+            self,
+            Self::Build(steno_services::BuildError::Lock(
+                steno_core::DatabaseLockError::Held(_)
+            ))
+        )
+    }
+}
+
 /// What the shell manages: the real host, or the fixture answerer.
 pub struct Host {
     #[cfg(not(feature = "fixture-host"))]
@@ -708,4 +722,35 @@ impl Host {
 /// The host the shell manages, from any handle.
 pub fn host(app: &AppHandle) -> tauri::State<'_, Host> {
     app.state::<Host>()
+}
+
+/// Whether the host is managed: false before `setup` built it, and for good
+/// in an app that refused to start (`refuse_to_start` in `main.rs`).
+pub fn is_running(app: &AppHandle) -> bool {
+    app.try_state::<Host>().is_some()
+}
+
+#[cfg(all(test, not(feature = "fixture-host")))]
+mod refusal_tests {
+    use super::ShellHostError;
+
+    /// Only a database another process holds makes the shell refuse to
+    /// start; any other build failure stays an error.
+    #[test]
+    fn only_a_held_database_refuses_the_start() {
+        let held = ShellHostError::Build(steno_services::BuildError::Lock(
+            steno_core::DatabaseLockError::Held("/support/steno.lock".into()),
+        ));
+        assert!(held.is_database_held());
+        let unreadable = ShellHostError::Build(steno_services::BuildError::Lock(
+            steno_core::DatabaseLockError::Io {
+                path: "/support/steno.lock".into(),
+                source: std::io::Error::other("read-only"),
+            },
+        ));
+        assert!(!unreadable.is_database_held());
+        assert!(
+            !ShellHostError::SupportDirectory(std::io::Error::other("full")).is_database_held()
+        );
+    }
 }

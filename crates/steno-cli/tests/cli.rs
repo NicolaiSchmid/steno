@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use steno_core::testing::{database_one_version_behind, recorded_migrations};
+
 struct Run {
     status: i32,
     stdout: String,
@@ -339,6 +341,113 @@ fn a_run_whose_meeting_ends_failed_exits_two_and_says_why() {
         process.stderr
     );
     assert_eq!(process.stdout, "", "no meeting id on a failed run");
+}
+
+/// A command that writes refuses while another process (the app) holds the
+/// database's lock, and runs once it is released; one that only reads runs
+/// beside it.
+#[test]
+fn a_writing_command_refuses_while_the_app_holds_the_database() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db_arg = db.to_str().unwrap();
+    let migrate = ["dev", "db", "migrate", "--db", db_arg];
+    assert_eq!(steno(&migrate, home).status, 0);
+    let wav = fixtures_root().join("audio/sweep-3s.wav");
+    let audio = home.join("audio");
+
+    let app = steno_core::DatabaseLock::acquire(&db).unwrap();
+    for args in [
+        &migrate[..],
+        &["dev", "db", "reindex", "--db", db_arg][..],
+        &[
+            "deliver",
+            "00000000-0000-0000-0000-000000000001",
+            "--db",
+            db_arg,
+        ][..],
+        &[
+            "process",
+            wav.to_str().unwrap(),
+            "--db",
+            db_arg,
+            "--audio-folder",
+            audio.to_str().unwrap(),
+        ][..],
+    ] {
+        let refused = steno(args, home);
+        assert_eq!(refused.status, 2, "{args:?}: {}", refused.stderr);
+        assert!(
+            refused.stderr.contains(&format!(
+                "Steno, or another steno command, is using {db_arg}; quit it first"
+            )),
+            "{args:?}: {}",
+            refused.stderr
+        );
+    }
+    assert!(!audio.exists(), "the refused process copied nothing");
+    let read = export_beside(&db, home);
+    assert!(!read.stderr.contains("quit it first"), "{}", read.stderr);
+
+    drop(app);
+    let migrated = steno(&migrate, home);
+    assert_eq!(migrated.status, 0, "{}", migrated.stderr);
+}
+
+/// `steno export` of a meeting that is not there, on `db`.
+fn export_beside(db: &Path, home: &Path) -> Run {
+    steno(
+        &[
+            "export",
+            "00000000-0000-0000-0000-000000000001",
+            "--db",
+            db.to_str().unwrap(),
+            "--out",
+            home.join("out").to_str().unwrap(),
+        ],
+        home,
+    )
+}
+
+/// A command that only reads, beside the app, opens the database without
+/// migrating it: it runs on a database at this build's version and changes
+/// nothing, and refuses one an older app still runs on (or the app is
+/// still migrating) rather than migrate the schema under it.
+#[test]
+fn a_reading_command_beside_the_app_never_migrates() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let current = home.join("current.sqlite");
+    let migrate = steno(
+        &["dev", "db", "migrate", "--db", current.to_str().unwrap()],
+        home,
+    );
+    assert_eq!(migrate.status, 0, "{}", migrate.stderr);
+    let before = recorded_migrations(&current);
+    let _app = steno_core::DatabaseLock::acquire(&current).unwrap();
+    let read = export_beside(&current, home);
+    assert!(
+        read.stderr.contains("not found"),
+        "it opened the database and looked the meeting up: {}",
+        read.stderr
+    );
+    assert_eq!(recorded_migrations(&current), before);
+
+    let older = home.join("older.sqlite");
+    database_one_version_behind(&older);
+    let before = recorded_migrations(&older);
+    let _older_app = steno_core::DatabaseLock::acquire(&older).unwrap();
+    let refused = export_beside(&older, home);
+    assert_eq!(refused.status, 2, "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains(
+            "Steno is updating its database, or an older Steno is running; quit it first, then run this command again."
+        ),
+        "{}",
+        refused.stderr
+    );
+    assert_eq!(recorded_migrations(&older), before, "nothing was migrated");
 }
 
 #[test]
