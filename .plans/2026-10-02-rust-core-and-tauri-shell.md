@@ -1398,12 +1398,16 @@ touch lines; each fix is ported to Swift before cutover.
   its save (Swift `revokeStarts`, Rust the count). A recording already admitted
   answers 200 with its meeting id after a revoke during the read, and its receipt
   leaves memory. The phone marks that recording `delivered` and deletes its copy also
-  when an unpair moved the row to `unpaired` while the `complete` was out (`TRANSITIONS`
-  in `mobile/src/features/queue/queue-index.ts` allows `unpaired` to `delivered`), so
-  a later pairing does not upload it again as a second meeting. A refused `complete`
-  leaves the row `unpaired` with its file, and the next pairing queues it again. Both
-  bind the hash to the file the intake gets: the partial's
-  identity is taken before the `verifying` write and checked before the promote, and a
+  when an unpair moved the row to `unpaired`, or a new pairing queued it again, while
+  the `complete` was out (`TRANSITIONS` in `mobile/src/features/queue/queue-index.ts`
+  allows `unpaired` and `queued` to `delivered`), so no pairing uploads it again as a
+  second meeting. Until that `complete` answers, the planner (`planNext` in
+  `mobile/src/features/sync/upload-coordinator.ts`) announces nothing for the row, so
+  its 200 cannot delete the file under a new pairing's upload. A refused `complete`
+  leaves the row `unpaired` with its file, or `queued` with a backoff after a new
+  pairing, and the new pairing uploads it. Both apps bind the hash to the file the
+  intake gets: the partial's identity is taken before the `verifying` write and
+  checked before the promote, and a
   partial gone or created again meanwhile (a stale `complete`'s refusal, then the
   phone's retried announce) answers 409 with no chunk listed, so the phone sends every
   chunk again instead of the intake admitting an empty file. Swift compares APFS file
@@ -1834,7 +1838,7 @@ PR off `main`.
 | A `complete` receipt stays `complete`, a racing first announce answers as a re-announce, and a revoked device's late write leaves another device's receipt alone (Swift core, the counterpart of #208) | `fix/swift-handover-complete-stays` | #209 | merged |
 | Small fixes after the port: non-Unicode environment variables, `steno process --title` as the user's title, logs that never wait for stderr, the headless PipeWire script's socket paths, a pnpm setup directory per CI job | `fix/rust-small-after-port` | #202 | merged |
 | Only a 401 to the current pairing's token unpairs the phone (`mobile/`) | `fix/mobile-current-pairing-401` | #200 | merged |
-| A `complete` answered after an unpair still delivers the recording and deletes the phone's copy (`mobile/`) | `fix/mobile-complete-after-unpair` | #211 | open |
+| A `complete` answered after an unpair, or after a new pairing, still delivers the recording and deletes the phone's copy (`mobile/`) | `fix/mobile-complete-after-unpair` | #211 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
