@@ -10,10 +10,6 @@ string_enum! {
     /// runs the app (a phone's arrives as [`MeetingSource::Phone`]), so
     /// this is also the platform a call was recorded on.
     ///
-    /// The bridge re-exports it as `steno_bridge::Platform`: the Tauri shell
-    /// sets the raw value as the page global `window.__STENO_PLATFORM__`,
-    /// and a page with nothing set is the Swift app's, always the Mac.
-    ///
     /// [`MeetingSource::Phone`]: crate::MeetingSource::Phone
     pub enum Platform {
         Macos = "macos",

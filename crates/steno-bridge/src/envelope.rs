@@ -299,6 +299,25 @@ string_enum! {
     }
 }
 
+impl PermissionKind {
+    /// The permissions `platform` has, in onboarding's order. The Mac has
+    /// all four. Windows has the microphone privacy switch and the firewall
+    /// prompt for the phone's connection; it records system audio without
+    /// a permission and Steno reads no calendar there. Linux has the
+    /// microphone (the portal asks inside a sandbox) and nothing else.
+    /// `READS_CALENDAR` in `apps/macos/web/src/lib/platform.tsx` says
+    /// whether the list has the calendar, for the General section's
+    /// calendar row; `tests/fixtures.rs` compares the two.
+    #[must_use]
+    pub const fn for_platform(platform: Platform) -> &'static [PermissionKind] {
+        match platform {
+            Platform::Macos => PermissionKind::ALL,
+            Platform::Windows => &[PermissionKind::Microphone, PermissionKind::LocalNetwork],
+            Platform::Linux => &[PermissionKind::Microphone],
+        }
+    }
+}
+
 string_enum! {
     /// Swift: `BridgePermissionState`.
     pub enum PermissionState {
@@ -357,35 +376,11 @@ string_enum! {
     }
 }
 
-/// The OS the host runs on, which decides the page's words ("this Mac" or
-/// "this computer", Finder or File Explorer) and its shortcut keys (⌘ or
-/// Ctrl). Not a message: the Tauri shell sets it as
-/// `window.__STENO_PLATFORM__` before the page's scripts run, and a page
-/// with nothing set is the Swift app's, always the Mac. The host words its
-/// own sentences and lists the permissions
-/// ([`PermissionKind::for_platform`]) for the same value. Defined in
-/// `steno_core`, where the exported notes name the platform a call was
-/// recorded on with it. Swift: none; the Swift app is the Mac.
+/// Swift: none; the Swift app is the Mac. `steno_core`'s type itself: the
+/// Tauri shell sets its raw value as `window.__STENO_PLATFORM__` before the
+/// page's scripts run, and a page with nothing set is the Swift app's.
+/// [`PermissionKind::for_platform`] lists its permissions.
 pub use steno_core::Platform;
-
-impl PermissionKind {
-    /// The permissions `platform` has, in onboarding's order. The Mac has
-    /// all four. Windows has the microphone privacy switch and the firewall
-    /// prompt for the phone's connection; it records system audio without
-    /// a permission and Steno reads no calendar there. Linux has the
-    /// microphone (the portal asks inside a sandbox) and nothing else.
-    /// `READS_CALENDAR` in `apps/macos/web/src/lib/platform.tsx` says
-    /// whether the list has the calendar, for the General section's
-    /// calendar row; `tests/fixtures.rs` compares the two.
-    #[must_use]
-    pub const fn for_platform(platform: Platform) -> &'static [PermissionKind] {
-        match platform {
-            Platform::Macos => PermissionKind::ALL,
-            Platform::Windows => &[PermissionKind::Microphone, PermissionKind::LocalNetwork],
-            Platform::Linux => &[PermissionKind::Microphone],
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
