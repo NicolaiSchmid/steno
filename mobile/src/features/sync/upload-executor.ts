@@ -165,15 +165,13 @@ export function createUploadExecutor(
 			error instanceof HandoverError && error.status === 409
 				? (announceConflicts.get(recordingID) ?? 0) + 1
 				: 0;
-		if (count > 0 && count < ANNOUNCE_CONFLICTS_BEFORE_FAILED) {
-			announceConflicts.set(recordingID, count);
-		} else {
-			announceConflicts.delete(recordingID);
-		}
 		if (count < ANNOUNCE_CONFLICTS_BEFORE_FAILED) {
+			if (count > 0) announceConflicts.set(recordingID, count);
+			else announceConflicts.delete(recordingID);
 			await fail(recordingID, error, token);
 			return;
 		}
+		announceConflicts.delete(recordingID);
 		await deps.update((current) => {
 			const rec = findRecording(current, recordingID);
 			return rec && isPending(rec)
