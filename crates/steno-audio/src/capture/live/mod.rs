@@ -29,7 +29,7 @@ pub use hal::CoreAudioError;
 #[cfg(target_os = "linux")]
 pub mod pipewire;
 #[cfg(target_os = "linux")]
-pub use pipewire::LiveCaptureBackend;
+pub use pipewire::{AudioDevices, LiveCaptureBackend};
 
 #[cfg(windows)]
 pub mod wasapi;
@@ -41,12 +41,13 @@ pub use stub::LiveCaptureBackend;
 
 /// One device as the app's input picker (and, on the Mac,
 /// `steno dev audio-devices`) sees it. `uid` is the stable identifier
-/// `Settings.input_device_uid` stores. Filled in by Core Audio on macOS and
-/// by WASAPI on Windows; Linux has no device list yet.
+/// `Settings.input_device_uid` stores. Filled in by Core Audio on macOS, by
+/// WASAPI on Windows and from the PipeWire registry on Linux (inputs only).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioDeviceInfo {
     /// The `AudioObjectID`, valid until the device goes away; on Windows
-    /// the index in the enumeration (WASAPI has no numeric ids).
+    /// the index in the enumeration (WASAPI has no numeric ids), on Linux
+    /// the node's global id.
     pub id: u32,
     /// The stable UID `Settings` stores.
     pub uid: String,

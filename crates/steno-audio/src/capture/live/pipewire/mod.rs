@@ -42,7 +42,11 @@
 //! Two roundtrips bring the registry's nodes and ports and the `default`
 //! metadata (`graph` keeps them). The targets resolve from it: the input
 //! node (by UID, its `node.name`, or the default source) and the default
-//! sink. The stream asks for 48 kHz `f32` with one `AUXn` channel per
+//! sink. A UID that names no source the capture can record (one saved on
+//! a Mac, a microphone unplugged since it was chosen) records the default
+//! source, with a warning, and the capture then follows the default as
+//! one without a UID does; a rebuild's restart tries the UID again. The
+//! stream asks for 48 kHz `f32` with one `AUXn` channel per
 //! linked port; PipeWire's adapter resamples whatever the graph runs at,
 //! so the rate is always [`SAMPLE_RATE`] and never a mismatch. The stream
 //! is connected without `AUTOCONNECT`, so the session manager leaves it
@@ -87,6 +91,7 @@
 //! monitor keeps the sink running, so, unlike the Mac's call mode, cycles
 //! arrive with nothing playing.
 
+mod devices;
 mod graph;
 
 use std::cell::{Cell, RefCell};
@@ -103,6 +108,8 @@ use pw::spa;
 use pw::types::ObjectType;
 use steno_core::AudioLane;
 
+pub use self::devices::AudioDevices;
+pub(crate) use self::graph::is_source_class;
 use self::graph::{Graph, Latency, Lost, Targets};
 use crate::SAMPLE_RATE;
 use crate::capture::{
@@ -133,7 +140,7 @@ const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The capture stream's `node.name`.
-const STREAM_NODE_NAME: &str = "steno-capture";
+pub(crate) const STREAM_NODE_NAME: &str = "steno-capture";
 
 /// The capture's way into the sink, closed for good by `stop()`, or by a
 /// `start` that failed, before it waits for the thread. Two kinds of pass
@@ -684,20 +691,34 @@ impl Capture {
         sink: Arc<LaneFrameSink>,
         gate: Arc<Gate>,
     ) -> Result<Self, CaptureError> {
-        let deadline = Instant::now() + START_TIMEOUT;
+        let started = Instant::now();
+        let deadline = started + START_TIMEOUT;
         let connection = Connection::open()?;
         // The first roundtrip brings the globals and binds the `default`
         // metadata, the second its properties.
         connection.roundtrip(deadline)?;
         connection.roundtrip(deadline)?;
-        let targets = connection
-            .shared
-            .graph
-            .borrow()
-            .resolve(lanes, input_device_uid)?;
+        let (targets, input_device_uid) = {
+            let graph = connection.shared.graph.borrow();
+            let known = graph.known_source(input_device_uid);
+            let targets = graph.resolve(lanes, known)?;
+            if let (Some(uid), None, Some(_)) = (input_device_uid, known, &targets.mic) {
+                tracing::warn!(
+                    "the input device {uid} is not connected; recording from the default source"
+                );
+            }
+            (targets, known)
+        };
         let mut capture = Self::new(connection, targets, input_device_uid, sink, gate)?;
         capture.link(deadline)?;
         capture.measure(deadline)?;
+        tracing::info!(
+            "the PipeWire capture runs {} ms after start: input latency {} frames, output \
+             latency {} frames",
+            started.elapsed().as_millis(),
+            capture.info.input_latency_frames,
+            capture.info.output_latency_frames
+        );
         Ok(capture)
     }
 
@@ -878,10 +899,15 @@ impl Capture {
     /// links run.
     fn measure(&mut self, deadline: Instant) -> Result<(), CaptureError> {
         let connection = &self.connection;
+        let linked = Instant::now();
         if !connection.pump_until(deadline, || self.cycle_frames.load(Ordering::Acquire) > 0) {
             return Err(connection.stalled("run the capture"));
         }
         let cycle = self.cycle_frames.load(Ordering::Relaxed);
+        tracing::debug!(
+            "the first cycle, {cycle} frames, came {} ms after linking",
+            linked.elapsed().as_millis()
+        );
         let clock = self.stream.time().ok().map(|time| time.rate());
         // Its own deadline: a first cycle late in the start's must not cut
         // the read short and leave the far-end delay at zero.
