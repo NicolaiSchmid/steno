@@ -7,6 +7,12 @@ use std::process::ExitCode;
 use steno_speech_sidecar::{Options, serve};
 
 fn main() -> ExitCode {
+    // The app names its support directory, where a panic leaves its log
+    // beside the app's (`steno_core::crash_log`); stderr still carries the
+    // panic to the parent's crash report.
+    if let Some(directory) = std::env::var_os(steno_core::crash_log::DIRECTORY_VARIABLE) {
+        steno_core::crash_log::write_crash_logs(directory.into(), Some("sidecar"));
+    }
     match Options::parse(std::env::args_os().skip(1)) {
         Ok(options) => serve(&options),
         Err(error) => {

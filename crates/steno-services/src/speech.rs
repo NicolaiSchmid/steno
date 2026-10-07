@@ -140,6 +140,7 @@ impl SpeechSetup {
         let mut sidecar = sidecar_config();
         // The client asks for it on Windows only.
         sidecar.options.directml = speech_settings.directml_on_windows;
+        sidecar.crash_log_directory = Some(paths.support_directory.clone());
         SpeechSetup {
             models_directory,
             speech_settings,

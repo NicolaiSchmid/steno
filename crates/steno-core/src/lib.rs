@@ -26,6 +26,8 @@
 //! - [`platform`]: the OS the app runs on, which is also the OS its
 //!   calls were recorded on.
 //! - [`content_hash`]: the SHA-256 every receipt carries.
+//! - [`crash_log`]: a file in the support directory for every panic, in
+//!   the app and in the speech sidecar.
 //! - [`database_lock`]: the lock that keeps one process per database.
 //! - [`recording_layout`]: where one meeting's audio files live.
 //!
@@ -40,6 +42,7 @@
 //! sides; `migrations/README.md` has the procedure.
 
 pub mod content_hash;
+pub mod crash_log;
 pub mod database_lock;
 pub mod json;
 pub mod model;

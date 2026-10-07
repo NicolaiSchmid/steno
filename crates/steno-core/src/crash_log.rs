@@ -2,11 +2,13 @@
 //! opened from the Finder, the Dock or at login has its stderr thrown
 //! away, so a panic on the Mac left no trace at all. [`write_crash_logs`]
 //! installs a panic hook that writes `crash-<UTC time>.log` into a folder
-//! (the shell passes the support directory) with the panic's message, its
-//! location, the thread and a backtrace, keeps the newest
-//! [`KEPT_CRASH_LOGS`] of them, and then runs the hook it replaced (the
-//! log queue's flush and the default message on stderr). Rust only: the
-//! Swift app had the system's crash reporter.
+//! (the support directory) with the panic's message, its location, the
+//! thread and a backtrace, keeps the newest [`KEPT_CRASH_LOGS`] of them,
+//! and then runs the hook it replaced (the log queue's flush and the
+//! default message on stderr). The desktop shell installs it first thing;
+//! the speech sidecar installs it when its parent names the folder in
+//! [`DIRECTORY_VARIABLE`], and its files end in `-sidecar.log`. Rust only:
+//! the Swift app had the system's crash reporter.
 //!
 //! The file stays on the computer, as every log does; nothing sends it.
 
@@ -21,18 +23,23 @@ pub const KEPT_CRASH_LOGS: usize = 20;
 /// Every crash log's name starts with this and ends in `.log`.
 const PREFIX: &str = "crash-";
 
+/// The environment variable a parent sets to the folder a child process
+/// writes its crash logs into: the speech sidecar's.
+pub const DIRECTORY_VARIABLE: &str = "STENO_CRASH_LOG_DIRECTORY";
+
 /// Installs the panic hook (see the module doc) over the one installed
-/// now, so call it after [`log_to_stderr`](crate::log_to_stderr), and
-/// trims `folder` to the newest [`KEPT_CRASH_LOGS`] files. The folder is
-/// created at the first panic if it is missing.
+/// now, so the shell calls it after its log output, and trims `folder` to
+/// the newest [`KEPT_CRASH_LOGS`] files. `process` names a child process
+/// in the file name (`Some("sidecar")`); the app passes `None`. The folder
+/// is created at the first panic if it is missing.
 ///
 /// ```no_run
-/// steno_services::log_to_stderr(steno_services::LOG_FILTER);
-/// steno_services::crash_log::write_crash_logs(
+/// steno_core::crash_log::write_crash_logs(
 ///     steno_core::StenoPaths::default_support_directory(),
+///     None,
 /// );
 /// ```
-pub fn write_crash_logs(folder: PathBuf) {
+pub fn write_crash_logs(folder: PathBuf, process: Option<&'static str>) {
     prune(&folder, KEPT_CRASH_LOGS);
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
@@ -42,9 +49,23 @@ pub fn write_crash_logs(folder: PathBuf) {
         let message = panic_message(panic.payload());
         let backtrace = std::backtrace::Backtrace::force_capture();
         // A failed write must not panic inside the panic hook.
-        if let Ok(path) = write_crash_log(&folder, Utc::now(), &message, &location, &backtrace) {
+        let written = write_crash_log(
+            &folder,
+            process,
+            Utc::now(),
+            &message,
+            &location,
+            &backtrace,
+        );
+        if let Ok(path) = written {
             prune(&folder, KEPT_CRASH_LOGS);
-            eprintln!("steno: the crash is described in {}", path.display());
+            // Not `eprintln!`, which panics, and so aborts, once stderr is
+            // gone (the sidecar's parent may have closed it).
+            let _ = writeln!(
+                std::io::stderr(),
+                "steno: the crash is described in {}",
+                path.display()
+            );
         }
         previous(panic);
     }));
@@ -65,6 +86,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// path. A second panic in the same millisecond gets a numbered name.
 fn write_crash_log(
     folder: &Path,
+    process: Option<&str>,
     at: DateTime<Utc>,
     message: &str,
     location: &str,
@@ -72,6 +94,9 @@ fn write_crash_log(
 ) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(folder)?;
     let stamp = at.format("%Y-%m-%dT%H-%M-%S%.3fZ");
+    let suffix = process
+        .map(|process| format!("-{process}"))
+        .unwrap_or_default();
     let thread = std::thread::current();
     let text = format!(
         "Steno {} panicked at {location} on thread '{}' ({})\n{message}\n\nbacktrace:\n{backtrace}\n",
@@ -82,9 +107,9 @@ fn write_crash_log(
     let mut attempt = 0u32;
     loop {
         let name = if attempt == 0 {
-            format!("{PREFIX}{stamp}.log")
+            format!("{PREFIX}{stamp}{suffix}.log")
         } else {
-            format!("{PREFIX}{stamp}-{attempt}.log")
+            format!("{PREFIX}{stamp}{suffix}-{attempt}.log")
         };
         let path = folder.join(name);
         match std::fs::OpenOptions::new()
@@ -143,6 +168,7 @@ mod tests {
         let folder = dir.path().join("support");
         let path = write_crash_log(
             &folder,
+            None,
             at(5),
             "index out of range",
             "src/x.rs:1:2",
@@ -162,8 +188,8 @@ mod tests {
     #[test]
     fn two_crashes_in_one_millisecond_get_two_files() {
         let dir = tempfile::tempdir().unwrap();
-        let first = write_crash_log(dir.path(), at(5), "one", "a", &"").unwrap();
-        let second = write_crash_log(dir.path(), at(5), "two", "a", &"").unwrap();
+        let first = write_crash_log(dir.path(), None, at(5), "one", "a", &"").unwrap();
+        let second = write_crash_log(dir.path(), None, at(5), "two", "a", &"").unwrap();
         assert_ne!(first, second);
         assert!(std::fs::read_to_string(second).unwrap().contains("two"));
     }
@@ -171,9 +197,10 @@ mod tests {
     #[test]
     fn only_the_newest_crash_logs_are_kept() {
         let dir = tempfile::tempdir().unwrap();
-        for second in 0..5 {
-            write_crash_log(dir.path(), at(second), "boom", "a", &"").unwrap();
+        for second in 0..4 {
+            write_crash_log(dir.path(), None, at(second), "boom", "a", &"").unwrap();
         }
+        write_crash_log(dir.path(), Some("sidecar"), at(4), "boom", "a", &"").unwrap();
         std::fs::write(dir.path().join("steno.sqlite"), b"").unwrap();
         prune(dir.path(), 2);
         let mut left: Vec<String> = std::fs::read_dir(dir.path())
@@ -185,7 +212,7 @@ mod tests {
             left,
             [
                 "crash-2026-10-07T12-00-03.000Z.log",
-                "crash-2026-10-07T12-00-04.000Z.log",
+                "crash-2026-10-07T12-00-04.000Z-sidecar.log",
                 "steno.sqlite"
             ]
         );
