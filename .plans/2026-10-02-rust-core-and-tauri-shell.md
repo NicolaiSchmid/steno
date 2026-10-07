@@ -1563,7 +1563,8 @@ item to settle before the Linux release:
   average of 9: the first cycle comes 2 to 43 ms after the links, and the
   whole `start` (connection, two roundtrips, links, first cycle,
   latencies) takes 6 to 47 ms, 26 ms in the median; over 72 starts at a
-  load average of 18 to 27, 5 to 474 ms, 28 ms in the median; `start` logs its
+  load average of 18 to 27, 5 to 474 ms, 28 ms in the median, and over 114
+  at 21 to 43, 18 to 908 ms, 90 ms in the median; `start` logs its
   length at `info`, the first cycle's wait at `debug`. The session holds its
   mutex across `backend.start()`, so its callers, `state()` included, wait
   as long: expected 1 to 2 s for a Bluetooth sink, against the Mac's 200 ms
