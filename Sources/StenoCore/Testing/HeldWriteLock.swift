@@ -24,9 +24,9 @@ extension MeetingStore {
   /// An on-disk store at `url` whose `checkpointDurably()` throws
   /// `SQLITE_BUSY` until the returned lock is released: another connection
   /// holds the write lock, and the store does not wait on a busy lock
-  /// (GRDB's default, where `onDisk` waits five seconds), so the test does
-  /// not wait either.
-  public static func withCheckpointBlocked(at url: URL) throws -> (MeetingStore, HeldWriteLock) {
+  /// (GRDB's default; `onDisk` sets five seconds), so the test does not
+  /// wait either.
+  public static func checkpointBlocked(at url: URL) throws -> (MeetingStore, HeldWriteLock) {
     let store = try MeetingStore(writer: DatabasePool(path: url.path))
     return (store, try HeldWriteLock(on: url))
   }

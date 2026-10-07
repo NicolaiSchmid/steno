@@ -114,20 +114,37 @@ public final class MeetingStore: Sendable {
     }
   }
 
-  /// Copies every commit in the WAL into the database file and syncs both
-  /// (`checkpoint(.full)` under `synchronous = FULL` with `fullfsync` on),
-  /// so everything the store reads is on the disk when this returns. The
-  /// app runs it at launch, before the handover listener starts: after a
-  /// crash, recovery can read back a commit whose WAL sync failed, and the
-  /// intake would answer a phone's retry `complete` from that commit. A
-  /// failed sync throws, and so does a checkpoint another connection still
-  /// blocks when the busy timeout runs out (`SQLITE_BUSY`), since the
-  /// commits it could not copy are not known to be on the disk. An
-  /// in-memory store has no WAL and returns at once.
+  /// Copies every commit in the WAL into the database file, syncs it, and
+  /// starts the WAL over, so a power loss afterwards brings back what the
+  /// store reads now. `HandoverService.checkpointStore(_:)` runs it at
+  /// launch, before the handover listener starts, and says why.
+  /// `checkpoint(.restart)` under `synchronous = FULL` with `fullfsync` on
+  /// copies the frames, syncs the database file and waits until no reader
+  /// is left in the WAL. That leaves the WAL file as it was: after a failed
+  /// WAL sync it can still hold older frames under their old salt, which
+  /// recovery after a power loss would replay over the checkpointed pages.
+  /// So one durable write that changes a page follows, in the same writer
+  /// access: a private table created and dropped, which leaves the schema
+  /// and the applied migrations as they were. Its commit restarts the WAL
+  /// with a new salt and syncs the header and its frames, and recovery
+  /// skips every frame under the old salt. A failed sync throws, and so
+  /// does a checkpoint that another connection (a writer, or a reader still
+  /// in the WAL) blocks when the busy timeout runs out (`SQLITE_BUSY`),
+  /// since the commits it could not copy are not known to be on the disk.
+  /// An in-memory store has no WAL and returns at once.
   /// Rust: `Store::checkpoint_durably`.
   public func checkpointDurably() async throws {
     try await writer.writeWithoutTransaction { db in
-      try Self.underFullSync(db) { _ = try db.checkpoint(.full) }
+      try Self.underFullSync(db) {
+        let (walFrameCount, _) = try db.checkpoint(.restart)
+        guard walFrameCount >= 0 else { return }
+        // A commit that changes no page (an update to the same value)
+        // writes no frame and leaves the WAL as it is.
+        try db.inTransaction(.immediate) {
+          try db.execute(sql: "CREATE TABLE stenoWalRestart(x); DROP TABLE stenoWalRestart")
+          return .commit
+        }
+      }
     }
   }
 

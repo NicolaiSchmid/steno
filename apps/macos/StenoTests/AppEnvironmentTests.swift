@@ -27,7 +27,7 @@ final class AppEnvironmentTests: XCTestCase {
   func testAStoreThatCannotSyncKeepsTheHandoverOff() async throws {
     let directory = try TestSupport.temporaryDirectory("steno-sync")
     defer { try? FileManager.default.removeItem(at: directory) }
-    let (store, other) = try MeetingStore.withCheckpointBlocked(
+    let (store, other) = try MeetingStore.checkpointBlocked(
       at: directory.appendingPathComponent("steno.sqlite"))
     let configuration = HandoverConfiguration(
       serviceName: "Test Mac", advertise: false,

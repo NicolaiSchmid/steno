@@ -727,6 +727,7 @@ import Testing
   /// A durable checkpoint leaves every commit in the database file itself:
   /// a copy of that file without its WAL holds the last commit. It runs
   /// under `FULL` and sets `NORMAL` back, like a durable write.
+  /// Rust: `a_durable_checkpoint_copies_every_commit_into_the_database_file`.
   @Test func aDurableCheckpointCopiesEveryCommitIntoTheDatabaseFile() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -748,10 +749,11 @@ import Testing
   /// A checkpoint another connection blocks past the busy timeout (here
   /// none, so the test does not wait) throws `SQLITE_BUSY` and sets
   /// `NORMAL` back; once the other connection lets go it succeeds.
+  /// Rust: `a_checkpoint_another_connection_blocks_fails_as_busy`.
   @Test func aCheckpointAnotherConnectionBlocksThrowsBusy() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
-    let (store, other) = try MeetingStore.withCheckpointBlocked(
+    let (store, other) = try MeetingStore.checkpointBlocked(
       at: directory.appendingPathComponent("steno.sqlite"))
 
     let error = await #expect(throws: DatabaseError.self) { try await store.checkpointDurably() }
@@ -759,6 +761,86 @@ import Testing
     #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
 
     try other.release()
+    try await store.checkpointDurably()
+  }
+
+  /// The salt in the WAL file's header (bytes 16 to 24), which every valid
+  /// frame repeats: recovery replays only frames under the header's salt.
+  static func walSalt(_ database: URL) throws -> Data {
+    let wal = URL(fileURLWithPath: database.path + "-wal")
+    return try Data(contentsOf: wal).subdata(in: 16..<24)
+  }
+
+  /// The schema rows and the applied migrations, as the schema dump reads
+  /// them.
+  static func schema(_ db: Database) throws -> [String] {
+    try String.fetchAll(
+      db,
+      sql: """
+        SELECT type || ' ' || name || ' ' || ifnull(sql, '') FROM sqlite_master ORDER BY name
+        """) + String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations")
+  }
+
+  /// A durable checkpoint starts the WAL over: the file's header has a new
+  /// salt, so recovery after a power loss replays none of the frames
+  /// written before it. The write that restarts it leaves the schema and
+  /// the applied migrations as they were.
+  /// Rust: `a_durable_checkpoint_restarts_the_wal`.
+  @Test func aDurableCheckpointRestartsTheWAL() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("steno.sqlite")
+    let store = try MeetingStore.onDisk(at: url)
+    try await store.save(SampleData.meeting())
+    let salt = try Self.walSalt(url)
+    let schema = try await store.writer.read(Self.schema)
+
+    try await store.checkpointDurably()
+
+    #expect(try Self.walSalt(url) != salt, "the WAL restarted")
+    #expect(try await store.writer.read(Self.schema) == schema)
+    #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
+  }
+
+  /// A reader still in the WAL blocks the checkpoint, on an older snapshot
+  /// and on the newest one alike: the WAL cannot restart under it. The
+  /// checkpoint throws `SQLITE_BUSY` (the store does not wait on a busy
+  /// lock here, so the test does not wait) and succeeds once the reader
+  /// has ended. Rust: `a_reader_in_the_wal_blocks_the_checkpoint`.
+  @Test func aReaderInTheWALBlocksTheCheckpoint() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("steno.sqlite")
+    let store = try MeetingStore(writer: DatabasePool(path: url.path))
+    var configuration = Configuration()
+    configuration.allowsUnsafeTransactions = true
+    let reader = try DatabaseQueue(path: url.path, configuration: configuration)
+    let beginReading = {
+      try reader.inDatabase { db in
+        try db.execute(sql: "BEGIN")
+        _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM meeting")
+      }
+    }
+    let endReading = { try reader.inDatabase { db in try db.execute(sql: "COMMIT") } }
+    let save = { (n: Int) in
+      var meeting = SampleData.meeting()
+      meeting.id = SampleData.uuid(n)
+      try await store.save(meeting)
+    }
+    try await save(1)
+
+    try beginReading()
+    try await save(2)
+    let older = await #expect(throws: DatabaseError.self) { try await store.checkpointDurably() }
+    #expect(older?.resultCode == .SQLITE_BUSY, "older snapshot")
+    try endReading()
+
+    try await save(3)
+    try beginReading()
+    let newest = await #expect(throws: DatabaseError.self) { try await store.checkpointDurably() }
+    #expect(newest?.resultCode == .SQLITE_BUSY, "newest snapshot")
+    try endReading()
+
     try await store.checkpointDurably()
   }
 
