@@ -33,7 +33,8 @@ pub(super) fn no_such_recording() -> HandoverResponse {
 
 impl Engine {
     /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
-    /// recording, 200 for a known one, both with `RecordingStatus`.
+    /// recording, 200 for a known one, both with `RecordingStatus`; 401 when
+    /// the device was revoked during the receipt read.
     pub(super) async fn announce(
         &self,
         recording_id: Uuid,
@@ -97,10 +98,16 @@ impl Engine {
         // line goes to the save whatever `open_files` did, and nothing
         // between `change` and the save yields. A failed opening leaves the
         // receipt saved without files, so the phone's retried announce
-        // reopens them as a re-announce.
-        let opened = self.open_files(&metadata);
-        if let Err(error) = self.save(receipt.clone(), place).await {
-            self.discard_own(recording_id, device.id, false);
+        // reopens them as a re-announce. A device revoked during the receipt
+        // read opens none and is answered 401: its receipt stayed out of
+        // memory.
+        let opened = self.open_files(&metadata, device.id);
+        let saved = self.save(receipt.clone(), place).await;
+        let Some(opened) = opened else {
+            return Self::unauthorized();
+        };
+        if let Err(error) = saved {
+            self.discard_own(recording_id, device.id);
             return HandoverResponse::internal_error("saving the receipt", &error);
         }
         if let Err(error) = opened {
@@ -114,7 +121,8 @@ impl Engine {
     /// reopened when it is gone (a sweep, a crash before the first chunk),
     /// with the same receipt and an empty chunk set; a verified file waiting
     /// for a second intake attempt keeps its chunk set, so the phone's retry
-    /// (announce, then complete) sends no chunk twice. A receipt a
+    /// (announce, then complete) sends no chunk twice. 401 with nothing
+    /// opened when the device was revoked during the receipt read. A receipt a
     /// `complete` admitted meanwhile stays `complete` ([`Engine::update`]),
     /// the answer says so, and the files this announce opened go.
     async fn reannounce(
@@ -142,9 +150,10 @@ impl Engine {
                 "metadata differs from the first announcement",
             );
         }
-        let received_chunks = match self.reopen_missing_files(metadata) {
-            Ok(reopened) => reopened.then(Vec::new),
-            Err(error) => {
+        let received_chunks = match self.reopen_missing_files(metadata, device.id) {
+            None => return Self::unauthorized(),
+            Some(Ok(reopened)) => reopened.then(Vec::new),
+            Some(Err(error)) => {
                 return HandoverResponse::internal_error("opening the partial file", &error);
             }
         };
@@ -158,7 +167,7 @@ impl Engine {
         // meanwhile: a stale `complete` would find them and verify an empty
         // partial.
         if receipt.state.kind() == HandoverStateKind::Complete {
-            self.discard_own(recording_id, device.id, false);
+            self.discard_own(recording_id, device.id);
         }
         HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt))
     }
@@ -331,7 +340,8 @@ impl Engine {
     /// That revoke may have missed the receipt, so its files are discarded
     /// and it leaves memory, unless memory holds another device's receipt
     /// of the recording id by then: another phone announced it after the
-    /// revoke, and the files are that phone's ([`Engine::discard_own`]).
+    /// revoke, and the files are that phone's
+    /// ([`Engine::discard_and_forget_own`]).
     fn refusal(
         &self,
         recording_id: Uuid,
@@ -341,7 +351,7 @@ impl Engine {
         if !self.revoked_since(device, revocation) {
             return None;
         }
-        self.discard_own(recording_id, device.id, true);
+        self.discard_and_forget_own(recording_id, device.id);
         Some(Self::unauthorized())
     }
 
@@ -446,7 +456,7 @@ impl Engine {
             return Verification::Answered(self.replaced_during_the_verify(receipt).await);
         }
         if !verified {
-            self.discard_own(recording_id, device.id, false);
+            self.discard_own(recording_id, device.id);
             let _ = self
                 .transition(
                     receipt,
@@ -495,7 +505,7 @@ impl Engine {
         device: &PairedDevice,
     ) -> HandoverResponse {
         if self.state().revoked.contains(&device.id) {
-            self.discard_own(recording_id, device.id, false);
+            self.discard_own(recording_id, device.id);
         }
         Self::unauthorized()
     }
@@ -548,7 +558,7 @@ impl Engine {
             .transition(receipt, HandoverState::Complete { meeting_id }, None)
             .await;
         let _ = std::fs::remove_file(file);
-        self.discard_own(recording_id, device.id, false);
+        self.discard_own(recording_id, device.id);
         HandoverResponse::json(StatusCode::OK, &wire::CompleteResponse { meeting_id })
     }
 
@@ -565,5 +575,101 @@ impl Engine {
             state: receipt.state.kind(),
             received_chunks: receipt.received_chunks.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! White-box checks of what a request on another worker thread can
+    //! leave in the synchronous stretches no gate of the integration tests
+    //! can stop: the state is built by hand, and the step after the
+    //! stretch is called as its route calls it.
+
+    use std::sync::Arc;
+
+    use chrono::{TimeZone as _, Utc};
+    use steno_core::testing::FakeHandoverIntake;
+    use steno_core::{AudioFormat, PairedDevice, RecordingMetadata, Store};
+    use tokio::sync::watch;
+    use uuid::Uuid;
+
+    use crate::configuration::HandoverConfiguration;
+    use crate::engine::Engine;
+    use crate::identity::HandoverIdentity;
+
+    fn device(name: &str) -> PairedDevice {
+        PairedDevice {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            paired_at: Utc.timestamp_opt(1_789_990_000, 0).unwrap(),
+            last_seen_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refusal_leaves_another_devices_receipt_and_files_alone() {
+        // Phone X's `complete` read X's receipt from the store (not
+        // remembered, X revoked), X's revoke bumped the count, and phone Y
+        // announced the same recording id, which made its receipt and
+        // opened its files, all on other threads between the read's return
+        // and the refusal. The refusal then leaves Y's upload alone.
+        let directory = tempfile::tempdir().unwrap();
+        let now = Utc.timestamp_opt(1_790_000_000, 0).unwrap();
+        let configuration = HandoverConfiguration {
+            service_name: "Test".to_owned(),
+            advertise: false,
+            inbox_directory: directory.path().join("inbox"),
+            ..HandoverConfiguration::default()
+        };
+        let store = Arc::new(Store::in_memory().unwrap());
+        let x = device("X");
+        let y = device("Y");
+        store.save_paired_device(&x, &[1; 32]).unwrap();
+        store.save_paired_device(&y, &[2; 32]).unwrap();
+        let engine = Engine::new(
+            configuration,
+            Arc::new(HandoverIdentity::mint("Test", now).unwrap()),
+            store,
+            Arc::new(FakeHandoverIntake::default()),
+            watch::channel(Vec::new()).0,
+            Arc::new(move || now),
+        );
+
+        // The count X's `complete` takes before its receipt read.
+        let revocation = engine.state().revocation_count(x.id);
+        engine.revoke(x.id).await.unwrap();
+        let recording_id = Uuid::new_v4();
+        let metadata = RecordingMetadata {
+            recording_id,
+            started_at: Utc.timestamp_opt(1_789_990_000, 0).unwrap(),
+            duration_seconds: 1.0,
+            byte_count: 3,
+            sha256: vec![7; 32],
+            chunk_size: 64 * 1024,
+            format: AudioFormat::M4aAac,
+            device_name: "Y".to_owned(),
+        };
+        let announced = engine
+            .announce(recording_id, &y, &serde_json::to_vec(&metadata).unwrap())
+            .await;
+        assert_eq!(announced.status, http::StatusCode::CREATED);
+
+        let refused = engine.refusal(recording_id, &x, revocation);
+        assert_eq!(
+            refused.map(|response| response.status),
+            Some(http::StatusCode::UNAUTHORIZED)
+        );
+        let held = engine.state().active_receipts.get(&recording_id).cloned();
+        assert_eq!(
+            held.map(|receipt| receipt.device_id),
+            Some(y.id),
+            "Y's receipt stays"
+        );
+        assert!(engine.inbox.has_partial(recording_id), "Y's partial stays");
+        assert_eq!(
+            engine.inbox.load_metadata(recording_id),
+            Some(metadata),
+            "and so does its sidecar"
+        );
     }
 }

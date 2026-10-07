@@ -30,14 +30,14 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
 use common::{EngineDevice, Phone, ScriptedIntake, StoreHold, TestService, chunks, seeded_bytes};
-use steno_core::{HandoverIntake, HandoverState, RecordingMetadata};
+use steno_core::{HandoverIntake, HandoverState, RecordingMetadata, Store};
 use steno_handover::engine::{
     AuthOutcome, Engine, HandoverResponse, Principal, RequestHandling as _,
 };
 use steno_handover::pairing::DeviceTokens;
 use steno_handover::route::Route;
 use steno_handover::{HandoverService, wire};
-use tokio::task::unconstrained;
+use tokio::task::{Unconstrained, unconstrained};
 use uuid::Uuid;
 
 const CHUNK_SIZE: i64 = 256 * 1024;
@@ -418,17 +418,12 @@ impl Restarted {
         (completing.await, again)
     }
 
-    /// Runs `complete` to just after its store read, then revokes the
-    /// device (and pairs it again with `pairs_again`), and hands back the
-    /// `complete`, not polled since its read returned.
-    ///
-    /// `complete` runs to its store read and waits there: the store is
-    /// held, so the read cannot finish before the first poll returns. This
-    /// takes the store read to be the first point where `complete` waits;
-    /// an await added before it would leave the read for after the revoke,
-    /// and the tests fail with a 404 (the row is gone) instead of a 401.
-    /// The future runs unconstrained, so a wake means the read returned,
-    /// never that tokio's budget ran out.
+    /// Runs `complete` to just after its store read
+    /// ([`past_the_store_read`]), then revokes the device (and pairs it
+    /// again with `pairs_again`), and hands back the `complete`, not polled
+    /// since its read returned. An await added before the read would leave
+    /// it for after the revoke, and the tests fail with a 404 (the row is
+    /// gone) instead of a 401.
     async fn revoke_during_the_read(
         &self,
         pairs_again: bool,
@@ -436,12 +431,8 @@ impl Restarted {
         Pin<Box<impl Future<Output = HandoverResponse> + '_>>,
         Option<EngineDevice>,
     ) {
-        let hold = StoreHold::new(&self.first.store);
-        let woken = Woken::new();
-        let mut completing = Box::pin(unconstrained(self.phone.complete(self.id())));
-        woken.pending(completing.as_mut(), "complete waits on the store read");
-        hold.release();
-        woken.wait("the store read returns").await;
+        let completing =
+            past_the_store_read(&self.first.store, self.phone.complete(self.id())).await;
         self.service.revoke(self.phone.device.id).await.unwrap();
         let again = if pairs_again {
             Some(self.phone.pair_again().await)
@@ -450,6 +441,25 @@ impl Restarted {
         };
         (completing, again)
     }
+}
+
+/// Runs `request` to its first store read and waits there until the read
+/// has returned, then hands it back, not polled since. The store is held,
+/// so the read cannot finish before the first poll returns; this takes the
+/// store read to be the first point where `request` waits. The future runs
+/// unconstrained, so a wake means the read returned, never that tokio's
+/// budget ran out.
+async fn past_the_store_read<F: Future>(
+    store: &Arc<Store>,
+    request: F,
+) -> Pin<Box<Unconstrained<F>>> {
+    let hold = StoreHold::new(store);
+    let woken = Woken::new();
+    let mut request = Box::pin(unconstrained(request));
+    woken.pending(request.as_mut(), "the request waits on the store read");
+    hold.release();
+    woken.wait("the store read returns").await;
+    request
 }
 
 /// A revoke that lands while `complete` reads the store finds nothing in
@@ -653,8 +663,7 @@ async fn a_refused_complete_leaves_another_phones_announce_alone() {
     // read found nothing, while the old `complete` goes on and is refused:
     // the refusal discards the files the revoke missed and forgets the
     // receipt. The announce makes its receipt and opens its files only
-    // after that, so both stay. Before, the announce opened its files
-    // before it made its receipt, and the refusal discarded them.
+    // after that, so both stay.
     let restarted = Restarted::new().await;
     let id = restarted.id();
     let (completing, _) = restarted.revoke_during_the_read(false).await;
@@ -681,6 +690,63 @@ async fn a_refused_complete_leaves_another_phones_announce_alone() {
         .await;
     assert_eq!(other.complete(id).await.status.as_u16(), 200);
     assert_eq!(restarted.intake.count(), 1);
+}
+
+#[tokio::test]
+async fn a_reannounce_of_a_phone_revoked_during_its_read_opens_no_files() {
+    // After a restart the receipt is only in the store, and its files are
+    // gone (a sweep). A revoke lands while the phone's re-announce reads the
+    // receipt, so the receipt stays out of memory. The re-announce is
+    // refused before it opens files: files with no receipt in memory would
+    // be no device's, and another phone's discard would take them.
+    let restarted = Restarted::new().await;
+    let id = restarted.id();
+    restarted.first.inbox().discard(id);
+    let announcing = past_the_store_read(
+        &restarted.first.store,
+        restarted.phone.announce(&restarted.metadata),
+    )
+    .await;
+    restarted
+        .service
+        .revoke(restarted.phone.device.id)
+        .await
+        .unwrap();
+
+    assert_eq!(announcing.await.status.as_u16(), 401);
+    assert!(restarted.files_are_gone(), "no file is opened");
+    assert!(restarted.service.engine.receipts_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn a_first_announce_of_a_phone_revoked_during_its_read_opens_no_files() {
+    // A revoke whose store delete fails lands while the phone's first
+    // announce of a recording reads the store: the device stays in the
+    // store, so the receipt's save goes through, but memory keeps it out.
+    // The announce opens no files and is answered 401.
+    let test = TestService::with(common::Options {
+        chunk_size: DIRECT_CHUNK_SIZE,
+        start: false,
+        ..common::Options::default()
+    })
+    .await;
+    let phone = EngineDevice::paired(&test, "Direct iPhone").await;
+    let bytes = seeded_bytes(DIRECT_CHUNK_SIZE as usize, 96);
+    let metadata = phone.metadata(&bytes, DIRECT_CHUNK_SIZE);
+    let id = metadata.recording_id;
+    common::execute_batch(
+        &test.store,
+        "CREATE TEMP TRIGGER refuse_revoke BEFORE DELETE ON pairedDevice \
+         BEGIN SELECT RAISE(ABORT, 'refused'); END",
+    );
+    let announcing = past_the_store_read(&test.store, phone.announce(&metadata)).await;
+    assert!(test.service.revoke(phone.device.id).await.is_err());
+
+    assert_eq!(announcing.await.status.as_u16(), 401);
+    let inbox = test.inbox();
+    assert!(!inbox.has_partial(id), "no partial is opened");
+    assert!(inbox.load_metadata(id).is_none(), "and no sidecar");
+    assert!(test.service.engine.receipts_snapshot().is_empty());
 }
 
 /// What the bearer gate of the computer, started again over `test`'s
