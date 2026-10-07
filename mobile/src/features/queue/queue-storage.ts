@@ -299,12 +299,12 @@ export type RecorderAdoption = {
 /**
  * The recordings in the recorder's directory (`recorderEntries`) that no
  * crash recovery will move: a file is left in place when it is not named
- * like an expo-audio recording, is below `MIN_RECORDING_BYTES` (no meaningful audio;
- * the recorder's file for the next recording starts as a header), or a
- * `recording` row names it as its `sourceUri` (`planRecovery` moves it under
- * that row). Every other one, a crash before its row was saved, becomes a new
- * queue file named after the UUID in the recorder's name, unless a row or a
- * queue file already has that name.
+ * like an expo-audio recording, is below `MIN_RECORDING_BYTES` (no
+ * meaningful audio; the recorder's file for the next recording starts as a
+ * header), or a `recording` row names it as its `sourceUri` (`planRecovery`
+ * moves it under that row). Every other one, a crash before its row was
+ * saved, becomes a new queue file named after the UUID in the recorder's
+ * name, unless a row or a queue file already has that name.
  */
 export function recorderFilesToMove(
 	index: QueueIndex,

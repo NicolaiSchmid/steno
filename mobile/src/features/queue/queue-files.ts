@@ -56,7 +56,10 @@ export const expoQueueFiles: QueueFileAPI = {
 		if (!directory.exists) return [];
 		// The modification time, then the load time, stand in for a creation
 		// time the file system does not report, so the row still gets a valid
-		// `startedAt`.
+		// `startedAt`. An unknown size lists as 0, unlike in crash recovery:
+		// on that load a file with no row is not adopted, and a hashless
+		// `queued` or `unpaired` row fails as interrupted, but the file stays
+		// and the first load that reads its size adopts it or reopens the row.
 		return directory
 			.list()
 			.filter((entry) => entry instanceof File)
