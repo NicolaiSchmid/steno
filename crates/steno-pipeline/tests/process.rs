@@ -722,18 +722,18 @@ fn speaker<'a>(speakers: &'a [steno_core::Speaker], label: &str) -> &'a steno_co
         .unwrap_or_else(|| panic!("no speaker {label}"))
 }
 
-/// A summarizer that keeps the speakers each call saw and answers as
+/// A summarizer that keeps the input each call saw and answers as
 /// [`FakeSummarizer`] does.
 #[derive(Default)]
-struct SpeakerRecordingSummarizer(Mutex<Vec<Vec<steno_core::Speaker>>>);
+struct RecordingSummarizer(Mutex<Vec<steno_core::SummaryInput>>);
 
 #[async_trait]
-impl steno_core::MeetingSummarizer for SpeakerRecordingSummarizer {
+impl steno_core::MeetingSummarizer for RecordingSummarizer {
     async fn summarize(
         &self,
         input: &steno_core::SummaryInput,
     ) -> steno_core::protocols::BoundaryResult<steno_core::SummaryOutput> {
-        self.0.lock().unwrap().push(input.speakers.clone());
+        self.0.lock().unwrap().push(input.clone());
         Ok(FakeSummarizer::output(
             input,
             FakeSummarizer::default().usage,
@@ -748,7 +748,7 @@ impl steno_core::MeetingSummarizer for SpeakerRecordingSummarizer {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_speaker_named_during_cleanup_stays_named() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let summarizer = Arc::new(SpeakerRecordingSummarizer::default());
+    let summarizer = Arc::new(RecordingSummarizer::default());
     let pipeline = meddling(
         &world,
         // Confirms "Speaker 1" as Anna and clears the clip of "Speaker 2",
@@ -799,17 +799,20 @@ async fn a_speaker_named_during_cleanup_stays_named() {
     assert_eq!(seen.len(), 1);
     assert!(
         seen[0]
+            .speakers
             .iter()
             .any(|speaker| speaker.id == first.id && speaker.assignment == anna),
         "the summary names the confirmed speaker"
     );
 }
 
-/// A title the user types while the meeting processes is kept: the
-/// stages' writes leave a title whose stored origin is `user` alone.
+/// A title the user types while the meeting processes is kept, and the
+/// summary is made with it: the stages' writes leave a title whose stored
+/// origin is `user` alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_title_typed_while_processing_is_kept() {
     let world = world(false, None, AudioRetention::KeepForever);
+    let summarizer = Arc::new(RecordingSummarizer::default());
     let pipeline = meddling(
         &world,
         |store, input| {
@@ -821,7 +824,7 @@ async fn a_title_typed_while_processing_is_kept() {
                 )
                 .unwrap();
         },
-        Arc::new(FakeSummarizer::default()),
+        summarizer.clone(),
     );
     let mut meeting = call_meeting(world.now);
     // No calendar event, so the summary would replace a default title.
@@ -836,10 +839,14 @@ async fn a_title_typed_while_processing_is_kept() {
     assert!(stored.summary.is_some());
     assert_eq!(stored.title, "Typed while processing");
     assert_eq!(stored.title_origin, steno_core::TitleOrigin::User);
+    assert_eq!(
+        summarizer.0.lock().unwrap()[0].meeting.title,
+        "Typed while processing"
+    );
 }
 
 /// A run without a summarizer (the LLM was turned off since) keeps the
-/// summary, tasks and decisions an earlier run wrote.
+/// summary, tasks, decisions and name suggestions an earlier run wrote.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
     let world = world(true, None, AudioRetention::KeepForever);
@@ -1747,7 +1754,7 @@ async fn a_failing_speaker_match_keeps_the_speakers_unknown() {
     assert_eq!(export.segments.len(), 12);
 }
 
-/// A diarizer failure once the app quits is not papered over: the run
+/// A diarizer failure once the app quits does not fall back: the run
 /// stops without persisting, so the meeting is processed again, speakers
 /// and all, at the next launch.
 #[tokio::test(flavor = "multi_thread")]
@@ -1849,6 +1856,132 @@ async fn a_failing_diarizer_on_the_mic_lane_makes_it_the_room() {
     );
 }
 
+/// A re-run of a call whose mic lane was diarized as the room keeps the
+/// room's stored speakers on the mic lane when its diarizer fails: a
+/// confirmation stays, and the mic never goes back to "me".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_of_a_mic_room_whose_diarizer_fails_keeps_its_speakers() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepForever,
+        engine_deaf_to_silence(),
+        FakeDiarizer::default(),
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    silence_the_tap(&asset);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let first = world.store.export(meeting.id).unwrap();
+    assert_eq!(labels(&first), ["Speaker 1", "Speaker 2"]);
+    let anna = sample_data::person(0, "Anna");
+    let confirmed = speaker(&first.speakers, "Speaker 1").id;
+    world.store.confirm_speaker(confirmed, &anna).unwrap();
+
+    with_failing_diarizer(&world, "no model")
+        .process(asset.id)
+        .await
+        .unwrap();
+
+    let again = world.store.export(meeting.id).unwrap();
+    assert_eq!(again.meeting.state, MeetingState::Ready);
+    assert_eq!(labels(&again), labels(&first));
+    assert_eq!(again.participants, [], "no \"me\" participant");
+    assert_eq!(
+        speaker(&again.speakers, "Speaker 1").assignment,
+        steno_core::SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    assert_eq!(again.segments.len(), first.segments.len());
+    for (segment, before) in again.segments.iter().zip(&first.segments) {
+        assert_eq!(segment.lane, AudioLane::Mic);
+        assert_eq!(segment.speaker_id, before.speaker_id, "{segment:?}");
+    }
+}
+
+/// When a re-run diarizes the other lane than the run before (the tap
+/// went quiet, so the mic is now the room) and its diarizer fails, the
+/// stored speakers keep their rows and confirmations but none of the new
+/// lane's words: those go to one unknown room speaker.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_on_the_other_lane_whose_diarizer_fails_gives_it_the_room_speaker() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepForever,
+        engine_deaf_to_silence(),
+        FakeDiarizer::default(),
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let first = world.store.export(meeting.id).unwrap();
+    assert_eq!(labels(&first), ["Me", "Speaker 1", "Speaker 2"]);
+    let anna = sample_data::person(0, "Anna");
+    let confirmed = speaker(&first.speakers, "Speaker 1").id;
+    world.store.confirm_speaker(confirmed, &anna).unwrap();
+
+    silence_the_tap(&asset);
+    with_failing_diarizer(&world, "no model")
+        .process(asset.id)
+        .await
+        .unwrap();
+
+    let again = world.store.export(meeting.id).unwrap();
+    assert_eq!(again.meeting.state, MeetingState::Ready);
+    let kept = again
+        .speakers
+        .iter()
+        .find(|kept| kept.id == confirmed)
+        .expect("the confirmed speaker keeps its row");
+    assert_eq!(
+        kept.assignment,
+        steno_core::SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    let room = steno_core::derived_uuid(meeting.id, "speaker-room");
+    assert!(again.speakers.iter().any(|speaker| speaker.id == room));
+    assert_ne!(again.segments, Vec::new());
+    assert!(
+        again
+            .segments
+            .iter()
+            .all(|segment| segment.lane == AudioLane::Mic && segment.speaker_id == Some(room)),
+        "{:?}",
+        again.segments
+    );
+}
+
+/// A re-run whose diarizer fails again keeps the room speaker the first
+/// failure made, with the name the user gave it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_diarizer_failure_keeps_the_named_room_speaker() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let pipeline = with_failing_diarizer(&world, "no model");
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    let room = steno_core::derived_uuid(meeting, "speaker-room");
+    let anna = sample_data::person(0, "Anna");
+    world.store.confirm_speaker(room, &anna).unwrap();
+    let asset = world.store.asset(meeting).unwrap().unwrap();
+
+    pipeline.process(asset.id).await.unwrap();
+
+    let again = world.store.export(meeting).unwrap();
+    assert_eq!(labels(&again), ["Me", "Speaker 1"]);
+    assert_eq!(
+        speaker(&again.speakers, "Speaker 1").assignment,
+        steno_core::SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    assert!(
+        again
+            .segments
+            .iter()
+            .filter(|segment| segment.lane == AudioLane::System)
+            .all(|segment| segment.speaker_id == Some(room))
+    );
+}
+
 /// A diarizer failure the run goes on after is logged at warn with its
 /// meeting and stage only: the reason can name the audio file.
 #[tokio::test(flavor = "multi_thread")]
@@ -1878,6 +2011,7 @@ struct PanickingOnceReady {
     store: Arc<Store>,
     meeting_id: Uuid,
     ticks: TickingClock,
+    panicked: std::sync::atomic::AtomicBool,
 }
 
 impl MonotonicClock for PanickingOnceReady {
@@ -1887,21 +2021,32 @@ impl MonotonicClock for PanickingOnceReady {
             .meeting(self.meeting_id)
             .unwrap()
             .is_some_and(|meeting| meeting.state == MeetingState::Ready);
-        assert!(!ready, "the clock broke after the ready write");
+        if ready
+            && !self
+                .panicked
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("the clock broke after the ready write");
+        }
         self.ticks.seconds()
     }
 }
 
-/// A meeting `persist` marked ready stays ready, even when the run panics
-/// after that write.
+/// A meeting `persist` marked ready stays ready, and is delivered, even
+/// when the run panics after that write.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panic_after_the_ready_write_leaves_the_meeting_ready() {
-    let world = world(false, None, AudioRetention::KeepForever);
+    let world = world(
+        false,
+        Some(|vault| FakeDestination::new(vault)),
+        AudioRetention::KeepForever,
+    );
     let meeting = call_meeting(world.now);
     let clock = PanickingOnceReady {
         store: world.store.clone(),
         meeting_id: meeting.id,
         ticks: TickingClock(Mutex::new(0.0)),
+        panicked: std::sync::atomic::AtomicBool::new(false),
     };
     let pipeline = ProcessingPipeline::new(
         world
@@ -1914,6 +2059,9 @@ async fn a_panic_after_the_ready_write_leaves_the_meeting_ready() {
     pipeline.enqueue(&meeting, &asset).unwrap();
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    let deliveries = world.store.deliveries(meeting.id).unwrap();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].status, DeliveryStatus::Delivered);
 }
 
 /// A failed background run is logged at warn with its asset and stage
