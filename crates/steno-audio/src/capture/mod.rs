@@ -12,7 +12,7 @@ pub mod session;
 pub mod snapshot;
 pub mod split_streams;
 
-pub use backend::{CaptureBackend, CaptureStream};
+pub use backend::{CaptureBackend, CaptureInput, CaptureStream};
 pub use configuration::{
     CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult, CaptureState,
     CaptureStatistics, DeviceChangeReason, LaneLevel, LaneLevels,

@@ -113,7 +113,8 @@ pub(crate) use self::graph::is_source_class;
 use self::graph::{Graph, Latency, Lost, Targets};
 use crate::SAMPLE_RATE;
 use crate::capture::{
-    CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot, LaneSource,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
+    LaneSource,
 };
 use crate::realtime::{LaneFrameSink, deliver_slices, interleaved_view};
 
@@ -365,6 +366,9 @@ pub(crate) fn connect() -> Result<
 #[derive(Default)]
 struct Shared {
     graph: RefCell<Graph>,
+    /// Whether the connection binds the `default` metadata: a capture does,
+    /// the device list does not (see `AudioDevices::inputs`).
+    reads_defaults: bool,
     /// The `default` metadata once bound: its global id, its listener,
     /// then the proxy, so the listener drops first.
     metadata: RefCell<Option<(u32, pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
@@ -418,16 +422,29 @@ impl Shared {
             return;
         };
         match global.type_ {
-            ObjectType::Node => self
-                .graph
-                .borrow_mut()
-                .add_node(global.id, |k| props.get(k)),
-            ObjectType::Port => self
-                .graph
-                .borrow_mut()
-                .add_port(global.id, |k| props.get(k)),
+            // The chosen source announced (again) is a change: a capture
+            // standing in with the default then returns to it.
+            ObjectType::Node => {
+                if self
+                    .graph
+                    .borrow_mut()
+                    .add_node(global.id, |k| props.get(k))
+                {
+                    self.changed();
+                }
+            }
+            ObjectType::Port => {
+                if self
+                    .graph
+                    .borrow_mut()
+                    .add_port(global.id, |k| props.get(k))
+                {
+                    self.changed();
+                }
+            }
             ObjectType::Metadata
-                if props.get("metadata.name") == Some("default")
+                if self.reads_defaults
+                    && props.get("metadata.name") == Some("default")
                     && self.metadata.borrow().is_none() =>
             {
                 let Some(registry) = registry.upgrade() else {
@@ -508,10 +525,15 @@ impl Drop for Connection {
 }
 
 impl Connection {
-    fn open() -> Result<Self, CaptureError> {
+    /// A connection and its registry view; `reads_defaults` binds the
+    /// `default` metadata too.
+    fn open(reads_defaults: bool) -> Result<Self, CaptureError> {
         let (main_loop, context, core, registry) =
             connect().map_err(CaptureError::BackendFailed)?;
-        let shared = Rc::new(Shared::default());
+        let shared = Rc::new(Shared {
+            reads_defaults,
+            ..Shared::default()
+        });
         let core_listener = core
             .add_listener_local()
             .done({
@@ -715,23 +737,27 @@ impl Capture {
     ) -> Result<Self, CaptureError> {
         let started = Instant::now();
         let deadline = started + START_TIMEOUT;
-        let connection = Connection::open()?;
+        let connection = Connection::open(true)?;
         // The first roundtrip brings the globals and binds the `default`
         // metadata, the second its properties.
         connection.roundtrip(deadline)?;
         connection.roundtrip(deadline)?;
-        let (targets, input_device_uid) = {
+        let (targets, input) = {
             let graph = connection.shared.graph.borrow();
-            let known = graph.known_source(input_device_uid);
-            let targets = graph.resolve(lanes, known)?;
-            if let (Some(uid), None, Some(_)) = (input_device_uid, known, &targets.mic) {
+            let targets = graph.resolve(lanes, graph.known_source(input_device_uid))?;
+            let input = graph.input(&targets, input_device_uid);
+            if let (Some(uid), Some(input)) = (input_device_uid, &input)
+                && input.is_fallback
+            {
                 tracing::warn!(
-                    "the input device {uid} is not connected; recording from the default source"
+                    "the input device {uid} is not connected; recording from the default \
+                     source {}",
+                    input.uid
                 );
             }
-            (targets, known)
+            (targets, input)
         };
-        let mut capture = Self::new(connection, targets, input_device_uid, sink, gate)?;
+        let mut capture = Self::new(connection, targets, input_device_uid, input, sink, gate)?;
         capture.link(deadline)?;
         capture.measure(deadline)?;
         tracing::info!(
@@ -745,11 +771,14 @@ impl Capture {
     }
 
     /// The capture stream for `targets` with its two listeners, not yet
-    /// connected.
+    /// connected. `input_device_uid` is the UID asked for, which the
+    /// snapshot keeps following ([`Graph::snapshot`]), and `input` the
+    /// microphone it resolved to.
     fn new(
         connection: Connection,
         targets: Targets,
         input_device_uid: Option<&str>,
+        input: Option<CaptureInput>,
         sink: Arc<LaneFrameSink>,
         gate: Arc<Gate>,
     ) -> Result<Self, CaptureError> {
@@ -805,6 +834,7 @@ impl Capture {
                 input_latency_frames: 0,
                 output_latency_frames: 0,
                 layout: Some(targets.layout.clone()),
+                input,
             },
             targets,
             input_device_uid: input_device_uid.map(str::to_owned),
@@ -1410,6 +1440,7 @@ mod tests {
             input_latency_frames: 0,
             output_latency_frames: 0,
             layout: None,
+            input: None,
         }
     }
 

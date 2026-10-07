@@ -36,11 +36,13 @@
 //! `info` unless a non-empty `RUST_LOG` says otherwise.
 //!
 //! The input list and the meeting detection's source run here too: the
-//! list names the test microphone as the default input and follows a
-//! source coming and going, and a `pw-record` of the microphone shows up
-//! holding it with its pid and goes when it ends, with a change for both,
-//! while Steno's own capture is never listed; an unknown microphone UID
-//! records the default source.
+//! list names the test microphone and follows a source coming and going,
+//! and a list while the session manager is stopped leaves a capture's
+//! default moves reported; a `pw-record` of the microphone shows up holding
+//! it with its pid and goes when it ends, with a change for both, while
+//! Steno's own capture is never listed. An unknown microphone UID records the default
+//! source, says so in the stream and follows default moves; a chosen
+//! microphone announced later is a change, and the restart records it.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -69,7 +71,8 @@ use steno_audio::capture::{ChannelRef, DeviceChangeReason};
 use steno_audio::testing::rt::CountingAllocator;
 use steno_audio::writer::WavStreamWriter;
 use steno_audio::{
-    CaptureBackend, CaptureError, CaptureStream, LaneFrameSink, LiveCaptureBackend, SAMPLE_RATE,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, LaneFrameSink, LiveCaptureBackend,
+    SAMPLE_RATE,
 };
 use steno_core::AudioLane;
 
@@ -528,17 +531,66 @@ fn in_person_records_only_the_microphone_by_its_uid() {
     stop_and_check_teardown(&backend, &sink);
 }
 
+/// The test microphone, standing in for a chosen one that is missing.
+fn test_mic_standing_in() -> CaptureInput {
+    CaptureInput {
+        uid: MIC.to_owned(),
+        name: "Steno test microphone".to_owned(),
+        is_fallback: true,
+    }
+}
+
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn an_unknown_microphone_records_the_default_source() {
+fn an_unknown_microphone_records_the_default_source_and_follows_it() {
     let _mic_tone = Tone::into_source(MIC, MIC_TONE);
     let lanes = [AudioLane::Mixed];
-    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     // A Core Audio UID, as a settings file synced from a Mac holds.
-    start(&backend, &lanes, Some("BuiltInMicrophoneDevice"), &sink).expect("start");
+    let stream = start(&backend, &lanes, Some("BuiltInMicrophoneDevice"), &sink).expect("start");
+    assert_eq!(stream.input, Some(test_mic_standing_in()));
     let audio = collect(&sink, 24_000);
     assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
+    // Standing in, the capture follows the default as one without a UID.
+    let other = TemporaryMic::create("steno-test-mic-default");
+    let _restore = DefaultSource;
+    DefaultSource::set(other.name);
+    assert_eq!(
+        next_report(&reasons),
+        DeviceChangeReason::DefaultInputChanged,
+        "{}",
+        default_metadata()
+    );
+    stop_and_check_teardown(&backend, &sink);
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
+    const LATER: &str = "steno-test-mic-later";
+    let lanes = [AudioLane::Mixed];
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    let stream = start(&backend, &lanes, Some(LATER), &sink).expect("start");
+    assert_eq!(stream.input, Some(test_mic_standing_in()));
+    let later = TemporaryMic::create(LATER);
+    assert_eq!(
+        next_report(&reasons),
+        DeviceChangeReason::DefaultInputChanged,
+        "its arrival"
+    );
+    // The session's rebuild: stop, re-arm, start again.
+    stop(&backend);
+    sink.rearm_device_change();
+    let stream = start(&backend, &lanes, Some(LATER), &sink).expect("the restart");
+    assert_eq!(
+        stream.input.map(|input| (input.uid, input.is_fallback)),
+        Some((LATER.to_owned(), false)),
+        "the chosen microphone again"
+    );
+    later.destroy();
+    assert_eq!(next_report(&reasons), DeviceChangeReason::InputDeviceGone);
     stop_and_check_teardown(&backend, &sink);
 }
 
@@ -598,6 +650,32 @@ impl Drop for DefaultSink {
     fn drop(&mut self) {
         Self::set(SINK);
         // Let WirePlumber move the default back before the next test.
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Puts the configured default source back when dropped.
+struct DefaultSource;
+
+impl DefaultSource {
+    fn set(name: &str) {
+        assert!(tool(
+            "pw-metadata",
+            &[
+                "-n",
+                "default",
+                "0",
+                "default.configured.audio.source",
+                &format!("{{ \"name\": \"{name}\" }}"),
+                "Spa:String:JSON",
+            ]
+        ));
+    }
+}
+
+impl Drop for DefaultSource {
+    fn drop(&mut self) {
+        Self::set(MIC);
         std::thread::sleep(Duration::from_millis(500));
     }
 }
@@ -1215,7 +1293,7 @@ fn inputs() -> Vec<steno_audio::capture::live::AudioDeviceInfo> {
 
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn the_input_list_names_the_sources_and_marks_the_default() {
+fn the_input_list_names_the_sources() {
     let listed = inputs();
     println!("{listed:#?}");
     let mic = listed
@@ -1223,7 +1301,6 @@ fn the_input_list_names_the_sources_and_marks_the_default() {
         .find(|device| device.uid == MIC)
         .expect("the test microphone");
     assert_eq!(mic.name, "Steno test microphone", "its description");
-    assert!(mic.is_default_input);
     assert_eq!(mic.input_channels, 1);
     assert!(
         listed
@@ -1231,12 +1308,13 @@ fn the_input_list_names_the_sources_and_marks_the_default() {
             .all(|device| device.uid != SINK && device.uid != SECOND_SINK),
         "a sink is no input"
     );
-    assert_eq!(listed.iter().filter(|d| d.is_default_input).count(), 1);
+    assert!(
+        listed.iter().all(|d| !d.is_default_input),
+        "the list reads no default"
+    );
     let extra = TemporaryMic::create("steno-test-mic-listed");
     assert!(
-        inputs()
-            .iter()
-            .any(|device| device.uid == extra.name && !device.is_default_input),
+        inputs().iter().any(|device| device.uid == extra.name),
         "a new source is listed"
     );
     extra.destroy();
@@ -1249,6 +1327,72 @@ fn the_input_list_names_the_sources_and_marks_the_default() {
         "each list's thread ends with it: {:?}",
         threads()
     );
+}
+
+/// WirePlumber, stopped with `SIGSTOP` until dropped, so it answers no
+/// ping. Its pid is the private daemon's own WirePlumber client's.
+struct StoppedSessionManager {
+    pid: String,
+}
+
+impl StoppedSessionManager {
+    fn stop() -> Self {
+        let pid = dump()
+            .iter()
+            .find_map(|object| {
+                let props = object.pointer("/info/props")?;
+                if props.get("application.name")?.as_str()? != "WirePlumber" {
+                    return None;
+                }
+                // `pw-dump` prints a number-like value as a number.
+                let pid = props.get("application.process.id")?;
+                pid.as_u64()
+                    .map(|pid| pid.to_string())
+                    .or_else(|| pid.as_str().map(str::to_owned))
+            })
+            .expect("WirePlumber's client and its pid");
+        assert!(tool("kill", &["-STOP", &pid]));
+        Self { pid }
+    }
+}
+
+impl Drop for StoppedSessionManager {
+    fn drop(&mut self) {
+        assert!(tool("kill", &["-CONT", &self.pid]));
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// A list while WirePlumber answers no ping binds nothing that waits for
+/// it, so a capture bound before still hears the next default move. A list
+/// that bound the `default` metadata and closed before the pong stopped
+/// those events for every client on PipeWire before 1.6.9.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_list_while_the_session_manager_stalls_leaves_default_moves_reported() {
+    let lanes = CALL;
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    let _restore = DefaultSink;
+    start(&backend, &lanes, None, &sink).expect("start");
+    {
+        // No `pw-dump` or `pw-metadata` in here: each binds the metadata.
+        let _stopped = StoppedSessionManager::stop();
+        let started = Instant::now();
+        let listed = inputs();
+        println!("listed in {:?} with WirePlumber stopped", started.elapsed());
+        assert!(listed.iter().any(|device| device.uid == MIC));
+    }
+    let since = Instant::now();
+    DefaultSink::set(SECOND_SINK);
+    assert_output_moved_once(
+        &reasons,
+        SECOND_SINK,
+        since,
+        false,
+        "after the stalled list: ",
+    );
+    stop(&backend);
 }
 
 /// A `pw-record` of the test microphone into a temporary file, killed

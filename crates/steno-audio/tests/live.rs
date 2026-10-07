@@ -4,7 +4,8 @@
 //! they print is swallowed). Over SSH the tap and the microphone deliver
 //! silence (a session without a GUI gets no TCC grant), which is fine: what
 //! these assert is that enumeration returns, that `start` and `stop` return
-//! within a bound, that nothing hangs, and that the in-person `IOProc` runs.
+//! within a bound, that nothing hangs, that the in-person `IOProc` runs, and
+//! that a UID naming no device records the default input.
 //! Call mode's `IOProc` runs only while another client has the output device
 //! open (see `capture::live::backend`), so a call capture with no callbacks
 //! is reported as skipped rather than as silence. Each run happens on its
@@ -20,7 +21,7 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use steno_audio::capture::live::AudioDevices;
-use steno_audio::{CaptureBackend, LaneFrameSink, LiveCaptureBackend};
+use steno_audio::{CaptureBackend, CaptureInput, LaneFrameSink, LiveCaptureBackend};
 use steno_core::AudioLane;
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
@@ -121,6 +122,51 @@ fn start_capture_stop(lanes: &'static [AudioLane]) -> Option<usize> {
         println!("stopped in {:?}", stopping.elapsed());
         Some(callbacks)
     })
+}
+
+/// A UID that names no device (a PipeWire node name from a settings file
+/// synced from Linux) records the default input and says so; the default's
+/// own UID records it as chosen.
+#[test]
+#[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
+fn an_unknown_microphone_records_the_default_input() {
+    within(Duration::from_secs(30), "start, capture, stop", || {
+        let Ok(default) = AudioDevices::default_input() else {
+            println!("SKIPPED: no default input");
+            return;
+        };
+        let lanes = [AudioLane::Mixed];
+        let backend = LiveCaptureBackend::new();
+        let sink = Arc::new(LaneFrameSink::new(&lanes));
+        let stream = backend
+            .start(
+                &lanes,
+                Some("alsa_input.pci-0000_00_1f.3.analog-stereo"),
+                Arc::clone(&sink),
+            )
+            .expect("the default input stands in");
+        println!("{stream:?}");
+        assert_eq!(
+            stream.input,
+            Some(CaptureInput {
+                uid: default.uid.clone(),
+                name: default.name.clone(),
+                is_fallback: true,
+            })
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(sink.available_to_read() > 0, "the default input runs");
+        backend.stop();
+        let stream = backend
+            .start(&lanes, Some(&default.uid), sink)
+            .expect("the default by its UID");
+        assert_eq!(
+            stream.input.map(|input| input.is_fallback),
+            Some(false),
+            "chosen, not standing in"
+        );
+        backend.stop();
+    });
 }
 
 #[test]

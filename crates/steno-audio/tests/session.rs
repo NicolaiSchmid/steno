@@ -27,8 +27,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use steno_audio::capture::{
-    CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult,
-    CaptureSession, CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
+    CaptureBackend, CaptureConfiguration, CaptureError, CaptureInput, CaptureMode, CaptureNotice,
+    CaptureResult, CaptureSession, CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
 };
 use steno_audio::realtime::{FrameRelay, LaneFrameSink};
 use steno_audio::testing::synthetic::SyntheticOptions;
@@ -79,6 +79,7 @@ fn restarted_stream() -> CaptureStream {
         input_latency_frames: 480,
         output_latency_frames: 9_600,
         layout: None,
+        input: None,
     }
 }
 
@@ -699,6 +700,125 @@ impl CaptureBackend for OnceThenFailing {
     fn stop(&self) {
         self.inner.stop();
     }
+}
+
+/// A backend that keeps the live backends' promise for a chosen
+/// microphone (`CaptureBackend::start`): while `connected` it records the
+/// one asked for, otherwise the default input in its place, saying so in
+/// the stream. Every UID it was asked for is kept.
+struct ChosenOrDefault {
+    inner: SyntheticCaptureBackend,
+    connected: AtomicBool,
+    asked: Mutex<Vec<Option<String>>>,
+}
+
+impl ChosenOrDefault {
+    const CHOSEN: &str = "usb-microphone";
+
+    fn input(uid: &str, name: &str, is_fallback: bool) -> Option<CaptureInput> {
+        Some(CaptureInput {
+            uid: uid.to_owned(),
+            name: name.to_owned(),
+            is_fallback,
+        })
+    }
+}
+
+impl CaptureBackend for ChosenOrDefault {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        self.asked.lock().unwrap().push(uid.map(str::to_owned));
+        let stream = self.inner.start(lanes, uid, sink)?;
+        let input = match uid {
+            Some(uid) if self.connected.load(Ordering::Relaxed) => {
+                Self::input(uid, "USB Microphone", false)
+            }
+            _ => Self::input("built-in", "Built-in Microphone", uid.is_some()),
+        };
+        Ok(CaptureStream { input, ..stream })
+    }
+
+    fn stop(&self) {
+        self.inner.stop();
+    }
+}
+
+/// A chosen microphone that goes during a recording: the rebuild asks for
+/// it again, the backend records the default input in its place, and the
+/// recording goes on, without `DeviceLost`, its stream naming the stand-in;
+/// once the microphone is back, the next change returns to it.
+#[test]
+fn a_chosen_microphone_that_goes_and_comes_back_keeps_the_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(ChosenOrDefault {
+        inner: SyntheticCaptureBackend::new(tones(&[AudioLane::Mixed], 0.5)),
+        connected: AtomicBool::new(true),
+        asked: Mutex::new(Vec::new()),
+    });
+    let mut configuration = configuration(CaptureMode::InPerson, directory.path(), false);
+    configuration.input_device_uid = Some(ChosenOrDefault::CHOSEN.to_owned());
+    let session = CaptureSession::with_backend(
+        configuration,
+        backend.clone(),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let notices = session.notices();
+    let next_notice = || notices.recv_timeout(Duration::from_secs(5)).unwrap();
+    let input = || session.stream().and_then(|stream| stream.input);
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        input(),
+        ChosenOrDefault::input(ChosenOrDefault::CHOSEN, "USB Microphone", false)
+    );
+
+    backend.connected.store(false, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::InputDeviceGone);
+    assert_eq!(
+        next_notice(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::InputDeviceGone)
+    );
+    assert!(matches!(
+        next_notice(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    assert_eq!(
+        input(),
+        ChosenOrDefault::input("built-in", "Built-in Microphone", true),
+        "the default input stands in"
+    );
+
+    backend.connected.store(true, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    assert_eq!(
+        next_notice(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(matches!(
+        next_notice(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    assert_eq!(
+        input(),
+        ChosenOrDefault::input(ChosenOrDefault::CHOSEN, "USB Microphone", false),
+        "back on the chosen microphone"
+    );
+
+    let result = session.stop().unwrap();
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 2);
+    assert_eq!(
+        *backend.asked.lock().unwrap(),
+        vec![Some(ChosenOrDefault::CHOSEN.to_owned()); 3],
+        "every start asks for the chosen microphone"
+    );
 }
 
 /// Meeting A records and stops; meeting B's start fails in the backend.

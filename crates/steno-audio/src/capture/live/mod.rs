@@ -7,7 +7,12 @@
 //! on Windows WASAPI process loopback and the capture endpoint as two
 //! streams on their own threads (`wasapi`, WP10a, not run on hardware;
 //! see its module doc). All three coalesce device changes and report them for
-//! the session's rebuild. Other targets get the stub, failing at `start`.
+//! the session's rebuild, and record the default input in place of a chosen
+//! one that is missing until it is back. Other targets get the stub, failing
+//! at `start`. Beside each backend, `AudioDevices` lists the platform's
+//! inputs for the picker: the HAL's devices (`devices`), the PipeWire
+//! sources (`pipewire::AudioDevices`), the active WASAPI endpoints
+//! (`wasapi::AudioDevices`).
 //! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
 
 #[cfg(target_os = "macos")]
@@ -39,8 +44,8 @@ pub use wasapi::{AudioDevices, LiveCaptureBackend};
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub use stub::LiveCaptureBackend;
 
-/// One device as the app's input picker (and, on the Mac,
-/// `steno dev audio-devices`) sees it. `uid` is the stable identifier
+/// One device as the app's input picker (and `steno dev audio-devices`)
+/// sees it. `uid` is the stable identifier
 /// `Settings.input_device_uid` stores. Filled in by Core Audio on macOS, by
 /// WASAPI on Windows and from the PipeWire registry on Linux (inputs only).
 #[derive(Debug, Clone, PartialEq)]

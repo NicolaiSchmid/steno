@@ -21,7 +21,10 @@
 //! relay, the writer thread, the writer and the files. The state stays
 //! `Recording`; `notices` carries `DeviceChanged` and `DeviceResumed`.
 //! Only when every restart fails does the recording end in
-//! `Failed(DeviceLost)`.
+//! `Failed(DeviceLost)`. A chosen microphone that is gone fails no restart:
+//! the live backends then record the default input and say so in
+//! [`CaptureStream::input`], which [`CaptureSession::stream`] hands out
+//! (see [`CaptureBackend::start`]).
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole

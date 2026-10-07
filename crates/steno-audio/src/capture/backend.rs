@@ -22,7 +22,12 @@ use crate::realtime::LaneFrameSink;
 pub trait CaptureBackend: Send + Sync {
     /// Starts delivering `lanes` (in this order) at [`SAMPLE_RATE`] and
     /// describes the stream it opened. `input_device_uid` `None` selects
-    /// the default input device.
+    /// the default input device. A live backend given a UID that names no
+    /// connected input records the default input instead, says so in
+    /// [`CaptureStream::input`], and reports a change once the chosen
+    /// device is back, so the rebuild's `start` returns to it; the
+    /// recording never fails or ends because the chosen microphone is
+    /// missing while another input exists.
     fn start(
         &self,
         lanes: &[AudioLane],
@@ -49,6 +54,23 @@ pub struct CaptureStream {
     pub output_latency_frames: usize,
     /// `None` for a backend without HAL buffers (synthetic).
     pub layout: Option<StreamLayout>,
+    /// The microphone the capture records; `None` without a microphone
+    /// lane, or for a backend without devices (synthetic).
+    pub input: Option<CaptureInput>,
+}
+
+/// The microphone a started capture records, so the app can name it while
+/// it is not the one the user chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureInput {
+    /// The UID `Settings.input_device_uid` would store for it: the Core
+    /// Audio UID, the PipeWire `node.name`, the WASAPI endpoint id.
+    pub uid: String,
+    /// Its name, as the input picker lists it.
+    pub name: String,
+    /// The chosen microphone is not connected, so this is the default
+    /// input standing in for it.
+    pub is_fallback: bool,
 }
 
 impl CaptureStream {
@@ -58,5 +80,6 @@ impl CaptureStream {
         input_latency_frames: 0,
         output_latency_frames: 0,
         layout: None,
+        input: None,
     };
 }

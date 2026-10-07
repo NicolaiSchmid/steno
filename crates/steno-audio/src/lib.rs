@@ -12,7 +12,8 @@
 //!   files to 16 kHz mono a block at a time, and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
 //!   microphone, debounced into a call starting and ending, the WASAPI
-//!   session mapping, and on Linux the PipeWire stream view.
+//!   session mapping, and the live process-activity source on each
+//!   platform.
 //! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
 //!   bodies, the processing thread and the relay; everything on the
 //!   real-time path.
@@ -131,9 +132,9 @@ pub const ECHO_TAIL_LENGTH: usize = 9_600;
 
 pub use aec::{EchoMetrics, PassthroughEchoCanceller, SpeexEchoCanceller};
 pub use capture::{
-    CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult,
-    CaptureSession, CaptureState, CaptureStatistics, CaptureStream, DeviceChangeReason, LaneLevel,
-    LaneLevels, LiveCaptureBackend, StreamLayout,
+    CaptureBackend, CaptureConfiguration, CaptureError, CaptureInput, CaptureMode, CaptureNotice,
+    CaptureResult, CaptureSession, CaptureState, CaptureStatistics, CaptureStream,
+    DeviceChangeReason, LaneLevel, LaneLevels, LiveCaptureBackend, StreamLayout,
 };
 pub use clock::{Clock, SystemClock};
 pub use codec::{CodecError, SymphoniaAudioCodec};

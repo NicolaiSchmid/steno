@@ -5,7 +5,11 @@
 //!
 //! `System` comes from the tap, `Mic` and `Mixed` from the first channel of
 //! the selected input device, which the aggregate resamples to the output
-//! device's 48 kHz clock.
+//! device's 48 kHz clock. A selected device that is not connected records
+//! the default input instead ([`chosen_or_default_input`]), and the device
+//! list is watched so the rebuild returns to it once it is back; Swift
+//! fails the start with `InputDeviceUnavailable` there (a deliberate parity
+//! change: no recording is lost to a missing microphone).
 //!
 //! Device notifications (a default device moving, a sub-device dying, the
 //! aggregate leaving 48 kHz) arrive on the HAL's notification thread and
@@ -41,7 +45,7 @@ use objc2_core_audio::{
     AudioObjectPropertySelector, kAudioDevicePropertyDeviceIsAlive,
     kAudioDevicePropertyNominalSampleRate, kAudioHardwarePropertyDefaultInputDevice,
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
+    kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
     kAudioObjectPropertyScopeOutput,
 };
 use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
@@ -53,8 +57,8 @@ use super::hal::{
 use super::{AudioDeviceInfo, AudioDevices};
 use crate::SAMPLE_RATE;
 use crate::capture::{
-    CaptureBackend, CaptureError, CaptureStream, DeviceSnapshot, LaneSource, NominalSampleRate,
-    StreamLayout,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceSnapshot, LaneSource,
+    NominalSampleRate, StreamLayout,
 };
 use crate::realtime::{BufferView, LaneFrameSink, deliver};
 
@@ -111,6 +115,28 @@ unsafe extern "C-unwind" fn io_proc(
     0
 }
 
+/// The input a capture asked for `uid` records now: the chosen device while
+/// it is connected and has input channels, else the default input; `true`
+/// beside it when that default stands in for a chosen device. `None` when
+/// no input resolves at all.
+fn chosen_or_default_input(uid: Option<&str>) -> (Option<AudioDeviceInfo>, bool) {
+    let chosen = uid.map(|uid| {
+        AudioDevices::device(uid)
+            .ok()
+            .flatten()
+            .filter(AudioDeviceInfo::is_input)
+    });
+    match chosen {
+        Some(Some(device)) => (Some(device), false),
+        chosen => (
+            AudioDevices::default_input()
+                .ok()
+                .filter(AudioDeviceInfo::is_input),
+            chosen.is_some(),
+        ),
+    }
+}
+
 /// The HAL reads behind one [`DeviceSnapshot`], fixed at `start` so every
 /// look after a notification asks about the objects the capture began on.
 #[derive(Debug, Clone)]
@@ -122,19 +148,15 @@ struct DeviceProbe {
 }
 
 impl DeviceProbe {
-    /// The devices as they are now: the defaults resolved again (or the
-    /// explicit input by UID), the started devices' `DeviceIsAlive`, the
+    /// The devices as they are now: the defaults resolved again (the input
+    /// as [`chosen_or_default_input`] picks it, so a chosen device coming
+    /// back reads as a change), the started devices' `DeviceIsAlive`, the
     /// aggregate's rate (0 once it is gone).
     fn resolve(&self) -> DeviceSnapshot {
         let output = AudioDevices::default_system_output().ok();
-        let input: Option<AudioDeviceInfo> = if self.mic_id.is_some() {
-            match &self.input_device_uid {
-                Some(uid) => AudioDevices::device(uid).ok().flatten(),
-                None => AudioDevices::default_input().ok(),
-            }
-        } else {
-            None
-        };
+        let input = self
+            .mic_id
+            .and_then(|_| chosen_or_default_input(self.input_device_uid.as_deref()).0);
         DeviceSnapshot {
             output_uid: output.map(|d| d.uid),
             default_output_uid: AudioDevices::default_output_uid(),
@@ -290,15 +312,19 @@ impl CaptureBackend for LiveCaptureBackend {
         let output = AudioDevices::default_system_output()
             .map_err(|_| CaptureError::OutputDeviceUnavailable)?;
         let mut mic: Option<AudioDeviceInfo> = None;
+        let mut is_fallback = false;
         if needs_mic {
-            let resolved = match input_device_uid {
-                Some(uid) => AudioDevices::device(uid).ok().flatten(),
-                None => AudioDevices::default_input().ok(),
-            };
-            match resolved {
-                Some(device) if device.is_input() => mic = Some(device),
-                _ => return Err(CaptureError::InputDeviceUnavailable),
+            let (resolved, fallback) = chosen_or_default_input(input_device_uid);
+            let device = resolved.ok_or(CaptureError::InputDeviceUnavailable)?;
+            if fallback {
+                tracing::warn!(
+                    "the input device {} is not connected; recording from the default input {}",
+                    input_device_uid.unwrap_or_default(),
+                    device.uid
+                );
             }
+            is_fallback = fallback;
+            mic = Some(device);
         }
 
         let tap = if needs_tap {
@@ -389,10 +415,16 @@ impl CaptureBackend for LiveCaptureBackend {
             (output.id, kAudioDevicePropertyDeviceIsAlive),
             (aggregate.id, kAudioDevicePropertyNominalSampleRate),
         ];
+        // The default input matters while it is what the microphone lane
+        // records; the device list while a chosen device could come back
+        // (or go: its own `DeviceIsAlive` covers that).
         if let Some(mic) = &mic {
             selectors.push((mic.id, kAudioDevicePropertyDeviceIsAlive));
-            if input_device_uid.is_none() {
+            if input_device_uid.is_none() || is_fallback {
                 selectors.push((SYSTEM, kAudioHardwarePropertyDefaultInputDevice));
+            }
+            if input_device_uid.is_some() {
+                selectors.push((SYSTEM, kAudioHardwarePropertyDevices));
             }
         }
         let watcher = Arc::new(Watcher {
@@ -463,6 +495,11 @@ impl CaptureBackend for LiveCaptureBackend {
             input_latency_frames: input_latency,
             output_latency_frames: output_latency,
             layout: Some(layout),
+            input: mic.map(|mic| CaptureInput {
+                uid: mic.uid,
+                name: mic.name,
+                is_fallback,
+            }),
         })
     }
 

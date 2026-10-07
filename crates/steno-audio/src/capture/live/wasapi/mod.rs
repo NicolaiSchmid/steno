@@ -23,7 +23,11 @@
 //!   loopback of the default render endpoint, which records Steno's own
 //!   output too; the switch is only logged.
 //! - **Microphone:** the selected capture endpoint by id, or the default
-//!   (`eCapture`, `eConsole`), shared mode, event-driven.
+//!   (`eCapture`, `eConsole`), shared mode, event-driven. A selected
+//!   endpoint that is not active records the default instead, and the
+//!   watcher reports the selected one coming back, so the rebuild returns
+//!   to it (the macOS backend does the same; Swift, macOS-only, fails the
+//!   start there).
 //!
 //! Both are asked for 48 kHz 32-bit float (`AUTOCONVERTPCM`, so the engine
 //! resamples from the device's mix format): mono for the microphone,
@@ -88,7 +92,7 @@ use super::AudioDeviceInfo;
 use crate::SAMPLE_RATE;
 use crate::capture::split_streams::{StreamSizes, far_end_latencies};
 use crate::capture::{
-    CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     SplitStreamPlan, StreamSource,
 };
 use crate::detection::EndpointFlow;
@@ -114,6 +118,9 @@ struct StreamInfo {
     /// system stream the default render endpoint at start.
     endpoint_id: Option<String>,
     loopback: Option<LoopbackKind>,
+    /// The microphone stream's endpoint, as [`CaptureStream::input`] names
+    /// it; `None` for the system stream.
+    input: Option<CaptureInput>,
 }
 
 /// A stream thread's reports to `start`.
@@ -261,25 +268,20 @@ impl DeviceProbe {
 
     /// The devices as they are now, in [`DeviceSnapshot`]'s terms: the
     /// default render endpoint (`eConsole`, the one both loopbacks follow),
-    /// the microphone (the explicit one while it is active, `None` once it
-    /// is not, as on the Mac; without an explicit one, the `eConsole`
-    /// default), whether the endpoints the capture started on
-    /// are still active. `default_output_uid` stays empty: no stream opens
-    /// the `eCommunications` default, so its changes cost no rebuild. Fields
+    /// the microphone as [`chosen_or_default`] picks it (so the explicit
+    /// one coming back reads as a change, as on the Mac), whether the
+    /// endpoints the capture started on are still active.
+    /// `default_output_uid` stays empty: no stream opens the
+    /// `eCommunications` default, so its changes cost no rebuild. Fields
     /// for a stream the capture does not open stay empty too, so they never
     /// differ. The engine converts to 48 kHz, so the rate is always
     /// [`SAMPLE_RATE`]; a device format change invalidates the stream
     /// instead, which the capture thread reports as the device gone.
     fn resolve(&self, enumerator: &Enumerator) -> DeviceSnapshot {
         let input_uid = if self.needs_mic {
-            match &self.input_device_uid {
-                Some(uid) => enumerator
-                    .endpoint(uid)
-                    .ok()
-                    .filter(com::Endpoint::is_active)
-                    .and_then(|endpoint| endpoint.id().ok()),
-                None => Self::endpoint_id(enumerator, EndpointFlow::Capture),
-            }
+            chosen_or_default(enumerator, self.input_device_uid.as_deref())
+                .0
+                .and_then(|endpoint| endpoint.id().ok())
         } else {
             None
         };
@@ -361,6 +363,28 @@ impl LiveCaptureBackend {
     }
 }
 
+/// The capture endpoint a capture asked for `uid` records now: the chosen
+/// one while it is active, else the active default; `true` beside it when
+/// that default stands in for a chosen one.
+fn chosen_or_default(enumerator: &Enumerator, uid: Option<&str>) -> (Option<com::Endpoint>, bool) {
+    let chosen = uid.map(|uid| {
+        enumerator
+            .endpoint(uid)
+            .ok()
+            .filter(com::Endpoint::is_active)
+    });
+    match chosen {
+        Some(Some(endpoint)) => (Some(endpoint), false),
+        chosen => (
+            enumerator
+                .default_endpoint(EndpointFlow::Capture)
+                .ok()
+                .filter(com::Endpoint::is_active),
+            chosen.is_some(),
+        ),
+    }
+}
+
 /// Joins COM and opens the stream `source` needs on this thread. The
 /// apartment comes first so it is dropped last.
 fn open(
@@ -370,16 +394,26 @@ fn open(
     let apartment = Apartment::enter()?;
     let enumerator = Enumerator::new()?;
     let channels = source.channels();
+    let mut input = None;
     let (client, endpoint_id, loopback) = match source {
         StreamSource::Microphone => {
-            let endpoint = match input_device_uid {
-                Some(uid) => enumerator.endpoint(uid).ok(),
-                None => enumerator.default_endpoint(EndpointFlow::Capture).ok(),
+            let (endpoint, is_fallback) = chosen_or_default(&enumerator, input_device_uid);
+            let endpoint = endpoint.ok_or(CaptureError::InputDeviceUnavailable)?;
+            let id = endpoint.id().ok();
+            if is_fallback {
+                tracing::warn!(
+                    "the input device {} is not active; recording from the default input {}",
+                    input_device_uid.unwrap_or_default(),
+                    id.as_deref().unwrap_or_default()
+                );
             }
-            .filter(com::Endpoint::is_active)
-            .ok_or(CaptureError::InputDeviceUnavailable)?;
+            input = id.clone().map(|uid| CaptureInput {
+                name: endpoint.friendly_name().unwrap_or_else(|| uid.clone()),
+                uid,
+                is_fallback,
+            });
             let client = CaptureClient::microphone(&endpoint, channels)?;
-            (client, endpoint.id().ok(), None)
+            (client, id, None)
         }
         StreamSource::System => {
             let render = enumerator.default_endpoint(EndpointFlow::Render);
@@ -403,6 +437,7 @@ fn open(
         sizes: client.sizes(),
         endpoint_id,
         loopback,
+        input,
     };
     Ok((apartment, enumerator, client, info))
 }
@@ -787,6 +822,7 @@ impl CaptureBackend for LiveCaptureBackend {
             input_latency_frames,
             output_latency_frames,
             layout: Some(plan.layout),
+            input: mic.and_then(|m| m.input),
         })
     }
 
