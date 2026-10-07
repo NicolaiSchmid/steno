@@ -597,9 +597,18 @@ Every package is written in parallel except where a dependency is named:
       PKCS#12 crate (for example `p12-keystore`, which reads Apple's legacy
       encryption; `cargo deny` must allow it) into the PEM entry
       `handover-identity`, replacing a desktop-id identity. A denied read leaves
-      the key empty, and Settings asks for it; a denied or failed export keeps
-      or mints an identity, and the step says that phones pair again. Then the
-      pipeline and the listener start. Skipping the step counts as both denied.
+      the key empty, and Settings asks for it. A denied or failed export never
+      mints an identity (D3): the handover listener stays off, and Settings >
+      Phones says that Steno could not bring over this Mac's phone pairing,
+      with Try again, which repeats the export and its prompt. Only when the
+      user chooses Pair again there, which says that every phone must pair
+      again, is a new identity minted. Then the pipeline starts, and the
+      listener once the identity is in place. Skipping the step counts as a
+      denied read and a denied export. The same rule holds outside the import:
+      when an existing `handover-identity` cannot be read (a denied prompt, a
+      locked keychain), `handover_listener` waits with Try again and never mints
+      over it; it mints only when no identity exists or the user chooses Pair
+      again.
   - **Login item** (D4). On macOS, `autostart.rs` uses `SMAppService.mainApp`.
     At the first launch after the handoff the new app registers its own
     identifier explicitly when the stored `launch_at_login` setting (shared
@@ -846,7 +855,9 @@ an install needs a newer build installed by hand (Rollback).
     - macOS asks once more for microphone, system audio and calendar, and for the
       login keychain password once per stored secret (choose Always Allow);
     - an old "Steno" entry in Login Items may need removing (S6);
-    - phones stay paired, or pair again where D5 or a denied export says so;
+    - phones stay paired; if macOS's export prompt is denied, Steno keeps the
+      phones waiting and offers Try again in Settings > Phones, and phones pair
+      again only where D5 says so or the user chooses Pair again;
     - the optional mixdown is now WAV;
     - Whisper, Ultra and DE now transcribe with Parakeet v3;
     - Homebrew users whose app updated itself can run
@@ -1090,8 +1101,10 @@ except case e.
   - on the Mac, no import step appears; onboarding opens on its permissions page
     at the first launch and each TCC prompt appears once; one keychain prompt
     with the login password appears per item the desktop-id
-    build created (`handover-identity` and the API key, both at launch); with
-    Always Allow, none appears again;
+    build created (`handover-identity` and the API key, both at launch). The
+    `handover-identity` prompt is first denied: no identity is minted
+    (`dns-sd -B _steno._tcp` shows no Steno, and Settings > Phones offers Try
+    again); Try again brings it back, and with Always Allow none appears again;
   - the phone uploads without pairing again;
   - both calls are listed, transcribed and summarised.
 - **R2 Handoff mechanics** (Forge; the cutover plan's test 6).
@@ -1134,7 +1147,11 @@ except case e.
      - the import step comes first and shows its note; then exactly two
        keychain prompts appear, each asking for the login password, one for the
        API key and one to export the handover key (record each prompt's
-       wording); Always Allow is chosen on both;
+       wording). Always Allow is chosen for the key. The export prompt is first
+       denied: no identity is minted (`security find-generic-password -s
+       uno.schmid.steno.mac -a handover-identity` finds nothing new, and
+       `dns-sd -B _steno._tcp` shows no Steno), and Settings > Phones offers Try
+       again. Try again brings the prompt back, and Always Allow is chosen;
      - no keychain prompt appears before the step, and until the step ends
        `dns-sd -B _steno._tcp` on the Mac shows no Steno;
      - onboarding then opens on its permissions page, and each of microphone,
