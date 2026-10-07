@@ -187,14 +187,12 @@ impl QuitLatch {
 /// assert_eq!(shared.id(), "fake-engine");
 /// ```
 #[derive(Clone)]
-pub struct SharedSpeechEngine {
-    engine: Arc<dyn SpeechEngine>,
-    claims: Arc<SpeechClaims>,
-}
+pub struct SharedSpeechEngine(Arc<SharedEngineState>);
 
-/// What the pipelines over one [`SharedSpeechEngine`] share about it.
-#[derive(Default)]
-struct SpeechClaims {
+/// What the pipelines over one [`SharedSpeechEngine`] share: the engine
+/// and its claims.
+struct SharedEngineState {
+    engine: Arc<dyn SpeechEngine>,
     /// Jobs between their warm-up and their last lane ([`SpeechClaim`]).
     count: Mutex<usize>,
     /// Serialises the warm-ups (`warm_up`, `warm_up_diarizer`) and the
@@ -212,41 +210,47 @@ impl SharedSpeechEngine {
     /// `steno_services::speech::SpeechEngines`.
     #[must_use]
     pub fn new(engine: Arc<dyn SpeechEngine>) -> Self {
-        SharedSpeechEngine {
+        SharedSpeechEngine(Arc::new(SharedEngineState {
             engine,
-            claims: Arc::default(),
-        }
+            count: Mutex::new(0),
+            preparing: AsyncMutex::new(()),
+        }))
     }
 
     /// The engine itself.
     #[must_use]
     pub fn engine(&self) -> &Arc<dyn SpeechEngine> {
-        &self.engine
+        &self.0.engine
     }
 
     /// Whether `other` is a clone of this one: the same engine with the
     /// same claims.
     #[must_use]
     pub fn ptr_eq(&self, other: &SharedSpeechEngine) -> bool {
-        Arc::ptr_eq(&self.claims, &other.claims)
+        Arc::ptr_eq(&self.0, &other.0)
     }
 
     /// A handle that finds this engine and its claims again while a
     /// clone of it is alive, without keeping them alive itself.
     #[must_use]
     pub fn downgrade(&self) -> WeakSpeechEngine {
-        WeakSpeechEngine {
-            engine: Arc::downgrade(&self.engine),
-            claims: Arc::downgrade(&self.claims),
-        }
+        WeakSpeechEngine(Arc::downgrade(&self.0))
     }
 
     /// The number of claims, under their lock.
     fn claim_count(&self) -> MutexGuard<'_, usize> {
-        self.claims
+        self.0
             .count
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Deref for SharedSpeechEngine {
+    type Target = dyn SpeechEngine;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.engine.as_ref()
     }
 }
 
@@ -269,27 +273,13 @@ impl SharedSpeechEngine {
 /// assert!(weak.upgrade().is_none());
 /// ```
 #[derive(Clone)]
-pub struct WeakSpeechEngine {
-    engine: Weak<dyn SpeechEngine>,
-    claims: Weak<SpeechClaims>,
-}
+pub struct WeakSpeechEngine(Weak<SharedEngineState>);
 
 impl WeakSpeechEngine {
     /// The engine with its claims, while a clone of it is alive.
     #[must_use]
     pub fn upgrade(&self) -> Option<SharedSpeechEngine> {
-        Some(SharedSpeechEngine {
-            engine: self.engine.upgrade()?,
-            claims: self.claims.upgrade()?,
-        })
-    }
-}
-
-impl Deref for SharedSpeechEngine {
-    type Target = dyn SpeechEngine;
-
-    fn deref(&self) -> &Self::Target {
-        self.engine.as_ref()
+        self.0.upgrade().map(SharedSpeechEngine)
     }
 }
 
@@ -627,7 +617,7 @@ impl ProcessingPipeline {
     /// The lock the warm-ups and the release take, shared by every
     /// pipeline over the same speech engine.
     async fn preparing(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.speech_engine().claims.preparing.lock().await
+        self.speech_engine().0.preparing.lock().await
     }
 
     fn now(&self) -> DateTime<Utc> {
