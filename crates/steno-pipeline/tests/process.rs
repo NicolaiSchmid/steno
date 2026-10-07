@@ -1146,10 +1146,14 @@ async fn a_job_whose_warm_up_fails_releases_the_engine_too() {
 enum Gate {
     FirstTranscription,
     FirstRelease,
+    /// Every transcription, and for ever, as a crash leaves the runs
+    /// alive at it.
+    EveryTranscription,
 }
 
 /// A fake engine whose first transcription or first release waits until
-/// `open` is notified (or panics, with `panics`), logging each `prepare`
+/// `open` is notified (or panics, with `panics`), or whose every
+/// transcription hangs (`Gate::EveryTranscription`), logging each `prepare`
 /// and the start and end of each `release`.
 struct GatedEngine {
     inner: FakeSpeechEngine,
@@ -1217,6 +1221,11 @@ impl steno_core::SpeechEngine for GatedEngine {
         audio: &steno_core::AudioBuffer16k,
         hint: Option<&steno_core::LanguageTag>,
     ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
+        if self.gate == Gate::EveryTranscription {
+            self.entered
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return std::future::pending().await;
+        }
         self.pass(Gate::FirstTranscription).await;
         self.inner.transcribe(audio, hint).await
     }
@@ -2550,39 +2559,6 @@ async fn a_failed_reprocess_leaves_the_audio_to_no_sweep() {
     }
 }
 
-/// An engine whose every transcription hangs, as one that takes the app
-/// down leaves the runs alive at the crash; it counts the transcriptions.
-#[derive(Default)]
-struct HangingEngine {
-    inner: FakeSpeechEngine,
-    entered: std::sync::atomic::AtomicUsize,
-}
-
-#[async_trait]
-impl steno_core::SpeechEngine for HangingEngine {
-    fn id(&self) -> &str {
-        self.inner.id()
-    }
-
-    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
-        self.inner.supported_languages()
-    }
-
-    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
-        self.inner.prepare().await
-    }
-
-    async fn transcribe(
-        &self,
-        _audio: &steno_core::AudioBuffer16k,
-        _hint: Option<&steno_core::LanguageTag>,
-    ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
-        self.entered
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        std::future::pending().await
-    }
-}
-
 /// A crash is charged to the run in flight: of two unfinished meetings
 /// that both ran when the app first went down, the one launch recovery
 /// resumes first (A) takes it down at every launch after, while the
@@ -2598,11 +2574,8 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
     // Launch recovery takes meetings of one start time by id.
     two.sort_by_key(|(meeting, _)| meeting.id);
     let [(a, a_asset), (b, b_asset)] = two;
-    for asset in [&a_asset, &b_asset] {
-        std::fs::remove_file(runs_file(asset)).unwrap();
-    }
     for launch in 1..=MAX_CRASHED_RUNS {
-        let engine = Arc::new(HangingEngine::default());
+        let engine = Arc::new(GatedEngine::new(Gate::EveryTranscription));
         let pipeline = ProcessingPipeline::new(
             with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default()),
         );
@@ -2611,13 +2584,8 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
             [a.id, b.id],
             "launch {launch}"
         );
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while engine.entered.load(std::sync::atomic::Ordering::SeqCst) == 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("A is transcribing");
+        // A is transcribing.
+        engine.wait_until_entered().await;
         assert_eq!(read_runs(&a_asset), launch.to_string(), "launch {launch}");
         // Both ran at the first launch; B waits behind A after that.
         assert_eq!(read_runs(&b_asset), "1", "launch {launch}");
