@@ -1374,7 +1374,7 @@ fn a_redelivery_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_
 /// shows and the folder name does not.
 fn with_a_changed_decision(export: &MeetingExport) -> MeetingExport {
     let mut changed = export.clone();
-    changed.decisions[0].text = "Die Aufteilung wird verschoben.".to_owned();
+    changed.decisions[0].text = String::from("Die Aufteilung wird verschoben.");
     changed
 }
 
