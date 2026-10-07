@@ -1238,6 +1238,23 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The person-page writer should write file names NFC-normalised, as the Rust writer
   does; Foundation writes `Anna Müller.md` in NFD on APFS, which maps both to one
   file, but a vault synced to a normalisation-sensitive filesystem gets two files.
+- `ObsidianFolderDestination.deliver` should run one delivery per vault at a time, as
+  the Rust destination does with its per-vault lock: `DeliveryCoordinator` is an
+  actor but re-entrant at `await destination.deliver`, so two meetings finishing at
+  once can drop one meeting's line from a shared person page, pick one folder for two
+  first deliveries with the same slug, and sweep each other's temp files. A first
+  delivery should claim its folder by creating it without intermediate directories,
+  a folder that is already there counting as taken unless it holds this meeting's
+  `meeting.json`, as the Rust `claim_folder` does. Between the two apps, or two CLI
+  runs, on one vault only the folder claim holds; the person-page merge and the temp
+  sweep are not guarded across processes in either app.
+- `removeMeetingLine` should skip a listed page that is the same file as a page this
+  delivery rendered, as the Rust destination does (device and inode on Unix; Swift
+  can compare `fileResourceIdentifier`): on APFS a person renamed from `anna` to
+  `Anna` today loses this meeting's line from the one page both names refer to.
+- On Windows the Rust person pages keep off the reserved device names (`Con` becomes
+  `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
+  names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.
 
 ### Audio
 
