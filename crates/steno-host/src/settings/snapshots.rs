@@ -139,6 +139,35 @@ pub fn general(
     }
 }
 
+/// The picker's name for a chosen microphone the device list lacks.
+pub const UNAVAILABLE_INPUT: &str = "Microphone not connected";
+
+/// The picker's devices: the list, then the chosen device when the list
+/// lacks it (unplugged, or a UID saved on another computer), named
+/// [`UNAVAILABLE_INPUT`], so the picker shows it as unavailable rather than
+/// as a bare UID; a recording then records the default input on Linux (see
+/// `capture::live::pipewire` in `steno-audio`). Rust only: the Swift
+/// picker shows no entry for it.
+fn recording_devices(audio: &AudioSettingsViewModel) -> Vec<RecordingDevice> {
+    let mut devices: Vec<RecordingDevice> = audio
+        .devices
+        .iter()
+        .map(|device| RecordingDevice {
+            uid: device.uid.clone(),
+            name: device.name.clone(),
+        })
+        .collect();
+    if let Some(uid) = &audio.input_device_uid
+        && !devices.iter().any(|device| &device.uid == uid)
+    {
+        devices.push(RecordingDevice {
+            uid: uid.clone(),
+            name: UNAVAILABLE_INPUT.to_owned(),
+        });
+    }
+    devices
+}
+
 #[must_use]
 pub fn recording(
     audio: &AudioSettingsViewModel,
@@ -152,14 +181,7 @@ pub fn recording(
     };
     RecordingSettingsSnapshot {
         subtitle: subtitle.to_owned(),
-        devices: audio
-            .devices
-            .iter()
-            .map(|device| RecordingDevice {
-                uid: device.uid.clone(),
-                name: device.name.clone(),
-            })
-            .collect(),
+        devices: recording_devices(audio),
         input_device_uid: audio.input_device_uid.clone(),
         audio_folder_path: audio.audio_folder.to_string_lossy().into_owned(),
         audio_folder_name: audio.folder_name(),
