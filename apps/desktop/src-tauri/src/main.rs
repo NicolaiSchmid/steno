@@ -546,12 +546,12 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 }
 
 /// What every exit runs once (`ExitGate`): the host's shutdown
-/// (`Host::shutdown_action`), then, on Linux, an autostart entry an
-/// earlier build wrote that waited for the exit goes
+/// (`Host::shutdown_action`), timed (`timed`), then, on Linux, an
+/// autostart entry an earlier build wrote that waited for the exit goes
 /// (`autostart::at_exit`): only once the save is over, since until then
 /// the unit the app runs as needs the entry.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
-    let shutdown = host::host(app).shutdown_action();
+    let shutdown = timed(host::host(app).shutdown_action());
     #[cfg(target_os = "linux")]
     let app = app.clone();
     then(shutdown, move || {
@@ -568,6 +568,19 @@ fn then(
     move || {
         shutdown();
         after();
+    }
+}
+
+/// The host's shutdown (`Host::shutdown_action`), which every exit runs,
+/// logging how long it took once it ends, so a machine's log shows how
+/// long a save takes against the waits it has to fit in: systemd's stop
+/// timeout, the session manager's, logind's delay. A shutdown cut off at
+/// `SHUTDOWN_PATIENCE` logs the gate's warning instead.
+fn timed(shutdown: impl FnOnce() + Send + 'static) -> impl FnOnce() + Send + 'static {
+    move || {
+        let started = std::time::Instant::now();
+        shutdown();
+        tracing::info!(elapsed = ?started.elapsed(), "the shutdown ended");
     }
 }
 
