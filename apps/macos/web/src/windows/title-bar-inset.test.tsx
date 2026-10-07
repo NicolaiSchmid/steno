@@ -58,19 +58,16 @@ describe("the title bar inset", () => {
 		},
 	);
 
-	it.each(
-		ONBOARDING_PAGES.flatMap((page) =>
-			PLATFORMS.map(
-				([name, platform, inset]) =>
-					[page[0], name, page[1], page[2], platform, inset] as const,
-			),
-		),
-	)(
-		"at the top of onboarding's %s page on %s",
-		async (_page, _name, query, testId, platform, inset) => {
-			const harness = await createBridgeHarness(query);
-			renderWithBridge(<OnboardingWindow />, harness, platform);
-			expect(screen.getByTestId(testId)).toHaveClass(inset ? "pt-13" : "pt-6");
+	describe.each(ONBOARDING_PAGES)(
+		"at the top of onboarding's %s page",
+		(_, query, testId) => {
+			it.each(PLATFORMS)("on %s", async (_, platform, inset) => {
+				const harness = await createBridgeHarness(query);
+				renderWithBridge(<OnboardingWindow />, harness, platform);
+				expect(screen.getByTestId(testId)).toHaveClass(
+					inset ? "pt-13" : "pt-6",
+				);
+			});
 		},
 	);
 });
