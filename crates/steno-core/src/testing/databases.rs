@@ -14,21 +14,8 @@ pub fn database_one_version_behind(path: &Path) {
     let _: String = connection
         .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
         .unwrap();
-    let transaction = connection.transaction().unwrap();
-    transaction
-        .execute_batch("CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
-        .unwrap();
     let (_, older) = migrator::MIGRATIONS.split_last().unwrap();
-    for migration in older {
-        transaction.execute_batch(migration.sql).unwrap();
-        transaction
-            .execute(
-                "INSERT INTO grdb_migrations (identifier) VALUES (?1)",
-                [migration.identifier],
-            )
-            .unwrap();
-    }
-    transaction.commit().unwrap();
+    migrator::migrate_with(&mut connection, older).unwrap();
 }
 
 /// The migrations the database at `path` records.

@@ -117,8 +117,9 @@ fn refuse_unknown(applied: &[String], migrations: &[Migration]) -> Result<()> {
     }
 }
 
-/// [`migrate`] over an explicit list; tests pass one with a bad migration.
-fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
+/// [`migrate`] over an explicit list; tests pass one with a bad migration,
+/// and `testing` the list without the newest.
+pub(crate) fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
     connection.execute_batch(MIGRATIONS_TABLE)?;
     let applied = applied(connection)?;
     refuse_unknown(&applied, migrations)?;
