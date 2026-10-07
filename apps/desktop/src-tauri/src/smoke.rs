@@ -383,10 +383,10 @@ fn check_main_hides(app: &AppHandle) -> Result<(), String> {
 /// new window would: the window is visible, shows the section's route and
 /// a new page sent `page.ready`. Elsewhere a close destroys it, as before.
 fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
-    if !windows::retires_on_close(BridgeWindow::Settings.as_str()) {
+    let label = BridgeWindow::Settings.as_str();
+    if !windows::retires_on_close(label) {
         return Ok(());
     }
-    let label = BridgeWindow::Settings.as_str();
     let settings = app
         .get_webview_window(label)
         .ok_or("Settings was gone before the close")?;

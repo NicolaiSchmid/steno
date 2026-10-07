@@ -308,13 +308,11 @@ impl Retired {
         let Ok(mut kept) = self.0.lock() else {
             return false;
         };
-        match kept.entry(label.to_owned()) {
-            std::collections::hash_map::Entry::Occupied(_) => false,
-            std::collections::hash_map::Entry::Vacant(vacant) => {
-                vacant.insert(document);
-                true
-            }
+        if kept.contains_key(label) {
+            return false;
         }
+        kept.insert(label.to_owned(), document);
+        true
     }
 
     /// Whether the window of `label` is kept.
