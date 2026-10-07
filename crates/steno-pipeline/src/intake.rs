@@ -306,6 +306,18 @@ pub enum LocalRecordingIntakeError {
     Pipeline(#[from] PipelineFailure),
 }
 
+impl LocalRecordingIntakeError {
+    /// Another connection held the database past the busy timeout.
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        match self {
+            LocalRecordingIntakeError::Store(error) => error.is_busy(),
+            LocalRecordingIntakeError::Pipeline(failure) => failure.is_busy(),
+            LocalRecordingIntakeError::NotRecording(..) => false,
+        }
+    }
+}
+
 /// The Mac recording transaction. `begin` writes the `recording` row the
 /// list shows while the capture session runs; `complete` turns the
 /// finished capture into a `queued` meeting with its asset and hands both
@@ -391,26 +403,39 @@ impl LocalRecordingIntake {
         Ok(meeting)
     }
 
+    /// How many times [`Self::complete`] tries its commit while another
+    /// connection holds the database: each try already waits out the
+    /// store's five-second busy timeout.
+    pub const COMMIT_ATTEMPTS: usize = 3;
+
     /// Writes the duration and the end reason, sets the asset's retention
     /// (`retention`, else the settings' default as it is now) with
-    /// `expires_at` cleared, and enqueues the meeting. A meeting that is not
-    /// `recording` is left alone, its row untouched; any other failure
-    /// marks it failed.
+    /// `expires_at` cleared, and enqueues the meeting: the meeting, now
+    /// `queued`, and its asset in one commit. A commit that finds the
+    /// database busy is tried again, up to [`Self::COMMIT_ATTEMPTS`] in
+    /// all. A meeting that is not `recording` is left alone, its row
+    /// untouched. Any other failure leaves the meeting `recording` and
+    /// returns the error: the recording stays on disk, and the next
+    /// launch's recovery finds it there and queues it. Swift marked the
+    /// meeting failed without its asset, so the recording was lost to the
+    /// list; the retry and the recording kept are Rust only.
     pub async fn complete(
         &self,
         meeting_id: Uuid,
         result: RecordingResult,
         retention: Option<AudioRetention>,
     ) -> Result<Meeting, LocalRecordingIntakeError> {
-        match self.complete_inner(meeting_id, result, retention).await {
-            Ok(meeting) => Ok(meeting),
-            Err(error @ LocalRecordingIntakeError::NotRecording(..)) => Err(error),
-            Err(error) => {
-                let _ = self.fail(
-                    meeting_id,
-                    &format!("Recording could not be saved: {error}"),
-                );
-                Err(error)
+        let mut attempt = 1;
+        loop {
+            match self
+                .complete_inner(meeting_id, result.clone(), retention)
+                .await
+            {
+                Err(error) if error.is_busy() && attempt < Self::COMMIT_ATTEMPTS => {
+                    tracing::debug!(%meeting_id, attempt, "the recording's commit found the database busy");
+                    attempt += 1;
+                }
+                outcome => return outcome,
             }
         }
     }
@@ -436,13 +461,12 @@ impl LocalRecordingIntake {
                 current.state.kind(),
             ));
         }
-        let mut meeting = self
-            .store
-            .update_meeting(meeting_id, timestamp, |meeting| {
-                meeting.duration = result.duration;
-                meeting.end_reason = Some(result.end_reason.clone());
-                Ok(())
-            })?;
+        // The enqueue writes the meeting and the asset in one commit, so a
+        // failed one leaves the row as it was.
+        let mut meeting = current;
+        meeting.duration = result.duration;
+        meeting.end_reason = Some(result.end_reason);
+        meeting.updated_at = timestamp;
         meeting.state = MeetingState::Queued;
         let mut asset = result.asset;
         asset.meeting_id = meeting_id;
@@ -659,6 +683,143 @@ mod tests {
         );
         assert!(!enqueued.load(Ordering::SeqCst));
     }
+
+    /// Another connection's write transaction on the same database, held
+    /// until the returned sender is dropped or sent to.
+    fn hold_the_write_lock(path: &Path) -> std::sync::mpsc::Sender<()> {
+        let other = Store::open(path).unwrap();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let (held, holding) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            other
+                .write(|_| {
+                    held.send(()).unwrap();
+                    let _ = released.recv();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        holding.recv().unwrap();
+        release
+    }
+
+    /// A Mac recording `begin` wrote, and what its capture handed back.
+    fn a_recording(store: &Arc<Store>, dir: &Path) -> (Meeting, RecordingResult) {
+        let at = DateTime::parse_from_rfc3339("2026-09-24T09:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let intake = LocalRecordingIntake::new(
+            store.clone(),
+            Arc::new(|_, _| Box::pin(async { Ok(()) })),
+            Arc::new(move || at),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let meeting = intake
+            .begin(MeetingSource::MacInPerson, None, None, &[], at)
+            .unwrap();
+        assert_eq!(
+            store.meeting(meeting.id).unwrap().unwrap().state,
+            MeetingState::Recording
+        );
+        let result = RecordingResult {
+            asset: AudioAsset {
+                id: Uuid::new_v4(),
+                meeting_id: meeting.id,
+                url: file_url(&dir.join("recording.caf"), false),
+                format: AudioFormat::Caf48kFloat32,
+                lanes: vec![AudioLane::Mixed],
+                sidecars_16k: std::collections::BTreeMap::new(),
+                retention: AudioRetention::KeepForever,
+                expires_at: None,
+                mixdown_url: None,
+            },
+            duration: 12.0,
+            end_reason: RecordingEndReason::Manual,
+        };
+        (meeting, result)
+    }
+
+    /// An enqueue that commits as the pipeline's does (the meeting and the
+    /// asset in one transaction, its error wrapped the same way) and
+    /// counts its calls; `after_call` runs after each.
+    fn committing_enqueue(
+        store: Arc<Store>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        after_call: impl Fn(usize) + Send + Sync + 'static,
+    ) -> Enqueue {
+        let after_call = Arc::new(after_call);
+        Arc::new(move |meeting, asset| {
+            let (store, calls, after_call) = (store.clone(), calls.clone(), after_call.clone());
+            Box::pin(async move {
+                let committed = store
+                    .save_meeting_with_asset(&meeting, &asset)
+                    .map_err(|error| PipelineFailure::wrapping(&error, PipelineStage::Decode));
+                after_call(calls.fetch_add(1, Ordering::SeqCst) + 1);
+                committed
+            })
+        })
+    }
+
+    /// A commit that finds another connection holding the database is
+    /// tried again and lands; one that keeps finding it leaves the meeting
+    /// `recording` (not failed, so the next launch recovers its master)
+    /// and returns the busy error.
+    #[tokio::test]
+    async fn a_busy_commit_is_tried_again_and_one_that_stays_busy_leaves_the_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("steno.sqlite");
+        let store = Arc::new(Store::open(&path).unwrap());
+        store
+            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_millis(20))?))
+            .unwrap();
+
+        let (meeting, result) = a_recording(&store, dir.path());
+        let release = Mutex::new(Some(hold_the_write_lock(&path)));
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let enqueue = committing_enqueue(store.clone(), calls.clone(), move |_| {
+            // The first commit found the lock; the next one will not.
+            release.lock().unwrap().take();
+        });
+        let intake = LocalRecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(Utc::now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let completed = intake
+            .complete(meeting.id, result.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "tried twice");
+        assert_eq!(completed.state, MeetingState::Queued);
+        assert_eq!(
+            store.meeting(meeting.id).unwrap().unwrap().state,
+            MeetingState::Queued
+        );
+        assert!(store.asset(meeting.id).unwrap().is_some());
+
+        let (meeting, result) = a_recording(&store, dir.path());
+        let release = hold_the_write_lock(&path);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let intake = LocalRecordingIntake::new(
+            store.clone(),
+            committing_enqueue(store.clone(), calls.clone(), |_| {}),
+            Arc::new(Utc::now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let error = intake.complete(meeting.id, result, None).await.unwrap_err();
+        drop(release);
+        assert!(error.is_busy(), "{error}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            LocalRecordingIntake::COMMIT_ATTEMPTS
+        );
+        let kept = store.meeting(meeting.id).unwrap().unwrap();
+        assert_eq!(kept.state, MeetingState::Recording, "not failed");
+        assert_eq!(kept, meeting, "the row is as `begin` wrote it");
+        assert!(store.asset(meeting.id).unwrap().is_none());
+    }
+
 
     /// Makes every meeting insert fail, as a full disk or a busy store
     /// would fail the admission's commit; with `failed_receipts_too`, the

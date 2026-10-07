@@ -62,6 +62,10 @@ use crate::run::ProcessingRun;
 pub struct PipelineFailure {
     pub stage: PipelineStage,
     pub reason: String,
+    /// Wraps a store error that another connection's lock caused
+    /// ([`StoreError::is_busy`]). Rust only: Swift's failure kept no such
+    /// mark, and its intake did not retry.
+    busy: bool,
 }
 
 impl PipelineFailure {
@@ -70,7 +74,15 @@ impl PipelineFailure {
         PipelineFailure {
             stage,
             reason: reason.into(),
+            busy: false,
         }
+    }
+
+    /// The failure wraps a busy store error: nothing is wrong with the
+    /// call, and a caller that can wait may try it again.
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        self.busy
     }
 
     /// `error` itself when it already is a `PipelineFailure`, bare or
@@ -85,7 +97,12 @@ impl PipelineFailure {
         });
         match carried {
             Some(failure) => failure.clone(),
-            None => PipelineFailure::new(stage, error.to_string()),
+            None => PipelineFailure {
+                busy: any
+                    .downcast_ref::<StoreError>()
+                    .is_some_and(StoreError::is_busy),
+                ..PipelineFailure::new(stage, error.to_string())
+            },
         }
     }
 }
