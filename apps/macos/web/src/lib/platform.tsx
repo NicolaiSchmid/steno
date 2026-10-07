@@ -8,12 +8,15 @@ import {
 import { type PlatformOS, platform as platformSchema } from "@/bridge/contract";
 
 /**
- * The OS the page runs on and everything the page words or binds for it:
+ * The OS the page runs on and everything the page words, binds or lays out
+ * for it:
  * the machine ("this Mac", "this computer"), the file manager (Finder,
  * File Explorer), where the privacy switches live, where Steno sits while
- * no window is open, and the shortcut keys (⌘F on the Mac, Ctrl+F
- * elsewhere). Call sites read `usePlatform()` and never branch on the OS
- * themselves; every word that differs lives in `WORDS` below.
+ * no window is open, the shortcut keys (⌘F on the Mac, Ctrl+F elsewhere),
+ * and whether the window's title bar lies over the page. Call sites read
+ * `usePlatform()` and never branch on the OS themselves; every word that
+ * differs lives in `WORDS` below, every other difference in the records
+ * beside it (`READS_CALENDAR`, `TITLE_BAR_INSET`).
  *
  * Where the value comes from, first match wins:
  * - `window.__STENO_PLATFORM__`, which the Tauri shell sets before the
@@ -137,6 +140,21 @@ const READS_CALENDAR: Record<PlatformOS, boolean> = {
 	linux: false,
 };
 
+/**
+ * Whether the window's title bar lies over the top of the page, so the
+ * page leaves the traffic lights their room: the sidebars' header-high
+ * spacer and onboarding's 52 px top. On the Mac the Swift windows and the
+ * Tauri shell's windows (`TitleBarStyle::Overlay` in
+ * `apps/desktop/src-tauri/src/windows.rs`) paint the page up to the top
+ * edge; on Windows and Linux the shell keeps the native title bar above
+ * the page, and the inset would be an empty band.
+ */
+const TITLE_BAR_INSET: Record<PlatformOS, boolean> = {
+	macos: true,
+	windows: false,
+	linux: false,
+};
+
 /** A modifier in a shortcut; `mod` is ⌘ on the Mac and Ctrl elsewhere. */
 type ShortcutModifier = "mod" | "shift";
 
@@ -244,6 +262,8 @@ export interface Platform {
 	words: PlatformWords;
 	/** Whether Steno reads a calendar here (see `READS_CALENDAR`). */
 	readsCalendar: boolean;
+	/** Whether the page leaves room for the traffic lights (see `TITLE_BAR_INSET`). */
+	titleBarInset: boolean;
 	/**
 	 * Whether the page answers the Record shortcut itself. The Swift app's
 	 * Record menu owns ⌘⇧R there, and a page that answered it too would
@@ -266,6 +286,7 @@ export function platformFor(os: PlatformOS): Platform {
 		os,
 		words: WORDS[os],
 		readsCalendar: READS_CALENDAR[os],
+		titleBarInset: TITLE_BAR_INSET[os],
 		bindsRecordShortcut: true,
 		label: (shortcut) => shortcutLabel(os, shortcut),
 		matches: (event, shortcut) => matchesShortcut(os, event, shortcut),

@@ -1526,7 +1526,10 @@ touch lines; each fix is ported to Swift before cutover.
   ellipsis off the Mac and "Exit Steno" on Windows, and shows shortcut hints on the
   Mac only. A call's folder note says "Windows call" or "Linux call" in its info line
   off the Mac (`RenderOptions::platform`, from `Platform::CURRENT`); the frontmatter's
-  `source` stays `mac-call`. The Swift app sets no platform and keeps the Mac's words.
+  `source` stays `mac-call`. Only the Mac's pages leave the traffic lights their
+  inset (`titleBarInset`); under the native title bar of Windows and Linux the
+  sidebars open without the spacer and onboarding at a 24 px top. The Swift app sets
+  no platform and keeps the Mac's words.
   Three changes reach both apps: a vault the CLI named reads "Obsidian (<vault
   folder>)" in the footer, onboarding page 1's button says Continue, and the retention
   sentence says "Recordings are kept until you delete them" and points at Settings >
@@ -1735,12 +1738,6 @@ it) and which pull requests found it. The pull request that fixes an item delete
   "Audio". Found: #197, #201.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
-- **First Linux release.** The pages keep the Mac's inset for the traffic lights (the
-  sidebar's header-high spacer, onboarding's 52 px top) where Windows and Linux draw
-  their own title bar above the page, so the top of each window has an empty band
-  there. Where: `apps/macos/web/src/components/ui/sidebar-column.tsx`,
-  `apps/macos/web/src/windows/onboarding/onboarding-page.tsx`,
-  `apps/desktop/src-tauri/src/windows.rs`. Found: #204.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
   measured DirectML's speed (at least three times the CPU's on an integrated GPU), so
   `directmlOnWindows` stays off by default (`SpeechSettings` in
@@ -1905,6 +1902,7 @@ PR off `main`.
 | A `complete` answered after an unpair, or after a new pairing, still delivers the recording and deletes the phone's copy (`mobile/`) | `fix/mobile-complete-after-unpair` | #211 | merged |
 | A call's folder note names the platform it was recorded on ("Windows call", "Linux call"); the `source` key stays `mac-call` (`steno-adapters`) | `fix/adapters-platform-call-label` | #215 | merged |
 | The handover's admission, first announce and revoke refusals leave another device's files and receipt alone, and the admission leaves no file behind (`steno-handover`) | `fix/rust-handover-admit-announce` | #219 | open |
+| No traffic light inset under a native title bar: the sidebars' spacer and onboarding's top follow the platform (`apps/macos/web/`) | `fix/web-platform-title-inset` | #217 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

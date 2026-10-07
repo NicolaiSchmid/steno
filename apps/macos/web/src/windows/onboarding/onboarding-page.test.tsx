@@ -1,11 +1,18 @@
 import { render, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { describe, expect, it } from "vitest";
 import { Button } from "@/components/ui";
+import { PlatformProvider, SWIFT_MAC } from "@/lib/platform";
 import { OnboardingPage } from "./onboarding-page";
+
+/** The page reads the platform's title bar inset; the Mac's here. */
+function renderOnMac(ui: ReactElement) {
+	return render(<PlatformProvider platform={SWIFT_MAC}>{ui}</PlatformProvider>);
+}
 
 describe("OnboardingPage", () => {
 	it("names the step, title, intro and aside and pins the footer buttons", () => {
-		render(
+		renderOnMac(
 			<OnboardingPage
 				aside="Each recording is deleted after 30 days."
 				footer={
@@ -51,7 +58,7 @@ describe("OnboardingPage", () => {
 	});
 
 	it("leaves the aside out when there is none", () => {
-		render(
+		renderOnMac(
 			<OnboardingPage
 				footer={<Button>Finish</Button>}
 				intro="Intro"
