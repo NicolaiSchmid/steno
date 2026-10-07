@@ -10,7 +10,9 @@ use common::*;
 use steno_adapters::naming::MeetingFolder;
 use steno_adapters::rendering::{ArtifactRenderer, RenderOptions, RenderedArtifactKind};
 use steno_core::summary;
-use steno_core::{MeetingExport, MeetingTask, TaskPriority, TranscriptSegment};
+use steno_core::{
+    MeetingExport, MeetingSource, MeetingTask, Platform, TaskPriority, TranscriptSegment,
+};
 
 fn renderer() -> ArtifactRenderer {
     ArtifactRenderer::new()
@@ -35,6 +37,65 @@ fn folder_note_matches_the_goldens_in_every_variant() {
         &renderer().render_folder_note(&export, &wikilink_utc(), None),
         "snapshots/obsidian/folder-note-wikilink-utc.md",
     );
+}
+
+#[test]
+fn folder_note_names_the_platform_a_call_was_recorded_on() {
+    let export = export();
+    for &platform in Platform::ALL {
+        for (options, variant) in [(plain(), "plain-utc"), (wikilink(), "wikilink-berlin")] {
+            assert_matches_golden(
+                &renderer().render_folder_note(
+                    &export,
+                    &RenderOptions {
+                        platform,
+                        ..options
+                    },
+                    None,
+                ),
+                &folder_note_golden(platform, variant),
+            );
+        }
+    }
+}
+
+#[test]
+fn only_a_call_names_its_platform_and_the_source_key_never_does() {
+    let words = [
+        (
+            MeetingSource::MacCall,
+            "mac-call",
+            ["Mac call", "Windows call", "Linux call"],
+        ),
+        (
+            MeetingSource::MacInPerson,
+            "mac-in-person",
+            ["In person"; 3],
+        ),
+        (MeetingSource::Phone, "phone", ["Phone"; 3]),
+    ];
+    let mut export = export();
+    for (source, key, labels) in words {
+        export.meeting.source = source;
+        for (&platform, label) in Platform::ALL.iter().zip(labels) {
+            let note = renderer().render_folder_note(
+                &export,
+                &RenderOptions {
+                    platform,
+                    ..plain()
+                },
+                None,
+            );
+            assert!(
+                note.contains(&format!("\nsource: \"{key}\"\n")),
+                "{source} on {platform}: {note}"
+            );
+            assert!(
+                note.contains(&format!(" · 1 h 30 min · {label} · [Transcript]")),
+                "{source} on {platform}: {note}"
+            );
+        }
+    }
 }
 
 #[test]

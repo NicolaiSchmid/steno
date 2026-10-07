@@ -1481,12 +1481,14 @@ touch lines; each fix is ported to Swift before cutover.
   the OS has: all four on the Mac, the microphone and local network on Windows, the
   microphone on Linux). The tray says "Settings" and "Check for Updates" without the
   ellipsis off the Mac and "Exit Steno" on Windows, and shows shortcut hints on the
-  Mac only. The Swift app sets no platform and keeps the Mac's words. Three changes
-  reach both apps: a vault the CLI named reads "Obsidian (<vault folder>)" in the
-  footer, onboarding page 1's button says Continue, and the retention sentence says
-  "Recordings are kept until you delete them" and points at Settings > Recording. The
-  page now answers ⌘F and ⇧⌘E in the Swift app too, where their hints showed but
-  nothing answered.
+  Mac only. A call's folder note says "Windows call" or "Linux call" in its info line
+  off the Mac (`RenderOptions::platform`, from `Platform::CURRENT`); the frontmatter's
+  `source` stays `mac-call`. The Swift app sets no platform and keeps the Mac's words.
+  Three changes reach both apps: a vault the CLI named reads "Obsidian (<vault
+  folder>)" in the footer, onboarding page 1's button says Continue, and the retention
+  sentence says "Recordings are kept until you delete them" and points at Settings >
+  Recording. The page now answers ⌘F and ⇧⌘E in the Swift app too, where their hints
+  showed but nothing answered.
 - Linux on a Wayland session runs under XWayland: `main` allows GDK only its `x11`
   backend (inside the process, so nothing it starts inherits it) when
   `WAYLAND_DISPLAY` and `DISPLAY` are set and the user set no `GDK_BACKEND`, because
@@ -1690,11 +1692,6 @@ request that fixes an item deletes it.
   "Audio". Found: #197, #201.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
-- **First Linux release.** The exported folder note calls a call recorded on Windows
-  or Linux a "Mac call" (`FolderNoteRenderer.sourceLabel`, Swift's word); the app
-  says "Call". The golden notes in `Tests/Fixtures/snapshots/` are shared with the
-  Swift renderer, so a platform's own word needs a fixture per platform. Where:
-  `crates/steno-adapters/src/rendering/folder_note.rs`. Found: #204.
 - **First Linux release.** The pages keep the Mac's inset for the traffic lights (the
   sidebar's header-high spacer, onboarding's 52 px top) where Windows and Linux draw
   their own title bar above the page, so the top of each window has an empty band
@@ -1866,6 +1863,7 @@ PR off `main`.
 | Small fixes after the port: non-Unicode environment variables, `steno process --title` as the user's title, logs that never wait for stderr, the headless PipeWire script's socket paths, a pnpm setup directory per CI job | `fix/rust-small-after-port` | #202 | merged |
 | Only a 401 to the current pairing's token unpairs the phone (`mobile/`) | `fix/mobile-current-pairing-401` | #200 | merged |
 | A `complete` answered after an unpair, or after a new pairing, still delivers the recording and deletes the phone's copy (`mobile/`) | `fix/mobile-complete-after-unpair` | #211 | open |
+| A call's folder note names the platform it was recorded on ("Windows call", "Linux call"); the `source` key stays `mac-call` (`steno-adapters`) | `fix/adapters-platform-call-label` | #215 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

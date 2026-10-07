@@ -774,11 +774,11 @@ mod tests {
             .iter()
             .map(|step| step["kind"].as_str().unwrap())
             .collect();
-        let expected: Vec<&str> = steno_bridge::Platform::CURRENT
-            .permissions()
-            .iter()
-            .map(|kind| kind.as_str())
-            .collect();
+        let expected: Vec<&str> =
+            steno_bridge::PermissionKind::for_platform(steno_bridge::Platform::CURRENT)
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect();
         assert_eq!(listed, expected);
     }
 

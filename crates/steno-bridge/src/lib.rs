@@ -11,9 +11,10 @@
 //! key, `String` enums are `steno_core::string_enum!` enums with the same
 //! raw values. The date and UUID codecs and the printer are
 //! `steno_core::json`'s ([`json`] re-exports the printer).
-//! [`Platform`] alone has no Swift type and travels in no message: the
-//! Tauri shell sets it as a page global
-//! (`apps/desktop/src-tauri/src/platform.rs`).
+//! [`Platform`] alone has no Swift type and travels in no message: it is
+//! `steno_core`'s, re-exported, and the Tauri shell sets it as a page global
+//! (`apps/desktop/src-tauri/src/platform.rs`);
+//! [`PermissionKind::for_platform`] lists its permissions.
 //!
 //! Naming: a top-level Swift type keeps its name without the `Bridge` prefix
 //! (`BridgeMeetingSource` is [`MeetingSource`]). A type nested in a snapshot,

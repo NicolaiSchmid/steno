@@ -2,7 +2,7 @@
 //! clicked.
 //! Swift: `Sources/StenoAdapters/Rendering/FolderNoteRenderer.swift`.
 
-use steno_core::{MeetingExport, MeetingSource, summary};
+use steno_core::{MeetingExport, MeetingSource, Platform, summary};
 
 use super::{
     ArtifactRenderer, Frontmatter, FrontmatterValue, LinkStyle, Names, RenderOptions, date_text,
@@ -99,7 +99,9 @@ impl FolderNoteRenderer<'_> {
         frontmatter
     }
 
-    /// `2026-09-24 14:00–15:30 · 1 h 30 min · Mac call · [[slug - Transcript|Transcript]] · [[slug - Tasks|Tasks]]`.
+    /// `2026-09-24 14:00–15:30 · 1 h 30 min · Mac call · [[slug - Transcript|Transcript]] · [[slug - Tasks|Tasks]]`,
+    /// with "Windows call" or "Linux call" when [`RenderOptions::platform`] is
+    /// Windows or Linux.
     pub fn info_line(&self) -> String {
         let meeting = &self.export.meeting;
         let start = meeting.started_at;
@@ -144,7 +146,7 @@ impl FolderNoteRenderer<'_> {
         [
             when,
             Self::duration_text(meeting.duration),
-            Self::source_label(meeting.source).to_owned(),
+            Self::source_label(meeting.source, self.options.platform).to_owned(),
         ]
         .into_iter()
         .chain(links)
@@ -191,6 +193,10 @@ impl FolderNoteRenderer<'_> {
         }
     }
 
+    /// The frontmatter's `source`: a stable data key that vault queries
+    /// match on, so a call is `mac-call` whichever platform recorded it;
+    /// only the info line's [`source_label`](Self::source_label) names the
+    /// platform.
     pub fn source_key(source: MeetingSource) -> &'static str {
         match source {
             MeetingSource::MacCall => "mac-call",
@@ -199,9 +205,15 @@ impl FolderNoteRenderer<'_> {
         }
     }
 
-    pub fn source_label(source: MeetingSource) -> &'static str {
+    /// The info line's word for the source; a call names the platform it
+    /// was recorded on. Swift: `sourceLabel`, always the Mac's.
+    pub fn source_label(source: MeetingSource, platform: Platform) -> &'static str {
         match source {
-            MeetingSource::MacCall => "Mac call",
+            MeetingSource::MacCall => match platform {
+                Platform::Macos => "Mac call",
+                Platform::Windows => "Windows call",
+                Platform::Linux => "Linux call",
+            },
             MeetingSource::MacInPerson => "In person",
             MeetingSource::Phone => "Phone",
         }

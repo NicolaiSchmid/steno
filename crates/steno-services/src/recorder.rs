@@ -432,8 +432,7 @@ fn denied_permissions(
     platform: steno_bridge::Platform,
     permissions: &dyn Permissions,
 ) -> Vec<PermissionKind> {
-    platform
-        .permissions()
+    PermissionKind::for_platform(platform)
         .iter()
         .copied()
         .filter(|kind| steno_host::services::permission_is_required(*kind))

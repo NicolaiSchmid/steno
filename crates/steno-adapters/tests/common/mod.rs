@@ -91,13 +91,14 @@ pub fn plain_berlin() -> RenderOptions {
         ..RenderOptions::PLAIN
     }
 }
-/// What the Obsidian destination uses with a people folder, in Berlin.
+/// What the Obsidian destination uses with a people folder, in Berlin, on
+/// the Mac.
 pub fn wikilink() -> RenderOptions {
     RenderOptions {
         link_style: LinkStyle::Wikilink,
         person_pages: true,
-        task_tag: None,
         time_zone: BERLIN,
+        ..RenderOptions::PLAIN
     }
 }
 pub fn wikilink_utc() -> RenderOptions {
@@ -528,6 +529,18 @@ pub fn repo_root() -> PathBuf {
 pub fn fixture(relative: &str) -> Vec<u8> {
     let path = repo_root().join("Tests/Fixtures").join(relative);
     std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// The folder note golden `variant` (`plain-utc`, `wikilink-berlin`) for a
+/// call recorded on `platform`: the Mac's in `snapshots/obsidian`, shared
+/// with the Swift renderer; the others in `snapshots/platforms/<platform>`.
+pub fn folder_note_golden(platform: Platform, variant: &str) -> String {
+    match platform {
+        Platform::Macos => format!("snapshots/obsidian/folder-note-{variant}.md"),
+        Platform::Windows | Platform::Linux => {
+            format!("snapshots/platforms/{platform}/folder-note-{variant}.md")
+        }
+    }
 }
 
 pub fn fixture_text(relative: &str) -> String {

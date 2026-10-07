@@ -21,6 +21,8 @@
 //! - [`string_enum`](mod@string_enum): the macro every Swift `String` enum is spelled with.
 //! - [`paths`]: where the database lives on each platform, and the file URL
 //!   codec the store's audio paths use.
+//! - [`platform`]: the OS the app runs on, which is also the OS its
+//!   calls were recorded on.
 //! - [`content_hash`]: the SHA-256 every receipt carries.
 //! - [`recording_layout`]: where one meeting's audio files live.
 //!
@@ -38,6 +40,7 @@ pub mod content_hash;
 pub mod json;
 pub mod model;
 pub mod paths;
+pub mod platform;
 pub mod protocols;
 pub mod recording_layout;
 pub mod store;
@@ -48,6 +51,7 @@ pub mod testing;
 
 pub use model::*;
 pub use paths::StenoPaths;
+pub use platform::Platform;
 pub use protocols::{
     AudioDecoder, BoundaryResult, BoxError, DEFAULT_MATCH_MARGIN, DeliveryDispatcher, Destination,
     Diarizer, EchoCanceller, HandoverIntake, LanguageModel, MeetingSummarizer, SecretKey,

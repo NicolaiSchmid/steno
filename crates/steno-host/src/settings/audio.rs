@@ -32,7 +32,7 @@ pub const RECORDING_PERMISSIONS: [PermissionKind; 2] =
 pub fn recording_permissions(platform: Platform) -> impl Iterator<Item = PermissionKind> {
     RECORDING_PERMISSIONS
         .into_iter()
-        .filter(move |kind| platform.permissions().contains(kind))
+        .filter(move |kind| PermissionKind::for_platform(platform).contains(kind))
 }
 
 /// The stepper's range for the days rule.

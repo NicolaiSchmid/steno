@@ -1,12 +1,12 @@
 //! Onboarding in two pages, after `Onboarding/OnboardingViewModel.swift`
 //! and `Web/OnboardingSnapshots.swift`. Page 1, permissions: microphone,
 //! system audio (both required), then calendar and local network
-//! (optional), as far as the platform has them (`Platform::permissions`:
-//! all four on the Mac, fewer on Windows and Linux). Page 2, "Summaries
-//! and export": the LLM endpoint and the Obsidian vault, both optional,
-//! written through the same view models the Settings sections use. The
-//! model owns the exit: Finish, or both rows handled on page 2, set the
-//! completed flag and `finished`.
+//! (optional), as far as the platform has them
+//! (`PermissionKind::for_platform`: all four on the Mac, fewer on Windows
+//! and Linux). Page 2, "Summaries and export": the LLM endpoint and the
+//! Obsidian vault, both optional, written through the same view models the
+//! Settings sections use. The model owns the exit: Finish, or both rows
+//! handled on page 2, set the completed flag and `finished`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -97,8 +97,7 @@ impl OnboardingViewModel {
     pub fn new(platform: Platform) -> Self {
         OnboardingViewModel {
             platform,
-            steps: platform
-                .permissions()
+            steps: PermissionKind::for_platform(platform)
                 .iter()
                 .map(|kind| Step {
                     kind: *kind,
@@ -126,8 +125,7 @@ impl OnboardingViewModel {
     /// the settings has nothing left to ask: the flag is written and the
     /// window stays closed. Swift: `OnboardingViewModel.shouldOpen`.
     pub fn should_open(store: &Store, services: &Services, platform: Platform) -> bool {
-        if platform
-            .permissions()
+        if PermissionKind::for_platform(platform)
             .iter()
             .filter(|kind| permission_is_required(**kind))
             .any(|kind| services.permissions.state(*kind) != PermissionState::Granted)

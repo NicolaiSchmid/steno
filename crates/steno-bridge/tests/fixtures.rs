@@ -269,8 +269,8 @@ fn contract_ts_shared_vocabulary_matches() {
 }
 
 /// `READS_CALENDAR` in `src/lib/platform.tsx`, as Biome writes it,
-/// against whether `Platform::permissions` lists the calendar: the page
-/// shows General's calendar row by it.
+/// against whether `PermissionKind::for_platform` lists the calendar:
+/// the page shows General's calendar row by it.
 #[test]
 fn platform_tsx_reads_the_calendar_where_the_platform_lists_it() {
     let path = repository_root().join("apps/macos/web/src/lib/platform.tsx");
@@ -278,7 +278,7 @@ fn platform_tsx_reads_the_calendar_where_the_platform_lists_it() {
     let entries: Vec<String> = Platform::ALL
         .iter()
         .map(|platform| {
-            let reads = platform.permissions().contains(&PermissionKind::Calendar);
+            let reads = PermissionKind::for_platform(*platform).contains(&PermissionKind::Calendar);
             format!("\t{platform}: {reads},")
         })
         .collect();

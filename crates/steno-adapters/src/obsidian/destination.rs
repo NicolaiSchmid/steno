@@ -9,7 +9,7 @@ use chrono_tz::Tz;
 use steno_core::paths::file_url_path;
 use steno_core::{
     BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport, ObsidianSettings,
-    async_trait,
+    Platform, async_trait,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -57,13 +57,18 @@ pub struct ObsidianFolderDestination {
     /// Time zone of the folder date and every date in the notes. The
     /// machine's zone in the app; tests pin it.
     time_zone: Tz,
+    /// The platform the folder note names a call by
+    /// ([`RenderOptions::platform`]): the one the app runs on, which
+    /// recorded every call it stores; tests pin it.
+    platform: Platform,
     sink: LocalFolderSink,
 }
 
 impl ObsidianFolderDestination {
     pub const DESTINATION_ID: &'static str = "obsidian-folder";
 
-    /// The stored destination for `settings`, with its dates in `time_zone`.
+    /// The stored destination for `settings`, with its dates in `time_zone`
+    /// and its calls named after [`Platform::CURRENT`].
     ///
     /// ```
     /// use chrono_tz::Tz;
@@ -95,8 +100,17 @@ impl ObsidianFolderDestination {
             id: id.to_owned(),
             settings,
             time_zone,
+            platform: Platform::CURRENT,
             sink,
         }
+    }
+
+    /// The same destination naming its calls after `platform`: the golden
+    /// tests render every platform's note on every OS.
+    #[must_use]
+    pub fn with_platform(mut self, platform: Platform) -> Self {
+        self.platform = platform;
+        self
     }
 
     #[must_use]
@@ -107,6 +121,11 @@ impl ObsidianFolderDestination {
     #[must_use]
     pub fn time_zone(&self) -> Tz {
         self.time_zone
+    }
+
+    #[must_use]
+    pub fn platform(&self) -> Platform {
+        self.platform
     }
 
     /// The vault is a writable directory (probed with a file that is created
@@ -144,6 +163,7 @@ impl ObsidianFolderDestination {
             person_pages: self.settings.people_folder.is_some(),
             task_tag: self.settings.task_tag.clone(),
             time_zone: self.time_zone,
+            platform: self.platform,
         };
         let renderer = ArtifactRenderer::new();
 
