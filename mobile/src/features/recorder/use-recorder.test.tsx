@@ -46,7 +46,7 @@ const fake = vi.hoisted(() => {
 		currentTime: 0,
 		isRecording: false,
 		uri: null as string | null,
-		prepareToRecordAsync: vi.fn(async () => {}),
+		prepareToRecordAsync: vi.fn(async (_options?: unknown) => {}),
 		record: vi.fn(() => {
 			recorder.isRecording = true;
 		}),
@@ -74,6 +74,7 @@ const fake = vi.hoisted(() => {
 			recorder.isRecording = false;
 			recorder.uri = null;
 			recorder.prepareToRecordAsync.mockClear();
+			recorder.prepareToRecordAsync.mockImplementation(async () => {});
 			recorder.record.mockClear();
 			recorder.stop.mockClear();
 			recorder.stop.mockImplementation(async () => {
@@ -187,6 +188,9 @@ describe("start", () => {
 		expect(fake.requestRecordingPermissionsAsync).toHaveBeenCalledTimes(1);
 		expect(fake.setAudioModeAsync).toHaveBeenCalledWith(RECORDING_AUDIO_MODE);
 		expect(fake.recorder.prepareToRecordAsync).toHaveBeenCalledTimes(1);
+		expect(fake.recorder.prepareToRecordAsync).toHaveBeenCalledWith(
+			RECORDING_OPTIONS,
+		);
 		expect(fake.recorder.record).toHaveBeenCalledTimes(1);
 		expect(h.handle.isRecording).toBe(true);
 		expect(h.callbacks.onStarted).toHaveBeenCalledWith({
@@ -207,6 +211,43 @@ describe("start", () => {
 			expect.objectContaining({ recordingID: "rec-1", sourceUri: SOURCE }),
 		);
 		expect(h.handle.session?.sourceUri).toBe(SOURCE);
+	});
+
+	it("gives every recording a fresh file, so a failed recording's file survives the next one", async () => {
+		// expo-audio on iOS: with options, prepareToRecordAsync builds a new
+		// recorder at a fresh `ExpoAudio/recording-<UUID>.m4a`; without, it
+		// prepares the previous recorder again, which truncates its file. The
+		// hook's recorder starts with the path its constructor drew.
+		let created = 0;
+		fake.recorder.uri = "file:///docs/ExpoAudio/recording-0.m4a";
+		fake.recorder.prepareToRecordAsync.mockImplementation(async (options) => {
+			if (options) {
+				fake.recorder.uri = `file:///docs/ExpoAudio/recording-${++created}.m4a`;
+			}
+			if (fake.recorder.uri) fake.files.set(fake.recorder.uri, 0);
+		});
+		const h = mount();
+
+		await h.start();
+		const first = h.handle.session?.sourceUri;
+		expect(first).toEqual(expect.any(String));
+		fake.files.set(first as string, 4096);
+		await h.emit(status({ hasError: true, error: "recorder failed" }));
+		expect(h.callbacks.onFailed).toHaveBeenCalledWith(
+			expect.objectContaining({ recordingID: "rec-1", sourceUri: first }),
+			"recorder failed",
+		);
+
+		await h.start();
+		const second = h.handle.session?.sourceUri;
+		expect(second).toEqual(expect.any(String));
+		expect(second).not.toBe(first);
+		expect(fake.files.get(first as string)).toBe(4096);
+
+		fake.files.set(second as string, 2048);
+		await h.stop();
+		expect(fake.moves).toEqual([[second, "file:///docs/queue/rec-2.m4a"]]);
+		expect(fake.files.get(first as string)).toBe(4096);
 	});
 
 	it("throws and stays idle when the permission is denied", async () => {

@@ -180,7 +180,11 @@ export function useRecorder(callbacks: RecorderCallbacks): RecorderHandle {
 			throw new Error("Microphone permission was not granted");
 		}
 		await setAudioModeAsync(RECORDING_AUDIO_MODE);
-		await recorder.prepareToRecordAsync();
+		// With options expo-audio builds a new native recorder at a fresh
+		// `ExpoAudio/recording-<UUID>.m4a`; without them it prepares the previous
+		// recorder again, on the same path, and a failed recording's file still
+		// there would be overwritten by this one.
+		await recorder.prepareToRecordAsync(RECORDING_OPTIONS);
 		const next: RecordingSession = {
 			recordingID: randomUUID(),
 			startedAt: new Date(),
