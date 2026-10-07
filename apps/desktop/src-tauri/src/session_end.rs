@@ -346,6 +346,7 @@ fn follow_session(
                 }
             }
             ClientStep::SaveAnswerQuit => {
+                tracing::info!(signal = member.as_str(), "the session is ending; saving");
                 (on_end.save)();
                 let answered = answer();
                 (on_end.quit)();
@@ -381,6 +382,7 @@ fn hold_shutdown_lock(system: &Connection, on_end: &SaveAndQuit) -> zbus::Result
     for signal in shutdowns {
         // `false` reports a shutdown called off, which no lock needs.
         if signal.body().deserialize::<bool>()? {
+            tracing::info!("the system is shutting down; saving");
             (on_end.save)();
             drop(lock);
             (on_end.quit)();
