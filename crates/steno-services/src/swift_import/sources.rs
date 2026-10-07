@@ -143,13 +143,9 @@ mod mac {
                 .limit(Limit::All)
                 .search()
                 .map_err(|error| format!("the certificate label query failed: {error}"))?;
-            let foreign = labels.iter().any(|result| {
-                result
-                    .simplify_dict()
-                    .and_then(|attributes| attributes.get("labl").cloned())
-                    .as_deref()
-                    != Some(SWIFT_IDENTITY_LABEL)
-            });
+            let foreign = labels
+                .iter()
+                .any(|result| label(result).as_deref() != Some(SWIFT_IDENTITY_LABEL));
             if foreign {
                 return Err(format!(
                     "the keychain returned a certificate not labelled \"{SWIFT_IDENTITY_LABEL}\""
@@ -165,10 +161,18 @@ mod mac {
     /// `errSecItemNotFound`.
     const ITEM_NOT_FOUND: i32 = -25300;
 
-    fn refusal(error: &steno_macos::keychain::KeychainError) -> KeychainRefusal {
+    /// The label (`labl`) of an attribute query's result.
+    fn label(result: &SearchResult) -> Option<String> {
+        result
+            .simplify_dict()
+            .and_then(|attributes| attributes.get("labl").cloned())
+    }
+
+    /// A read that failed without the user refusing it.
+    fn failed(detail: String) -> KeychainRefusal {
         KeychainRefusal {
-            denied: error.is_denied(),
-            detail: error.to_string(),
+            denied: false,
+            detail,
         }
     }
 
@@ -187,26 +191,17 @@ mod mac {
                 .limit(Limit::All)
                 .search()
             {
-                Ok(results) => Ok(results.iter().any(|result| {
-                    result
-                        .simplify_dict()
-                        .and_then(|attributes| attributes.get("labl").cloned())
-                        .as_deref()
-                        == Some(SWIFT_API_KEY_LABEL)
-                })),
+                Ok(results) => Ok(results
+                    .iter()
+                    .any(|result| label(result).as_deref() == Some(SWIFT_API_KEY_LABEL))),
                 Err(error) if error.code() == ITEM_NOT_FOUND => Ok(false),
                 Err(error) => Err(format!("the API key query failed: {error}")),
             }
         }
 
         fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal> {
-            let entry =
-                keyring::Entry::new(KEYRING_SERVICE, SecretKey::LLM_API_KEY).map_err(|error| {
-                    KeychainRefusal {
-                        denied: false,
-                        detail: error.to_string(),
-                    }
-                })?;
+            let entry = keyring::Entry::new(KEYRING_SERVICE, SecretKey::LLM_API_KEY)
+                .map_err(|error| failed(error.to_string()))?;
             match entry.get_password() {
                 Ok(key) => Ok(Some(key)),
                 Err(keyring::Error::NoEntry) => Ok(None),
@@ -220,27 +215,23 @@ mod mac {
         }
 
         fn export_identity(&self, passphrase: &str) -> Result<Vec<u8>, KeychainRefusal> {
-            let certificate = self
-                .certificate()
-                .map_err(|detail| KeychainRefusal {
-                    denied: false,
-                    detail,
-                })?
-                .ok_or_else(|| KeychainRefusal {
-                    denied: false,
-                    detail: format!("no certificate is labelled \"{SWIFT_IDENTITY_LABEL}\""),
-                })?;
+            let certificate = self.certificate().map_err(failed)?.ok_or_else(|| {
+                failed(format!(
+                    "no certificate is labelled \"{SWIFT_IDENTITY_LABEL}\""
+                ))
+            })?;
             // The first argument is the search list for the private key:
             // the default list in the product, the test's keychain there.
             let identity =
                 SecIdentity::with_certificate(&self.keychains, &certificate).map_err(|error| {
-                    KeychainRefusal {
-                        denied: false,
-                        detail: format!("SecIdentityCreateWithCertificate failed: {error}"),
-                    }
+                    failed(format!("SecIdentityCreateWithCertificate failed: {error}"))
                 })?;
-            steno_macos::keychain::export_pkcs12(&identity, passphrase)
-                .map_err(|error| refusal(&error))
+            steno_macos::keychain::export_pkcs12(&identity, passphrase).map_err(|error| {
+                KeychainRefusal {
+                    denied: error.is_denied(),
+                    detail: error.to_string(),
+                }
+            })
         }
     }
 }
