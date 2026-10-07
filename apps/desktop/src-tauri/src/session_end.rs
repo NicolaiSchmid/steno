@@ -9,15 +9,16 @@
 //!   `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`,
 //!   `SessionApi`). It finds the manager's unique name with
 //!   `GetNameOwner`, so it starts none, and takes the client signals from
-//!   that name only. On GNOME it answers `QueryEndSession` at once
-//!   (gnome-session asks before its confirmation dialog, which the user
-//!   can still cancel, and gives a query one second), and on `EndSession`
-//!   saves, answers `EndSessionResponse` and quits; gnome-session waits
-//!   about ten seconds for that answer. On Xfce it saves at
-//!   `QueryEndSession`, answers and quits: xfce4-session asks once the
-//!   user chose to log out and waits up to a minute for the answer, but
-//!   only seven seconds after `EndSession`, and on Wayland it quits after
-//!   the query without sending `EndSession`. Where no session manager runs
+//!   that name only. It answers `QueryEndSession` at once, and on
+//!   `EndSession` saves, answers `EndSessionResponse` and quits:
+//!   gnome-session asks before its confirmation dialog and gives a query
+//!   one second, and on X11 another client can still call an Xfce logout
+//!   off after the query (`CancelEndSession`), so a recording goes on
+//!   until the end really comes. gnome-session waits about ten seconds for
+//!   the answer at the end, xfce4-session seven. Xfce on Wayland is the
+//!   exception: xfce4-session quits right after the query, with no
+//!   `EndSession` and no cancel to follow, so there the app saves at the
+//!   query, then answers and quits. Where no session manager runs
 //!   (KDE Plasma, wlroots desktops), through the desktop portal's session
 //!   monitor (`follow_portal`): the app opens it (`CreateMonitor` on
 //!   `org.freedesktop.portal.Inhibit`), answers query-end at once
@@ -80,9 +81,11 @@ struct SessionApi {
     /// The interface of a registered client's object: the manager's
     /// signals to it and its answer (`EndSessionResponse`).
     client: &'static str,
-    /// Whether the client saves at `QueryEndSession` rather than at
-    /// `EndSession` (`client_step`).
-    saves_at_query: bool,
+    /// Whether the manager, on a Wayland session, ends it right after
+    /// `QueryEndSession`, sends no `EndSession` and so can no longer call
+    /// the logout off: the client saves at the query there, and at
+    /// `EndSession` everywhere else (`client_step`).
+    query_ends_on_wayland: bool,
 }
 
 impl SessionApi {
@@ -93,20 +96,20 @@ impl SessionApi {
         client: "org.gnome.SessionManager.ClientPrivate",
         // gnome-session asks before its confirmation dialog, which the user
         // can still cancel, and gives a query one second.
-        saves_at_query: false,
+        query_ends_on_wayland: false,
     };
     const XFCE: Self = Self {
         name: "org.xfce.SessionManager",
         path: "/org/xfce/SessionManager",
         manager: "org.xfce.Session.Manager",
         client: "org.xfce.Session.Client",
-        // xfce4-session asks once the user chose to log out, waits up to a
-        // minute for the answer and seven seconds after `EndSession`, and
-        // on Wayland quits after the query without sending `EndSession`.
-        // Another client can still call the logout off after the query
-        // (XSMP's interact-cancel); the app has then stopped the recording,
-        // saved it and quit.
-        saves_at_query: true,
+        // On X11 xfce4-session waits up to a minute for the query's answer
+        // and seven seconds after `EndSession`, and another client can still
+        // call the logout off between the two (XSMP's interact-cancel, then
+        // `CancelEndSession`). On Wayland it quits right after sending the
+        // query (`xfsm_manager_save_yourself_global`), with no `EndSession`
+        // and no cancel to follow.
+        query_ends_on_wayland: true,
     };
     /// In the order the app looks for them on the bus.
     const ALL: [Self; 2] = [Self::GNOME, Self::XFCE];
@@ -165,7 +168,10 @@ pub fn watch(app: &tauri::AppHandle, startup_id: String) {
         spawn_client(
             "steno-session-client",
             "a logout saves only when a signal reaches the app or the display closes",
-            move || follow_session_end(&patient(Builder::session()?)?, &startup_id, &on_end),
+            move || {
+                let session = patient(Builder::session()?)?;
+                follow_session_end(&session, &startup_id, wayland_session(), &on_end)
+            },
         );
         let (busy, recording) = mpsc::channel();
         app.manage(LogoutInhibitor::new(busy));
@@ -183,6 +189,13 @@ pub fn watch(app: &tauri::AppHandle, startup_id: String) {
         "a system shutdown or reboot saves only when a signal reaches the app",
         move || hold_shutdown_lock(&patient(Builder::system()?)?, &on_end),
     );
+}
+
+/// Whether the app runs in a Wayland session: `WAYLAND_DISPLAY` is set,
+/// also when the shell runs under `XWayland` (`display`), since GTK leaves
+/// it in place.
+fn wayland_session() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty())
 }
 
 /// The connection `builder` makes, whose method calls wait `CALL_PATIENCE`
@@ -229,7 +242,7 @@ fn proxy<'a>(
 /// What a session client does on one of the session manager's signals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientStep {
-    /// Answers yes at once: the query comes before the user confirmed; the
+    /// Answers yes at once: the logout can still be called off, and the
     /// logout inhibitor is what asks the user.
     Answer,
     /// Saves, answers, then quits: the session ends.
@@ -240,12 +253,14 @@ enum ClientStep {
     Wait,
 }
 
-/// The step for the session manager's signal `member` under `api`: the
-/// query is answered at once or, where the manager asks only once the user
-/// chose to log out (`SessionApi::saves_at_query`), after the save.
-fn client_step(api: SessionApi, member: &str) -> ClientStep {
+/// The step for the session manager's signal `member`: the query is
+/// answered at once or, where it is the session's end
+/// (`saves_at_query`, `SessionApi::query_ends_on_wayland`), after the save.
+/// A query answered at once can still be called off (`CancelEndSession`),
+/// and the recording goes on.
+fn client_step(saves_at_query: bool, member: &str) -> ClientStep {
     match member {
-        "QueryEndSession" if api.saves_at_query => ClientStep::SaveAnswerQuit,
+        "QueryEndSession" if saves_at_query => ClientStep::SaveAnswerQuit,
         "QueryEndSession" => ClientStep::Answer,
         "EndSession" => ClientStep::SaveAnswerQuit,
         "Stop" => ClientStep::Quit,
@@ -281,29 +296,34 @@ fn session_manager(session: &Connection) -> zbus::Result<Option<(SessionApi, Own
     Ok(None)
 }
 
-/// Follows the end of the session on `session`: as a client of its
-/// session manager when one runs (`follow_session`), else through the
-/// desktop portal's session monitor (`follow_portal`).
+/// Follows the end of the session on `session`, a Wayland one when
+/// `wayland`: as a client of its session manager when one runs
+/// (`follow_session`), else through the desktop portal's session monitor
+/// (`follow_portal`).
 fn follow_session_end(
     session: &Connection,
     startup_id: &str,
+    wayland: bool,
     on_end: &SaveAndQuit,
 ) -> zbus::Result<()> {
     match session_manager(session)? {
-        Some(manager) => follow_session(session, manager, startup_id, on_end),
+        Some(manager) => follow_session(session, manager, startup_id, wayland, on_end),
         None => follow_portal(session, on_end),
     }
 }
 
-/// Registers the app with `manager`, the session manager on `session`,
-/// and follows its signals to this client until the session ends; an
-/// error when the bus goes away before the app quit.
+/// Registers the app with `manager`, the session manager on `session`
+/// (a Wayland one when `wayland`), and follows its signals to this client
+/// until the session ends; an error when the bus goes away before the app
+/// quit.
 fn follow_session(
     session: &Connection,
     (api, owner): (SessionApi, OwnedUniqueName),
     startup_id: &str,
+    wayland: bool,
     on_end: &SaveAndQuit,
 ) -> zbus::Result<()> {
+    let saves_at_query = api.query_ends_on_wayland && wayland;
     // Subscribed before the app registers, so no signal falls between. The
     // rule names the manager's unique name, which zbus also checks on
     // every message it delivers, so a signal another peer sends straight
@@ -337,7 +357,7 @@ fn follow_session(
         let Some(member) = header.member() else {
             continue;
         };
-        match client_step(api, member.as_str()) {
+        match client_step(saves_at_query, member.as_str()) {
             // A lost answer leaves the client following: the end may still
             // come.
             ClientStep::Answer => {
@@ -624,23 +644,21 @@ mod tests {
     use super::*;
     use std::io::{BufRead as _, Read as _};
 
-    /// GNOME's query is answered at once, Xfce's saved for first; the end
-    /// saves on both.
+    /// A query is answered at once unless it is the session's end, which
+    /// saves first; the end saves, and a cancel changes nothing.
     #[test]
     fn the_session_managers_signals_map_to_their_steps() {
+        assert_eq!(client_step(false, "QueryEndSession"), ClientStep::Answer);
         assert_eq!(
-            client_step(GNOME_SESSION, "QueryEndSession"),
-            ClientStep::Answer
-        );
-        assert_eq!(
-            client_step(XFCE4_SESSION, "QueryEndSession"),
+            client_step(true, "QueryEndSession"),
             ClientStep::SaveAnswerQuit
         );
-        for api in [GNOME_SESSION, XFCE4_SESSION] {
-            assert_eq!(client_step(api, "EndSession"), ClientStep::SaveAnswerQuit);
-            assert_eq!(client_step(api, "Stop"), ClientStep::Quit);
-            assert_eq!(client_step(api, "CancelEndSession"), ClientStep::Wait);
-            assert_eq!(client_step(api, "Unknown"), ClientStep::Wait);
+        for saves_at_query in [false, true] {
+            let step = |member| client_step(saves_at_query, member);
+            assert_eq!(step("EndSession"), ClientStep::SaveAnswerQuit);
+            assert_eq!(step("Stop"), ClientStep::Quit);
+            assert_eq!(step("CancelEndSession"), ClientStep::Wait);
+            assert_eq!(step("Unknown"), ClientStep::Wait);
         }
     }
 
@@ -912,14 +930,14 @@ mod tests {
         path: "/org/gnome/SessionManager",
         manager: "org.gnome.SessionManager",
         client: "org.gnome.SessionManager.ClientPrivate",
-        saves_at_query: false,
+        query_ends_on_wayland: false,
     };
     const XFCE4_SESSION: SessionApi = SessionApi {
         name: "org.xfce.SessionManager",
         path: "/org/xfce/SessionManager",
         manager: "org.xfce.Session.Manager",
         client: "org.xfce.Session.Client",
-        saves_at_query: true,
+        query_ends_on_wayland: true,
     };
 
     /// A session manager under `api`'s names as far as one client goes, on
@@ -982,7 +1000,8 @@ mod tests {
     }
 
     impl Session {
-        fn follow(daemon: &Daemon, api: SessionApi) -> Self {
+        /// On X11 (`wayland` false) or Wayland.
+        fn follow(daemon: &Daemon, api: SessionApi, wayland: bool) -> Self {
             let steps = Steps::default();
             let (registered, registrations) = mpsc::channel();
             let (answered, answers) = mpsc::channel();
@@ -998,7 +1017,8 @@ mod tests {
             );
             let (connection, on_end) = (daemon.connect(), noting(&steps));
             let client_name = connection.unique_name().unwrap().to_string();
-            let result = spawn(move || follow_session_end(&connection, "a-startup-id", &on_end));
+            let result =
+                spawn(move || follow_session_end(&connection, "a-startup-id", wayland, &on_end));
             assert_eq!(
                 registrations.recv_timeout(WAIT).expect("registered"),
                 (APP_ID.to_owned(), "a-startup-id".to_owned())
@@ -1028,16 +1048,27 @@ mod tests {
         /// Asks the client whether the session may end and waits for its
         /// yes, which it gives without saving.
         fn query(&self) {
+            let before = self.steps().len();
             self.emit(&self.client, "QueryEndSession");
             self.answers
                 .recv_timeout(WAIT)
                 .expect("the query was answered");
-            assert_eq!(self.steps(), ["answered true"]);
+            assert_eq!(self.steps()[before..].to_vec(), ["answered true"]);
+        }
+
+        /// Calls the logout off: the client neither saves nor quits.
+        fn cancel(&self) {
+            let before = self.steps();
+            self.emit(&self.client, "CancelEndSession");
+            // Longer than a save, so a client that acted on it would be
+            // seen.
+            std::thread::sleep(SAVE * 2);
+            assert_eq!(self.steps(), before);
+            assert!(self.result.try_recv().is_err(), "the client ended");
         }
 
         /// Asks the client whether the session may end, where the query
-        /// comes only once it ends: the client saves, answers and quits, in
-        /// that order.
+        /// is the end: the client saves, answers and quits, in that order.
         fn query_ends(&self) {
             self.emit(&self.client, "QueryEndSession");
             self.result
@@ -1048,46 +1079,57 @@ mod tests {
         }
 
         /// Ends the session: the client saves, answers and quits, in that
-        /// order, after the one query.
+        /// order, having saved nothing before.
         fn end(&self) {
+            let before = self.steps();
             self.emit(&self.client, "EndSession");
             self.result
                 .recv_timeout(WAIT)
                 .expect("the client ended")
                 .unwrap();
+            assert!(!before.contains(&"saved".to_owned()), "{before:?}");
             assert_eq!(
-                self.steps(),
-                ["answered true", "saved", "answered true", "quit"]
+                self.steps()[before.len()..].to_vec(),
+                ["saved", "answered true", "quit"]
             );
         }
     }
 
     /// The client registers with the app's id and its startup id, ignores
     /// another client's signals, and saves, answers and quits, in that
-    /// order: on GNOME at the session's end, after a query it answered at
-    /// once without saving; on Xfce at the query.
-    fn a_logout_saves_before_the_session_manager_is_answered(api: SessionApi) {
+    /// order. Where the query is not the end, it answers the query at once
+    /// without saving, records on through a logout called off, and saves
+    /// at the end; where it is (Xfce on Wayland), it saves at the query.
+    fn a_logout_saves_before_the_session_manager_is_answered(api: SessionApi, wayland: bool) {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let session = Session::follow(&daemon, api);
+        let session = Session::follow(&daemon, api, wayland);
         session.emit(&format!("{}/Client2", api.path), "EndSession");
-        if api.saves_at_query {
+        if api.query_ends_on_wayland && wayland {
             session.query_ends();
         } else {
+            session.query();
+            session.cancel();
             session.query();
             session.end();
         }
     }
 
     #[test]
-    fn a_gnome_logout_saves_before_the_session_manager_is_answered() {
-        a_logout_saves_before_the_session_manager_is_answered(GNOME_SESSION);
+    fn a_gnome_logout_saves_at_the_end() {
+        a_logout_saves_before_the_session_manager_is_answered(GNOME_SESSION, false);
+        a_logout_saves_before_the_session_manager_is_answered(GNOME_SESSION, true);
     }
 
     #[test]
-    fn an_xfce_logout_saves_before_the_session_manager_is_answered() {
-        a_logout_saves_before_the_session_manager_is_answered(XFCE4_SESSION);
+    fn an_xfce_logout_on_x11_saves_at_the_end() {
+        a_logout_saves_before_the_session_manager_is_answered(XFCE4_SESSION, false);
+    }
+
+    #[test]
+    fn an_xfce_logout_on_wayland_saves_at_the_query() {
+        a_logout_saves_before_the_session_manager_is_answered(XFCE4_SESSION, true);
     }
 
     /// A peer other than the session manager that sends the client's
@@ -1097,7 +1139,7 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let session = Session::follow(&daemon, GNOME_SESSION);
+        let session = Session::follow(&daemon, GNOME_SESSION, false);
         let peer = daemon.connect();
         for destination in [None, Some(session.client_name.as_str())] {
             peer.emit_signal(
@@ -1146,7 +1188,7 @@ mod tests {
             Steps::default(),
             xfce_answered,
         );
-        let session = Session::follow(&daemon, GNOME_SESSION);
+        let session = Session::follow(&daemon, GNOME_SESSION, false);
         session.query();
         session.end();
         assert!(
@@ -1162,7 +1204,7 @@ mod tests {
         let Some(mut daemon) = Daemon::start() else {
             return;
         };
-        let session = Session::follow(&daemon, GNOME_SESSION);
+        let session = Session::follow(&daemon, GNOME_SESSION, false);
         // Answered, so the client follows the signals and the bus ends
         // under that wait.
         session.query();
@@ -1183,7 +1225,7 @@ mod tests {
             save: Arc::new(|| panic!("saved")),
             quit: Arc::new(|| panic!("quit")),
         };
-        assert!(follow_session_end(&daemon.connect(), "", &on_end).is_err());
+        assert!(follow_session_end(&daemon.connect(), "", false, &on_end).is_err());
         assert!(hold_shutdown_lock(&daemon.connect(), &on_end).is_err());
     }
 
@@ -1362,7 +1404,7 @@ mod tests {
             let (portal, calls) = FakePortal::serve(daemon, &steps);
             let (connection, on_end) = (daemon.connect(), noting(&steps));
             let client = connection.unique_name().unwrap().to_string();
-            let result = spawn(move || follow_session_end(&connection, "", &on_end));
+            let result = spawn(move || follow_session_end(&connection, "", false, &on_end));
             let asked = calls.recv_timeout(WAIT);
             assert!(
                 asked.is_ok(),

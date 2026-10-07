@@ -1171,14 +1171,15 @@ still has to draw the window side. `[ ]` is not ported yet.
     bus, GNOME's `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`
     (the same client protocol under names of its own), finds its unique name with
     `GetNameOwner`, so it starts none, and takes the client signals from that name
-    only (`apps/desktop/src-tauri/src/session_end.rs`). On GNOME it answers
-    `QueryEndSession` at once (asked before the confirmation dialog the user can
-    still cancel, with one second to answer) and `EndSession` only after the save,
-    then quits; gnome-session waits about ten seconds for that answer. On Xfce it
-    saves at `QueryEndSession`, then answers and quits: xfce4-session asks once the
-    user chose to log out and waits up to a minute for the answer, but only seven
-    seconds after `EndSession`, and on Wayland it quits after the query without
-    sending `EndSession`.
+    only (`apps/desktop/src-tauri/src/session_end.rs`). It answers
+    `QueryEndSession` at once and `EndSession` only after the save, then quits:
+    gnome-session asks before the confirmation dialog the user can still cancel,
+    with one second to answer, and on X11 another client can still call an Xfce
+    logout off after the query (`CancelEndSession`), so the recording goes on until
+    the end comes. gnome-session waits about ten seconds for the answer at the end,
+    xfce4-session seven. On Wayland xfce4-session quits right after the query,
+    without `EndSession` and with no cancel to follow, so there the shell saves at
+    the query, then answers and quits (`SessionApi::query_ends_on_wayland`).
   - Where no session manager runs (KDE Plasma, wlroots desktops), the shell opens
     the desktop portal's session monitor (`CreateMonitor` on
     `org.freedesktop.portal.Inhibit`), answers query-end at once

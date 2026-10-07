@@ -53,11 +53,13 @@ exits reach the shutdown these ways:
   app go: the app registers with it on the session bus (GNOME's
   `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`,
   which serves the same protocol under names of its own,
-  `session_end.rs`). GNOME asks first, before its confirmation dialog, so
-  the app answers that at once and saves at the end, which gnome-session
-  waits about ten seconds for. Xfce asks only once the user chose to log
-  out, waits up to a minute for the answer and on Wayland never sends the
-  end, so the app saves when asked, then answers and quits.
+  `session_end.rs`). The session manager first asks whether the session
+  may end, and the logout can still be called off after that (GNOME's
+  confirmation dialog, another Xfce app), so the app answers at once,
+  records on, and saves at the end, which gnome-session waits about ten
+  seconds for and xfce4-session seven. On Wayland xfce4-session quits
+  right after it asked, with no end and no cancel to follow, so there the
+  app saves when asked, then answers and quits.
 - Where no session manager runs (KDE Plasma, wlroots desktops), the app
   follows the desktop portal's session monitor. It answers the portal's
   query at once, since the user can still call the logout off then, and
@@ -111,7 +113,7 @@ only a kill cuts it off on any of them:
 | Desktop | What starts the save |
 |---|---|
 | GNOME (X11, Wayland) | `EndSession`, about ten seconds to answer; then the display closing holds the exit until the save has ended |
-| Xfce on X11 | `QueryEndSession`, a minute to answer |
+| Xfce on X11 | `EndSession`, seven seconds to answer; then the display closing holds the exit until the save has ended |
 | Xfce on Wayland | `QueryEndSession`; xfce4-session quits at once, and the display closing holds the exit until the save has ended |
 | KDE Plasma 6.6 (Wayland, X11) | the display closing |
 | A desktop whose portal reports the end | the portal's ending state, then the display closing |
