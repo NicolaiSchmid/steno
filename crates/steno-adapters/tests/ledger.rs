@@ -295,8 +295,8 @@ fn moving_the_folder_drops_its_files_and_writes_the_claimed_one_as_on_a_first_de
         "directly in the claimed folder only"
     );
     assert!(
-        !ledger.may_write(&format!("{claimed}0/meeting.json"), true),
-        "a sibling with the same prefix is not the claimed folder"
+        !ledger.may_write(&format!("{claimed}0.md"), true),
+        "a sibling with the same prefix is not in the claimed folder"
     );
     assert!(!ledger.may_write(AUDIO, true), "the lost folder: as before");
     assert_eq!(ledger.receipt(&claimed, 1).folder, claimed);
