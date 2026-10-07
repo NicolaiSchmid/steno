@@ -1146,10 +1146,16 @@ fn a_report_stuck_in_its_handler_holds_neither_stop_nor_the_rebuild() {
     // started on the same sink beside the old capture.
     sink.rearm_device_change();
     start(&backend, &lanes, None, &sink).expect("a start beside the stuck capture");
-    assert_eq!(threads_named("steno-pipewire"), 2, "{:?}", threads());
-    assert_eq!(
-        capture_nodes(),
-        2,
+    // Waited for: one CI run counted one thread here and listed both right
+    // after. The old capture cannot go before the release, so a count that
+    // never reaches two still fails.
+    assert!(
+        eventually(SETTLE, || threads_named("steno-pipewire") == 2),
+        "the old capture's thread stays while stuck: {:?}",
+        threads()
+    );
+    assert!(
+        eventually(SETTLE, || capture_nodes() == 2),
         "the old capture's node stays while stuck"
     );
     let audio = collect(&sink, 12_000);
