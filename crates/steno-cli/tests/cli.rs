@@ -350,14 +350,12 @@ fn a_writing_command_refuses_while_the_app_holds_the_database() {
     let home = home.path();
     let db = home.join("steno.sqlite");
     let db_arg = db.to_str().unwrap();
-    assert_eq!(
-        steno(&["dev", "db", "migrate", "--db", db_arg], home).status,
-        0
-    );
+    let migrate = ["dev", "db", "migrate", "--db", db_arg];
+    assert_eq!(steno(&migrate, home).status, 0);
 
     let app = steno_core::DatabaseLock::acquire(&db).unwrap();
     for args in [
-        &["dev", "db", "migrate", "--db", db_arg][..],
+        &migrate[..],
         &["dev", "db", "reindex", "--db", db_arg][..],
         &[
             "deliver",
@@ -389,8 +387,8 @@ fn a_writing_command_refuses_while_the_app_holds_the_database() {
     assert!(!read.stderr.contains("Steno is running"), "{}", read.stderr);
 
     drop(app);
-    let migrate = steno(&["dev", "db", "migrate", "--db", db_arg], home);
-    assert_eq!(migrate.status, 0, "{}", migrate.stderr);
+    let migrated = steno(&migrate, home);
+    assert_eq!(migrated.status, 0, "{}", migrated.stderr);
 }
 
 #[test]

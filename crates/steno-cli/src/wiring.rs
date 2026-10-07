@@ -71,7 +71,7 @@ impl DatabaseOptions {
 static HELD_LOCKS: std::sync::Mutex<Vec<DatabaseLock>> = std::sync::Mutex::new(Vec::new());
 
 /// Takes the lock of the database at `database` for the rest of the
-/// process; at once when this process holds it already.
+/// process; nothing to do when this process holds it already.
 fn hold_lock(database: &Path) -> Result<(), Failure> {
     let mut held = HELD_LOCKS
         .lock()
