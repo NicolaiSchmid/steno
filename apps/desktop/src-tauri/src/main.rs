@@ -18,10 +18,10 @@
 //! instance, on Linux the logout and shutdown clients (`session_end`) and
 //! the systemd drop-ins for the stop timeout (`stop_timeout`), and on a
 //! Wayland session the `XWayland` backend the panels need (`display`).
-//! Every one is a thin module over a Tauri plugin or an
-//! OS API with its rules in plain functions the tests cover. Everything
-//! that is on the wire (errors, topics, windows, sections, params) is the
-//! `steno-bridge` crate's type; the shell adds only what it needs on top
+//! Every one is a thin module over a Tauri plugin or an OS API with its
+//! rules in plain functions the tests cover. Everything that is on the
+//! wire (errors, topics, windows, sections, params) is the `steno-bridge`
+//! crate's type; the shell adds only what it needs on top
 //! (`recording::RecorderState`, `windows::Spec`). Secrets are not the
 //! shell's: the keyring `SecretStore` lives in `steno-services` (#173,
 //! `WP6b`).
@@ -549,17 +549,22 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 }
 
 /// What every exit runs once (`ExitGate`): the host's shutdown
-/// (`Host::shutdown_action`), timed (`timed`), then, on Linux, Launch at
-/// login turned off while the app ran as the autostart unit goes off
+/// (`Host::shutdown_action`), then a `warn` line with how long it took, so
+/// a machine's log, under the default filter (`LOG_FILTER`), shows how
+/// long a save takes against the waits it has to fit in: systemd's stop
+/// timeout, the session manager's, logind's delay. A shutdown cut off at
+/// `SHUTDOWN_PATIENCE` logs the gate's warning first, and this line only
+/// if the save ends before the process does. After it, on Linux, Launch
+/// at login turned off while the app ran as the autostart unit goes off
 /// (`autostart::turn_off_at_exit`), and an autostart entry an earlier
 /// build wrote that waited for the exit goes
 /// (`autostart::remove_earlier_entry_at_exit`): only once the save is
 /// over, since until then the unit the app runs as needs the entry.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
-    let shutdown = timed(host::host(app).shutdown_action());
+    let shutdown = host::host(app).shutdown_action();
     #[cfg(target_os = "linux")]
     let app = app.clone();
-    then(shutdown, move || {
+    timed_then(shutdown, move || {
         #[cfg(target_os = "linux")]
         {
             autostart::turn_off_at_exit(&app);
@@ -568,29 +573,16 @@ fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     })
 }
 
-/// `shutdown`, then `after`, in that order.
-fn then(
+/// `shutdown`, the line with its duration, then `after`, in that order.
+fn timed_then(
     shutdown: impl FnOnce() + Send + 'static,
     after: impl FnOnce() + Send + 'static,
 ) -> impl FnOnce() + Send + 'static {
     move || {
-        shutdown();
-        after();
-    }
-}
-
-/// The host's shutdown (`Host::shutdown_action`), which every exit runs,
-/// logging how long it took once it ends, so a machine's log shows how
-/// long a save takes against the waits it has to fit in: systemd's stop
-/// timeout, the session manager's, logind's delay. At `warn`, so the
-/// default filter (`LOG_FILTER`) keeps the line. A shutdown cut off at
-/// `SHUTDOWN_PATIENCE` logs the gate's warning first, and this line only
-/// if the save ends before the process does.
-fn timed(shutdown: impl FnOnce() + Send + 'static) -> impl FnOnce() + Send + 'static {
-    move || {
         let started = std::time::Instant::now();
         shutdown();
         tracing::warn!(elapsed = ?started.elapsed(), "the shutdown ended");
+        after();
     }
 }
 
@@ -932,7 +924,7 @@ mod tests {
     fn the_exit_action_runs_its_after_step_once_the_shutdown_ended() {
         let steps = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let (shutdown, after) = (steps.clone(), steps.clone());
-        then(
+        timed_then(
             move || shutdown.lock().unwrap().push("shutdown"),
             move || after.lock().unwrap().push("after"),
         )();
