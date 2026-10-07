@@ -45,12 +45,13 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    starts are written once in SQL and mirrored in `Migrations.swift` and the Rust
    `.sql` files until cutover; the parity test proves them equal. The `setting` table
    is shared too: the Rust store writes only the keys `Settings` knows, deletes only
-   those of them that are now `None`, and keeps rows and fields of the Obsidian value
-   that it does not know. Swift's `SettingsStore` still deletes and rewrites every row
-   on each save, and fails to load when a stored enum value is one it does not know. So
+   those of them that are now `None`, and keeps the rows it does not know and the
+   Obsidian value's fields it does not know (for the same vault only: another vault
+   starts without them). Swift's `SettingsStore` still deletes and rewrites every row
+   on each save. Both stores fail to load a stored enum value they do not know. So
    until the Swift removal (S9 of `.plans/2026-10-07-stable-promotion.md`), no new
    setting key or stored enum value lands unless its PR says what the rolled-back Swift
-   app does with it.
+   app or an older Rust build does with it.
 3. **Audio never leaves the device.** Only these code paths use the network, and a
    new one needs a plan first:
    - the LLM client (`steno-llm`), text only: the prompts and the transcript to the
