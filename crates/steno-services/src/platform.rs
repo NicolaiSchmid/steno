@@ -75,12 +75,7 @@ impl AudioDevices for PlatformAudioDevices {
 #[derive(Debug)]
 pub struct FilePreferences {
     path: PathBuf,
-    state: Mutex<PreferencesState>,
-}
-
-#[derive(Debug)]
-struct PreferencesState {
-    values: BTreeMap<String, Value>,
+    values: Mutex<BTreeMap<String, Value>>,
     /// False when the file on disk could not be read or set aside.
     writable: bool,
 }
@@ -89,74 +84,83 @@ impl FilePreferences {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let (values, writable) = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(values) => (values, true),
-                Err(error) => match set_aside(&path) {
-                    Ok(aside) => {
-                        tracing::warn!(
-                            "{} did not parse ({error}); moved it to {} and started empty",
-                            path.display(),
-                            aside.display()
-                        );
-                        (BTreeMap::new(), true)
-                    }
-                    Err(move_error) => {
-                        tracing::warn!(
-                            "{} did not parse ({error}) and could not be moved aside \
-                             ({move_error}); it stays and is not written",
-                            path.display()
-                        );
-                        (BTreeMap::new(), false)
-                    }
-                },
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (BTreeMap::new(), true),
-            Err(error) => {
-                tracing::warn!(
-                    "{} could not be read ({error}); it stays and is not written",
-                    path.display()
-                );
-                (BTreeMap::new(), false)
-            }
-        };
+        let (values, writable) = load(&path);
         FilePreferences {
             path,
-            state: Mutex::new(PreferencesState { values, writable }),
+            values: Mutex::new(values),
+            writable,
         }
     }
 
-    fn state(&self) -> std::sync::MutexGuard<'_, PreferencesState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    /// Replaces the file with `values`.
+    fn write(&self, values: &BTreeMap<String, Value>) -> std::io::Result<()> {
+        let data = serde_json::to_vec_pretty(values)?;
+        if let Some(parent) = self.path.parent() {
+            create_dir_all_durably(parent)?;
+        }
+        replace_file(&self.path, &data, Access::Default)
+    }
+}
+
+/// The values in `path` and whether it may be written.
+fn load(path: &Path) -> (BTreeMap<String, Value>, bool) {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (BTreeMap::new(), true);
+        }
+        Err(error) => {
+            tracing::warn!(
+                "{} could not be read ({error}); it stays and is not written",
+                path.display()
+            );
+            return (BTreeMap::new(), false);
+        }
+    };
+    let error = match serde_json::from_slice(&bytes) {
+        Ok(values) => return (values, true),
+        Err(error) => error,
+    };
+    match set_aside(path) {
+        Ok(aside) => {
+            tracing::warn!(
+                "{} did not parse ({error}); moved it to {} and started empty",
+                path.display(),
+                aside.display()
+            );
+            (BTreeMap::new(), true)
+        }
+        Err(move_error) => {
+            tracing::warn!(
+                "{} did not parse ({error}) and could not be moved aside \
+                 ({move_error}); it stays and is not written",
+                path.display()
+            );
+            (BTreeMap::new(), false)
+        }
     }
 }
 
 impl Preferences for FilePreferences {
     fn flag(&self, key: &str) -> bool {
-        self.state()
-            .values
+        self.values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(key)
             .and_then(Value::as_bool)
             .unwrap_or(false)
     }
 
     fn set_flag(&self, key: &str, value: bool) {
-        let mut state = self.state();
-        state.values.insert(key.to_owned(), Value::Bool(value));
-        if !state.writable {
+        let mut values = self
+            .values
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        values.insert(key.to_owned(), Value::Bool(value));
+        if !self.writable {
             return;
         }
-        let written = serde_json::to_vec_pretty(&state.values)
-            .map_err(std::io::Error::from)
-            .and_then(|data| {
-                if let Some(parent) = self.path.parent() {
-                    create_dir_all_durably(parent)?;
-                }
-                replace_file(&self.path, &data, Access::Default)
-            });
-        if let Err(error) = written {
+        if let Err(error) = self.write(&values) {
             tracing::warn!("{} could not be written: {error}", self.path.display());
         }
     }
