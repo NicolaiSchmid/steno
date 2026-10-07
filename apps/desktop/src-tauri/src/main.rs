@@ -38,15 +38,16 @@
 //! relaunch bypasses the request, so both run the same shutdown first
 //! (`shut_down_before_exit`). The one exception: a second SIGTERM or a
 //! second SIGINT ends the process at once, unsaved (`forced_exit`). On
-//! Linux a logout on GNOME, and on Xfce under X11, and a system shutdown
-//! or reboot run the same shutdown before they let the app go, over D-Bus
-//! (`session_end`), and an exit that went through ends the process
-//! `EXIT_GRACE` later at the latest (`end_within`). Open: the Windows
-//! logoff is untested on hardware, and Windows' end-session timeout (about
-//! five seconds) is shorter than `SHUTDOWN_PATIENCE` (WP10); a logout on
-//! KDE Plasma, or on Xfce under Wayland, saves only when systemd signals
-//! the app (`session_end`), and none of the Linux paths is tested on a
-//! real desktop (before the first Linux release).
+//! Linux a logout on GNOME or Xfce, through the session manager, a logout
+//! where the desktop portal reports the session's end, and a system
+//! shutdown or reboot run the same shutdown before they let the app go,
+//! over D-Bus (`session_end`); the display closing under the app at the end
+//! of any session runs it before GDK ends the process (`display_lost`);
+//! and an exit that went through ends the process `EXIT_GRACE` later at the
+//! latest (`end_within`). Open: the Windows logoff is untested on hardware,
+//! and Windows' end-session timeout (about five seconds) is shorter than
+//! `SHUTDOWN_PATIENCE` (WP10); the Linux paths have not run on a real
+//! GNOME or KDE Plasma session (before the first Linux release).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 // The fixture host leaves the real host's seams (the login item, the
@@ -449,12 +450,10 @@ fn on_exit_signal(
 /// shutdown runs first: a plain `kill`, Ctrl-C in a terminal, a closed
 /// terminal, systemd at a shutdown. A logout on Linux saves here when
 /// logind ends the session's processes (with `KillUserProcesses=yes`,
-/// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME, and on
-/// Xfce under X11, the session manager's `EndSession` saves first
-/// (`session_end`). On KDE Plasma, or on Xfce under Wayland, without
-/// `KillUserProcesses`, nothing signals the app, and when the display
-/// connection closes first, GDK ends the process unsaved. On macOS a
-/// logout goes through `RunEvent::Exit` instead.
+/// systemd stops the scope with SIGTERM, then SIGHUP); on GNOME and Xfce
+/// the session manager's end saves first (`session_end`), and on every
+/// desktop the display closing does (`display_lost`). On macOS a logout
+/// goes through `RunEvent::Exit` instead.
 /// Each signal quits the pipeline here, off the main thread, before it asks
 /// for the exit (`Host::quit_pipeline`), so a job a busy main thread would
 /// let fail first stays resumable. A second SIGTERM or a second SIGINT

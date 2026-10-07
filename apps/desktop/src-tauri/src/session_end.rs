@@ -1,44 +1,53 @@
 //! Linux: a logout and a system shutdown or reboot, which reach the app as
-//! no exit request of their own. Two D-Bus clients run the shutdown Quit
-//! runs before the app goes (`SaveAndQuit`), each on a thread of its own:
+//! no exit request of their own. Three D-Bus clients, each on a thread of
+//! its own, run the shutdown Quit runs before the app goes (`SaveAndQuit`)
+//! or tell the desktop a recording runs:
 //!
-//! - **A logout** on GNOME, and on Xfce under X11: the app registers as a
-//!   client of the session manager on the session bus (`RegisterClient`
-//!   on GNOME's `org.gnome.SessionManager`, else Xfce's
-//!   `org.xfce.SessionManager`, `SessionApi`), answers `QueryEndSession`
-//!   at once, and on `EndSession` saves first and answers
-//!   `EndSessionResponse` after, then quits. It finds the manager's unique
-//!   name with `GetNameOwner`, so it starts none, and takes the client
-//!   signals from that name only. After `EndSession` gnome-session waits
-//!   about ten seconds for the answer (older releases ninety) and
-//!   xfce4-session seven, on current releases both no more than
-//!   `SHUTDOWN_PATIENCE`, so a save that needs all of its patience can be
-//!   cut off when the session ends. A `GtkApplication` that sets
-//!   `register-session` registers the same way; tao's does not.
+//! - **A logout, through the session manager** on GNOME and on Xfce: the
+//!   app registers as a client on the session bus (`RegisterClient` on
+//!   GNOME's `org.gnome.SessionManager`, else Xfce's
+//!   `org.xfce.SessionManager`, `SessionApi`). It finds the manager's
+//!   unique name with `GetNameOwner`, so it starts none, and takes the
+//!   client signals from that name only. On GNOME it answers
+//!   `QueryEndSession` at once (gnome-session asks before its confirmation
+//!   dialog, which the user can still cancel, and gives a query one
+//!   second), and on `EndSession` saves, answers `EndSessionResponse` and
+//!   quits; gnome-session waits about ten seconds for that answer. On Xfce
+//!   it saves at `QueryEndSession`, answers and quits: xfce4-session asks
+//!   once the user chose to log out and waits up to a minute for the
+//!   answer, but only seven seconds after `EndSession`, and on Wayland it
+//!   quits after the query without sending `EndSession`.
+//! - **A logout, through the desktop portal**, where no session manager
+//!   runs (KDE Plasma, wlroots desktops): the app opens the portal's
+//!   session monitor (`CreateMonitor` on `org.freedesktop.portal.Inhibit`)
+//!   and at query-end or ending (`StateChanged`) saves, answers
+//!   `QueryEndResponse` after the save and quits (`follow_portal`). Plasma
+//!   6.6's portal serves the monitor, but nothing in Plasma 6.6 asks it
+//!   yet, so it never reports the end there; Plasma before 6.6 and the GTK
+//!   portal off GNOME report none. While a recording runs the app also
+//!   holds the portal's logout inhibitor (`hold_logout_inhibitor`): GNOME
+//!   shows it in its logout dialog, Plasma 6.6 notes it for its monitor,
+//!   and the GTK portal off GNOME refuses it.
 //! - **A system shutdown or reboot**: the app holds logind's `shutdown`
 //!   delay lock (`Inhibit` on the system bus), and on
 //!   `PrepareForShutdown(true)` it saves and then releases the lock. logind
 //!   waits for the lock at most its `InhibitDelayMaxSec`, five seconds by
 //!   default, and then goes ahead; the SIGTERM that follows waits for the
-//!   save in progress (`exit_on_signals` in `main.rs`), but the display
-//!   closes then too, and GDK ends the process when it does, so a save
-//!   that outlasts logind's wait can be cut off as well.
+//!   save in progress (`exit_on_signals` in `main.rs`).
 //!
-//! Neither follows sleep or the screen lock: a recording goes on through
-//! both, as it does on the Mac. A bus that is missing or refuses, a session
-//! manager that is not running, or a lock logind denies leaves the app to
-//! the signals: it saves when one reaches it. A slow or frozen bus holds
-//! only its client's thread, never the launch or an exit.
+//! Every desktop then ends the display server, and GDK would end the
+//! process with it; the log writer in `display_lost` holds that exit until
+//! the save in progress, or one it starts, has ended. So a save that
+//! outlasts a session manager's or logind's wait still ends, at most
+//! `SHUTDOWN_PATIENCE` after it began, unless something kills the process
+//! first (systemd's `SIGKILL` once a stop has waited its timeout, 90 s by
+//! default). On KDE Plasma, which does not ask the app, that is the save.
 //!
-//! Open: none of it has run on a real desktop, only against fakes on a
-//! private bus. A logout on KDE Plasma, or on Xfce under Wayland, saves
-//! only when systemd signals the app. Plasma before 6.6 serves no
-//! session-manager client API on D-Bus, and from 6.6 its portal's session
-//! monitor waits about 1.5 s at the query and not at the end, too short
-//! for the save; its session manager speaks XSMP to X11 clients, which
-//! GTK 3 does not speak. xfce4-session on Wayland quits after the save
-//! phase without sending `EndSession`. logind runs on both, so the
-//! shutdown lock works there.
+//! None of it follows sleep or the screen lock: a recording goes on
+//! through both, as it does on the Mac. A bus that is missing or refuses, a
+//! session manager or portal that is not running, or a lock logind denies
+//! leaves the app to the signals and the lost display. A slow or frozen
+//! bus holds only its client's thread, never the launch or an exit.
 //!
 //! Swift: none; `AppKit` sends a logout and a shutdown to
 //! `applicationShouldTerminate`, which Quit goes through too.
