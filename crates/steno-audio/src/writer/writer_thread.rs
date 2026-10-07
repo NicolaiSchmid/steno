@@ -255,17 +255,18 @@ mod tests {
     use crate::FRAME_SIZE;
     use crate::writer::{LaneFrames, RecordingFiles};
 
-    /// What the fake writer was asked to do, in order.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum Call {
-        Write,
-        Sync,
+    /// What the fake writer saw: the frames written, and how many had
+    /// been written at each sync.
+    #[derive(Default)]
+    struct Seen {
+        writes: usize,
+        syncs: Vec<usize>,
     }
 
-    /// Records every call; every sync fails when `fail_syncs` is set, with
+    /// Counts the writes and syncs; every sync fails when `fail_syncs` is set, with
     /// what a WebDAV mount on the Mac answers both syncs (ENOTTY).
     struct Recording {
-        calls: Arc<Mutex<Vec<Call>>>,
+        seen: Arc<Mutex<Seen>>,
         fail_syncs: bool,
     }
 
@@ -279,11 +280,12 @@ mod tests {
             }
         }
         fn write(&mut self, _frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
-            self.calls.lock().unwrap().push(Call::Write);
+            self.seen.lock().unwrap().writes += 1;
             Ok(())
         }
         fn sync(&mut self) -> std::io::Result<()> {
-            self.calls.lock().unwrap().push(Call::Sync);
+            let seen = &mut *self.seen.lock().unwrap();
+            seen.syncs.push(seen.writes);
             if self.fail_syncs {
                 Err(std::io::Error::from_raw_os_error(25))
             } else {
@@ -312,10 +314,10 @@ mod tests {
     /// Three sync intervals and part of a fourth.
     const FRAMES: usize = 3 * SYNC_INTERVAL_FRAMES + 10;
 
-    /// What a run did: the fake's calls, the errors reported, the error
+    /// What a run did: what the fake saw, the errors reported, the error
     /// kept for the close, and the `warn` lines.
     struct Run {
-        calls: Vec<Call>,
+        seen: Seen,
         reported: Vec<CaptureError>,
         kept: Option<CaptureError>,
         log: String,
@@ -326,12 +328,12 @@ mod tests {
     /// there. The relay holds them all, so none is dropped.
     fn run(fail_syncs: bool) -> Run {
         let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, FRAMES));
-        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new(Mutex::new(Seen::default()));
         let reported = Arc::new(Mutex::new(Vec::new()));
         let mut thread = WriterThread::new(
             Arc::clone(&relay),
             Box::new(Recording {
-                calls: Arc::clone(&calls),
+                seen: Arc::clone(&seen),
                 fail_syncs,
             }),
             Arc::new(LevelSlot::new(false)),
@@ -360,36 +362,19 @@ mod tests {
         let mut worker = thread.worker.take().unwrap();
         tracing::subscriber::with_default(subscriber, || worker.drain());
         thread.worker = Some(worker);
-        let kept = thread.take_error();
-        let calls = calls.lock().unwrap().clone();
-        let reported = reported.lock().unwrap().clone();
-        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
         Run {
-            calls,
-            reported,
-            kept,
-            log,
+            seen: std::mem::take(&mut *seen.lock().unwrap()),
+            reported: reported.lock().unwrap().clone(),
+            kept: thread.take_error(),
+            log: String::from_utf8(log.0.lock().unwrap().clone()).unwrap(),
         }
-    }
-
-    /// The writes before each sync among the fake's calls.
-    fn writes_before_each_sync(calls: &[Call]) -> Vec<usize> {
-        let mut writes = 0;
-        let mut before = Vec::new();
-        for call in calls {
-            match call {
-                Call::Write => writes += 1,
-                Call::Sync => before.push(writes),
-            }
-        }
-        before
     }
 
     #[test]
     fn the_master_is_synced_after_every_interval_of_frames_and_not_before() {
         let run = run(false);
         assert!(run.reported.is_empty(), "{:?}", run.reported);
-        assert_eq!(writes_before_each_sync(&run.calls), [500, 1000, 1500]);
+        assert_eq!(run.seen.syncs, [500, 1000, 1500]);
         assert!(run.kept.is_none(), "{:?}", run.kept);
         assert_eq!(run.log, "");
     }
@@ -403,14 +388,8 @@ mod tests {
     fn a_failed_sync_keeps_the_writes_going_is_logged_once_and_kept() {
         let run = run(true);
         assert!(run.reported.is_empty(), "{:?}", run.reported);
-        assert_eq!(
-            run.calls
-                .iter()
-                .filter(|call| **call == Call::Write)
-                .count(),
-            FRAMES
-        );
-        assert_eq!(writes_before_each_sync(&run.calls), [500, 1000, 1500]);
+        assert_eq!(run.seen.writes, FRAMES);
+        assert_eq!(run.seen.syncs, [500, 1000, 1500]);
         assert!(
             matches!(&run.kept, Some(CaptureError::WriterFailed(message)) if message.starts_with("master.caf: ")),
             "{:?}",
