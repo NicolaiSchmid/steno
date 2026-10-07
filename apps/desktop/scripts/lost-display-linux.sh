@@ -36,9 +36,7 @@ app=""
 # Ends only the processes this script started.
 cleanup() {
   for pid in "$app" "$server"; do
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill -KILL "$pid" 2>/dev/null || true
-    fi
+    [[ -z "$pid" ]] || kill -KILL "$pid" 2>/dev/null || true
   done
 }
 trap cleanup EXIT
