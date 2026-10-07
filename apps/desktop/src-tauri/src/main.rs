@@ -214,18 +214,28 @@ fn setup(
 /// The exit code of an app that refused to start (`refuse_to_start`).
 const REFUSED_CODE: i32 = 3;
 
+/// How long a refused app waits for its alert to be closed before it ends
+/// anyway (`refuse_to_start`).
+const REFUSED_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Another Steno holds the database (`steno_core::DatabaseLock`): another
 /// app, the old identifier's beside the new one, one the single-instance
 /// guard missed (Linux without a session bus, a failed connect on the
 /// Mac), or a `steno` command that writes. Two on one database would fail
 /// each other's recordings at launch, so this one says why and ends once
 /// the alert is closed, before it opens a window or touches the database.
-/// Its run loop has no host to shut down (`host::is_running`). Rust only:
+/// Its run loop has no host to shut down (`host::is_running`). Should the
+/// alert never show, or its callback never run, the process ends after
+/// [`REFUSED_PATIENCE`] all the same: it holds nothing to save. Rust only:
 /// the Swift app relied on macOS opening one copy per bundle id.
 fn refuse_to_start(handle: &tauri::AppHandle, error: &dyn std::error::Error) {
     use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 
     stderr_line!("[steno-desktop] not starting: {error}");
+    std::thread::spawn(|| {
+        std::thread::sleep(REFUSED_PATIENCE);
+        std::process::exit(REFUSED_CODE);
+    });
     let app = handle.clone();
     handle
         .dialog()
