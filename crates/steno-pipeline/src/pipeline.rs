@@ -904,7 +904,8 @@ impl ProcessingPipeline {
             if self.state().in_flight.contains(&meeting.id) {
                 continue;
             }
-            let Some(asset) = attributing(PipelineStage::Decode, self.store().asset(meeting.id))?
+            let Some(mut asset) =
+                attributing(PipelineStage::Decode, self.store().asset(meeting.id))?
             else {
                 attributing(
                     PipelineStage::Decode,
@@ -933,10 +934,8 @@ impl ProcessingPipeline {
                 );
                 // Processing it again needs the audio: a stamp left from
                 // an earlier run must not let the sweep take it.
-                if asset.expires_at.is_some() {
-                    let mut kept = asset.clone();
-                    kept.expires_at = None;
-                    attributing(PipelineStage::Retention, self.store().save_asset(&kept))?;
+                if asset.expires_at.take().is_some() {
+                    attributing(PipelineStage::Retention, self.store().save_asset(&asset))?;
                 }
                 attributing(
                     PipelineStage::Decode,
