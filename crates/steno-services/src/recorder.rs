@@ -437,12 +437,11 @@ fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Optio
         .unwrap_or(0);
     if dropped > 0 {
         let seconds = dropped.div_ceil(CaptureSession::gap_frames(Duration::from_secs(1)));
-        let amount = if seconds == 1 {
-            "About 1 second of the recording is".to_owned()
+        lines.push(if seconds == 1 {
+            "About 1 second of the recording is missing.".to_owned()
         } else {
-            format!("About {seconds} seconds of the recording are")
-        };
-        lines.push(format!("{amount} missing."));
+            format!("About {seconds} seconds of the recording are missing.")
+        });
     }
     if mode == CaptureMode::Call && statistics.system_lane_silent {
         lines.push(
@@ -991,8 +990,8 @@ mod tests {
         assert_eq!(recording_warning(CaptureMode::Call, &statistics()), None);
     }
 
-    /// Frames the writer could not keep up with are a warning, in whole
-    /// seconds of the lane that lost most, rounded up.
+    /// Lost frames are a warning, in whole seconds of the lane that lost
+    /// most, rounded up.
     #[test]
     fn dropped_frames_warn_with_the_seconds_missing() {
         let mut dropped = statistics();
