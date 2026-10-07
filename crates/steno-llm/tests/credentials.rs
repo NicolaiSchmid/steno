@@ -785,6 +785,39 @@ fn leftovers(home: &CodexHome) -> Vec<String> {
         .collect()
 }
 
+/// The document in the temporary `name` a failed rename left.
+fn leftover_document(home: &CodexHome, name: &str) -> serde_json::Value {
+    serde_json::from_slice(&std::fs::read(home.directory.path().join(name)).unwrap()).unwrap()
+}
+
+/// A store whose first refresh answered `access` and `rt_2` but could not
+/// rename them in, so it keeps them.
+async fn store_after_a_failed_rename(home: &CodexHome, access: &str) -> CodexCredentialStore {
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    occupy_the_file_during_the_refresh(home, access);
+    let store = home.store();
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    store
+}
+
+/// Makes `directory` read-only; false, with the mode restored, where the
+/// process writes past the mode, as root does.
+#[cfg(unix)]
+fn make_read_only(directory: &std::path::Path) -> bool {
+    set_mode(directory, 0o500);
+    if std::fs::File::create(directory.join("probe")).is_ok() {
+        set_mode(directory, 0o700);
+        return false;
+    }
+    true
+}
+
+#[cfg(unix)]
+fn set_mode(directory: &std::path::Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
 /// The refresh tokens the store posted, in order.
 fn posted_refresh_tokens(home: &CodexHome) -> Vec<serde_json::Value> {
     home.server
@@ -815,9 +848,7 @@ async fn a_failed_rename_keeps_the_new_sign_in_and_writes_it_on_the_next_call() 
         .iter()
         .find(|name| name.starts_with(".auth.json.steno-"))
         .expect("the temporary file stays");
-    let kept: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.directory.path().join(temporary)).unwrap())
-            .unwrap();
+    let kept = leftover_document(&home, temporary);
     assert_eq!(kept["tokens"]["refresh_token"], "rt_2");
     assert_eq!(kept["tokens"]["access_token"], json!(fresh));
 
@@ -849,10 +880,7 @@ async fn a_failed_rename_keeps_the_new_sign_in_and_writes_it_on_the_next_call() 
 #[tokio::test]
 async fn a_rename_that_keeps_failing_leaves_only_the_newest_temporary() {
     let home = CodexHome::new().await;
-    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
-    occupy_the_file_during_the_refresh(&home, &CodexHome::access_token(10, "plus"));
-    let store = home.store();
-    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    let store = store_after_a_failed_rename(&home, &CodexHome::access_token(10, "plus")).await;
     let first = leftovers(&home);
     assert_eq!(first.len(), 1, "{first:?}");
     // The kept tokens expire too, and the next call refreshes them.
@@ -864,10 +892,10 @@ async fn a_rename_that_keeps_failing_leaves_only_the_newest_temporary() {
     let second = leftovers(&home);
     assert_eq!(second.len(), 1, "{second:?}");
     assert_ne!(first, second);
-    let kept: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.directory.path().join(&second[0])).unwrap())
-            .unwrap();
-    assert_eq!(kept["tokens"]["refresh_token"], "rt_3");
+    assert_eq!(
+        leftover_document(&home, &second[0])["tokens"]["refresh_token"],
+        "rt_3"
+    );
 }
 
 /// A file that does not parse (the CLI half way through writing it) gets
@@ -876,11 +904,8 @@ async fn a_rename_that_keeps_failing_leaves_only_the_newest_temporary() {
 #[tokio::test]
 async fn a_file_that_does_not_parse_gets_the_kept_sign_in_without_being_written() {
     let home = CodexHome::new().await;
-    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     let fresh = CodexHome::access_token(3_600, "plus");
-    occupy_the_file_during_the_refresh(&home, &fresh);
-    let store = home.store();
-    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    let store = store_after_a_failed_rename(&home, &fresh).await;
     std::fs::remove_dir_all(home.file()).unwrap();
     let half_written = br#"{"tokens": {"refresh_tok"#;
     std::fs::write(home.file(), half_written).unwrap();
@@ -903,10 +928,7 @@ async fn a_file_that_does_not_parse_gets_the_kept_sign_in_without_being_written(
 #[tokio::test]
 async fn a_parsed_file_with_another_token_wins_even_when_it_is_unreadable_to_steno() {
     let home = CodexHome::new().await;
-    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
-    occupy_the_file_during_the_refresh(&home, &CodexHome::access_token(3_600, "plus"));
-    let store = home.store();
-    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    let store = store_after_a_failed_rename(&home, &CodexHome::access_token(3_600, "plus")).await;
     std::fs::remove_dir_all(home.file()).unwrap();
     home.write(AuthFile {
         id: None,
@@ -929,10 +951,7 @@ async fn a_parsed_file_with_another_token_wins_even_when_it_is_unreadable_to_ste
 #[tokio::test]
 async fn a_logout_after_a_failed_write_stays_signed_out() {
     let home = CodexHome::new().await;
-    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
-    occupy_the_file_during_the_refresh(&home, &CodexHome::access_token(3_600, "plus"));
-    let store = home.store();
-    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    let store = store_after_a_failed_rename(&home, &CodexHome::access_token(3_600, "plus")).await;
     std::fs::remove_dir_all(home.file()).unwrap();
     assert_eq!(
         store.current().await.unwrap_err(),
@@ -949,14 +968,10 @@ async fn a_logout_after_a_failed_write_stays_signed_out() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_failed_write_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
-    use std::os::unix::fs::PermissionsExt as _;
     let home = CodexHome::new().await;
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     let directory = home.directory.path().to_owned();
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
-    if std::fs::File::create(directory.join("probe")).is_ok() {
-        // Root writes past the mode; nothing to test.
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if !make_read_only(&directory) {
         return;
     }
     let fresh = CodexHome::access_token(3_600, "plus");
@@ -964,7 +979,7 @@ async fn a_failed_write_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
         .enqueue([scripts.token_refresh(&fresh, Some("rt_2"), None)]);
     let store = home.store();
     let result = store.current().await;
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    set_mode(&directory, 0o700);
     let credentials = result.unwrap();
     assert_eq!(credentials.access_token, fresh);
     assert_eq!(credentials.refresh_token, "rt_2");
@@ -992,14 +1007,10 @@ async fn a_failed_write_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
 #[cfg(unix)]
 #[tokio::test]
 async fn a_second_refresh_while_the_write_keeps_failing_posts_the_kept_token() {
-    use std::os::unix::fs::PermissionsExt as _;
     let home = CodexHome::new().await;
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     let directory = home.directory.path().to_owned();
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
-    if std::fs::File::create(directory.join("probe")).is_ok() {
-        // Root writes past the mode; nothing to test.
-        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if !make_read_only(&directory) {
         return;
     }
     let fresh = CodexHome::access_token(3_600, "plus");
@@ -1010,7 +1021,7 @@ async fn a_second_refresh_while_the_write_keeps_failing_posts_the_kept_token() {
     let store = home.store();
     let first = store.current().await;
     let second = store.current().await;
-    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    set_mode(&directory, 0o700);
     assert_eq!(first.unwrap().refresh_token, "rt_2");
     assert_eq!(second.unwrap().refresh_token, "rt_3");
     assert_eq!(
@@ -1034,11 +1045,8 @@ async fn a_second_refresh_while_the_write_keeps_failing_posts_the_kept_token() {
 #[tokio::test]
 async fn a_new_login_after_a_failed_write_wins_over_the_kept_sign_in() {
     let home = CodexHome::new().await;
-    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     let fresh = CodexHome::access_token(3_600, "plus");
-    occupy_the_file_during_the_refresh(&home, &fresh);
-    let store = home.store();
-    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    let store = store_after_a_failed_rename(&home, &fresh).await;
     std::fs::remove_dir_all(home.file()).unwrap();
     home.write(AuthFile::default().refresh("rt_new_login"));
     assert_eq!(store.current().await.unwrap().refresh_token, "rt_new_login");
