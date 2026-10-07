@@ -1,0 +1,52 @@
+{
+  "canSaveSummaries" : false,
+  "finished" : false,
+  "page" : "import",
+  "permissions" : [
+    {
+      "isRequesting" : false,
+      "isRequired" : true,
+      "isSkipped" : false,
+      "kind" : "microphone",
+      "state" : "unknown"
+    },
+    {
+      "isRequesting" : false,
+      "isRequired" : true,
+      "isSkipped" : false,
+      "kind" : "systemAudio",
+      "state" : "unknown"
+    },
+    {
+      "isRequesting" : false,
+      "isRequired" : false,
+      "isSkipped" : false,
+      "kind" : "calendar",
+      "state" : "unknown"
+    },
+    {
+      "isRequesting" : false,
+      "isRequired" : false,
+      "isSkipped" : false,
+      "kind" : "localNetwork",
+      "state" : "unknown"
+    }
+  ],
+  "permissionsComplete" : false,
+  "retentionSentence" : "Each recording is deleted 30 days after it was processed and exported. Change this any time in Settings > Recording.",
+  "setup" : [
+    {
+      "kind" : "summaries",
+      "state" : "open"
+    },
+    {
+      "kind" : "vault",
+      "state" : "open"
+    }
+  ],
+  "swiftImport" : {
+    "error" : "macOS did not let Steno read this Mac's phone pairing. Choose Try again, then Always Allow.",
+    "prompts" : 1,
+    "state" : "waiting"
+  }
+}

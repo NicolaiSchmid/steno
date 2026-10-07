@@ -115,6 +115,14 @@ string_enum! {
         OnboardingSaveVault = "onboarding.saveVault",
         OnboardingSkipSetup = "onboarding.skipSetup",
         OnboardingFinish = "onboarding.finish",
+        /// The import step (Mac, after an update from the Swift app): reads
+        /// the old app's API key and exports its handover identity, each
+        /// behind one keychain prompt. Also the step's Try again, which
+        /// repeats the export. Rust only: the Swift app never imports.
+        OnboardingImport = "onboarding.import",
+        /// The import step's Not now: counts as both reads denied, so phone
+        /// handover waits and the step returns at the next launch.
+        OnboardingSkipImport = "onboarding.skipImport",
 
         UpdatesCheck = "updates.check",
         SystemOpenUrl = "system.openURL",

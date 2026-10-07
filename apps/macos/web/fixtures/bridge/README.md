@@ -16,3 +16,8 @@ Playwright screens read the same files through the mock transport
 (`src/bridge/mock-transport.ts`: topics become snapshots, `*.reply.json`
 become command replies). A drift between the two contracts fails both sides.
 Do not edit these files by hand, and do not format them: Biome skips them.
+
+One fixture has no Swift sample: `onboarding.import.json`, the Tauri app's
+import step, which the Swift app never shows. It is listed last in
+`index.json`, `BridgeFixturesTests.rustOnly` keeps it there when the Swift
+side records, and `crates/steno-bridge/tests/fixtures.rs` pins its bytes.
