@@ -117,15 +117,15 @@ impl Engine {
     }
 
     /// A known recording announced again: 200 with the status, 409 when
-    /// another device owns it or the metadata changed. The partial is
-    /// reopened when it or the sidecar is gone (a sweep, a crash before the
-    /// first chunk, a refusal), with the same receipt and an empty chunk
-    /// set; a verified file waiting for a second intake attempt keeps its
-    /// chunk set, so the phone's retry (announce, then complete) sends no
-    /// chunk twice. 401 with nothing opened when the device was revoked
-    /// since its receipt read. A receipt a `complete` admitted meanwhile
-    /// stays `complete` ([`Engine::update`]), the answer says so, and the
-    /// files this announce opened go.
+    /// another device owns it or the metadata changed, also once it is
+    /// `complete`. The partial is reopened when it or the sidecar is gone (a
+    /// sweep, a crash before the first chunk, a refusal), with the same
+    /// receipt and an empty chunk set; a verified file waiting for a second
+    /// intake attempt keeps its chunk set, so the phone's retry (announce,
+    /// then complete) sends no chunk twice. 401 with nothing opened when the
+    /// device was revoked since its receipt read. A receipt a `complete`
+    /// admitted meanwhile stays `complete` ([`Engine::update`]), the answer
+    /// says so, and the files this announce opened go.
     async fn reannounce(
         &self,
         mut receipt: HandoverReceipt,
@@ -138,10 +138,9 @@ impl Engine {
                 "another device owns this recording",
             );
         }
-        let recording_id = receipt.recording_id;
-        if receipt.state.kind() == HandoverStateKind::Complete {
-            return HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt));
-        }
+        // Also for a `complete` receipt: the phone answered `complete` posts
+        // `complete`, and that 200 deletes its copy. A different file under
+        // an admitted id is refused instead, and stays on the phone.
         if receipt.byte_count != metadata.byte_count
             || receipt.sha256 != metadata.sha256
             || receipt.chunk_size != metadata.chunk_size
@@ -150,6 +149,10 @@ impl Engine {
                 StatusCode::CONFLICT,
                 "metadata differs from the first announcement",
             );
+        }
+        let recording_id = receipt.recording_id;
+        if receipt.state.kind() == HandoverStateKind::Complete {
+            return HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt));
         }
         let received_chunks = match self.reopen_missing_files(metadata, device.id) {
             None => return Self::unauthorized(),
