@@ -473,16 +473,8 @@ fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
     let jerome = common::person();
     let speakers = common::speakers(meeting.id);
     store.confirm_speaker(speakers[0].id, &jerome).unwrap();
-    assert_eq!(
-        store
-            .persons()
-            .unwrap()
-            .into_iter()
-            .find(|person| person.id == jerome.id)
-            .unwrap()
-            .sample_count,
-        1
-    );
+    let voice = |store: &Store| store.person(jerome.id).unwrap().unwrap();
+    assert_eq!(voice(&store).sample_count, 1);
 
     // The re-run diarizes "Speaker 1" again with another voice, unconfirmed.
     let mut rerun = speakers.clone();
@@ -500,14 +492,6 @@ fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
     );
     assert_eq!(stored[0].embedding, rerun[0].embedding);
     assert_eq!(stored[1].assignment, SpeakerAssignment::Unknown);
-    let voice = |store: &Store| {
-        store
-            .persons()
-            .unwrap()
-            .into_iter()
-            .find(|person| person.id == jerome.id)
-            .unwrap()
-    };
     assert_eq!(
         voice(&store).embedding,
         Embedding::mean(&[rerun[0].embedding.clone().unwrap()])

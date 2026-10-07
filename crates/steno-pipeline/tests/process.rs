@@ -659,26 +659,21 @@ async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
     assert!(error.reason.contains("no LLM endpoint"));
 }
 
-/// A cleaner that names a speaker while it runs, as the user can while the
-/// cleanup pass waits on the model: it confirms "Speaker 1" as Anna, then
-/// returns every segment's text marked as cleaned.
-struct ConfirmingCleaner {
+/// A cleaner that first does what the user can while the cleanup pass
+/// waits on the model (`meddle`, with the store), then returns every
+/// segment's text marked as cleaned.
+struct MeddlingCleaner {
     store: Arc<Store>,
+    meddle: fn(&Store, &steno_core::CleanupInput),
 }
 
 #[async_trait]
-impl steno_core::TranscriptCleaner for ConfirmingCleaner {
+impl steno_core::TranscriptCleaner for MeddlingCleaner {
     async fn clean(
         &self,
         input: &steno_core::CleanupInput,
     ) -> steno_core::protocols::BoundaryResult<steno_core::CleanupOutput> {
-        let speaker = input
-            .speakers
-            .iter()
-            .find(|speaker| speaker.cluster_label == "Speaker 1")
-            .expect("the diarizer's first speaker");
-        let anna = sample_data::person(0, "Anna");
-        self.store.confirm_speaker(speaker.id, &anna).unwrap();
+        (self.meddle)(&self.store, input);
         Ok(steno_core::CleanupOutput {
             segments: input
                 .segments
@@ -705,8 +700,18 @@ impl steno_core::TranscriptCleaner for ConfirmingCleaner {
 async fn a_speaker_named_during_cleanup_stays_named() {
     let world = world(false, None, AudioRetention::KeepForever);
     let dependencies = world.pipeline.dependencies().clone().with_llm(
-        Some(Arc::new(ConfirmingCleaner {
+        Some(Arc::new(MeddlingCleaner {
             store: world.store.clone(),
+            // Confirms "Speaker 1" as Anna.
+            meddle: |store, input| {
+                let speaker = input
+                    .speakers
+                    .iter()
+                    .find(|speaker| speaker.cluster_label == "Speaker 1")
+                    .expect("the diarizer's first speaker");
+                let anna = sample_data::person(0, "Anna");
+                store.confirm_speaker(speaker.id, &anna).unwrap();
+            },
         })),
         None,
     );
@@ -776,38 +781,6 @@ async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
     assert_eq!(again.decisions, summarized.decisions);
 }
 
-/// A cleaner that picks another template while it runs, as the user's
-/// `meeting.setTemplate` can while the meeting is in flight, and returns
-/// the segments untouched.
-struct TemplatePickingCleaner {
-    store: Arc<Store>,
-}
-
-#[async_trait]
-impl steno_core::TranscriptCleaner for TemplatePickingCleaner {
-    async fn clean(
-        &self,
-        input: &steno_core::CleanupInput,
-    ) -> steno_core::protocols::BoundaryResult<steno_core::CleanupOutput> {
-        let meeting_id = input.segments[0].meeting_id;
-        self.store
-            .update_meeting(meeting_id, sample_data::started_at(), |meeting| {
-                "interview".clone_into(&mut meeting.template_id);
-                Ok(())
-            })
-            .unwrap();
-        Ok(steno_core::CleanupOutput {
-            segments: input.segments.clone(),
-            failed_chunks: Vec::new(),
-            usage: steno_core::LlmUsage {
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                requests: 1,
-            },
-        })
-    }
-}
-
 /// A template picked while the meeting processes is kept, and the summary
 /// is made with it: the run read the meeting before the pick and never
 /// writes the old template back.
@@ -815,8 +788,22 @@ impl steno_core::TranscriptCleaner for TemplatePickingCleaner {
 async fn a_template_picked_while_processing_is_kept_and_used() {
     let world = world(false, None, AudioRetention::KeepForever);
     let dependencies = world.pipeline.dependencies().clone().with_llm(
-        Some(Arc::new(TemplatePickingCleaner {
+        Some(Arc::new(MeddlingCleaner {
             store: world.store.clone(),
+            // Picks another template, as the user's `meeting.setTemplate`
+            // can while the meeting is in flight.
+            meddle: |store, input| {
+                store
+                    .update_meeting(
+                        input.segments[0].meeting_id,
+                        sample_data::started_at(),
+                        |meeting| {
+                            "interview".clone_into(&mut meeting.template_id);
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+            },
         })),
         Some(Arc::new(FakeSummarizer::default())),
     );
