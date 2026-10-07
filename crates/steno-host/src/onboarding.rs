@@ -1,8 +1,9 @@
 //! Onboarding in two pages, after `Onboarding/OnboardingViewModel.swift`
 //! and `Web/OnboardingSnapshots.swift`, with an import step before them on
 //! the Mac's first launch after the update from the Swift app (Rust only,
-//! [`SwiftImport`](crate::services::SwiftImport)): it explains the keychain prompts, runs the import and
-//! offers Try again while the handover identity has not come over. Page 1, permissions: microphone,
+//! [`SwiftImport`](crate::services::SwiftImport)): it explains the
+//! keychain prompts, runs the import and offers Try again while the
+//! handover identity has not come over. Page 1, permissions: microphone,
 //! system audio (both required), then calendar and local network
 //! (optional), as far as the platform has them
 //! (`PermissionKind::for_platform`: all four on the Mac, fewer on Windows
@@ -222,9 +223,9 @@ impl OnboardingViewModel {
 
     // The import step
 
-    /// The keychain prompts are about to come up; the host publishes,
-    /// runs [`SwiftImport::run`](crate::services::SwiftImport::run) with its lock released, then calls
-    /// [`Self::finish_import`].
+    /// The keychain prompts are about to come up; the host publishes, runs
+    /// [`SwiftImport::run`](crate::services::SwiftImport::run) with its
+    /// lock released, then calls [`Self::finish_import`].
     pub fn begin_import(&mut self) {
         self.importing = true;
     }
