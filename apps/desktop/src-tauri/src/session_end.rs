@@ -994,6 +994,15 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(10);
 
+    /// Waits until `steps` are `wanted`, `WAIT` at most.
+    fn reach(steps: &Steps, wanted: &[&str]) {
+        let deadline = std::time::Instant::now() + WAIT;
+        while *steps.lock().unwrap() != wanted && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(*steps.lock().unwrap(), wanted);
+    }
+
     /// logind's manager as far as the lock goes: `Inhibit` hands out the
     /// write end of a pipe and the test keeps the read end, which reads to
     /// its end once the client released the lock.
@@ -1325,11 +1334,7 @@ mod tests {
             self.answers
                 .recv_timeout(WAIT)
                 .expect("the query was answered");
-            let deadline = std::time::Instant::now() + WAIT;
-            while self.steps().len() < 3 && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            assert_eq!(self.steps(), ["saved", "answered true", "awaits the end"]);
+            reach(&self.steps, &["saved", "answered true", "awaits the end"]);
             assert!(self.result.try_recv().is_err(), "the client ended");
         }
 
@@ -1768,15 +1773,6 @@ mod tests {
         fn ended(&self) -> zbus::Result<()> {
             self.result.recv_timeout(WAIT).expect("the client ended")
         }
-
-        /// Waits until the steps are `wanted`, `WAIT` at most.
-        fn reaches(&self, wanted: &[&str]) {
-            let deadline = std::time::Instant::now() + WAIT;
-            while self.steps() != wanted && std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            assert_eq!(self.steps(), wanted);
-        }
     }
 
     /// Without a session manager the client opens the portal's session
@@ -1813,7 +1809,7 @@ mod tests {
         monitor.waits(&[]);
         state(portal, client, session, 2);
         let answered = format!("answered {session}");
-        monitor.reaches(&[answered.as_str()]);
+        reach(&monitor.steps, &[answered.as_str()]);
         // The logout was called off: the session runs again.
         state(portal, client, session, 1);
         monitor.waits(&[answered.as_str()]);
@@ -1834,7 +1830,7 @@ mod tests {
         monitor.refuse.store(true, Ordering::SeqCst);
         state(portal, client, session, 2);
         let refused = format!("refused {session}");
-        monitor.reaches(&[refused.as_str()]);
+        reach(&monitor.steps, &[refused.as_str()]);
         monitor.waits(&[refused.as_str()]);
         state(portal, client, session, 3);
         monitor.ended().unwrap();
