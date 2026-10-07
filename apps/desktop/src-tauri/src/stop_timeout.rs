@@ -39,12 +39,12 @@ use zbus::blocking::connection::Builder;
 /// directory, and its contents, byte for byte the file the `.deb`
 /// installs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DropIn {
+struct DropIn {
     /// The unit, or for a drop-in every unit of a prefix applies to, the
     /// unit name cut after that prefix's last `-`, as systemd looks it up.
-    pub unit: &'static str,
-    pub file_name: &'static str,
-    pub contents: &'static str,
+    unit: &'static str,
+    file_name: &'static str,
+    contents: &'static str,
 }
 
 impl DropIn {
@@ -54,7 +54,7 @@ impl DropIn {
     /// escaped as systemd escapes a unit name, `-` as `\x2d`. Named
     /// `10-` so a drop-in of the user's own (`systemctl --user edit`,
     /// `override.conf`) still wins.
-    pub const AUTOSTART: Self = Self {
+    const AUTOSTART: Self = Self {
         unit: "app-steno\\x2ddesktop@autostart.service",
         file_name: "10-steno.conf",
         contents: include_str!("../linux/autostart-service-stop-timeout.conf"),
@@ -65,14 +65,14 @@ impl DropIn {
     /// across the directories, so the name sorts after gnome-session's
     /// `override.conf`; naming it `override.conf` would replace that file
     /// and drop its `PartOf=graphical-session.target`.
-    pub const GNOME_SCOPE: Self = Self {
+    const GNOME_SCOPE: Self = Self {
         unit: "app-gnome-steno\\x2ddesktop-.scope",
         file_name: "zz-steno.conf",
         contents: include_str!("../linux/gnome-scope-stop-timeout.conf"),
     };
 
     /// The drop-in's path below a unit directory: `<unit>.d/<file name>`.
-    pub fn relative_path(&self) -> String {
+    fn relative_path(&self) -> String {
         format!("{}.d/{}", self.unit, self.file_name)
     }
 
@@ -83,7 +83,7 @@ impl DropIn {
     /// `$HOME/.config`, which is where that manager reads drop-ins; an
     /// `XDG_CONFIG_HOME` the app sees may be set for the units alone
     /// (`environment.d`, `systemctl --user set-environment`).
-    pub fn user_path(&self, home: &Path) -> PathBuf {
+    fn user_path(&self, home: &Path) -> PathBuf {
         home.join(".config/systemd/user").join(self.relative_path())
     }
 }
@@ -95,7 +95,7 @@ impl DropIn {
 /// A failure is logged and changes nothing else: Launch at login works
 /// without the drop-ins.
 pub fn sync(login_item: Option<bool>) {
-    let Some(home) = std::env::home_dir().filter(|home| home.is_absolute()) else {
+    let Some(home) = home() else {
         tracing::warn!("no home directory for the stop timeout drop-ins");
         return;
     };
@@ -117,9 +117,14 @@ fn sync_in(home: &Path, login_item: Option<bool>, reload: impl FnOnce()) {
 /// Removes the autostart unit's drop-in without a reload, at the exit
 /// that turns Launch at login off (`autostart::turn_off_at_exit`).
 pub fn remove_autostart() {
-    if let Some(home) = std::env::home_dir().filter(|home| home.is_absolute()) {
+    if let Some(home) = home() {
         change(&DropIn::AUTOSTART, &home, false);
     }
+}
+
+/// The user's home directory, if it is an absolute path.
+fn home() -> Option<PathBuf> {
+    std::env::home_dir().filter(|home| home.is_absolute())
 }
 
 /// Installs (`on`) or removes `drop_in`'s copy under `home`; true when it
@@ -133,27 +138,19 @@ fn change(drop_in: &DropIn, home: &Path, on: bool) -> bool {
         remove(&path)
     };
     match changed {
-        Ok(changed) => {
-            if changed {
-                tracing::info!(unit = drop_in.unit, on, "a stop timeout drop-in changed");
-                tracing::debug!(path = %path.display(), on, "a stop timeout drop-in changed");
-            }
-            on && changed
+        Ok(false) => false,
+        Ok(true) => {
+            tracing::info!(unit = drop_in.unit, on, "a stop timeout drop-in changed");
+            tracing::debug!(path = %path.display(), on, "a stop timeout drop-in changed");
+            on
         }
         Err(error) => {
-            if on {
-                tracing::warn!(
-                    unit = drop_in.unit,
-                    kind = %error.kind(),
-                    "a stop timeout drop-in could not be written; the unit keeps a 5 s stop timeout"
-                );
+            let failure = if on {
+                "a stop timeout drop-in could not be written; the unit keeps a 5 s stop timeout"
             } else {
-                tracing::warn!(
-                    unit = drop_in.unit,
-                    kind = %error.kind(),
-                    "a stop timeout drop-in could not be removed"
-                );
-            }
+                "a stop timeout drop-in could not be removed"
+            };
+            tracing::warn!(unit = drop_in.unit, kind = %error.kind(), "{failure}");
             tracing::debug!(path = %path.display(), %error, on, "the stop timeout drop-in");
             false
         }
@@ -163,7 +160,7 @@ fn change(drop_in: &DropIn, home: &Path, on: bool) -> bool {
 /// Writes `contents` at `path` unless it already holds them; true when it
 /// wrote. Atomic: a temporary file in the same directory (`temporary`),
 /// renamed over the old one.
-pub fn install(path: &Path, contents: &str) -> io::Result<bool> {
+fn install(path: &Path, contents: &str) -> io::Result<bool> {
     if std::fs::read(path).is_ok_and(|current| current == contents.as_bytes()) {
         return Ok(false);
     }
@@ -189,7 +186,7 @@ fn temporary(path: &Path) -> PathBuf {
 
 /// Removes the drop-in at `path`, and its directory when that is left
 /// empty; true when there was one.
-pub fn remove(path: &Path) -> io::Result<bool> {
+fn remove(path: &Path) -> io::Result<bool> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
