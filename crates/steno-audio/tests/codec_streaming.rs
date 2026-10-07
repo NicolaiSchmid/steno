@@ -21,7 +21,7 @@ mod whole_file;
 
 use std::path::{Path, PathBuf};
 
-use steno_audio::codec::{CodecError, SymphoniaAudioCodec};
+use steno_audio::codec::{CodecError, LaneResampler, SymphoniaAudioCodec};
 use steno_audio::testing::AudioFixtures;
 use steno_audio::writer::{
     CafStreamWriter, LaneFrames, RecordingWriter, RecordingWriting, WavFile, WavStreamWriter,
@@ -503,4 +503,51 @@ async fn a_pure_tone_decodes_as_before() {
         directory.path(),
     )
     .await;
+}
+
+/// The resampler fed in pieces of every size, from one sample to more
+/// than a block, at every rate the decoder handles: the same samples as
+/// one pass over the whole lane, and `settled` never promises a sample the
+/// finished lane drops.
+#[test]
+fn the_lane_resampler_is_cut_proof() {
+    let mut cut = 0x2545_f491_4f6c_dd1du64;
+    for rate in [
+        8_000u32, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000, 96_000,
+    ] {
+        for count in [
+            0usize, 1, 31, 32, 33, 64, 479, 480, 481, 4_095, 4_096, 4_097, 77_777,
+        ] {
+            let input = signal(u64::from(rate) + count as u64, count, f64::from(rate));
+            let reference = whole_file::to_16k(&input, rate);
+            assert_same(
+                &format!("{rate} Hz, {count} samples in one piece"),
+                Ok(SymphoniaAudioCodec::to_16k(&input, rate)),
+                Ok(reference.clone()),
+            );
+            let mut resampler = LaneResampler::new(rate);
+            let mut lane = Vec::new();
+            let mut handed_on = Vec::new();
+            let mut at = 0;
+            while at < input.len() {
+                cut ^= cut << 13;
+                cut ^= cut >> 7;
+                cut ^= cut << 17;
+                let size = [1, 2, 3, 7, 160, 479, 481, 1_152, 4_096, 40_000][(cut % 10) as usize];
+                let end = (at + size).min(input.len());
+                resampler.push(input[at..end].iter().copied(), &mut lane);
+                at = end;
+                // Hand on what is settled, as the mixdown does.
+                let settled = resampler.settled() - handed_on.len();
+                handed_on.extend(lane.drain(..settled));
+            }
+            resampler.finish(&mut lane);
+            handed_on.extend(lane);
+            assert_same(
+                &format!("{rate} Hz, {count} samples in pieces"),
+                Ok(handed_on),
+                Ok(reference),
+            );
+        }
+    }
 }

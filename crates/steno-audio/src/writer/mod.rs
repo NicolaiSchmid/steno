@@ -9,6 +9,7 @@ use std::path::Path;
 
 use crate::capture::CaptureError;
 
+mod bytes;
 pub mod caf;
 mod durable;
 pub mod recording_writer;
