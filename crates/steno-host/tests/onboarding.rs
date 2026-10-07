@@ -478,6 +478,7 @@ fn a_vault_saved_by_onboarding_survives_the_export_sections_save() {
                 people_folder: None,
                 include_audio: false,
                 task_tag: None,
+                extra: serde_json::Map::new(),
             });
             store.save_settings(&settings).unwrap();
         })
@@ -711,6 +712,7 @@ fn should_open_follows_the_flag_and_the_required_permissions() {
                 people_folder: None,
                 include_audio: false,
                 task_tag: None,
+                extra: serde_json::Map::new(),
             });
             store.save_settings(&settings).unwrap();
         })

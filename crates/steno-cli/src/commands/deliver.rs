@@ -56,6 +56,7 @@ impl ObsidianOptions {
                 people_folder: self.people_folder.clone(),
                 include_audio: self.include_audio,
                 task_tag: self.task_tag.clone(),
+                extra: serde_json::Map::new(),
             },
             steno_adapters::runtime::local_time_zone(),
             &format!("{}@{path}", ObsidianFolderDestination::DESTINATION_ID),

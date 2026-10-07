@@ -206,6 +206,7 @@ async fn no_obsidian_settings_means_no_destinations_and_no_rows() {
             people_folder: Some("People".to_owned()),
             include_audio: false,
             task_tag: None,
+            extra: serde_json::Map::new(),
         }),
         ..Settings::default()
     };
@@ -346,6 +347,7 @@ async fn the_stored_receipt_round_trips_into_the_real_destination() {
         people_folder: Some("People".to_owned()),
         include_audio: false,
         task_tag: None,
+        extra: serde_json::Map::new(),
     });
     store.save_settings(&configured).unwrap();
     let coordinator = DeliveryCoordinator::with_destinations(

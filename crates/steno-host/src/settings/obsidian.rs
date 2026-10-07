@@ -64,7 +64,8 @@ impl ObsidianSettingsViewModel {
         self.enabled && self.vault_path.trim().is_empty()
     }
 
-    /// The typed settings as entered; `None` when disabled.
+    /// The typed settings as entered; `None` when disabled. Fields this
+    /// build does not know come from the stored value.
     #[must_use]
     pub fn draft(&self) -> Option<ObsidianSettings> {
         if !self.enabled {
@@ -77,6 +78,11 @@ impl ObsidianSettingsViewModel {
             people_folder: (!people.is_empty()).then(|| people.to_owned()),
             include_audio: self.include_audio,
             task_tag: (!tag.is_empty()).then(|| tag.to_owned()),
+            extra: self
+                .stored
+                .as_ref()
+                .map(|stored| stored.extra.clone())
+                .unwrap_or_default(),
         })
     }
 
@@ -117,10 +123,18 @@ impl ObsidianSettingsViewModel {
             self.validation_message = Some(message.to_string());
             return;
         }
-        let stored = draft.clone();
-        match update_settings(store, move |settings| settings.obsidian = stored) {
-            Ok(_) => {
-                self.stored = draft;
+        let result = update_settings(store, |settings| {
+            // The unknown fields as stored now, not as loaded: another
+            // writer may have added some since.
+            let mut next = draft;
+            if let (Some(next), Some(current)) = (&mut next, &settings.obsidian) {
+                next.extra.clone_from(&current.extra);
+            }
+            settings.obsidian = next;
+        });
+        match result {
+            Ok(settings) => {
+                self.stored = settings.obsidian;
                 self.saved = true;
                 self.errors.clear();
             }

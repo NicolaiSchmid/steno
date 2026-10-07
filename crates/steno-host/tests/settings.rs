@@ -1188,6 +1188,96 @@ fn export_waits_for_a_vault_validates_through_the_destination_and_saves() {
     );
 }
 
+fn setting_row(harness: &Harness, key: &str) -> Option<String> {
+    harness
+        .store
+        .read(|connection| {
+            let mut statement = connection.prepare("SELECT value FROM setting WHERE key = ?1")?;
+            let mut rows = statement.query([key])?;
+            Ok(match rows.next()? {
+                Some(row) => Some(row.get(0)?),
+                None => None,
+            })
+        })
+        .unwrap()
+}
+
+/// Rows and fields this build does not know (a newer build's, the Swift
+/// app's) outlive an edit of the export settings.
+#[test]
+fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            store
+                .write(|transaction| {
+                    transaction.execute(
+                        "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
+                        [
+                            "obsidian",
+                            r#"{"futureFolder":"Daily","includeAudio":false,"vaultPath":"/vault"}"#,
+                        ],
+                    )?;
+                    transaction.execute(
+                        "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
+                        ["aFutureSetting", "7"],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+        })
+        .build();
+    harness
+        .host
+        .settings_export_update(ExportUpdateParams {
+            people_folder: None,
+            include_audio: Some(true),
+            task_tag: None,
+        })
+        .unwrap();
+    assert_eq!(
+        setting_row(&harness, "obsidian").as_deref(),
+        Some(r#"{"futureFolder":"Daily","includeAudio":true,"vaultPath":"/vault"}"#)
+    );
+
+    // A field another writer added after the host loaded is kept too.
+    harness
+        .store
+        .write(|transaction| {
+            transaction.execute(
+                "UPDATE setting SET value = ?1 WHERE key = 'obsidian'",
+                [r#"{"futureFolder":"Daily","includeAudio":true,"laterField":1,"vaultPath":"/vault"}"#],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_export_update(ExportUpdateParams {
+            people_folder: None,
+            include_audio: None,
+            task_tag: Some("todo".to_owned()),
+        })
+        .unwrap();
+    harness.host.settings_export_save().unwrap();
+    assert_eq!(
+        setting_row(&harness, "obsidian").as_deref(),
+        Some(
+            r#"{"futureFolder":"Daily","includeAudio":true,"laterField":1,"taskTag":"todo","vaultPath":"/vault"}"#
+        )
+    );
+    assert_eq!(
+        setting_row(&harness, "aFutureSetting").as_deref(),
+        Some("7")
+    );
+    assert!(
+        !harness
+            .snapshot(BridgeTopic::SettingsExport)
+            .to_string()
+            .contains("futureFolder"),
+        "the bridge shows only the fields it knows"
+    );
+}
+
 /// Swift: `testPhonesPairingListsDevicesAndRevokes`, `testPhonesWithoutAHandoverServiceIsUnavailable`.
 #[test]
 fn phones_pair_list_and_revoke_devices() {
