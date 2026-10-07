@@ -743,16 +743,18 @@ fn models_list_line(home: &Path, asset: &str) -> String {
 }
 
 /// Parakeet v3 is listed with the size of the model the platform runs:
-/// the `CoreML` build's on the Mac by default; the fp32 export's (about
-/// 2.6 GB) elsewhere, and on the Mac too once `speech.json` chooses the
-/// speech sidecar.
+/// the `CoreML` build's manifest on the Mac by default (about 483 MB); the
+/// fp32 export's (about 2.6 GB) elsewhere, and on the Mac too once
+/// `speech.json` chooses the speech sidecar.
 #[test]
 fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     let home = tempfile::tempdir().unwrap();
     let home = home.path();
     let not_installed =
         |bytes: i64| format!("not installed (~{})", steno_host::labels::file_size(bytes));
-    let coreml = not_installed(steno_host::speech::ModelAsset::ParakeetV3.approximate_bytes());
+    let coreml = not_installed(
+        i64::try_from(steno_speech::ModelAsset::parakeet_v3_coreml().total_size()).unwrap(),
+    );
     let fp32 = not_installed(
         i64::try_from(steno_speech::ModelAsset::parakeet_v3_fp32().total_size()).unwrap(),
     );
