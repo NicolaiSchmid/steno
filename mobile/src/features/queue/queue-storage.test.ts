@@ -26,9 +26,10 @@ import { createQueueStore, QUEUE_NOT_LOADED_MESSAGE } from "./queue-store";
 /**
  * In-memory file API; `failNextRename` makes the next rename or move throw
  * once and `failReads` the next that many reads; reads of `unreadable` paths
- * throw, and `undecodable` paths read as bytes that are not text. `move` throws when the target exists. `list`
- * returns every file under the directory, its creation time from `created`
- * by file name (0 when absent) and its size from the text's length.
+ * throw, and `undecodable` paths read as bytes that are not text. `move`
+ * throws when the target exists. `list` returns every file under the
+ * directory, its creation time from `created` by file name (0 when absent)
+ * and its size from the text's length.
  */
 function memoryFiles(
 	initial: Record<string, string> = {},
