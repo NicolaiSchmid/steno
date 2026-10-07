@@ -462,3 +462,153 @@ fn a_stage_rate_folds_every_sample_into_one_row() {
     assert_eq!(row.updated_at, date("2026-10-01T10:01:00.000Z"));
     assert_eq!(count(&store, "stageRate"), 1);
 }
+
+/// A re-run's transcript keeps what the user confirmed: a speaker whose id
+/// comes back stays confirmed, with the re-run's embedding, and the voices
+/// of the persons involved are recomputed from what is stored now.
+/// `.plans/2026-09-29-speaker-calibration.md`, decision 5.
+#[test]
+fn replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices() {
+    let (store, meeting) = populated();
+    let jerome = common::person();
+    let speakers = common::speakers(meeting.id);
+    store.confirm_speaker(speakers[0].id, &jerome).unwrap();
+    assert_eq!(
+        store
+            .persons()
+            .unwrap()
+            .into_iter()
+            .find(|person| person.id == jerome.id)
+            .unwrap()
+            .sample_count,
+        1
+    );
+
+    // The re-run diarizes "Speaker 1" again with another voice, unconfirmed.
+    let mut rerun = speakers.clone();
+    rerun[0].assignment = SpeakerAssignment::Unknown;
+    rerun[0].embedding = Some(Embedding(vec![1.0; Embedding::DIMENSION]));
+    store
+        .replace_transcript(&meeting, &common::segments(meeting.id, &rerun), &rerun)
+        .unwrap();
+    let stored = store.speakers(meeting.id).unwrap();
+    assert_eq!(
+        stored[0].assignment,
+        SpeakerAssignment::Confirmed {
+            person_id: jerome.id
+        }
+    );
+    assert_eq!(stored[0].embedding, rerun[0].embedding);
+    assert_eq!(stored[1].assignment, SpeakerAssignment::Unknown);
+    let voice = |store: &Store| {
+        store
+            .persons()
+            .unwrap()
+            .into_iter()
+            .find(|person| person.id == jerome.id)
+            .unwrap()
+    };
+    assert_eq!(
+        voice(&store).embedding,
+        Embedding::mean(&[rerun[0].embedding.clone().unwrap()])
+    );
+    assert_eq!(voice(&store).sample_count, 1);
+
+    // A re-run in which the speaker no longer appears drops it, and the
+    // person's voice no longer carries its embedding.
+    store
+        .replace_transcript(&meeting, &[], &rerun[1..])
+        .unwrap();
+    assert_eq!(store.speakers(meeting.id).unwrap().len(), 1);
+    assert_eq!(voice(&store).embedding, None);
+    assert_eq!(voice(&store).sample_count, 0);
+}
+
+/// The cleanup pass's write: the text of each stored segment by id, the
+/// speakers and every other column as they are.
+#[test]
+fn updating_segment_texts_leaves_the_speakers_and_other_columns_alone() {
+    let (store, meeting) = populated();
+    let speakers = common::speakers(meeting.id);
+    store
+        .confirm_speaker(speakers[1].id, &common::person())
+        .unwrap();
+    let before = store.speakers(meeting.id).unwrap();
+    let mut cleaned = common::segments(meeting.id, &speakers);
+    for segment in &mut cleaned {
+        segment.text = format!("{} (cleaned)", segment.raw_text);
+        // A stale copy's speaker is not written back.
+        segment.speaker_id = None;
+    }
+    let mut gone = cleaned[0].clone();
+    gone.id = uuid("00000000-0000-4000-8000-0000000000aa");
+    cleaned.push(gone);
+    store.update_segment_texts(&meeting, &cleaned).unwrap();
+
+    assert_eq!(store.speakers(meeting.id).unwrap(), before);
+    let stored = store.segments(meeting.id).unwrap();
+    let original = common::segments(meeting.id, &speakers);
+    assert_eq!(
+        stored.len(),
+        original.len(),
+        "a segment no longer stored is not added"
+    );
+    for (stored, original) in stored.iter().zip(&original) {
+        assert_eq!(stored.text, format!("{} (cleaned)", original.raw_text));
+        assert_eq!(stored.speaker_id, original.speaker_id);
+        assert_eq!(stored.raw_text, original.raw_text);
+    }
+}
+
+/// Without a summarizer the summarize stage writes only the processing
+/// columns: the summary, tasks and decisions stay.
+#[test]
+fn saving_processing_results_keeps_the_summary_tasks_and_decisions() {
+    let (store, meeting) = populated();
+    let tasks = store.tasks(meeting.id).unwrap();
+    let decisions = store.decisions(meeting.id).unwrap();
+    let mut results = meeting.clone();
+    results.state = MeetingState::Ready;
+    results.updated_at = date("2026-09-30T09:00:00.000Z");
+    store.save_processing_results(&results).unwrap();
+    let read = store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(read.summary, meeting.summary);
+    assert_eq!(read.updated_at, results.updated_at);
+    assert_eq!(store.tasks(meeting.id).unwrap(), tasks);
+    assert_eq!(store.decisions(meeting.id).unwrap(), decisions);
+}
+
+/// A stage that read the meeting before the user picked another template
+/// does not write the old one back; a summary re-run's write stores the
+/// template it ran with.
+#[test]
+fn processing_results_leave_the_template_to_the_user_and_the_rerun() {
+    let (store, meeting) = populated();
+    let now = date("2026-09-30T09:00:00.000Z");
+    store
+        .update_meeting(meeting.id, now, |stored| {
+            "interview".clone_into(&mut stored.template_id);
+            Ok(())
+        })
+        .unwrap();
+    let stale = meeting.clone();
+    assert_eq!(stale.template_id, Meeting::DEFAULT_TEMPLATE_ID);
+    store.replace_transcript(&stale, &[], &[]).unwrap();
+    store.update_segment_texts(&stale, &[]).unwrap();
+    store.save_processing_results(&stale).unwrap();
+    store.replace_summary(&stale, &[], &[], &[]).unwrap();
+    assert_eq!(
+        store.meeting(meeting.id).unwrap().unwrap().template_id,
+        "interview"
+    );
+
+    let mut rerun = stale;
+    "daily-standup".clone_into(&mut rerun.template_id);
+    store
+        .replace_summary_with_template(&rerun, &[], &[], &[])
+        .unwrap();
+    assert_eq!(
+        store.meeting(meeting.id).unwrap().unwrap().template_id,
+        "daily-standup"
+    );
+}

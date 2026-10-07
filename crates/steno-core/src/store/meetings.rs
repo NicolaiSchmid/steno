@@ -2,7 +2,7 @@
 //! what hangs off it.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -13,8 +13,8 @@ use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
 use super::{Result, Store, StoreError, assets, people, query_all, tasks, transcript, upsert_sql};
 use crate::model::{
     AudioAsset, Decision, LanguageTag, Meeting, MeetingState, MeetingStateKind, MeetingTask,
-    Participant, Speaker, SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment,
-    derived_uuid,
+    Participant, Speaker, SpeakerAssignment, SpeakerNameSuggestion, SummaryDocument, TitleOrigin,
+    TranscriptSegment, derived_uuid,
 };
 use crate::paths::file_url_path;
 
@@ -102,6 +102,41 @@ fn write_processing_results(connection: &Connection, results: &Meeting) -> Resul
     let mut meeting = current(connection, results.id)?;
     meeting.apply_processing_results(results);
     save(connection, &meeting)
+}
+
+/// The rows [`Store::replace_summary`] writes, inside the caller's
+/// transaction.
+fn replace_summary_rows(
+    transaction: &Connection,
+    meeting: &Meeting,
+    tasks: &[MeetingTask],
+    decisions: &[String],
+    speaker_names: &[SpeakerNameSuggestion],
+) -> Result<()> {
+    write_processing_results(transaction, meeting)?;
+    people::replace_name_suggestions(transaction, meeting.id, speaker_names)?;
+    transaction.execute(
+        "DELETE FROM meetingTask WHERE meetingID = ?1",
+        [DbUuid(meeting.id)],
+    )?;
+    for task in tasks {
+        let mut task = task.clone();
+        task.meeting_id = meeting.id;
+        tasks::insert_task(transaction, &task)?;
+    }
+    transaction.execute(
+        "DELETE FROM decision WHERE meetingID = ?1",
+        [DbUuid(meeting.id)],
+    )?;
+    for (index, text) in decisions.iter().enumerate() {
+        let decision = Decision {
+            id: derived_uuid(meeting.id, &format!("decision-{index}")),
+            meeting_id: meeting.id,
+            text: text.clone(),
+        };
+        tasks::insert_decision(transaction, &decision)?;
+    }
+    Ok(())
 }
 
 /// What `delete_meeting` leaves for the caller: the files the rows pointed
@@ -307,8 +342,16 @@ impl Store {
     }
 
     /// One transaction: the meeting's processing columns plus every speaker
-    /// and segment of the meeting, replaced. The merge and cleanup stages
-    /// call this.
+    /// and segment of the meeting, replaced. The merge stage calls this.
+    ///
+    /// A speaker the user confirmed keeps its confirmation when its id
+    /// comes back (ids derive from the meeting id and the cluster label, so
+    /// a re-run's do), and every person who had a confirmed speaker here
+    /// has their voice recomputed, so a person whose speaker vanished no
+    /// longer carries its embedding and one whose speaker came back carries
+    /// the new one. A first write recomputes nothing, as in Swift. Rust only: Swift's
+    /// `replaceTranscript` replaces the assignments too
+    /// (`.plans/2026-09-29-speaker-calibration.md`, decision 5).
     pub fn replace_transcript(
         &self,
         meeting: &Meeting,
@@ -317,6 +360,16 @@ impl Store {
     ) -> Result<()> {
         self.write(|transaction| {
             write_processing_results(transaction, meeting)?;
+            let confirmed: BTreeMap<Uuid, SpeakerAssignment> =
+                people::speakers_of_meeting(transaction, meeting.id)?
+                    .into_iter()
+                    .filter(|speaker| speaker.assignment.is_confirmed())
+                    .map(|speaker| (speaker.id, speaker.assignment))
+                    .collect();
+            let voices: BTreeSet<Uuid> = confirmed
+                .values()
+                .filter_map(SpeakerAssignment::person_id)
+                .collect();
             transaction.execute(
                 "DELETE FROM transcriptSegment WHERE meetingID = ?1",
                 [DbUuid(meeting.id)],
@@ -328,6 +381,9 @@ impl Store {
             for speaker in speakers {
                 let mut speaker = speaker.clone();
                 speaker.meeting_id = meeting.id;
+                if let Some(assignment) = confirmed.get(&speaker.id) {
+                    speaker.assignment = assignment.clone();
+                }
                 people::insert_speaker(transaction, &speaker)?;
             }
             for segment in segments {
@@ -335,15 +391,46 @@ impl Store {
                 segment.meeting_id = meeting.id;
                 transcript::insert_segment(transaction, &segment)?;
             }
+            for person_id in voices {
+                people::refresh_voice(transaction, person_id)?;
+            }
             Ok(())
         })
+    }
+
+    /// One transaction: the meeting's processing columns plus the `text` of
+    /// each of `segments` that is still stored, by id. Speakers and the
+    /// segments' other columns stay as they are, so a speaker the user
+    /// named while the cleanup pass ran keeps its name. The cleanup stage
+    /// calls this. Rust only: Swift's cleanup replaces the whole transcript.
+    pub fn update_segment_texts(
+        &self,
+        meeting: &Meeting,
+        segments: &[TranscriptSegment],
+    ) -> Result<()> {
+        self.write(|transaction| {
+            write_processing_results(transaction, meeting)?;
+            for segment in segments {
+                transcript::update_text(transaction, meeting.id, segment)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// One transaction: the meeting's processing columns only (state,
+    /// language, summary, usage and title, over the row as it is now). The
+    /// summarize stage calls this when no summarizer is set up, so the
+    /// summary, tasks and decisions an earlier run wrote stay.
+    pub fn save_processing_results(&self, meeting: &Meeting) -> Result<()> {
+        self.write(|transaction| write_processing_results(transaction, meeting))
     }
 
     /// One transaction: the meeting's processing columns plus its tasks,
     /// decisions and speaker name suggestions, replaced. Decision ids derive
     /// from the meeting id so re-runs are stable. Of `speaker_names`, only
     /// suggestions that carry a name and point at one of the meeting's
-    /// speakers are kept, the strongest per speaker.
+    /// speakers are kept, the strongest per speaker. The stored template
+    /// stays (see [`Meeting::apply_processing_results`]).
     pub fn replace_summary(
         &self,
         meeting: &Meeting,
@@ -352,29 +439,26 @@ impl Store {
         speaker_names: &[SpeakerNameSuggestion],
     ) -> Result<()> {
         self.write(|transaction| {
-            write_processing_results(transaction, meeting)?;
-            people::replace_name_suggestions(transaction, meeting.id, speaker_names)?;
+            replace_summary_rows(transaction, meeting, tasks, decisions, speaker_names)
+        })
+    }
+
+    /// [`Store::replace_summary`] that also stores `meeting.template_id`,
+    /// in the same transaction: a summary re-run's write, so the template
+    /// a summary was made with is the meeting's.
+    pub fn replace_summary_with_template(
+        &self,
+        meeting: &Meeting,
+        tasks: &[MeetingTask],
+        decisions: &[String],
+        speaker_names: &[SpeakerNameSuggestion],
+    ) -> Result<()> {
+        self.write(|transaction| {
+            replace_summary_rows(transaction, meeting, tasks, decisions, speaker_names)?;
             transaction.execute(
-                "DELETE FROM meetingTask WHERE meetingID = ?1",
-                [DbUuid(meeting.id)],
+                "UPDATE meeting SET templateID = ?1 WHERE id = ?2",
+                params![meeting.template_id, DbUuid(meeting.id)],
             )?;
-            for task in tasks {
-                let mut task = task.clone();
-                task.meeting_id = meeting.id;
-                tasks::insert_task(transaction, &task)?;
-            }
-            transaction.execute(
-                "DELETE FROM decision WHERE meetingID = ?1",
-                [DbUuid(meeting.id)],
-            )?;
-            for (index, text) in decisions.iter().enumerate() {
-                let decision = Decision {
-                    id: derived_uuid(meeting.id, &format!("decision-{index}")),
-                    meeting_id: meeting.id,
-                    text: text.clone(),
-                };
-                tasks::insert_decision(transaction, &decision)?;
-            }
             Ok(())
         })
     }

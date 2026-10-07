@@ -264,14 +264,17 @@ impl Meeting {
     pub const DEFAULT_TEMPLATE_ID: &'static str = "default";
 
     /// Copies the columns the pipeline owns from `results`: title with its
-    /// origin, language, state, template, summary, usage and `updatedAt`.
-    /// Everything the user or the app owns stays as stored.
+    /// origin, language, state, summary, usage and `updatedAt`. Everything
+    /// the user or the app owns stays as stored, the template included: the
+    /// user picks it, so a run that read the meeting before a pick never
+    /// writes the old one back, and only a summary re-run stores the
+    /// template it ran with (`Store::replace_summary_with_template`). Rust
+    /// only: Swift's `writeProcessingResults` copies the template too.
     pub fn apply_processing_results(&mut self, results: &Meeting) {
         self.title.clone_from(&results.title);
         self.title_origin = results.title_origin;
         self.language.clone_from(&results.language);
         self.state.clone_from(&results.state);
-        self.template_id.clone_from(&results.template_id);
         self.summary.clone_from(&results.summary);
         self.llm_usage = results.llm_usage;
         self.updated_at = results.updated_at;

@@ -249,7 +249,7 @@ const VOICE_WINDOW: usize = 50;
 /// normalised mean of the newest `VOICE_WINDOW` embeddings by
 /// `meeting.startedAt`, `sampleCount` their number; none and 0 without
 /// any. A missing person is ignored. Swift: `MeetingStore.refreshVoice`.
-fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<()> {
+pub(super) fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<()> {
     let Some(mut person) = fetch_person(connection, person_id)? else {
         return Ok(());
     };
