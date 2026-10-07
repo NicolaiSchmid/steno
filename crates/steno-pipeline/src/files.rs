@@ -1,8 +1,9 @@
-//! Durable file writes: replacing a file in one step (the secrets file, the
-//! CLI's `meeting.json`; Swift: `Data.write(to:options: .atomic)`), copying
-//! a recording so it survives a power loss (the phone intake), and creating
-//! folders whose entries survive one. The services and the CLI use these
-//! too, so there is one implementation.
+//! Durable file writes: replacing a file in one step (the secrets file,
+//! `preferences.json`, the CLI's `meeting.json`; Swift:
+//! `Data.write(to:options: .atomic)`), copying a recording so it survives a
+//! power loss (the phone intake), creating folders whose entries survive
+//! one, and setting aside a file that does not parse (`preferences.json`).
+//! The services and the CLI use these too, so there is one implementation.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
@@ -197,11 +198,17 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
 }
 
 /// Moves `path` aside to `<name>.corrupt-<UTC time>` beside it, with `-2`,
-/// `-3` and on added when that name is taken, so an earlier copy set aside
-/// is never replaced; the folder is synced after the rename. A reader that
-/// cannot parse a file it owns calls this before it starts empty, so the
-/// next write cannot replace bytes nobody has looked at. Returns the new
-/// path.
+/// `-3` and so on added when that name is taken, so an earlier copy set
+/// aside is never replaced; the folder is synced after the move. A reader
+/// that cannot parse a file it owns calls this before it starts empty, so
+/// the next write cannot replace bytes nobody has looked at. Returns the
+/// new path.
+///
+/// The new name is claimed with a hard link, which fails when the name is
+/// taken, so a copy another process sets aside in the same second is never
+/// replaced; the old name is removed after. Where no hard link can be made
+/// the move is a rename, which replaces a taken name, so a check that the
+/// name is free comes first and is all that guards it there.
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -218,13 +225,25 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
         } else {
             path.with_file_name(format!("{base}-{attempt}"))
         };
-        match candidate.symlink_metadata() {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break candidate,
-            Err(error) => return Err(error),
-            Ok(_) => attempt += 1,
+        match std::fs::hard_link(path, &candidate) {
+            Ok(()) => {
+                std::fs::remove_file(path)?;
+                break candidate;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
+            // No hard link here (FAT, some network shares, a Linux that
+            // protects links to files of other users): a rename, which
+            // fails as well for any other cause.
+            Err(_) => match candidate.symlink_metadata() {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(path, &candidate)?;
+                    break candidate;
+                }
+                Err(error) => return Err(error),
+                Ok(_) => attempt += 1,
+            },
         }
     };
-    std::fs::rename(path, &aside)?;
     if let Some(directory) = aside.parent() {
         Disk.directory(directory);
     }
