@@ -1625,7 +1625,7 @@ touch lines; each fix is ported to Swift before cutover.
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
   `/etc/hostname` and falls back to `Steno`; the shell passes the OS computer name on
   the Mac (WP9) and on Windows (WP10).
-- Phone queue (`mobile/src/features/queue/queue-storage.ts`):
+- Phone queue (`mobile/src/features/`):
   - Adoption. Every load lists `Documents/queue/` and adds a row for each recording
     file of 1 KiB or more (`MIN_RECORDING_BYTES`; smaller holds no meaningful audio)
     that no row names (`adoptRecordingFiles`), so a corrupt index with no usable temp
@@ -1640,15 +1640,21 @@ touch lines; each fix is ported to Swift before cutover.
     and is not `recording` (`settleUnhashedRows`). One whose file holds audio, in the
     queue or as its own `sourceUri` in `Documents/ExpoAudio/`, goes back to
     `recording`; a `failed` one without stays failed, and a `queued` or `unpaired`
-    one without (a Retry of an earlier version made it) fails as interrupted, with no
-    Retry. A recorder file several rows name is no row's own (an earlier version
-    wrote every recording of one run to one file), so it goes only to a `recording`
-    row. The load then moves into the queue, without replacing a file, each
-    `recording-<UUID>.m4a` there that no `recording` row names
-    (`recorderFilesToMove`), as `<uuid>.m4a`: a crash before the row was saved.
-    Crash recovery hashes and queues these rows, and fails one with no file of
-    1 KiB or more. The upload planner skips a row with no hash, and Retry is offered
-    only for a failed row with one.
+    one without (a Retry of an earlier version, then perhaps an unpair) fails as
+    interrupted, with no Retry. A recorder file several rows name is no row's own (an
+    earlier version wrote every recording of one run to one file), so it goes only to
+    a `recording` row. Crash recovery hashes and queues these rows, and fails one with
+    no file of 1 KiB or more. The upload planner skips a row with no hash, and Retry
+    is offered only for a failed row with one.
+  - Recorder files. Each `recording-<UUID>.m4a` in `Documents/ExpoAudio/` that no
+    `recording` row names, left by a crash before its row was saved, moves into the
+    queue as `<uuid>.m4a` without replacing a file (`recorderFilesToMove`).
+  - Crash recovery (`recorder/recovery-files.ts`). It finds a row's recorder file by
+    the file name of its `sourceUri` in the current `Documents/ExpoAudio/`, never by
+    the stored absolute path, since iOS moves the app's container to a new path on an
+    update or a restore. It replaces only a queue file read as below 1 KiB. A queue
+    file whose size cannot be read (expo reads it as null on iOS) counts as present:
+    recovery leaves its row in `recording`, and a later launch tries again.
   - One file per recording. The recorder prepares expo-audio with the recording
     preset (`use-recorder.ts`), which builds a new recorder at a fresh
     `recording-<UUID>.m4a`, so a failed recording's file is not overwritten by the
