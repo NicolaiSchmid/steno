@@ -352,7 +352,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 
     let permissions = Arc::new(FakePermissions::all_granted());
     let speech_models = Arc::new(ModelStoreSpeechModels::new(speech));
-    let recorder = Arc::new(CaptureRecorder::new(
+    let recorder = CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
         options.make_capture_session,
@@ -360,7 +360,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         speech_models.clone(),
         zone,
         runtime.clone(),
-    ));
+    );
 
     let handover = match handover_listener(&store, &pipeline, &secrets, zone, &runtime) {
         Ok(pair) => Some(pair),
@@ -1064,7 +1064,7 @@ mod tests {
         let pipeline = crate::testing::current_pipeline(fake_dependencies(store, "fake-engine"));
         let zone = FixedOffset::east_opt(0).unwrap();
         let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let recorder = Arc::new(CaptureRecorder::new(
+        let recorder = CaptureRecorder::new(
             store.clone(),
             pipeline.clone(),
             make_session,
@@ -1072,7 +1072,7 @@ mod tests {
             fakes.speech_models.clone(),
             zone,
             tokio::runtime::Handle::current(),
-        ));
+        );
         let mut services = fakes.services();
         services.recorder = recorder.clone();
         App {

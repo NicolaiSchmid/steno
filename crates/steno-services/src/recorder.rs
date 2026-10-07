@@ -3,14 +3,28 @@
 //! The calendar lookup, the auto-stop after a call ends and the detection
 //! prompt are WP5's recorder policy (the plan's parity list); the status
 //! carries what the capture session reports.
+//!
+//! Each recording has a watcher thread ([`CaptureRecorder::watch`]). A
+//! session that fails on its own (a device that stayed lost, a write that
+//! failed on a full disk) is finished there as Stop would finish it: the
+//! recording so far is saved and queued, and the status says why it ended.
+//! Swift: the states task of `RecordingController.observe`, which said
+//! "Recording failed: <error>" and kept the device-loss warning beside it;
+//! here the one error line also says the recording is saved. The watcher
+//! also keeps an eye on the free space under the recordings folder
+//! ([`DiskWatch`]): a recording does not start without room, warns when
+//! about half an hour is left, and stops and is saved before the disk
+//! fills. Rust only: Swift had no disk check.
 
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::path::Path;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
 
 use chrono::{FixedOffset, Utc};
 use steno_audio::{
-    CaptureConfiguration, CaptureNotice, CaptureSession, CaptureStatistics, CaptureStream,
-    FRAMES_PER_SECOND, LaneLevels as AudioLevels,
+    CaptureConfiguration, CaptureError, CaptureNotice, CaptureSession, CaptureState,
+    CaptureStatistics, CaptureStream, FRAMES_PER_SECOND, LaneLevels as AudioLevels,
 };
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
@@ -27,6 +41,103 @@ use crate::pipeline::CurrentPipeline;
 /// `CaptureSession::new`, tests a synthetic backend.
 pub type MakeCaptureSession =
     Arc<dyn Fn(CaptureConfiguration) -> Result<CaptureSession, String> + Send + Sync>;
+
+/// The bytes free on the volume that holds a path; the product asks the
+/// file system ([`DiskWatch::system`]), tests pass a fake.
+pub type FreeSpace = Arc<dyn Fn(&Path) -> std::io::Result<u64> + Send + Sync>;
+
+/// How a recording watches the free space under the recordings folder;
+/// see the module doc.
+#[derive(Clone)]
+pub struct DiskWatch {
+    /// Reads the free space.
+    pub free_space: FreeSpace,
+    /// How often a recording reads it.
+    pub interval: Duration,
+}
+
+impl DiskWatch {
+    /// Below this a recording does not start, and one in progress stops
+    /// and is saved: room for the database, the processing and the system,
+    /// so the save itself never meets a full disk.
+    pub const STOP_BELOW_BYTES: u64 = 512 * 1024 * 1024;
+    /// The recording time left above [`Self::STOP_BELOW_BYTES`] below which
+    /// a recording warns.
+    pub const WARN_BELOW: Duration = Duration::from_secs(30 * 60);
+
+    /// The file system's free space, read every five seconds.
+    #[must_use]
+    pub fn system() -> Self {
+        Self {
+            free_space: Arc::new(|path| fs4::available_space(path)),
+            interval: Duration::from_secs(5),
+        }
+    }
+
+    /// The bytes free for `folder`, asked of its nearest folder that
+    /// exists (the recordings folder may not exist before the first
+    /// recording); `None` when that cannot be read, which never stops a
+    /// recording.
+    fn free_for(&self, folder: &Path) -> Option<u64> {
+        let existing = folder.ancestors().find(|path| path.exists())?;
+        match (self.free_space)(existing) {
+            Ok(bytes) => Some(bytes),
+            Err(error) => {
+                tracing::debug!(%error, "the free disk space could not be read");
+                None
+            }
+        }
+    }
+}
+
+/// What a recording does about the space left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Room {
+    Enough,
+    /// The warning to show, with the minutes left.
+    Low(String),
+    /// Too little to go on.
+    Full,
+}
+
+impl Room {
+    /// The room `free` bytes leave a recording that writes
+    /// `bytes_per_second`.
+    fn of(free: u64, bytes_per_second: u64) -> Self {
+        let Some(spare) = free.checked_sub(DiskWatch::STOP_BELOW_BYTES) else {
+            return Room::Full;
+        };
+        let seconds_left = spare / bytes_per_second.max(1);
+        if seconds_left >= DiskWatch::WARN_BELOW.as_secs() {
+            return Room::Enough;
+        }
+        let minutes = (seconds_left / 60).max(1);
+        let unit = if minutes == 1 { "minute" } else { "minutes" };
+        Room::Low(format!(
+            "The disk is almost full: about {minutes} {unit} of recording left. \
+             Steno stops and saves the recording before the disk fills."
+        ))
+    }
+}
+
+/// The bytes a second the files of `configuration` grow by: the 48 kHz
+/// Float32 master, one 16 kHz Int16 sidecar per lane, and the raw
+/// microphone when kept. About 1.6 GB an hour for a call.
+fn bytes_per_second(configuration: &CaptureConfiguration) -> u64 {
+    let lanes = configuration.lanes().len() as u64;
+    let raw = u64::from(configuration.keep_raw_mic_lane);
+    (lanes + raw) * 48_000 * 4 + lanes * 16_000 * 2
+}
+
+/// The status line of a recording that a failure ended before Stop, the
+/// recording up to it kept.
+fn ended_early(failure: &CaptureError) -> String {
+    format!("The recording stopped early: {failure}. What was recorded until then is saved.")
+}
+
+/// The status line of a recording stopped because the disk was nearly full.
+const STOPPED_FOR_SPACE: &str =
+    "The disk is almost full, so Steno stopped the recording and saved it.";
 
 struct Active {
     session: Arc<CaptureSession>,
@@ -129,6 +240,11 @@ pub struct CaptureRecorder {
     changes: Condvar,
     /// Called after every status change so the host republishes.
     changed: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// How recordings watch the disk; [`DiskWatch::system`] unless a test
+    /// set its own ([`Self::watch_disk_with`]).
+    disk: Mutex<DiskWatch>,
+    /// This recorder, for the watcher threads.
+    this: Weak<CaptureRecorder>,
 }
 
 impl CaptureRecorder {
@@ -141,8 +257,8 @@ impl CaptureRecorder {
         speech_models: Arc<dyn SpeechModels>,
         zone: FixedOffset,
         runtime: tokio::runtime::Handle,
-    ) -> Self {
-        CaptureRecorder {
+    ) -> Arc<Self> {
+        Arc::new_cyclic(|this| CaptureRecorder {
             store,
             pipeline,
             make_session,
@@ -157,7 +273,24 @@ impl CaptureRecorder {
             }),
             changes: Condvar::new(),
             changed: Mutex::new(None),
-        }
+            disk: Mutex::new(DiskWatch::system()),
+            this: this.clone(),
+        })
+    }
+
+    /// Replaces how recordings watch the disk, for the next recording on.
+    pub fn watch_disk_with(&self, disk: DiskWatch) {
+        *self
+            .disk
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = disk;
+    }
+
+    fn disk(&self) -> DiskWatch {
+        self.disk
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// The hook the app wires to `Host::recorder_changed`.
@@ -251,10 +384,20 @@ impl CaptureRecorder {
             CaptureMode::Call => steno_audio::CaptureMode::Call,
             CaptureMode::InPerson => steno_audio::CaptureMode::InPerson,
         };
-        let mut configuration = CaptureConfiguration::new(audio_mode, audio_folder);
+        let disk = self.disk();
+        let free = disk.free_for(&audio_folder);
+        let mut configuration = CaptureConfiguration::new(audio_mode, &audio_folder);
         configuration
             .input_device_uid
             .clone_from(&settings.input_device_uid);
+        let rate = bytes_per_second(&configuration);
+        let room = free.map_or(Room::Enough, |free| Room::of(free, rate));
+        if room == Room::Full {
+            return Err(
+                "the disk is almost full. Free some space, then start the recording again"
+                    .to_owned(),
+            );
+        }
         let session = Arc::new((self.make_session)(configuration)?);
         let started_at = Utc::now();
         let intake = self.intake();
@@ -272,6 +415,8 @@ impl CaptureRecorder {
             .map_err(|e| e.to_string())?;
         let levels_receiver = session.levels();
         let notices = session.notices();
+        // Before the start, so a failure right after it is not missed.
+        let states = session.states();
         if let Err(error) = session.start(meeting.id) {
             let _ = intake.fail(meeting.id, &format!("Recording could not start: {error}"));
             return Err(error.to_string());
@@ -335,7 +480,10 @@ impl CaptureRecorder {
             inner.status.meeting_id = Some(meeting_id);
             inner.status.levels = None;
             inner.status.error = None;
-            inner.status.warning = None;
+            inner.status.warning = match room {
+                Room::Low(warning) => Some(warning),
+                Room::Enough | Room::Full => None,
+            };
             inner.active = Some(Active {
                 session,
                 meeting_id,
@@ -346,7 +494,109 @@ impl CaptureRecorder {
                 notice_thread,
             });
         }
+        // Not joined: it may be the thread that finishes the recording,
+        // and it ends on its own once the session is gone.
+        let this = self.this.clone();
+        let spawned = std::thread::Builder::new()
+            .name("steno-recording-watch".into())
+            .spawn(move || Self::watch(&this, meeting_id, &states, &disk, &audio_folder, rate));
+        if let Err(error) = spawned {
+            tracing::error!(%error, "the recording runs without its watcher");
+        }
         Ok(())
+    }
+
+    /// The watcher of the recording of `meeting_id` (see the module doc),
+    /// until its session leaves `Recording` or is gone: a `Failed` the
+    /// session reached on its own finishes the recording here, and every
+    /// `disk.interval` the free space under `folder` is read against
+    /// `rate` bytes a second.
+    fn watch(
+        this: &Weak<Self>,
+        meeting_id: Uuid,
+        states: &Receiver<CaptureState>,
+        disk: &DiskWatch,
+        folder: &Path,
+        rate: u64,
+    ) {
+        let mut recording = false;
+        loop {
+            match states.recv_timeout(disk.interval) {
+                Ok(CaptureState::Recording { .. }) => recording = true,
+                Ok(CaptureState::Failed { error, .. }) => {
+                    if let Some(recorder) = this.upgrade() {
+                        recorder.end_early(meeting_id, &error);
+                    }
+                    return;
+                }
+                Ok(CaptureState::Idle) if recording => return,
+                Ok(_) => {}
+                Err(RecvTimeoutError::Disconnected) => return,
+                Err(RecvTimeoutError::Timeout) => {
+                    let Some(recorder) = this.upgrade() else {
+                        return;
+                    };
+                    let Some(free) = disk.free_for(folder) else {
+                        continue;
+                    };
+                    match Room::of(free, rate) {
+                        Room::Enough => {}
+                        Room::Low(warning) => recorder.warn(meeting_id, warning),
+                        Room::Full => {
+                            recorder.stop_recording(
+                                meeting_id,
+                                RecordingEndReason::Failed,
+                                Some(STOPPED_FOR_SPACE.to_owned()),
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The session of `meeting_id` failed on its own: the recording ends
+    /// with `DeviceLost` or `Failed` and is saved, as Stop saves it.
+    fn end_early(&self, meeting_id: Uuid, error: &CaptureError) {
+        let reason = match error {
+            CaptureError::DeviceLost => RecordingEndReason::DeviceLost,
+            _ => RecordingEndReason::Failed,
+        };
+        self.stop_recording(meeting_id, reason, None);
+    }
+
+    /// Stops the recording of `meeting_id` with `reason` and `error` for the
+    /// status, when it is still the one in progress; a Stop or a quit that
+    /// came first wins.
+    fn stop_recording(&self, meeting_id: Uuid, reason: RecordingEndReason, error: Option<String>) {
+        let active = {
+            let mut inner = self.inner();
+            if inner
+                .active
+                .as_ref()
+                .is_none_or(|active| active.meeting_id != meeting_id)
+            {
+                return;
+            }
+            Self::begin_stop(&mut inner)
+        };
+        if let Some(active) = active {
+            self.finish_stop(active, reason, error);
+        }
+    }
+
+    /// Shows `warning` while the recording of `meeting_id` runs.
+    fn warn(&self, meeting_id: Uuid, warning: String) {
+        let mut inner = self.inner();
+        if inner.status.meeting_id != Some(meeting_id)
+            || inner.status.warning.as_ref() == Some(&warning)
+        {
+            return;
+        }
+        inner.status.warning = Some(warning);
+        drop(inner);
+        self.notify();
     }
 
     /// Quitting: once a start or a stop in progress has settled, a
@@ -362,7 +612,7 @@ impl CaptureRecorder {
             Self::begin_stop(&mut inner)
         };
         if let Some(active) = active {
-            self.finish_stop(active, RecordingEndReason::Quit);
+            self.finish_stop(active, RecordingEndReason::Quit, None);
         }
     }
 
@@ -376,13 +626,19 @@ impl CaptureRecorder {
 
     /// Stops the session `begin_stop` took and saves the recording, then
     /// leaves the recorder `Idle` with the outcome's message; the host
-    /// hears of `Stopping` and of `Idle`.
-    fn finish_stop(&self, active: Active, reason: RecordingEndReason) {
+    /// hears of `Stopping` and of `Idle`. `error` says why the recorder
+    /// stopped on its own; without it, a failure the result carries (a
+    /// device that stayed lost, a write or a close that failed) does.
+    fn finish_stop(&self, active: Active, reason: RecordingEndReason, error: Option<String>) {
         self.notify();
         let intake = self.intake();
+        let mut ended_with = error;
         let outcome = match active.session.stop() {
             Ok(result) => {
                 log_dropped_frames(active.meeting_id, &result.statistics);
+                if ended_with.is_none() {
+                    ended_with = result.failure.as_ref().map(ended_early);
+                }
                 let duration = result.statistics.duration;
                 let statistics = result.statistics.clone();
                 let completed = block_on(
@@ -434,7 +690,10 @@ impl CaptureRecorder {
         inner.status.levels = None;
         inner.status.auto_stop = None;
         match outcome {
-            Ok(warning) => inner.status.warning = warning,
+            Ok(warning) => {
+                inner.status.warning = warning;
+                inner.status.error = ended_with;
+            }
             Err(error) => inner.status.error = Some(error),
         }
         drop(inner);
@@ -493,7 +752,7 @@ impl Recorder for CaptureRecorder {
     fn stop(&self) {
         let active = Self::begin_stop(&mut self.inner());
         if let Some(active) = active {
-            self.finish_stop(active, RecordingEndReason::Manual);
+            self.finish_stop(active, RecordingEndReason::Manual, None);
         }
     }
 
@@ -536,22 +795,20 @@ impl Recorder for CaptureRecorder {
 }
 
 /// What a saved recording warns about, every line that applies joined
-/// into one: a device that disappeared, frames that never reached the
-/// files (in seconds of the lane that lost most, rounded to the nearest
-/// second, so from half a second on: a lone 10 ms drift slip is not worth
-/// a warning, and the log line keeps every count), and a call whose system
-/// audio stayed silent. The dropped frames name no
-/// cause, since the count holds several: the relay full behind a slow
-/// disk, ring overruns while the computer was too busy, frames a stop left
-/// undrained and, on Windows, the slips that absorb clock drift. Swift:
+/// into one: frames that never reached the files (in seconds of the lane
+/// that lost most, rounded to the nearest second, so from half a second
+/// on: a lone 10 ms drift slip is not worth a warning, and the log line
+/// keeps every count), and a call whose system audio stayed silent. The
+/// dropped frames name no cause, since the count holds several: the relay
+/// full behind a slow disk, ring overruns while the computer was too busy,
+/// frames a stop left undrained and, on Windows, the slips that absorb
+/// clock drift. A device that disappeared is the status's error instead
+/// ([`ended_early`]). Swift:
 /// `RecordingController.stop`, where a device loss replaced the silent-lane
-/// line and that line reads "The system audio lane stayed silent"; the
-/// joining and the dropped frames are Rust only.
+/// line as a warning and that line reads "The system audio lane stayed
+/// silent"; the joining and the dropped frames are Rust only.
 fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Option<String> {
     let mut lines = Vec::new();
-    if statistics.ended_on_device_loss {
-        lines.push("An audio device disappeared; the partial recording was kept.".to_owned());
-    }
     let dropped = statistics
         .dropped_frames
         .values()
@@ -604,7 +861,7 @@ fn denied_permissions(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     use super::*;
     use crate::app::BuildError;
@@ -623,6 +880,12 @@ mod tests {
     struct Harness {
         _dir: tempfile::TempDir,
         store: Arc<Store>,
+        /// The bytes the disk watch reads as free; plenty unless a test
+        /// lowers it.
+        free: Arc<AtomicU64>,
+        /// The capture sessions the recorder builds; the synthetic tone
+        /// unless a test swaps in its own.
+        capture: Arc<Mutex<MakeCaptureSession>>,
         recorder: Arc<CaptureRecorder>,
         engine: Arc<FakeSpeechEngine>,
         diarizer: Arc<FakeDiarizer>,
@@ -686,6 +949,9 @@ mod tests {
         capture: MakeCaptureSession,
     ) -> Harness {
         let (dir, store) = temp_store();
+        let free = Arc::new(AtomicU64::new(u64::MAX));
+        let capture_slot = Arc::new(Mutex::new(capture));
+        let capture = capture_slot.clone();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
         engine_id.clone_into(&mut settings.speech_engine_id);
@@ -719,18 +985,21 @@ mod tests {
             make,
             tokio::runtime::Handle::current(),
         ));
-        let recorder = Arc::new(CaptureRecorder::new(
+        let recorder = CaptureRecorder::new(
             store.clone(),
             pipeline,
-            capture,
+            Arc::new(move |configuration| (capture.lock().unwrap())(configuration)),
             Arc::new(FakePermissions::all_granted()),
             models,
             chrono::FixedOffset::east_opt(0).unwrap(),
             tokio::runtime::Handle::current(),
-        ));
+        );
+        recorder.watch_disk_with(disk_with(free.clone()));
         Harness {
             _dir: dir,
             store: store.clone(),
+            free,
+            capture: capture_slot,
             recorder,
             engine,
             diarizer,
@@ -738,7 +1007,81 @@ mod tests {
         }
     }
 
+    /// A disk watch over `free`, read every 20 ms.
+    fn disk_with(free: Arc<AtomicU64>) -> DiskWatch {
+        DiskWatch {
+            free_space: Arc::new(move |_| Ok(free.load(Ordering::SeqCst))),
+            interval: std::time::Duration::from_millis(20),
+        }
+    }
+
+    /// Capture sessions over the synthetic tone whose writer fails every
+    /// write after the first `writes`, as a disk that fills does, and whose
+    /// restarts after a device change all fail when `device_lost` is set.
+    fn failing_capture(writes: Option<usize>, device_lost: bool) -> MakeCaptureSession {
+        use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
+
+        struct FillsUp {
+            inner: RecordingWriter,
+            left: Option<usize>,
+        }
+        impl RecordingWriting for FillsUp {
+            fn files(&self) -> RecordingFiles {
+                self.inner.files()
+            }
+            fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+                if let Some(left) = self.left.as_mut() {
+                    if *left == 0 {
+                        return Err(CaptureError::WriterFailed("No space left on device".into()));
+                    }
+                    *left -= 1;
+                }
+                self.inner.write(frames)
+            }
+            fn sync(&mut self) -> std::io::Result<()> {
+                self.inner.sync()
+            }
+            fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+                self.inner.finish()
+            }
+        }
+
+        Arc::new(move |configuration: CaptureConfiguration| {
+            let lanes = configuration.lanes();
+            let mut options = steno_audio::testing::synthetic::SyntheticOptions::tones(
+                &lanes,
+                &[(steno_core::AudioLane::Mic, 440.0)],
+                600.0,
+            );
+            options.real_time = true;
+            if device_lost {
+                options = options
+                    .change_device_after(0.2)
+                    .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS);
+            }
+            CaptureSession::with_writer_factory(
+                configuration,
+                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+                None,
+                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                Arc::new(steno_audio::SystemClock::new()),
+                Arc::new(move |layout, lanes, keep_raw| {
+                    Ok(Box::new(FillsUp {
+                        inner: RecordingWriter::new(layout, lanes, keep_raw)?,
+                        left: writes,
+                    }) as Box<dyn RecordingWriting>)
+                }),
+            )
+            .map_err(|error| error.to_string())
+        })
+    }
+
     impl Harness {
+        /// Records with `make` from the next start on.
+        fn capture_with(&self, make: MakeCaptureSession) {
+            *self.capture.lock().unwrap() = make;
+        }
+
         /// Stores `engine_id` as a Settings save does, then reloads.
         fn save_engine(&self, engine_id: &str) -> Result<(), BuildError> {
             let mut settings = self.store.settings().unwrap();
@@ -1315,8 +1658,8 @@ mod tests {
         }
     }
 
-    /// Every warning that applies is kept: a device loss no longer hides a
-    /// silent system lane or missing audio.
+    /// Every warning that applies is kept; a device loss is the error, not
+    /// one of them.
     #[test]
     fn every_warning_that_applies_is_joined() {
         let mut all = statistics();
@@ -1326,8 +1669,7 @@ mod tests {
         let warning = recording_warning(CaptureMode::Call, &all).unwrap();
         assert_eq!(
             warning,
-            "An audio device disappeared; the partial recording was kept. \
-             About 1 second of the recording is missing. \
+            "About 1 second of the recording is missing. \
              Steno heard nothing from the call's audio. Check the system audio permission."
         );
         // In person there is no system lane to warn about.
@@ -1421,7 +1763,7 @@ mod tests {
                 .map_err(|error| error.to_string())
             })
         };
-        let recorder = Arc::new(CaptureRecorder::new(
+        let recorder = CaptureRecorder::new(
             harness.store.clone(),
             harness.recorder.pipeline.clone(),
             make,
@@ -1429,7 +1771,7 @@ mod tests {
             harness.recorder.speech_models.clone(),
             FixedOffset::east_opt(0).unwrap(),
             tokio::runtime::Handle::current(),
-        ));
+        );
         start(&recorder).await;
         let meeting_id = recorder.status().meeting_id.unwrap();
         let finished = backend.clone();
@@ -1445,5 +1787,195 @@ mod tests {
                     && line.contains("the recording lost frames")),
             "{text}"
         );
+    }
+
+    /// Waits until the recorder is idle again after a recording that ended
+    /// on its own, and returns the saved meeting.
+    async fn ended_on_its_own(harness: &Harness, meeting_id: Uuid) -> steno_core::Meeting {
+        eventually("the recording ended on its own", || {
+            harness.recorder.status().state == RecordingState::Idle
+        })
+        .await;
+        harness.store.meeting(meeting_id).unwrap().unwrap()
+    }
+
+    /// A disk that fills mid-recording fails the session's writer; the
+    /// recorder hears of it at once instead of showing Recording until a
+    /// Stop: the recording so far is saved with `failed` and queued, and
+    /// the status says why it stopped.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_writer_that_fails_mid_recording_ends_and_saves_the_recording() {
+        let harness = harness(&[]);
+        harness.capture_with(failing_capture(Some(30), false));
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let meeting = ended_on_its_own(&harness, meeting_id).await;
+        let status = harness.recorder.status();
+        let error = status.error.unwrap_or_default();
+        assert!(
+            error.starts_with("The recording stopped early: writing the recording failed: No space left on device."),
+            "{error}"
+        );
+        assert_eq!(meeting.end_reason, Some(RecordingEndReason::Failed));
+        assert_ne!(
+            meeting.state.kind(),
+            steno_core::MeetingStateKind::Recording
+        );
+        let asset = harness.store.asset(meeting_id).unwrap().unwrap();
+        assert!(asset.url.ends_with("recording.caf"), "{}", asset.url);
+        assert!(meeting.duration > 0.0);
+    }
+
+    /// A device that stays lost through every restart ends the recording
+    /// with `deviceLost`, saved, and the status says so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_device_that_stays_lost_ends_and_saves_the_recording() {
+        let harness = harness(&[]);
+        harness.capture_with(failing_capture(None, true));
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let meeting = ended_on_its_own(&harness, meeting_id).await;
+        assert_eq!(
+            harness.recorder.status().error.as_deref(),
+            Some(
+                "The recording stopped early: an audio device disappeared. What was recorded until then is saved."
+            )
+        );
+        assert_eq!(meeting.end_reason, Some(RecordingEndReason::DeviceLost));
+        assert!(harness.store.asset(meeting_id).unwrap().is_some());
+    }
+
+    /// Without room for the save, a recording does not start, and no
+    /// meeting is written.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_does_not_start_on_a_full_disk() {
+        let harness = harness(&[]);
+        harness
+            .free
+            .store(DiskWatch::STOP_BELOW_BYTES - 1, Ordering::SeqCst);
+        let starting = harness.recorder.clone();
+        tokio::task::spawn_blocking(move || starting.start(CaptureMode::Call, None))
+            .await
+            .unwrap();
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Idle);
+        assert_eq!(
+            status.error.as_deref(),
+            Some(
+                "Recording could not start: the disk is almost full. Free some space, then start the recording again"
+            )
+        );
+        assert_eq!(harness.store.meetings(10, 0).unwrap(), []);
+    }
+
+    /// With little room the recording starts and warns how long it can
+    /// run; when the room runs out it stops and is saved before the disk
+    /// fills.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_warns_when_the_disk_runs_low_and_stops_before_it_fills() {
+        let harness = harness(&[]);
+        // Ten minutes of an in-person recording above the floor.
+        let ten_minutes = 600 * (48_000 * 4 + 16_000 * 2);
+        harness
+            .free
+            .store(DiskWatch::STOP_BELOW_BYTES + ten_minutes, Ordering::SeqCst);
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        assert_eq!(
+            harness.recorder.status().warning.as_deref(),
+            Some(
+                "The disk is almost full: about 10 minutes of recording left. Steno stops and saves the recording before the disk fills."
+            )
+        );
+        harness
+            .free
+            .store(DiskWatch::STOP_BELOW_BYTES / 2, Ordering::SeqCst);
+        let meeting = ended_on_its_own(&harness, meeting_id).await;
+        assert_eq!(
+            harness.recorder.status().error.as_deref(),
+            Some(STOPPED_FOR_SPACE)
+        );
+        assert_eq!(meeting.end_reason, Some(RecordingEndReason::Failed));
+        assert!(harness.store.asset(meeting_id).unwrap().is_some());
+    }
+
+    /// The warning follows the room left while recording.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_disk_warning_appears_once_the_room_runs_low_while_recording() {
+        let harness = harness(&[]);
+        start(&harness.recorder).await;
+        assert_eq!(harness.recorder.status().warning, None);
+        harness.free.store(
+            DiskWatch::STOP_BELOW_BYTES + 60 * (48_000 * 4 + 16_000 * 2),
+            Ordering::SeqCst,
+        );
+        eventually("the warning shows", || {
+            harness
+                .recorder
+                .status()
+                .warning
+                .is_some_and(|warning| warning.contains("about 1 minute of recording left"))
+        })
+        .await;
+        stop(&harness.recorder).await;
+    }
+
+    /// A free space that cannot be read never stops a recording.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_unreadable_free_space_lets_the_recording_run() {
+        let harness = harness(&[]);
+        let reads = Arc::new(AtomicUsize::new(0));
+        harness.recorder.watch_disk_with(DiskWatch {
+            free_space: {
+                let reads = reads.clone();
+                Arc::new(move |_| {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Err(std::io::Error::other("statvfs failed"))
+                })
+            },
+            interval: std::time::Duration::from_millis(20),
+        });
+        start(&harness.recorder).await;
+        eventually("the space was read while recording", || {
+            reads.load(Ordering::SeqCst) > 2
+        })
+        .await;
+        assert_eq!(harness.recorder.status().state, RecordingState::Recording);
+        stop(&harness.recorder).await;
+        assert_eq!(harness.recorder.status().error, None);
+    }
+
+    #[test]
+    fn the_room_left_counts_from_the_floor() {
+        let rate = 448_000;
+        assert_eq!(Room::of(0, rate), Room::Full);
+        assert_eq!(Room::of(DiskWatch::STOP_BELOW_BYTES - 1, rate), Room::Full);
+        assert_eq!(
+            Room::of(DiskWatch::STOP_BELOW_BYTES + 30 * 60 * rate, rate),
+            Room::Enough
+        );
+        assert_eq!(
+            Room::of(DiskWatch::STOP_BELOW_BYTES + 29 * 60 * rate, rate),
+            Room::Low(
+                "The disk is almost full: about 29 minutes of recording left. \
+                 Steno stops and saves the recording before the disk fills."
+                    .to_owned()
+            )
+        );
+        assert!(
+            matches!(Room::of(DiskWatch::STOP_BELOW_BYTES, rate), Room::Low(warning) if warning.contains("about 1 minute "))
+        );
+    }
+
+    /// A call writes about 1.6 GB an hour, an in-person recording half of
+    /// it, the raw microphone 0.7 GB more.
+    #[test]
+    fn a_call_writes_about_one_point_six_gigabytes_an_hour() {
+        let call = CaptureConfiguration::new(steno_audio::CaptureMode::Call, "/audio");
+        assert_eq!(bytes_per_second(&call) * 3600, 1_612_800_000);
+        let mut in_person = CaptureConfiguration::new(steno_audio::CaptureMode::InPerson, "/audio");
+        assert_eq!(bytes_per_second(&in_person), 224_000);
+        in_person.keep_raw_mic_lane = true;
+        assert_eq!(bytes_per_second(&in_person), 416_000);
     }
 }
