@@ -1629,12 +1629,26 @@ touch lines; each fix is ported to Swift before cutover.
   recording file no row of the index names (`adoptRecordingFiles` in
   `mobile/src/features/queue/queue-storage.ts`), so an unreadable index with no usable
   temp file, a stale temp file or a row that was never saved leaves no recording
-  behind; the unreadable index is kept as `index.corrupt.json`. The new row enters
-  crash recovery, which hashes and queues it. A file whose row is `delivered` keeps
-  that row. A file left by a `delivered` row the lost index named is uploaded again:
-  the Mac answers its announce from the receipt, which is `complete`, and the
+  behind; the unreadable index is kept as `index.corrupt.json`, and a failure to set
+  it aside no longer fails the load. Before that the load moves into the queue each
+  non-empty `recording-<UUID>.m4a` in expo-audio's `Documents/ExpoAudio/` that no
+  `recording` row names as its `sourceUri` (`adoptRecorderFiles`), as `<uuid>.m4a`:
+  a crash before the row was saved, or a failed row whose file stayed there. The new
+  rows enter crash recovery, which hashes and queues them. No load runs while the
+  recorder writes: recording starts only once the queue is loaded, and a load runs
+  only until one succeeds. A load that fails saves nothing (`queue-store.ts`): the
+  index stays as it is on disk, every update first loads again and rejects while that
+  fails, the app loads again when it comes to the foreground, and the recorder screen
+  says the list could not be read, with Try again. A file whose row is `delivered`
+  keeps that row. A file left by a `delivered` row the lost index named is uploaded
+  again: the Mac answers its announce from the receipt, which is `complete`, and the
   `complete` with the meeting id, so no second meeting is made while the receipt
-  exists; after a revoke deleted the receipt it becomes a second meeting.
+  exists; after a revoke deleted the receipt it becomes a second meeting. Three
+  announces in a row answered 409 (the receipt belongs to another device, or holds
+  other metadata) mark the row `failed` with a message and Retry, instead of
+  retrying forever (`ANNOUNCE_CONFLICTS_BEFORE_FAILED` in
+  `mobile/src/features/sync/upload-executor.ts`); the Mac taking such a receipt over
+  belongs to `fix/handover-lost-complete-answer`.
 
 ### Shell
 
@@ -2021,7 +2035,7 @@ PR off `main`.
 | The handover's admission, first announce and revoke refusals leave another device's files and receipt alone, and the admission leaves no file behind (`steno-handover`) | `fix/rust-handover-admit-announce` | #219 | merged |
 | No traffic light inset under a native title bar: the sidebars' spacer and onboarding's top follow the platform (`apps/macos/web/`) | `fix/web-platform-title-inset` | #217 | merged |
 | After the intake, `admit` discards every file of the recording unless another device holds its receipt, and so do a refused `complete` and a failed first save (Swift core, the counterpart of #219) | `fix/swift-handover-admit` | #212 | open |
-| The phone rebuilds its queue index from the recording files on disk, so a lost or stale index leaves no recording behind (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | open |
+| The phone rebuilds its queue index from the recording files on disk and the recorder's directory, saves nothing after a failed load, and fails a row after repeated announce 409s (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
