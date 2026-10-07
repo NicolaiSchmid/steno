@@ -1790,17 +1790,19 @@ touch lines; each fix is ported to Swift before cutover.
   on a filesystem without locks the app runs without one and logs a warning. A second
   app on the same database says "Steno is already running" and ends before it opens a
   window (`refuse_to_start` in the shell's `main.rs`, which also ends the process
-  after 60 s should the alert never close): the old identifier's beside the new one, a
-  Linux session without a bus (no single-instance guard there), or a single-instance
-  connect that failed. The CLI's commands that write (`process`, `deliver`, `dev db`)
-  refuse while another process holds the lock. The ones that only read (`export`, the
-  settings `dev models` and `dev llm` read) take the lock when it is free and open the
-  database as usual; beside the app they open it without migrating
-  (`Store::open_without_migrating`), so a newer CLI never changes the schema under an
-  older app, and refuse when the app is older than the CLI. Without the lock each
-  instance failed the other's live recording at launch, processed the same meetings
-  and ran its own retention sweep. The Swift app takes no lock and ships no further
-  release, so on the Mac the Rust app looks for it by bundle id
+  after 60 s should the alert never close): an app under the old identifier beside one
+  under the new, a Linux session without a bus (no single-instance guard there), or a
+  single-instance connect that failed. The CLI's commands that write (`process`,
+  `deliver`, `dev db`) refuse while another process holds the lock. The ones that only
+  read (`export`, the settings `dev models`, `dev llm` and `bakeoff --cleanup` read)
+  take the lock when it is free, open the database as usual, migrating included, and
+  let go of the lock before they read, so a long read never keeps the app out; beside
+  the app they open it without migrating (`Store::open_without_migrating`), so a newer
+  CLI never changes the schema under an older app, and refuse while the database lacks
+  a migration the CLI would apply. Without the lock each instance failed the other's
+  live recording at launch, processed the same meetings and ran its own retention
+  sweep. The Swift app and the Swift `steno` CLI take no lock, and the Swift app ships
+  no further release, so on the Mac the Rust app looks for it by bundle id
   (`NSRunningApplication`) and refuses to start while it runs ("An older Steno is
   running"). A Swift app started after the Rust app is still not kept out, and either
   one's launch can fail the other's live recording; `fix/recording-recovery` makes the
