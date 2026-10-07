@@ -115,8 +115,8 @@ struct FolderNoteRenderer {
 
   /// The info line's word for the source. The Swift app is the Mac, so a
   /// call is always a "Mac call"; the Rust renderer names the platform a
-  /// call was recorded on (`RenderOptions.platform` in
-  /// `crates/steno-adapters`).
+  /// call was recorded on (`RenderOptions::platform` in
+  /// `crates/steno-adapters/src/rendering/options.rs`).
   static func sourceLabel(_ source: MeetingSource) -> String {
     switch source {
     case .macCall: "Mac call"

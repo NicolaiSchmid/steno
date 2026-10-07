@@ -100,7 +100,8 @@ impl FolderNoteRenderer<'_> {
     }
 
     /// `2026-09-24 14:00–15:30 · 1 h 30 min · Mac call · [[slug - Transcript|Transcript]] · [[slug - Tasks|Tasks]]`,
-    /// with "Windows call" or "Linux call" for a call the options place there.
+    /// with "Windows call" or "Linux call" when [`RenderOptions::platform`] is
+    /// Windows or Linux.
     pub fn info_line(&self) -> String {
         let meeting = &self.export.meeting;
         let start = meeting.started_at;

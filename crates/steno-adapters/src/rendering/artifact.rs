@@ -60,8 +60,10 @@ pub struct PersonPage {
 pub struct ArtifactRenderer;
 
 impl ArtifactRenderer {
-    /// Bumped whenever any renderer's bytes change; recorded in every receipt
-    /// and pinned by `Tests/Fixtures/snapshots/obsidian/VERSION`.
+    /// Bumped whenever the Mac's bytes change (the goldens Swift shares);
+    /// recorded in every receipt and pinned by
+    /// `Tests/Fixtures/snapshots/obsidian/VERSION`. A platform's own word in
+    /// the info line ([`RenderOptions::platform`]) is not a version.
     pub const VERSION: i64 = 2;
 
     #[must_use]

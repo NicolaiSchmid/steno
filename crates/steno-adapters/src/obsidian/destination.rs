@@ -58,8 +58,8 @@ pub struct ObsidianFolderDestination {
     /// machine's zone in the app; tests pin it.
     time_zone: Tz,
     /// The platform the folder note names a call by
-    /// ([`RenderOptions::platform`]): the one this binary runs on, which
-    /// recorded every call in its store; tests pin it.
+    /// ([`RenderOptions::platform`]): the one the app runs on, which
+    /// recorded every call it stores; tests pin it.
     platform: Platform,
     sink: LocalFolderSink,
 }

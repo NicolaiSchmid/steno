@@ -18,7 +18,7 @@ case-insensitive by default.
 | `snapshots/summary/` | `SummaryMarkdown.render` output for the sample export |
 | `snapshots/e2e/` | The files `StenoEndToEndTests` finds in its temp vault; each workstream that replaces a fake updates it in the same PR |
 | `snapshots/obsidian/` | One golden per adapter renderer output and variant; `VERSION` pins `ArtifactRenderer.version` to a SHA-256 over the goldens, so a golden change without a version bump fails `RendererVersionTests` |
-| `snapshots/platforms/` | The Rust folder note's goldens for a call recorded on Windows (`windows/`) and Linux (`linux/`): `obsidian/`'s goldens of the same name with the info line's "Mac call" named after that platform. Read by the Rust tests only; outside `obsidian/`, so `VERSION` does not cover them |
+| `snapshots/platforms/` | The Rust folder note's goldens for a call recorded on Windows (`windows/`) and Linux (`linux/`): copies of `obsidian/`'s goldens of the same name with "Windows call" or "Linux call" where the info line says "Mac call". Read by the Rust tests only. They sit outside `obsidian/`, so `VERSION` does not hash them. A change to `obsidian/folder-note-*.md` is copied here by hand; the Rust renderer tests fail until it is |
 | `snapshots/macos/` | The macOS app's four detail tabs (Summary, Transcript, Tasks, Scratchpad) as text lines for the sample meeting, from `TabText` in `apps/macos`; checked by `TabTextSnapshotTests` in the app's hostless test bundle |
 | `snapshots/` (other) | Golden outputs of later workstreams' renderers |
 

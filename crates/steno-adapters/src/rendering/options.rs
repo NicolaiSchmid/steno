@@ -28,17 +28,18 @@ pub struct RenderOptions {
     pub task_tag: Option<String>,
     /// Time zone of dates in frontmatter, the info line and person lines.
     pub time_zone: Tz,
-    /// The platform the meeting's calls were recorded on, which the folder
-    /// note's info line names ("Mac call", "Windows call", "Linux call").
-    /// The meeting row does not store it; every recording is made on the
-    /// machine that runs the app, so the app passes [`Platform::CURRENT`].
-    /// Swift is the Mac.
+    /// The platform a call was recorded on, which the folder note's info
+    /// line names ("Mac call", "Windows call", "Linux call"). The meeting row
+    /// does not store it; the app records every call itself, so
+    /// [`ObsidianFolderDestination`](crate::ObsidianFolderDestination) passes
+    /// [`Platform::CURRENT`]. Swift: none; the Swift app is the Mac.
     pub platform: Platform,
 }
 
 impl RenderOptions {
-    /// Plain names, no people, no tag, UTC, the Mac: the same bytes on every
-    /// machine, the Swift renderer's.
+    /// Plain names, no people, no tag, UTC, the Mac, so the bytes are the
+    /// same on every machine and equal the Swift renderer's. A destination
+    /// sets `platform` from [`Platform::CURRENT`] itself.
     pub const PLAIN: RenderOptions = RenderOptions {
         link_style: LinkStyle::None,
         person_pages: false,
