@@ -65,7 +65,9 @@ impl ObsidianSettingsViewModel {
     }
 
     /// The typed settings as entered; `None` when disabled. Fields this
-    /// build does not know come from the stored value.
+    /// build does not know come from the stored value, so a draft nobody
+    /// edited equals it and [`commit`](Self::commit) saves nothing; the
+    /// save itself takes them from the value stored then.
     #[must_use]
     pub fn draft(&self) -> Option<ObsidianSettings> {
         if !self.enabled {
@@ -125,10 +127,14 @@ impl ObsidianSettingsViewModel {
         }
         let result = update_settings(store, |settings| {
             // The unknown fields as stored now, not as loaded: another
-            // writer may have added some since.
+            // writer may have added some since. They may belong to the
+            // vault, so another vault starts without them.
             let mut next = draft;
-            if let (Some(next), Some(current)) = (&mut next, &settings.obsidian) {
-                next.extra.clone_from(&current.extra);
+            if let Some(next) = &mut next {
+                next.extra = match &settings.obsidian {
+                    Some(current) if current.vault_path == next.vault_path => current.extra.clone(),
+                    _ => serde_json::Map::new(),
+                };
             }
             settings.obsidian = next;
         });
