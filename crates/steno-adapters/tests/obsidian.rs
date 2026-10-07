@@ -1332,9 +1332,9 @@ fn is_case_insensitive(directory: &Path) -> bool {
     insensitive
 }
 
-/// A case-insensitive folder played on any Unix: the old spelling is a
-/// symlink to the page the new one names, so both are one file as `anna`
-/// and `Anna` are on APFS.
+/// A case-insensitive folder played on a case-sensitive Unix one: the old
+/// spelling is a symlink to the page the new one names, so both are one
+/// file as `anna` and `Anna` are on APFS.
 #[cfg(unix)]
 #[test]
 fn a_case_only_rename_keeps_the_meeting_on_a_page_both_spellings_name() {
@@ -1417,6 +1417,9 @@ fn a_case_only_rename_on_a_case_sensitive_vault_moves_the_line_to_the_new_page()
 #[test]
 fn a_person_named_after_a_windows_device_gets_a_page_windows_can_create() {
     let vault = Vault::new();
+    if is_case_insensitive(&vault.root) {
+        return; // the next test runs the real thing
+    }
     let destination = vault.destination_with(false, Some("People"));
     let receipt = deliver(&destination, &with_anna_named("Con"), None);
 
