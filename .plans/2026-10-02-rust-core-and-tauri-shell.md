@@ -63,9 +63,12 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    - the model downloads, which send nothing but the request: `steno-speech`'s
      `ModelStore` (`crates/steno-speech/src/model_store.rs`) fetches the fp32 Parakeet
      export from Hugging Face at a pinned commit and Silero VAD from a GitHub release
-     asset, and `steno-diarize`'s two models (`crates/steno-diarize/src/models.rs`)
-     from Hugging Face at a pinned commit and a GitHub release asset, or all of them
-     from the mirror the speech settings name;
+     asset, `steno-diarize`'s two models (`crates/steno-diarize/src/models.rs`)
+     from Hugging Face at a pinned commit and a GitHub release asset, and on the Mac the
+     `CoreML` Parakeet from the repository FluidAudio reads
+     (`FluidInference/parakeet-tdt-0.6b-v3-coreml` on Hugging Face) at a pinned commit,
+     or all of them from the mirror the speech settings name; in the app only Settings
+     and onboarding start a download, never a pipeline run;
    - the Tauri updater, which fetches `latest.json` and the signed bundle from the
      repository's GitHub releases and sends nothing (the `desktop-stable` endpoint in
      `apps/desktop/src-tauri/tauri.conf.json`, the `desktop-beta` one in
@@ -691,14 +694,19 @@ still has to draw the window side. `[ ]` is not ported yet.
   it holds a whole store root. Nothing writes the file and the bridge contract has no
   field for any of them, so the Settings window shows none:
   `.plans/2026-10-07-speech-settings-ui.md` proposes their place and wording.
-- [ ] Where the speech sidecar runs Parakeet v3, processing a meeting before its models
-  are downloaded starts a silent 2.6 GB download inside the pipeline, which the Settings
-  row does not show. The same holds for a stored engine other than Parakeet v3:
-  Whisper, Ultra and DE run Parakeet v3 in the sidecar, but their Settings row is their
-  own and never installs, so only processing downloads the export. Either show
-  pipeline-side downloads in the row of the engine that runs (and map those engines'
-  rows to Parakeet v3's models), or fail processing with "Download the speech model in
-  Settings" until the engine's models are installed.
+- [x] No pipeline run downloads a model (S1 of `.plans/2026-10-07-stable-promotion.md`).
+  The app's speech engines and diarizer sit behind gates
+  (`crates/steno-services/src/model_gate.rs`) that refuse a call while their models are
+  missing, and the speech sidecar's own install is off in them
+  (`SidecarConfig::install_models`). The refusal is `PipelineFailure::models_missing`
+  (`FailureKind::ModelsMissing`): the meeting stays `queued` without a reason, the
+  `ModelsMissing` event gives its progress entry the stage `modelsMissing` and the
+  title "Download the speech model in Settings", and a download from Settings resumes
+  it (`ResumeAfterInstall` calls `resume_unfinished`). A stored Whisper, Ultra or DE id
+  becomes `parakeet-v3` at launch (`Store::retire_speech_engine`), with a one-time
+  notice in the setup banner's place, and the Transcription section offers Parakeet v3
+  alone. The CLI's engines still download on first use. Rust only: Swift downloaded
+  inside the run.
 - [x] One model store: the diarizer's two models are the `steno_speech::ModelAsset`
   `diarization` (`crates/steno-diarize/src/models.rs`), installed by
   `steno_speech::ModelStore` into `<models directory>/onnx/diarization/`, the folder the
@@ -1237,13 +1245,12 @@ still has to draw the window side. `[ ]` is not ported yet.
 - Settings > General acknowledges the Parakeet the platform runs: "Parakeet TDT 0.6B v3
   (int8)" from the `CoreML` repository on the Mac, as Swift; "Parakeet TDT 0.6B v3
   (fp32)" from `nvidia/parakeet-tdt-0.6b-v3` elsewhere and with the Mac's sidecar
-  fallback (`SpeechModels::display_name` and `source_repo`). Open: the diarizer's
-  rows still describe the Swift app's `CoreML` diarizer (its acknowledgement and its
-  size in Settings > Transcription), while every platform runs the ONNX pyannote 3.0
-  and WeSpeaker ResNet34-LM models; the same hooks (`display_name`, `source_repo`,
-  `expected_bytes`) fix them, and the acknowledgement's licence and attribution
-  (`steno_host::speech::ModelAsset::licence`) take `steno_diarize::models`'
-  `LICENCE` and `ATTRIBUTION`.
+  fallback (`SpeechModels::display_name` and `source_repo`). The diarizer is the ONNX
+  pyannote segmentation 3.0 and WeSpeaker ResNet34-LM models on every platform: its row
+  is named after them with their 33 MB, and Settings > General acknowledges each with
+  its licence and attribution (MIT; CC BY 4.0 for the VoxCeleb-trained WeSpeaker
+  model) through `SpeechModels::notices`. Only the assets the Rust app offers are
+  acknowledged (`ModelAsset::OFFERED`).
 - The phone intake syncs the copy, its meeting folder and the parent of every folder
   it created to the disk before it marks the receipt complete, in both apps: Rust
   through `steno_pipeline::files::copy_durably` and `create_dir_all_durably`, Swift
@@ -2935,11 +2942,10 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `.plans/2026-10-07-stable-promotion.md` (D3), which replaces the rule that all must
   be ticked before the cutover opens. The lines: the menu bar's queue and recent
   meetings, the detection prompt, the auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
-  bar's Record and Find Meetings items, and the "Where the speech sidecar runs
-  Parakeet v3" line under "Speech" (its two items below). Several name WP5 or WP8,
-  which merged without them. The other unticked "Speech" line, `SpeechSettings`,
-  covers Rust-only settings with no Swift behaviour to match: it does not gate the
-  cutover and has its own **Unowned.** item. Where:
+  bar's Record and Find Meetings items. Several name WP5 or WP8, which merged without
+  them. The other unticked "Speech" line, `SpeechSettings`, covers Rust-only settings
+  with no Swift behaviour to match: it does not gate the cutover and has its own
+  **Unowned.** item. Where:
   the unticked lines under "Beyond the bridge" and "Speech" and the open items under
   "Pipeline and services (WP6b)" and "Shell" in the parity list. Found: #170, #172,
   #173.
@@ -2948,31 +2954,10 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   play). Where: the fake in `build` (`crates/steno-services/src/app.rs`), the tray
   (`apps/desktop/src-tauri/src/tray.rs`); the WP9 paragraph and seam (4) under
   "Pipeline and services (WP6b)". Found: #173, #185.
-- **WP9b.** The Rust app cannot download the Mac's CoreML Parakeet model: Settings
-  answers "This build cannot download the CoreML Parakeet v3 model", so only a Mac
-  where the Swift app installed it can transcribe, and a fresh install of the cutover
-  build (cutover test 5) has no speech model. Where: `ModelStoreSpeechModels::download`
-  in `crates/steno-services/src/speech.rs`. Found: #173.
-- **WP9b.** Whisper, Ultra and DE cannot be installed on the Rust side: a stored
-  `whisperkit-large-v3-turbo`, `parakeet-ultra` or `parakeet-de` runs Parakeet v3 in
-  the speech sidecar on every platform, the Mac included, while its Settings row
-  answers "has no Rust engine yet", so only processing installs the export, unseen.
-  Swift users who chose one of them carry it across the cutover. Where:
-  `speech_asset` and `download` in `crates/steno-services/src/speech.rs`; the "Where
-  the speech sidecar runs Parakeet v3" item under "Speech" in the parity list. Found:
-  #189.
-- **WP9b.** Processing a meeting before the speech models are installed starts a
-  silent 2.6 GB download inside the pipeline wherever the sidecar speech engine
-  (`SidecarSpeechEngine`) runs, on the Mac for Whisper, Ultra and DE: it installs its
-  models on first use, and the Settings row shows no progress. It blocks the first
-  Linux release too. Where: the "Where the speech sidecar runs Parakeet v3" item under
-  "Speech" in the parity list. Found: #189.
-- **WP9b.** Settings still describes the diarizer as the Swift app's CoreML model (its
-  acknowledgement and its size), while every platform, the Mac included, runs the ONNX
-  pyannote segmentation and WeSpeaker embedding models, whose licence notices the app
-  does not show yet. It blocks the first Linux release too. Where: `display_name`,
-  `source_repo` and `expected_bytes` in `crates/steno-services/src/speech.rs`; the
-  Settings > General item under "Pipeline and services (WP6b)". Found: #164, #183.
+- **WP9b.** The diarizer's manifest still gives WeSpeaker ResNet34-LM the licence
+  Apache-2.0, where its VoxCeleb training data makes it CC BY 4.0; Settings already
+  shows CC BY 4.0 with the attribution. Where: `WESPEAKER_RESNET34_LM` in
+  `crates/steno-diarize/src/models.rs`, which #229 rewrites. Found: #164, #183.
 - **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
   Swift defects (each ported to Swift if it ships another release, otherwise closed by
   the cutover), the fixtures the Swift side owes, and the audio choices to settle at
@@ -3165,6 +3150,8 @@ PR off `main`.
 | The flake builds the Linux app from source (`packages.x86_64-linux.steno`: nixpkgs' ONNX Runtime, the tray's `dlopen` patched, the sidecar beside the wrapped binary, `STENO_DISTRIBUTION=nix`) and adds the NixOS module `programs.steno` (`steno.service` with the graphical session, which a rebuild never restarts or stops, PipeWire, GNOME Keyring where no other Secret Service or SSH agent runs, opt-in logind delay; the firewall is X4's), X7 of `.plans/2026-10-07-stable-promotion.md`; FLEURS 4.9 % with either ONNX Runtime build (`flake.nix`, `nix/`) | `feat/nix-linux-package` | #259 | open |
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
+||||||| parent of ff1dfb5e9 (docs(plans): the CoreML Parakeet download joins invariant 3, and the S1 items close)
+| The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
