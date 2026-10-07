@@ -916,7 +916,7 @@ impl AudioDevices {
                 let is_default_output = !is_input && is_default(default_output.as_deref());
                 devices.push(AudioDeviceInfo {
                     id: u32::try_from(devices.len()).unwrap_or(u32::MAX),
-                    name: endpoint.friendly_name(),
+                    name: endpoint.friendly_name().unwrap_or_else(|| uid.clone()),
                     input_channels: if is_input { channels } else { 0 },
                     output_channels: if is_input { 0 } else { channels },
                     nominal_sample_rate: f64::from(rate),
