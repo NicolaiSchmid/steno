@@ -16,7 +16,7 @@ use steno_audio::SymphoniaAudioCodec;
 use steno_core::testing::{FakeDiarizer, FakeSpeechEngine, sample_data};
 use steno_core::{
     AudioRetention, DeliveryStatus, Destination, LlmUsage, Meeting, MeetingEvent, MeetingExport,
-    MeetingState, ObsidianSettings, PipelineStage, SpeakerAssignmentKind, Store,
+    MeetingState, ObsidianSettings, PipelineStage, Platform, SpeakerAssignmentKind, Store,
     paths::{file_url, file_url_path},
 };
 use steno_llm::testing::{Scripts, StubChatServer};
@@ -328,6 +328,15 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
     );
     let note = std::fs::read_to_string(vault.join(format!("{folder}/{slug}.md"))).unwrap();
     assert!(note.contains("Produktstrategie"), "{note}");
+    let call = match Platform::CURRENT {
+        Platform::Macos => " · Mac call · ",
+        Platform::Windows => " · Windows call · ",
+        Platform::Linux => " · Linux call · ",
+    };
+    assert!(
+        note.contains(call),
+        "the info line names the platform the app runs on: {note}"
+    );
 
     // Re-export through the one entry point overwrites Steno's files and
     // leaves the user's alone.
