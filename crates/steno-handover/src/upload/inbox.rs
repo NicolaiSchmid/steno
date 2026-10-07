@@ -65,7 +65,10 @@ impl Inbox {
         std::fs::create_dir_all(&self.directory)
     }
 
-    /// Starts a recording: empty partial file and the metadata beside it.
+    /// Starts a recording: an empty partial file, unless one is there (it
+    /// is kept, never truncated), and the metadata sidecar beside it,
+    /// written over any sidecar there. The engine calls it only under its
+    /// files lock (`Engine::open_files`, `Engine::reopen_missing_files`).
     pub fn begin(&self, metadata: &RecordingMetadata) -> std::io::Result<()> {
         self.prepare()?;
         receiving_file::create(&self.partial(metadata.recording_id))?;
