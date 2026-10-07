@@ -436,14 +436,10 @@ pub struct CafHeader {
     pub sample_rate: f64,
     /// Interleaved channels, at least one.
     pub channel_count: usize,
-    /// The byte offset of the first sample.
-    pub data_offset: u64,
     /// Whole frames on disk: up to the `data` chunk's size, or to the end
     /// of the file while that size is -1. A frame cut short by a kill or a
     /// full disk does not count.
     pub frame_count: u64,
-    /// The `data` chunk's size is still -1: the writer never finished.
-    pub unfinished: bool,
 }
 
 impl CafHeader {
@@ -472,7 +468,7 @@ impl CafHeader {
         let edit = CafStreamWriter::EDIT_COUNT_SIZE as u64;
         let mut offset = CafStreamWriter::FILE_HEADER_SIZE as u64;
         let mut format: Option<(f64, u32, usize, usize, [u8; 4])> = None;
-        let mut samples: Option<(u64, u64, bool)> = None;
+        let mut samples: Option<u64> = None;
         while samples.is_none() && offset + chunk_header <= length {
             let mut header = [0u8; CafStreamWriter::CHUNK_HEADER_SIZE];
             read_at(reader, offset, &mut header)?;
@@ -504,7 +500,7 @@ impl CafHeader {
                         Ok(size) => size.saturating_sub(edit).min(available),
                         Err(_) => available,
                     };
-                    samples = Some((body + edit, count, size < 0));
+                    samples = Some(count);
                 }
                 _ => {}
             }
@@ -516,7 +512,7 @@ impl CafHeader {
         let Some((sample_rate, flags, channel_count, bits, format_id)) = format else {
             return Err(CafReadError::Malformed("no desc chunk".into()));
         };
-        let Some((data_offset, count, unfinished)) = samples else {
+        let Some(count) = samples else {
             return Err(CafReadError::Malformed("no data chunk".into()));
         };
         check_format(format_id, flags, bits)?;
@@ -527,9 +523,7 @@ impl CafHeader {
         Ok(Self {
             sample_rate,
             channel_count,
-            data_offset,
             frame_count: count / bytes_per_frame,
-            unfinished,
         })
     }
 

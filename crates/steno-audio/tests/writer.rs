@@ -336,9 +336,7 @@ fn the_caf_header_counts_the_frames_of_an_unfinished_and_a_finished_master() {
         CafHeader {
             sample_rate: 48_000.0,
             channel_count: 2,
-            data_offset: CafStreamWriter::HEADER_SIZE as u64,
             frame_count: 960,
-            unfinished: true,
         }
     );
     assert_eq!(unfinished.duration(), 0.02);
@@ -351,7 +349,6 @@ fn the_caf_header_counts_the_frames_of_an_unfinished_and_a_finished_master() {
     std::io::Write::write_all(&mut file, &[0u8; 64]).unwrap();
     drop(file);
     let finished = CafHeader::read(&path).unwrap();
-    assert!(!finished.unfinished);
     assert_eq!(finished.frame_count, 960, "the patched size, not the file");
 }
 
