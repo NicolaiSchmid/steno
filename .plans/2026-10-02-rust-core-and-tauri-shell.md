@@ -1390,13 +1390,13 @@ touch lines; each fix is ported to Swift before cutover.
   In both, a first announce whose store read found nothing answers as a re-announce
   when memory holds the receipt by then, so the chunks folded into it and a
   `complete` stay (Swift's `RecordingHandler.receipt`). Rust opens a new recording's
-  files only once its announce made the receipt (`Engine::open_files`), so the sidecar
-  is always the metadata of the receipt memory holds and the losing announce leaves it
-  alone; a failed opening still saves the receipt at its place in line, and the
-  phone's retried announce opens the files as a re-announce. Swift checks memory, runs
-  `begin` and makes the receipt in one step on the actor. The intake's own receipt
-  saves (`RecordingIntake::admit`, `RecordingIntake.admit`) run outside the line in
-  both apps.
+  files only once its announce made the receipt (`Engine::open_files`), so of two
+  first announces that race, the sidecar is the metadata of the one whose receipt
+  memory holds, and the late one leaves it alone; a failed opening still saves the
+  receipt at its place in line, and the phone's retried announce opens the files as a
+  re-announce. Swift checks memory, runs `begin` and makes the receipt in one step on
+  the actor. The intake's own receipt saves (`RecordingIntake::admit`,
+  `RecordingIntake.admit`) run outside the line in both apps.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
@@ -1460,26 +1460,32 @@ touch lines; each fix is ported to Swift before cutover.
   paired in the store but its recording routes answer 401 until it pairs again, a
   retried revoke finishes or the app restarts: a half-revoked phone that cannot hand
   over is safer than one that can.
-- Files by recording id: every discard of the Rust engine but the start's sweep
-  removes a recording's inbox files, and a refusal forgets its receipt, on behalf of
-  one device only while memory holds no receipt of another device for that recording
-  id (`Engine::discard_own`, `Engine::forget_own`): the admission, a `complete`
-  refused for a revoke (after the read and after the hash), its 200 for a recording
-  admitted before, the revoke, the 422 and a re-announce that finds the receipt
-  `complete`. So when a phone is revoked while its recording is verified or in the
-  intake and another phone announces the same recording id, that phone keeps its
-  receipt, partial and sidecar, and its upload goes on. On success the admission
-  removes every file of the recording, also the partial and sidecar a re-announce
-  opened during the intake, else an empty partial would wait for the next start's
-  sweep. Only a request whose device's receipt memory holds creates a recording's
-  files, and the creation, like the check and the discard, holds the engine's files
-  lock (taken before the state lock, held across those file calls only), so no
-  announce opens files between the check and the discard; in Swift the actor makes
-  them one step. Swift's `RecordingHandler.admit` removes only the metadata sidecar,
-  whatever memory holds, until it takes the same two rules, and its `refusal` after
-  the verify and its `forget` go by recording id alone: a phone that announced the
-  same recording id during a revoked phone's verify loses its receipt from memory and
-  its files, is answered 404 "announce again" and sends again; nothing is lost.
+- Files by recording id: Rust discards a recording's inbox files, and forgets its
+  receipt, on behalf of one device under two rules. Nothing goes while memory holds
+  another device's receipt of that recording id (`Engine::discard_own`,
+  `Engine::discard_and_forget_own`, `Engine::forget_own`). And files are created only
+  for a device that `revoked` does not hold, by the announce whose change made the
+  receipt or by a re-announce of its owner, so memory holds that receipt; a first
+  announce or re-announce whose device was revoked during its receipt read opens none
+  and answers 401 (`Engine::open_files`, `Engine::reopen_missing_files`). The check
+  and the discard, like the creation, hold the engine's files lock (taken before the
+  state lock, held across those file calls only), so no announce opens files between
+  the two. Every discard but the start's sweep follows the rules: the first announce's
+  failed save (`announce` in `crates/steno-handover/src/engine/recording.rs`), the
+  admission, a `complete` refused for a revoke (after the read, which also forgets the
+  receipt, and after the verify), the revoke, the 422 and a re-announce that finds the
+  receipt `complete`; so does the forget of a recording admitted before, whose
+  `complete` answers 200 after a revoke. So when a phone is revoked while its
+  recording is verified or in the intake and another phone announces the same
+  recording id, that phone keeps its receipt, partial and sidecar, and its upload goes
+  on. On success the admission removes every file of the recording, also the partial
+  and sidecar a re-announce opened during the intake, else an empty partial would wait
+  for the next start's sweep. Swift's `RecordingHandler.admit` removes only the
+  metadata sidecar, whatever memory holds, until it takes the same two rules, and its
+  `refusal` after the verify and its `forget` go by recording id alone: a phone that
+  announced the same recording id during a revoked phone's verify loses its receipt
+  from memory and its files, is answered 404 "announce again" and sends again; nothing
+  is lost.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
@@ -1769,6 +1775,19 @@ request that fixes an item deletes it.
   platform, against invariant 4, so a crash in ONNX Runtime there ends the app; moving
   it needs its own request in the sidecar protocol. Where: `crates/steno-diarize`; the
   "Open, against invariant 4" item under "Pipeline and services (WP6b)". Found: #183.
+- **Unowned.** Swift's handover discards and forgets by recording id alone where Rust
+  follows the two rules of "Files by recording id" in the Handover parity notes:
+  `admit` removes only the metadata sidecar after the intake, whatever memory holds,
+  so another phone that announced the same recording id during a revoked phone's
+  intake loses its sidecar, and a re-announce during the intake leaves an empty
+  partial until the next start's sweep; the `refusal` after the verify and `forget`
+  take another phone's receipt or files; and the discard after a failed first save in
+  `announce` runs after a suspension, so it can take the files of another phone that
+  announced the same recording id meanwhile. Nothing is lost: that phone is answered
+  404 "announce again" and sends again. `fix/swift-handover-admit` (#212) fixes
+  `admit` and the `refusal`. Swift only. Where: `admit`, `refusal`, `complete` and
+  `announce` in `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #208,
+  #209, #219.
 - **Unowned.** `IdempotencyTests.receiptsStreamReachesComplete` hangs past its time
   limit when `complete` fails, because its collector task is never cancelled; the
   failure shows as a timeout instead of the assertion. Swift only. Where:
