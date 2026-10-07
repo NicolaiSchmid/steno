@@ -312,19 +312,22 @@ fn a_silent_system_lane_is_reported_in_statistics_and_levels() {
     assert!(master.channels[0].iter().any(|s| *s != 0.0));
 }
 
-/// The default relay rides out a writer stalled for 15 s: every frame of
+/// The default relay rides out a writer stalled for 20 s: every frame of
 /// three channels (two lanes and the raw microphone) fits with nothing
 /// draining it, so a slow sync or a sleeping disk drops nothing.
 #[test]
-fn the_default_relay_holds_fifteen_seconds_with_the_writer_stalled() {
-    let frames_per_second = CaptureSession::gap_frames(Duration::from_secs(1));
+fn the_default_relay_holds_twenty_seconds_with_the_writer_stalled() {
+    assert_eq!(
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        20 * CaptureSession::gap_frames(Duration::from_secs(1))
+    );
     let relay = FrameRelay::new(
         3,
         FRAME_SIZE,
         CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
     );
     let zeros = vec![0.0f32; FRAME_SIZE];
-    for frame in 0..15 * frames_per_second {
+    for frame in 0..CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES {
         assert!(relay.begin_frame(), "frame {frame} refused");
         for channel in 0..3 {
             relay.write(channel, &zeros);
