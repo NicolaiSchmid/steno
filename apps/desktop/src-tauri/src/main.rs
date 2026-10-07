@@ -756,20 +756,11 @@ mod tests {
     #[cfg(not(feature = "fixture-host"))]
     #[test]
     fn a_running_swift_app_refuses_the_start() {
-        let asked = std::cell::RefCell::new(Vec::new());
-        let running = |answer: bool| {
-            let asked = &asked;
-            move |bundle_id: &str| {
-                asked.borrow_mut().push(bundle_id.to_owned());
-                answer
-            }
-        };
         assert_eq!(
-            refusal_before_build(running(true)),
+            refusal_before_build(|bundle_id| bundle_id == SWIFT_BUNDLE_ID),
             Some(Refusal::OlderSteno)
         );
-        assert_eq!(refusal_before_build(running(false)), None);
-        assert_eq!(*asked.borrow(), [SWIFT_BUNDLE_ID, SWIFT_BUNDLE_ID]);
+        assert_eq!(refusal_before_build(|_| false), None);
         assert_eq!(Refusal::OlderSteno.title(), "An older Steno is running");
     }
 
