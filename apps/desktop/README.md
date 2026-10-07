@@ -20,7 +20,7 @@ Everything the Swift app does outside its three windows, per OS:
 |---|---|---|---|
 | Tray (`tray.rs`) | Menu bar extra with a template icon | Status notifier item (libayatana-appindicator) | Notification area icon |
 | Floating panels (`panels.rs`) | Non-activating `NSPanel`s on every space (`tauri-nspanel`) | Always-on-top undecorated windows, under XWayland on a Wayland session (see below) | Always-on-top undecorated windows |
-| Launch at login (`autostart.rs`, `packaged.rs`) | Launch Agent | `~/.config/autostart` entry naming a stable path (see Packaged installs) | Run registry key |
+| Launch at login (`autostart.rs`, `packaged.rs`) | Launch Agent | `~/.config/autostart` entry naming a stable path (see Packaged installs), and a systemd drop-in for its stop timeout (see below) | Run registry key |
 | Updates (`updater.rs`) | signed manifest per lane | same; off on a packaged install (see Packaged installs) | same |
 | Permissions (`permissions.rs`) | microphone TCC status and prompt; system audio and calendar deferred to the host's probes | unknown (nothing to query before capture; the portal asks when the stream opens) | unknown (the privacy switch decides at capture time) |
 | Deep links (`deep_links.rs`) | `steno:` through `CFBundleURLTypes`, written into the bundle by the deep-link plugin from `plugins.deep-link` | the `.deb`'s desktop entry from `linux/` (`Exec=… %u`, the `x-scheme-handler/steno` MIME type); an AppImage and a debug build register at start | registry (debug builds register at start) |
@@ -107,6 +107,15 @@ exits reach the shutdown these ways:
   (`InhibitDelayMaxSec`), then goes ahead; the SIGTERM that follows waits
   for the save in progress, and so does the display closing. Sleep and
   the screen lock do not stop a recording.
+- An autostarted Steno on a desktop that runs XDG autostart through
+  systemd (KDE Plasma, and uwsm sessions such as Omarchy's Hyprland;
+  GNOME starts the entries itself) is the unit
+  `app-steno\x2ddesktop@autostart.service`, which
+  `systemd-xdg-autostart-generator` makes from the entry with
+  `TimeoutStopSec=5s`. At a logout, or when the compositor ends, systemd
+  sends SIGTERM and kills the app 5 s later, before a save that needs its
+  ten seconds, plus the two the process may take to end, is done. A
+  drop-in raises the timeout to 20 s (see Launch at login under systemd).
 - The Dock's Quit, a logout and a shutdown on macOS reach the shell only as
   the run loop's last event, `RunEvent::Exit`, which AppKit waits for, so
   it waits for the shutdown first (`shut_down_before_exit`).
@@ -142,7 +151,8 @@ under Xvfb and headless sway with a recording in progress, and a real
 xfce4-session 4.20.4 logout ran on X11 and on Wayland under labwc, and
 its Quit Program and Save Session under a recording on X11; no
 real GNOME or KDE Plasma session has run yet (before the first Linux
-release).
+release). The autostart unit's stop ran under a real systemd user
+manager, in a container (see Launch at login under systemd).
 
 On Linux an exit that went through ends the process two seconds later at
 the latest (`end_within` in `main.rs`): the single-instance plugin
@@ -280,6 +290,48 @@ host read in any case, the section as the contract spells it; a pairing
 link is logged and ignored. A link that reaches a window before its page
 has mounted (a cold launch) waits in `windows::Pages` and is published on
 the page's `page.ready`.
+
+### Launch at login under systemd
+
+`linux/autostart-stop-timeout.conf` is a drop-in for the autostart unit
+that sets `TimeoutStopSec=20s`: the shutdown's ten seconds and the two
+the process may take to end after it, with room to spare, and still
+short enough that a hung app does not hold a logout for long. It reaches
+the user manager two ways:
+
+- The `.deb` installs it as
+  `/usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf`
+  (`bundle.linux.deb.files` in `tauri.conf.json`; `check-bundle.sh`
+  checks it is there).
+- The app writes the same file, under the same name, into the user's
+  own unit directory, `$XDG_CONFIG_HOME/systemd/user/` (else
+  `~/.config/systemd/user/`), whenever Launch at login is on: at each
+  launch and when it is switched on. It removes the file when Launch at
+  login is off, and after either change asks the user manager to reload
+  its units over the session bus, so a running session takes the new
+  timeout at once (`stop_timeout` in `autostart.rs`). This covers the
+  AppImage, and installs that turned Launch at login on before the
+  drop-in existed. A directory it cannot write is logged and changes
+  nothing else.
+
+A package for another distribution installs the same file under its
+`lib/systemd/user/`: the AUR package and the Nix package the stable
+promotion plan adds (PR #216) must ship it.
+
+The app logs how long each shutdown took (`the shutdown ended`, with
+`elapsed`; on Linux in the journal of the unit), so a real machine's log
+shows how long a save takes. In a container limited to one CPU, a debug
+build stopped by `systemctl --user stop` saved a 20 s recording in
+0.25 s, and the meeting was `queued` with its duration; the same unit
+without the drop-in killed a stand-in that needs 8 s to save after 5 s.
+
+At a reboot the save runs inside logind's delay (above), before systemd
+stops anything. On Omarchy logind waits up to 15 s (`InhibitDelayMaxSec`),
+more than the save's ten; the user manager itself then gets only 5 s
+(`user@.service` `TimeoutStopSec=5s`), which a drop-in for Steno's unit
+cannot raise, so that path relies on the delay. Elsewhere logind waits 5 s
+by default and the user manager 120 s, so a save that outlasts logind's
+wait finishes under the drop-in's 20 s.
 
 ## Packaged installs
 
@@ -1060,7 +1112,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 |---|---|
 | `apps/desktop/src-tauri/Cargo.toml` | Crate `steno-desktop`, binary `steno-desktop`; features `fixture-host` (opt-in) and `custom-protocol` (embeds the bundle, see Build). Dependency versions come from the workspace table in `Cargo.toml` |
 | `apps/desktop/src-tauri/tauri.conf.json` | `frontendDist` is the web app's `dist/`; no `version`, so Tauri takes the crate's; `beforeDevCommand` and `beforeBuildCommand` run `pnpm dev` and `pnpm build` with `cwd` `../../macos/web`: the CLI runs them from `src-tauri`, the directory holding this file, which is also where `frontendDist` (`../../macos/web/dist`) resolves from; `csp` lets the page load only its own scripts, styles, fonts and images, and `connect-src` only the IPC origins (`ipc:`, `http://ipc.localhost`), so nothing the page does reaches the network; `plugins` carries the `steno` scheme and the updater's public key and stable endpoint; `bundle` the six installer targets (see Bundles); no windows are declared, `windows.rs` and `panels.rs` create them |
-| `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles) |
+| `apps/desktop/src-tauri/tauri.linux.conf.json`, `linux/steno-desktop.desktop`, `linux/autostart-stop-timeout.conf` | Merged on Linux: the `steno-desktop` product name for the package, and the desktop entry template (see Bundles); the autostart unit's stop timeout drop-in (see Launch at login under systemd) |
 | `apps/desktop/src-tauri/Info.plist`, `Entitlements.plist` | Merged into the macOS bundle: the TCC purpose strings and the Bonjour service, verbatim from `apps/macos/project.yml`; the audio-input and calendars entitlements |
 | `apps/desktop/src-tauri/build.rs`, `apps/desktop/src-tauri/placeholder/` | Points `frontendDist` at the placeholder page when the web `dist/` is missing, so a debug `cargo build` works on a bare checkout (a release build fails instead); then `tauri_build::build()` |
 | `apps/desktop/src-tauri/src/main.rs` | Wires the plugins (single instance first, autostart, deep link, dialog, opener, updater, `tauri-nspanel` on macOS), the managed state, the one menu handler, the tray and the windows; hides the main window on close and keeps the process while a tray stands, ends it otherwise; every exit through the shutdown (`exit_request`, `RunEvent::Exit`, SIGTERM, SIGINT, SIGHUP); a dragged panel's anchor, a destroyed window's page, and the Dock's reopen. `display.rs`, on Linux: the GDK backend (XWayland on a Wayland session). `session_end.rs`, on Linux: the GNOME and Xfce session client, the portal's session monitor and logout inhibitor, and logind's shutdown lock. `display_lost.rs`, on Linux: the log writer that saves before GDK ends the process for a lost display |
