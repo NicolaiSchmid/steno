@@ -760,12 +760,106 @@ async fn a_refresh_that_cannot_connect_names_the_cause() {
 }
 
 /// A rename that fails (here `auth.json` became a non-empty directory
-/// during the round trip) keeps the temporary file, which holds the only
-/// live tokens since the posted refresh token is spent, and the error names
-/// that file, never what it holds.
+/// during the round trip) still answers with the new tokens, which the
+/// store keeps in memory, and leaves the temporary file with them in it in
+/// case the app quits first. Once the file can be written again, the next
+/// call writes the kept tokens, removes the temporary and posts nothing:
+/// the posted refresh token is spent.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_failed_rename_keeps_the_temporary_file_and_names_it() {
+async fn a_failed_rename_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let original = std::fs::read(home.file()).unwrap();
+    let fresh = CodexHome::access_token(3_600, "plus");
+    let fresh_for_responder = fresh.clone();
+    let file = home.file();
+    home.server.respond(Arc::new(move |_| {
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        std::fs::write(file.join("occupied"), b"x").unwrap();
+        Some(scripts.token_refresh(&fresh_for_responder, Some("rt_2"), None))
+    }));
+    let store = home.store();
+    let credentials = store.current().await.unwrap();
+    assert_eq!(credentials.access_token, fresh);
+    assert_eq!(credentials.refresh_token, "rt_2");
+    let entries = file_names(home.directory.path());
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    let temporary = entries
+        .iter()
+        .find(|name| name.starts_with(".auth.json.steno-"))
+        .expect("the temporary file stays");
+    let kept: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.directory.path().join(temporary)).unwrap())
+            .unwrap();
+    assert_eq!(kept["tokens"]["refresh_token"], "rt_2");
+    assert_eq!(kept["tokens"]["access_token"], json!(fresh));
+
+    // The file is back as it was, with the spent token.
+    std::fs::remove_dir_all(home.file()).unwrap();
+    std::fs::write(home.file(), &original).unwrap();
+    let again = store.current().await.unwrap();
+    assert_eq!(again.refresh_token, "rt_2");
+    assert_eq!(
+        home.server.request_count(),
+        1,
+        "the spent token is not posted"
+    );
+    assert_eq!(home.document()["tokens"]["refresh_token"], "rt_2");
+    assert_eq!(home.document()["agent_identity"], json!({"keep": true}));
+    assert_eq!(file_names(home.directory.path()), ["auth.json"]);
+}
+
+/// A sign-in file that cannot be written at all (the folder is read-only)
+/// leaves no temporary behind; the new tokens are answered and kept in
+/// memory, and once the folder is writable the next call writes them and
+/// posts nothing.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_write_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let directory = home.directory.path().to_owned();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::File::create(directory.join("probe")).is_ok() {
+        // Root writes past the mode; nothing to test.
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+    let fresh = CodexHome::access_token(3_600, "plus");
+    home.server
+        .enqueue([scripts.token_refresh(&fresh, Some("rt_2"), None)]);
+    let store = home.store();
+    let credentials = store.current().await.unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(credentials.access_token, fresh);
+    assert_eq!(credentials.refresh_token, "rt_2");
+    assert_eq!(
+        home.document()["tokens"]["refresh_token"],
+        "rt_original",
+        "nothing was written"
+    );
+    assert_eq!(file_names(&directory), ["auth.json"]);
+
+    let again = store.current().await.unwrap();
+    assert_eq!(again.access_token, fresh);
+    assert_eq!(
+        home.server.request_count(),
+        1,
+        "the spent token is not posted"
+    );
+    assert_eq!(home.document()["tokens"]["refresh_token"], "rt_2");
+    assert_eq!(home.document()["tokens"]["access_token"], json!(fresh));
+}
+
+/// A file the user changed after a failed write-back (a new `codex
+/// login`) wins over the tokens kept in memory, and the temporary they
+/// left goes.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_login_after_a_failed_write_wins_over_the_kept_sign_in() {
     let home = CodexHome::new().await;
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     let fresh = CodexHome::access_token(3_600, "plus");
@@ -777,27 +871,13 @@ async fn a_failed_rename_keeps_the_temporary_file_and_names_it() {
         std::fs::write(file.join("occupied"), b"x").unwrap();
         Some(scripts.token_refresh(&fresh_for_responder, Some("rt_2"), None))
     }));
-    let error = home.store().current().await.unwrap_err();
-    assert!(
-        matches!(error, CodexCredentialError::RefreshFailed(_)),
-        "{error:?}"
-    );
-    let entries = file_names(home.directory.path());
-    assert_eq!(entries.len(), 2, "{entries:?}");
-    assert!(entries.contains(&"auth.json".to_owned()), "{entries:?}");
-    let temporary = entries
-        .iter()
-        .find(|name| name.starts_with(".auth.json.steno-"))
-        .expect("the temporary file stays");
-    let kept: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.directory.path().join(temporary)).unwrap())
-            .unwrap();
-    assert_eq!(kept["tokens"]["refresh_token"], "rt_2");
-    assert_eq!(kept["tokens"]["access_token"], json!(fresh));
-    let detail = error.detail().unwrap();
-    assert!(detail.contains(temporary.as_str()), "{detail}");
-    assert!(!detail.contains("rt_2"), "{detail}");
-    assert!(!detail.contains(&fresh), "{detail}");
+    let store = home.store();
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    std::fs::remove_dir_all(home.file()).unwrap();
+    home.write(AuthFile::default().refresh("rt_new_login"));
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_new_login");
+    assert_eq!(home.server.request_count(), 1);
+    assert_eq!(file_names(home.directory.path()), ["auth.json"]);
 }
 
 /// What the CLI wrote during the round trip survives the write-back.

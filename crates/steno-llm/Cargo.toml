@@ -28,6 +28,9 @@ thiserror.workspace = true
 # sockets come with the `testing` feature. Additive on top of the workspace
 # line.
 tokio = { workspace = true, features = ["sync", "time"] }
+# A sign-in file that cannot be written is logged (its path, never a
+# token) while the refreshed tokens stay in memory.
+tracing.workspace = true
 # Echoed speaker labels are found by grapheme cluster, as Swift's
 # `Character` walks them.
 unicode-segmentation.workspace = true
