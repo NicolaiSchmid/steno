@@ -884,10 +884,10 @@ impl ProcessingPipeline {
     /// app [`MAX_CRASHED_RUNS`] times ([`crate::crash_loop`]), with
     /// [`TOO_MANY_CRASHED_RUNS`]; its audio is kept, and a retention
     /// stamp an earlier run left is cleared so the sweep keeps it too. A
-    /// meeting with any such run waits, then runs alone ([`Turn::Alone`]),
-    /// so a crash is charged to the one run in flight. Returns the
-    /// meetings whose processing was started, those that wait last: none
-    /// once the pipeline [quits](Self::quit).
+    /// meeting with any such run waits, then runs alone, so a crash is
+    /// charged to the one run in flight. Returns the meetings whose
+    /// processing was started, those that wait last: none once the
+    /// pipeline [quits](Self::quit).
     pub fn resume_unfinished(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
