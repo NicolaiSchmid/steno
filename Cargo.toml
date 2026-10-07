@@ -60,8 +60,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 gdk = "0.18"
 gio = "0.18"
 # Linux only: the desktop shell's logout and shutdown clients on D-Bus
-# (`session_end`). Already in the lock through the single-instance and
-# opener plugins.
+# (`session_end`) and the services' Secret Service client
+# (`steno-services`' `secrets`). Already in the lock through the
+# single-instance and opener plugins.
 zbus = "5.19"
 # Unix only: the desktop shell's signal dispositions (`sigaction`) and the
 # speech sidecar's (`signal`).
@@ -102,10 +103,11 @@ windows-core = "0.62"
 # it needs the libpipewire-0.3 headers and libclang (scripts/setup-linux.sh).
 pipewire = "0.10"
 # The secret store behind `SecretStore` in the services assembly: the
-# Keychain and the Windows credential store. On Linux the services use
-# the 0600 secrets file instead (`linux-native` is the kernel keyring,
-# which does not survive a reboot, and the Secret Service store needs
-# D-Bus); the feature stays so the crate builds there without a mock.
+# Keychain and the Windows credential store. On Linux the services talk to
+# the Secret Service over `zbus` themselves (the crate's own Secret
+# Service stores bring a second `zbus` or libdbus; `linux-native` is the
+# kernel keyring, which does not survive a reboot); the feature stays so
+# the crate builds there without a mock.
 keyring = { version = "3", default-features = false, features = ["apple-native", "windows-native", "linux-native"] }
 # The `steno` CLI's argument parser.
 clap = { version = "4", features = ["derive"] }

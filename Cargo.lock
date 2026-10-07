@@ -5003,6 +5003,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "fs4",
+ "futures-util",
  "keyring",
  "rusqlite",
  "serde",
@@ -5024,6 +5025,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zbus",
 ]
 
 [[package]]

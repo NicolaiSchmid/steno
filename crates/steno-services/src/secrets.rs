@@ -1,8 +1,8 @@
 //! `SecretStore` implementations: the platform keyring (the Keychain, the
-//! Windows credential store) through the `keyring` crate, and the 0600
-//! JSON file the Swift CLI used where no keyring is reachable
-//! (`STENO_<KEY>` wins over the file). Linux uses the file for the
-//! app too; the crate doc says why.
+//! Windows credential store) through the `keyring` crate, the Secret
+//! Service on Linux ([`SecretServiceStore`]), and the 0600 JSON file the
+//! Swift CLI used where no keyring is reachable (`STENO_<KEY>` wins over
+//! the file and over the Secret Service).
 //! Swift: `apps/macos/Steno/Services/KeychainSecretStore.swift`,
 //! `Sources/StenoCore/Testing/FileSecretStore.swift`.
 
@@ -15,6 +15,13 @@ use steno_core::{SecretKey, SecretStore, StenoPaths, async_trait, protocols::Bou
 
 use crate::files::{Access, replace_file, restrict_new_file};
 
+#[cfg(all(test, target_os = "linux"))]
+mod fake_service;
+#[cfg(target_os = "linux")]
+mod secret_service;
+#[cfg(target_os = "linux")]
+pub use secret_service::SecretServiceStore;
+
 /// The service every Steno keyring entry is filed under, on every
 /// platform: the Swift app's (`KeychainSecretStore.defaultService` in
 /// `apps/macos/Steno/Services/KeychainSecretStore.swift`), so the Rust app
@@ -22,27 +29,28 @@ use crate::files::{Access, replace_file, restrict_new_file};
 /// `SecretKey`'s raw value, as in Swift. Swift also labels the item
 /// `Steno <key>`; the `keyring` crate cannot set a label (the Keychain
 /// then shows the service), and lookups match on service and account only.
+/// The Secret Service item carries the label (see [`SecretServiceStore`]).
 pub const KEYRING_SERVICE: &str = "uno.schmid.steno.mac";
 
-/// The platform keyring when `keyring` is set and the platform has one
-/// that persists (macOS, Windows), else the secrets file under the
-/// support directory (the CLI, headless machines, Linux).
+/// The platform keyring when `keyring` is set: the Keychain on macOS, the
+/// credential store on Windows, the Secret Service on Linux when a
+/// provider answers on the session bus (else the secrets file, decided on
+/// first use; see [`SecretServiceStore`]). Without `keyring` (the CLI),
+/// the secrets file under the support directory.
 #[must_use]
 pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
-    if uses_file(keyring) {
-        Arc::new(FileSecretStore::in_support_directory(
-            &paths.support_directory,
-        ))
-    } else {
+    let file = || FileSecretStore::in_support_directory(&paths.support_directory);
+    if !keyring {
+        return Arc::new(file());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Arc::new(SecretServiceStore::new(file()))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
         Arc::new(KeyringSecretStore)
     }
-}
-
-/// Whether the file store answers: always when the keyring was not asked
-/// for, and on Linux regardless.
-#[must_use]
-pub fn uses_file(keyring: bool) -> bool {
-    !keyring || cfg!(target_os = "linux")
 }
 
 /// The platform keyring.
@@ -84,8 +92,9 @@ impl SecretStore for KeyringSecretStore {
 /// (`llm-api-key` becomes `STENO_LLM_API_KEY`) overrides the file, so a
 /// CLI run never has to store a key.
 ///
-/// Every read goes to the file; nothing is cached, so the CLI and the app
-/// (which share the file on Linux) see each other's writes. A write is a
+/// Every read goes to the file; nothing is cached, so two processes over
+/// one file see each other's writes (the CLI and an app on Linux that
+/// found no Secret Service provider). A write is a
 /// read-modify-write under an advisory lock on `<file>.lock`, so two
 /// processes writing different keys both keep theirs, and it replaces the
 /// file by renaming a complete, synced temporary file over it, so a crash
@@ -122,6 +131,41 @@ impl FileSecretStore {
         format!("STENO_{}", key.as_str().to_uppercase().replace('-', "_"))
     }
 
+    /// The value `STENO_<KEY>` sets for `key`, unless it is empty.
+    fn environment_value(&self, key: &SecretKey) -> Option<&str> {
+        self.environment
+            .get(&Self::environment_variable(key))
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+    }
+
+    /// Removes the entries of `moved` whose value the file still holds,
+    /// under the lock, and deletes the file once it holds nothing. An entry
+    /// another process changed since it was read stays. The lock file
+    /// stays too: deleting it while another process waits on it would let
+    /// the next writer lock a new file beside the old one.
+    #[cfg(target_os = "linux")]
+    fn remove_moved(&self, moved: &BTreeMap<String, String>) -> std::io::Result<()> {
+        self.locked(|map| {
+            map.retain(|key, value| moved.get(key) != Some(value));
+            if map.is_empty() {
+                if let Err(error) = std::fs::remove_file(&self.path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(error);
+                }
+                if let Some(parent) = self.path.parent()
+                    && let Ok(directory) = std::fs::File::open(parent)
+                {
+                    let _ = directory.sync_all();
+                }
+                return Ok(());
+            }
+            let data = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
+            replace_file(&self.path, &data, Access::OwnerOnly)
+        })
+    }
+
     fn read(&self) -> std::io::Result<BTreeMap<String, String>> {
         match std::fs::read(&self.path) {
             Ok(bytes) if bytes.is_empty() => Ok(BTreeMap::new()),
@@ -141,16 +185,26 @@ impl FileSecretStore {
     /// Applies `change` to the stored map under the lock and writes the
     /// result atomically.
     fn update(&self, change: impl FnOnce(&mut BTreeMap<String, String>)) -> std::io::Result<()> {
+        self.locked(|map| {
+            change(map);
+            let data = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
+            replace_file(&self.path, &data, Access::OwnerOnly)
+        })
+    }
+
+    /// Runs `write` on the stored map under the advisory lock on
+    /// `<file>.lock`.
+    fn locked(
+        &self,
+        write: impl FnOnce(&mut BTreeMap<String, String>) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let lock = restrict_new_file(std::fs::OpenOptions::new().create(true).write(true))
             .open(self.beside(".lock"))?;
         lock.lock()?;
-        let mut map = self.read()?;
-        change(&mut map);
-        let data = serde_json::to_vec_pretty(&map).map_err(std::io::Error::other)?;
-        replace_file(&self.path, &data, Access::OwnerOnly)
+        write(&mut self.read()?)
     }
 }
 
@@ -171,10 +225,8 @@ fn text_variables(
 #[async_trait]
 impl SecretStore for FileSecretStore {
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
-        if let Some(value) = self.environment.get(&Self::environment_variable(key))
-            && !value.is_empty()
-        {
-            return Ok(Some(value.clone()));
+        if let Some(value) = self.environment_value(key) {
+            return Ok(Some(value.to_owned()));
         }
         Ok(self.read()?.get(key.as_str()).cloned())
     }
@@ -393,12 +445,6 @@ mod tests {
             assert!(writer.wait().unwrap().success());
         }
         assert_every_key(&path, &["a", "b"]);
-    }
-
-    #[test]
-    fn linux_uses_the_file_store_even_when_the_keyring_is_asked_for() {
-        assert!(uses_file(false));
-        assert_eq!(uses_file(true), cfg!(target_os = "linux"));
     }
 
     /// Reads a Swift source from the repository root.

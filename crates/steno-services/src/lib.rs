@@ -34,13 +34,14 @@
 //! run in this process.
 //!
 //! Secrets live in the platform keyring on macOS (the Keychain) and on
-//! Windows (the credential store). On Linux they live in the 0600
-//! `secrets.json` under the support directory, the store the CLI uses
-//! everywhere: the `keyring` crate's `linux-native` store is the kernel
-//! keyring, which does not survive a reboot (the handover identity and the
-//! LLM API key would vanish), and its Secret Service store needs D-Bus and
-//! a running secret service, which headless machines and the CI runners
-//! do not have. The Secret Service has no work package yet.
+//! Windows (the credential store). On Linux they live in the Secret
+//! Service when a provider answers on the session bus
+//! ([`secrets::SecretServiceStore`], which first moves what the file
+//! holds into it), else in the 0600 `secrets.json` under the support
+//! directory, the store the CLI uses everywhere; the choice is made once
+//! per process and logged. The `keyring` crate's `linux-native` store is
+//! the kernel keyring, which does not survive a reboot (the handover
+//! identity and the LLM API key would vanish), so it is not used.
 //!
 //! The shell's launch, in one piece:
 //!

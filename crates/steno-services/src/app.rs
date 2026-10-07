@@ -56,7 +56,8 @@ pub struct AppOptions {
     /// `None` opens the database under `paths`.
     pub database_path: Option<std::path::PathBuf>,
     /// The platform keyring when true, else the 0600 secrets file (the CLI
-    /// and headless machines). Linux always uses the file; see the crate doc.
+    /// and headless machines). On Linux the keyring is the Secret Service
+    /// when a provider runs, else the file; see the crate doc.
     pub keyring: bool,
     /// The window opener and URL opener; the shell's, a no-op for the CLI.
     pub opener: Arc<dyn Opener>,
