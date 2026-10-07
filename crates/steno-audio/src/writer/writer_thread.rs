@@ -5,14 +5,18 @@
 //! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`.
 //!
 //! Every [`SYNC_INTERVAL_FRAMES`] frames the thread
-//! [`sync`](RecordingWriting::sync)s the master, so a power loss or a kernel
-//! crash loses at most the last 5 s of a recording, not everything still in
-//! the page cache. Rust only: Swift synced at the close alone.
+//! [`sync`](RecordingWriting::sync)s the master (`File::sync_data`,
+//! `F_FULLFSYNC` on the Mac), so a power loss or a kernel crash loses about
+//! the last 5 s of a recording, more while the writer is behind, not
+//! everything still in the page cache. A failed sync (a filesystem that
+//! refuses it, as a network share can) is logged once and tried again at
+//! the next interval; the writes go on. Rust only: Swift synced at the
+//! close alone.
 //!
-//! A write or sync error is kept (for [`WriterThread::take_error`]),
-//! reported once and stops further writes; the loop keeps draining so the
-//! relay never fills. The lane slices handed to the writer sit in a stack
-//! array sized by [`AudioLane::ALL`], so a drained frame allocates nothing (not a
+//! A write error is kept (for [`WriterThread::take_error`]), reported once
+//! and stops further writes; the loop keeps draining so the relay never
+//! fills. The lane slices handed to the writer sit in a stack array sized
+//! by [`AudioLane::ALL`], so a drained frame allocates nothing (not a
 //! real-time requirement here, the thread does file I/O, but one less
 //! allocation per 10 ms).
 
@@ -58,6 +62,8 @@ struct Worker {
     last_generation: usize,
     /// Frames written since the last sync.
     unsynced_frames: usize,
+    /// A failed sync was logged; later failures are not.
+    sync_failure_logged: bool,
 }
 
 impl Worker {
@@ -80,19 +86,34 @@ impl Worker {
                     .has_raw_mic
                     .then(|| self.buffers[self.lane_count].as_slice()),
             };
-            let written = self.writer.write(&frames).and_then(|()| {
-                self.unsynced_frames += 1;
-                if self.unsynced_frames < SYNC_INTERVAL_FRAMES {
-                    return Ok(());
+            match self.writer.write(&frames) {
+                Ok(()) => self.sync_if_due(),
+                Err(error) => {
+                    self.failed.store(true, Ordering::Release);
+                    self.error = Some(error.clone());
+                    (self.on_error)(error);
                 }
-                self.unsynced_frames = 0;
-                self.writer.sync()
-            });
-            if let Err(error) = written {
-                self.failed.store(true, Ordering::Release);
-                self.error = Some(error.clone());
-                (self.on_error)(error);
             }
+        }
+    }
+
+    /// Syncs the master after every [`SYNC_INTERVAL_FRAMES`] frames
+    /// written. A failure is logged once, by its kind alone (the log's
+    /// privacy rule: no path), and the next interval tries again.
+    fn sync_if_due(&mut self) {
+        self.unsynced_frames += 1;
+        if self.unsynced_frames < SYNC_INTERVAL_FRAMES {
+            return;
+        }
+        self.unsynced_frames = 0;
+        if let Err(error) = self.writer.sync()
+            && !self.sync_failure_logged
+        {
+            self.sync_failure_logged = true;
+            tracing::warn!(
+                kind = ?error.kind(),
+                "the recording could not be synced to disk; the writes go on"
+            );
         }
     }
 
@@ -147,6 +168,7 @@ impl WriterThread {
             error: None,
             last_generation: 0,
             unsynced_frames: 0,
+            sync_failure_logged: false,
         };
         Self {
             worker: Some(worker),
@@ -235,10 +257,10 @@ mod tests {
         Sync,
     }
 
-    /// Records every call; the sync numbered `fail_sync` (from 1) fails.
+    /// Records every call; every sync fails when `fail_syncs` is set.
     struct Recording {
         calls: Arc<Mutex<Vec<Call>>>,
-        fail_sync: Option<usize>,
+        fail_syncs: bool,
     }
 
     impl RecordingWriting for Recording {
@@ -254,12 +276,10 @@ mod tests {
             self.calls.lock().unwrap().push(Call::Write);
             Ok(())
         }
-        fn sync(&mut self) -> Result<(), CaptureError> {
-            let mut calls = self.calls.lock().unwrap();
-            calls.push(Call::Sync);
-            let syncs = calls.iter().filter(|call| **call == Call::Sync).count();
-            if self.fail_sync == Some(syncs) {
-                return Err(CaptureError::WriterFailed("EIO".into()));
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push(Call::Sync);
+            if self.fail_syncs {
+                return Err(std::io::ErrorKind::Unsupported.into());
             }
             Ok(())
         }
@@ -271,7 +291,7 @@ mod tests {
     /// Pushes `frames` one-lane frames through a writer thread over the
     /// fake and returns its calls and the errors it reported. The relay
     /// holds them all, so none is dropped.
-    fn run(frames: usize, fail_sync: Option<usize>) -> (Vec<Call>, Vec<CaptureError>) {
+    fn run(frames: usize, fail_syncs: bool) -> (Vec<Call>, Vec<CaptureError>) {
         let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, frames));
         let calls = Arc::new(Mutex::new(Vec::new()));
         let errors = Arc::new(Mutex::new(Vec::new()));
@@ -279,7 +299,7 @@ mod tests {
             Arc::clone(&relay),
             Box::new(Recording {
                 calls: Arc::clone(&calls),
-                fail_sync,
+                fail_syncs,
             }),
             Arc::new(LevelSlot::new(false)),
             1,
@@ -303,37 +323,42 @@ mod tests {
         (calls, errors)
     }
 
-    #[test]
-    fn the_master_is_synced_after_every_interval_of_frames_and_not_before() {
-        let (calls, errors) = run(SYNC_INTERVAL_FRAMES * 3 + 10, None);
-        assert!(errors.is_empty(), "{errors:?}");
-        let syncs: Vec<usize> = calls
+    /// The indices of the syncs among the fake's calls.
+    fn sync_indices(calls: &[Call]) -> Vec<usize> {
+        calls
             .iter()
             .enumerate()
             .filter(|(_, call)| **call == Call::Sync)
             .map(|(index, _)| index)
-            .collect();
-        // Each sync follows the interval's last write: after writes
-        // 500, 1000 and 1500, with the syncs before them counted in.
-        assert_eq!(
-            syncs,
-            [
-                SYNC_INTERVAL_FRAMES,
-                2 * SYNC_INTERVAL_FRAMES + 1,
-                3 * SYNC_INTERVAL_FRAMES + 2
-            ]
-        );
+            .collect()
     }
 
+    /// Each sync follows the interval's last write: after writes 500, 1000
+    /// and 1500, with the syncs before them counted in.
+    const SYNCS_AFTER_1510_FRAMES: [usize; 3] = [
+        SYNC_INTERVAL_FRAMES,
+        2 * SYNC_INTERVAL_FRAMES + 1,
+        3 * SYNC_INTERVAL_FRAMES + 2,
+    ];
+
     #[test]
-    fn a_failed_sync_is_reported_once_and_stops_the_writes() {
-        let (calls, errors) = run(SYNC_INTERVAL_FRAMES * 3, Some(1));
-        assert_eq!(errors, [CaptureError::WriterFailed("EIO".into())]);
+    fn the_master_is_synced_after_every_interval_of_frames_and_not_before() {
+        let (calls, errors) = run(SYNC_INTERVAL_FRAMES * 3 + 10, false);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(sync_indices(&calls), SYNCS_AFTER_1510_FRAMES);
+    }
+
+    /// A filesystem that refuses every sync (a network share can) neither
+    /// ends nor shortens the recording: every frame is written, nothing is
+    /// reported as an error, and every interval tries the sync again.
+    #[test]
+    fn a_failed_sync_keeps_the_writes_going_and_is_tried_again() {
+        let (calls, errors) = run(SYNC_INTERVAL_FRAMES * 3 + 10, true);
+        assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(
             calls.iter().filter(|call| **call == Call::Write).count(),
-            SYNC_INTERVAL_FRAMES,
-            "no write after the failed sync"
+            SYNC_INTERVAL_FRAMES * 3 + 10
         );
-        assert_eq!(calls.last(), Some(&Call::Sync));
+        assert_eq!(sync_indices(&calls), SYNCS_AFTER_1510_FRAMES);
     }
 }

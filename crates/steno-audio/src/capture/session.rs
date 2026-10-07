@@ -1256,7 +1256,7 @@ mod tests {
         fn write(&mut self, _frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
             Err(CaptureError::WriterFailed("DiskFull".into()))
         }
-        fn sync(&mut self) -> Result<(), CaptureError> {
+        fn sync(&mut self) -> std::io::Result<()> {
             self.inner.sync()
         }
         fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {

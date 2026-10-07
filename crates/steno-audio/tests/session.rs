@@ -334,6 +334,64 @@ fn the_default_relay_holds_fifteen_seconds_with_the_writer_stalled() {
     assert_eq!(relay.dropped_frames(), [0, 0, 0]);
 }
 
+/// The real writer on a filesystem that refuses every sync, as a network
+/// share can refuse `F_FULLFSYNC`.
+struct SyncRefused(RecordingWriter);
+
+impl RecordingWriting for SyncRefused {
+    fn files(&self) -> RecordingFiles {
+        self.0.files()
+    }
+    fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+        self.0.write(frames)
+    }
+    fn sync(&mut self) -> std::io::Result<()> {
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
+    fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+        self.0.finish()
+    }
+}
+
+/// A sync that always fails costs the recording nothing: 8 s delivered
+/// (past the first sync, at 5 s) are all in the master, and the session
+/// ends `Idle`, never `Failed`.
+#[test]
+fn a_refused_sync_keeps_the_whole_recording_and_ends_idle() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        8.0,
+    )));
+    let session = CaptureSession::with_writer_factory(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        Arc::new(SystemClock::new()),
+        Arc::new(|layout, lanes, keep_raw| {
+            Ok(
+                Box::new(SyncRefused(RecordingWriter::new(layout, lanes, keep_raw)?))
+                    as Box<dyn RecordingWriting>,
+            )
+        }),
+    )
+    .unwrap();
+    let states = session.states();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+    let seen = collect_states(&states, until_idle_again());
+    assert!(!seen.iter().any(until_failed), "{:?}", kinds(&seen));
+    assert_eq!(master_of(&result).frame_count(), 800 * FRAME_SIZE);
+    assert!(
+        result.statistics.dropped_frames.values().all(|n| *n == 0),
+        "{:?}",
+        result.statistics.dropped_frames
+    );
+}
+
 /// One frame of relay headroom against a backend that delivers two seconds
 /// in milliseconds: the writer falls behind, and every frame it missed is
 /// counted against the master that was written, on every lane alike.
@@ -724,7 +782,7 @@ impl RecordingWriting for FaultyWriter {
         }
         self.inner.write(frames)
     }
-    fn sync(&mut self) -> Result<(), CaptureError> {
+    fn sync(&mut self) -> std::io::Result<()> {
         self.inner.sync()
     }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
@@ -938,7 +996,7 @@ fn a_writer_thread_that_died_ends_failed_and_the_session_starts_again() {
             assert!(self.1 < 10, "writer panics on purpose");
             self.0.write(frames)
         }
-        fn sync(&mut self) -> Result<(), CaptureError> {
+        fn sync(&mut self) -> std::io::Result<()> {
             self.0.sync()
         }
         fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
@@ -2073,9 +2131,9 @@ impl RecordingWriting for FullFrom {
         }
         self.0.write(frames)
     }
-    fn sync(&mut self) -> Result<(), CaptureError> {
+    fn sync(&mut self) -> std::io::Result<()> {
         if self.1.load(Ordering::SeqCst) {
-            return Err(CaptureError::WriterFailed("DiskFull".into()));
+            return Err(std::io::ErrorKind::StorageFull.into());
         }
         self.0.sync()
     }
@@ -2347,7 +2405,7 @@ impl RecordingWriting for HeldWrites {
         }
         self.inner.write(frames)
     }
-    fn sync(&mut self) -> Result<(), CaptureError> {
+    fn sync(&mut self) -> std::io::Result<()> {
         self.inner.sync()
     }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
