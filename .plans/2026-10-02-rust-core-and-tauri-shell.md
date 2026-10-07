@@ -1494,28 +1494,33 @@ touch lines; each fix is ported to Swift before cutover.
   partial and sidecar, and its upload goes on. On success the admission removes every
   file of the recording, also the partial and sidecar a re-announce opened during the
   intake, else an empty partial would wait for the next start's sweep. Swift keeps the
-  first rule (#212): nothing goes, and no receipt is forgotten, while memory holds
-  another device's receipt of that recording id
-  (`RecordingHandler.ownedByAnotherDevice`), and the actor makes each check and its
-  discard one step, with no `await` between them, so no announce lands between the
-  two. The rule covers the admission, a `complete` refused for a revoke (`refusal`,
-  after the read and after the verify, which also forgets the receipt) and the discard
-  after a first announce's failed receipt save (`announce` in
-  `Sources/StenoHandover/Routing/RecordingHandler.swift`), which runs after the save's
-  suspension, so a revoke and another phone's announce can land before it. After the
-  intake `admit` removes the verified file it handed over whatever memory holds (no
-  other request creates it while the `complete` holds its `completing` mark), then the
-  rest of the recording's files under the rule, also the partial and sidecar a
-  re-announce opened during the intake. Three discards need no check: the revoke
-  removes the files of its own device's receipts in memory; the 422 after the hash
-  follows the revocation check in the same actor step, so memory holds the phone's own
-  receipt or none; and nothing suspends between the receipt read and the forget of a
-  recording admitted before, whose `complete` answers 200 after a revoke. Swift has no
-  second rule: `announce` does not check `revoked`, so the files a revoked phone's
-  announce opens before the revoke's delete commits (the phone still passes the gate)
-  belong to no receipt in memory (`remember` skips that device) and wait for the next
-  start's sweep; another phone's first announce of that id keeps them (`begin`), which
-  the first-announce discard owned by `fix/handover-first-announce-discard` closes.
+  first rule: nothing goes, and no receipt is forgotten, while memory holds another
+  device's receipt of that recording id (`RecordingHandler.ownedByAnotherDevice`), and
+  the actor makes each check and its discard one step, with no `await` between them,
+  so no announce lands between the two. The rule covers the admission, a `complete`
+  refused for a revoke (`refusal`, after the read and after the verify, both of which
+  also forget the receipt) and the discard after a first announce's failed receipt
+  save (`announce` in `Sources/StenoHandover/Routing/RecordingHandler.swift`), which
+  runs after the save's suspension, so a revoke and another phone's announce can land
+  before it. After the intake `admit` removes the verified file it handed over
+  whatever memory holds (no other request creates it while the `complete` holds its
+  `completing` mark), then the rest of the recording's files under the rule. Three
+  discards need no check: the revoke removes the files of its own device's receipts in
+  memory; the 422 after the hash follows the revocation check in the same actor step,
+  so memory holds the phone's own receipt or none; and nothing suspends between the
+  receipt read and the forget of a recording admitted before, whose `complete` answers
+  200 after a revoke. A re-announce that finds the receipt `complete` needs no discard:
+  it reads memory and calls `begin` in one step, and `receipt` checks memory again
+  after its store read, so no file is opened once memory holds the `complete` receipt.
+  Swift has no second rule: `announce` does not check `revoked`. A revoked phone's
+  first announce before the revoke's delete commits (the phone still passes the gate)
+  remembers nothing, its save queues behind the delete and fails on the foreign key,
+  and the discard after the failed save removes its files under the rule. Its
+  re-announce in that window finds the store row and opens files that belong to no
+  receipt in memory (`remember` skips that device); its save fails the same way, with
+  no discard, so the files wait for the next start's sweep, and another phone's first
+  announce of that id keeps them (`begin`), which the first-announce discard owned by
+  `fix/handover-first-announce-discard` closes.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
@@ -1813,12 +1818,12 @@ it) and which pull requests found it. The pull request that fixes an item delete
   `verifiedFile` returns it without a hash). In Rust the same holds for a revoked
   phone's files when its refusal lands between another phone's `change` and that
   phone's `open_files`, and for the partial and sidecar a second revoke leaves after
-  `Engine::reopen_missing_files`; in Swift for the files a revoked phone's announce
-  opens before the revoke's delete commits. Discarding every file of that id before
-  `begin` closes it (Swift: in the same actor step; Rust: in `open_files` under the
-  `files` lock), with a deterministic test of the restart path in each app. Both apps.
-  Where: `announce` in `crates/steno-handover/src/engine/recording.rs` and in
-  `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #219.
+  `Engine::reopen_missing_files`; in Swift for the files a revoked phone's
+  re-announce opens before the revoke's delete commits. Discarding every file of that
+  id before `begin` closes it (Swift: in the same actor step; Rust: in `open_files`
+  under the `files` lock), with a deterministic test of the restart path in each app.
+  Both apps. Where: `announce` in `crates/steno-handover/src/engine/recording.rs` and
+  in `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #219, #212.
 - **`fix/handover-lost-complete-answer`.** Opens after
   `fix/handover-first-announce-discard`. A `complete` the computer admitted whose
   answer never reaches the phone (the 10 s timeout, a dropped connection, the app
