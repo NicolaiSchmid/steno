@@ -1256,9 +1256,9 @@ still has to draw the window side. `[ ]` is not ported yet.
 - A redelivery should check whose `meeting.json` the pinned folder holds before it
   writes there, as the Rust destination does: when the user moved or deleted the
   meeting's folder and a meeting with the same date and title claimed the name since,
-  Swift writes over that meeting's notes. The Rust destination claims a folder as on a
-  first delivery (`X-2`) and drops the old folder's files from the receipt, and writes
-  the claimed folder as a first delivery would. It does the same when the pinned folder
+  Swift writes over that meeting's notes. The Rust destination claims and writes a
+  folder as a first delivery would (`X-2`) and drops the old folder's files from the
+  receipt. It does the same when the pinned folder
   is there but its `meeting.json` is missing or unreadable as a meeting: a duplicate
   folder, never an overwrite.
 - On Windows the Rust person pages keep off the reserved device names (`Con` becomes
