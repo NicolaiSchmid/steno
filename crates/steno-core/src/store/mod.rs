@@ -23,7 +23,6 @@ mod tasks;
 mod timings;
 mod transcript;
 
-use std::ops::{Deref, DerefMut};
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -278,8 +277,8 @@ impl Store {
     /// unwound by a panic), all under one hold of the lock: no other write
     /// runs under them. Swift: `MeetingStore.writeDurably`.
     pub fn write_durably<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let mut connection = FullSync::hold(self.lock())?;
-        self.commit_on(&mut connection, body)
+        let mut full = FullSync::hold(self.lock())?;
+        self.commit_on(&mut full.connection, body)
     }
 
     /// The `IMMEDIATE` transaction of [`Store::write`] on `connection`,
@@ -389,20 +388,6 @@ impl Drop for FullSync<'_> {
         let _ = self
             .connection
             .pragma_update(None, "fullfsync", self.fullfsync);
-    }
-}
-
-impl Deref for FullSync<'_> {
-    type Target = Connection;
-
-    fn deref(&self) -> &Connection {
-        &self.connection
-    }
-}
-
-impl DerefMut for FullSync<'_> {
-    fn deref_mut(&mut self) -> &mut Connection {
-        &mut self.connection
     }
 }
 
