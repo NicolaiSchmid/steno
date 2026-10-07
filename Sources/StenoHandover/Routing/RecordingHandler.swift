@@ -30,9 +30,9 @@ extension HandoverEngine {
       guard existing.deviceID == device.id else {
         return .problem(.conflict, "another device owns this recording")
       }
-      // Also for a `.complete` receipt: the phone answered `complete` posts
-      // `complete`, and that 200 deletes its copy. A different file under an
-      // admitted id is refused instead, and stays on the phone.
+      // Also for a `.complete` receipt: a phone told `complete` posts
+      // `complete`, and the 200 to that deletes its copy. A different file
+      // under an admitted id is refused instead, and stays on the phone.
       guard existing.byteCount == metadata.byteCount, existing.sha256 == metadata.sha256,
         existing.chunkSize == metadata.chunkSize
       else {

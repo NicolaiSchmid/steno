@@ -139,9 +139,9 @@ impl Engine {
             );
         }
         let recording_id = receipt.recording_id;
-        // Also for a `complete` receipt: the phone answered `complete` posts
-        // `complete`, and that 200 deletes its copy. A different file under
-        // an admitted id is refused instead, and stays on the phone.
+        // Also for a `complete` receipt: a phone told `complete` posts
+        // `complete`, and the 200 to that deletes its copy. A different file
+        // under an admitted id is refused instead, and stays on the phone.
         if receipt.byte_count != metadata.byte_count
             || receipt.sha256 != metadata.sha256
             || receipt.chunk_size != metadata.chunk_size
