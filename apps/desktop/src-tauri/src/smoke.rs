@@ -11,11 +11,11 @@
 //! panels hid, closing main hid it rather than destroying it, and on Linux
 //! closing Settings kept it and opening it again on a section loaded a
 //! fresh page there, and closing onboarding kept it and told the host once
-//! (`windows::Kept`); 1 otherwise; a value that is not a positive number ends the run at once
-//! with 2. Screenshots of the Xvfb root during the wait are the review
-//! evidence; the windows carry what the host's database holds (nothing on a
-//! fresh runner, synthetic data with the fixture host), the prompts name
-//! made-up apps.
+//! (`windows::Kept`); 1 otherwise; a value that is not a positive number
+//! ends the run at once with 2. Screenshots of the Xvfb root during the
+//! wait are the review evidence; the windows carry what the host's
+//! database holds (nothing on a fresh runner, synthetic data with the
+//! fixture host), the prompts name made-up apps.
 
 use std::{
     collections::HashMap,

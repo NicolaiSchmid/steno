@@ -7,10 +7,10 @@
 //! those paths first logs one line through `GLib`, in the `Gdk` domain, and
 //! `GLib` hands it to the process's log writer on the thread that hit the
 //! loss, before the `_exit`. The shell's writer (`write`, installed by
-//! `watch`) runs the shutdown there, on that thread's behalf, and only then hands the line
-//! to `GLib`'s default writer and lets GDK end the process: so a recording
-//! in progress is saved first, at most `SHUTDOWN_PATIENCE` later, however
-//! the session ended.
+//! `watch`) runs the shutdown there, on that thread's behalf, and only
+//! then hands the line to `GLib`'s default writer and lets GDK end the
+//! process: so a recording in progress is saved first, at most
+//! `SHUTDOWN_PATIENCE` later, however the session ended.
 //!
 //! The save needs nothing of the main thread, which is blocked meanwhile:
 //! `App::shutdown` runs on a thread of its own (`ExitGate`), and the host

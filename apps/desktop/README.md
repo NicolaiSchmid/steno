@@ -55,11 +55,17 @@ exits reach the shutdown these ways:
   which serves the same protocol under names of its own,
   `session_end.rs`). The session manager first asks whether the session
   may end, and the logout can still be called off after that (GNOME's
-  confirmation dialog, another Xfce app), so the app answers at once,
-  records on, and saves at the end, which gnome-session waits about ten
-  seconds for and xfce4-session seven. On Wayland xfce4-session quits
-  right after it asked, with no end and no cancel to follow, so there the
-  app saves when asked, then answers and quits.
+  confirmation dialog, another Xfce app; xfce4-session then tells the app
+  nothing), so the app answers at once, records on, and saves at the end,
+  which gnome-session waits about ten seconds for and xfce4-session
+  seven. xfce4-session also tells the app to leave when a checkpoint
+  (Session settings' Save Session) has waited a minute, with no logout to
+  follow; the app leaves only once a logout has asked. On Wayland
+  xfce4-session quits right after it asked, with no end and no cancel to
+  follow, so there the app saves when asked, answers, and ends with the
+  display. Should the session go on after all (the app took it for a
+  Wayland one wrongly), the app says so 30 seconds later and relaunches,
+  so a recorder runs again.
 - Where no session manager runs (KDE Plasma, wlroots desktops), the app
   follows the desktop portal's session monitor. It answers the portal's
   query at once, since the user can still call the logout off then, and
@@ -75,17 +81,18 @@ exits reach the shutdown these ways:
   GTK 3 is not, and on Wayland KWin closes only native Wayland windows,
   not the app's, which run under XWayland. The writer knows GDK's lines
   by GTK 3.24.52's wording; a GTK that rewords them ends the app unsaved
-  again. Only a kill ends the save early:
-  systemd's `SIGKILL` once a stop has waited its timeout (90 s by
-  default), or a second SIGTERM.
+  again. Only a kill ends the save early: systemd's `SIGKILL` once a
+  stop has waited out the unit's `TimeoutStopSec` (90 s unless the unit
+  sets another), or a second SIGTERM.
 - While a recording runs the app holds the portal's logout inhibitor
   ("A meeting is being recorded") and releases it when the recording
   stops. GNOME then lists Steno in its logout dialog, also for
   `gnome-session-quit --logout --no-prompt`, so the user can go back to
   the meeting; logging out anyway saves as above (read from
   gnome-session's and the GTK portal's source; not yet seen on a real
-  GNOME session). Plasma 6.6 notes it for its session monitor; the GTK
-  portal off GNOME (Xfce, wlroots) refuses it.
+  GNOME session). Plasma 6.6's portal records it for its session
+  monitor, which nothing in Plasma asks yet; the GTK portal outside
+  GNOME (Xfce, wlroots) refuses it.
 - A system shutdown or reboot on Linux saves while logind waits: the app
   holds logind's `shutdown` delay lock and releases it after the save.
   logind waits for the lock at most five seconds by default
@@ -802,7 +809,7 @@ Nothing beyond the Rust toolchain. WebView2 ships with Windows 11; the
 | `apps/desktop/src-tauri/src/platform.rs` | The initialization script that tells every page its platform |
 | `apps/desktop/src-tauri/src/panels.rs`, `panel_geometry.rs` | The two floating panels and the one content rule, the macOS `NSPanel` conversion; the anchor, frames and size validation as plain values |
 | `apps/desktop/src-tauri/src/autostart.rs`, `updater.rs`, `permissions.rs`, `deep_links.rs`, `dialogs.rs` | One module per service (see What the shell owns); each is plain rules the tests cover over a plugin or OS call |
-| `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. On Linux a closed Settings or onboarding window is kept, without its page, and loads afresh when opened again (`Kept`, against WebKitGTK's fd leak). New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
+| `apps/desktop/src-tauri/src/windows.rs` | The three windows with the Swift sizes: main 1120 by 720 (minimum 960 by 600) at `#/main`, Settings 960 by 640 (minimum 760 by 520) at `#/settings`, onboarding fixed 560 by 620 at `#/onboarding`. Main opens at start; the others on `window.open`, focused when already open. On Linux a closed Settings or onboarding window is kept, without its page, and loads afresh when opened again (`Kept`, against the fd leak of a destroyed webview). New windows from the page are denied. `Pages` holds the requests a window is owed until its page mounts |
 | `apps/desktop/src-tauri/src/bridge.rs` | `bridge_call(method, params)` and the `steno:event` emitter, scoped to the calling window; a finished `onboarding` snapshot closes the onboarding window, a `recording` snapshot to main moves the tray and the panels. `window.open` (typed: one of the six sections, a UUID meeting id), `window.close` (the onboarding window, from itself), `system.openURL` (`https:` and `mailto:` only) and the shell's own methods listed above are the shell's; everything else goes to the host. `panel_call(action, params)` is the panels' own command |
 | `apps/desktop/src-tauri/src/host.rs` | The real host: `steno_host::Host` over `steno_services::build`, the window sink that delivers on the main thread, the `Opener`, the alert and the chosen folder, the exits' `shutdown_action` |
 | `apps/desktop/src-tauri/src/fixtures.rs` (and `host.rs` under the feature) | With `--features fixture-host`, the fixture host: the fixtures `index.json` lists, embedded with `include_str!`; every topic's snapshot on `page.ready`; replies as `mock-transport.ts` gives them (`speakers.options.reply`, `reply.confirm` and `reply.chosenPath` for the alerts and folder panels, `null` otherwise); a deep link as the `app` snapshot with the request set, then the clean one |
@@ -851,17 +858,21 @@ there beside the Swift ones (the plan's risk list). Linux and Windows
 keep their native title bar; macOS gets the overlay title bar the Swift
 windows have, and only there does the page leave the traffic lights
 their inset (`titleBarInset` in `apps/macos/web/src/lib/platform.tsx`).
-On Linux, WebKitGTK leaks one shared-memory file
-descriptor per destroyed webview
-([#160](https://github.com/NicolaiSchmid/steno/issues/160)). The app
+On Linux every destroyed webview leaks one shared-memory file
+descriptor ([#160](https://github.com/NicolaiSchmid/steno/issues/160)):
+wry's IPC handler holds the webview it belongs to, a reference cycle
+(webview, its user content manager, the handler, the webview), so the
+view is never finalised and WebKitGTK never frees its memfd. The app
 works around it rather than fixing it: no window is destroyed there
 while the app runs. Main and the panels hide, and a closed Settings or
 onboarding window is kept, drops its page (`about:blank`) and loads its
 route afresh, on the section asked for, when opened again
 (`windows.rs`). Over 70 Settings open and close cycles under Xvfb the
 shell's file descriptors stay at 69 to 72, where destroying the window
-took them from 61 to 128. The leak itself remains in WebKitGTK and is
-not yet reported there. On Linux a panel keeps a 5 px resize border that
-Tauri gives every undecorated resizable window. The pinned size holds, but the
-border shows a resize cursor and swallows a press, so a drag that starts
-on the outer 5 px does not move the panel; no control sits there.
+took them from 61 to 128. The cycle itself remains in wry and is not
+yet reported there.
+
+On Linux a panel keeps a 5 px resize border that Tauri gives every
+undecorated resizable window. The pinned size holds, but the border
+shows a resize cursor and swallows a press, so a drag that starts on the
+outer 5 px does not move the panel; no control sits there.

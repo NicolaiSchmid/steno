@@ -6,12 +6,15 @@
 //! mounted yet waits in `Pages` and is published on its `page.ready`.
 //!
 //! On Linux a closed Settings or onboarding window is kept, not destroyed
-//! (`Kept`): `WebKitGTK` leaks a file descriptor for every webview
-//! destroyed (#160), so a long session that opens Settings often would run
-//! out of them. The kept window drops its page (`about:blank`) and hides;
-//! opened again, it loads its route as a new window would, with the query
-//! asked for, so the user sees a fresh window. macOS and Windows destroy
-//! the window as before.
+//! (`Kept`): every destroyed webview leaks a file descriptor (#160), so a
+//! long session that opens Settings often would run out of them. wry's IPC
+//! handler holds the webview it belongs to (`attach_ipc_handler` in wry
+//! 0.57's `src/webkitgtk/mod.rs`), a reference cycle through the view's
+//! user content manager, so the view is never finalised and `WebKitGTK`
+//! never frees its memfd. The kept window drops its page (`about:blank`)
+//! and hides; opened again, it loads its route as a new window would, with
+//! the query asked for, so the user sees a fresh window. macOS and Windows
+//! destroy the window as before.
 //!
 //! Swift: the sizes live in `StenoApp.swift` (main), `SettingsWindow.swift`
 //! and `OnboardingWindow.swift`, main's minimum in `MainWindow.swift`.
@@ -294,9 +297,9 @@ pub fn request(
 }
 
 /// Whether closing the window of `label` keeps it instead (`keep`):
-/// Settings and onboarding on Linux, against `WebKitGTK`'s leak (#160). Main
-/// has its own rule (`hides_on_close` in `main.rs`); the panels only ever
-/// hide.
+/// Settings and onboarding on Linux, against a destroyed webview's leak
+/// (#160). Main has its own rule (`hides_on_close` in `main.rs`); the
+/// panels only ever hide.
 pub fn keeps_on_close(label: &str) -> bool {
     cfg!(target_os = "linux")
         && (label == BridgeWindow::Settings.as_str() || label == BridgeWindow::Onboarding.as_str())
@@ -365,9 +368,10 @@ pub fn keep(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<bool> {
     Ok(true)
 }
 
-/// The app's document `shown` is; main's (`main`) when `shown` is the
-/// `about:blank` of a window closed again before its reopened page
-/// loaded; none when neither shows one.
+/// The app document a window showing `shown` keeps: `shown` itself, or
+/// main's (`main`) when `shown` is the `about:blank` of a window closed
+/// again before its reopened page loaded; none when neither is one of the
+/// app's.
 fn app_document(shown: Url, main: impl FnOnce() -> Option<Url>) -> Option<Url> {
     let blank = |url: &Url| url.as_str() == "about:blank";
     if blank(&shown) {
