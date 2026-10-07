@@ -794,7 +794,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   `a_finisher_that_sees_another_claim_does_not_wait_on_a_warm_up`,
   `a_job_that_panics_gives_its_claim_on_the_engine_back`,
   `a_job_whose_lane_cannot_be_decoded_releases_the_engine_too`,
-  `a_job_whose_warm_up_fails_releases_the_engine_too`, and against the real binary
+  `a_job_whose_diarizer_does_not_load_keeps_its_transcript`, and against the real binary
   `each_job_starts_the_sidecar_and_frees_it_once_its_lanes_are_transcribed`. So each
   job in the speech sidecar loads the 2.6 GB export again; the Mac's `CoreML` engine
   ignores the release and stays warm. A job that panics or is cancelled leaves the
@@ -872,6 +872,34 @@ still has to draw the window side. `[ ]` is not ported yet.
   `MeetingDetailViewModel` did. Difference: a re-export after a speaker change that
   fails once started shows there too, where Swift kept it quiet and retried on the
   next `.ready` tick.
+- No stage throws away what an earlier stage or the user produced (Nicolai's rule
+  of 2026-10-07 that nothing may lose data). A diarizer that fails or does not load,
+  and a voice match that fails, cost only the speaker labels: the transcript is kept,
+  the room lane becomes one unknown "Speaker 1" without an embedding (a mic lane stays
+  "me"), and the stage is logged
+  (`a_failing_diarizer_keeps_the_transcript_with_one_room_speaker`,
+  `a_job_whose_diarizer_does_not_load_keeps_its_transcript`,
+  `a_failing_speaker_match_keeps_the_speakers_unknown`); once the app quits, such a
+  failure ends the run unpersisted, so the meeting is processed again at the next
+  launch (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
+  The cleanup pass writes each segment's text by id and leaves the speakers alone
+  (`Store::update_segment_texts`, `a_speaker_named_during_cleanup_stays_named`); the
+  merge's `replace_transcript` keeps a stored confirmation for a speaker id that comes
+  back and recomputes the voices of the persons involved (decision 5 of
+  `.plans/2026-09-29-speaker-calibration.md`,
+  `replacing_the_transcript_keeps_confirmed_speakers_and_refreshes_voices`). A run
+  without a summarizer keeps the summary, tasks and decisions
+  (`a_run_without_a_summarizer_keeps_the_earlier_summary`), and a panic before
+  `persist` fails the meeting, named by the stage it was in, instead of leaving it
+  `processing` (`a_run_that_panics_fails_its_meeting`). A template the user picks while
+  a run is in flight is kept: the stages' writes leave `templateID` as stored
+  (`Meeting::apply_processing_results`), `process` summarizes with the template stored
+  when its summarize stage starts, and only a summary re-run stores the template it ran
+  with (`Store::replace_summary_with_template`;
+  `a_template_picked_while_processing_is_kept_and_used`,
+  `processing_results_leave_the_template_to_the_user_and_the_rerun`). Rust only: Swift
+  fails the meeting on a diarizer error, rewrites the speakers at cleanup, clears the
+  summary without an LLM and writes back the template a run started with.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file

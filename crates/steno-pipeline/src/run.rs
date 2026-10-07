@@ -41,6 +41,12 @@ impl ProcessingRun {
         }
     }
 
+    /// The stage of the last posted event; `None` before the first.
+    #[must_use]
+    pub fn last_stage(&self) -> Option<PipelineStage> {
+        self.last.as_ref().map(|last| last.stage)
+    }
+
     /// The event for `stage` (lane `lane` inside transcribe) at `elapsed`
     /// seconds, clamped: the fraction never falls below the previous
     /// event's `next_fraction`, and `next_fraction` is rescaled with it so
