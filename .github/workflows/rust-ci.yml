@@ -25,7 +25,8 @@ name: Rust CI
 # half), checks it, runs the Tauri shell's headless smoke under Xvfb
 # (apps/desktop/scripts/smoke-linux.sh; the screenshots are uploaded as
 # `desktop-smoke-screens`), ends the Xvfb server under a recording and
-# requires it saved (apps/desktop/scripts/lost-display-linux.sh), and bundles a `.deb` with the speech sidecar
+# requires it saved (apps/desktop/scripts/lost-display-linux.sh), and
+# bundles a `.deb` with the speech sidecar
 # (apps/desktop/scripts/check-bundle.sh finds it beside the app) so a
 # packaging regression (the bundle config, the icons, the plists, the
 # release profile, the sidecar) fails here and not in desktop-release.yml.
