@@ -185,8 +185,10 @@ pub(super) enum ServiceError {
 /// A connection with an open session and the default collection.
 struct Service {
     connection: Connection,
+    /// The service object, which opens sessions and unlocks.
+    secrets: ServiceProxy<'static>,
     session: OwnedObjectPath,
-    collection: OwnedObjectPath,
+    collection: CollectionProxy<'static>,
 }
 
 /// The path the Secret Service answers with for "no object".
@@ -201,16 +203,17 @@ impl Service {
             Bus::Address(address) => zbus::connection::Builder::address(address.as_str())?,
         };
         let connection = builder.method_timeout(CALL_TIMEOUT).build().await?;
-        let service = ServiceProxy::new(&connection).await?;
-        let (_, session) = service.open_session("plain", &Value::from("")).await?;
-        let collection = service.read_alias("default").await?;
+        let secrets = ServiceProxy::new(&connection).await?;
+        let (_, session) = secrets.open_session("plain", &Value::from("")).await?;
+        let collection = secrets.read_alias("default").await?;
         if collection.as_str() == NO_OBJECT {
             return Err(ServiceError::NoDefaultCollection);
         }
         let service = Service {
+            collection: CollectionProxy::new(&connection, collection).await?,
             connection,
+            secrets,
             session,
-            collection,
         };
         service.unlock().await?;
         Ok(service)
@@ -269,8 +272,7 @@ impl Service {
         };
         self.unlock().await?;
         let (_, prompt) = self
-            .collection()
-            .await?
+            .collection
             .create_item(properties, &secret, true)
             .await?;
         self.complete(prompt).await
@@ -280,23 +282,15 @@ impl Service {
     /// unlocked.
     async fn items(&self, key: &SecretKey) -> Result<Vec<OwnedObjectPath>, ServiceError> {
         self.unlock().await?;
-        Ok(self
-            .collection()
-            .await?
-            .search_items(attributes(key))
-            .await?)
-    }
-
-    async fn collection(&self) -> zbus::Result<CollectionProxy<'_>> {
-        CollectionProxy::new(&self.connection, &self.collection).await
+        Ok(self.collection.search_items(attributes(key)).await?)
     }
 
     /// Unlocks the default collection, which asks the user when it is
     /// locked; a no-op when it is not.
     async fn unlock(&self) -> Result<(), ServiceError> {
-        let (_, prompt) = ServiceProxy::new(&self.connection)
-            .await?
-            .unlock(&[self.collection.as_ref()])
+        let (_, prompt) = self
+            .secrets
+            .unlock(std::slice::from_ref(self.collection.inner().path()))
             .await?;
         self.complete(prompt).await
     }
@@ -459,10 +453,6 @@ mod tests {
         fn values(&self, key: &str) -> Vec<String> {
             self.state.lock().unwrap().values(key)
         }
-
-        fn chose_service(store: &SecretServiceStore) -> bool {
-            matches!(store.backend.get(), Some(Backend::Service(_)))
-        }
     }
 
     #[tokio::test]
@@ -473,7 +463,7 @@ mod tests {
         let store = setup.store(&[]);
         let key = SecretKey::llm_api_key();
         assert_eq!(store.secret(&key).await.unwrap(), None);
-        assert!(Setup::chose_service(&store));
+        assert!(matches!(store.backend.get(), Some(Backend::Service(_))));
         store.set_secret(&key, Some("sk-1")).await.unwrap();
         store.set_secret(&key, Some("sk-2")).await.unwrap();
         assert_eq!(store.secret(&key).await.unwrap().as_deref(), Some("sk-2"));
@@ -623,7 +613,7 @@ mod tests {
         let store = setup.store(&[]);
         let key = SecretKey::llm_api_key();
         store.set_secret(&key, Some("sk-1")).await.unwrap();
-        assert!(Setup::chose_service(&store));
+        assert!(matches!(store.backend.get(), Some(Backend::Service(_))));
         assert_eq!(setup.state.lock().unwrap().prompts, 1);
 
         // Locked again while the app runs: the next read asks again.
