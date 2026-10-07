@@ -16,11 +16,11 @@
 //! synced at the close alone.
 //!
 //! A write error is kept (for [`WriterThread::take_error`]), reported once
-//! and stops further writes; the loop keeps
-//! draining so the relay never fills. The lane slices handed to the writer
-//! sit in a stack array sized by [`AudioLane::ALL`], so a drained frame
-//! allocates nothing (not a real-time requirement here, the thread does
-//! file I/O, but one less allocation per 10 ms).
+//! and stops further writes; the loop keeps draining so the relay never
+//! fills. The lane slices handed to the writer sit in a stack array sized
+//! by [`AudioLane::ALL`], so a drained frame allocates nothing (not a
+//! real-time requirement here, the thread does file I/O, but one less
+//! allocation per 10 ms).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

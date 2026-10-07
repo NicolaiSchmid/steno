@@ -726,8 +726,7 @@ impl Core {
     /// closing the files fails (its paths are fixed at start and the
     /// duration is what the master holds); the failure comes back beside
     /// it: a failed write or close, else the device loss that ended the
-    /// recording, else a sync that failed while recording, so a sync
-    /// failure is reported only when nothing else ended the recording.
+    /// recording, else a sync that failed while recording.
     /// `WriterFailed` with no asset when there is nothing to hand out:
     /// the writer thread died and took the writer with it, or the master is
     /// gone from disk (its folder deleted while recording; an unlinked file
