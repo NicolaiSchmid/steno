@@ -82,10 +82,16 @@ impl SwiftDefaults for FakeDefaults {
 /// The Swift keychain items a test sets; records every call.
 struct FakeKeychain {
     certificate: Mutex<Option<Vec<u8>>>,
-    swift_key: bool,
+    /// The certificate query's failure, which wins over `certificate`.
+    certificate_error: Mutex<Option<String>>,
+    key_item: ApiKeyItem,
+    /// A `handover-identity` entry is filed (a desktop-id build's).
+    stored_identity: bool,
     key: Result<Option<String>, KeychainRefusal>,
     /// The export's refusal; `None` exports the test identity.
     export_refusal: Mutex<Option<KeychainRefusal>>,
+    /// The certificate each export was asked for.
+    exported: Mutex<Vec<Vec<u8>>>,
     calls: Mutex<Vec<&'static str>>,
 }
 
@@ -93,9 +99,12 @@ impl FakeKeychain {
     fn swift_app() -> Self {
         FakeKeychain {
             certificate: Mutex::new(Some(identity_der())),
-            swift_key: true,
+            certificate_error: Mutex::new(None),
+            key_item: ApiKeyItem::Swift,
+            stored_identity: false,
             key: Ok(Some("sk-swift".to_owned())),
             export_refusal: Mutex::new(None),
+            exported: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
         }
     }
@@ -119,12 +128,20 @@ impl FakeKeychain {
 impl SwiftKeychain for FakeKeychain {
     fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String> {
         self.calls.lock().unwrap().push("certificate");
+        if let Some(error) = self.certificate_error.lock().unwrap().clone() {
+            return Err(error);
+        }
         Ok(self.certificate.lock().unwrap().clone())
     }
 
-    fn has_swift_api_key(&self) -> Result<bool, String> {
-        self.calls.lock().unwrap().push("has key");
-        Ok(self.swift_key)
+    fn api_key_item(&self) -> Result<ApiKeyItem, String> {
+        self.calls.lock().unwrap().push("key item");
+        Ok(self.key_item)
+    }
+
+    fn has_stored_identity(&self) -> Result<bool, String> {
+        self.calls.lock().unwrap().push("identity entry");
+        Ok(self.stored_identity)
     }
 
     fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal> {
@@ -132,8 +149,16 @@ impl SwiftKeychain for FakeKeychain {
         self.key.clone()
     }
 
-    fn export_identity(&self, passphrase: &str) -> Result<Vec<u8>, KeychainRefusal> {
+    fn export_identity(
+        &self,
+        certificate_der: &[u8],
+        passphrase: &str,
+    ) -> Result<Vec<u8>, KeychainRefusal> {
         self.calls.lock().unwrap().push("export");
+        self.exported
+            .lock()
+            .unwrap()
+            .push(certificate_der.to_vec());
         match self.export_refusal.lock().unwrap().clone() {
             Some(refusal) => Err(refusal),
             None => Ok(identity_pkcs12(passphrase)),
@@ -179,7 +204,11 @@ fn the_launch_half_copies_the_onboarding_flag_and_the_update_flags_and_nothing_e
     ] {
         assert!(!again.contains(left), "{left} was copied");
     }
-    assert_eq!(keychain.calls(), ["certificate", "has key"], "nothing read");
+    assert_eq!(
+        keychain.calls(),
+        ["certificate", "key item", "identity entry"],
+        "nothing read"
+    );
     assert_flags_only(dir.path());
 }
 
@@ -189,7 +218,7 @@ fn a_flag_the_swift_domain_lacks_stays_unset_and_a_key_that_is_not_the_swift_one
     let preferences = preferences(&dir);
     let defaults = FakeDefaults::new(fixture("swift-domain-without-update-flags.plist"));
     let keychain = Arc::new(FakeKeychain {
-        swift_key: false,
+        key_item: ApiKeyItem::Other,
         ..FakeKeychain::swift_app()
     });
     let pending = pending(launch(&at_home(), preferences.clone(), &defaults, keychain));
@@ -197,7 +226,7 @@ fn a_flag_the_swift_domain_lacks_stays_unset_and_a_key_that_is_not_the_swift_one
         pending.gate_key,
         "the key is gated while pending all the same"
     );
-    assert!(!pending.read_key);
+    assert!(!pending.read_key && pending.other_key);
     assert!(preferences.contains(OnboardingViewModel::COMPLETED_KEY));
     assert!(!preferences.flag(OnboardingViewModel::COMPLETED_KEY));
     assert!(!preferences.contains(AUTOMATIC_CHECKS_KEY));
@@ -316,11 +345,13 @@ fn the_context_reads_the_smoke_variable() {
     assert_eq!(context.skip_reason(), Some(SkipReason::Smoke));
 }
 
-/// A secret store that counts the reads of each key.
+/// A secret store that counts the reads of each key, and refuses the
+/// identity's writes while `refuse_identity` is set.
 #[derive(Default)]
 struct CountingSecrets {
     inner: InMemorySecretStore,
     reads: Mutex<Vec<String>>,
+    refuse_identity: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -331,6 +362,11 @@ impl SecretStore for CountingSecrets {
     }
 
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+        if key.as_str() == HandoverIdentity::SECRET_KEY
+            && self.refuse_identity.load(Ordering::SeqCst)
+        {
+            return Err("errSecAuthFailed".into());
+        }
         self.inner.set_secret(key, value).await
     }
 }
@@ -357,7 +393,10 @@ struct Step {
 fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) -> Step {
     let dir = tempfile::tempdir().unwrap();
     let preferences = preferences(&dir);
-    let keychain = Arc::new(keychain);
+    let keychain = Arc::new(FakeKeychain {
+        stored_identity: existing_identity.is_some(),
+        ..keychain
+    });
     let raw = Arc::new(CountingSecrets::default());
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -434,6 +473,11 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     let desktop =
         HandoverIdentity::mint("Steno on a desktop-id build", chrono::Utc::now()).unwrap();
     let step = step(FakeKeychain::swift_app(), Some(&desktop));
+    assert_eq!(
+        step.import.status().prompts,
+        3,
+        "the key, the export and the entry it replaces"
+    );
     let status = step.import.run();
     assert_eq!(status.stage, SwiftImportStage::Done);
     assert_eq!(status.failure, None);
@@ -441,7 +485,8 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
         step.keychain.calls(),
         [
             "certificate",
-            "has key",
+            "key item",
+            "identity entry",
             "read key",
             "certificate",
             "export"
@@ -490,8 +535,9 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
             step.graph.gate.handover(),
             HandoverGate::Waiting(WaitReason::ImportDenied)
         );
-        // Try again asks for the identity alone: the key was read.
-        assert_eq!(status.prompts, 1);
+        // Try again asks for the identity alone (and the entry it
+        // replaces): the key was read.
+        assert_eq!(status.prompts, 1 + u8::from(existing.is_some()));
         step.keychain.allow_export();
         assert_eq!(step.import.run().stage, SwiftImportStage::Done);
         assert_eq!(
@@ -504,6 +550,105 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
         );
         assert_eq!(step.graph.gate.handover(), HandoverGate::Ready);
     }
+}
+
+/// The export is of the certificate the step's lookup found, so two
+/// certificates under the Swift label cannot make the two calls disagree.
+#[test]
+fn the_export_is_of_the_certificate_the_lookup_found() {
+    let step = step(FakeKeychain::swift_app(), None);
+    assert_eq!(step.import.run().stage, SwiftImportStage::Done);
+    assert_eq!(*step.keychain.exported.lock().unwrap(), [identity_der()]);
+}
+
+/// A desktop-id build's key item and identity entry each count as a
+/// prompt the step announces. Not now reads neither; Continue lets the
+/// graph read the key.
+#[test]
+fn a_desktop_id_key_and_identity_count_as_prompts_and_not_now_reads_neither() {
+    let desktop =
+        HandoverIdentity::mint("Steno on a desktop-id build", chrono::Utc::now()).unwrap();
+    let keychain = FakeKeychain {
+        key_item: ApiKeyItem::Other,
+        ..FakeKeychain::swift_app()
+    };
+    let step = step(keychain, Some(&desktop));
+    assert_eq!(step.import.status().prompts, 3);
+    step.import.skip();
+    let key = SecretKey::llm_api_key();
+    assert_eq!(read(&*step.graph.secrets, &key), None);
+    assert!(
+        step.raw.reads.lock().unwrap().is_empty(),
+        "Not now read a key"
+    );
+    assert!(!step.keychain.calls().contains(&"read key"));
+    assert_eq!(step.import.run().stage, SwiftImportStage::Done);
+    assert!(!step.keychain.calls().contains(&"read key"), "not the Swift key");
+    assert_eq!(read(&*step.graph.secrets, &key).as_deref(), Some("sk-swift"));
+}
+
+/// A store that fails while it replaces a stored entry reads as that
+/// prompt denied; Try again stores the identity it kept, without a second
+/// export. Without an entry to replace the store simply failed.
+#[test]
+fn a_refused_replace_counts_as_denied_and_try_again_repeats_only_the_store() {
+    let desktop =
+        HandoverIdentity::mint("Steno on a desktop-id build", chrono::Utc::now()).unwrap();
+    for existing in [Some(&desktop), None] {
+        let step = step(FakeKeychain::swift_app(), existing);
+        step.raw.refuse_identity.store(true, Ordering::SeqCst);
+        let status = step.import.run();
+        assert_eq!(status.stage, SwiftImportStage::Waiting);
+        let expected = if existing.is_some() {
+            DENIED_EXPORT
+        } else {
+            FAILED_EXPORT
+        };
+        assert_eq!(status.failure.as_deref(), Some(expected));
+        assert_eq!(
+            status.prompts,
+            u8::from(existing.is_some()),
+            "the store alone is left"
+        );
+        assert_eq!(
+            step.graph.gate.handover(),
+            HandoverGate::Waiting(WaitReason::ImportDenied)
+        );
+        step.raw.refuse_identity.store(false, Ordering::SeqCst);
+        assert_eq!(step.import.run().stage, SwiftImportStage::Done);
+        let exports = step
+            .keychain
+            .calls()
+            .iter()
+            .filter(|call| **call == "export")
+            .count();
+        assert_eq!(exports, 1, "Try again exported again");
+        let stored = read(&*step.raw, &HandoverIdentity::secret_key()).unwrap();
+        assert_eq!(
+            hex(&HandoverIdentity::from_pem(&stored).unwrap().fingerprint()),
+            FIXTURE_FINGERPRINT
+        );
+    }
+}
+
+/// A certificate query that failed may have hidden the Swift identity:
+/// the import stays pending rather than end, so the listener cannot mint
+/// over it.
+#[test]
+fn a_failed_certificate_query_leaves_the_import_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let preferences = preferences(&dir);
+    let keychain = Arc::new(FakeKeychain::swift_app());
+    *keychain.certificate_error.lock().unwrap() = Some("errSecInteractionNotAllowed".to_owned());
+    let launched = launch(
+        &at_home(),
+        preferences.clone(),
+        &FakeDefaults::new(fixture("swift-domain.plist")),
+        keychain,
+    );
+    assert!(matches!(launched, Launch::Pending(_)), "{launched:?}");
+    assert!(!preferences.flag(IMPORT_RAN_KEY));
+    assert!(!preferences.contains(IMPORT_RAN_KEY));
 }
 
 #[test]
@@ -684,7 +829,7 @@ fn skipping_the_step_counts_as_both_denied_and_the_next_launch_asks_again() {
     assert!(!step.preferences.flag(KEY_READ_KEY));
     assert_eq!(
         step.keychain.calls(),
-        ["certificate", "has key"],
+        ["certificate", "key item", "identity entry"],
         "no prompt"
     );
 

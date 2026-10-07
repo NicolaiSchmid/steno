@@ -27,7 +27,8 @@ use security_framework::os::macos::keychain::{CreateOptions, SecKeychain};
 use steno_handover::identity::hex;
 use steno_macos::keychain::fixture;
 use steno_services::swift_import::{
-    LoginKeychain, SWIFT_API_KEY_LABEL, SWIFT_IDENTITY_LABEL, SwiftKeychain, decode_pkcs12,
+    ApiKeyItem, LoginKeychain, SWIFT_API_KEY_LABEL, SWIFT_IDENTITY_LABEL, SwiftKeychain,
+    decode_pkcs12,
 };
 
 /// `HandoverIdentity.fingerprint` of `test-identity.der`, as
@@ -131,10 +132,17 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
         Some(&certificate_der[..]),
         "found by label"
     );
-    assert!(!swift.has_swift_api_key().unwrap(), "no key item yet");
+    assert_eq!(
+        swift.api_key_item().unwrap(),
+        ApiKeyItem::Missing,
+        "no key item yet"
+    );
+    assert!(!swift.has_stored_identity().unwrap(), "no entry yet");
 
     let passphrase = "a passphrase for this export";
-    let exported = swift.export_identity(passphrase).unwrap();
+    let exported = swift
+        .export_identity(&certificate_der, passphrase)
+        .unwrap();
     let (identity, _bundle) = decode_pkcs12(&exported, passphrase, &certificate_der).unwrap();
     assert_eq!(hex(&identity.fingerprint()), FINGERPRINT);
     assert_eq!(
@@ -144,19 +152,39 @@ fn the_swift_identity_exports_from_a_keychain_and_keeps_its_fingerprint_and_mac_
     );
 
     if let Some(target) = std::env::var_os("STENO_WRITE_EXPORT_FIXTURE") {
-        let committed = swift.export_identity(EXPORTED_PASSPHRASE).unwrap();
+        let committed = swift
+            .export_identity(&certificate_der, EXPORTED_PASSPHRASE)
+            .unwrap();
         std::fs::write(target, committed).unwrap();
     }
 
-    // The Swift API key item: found by its label, without reading it.
-    let mut key = ItemAddOptions::new(ItemAddValue::Data {
-        class: ItemClass::generic_password(),
-        data: core_foundation::data::CFData::from_buffer(b"sk-test"),
-    });
-    key.set_service(steno_services::secrets::KEYRING_SERVICE)
-        .set_account_name(steno_core::SecretKey::LLM_API_KEY)
-        .set_label(SWIFT_API_KEY_LABEL)
-        .set_location(Location::FileKeychain(opened.clone()));
-    key.add().unwrap();
-    assert!(swift.has_swift_api_key().unwrap());
+    // The items a desktop-id build leaves (no label) and the Swift API
+    // key item (labelled): told apart by their attributes, without reading
+    // them, so no prompt comes up while user interaction is disabled.
+    let add_password = |account: &str, label: Option<&str>| {
+        let mut item = ItemAddOptions::new(ItemAddValue::Data {
+            class: ItemClass::generic_password(),
+            data: core_foundation::data::CFData::from_buffer(b"secret"),
+        });
+        item.set_service(steno_services::secrets::KEYRING_SERVICE)
+            .set_account_name(account)
+            .set_location(Location::FileKeychain(opened.clone()));
+        if let Some(label) = label {
+            item.set_label(label);
+        }
+        item.add().unwrap();
+    };
+    add_password(steno_handover::HandoverIdentity::SECRET_KEY, None);
+    assert!(swift.has_stored_identity().unwrap());
+    add_password(steno_core::SecretKey::LLM_API_KEY, None);
+    assert_eq!(swift.api_key_item().unwrap(), ApiKeyItem::Other);
+    ItemSearchOptions::new()
+        .keychains(std::slice::from_ref(&opened))
+        .class(ItemClass::generic_password())
+        .service(steno_services::secrets::KEYRING_SERVICE)
+        .account(steno_core::SecretKey::LLM_API_KEY)
+        .delete()
+        .unwrap();
+    add_password(steno_core::SecretKey::LLM_API_KEY, Some(SWIFT_API_KEY_LABEL));
+    assert_eq!(swift.api_key_item().unwrap(), ApiKeyItem::Swift);
 }

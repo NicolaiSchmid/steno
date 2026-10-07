@@ -4,43 +4,56 @@
 //! identifier, so it reads the Swift app's defaults domain by name and asks
 //! macOS, once per keychain item, for what the Swift app stored there.
 //!
+//! A *desktop-id build* below is a build of this app under the desktop
+//! identifier (D5 of `.plans/2026-10-07-stable-promotion.md`) that ran on
+//! this Mac before the update, for example a release candidate: it files
+//! its keychain entries under the same service and accounts as the Swift
+//! app, but macOS lists that build, not this one, on their access lists.
+//!
 //! Two halves, both macOS only in the product (the logic is
 //! platform-independent and tested everywhere over fakes):
 //!
-//! - **[`launch`]**, first in the shell's `setup`, before the graph is
-//!   built. While `preferences.json` holds no onboarding flag it copies
-//!   three values from the Swift domain (`/usr/bin/defaults export
-//!   uno.schmid.steno.mac -`, [`SwiftDefaults`]):
-//!   `steno.onboardingCompleted` as it is, and Sparkle's
-//!   `SUEnableAutomaticChecks` and `SUAutomaticallyUpdate` as
-//!   [`AUTOMATIC_CHECKS_KEY`] and [`AUTOMATIC_DOWNLOAD_KEY`], the two
-//!   flags the updater's schedule (S4) reads. `steno.loginItemRegistered`
-//!   stays behind, so the new identifier registers its own login item; the
+//! - **[`launch`]**, inside [`crate::build_with_import`] once the
+//!   database's lock is held and before the graph reads a preference or a
+//!   secret, so a second app the lock refuses never runs it. While
+//!   `preferences.json` holds no onboarding flag it copies three values
+//!   from the Swift domain (`/usr/bin/defaults export uno.schmid.steno.mac
+//!   -`, [`SwiftDefaults`]): `steno.onboardingCompleted` as it is, and
+//!   Sparkle's `SUEnableAutomaticChecks` and `SUAutomaticallyUpdate` as
+//!   [`AUTOMATIC_CHECKS_KEY`] and [`AUTOMATIC_DOWNLOAD_KEY`], the two flags
+//!   the updater's schedule (S4) reads. `steno.loginItemRegistered` stays
+//!   behind, so the new identifier registers its own login item; the
 //!   floating panel's anchor stays behind, so the panel opens at its
 //!   default place. Then, when the keychain holds the Swift handover
 //!   certificate ([`SWIFT_IDENTITY_LABEL`], found by a certificate query
-//!   that asks nothing, [`SwiftKeychain`]), the import is pending: the graph
-//!   is built over [`PendingImport`], which reads no API key and starts no
-//!   handover listener until the second half ends. A key alone does not
-//!   make the import pending, since a desktop-id build files its key under
-//!   the same service and account; the step reads the key only when it is
-//!   the Swift one ([`SWIFT_API_KEY_LABEL`]).
+//!   that asks nothing, [`SwiftKeychain`]), or the query failed, the
+//!   import is pending: the graph is built over [`PendingImport`], which
+//!   reads no API key and starts no handover listener until the second
+//!   half ends. A key alone does not make the import pending, since a
+//!   desktop-id build files its key under the same service and account.
+//!   Attribute queries, which ask nothing either, tell the Swift key
+//!   ([`SWIFT_API_KEY_LABEL`]) from a desktop-id build's and find a
+//!   `handover-identity` entry a desktop-id build stored; the step counts
+//!   a prompt for each.
 //! - **[`ImportStep`]**, the onboarding step's half, shown first while the
 //!   import is pending (`steno_host::services::SwiftImport`). It reads the
-//!   API key through `keyring` (one prompt; the item stays as it is,
-//!   shared with the Swift app, which still reads it after a rollback),
+//!   Swift API key through `keyring` (one prompt; the item stays as it is,
+//!   shared with the Swift app, which still reads it after a rollback), or
+//!   lets the graph read a desktop-id build's key (one prompt at most),
 //!   then exports the handover identity (the certificate by label,
 //!   `SecIdentityCreateWithCertificate`, `SecItemExport` as PKCS#12 through
 //!   `steno-macos`, one prompt), decodes it ([`decode_pkcs12`]) and stores
-//!   it as the PEM entry `handover-identity`
-//!   ([`store_imported_identity`]), replacing a desktop-id identity (D5):
-//!   the Swift one is the identity the paired phones pin. A denied key read
-//!   leaves the key empty, and Settings asks for it; no later launch asks
-//!   the keychain for it until a key is saved ([`KEY_DENIED_KEY`]). A denied or failed
-//!   export never mints an identity and never replaces one: the gate
-//!   ([`HandoverGate`]) says the handover waits, the step offers Try again,
-//!   and the step comes back at the next launch. Skipping the step counts
-//!   as a denied read and a denied export.
+//!   it as the PEM entry `handover-identity` ([`store_imported_identity`]),
+//!   replacing a desktop-id build's entry (one more prompt, as `keyring`
+//!   reads an item before it overwrites it): the Swift identity is the one
+//!   the paired phones pin. A denied key read leaves the key empty, and
+//!   Settings asks for it; no later launch asks the keychain for it until
+//!   a key is saved ([`KEY_DENIED_KEY`]). A denied or failed export or
+//!   store never mints an identity and never replaces one: the gate
+//!   ([`HandoverGate`]) says the handover waits, the step offers Try again
+//!   (which repeats only the store when the export got through), and the
+//!   step comes back at the next launch. Skipping the step counts as a
+//!   denied read and a denied export, and brings up no prompt.
 //!
 //! `steno.swiftImportRan` ([`IMPORT_RAN_KEY`]) is set once the identity is
 //! in place, or at launch when there is no Swift certificate to import,
@@ -65,7 +78,7 @@ use tokio::sync::watch;
 pub use identity::{ImportedIdentityError, decode_pkcs12, store_imported_identity};
 #[cfg(target_os = "macos")]
 pub use sources::{DefaultsCommand, LoginKeychain};
-pub use sources::{KeychainRefusal, SwiftDefaults, SwiftKeychain};
+pub use sources::{ApiKeyItem, KeychainRefusal, SwiftDefaults, SwiftKeychain};
 
 use crate::block_on;
 use crate::platform::FilePreferences;
@@ -201,6 +214,13 @@ pub struct PendingImport {
     /// The step reads the Swift API key: the key is gated and the item is
     /// the Swift app's.
     pub read_key: bool,
+    /// The key is gated and its item is not the Swift app's (a desktop-id
+    /// build's): the step lets the graph read it, which may prompt once.
+    pub other_key: bool,
+    /// The keychain already holds a `handover-identity` entry (a
+    /// desktop-id build's): replacing it may prompt once more, since
+    /// `keyring` reads an item before it overwrites it.
+    pub replaces_identity: bool,
 }
 
 /// The launch half: copies the Swift preferences while `preferences.json`
@@ -235,17 +255,28 @@ pub fn launch(
                 tracing::warn!(%error, "the Swift handover certificate could not be looked up");
             }
             let gate_key = !preferences.flag(KEY_READ_KEY);
-            let read_key = gate_key
-                && keychain.has_swift_api_key().unwrap_or_else(|error| {
-                    tracing::warn!(%error, "the Swift API key could not be looked up");
-                    false
-                });
+            let key_item = if gate_key {
+                // An item the query could not classify may prompt: it
+                // counts as one that is not the Swift app's.
+                keychain.api_key_item().unwrap_or_else(|error| {
+                    tracing::warn!(%error, "the API key item could not be looked up");
+                    ApiKeyItem::Other
+                })
+            } else {
+                ApiKeyItem::Missing
+            };
+            let replaces_identity = keychain.has_stored_identity().unwrap_or_else(|error| {
+                tracing::warn!(%error, "the stored handover identity could not be looked up");
+                false
+            });
             Launch::Pending(PendingImport {
                 key_denied: preferences.flag(KEY_DENIED_KEY),
                 preferences,
                 keychain,
                 gate_key,
-                read_key,
+                read_key: key_item == ApiKeyItem::Swift,
+                other_key: key_item == ApiKeyItem::Other,
+                replaces_identity,
             })
         }
     }
@@ -454,7 +485,8 @@ pub struct GraphImport {
     pub secrets: Arc<dyn SecretStore>,
     raw_secrets: Arc<dyn SecretStore>,
     keychain: Arc<dyn SwiftKeychain>,
-    read_key: bool,
+    /// The step's items, from the launch half.
+    items: StepItems,
 }
 
 impl GraphImport {
@@ -479,7 +511,11 @@ impl GraphImport {
             gate,
             raw_secrets: secrets,
             keychain: pending.keychain,
-            read_key: pending.read_key,
+            items: StepItems {
+                read_key: pending.read_key,
+                other_key: pending.other_key,
+                replaces_identity: pending.replaces_identity,
+            },
         }
     }
 
@@ -500,7 +536,8 @@ impl GraphImport {
             runtime,
             state: Mutex::new(StepState {
                 stage: SwiftImportStage::Pending,
-                read_key: self.read_key,
+                items: self.items,
+                bundle: None,
                 failure: None,
             }),
             running: Mutex::new(()),
@@ -508,10 +545,24 @@ impl GraphImport {
     }
 }
 
-#[derive(Debug)]
+/// The keychain items a run still reads, each behind a prompt.
+#[derive(Debug, Clone, Copy)]
+struct StepItems {
+    /// The Swift API key, until the step read it or was refused.
+    read_key: bool,
+    /// A key that is not the Swift app's, until the step let the graph
+    /// read it.
+    other_key: bool,
+    /// The stored `handover-identity` entry the identity replaces.
+    replaces_identity: bool,
+}
+
 struct StepState {
     stage: SwiftImportStage,
-    read_key: bool,
+    items: StepItems,
+    /// The decoded identity a failed store left, so Try again repeats the
+    /// store alone, without a second export prompt.
+    bundle: Option<String>,
     failure: Option<&'static str>,
 }
 
@@ -548,21 +599,24 @@ impl ImportStep {
     }
 
     /// The step had no Swift key to read: the store answers from now on.
-    fn open_key(&self) {
+    /// `other_key` opens the gate also over the no key that Not now left
+    /// for a key item that is not the Swift app's.
+    fn open_key(&self, other_key: bool) {
         let mut key = self.gate.key();
-        if *key == KeyGate::Closed {
+        if *key == KeyGate::Closed || (other_key && *key == KeyGate::Read(None)) {
             *key = KeyGate::Open;
             drop(key);
             (self.reload)();
         }
     }
 
-    /// Exports, decodes and stores the Swift identity; `Ok` also when the
-    /// certificate is gone by now (nothing is left to import).
-    fn export(&self) -> Result<(), &'static str> {
+    /// Exports and decodes the Swift identity into its PEM bundle; `None`
+    /// when the certificate is gone by now (nothing is left to import).
+    /// The export is of the certificate this lookup found.
+    fn export(&self) -> Result<Option<String>, &'static str> {
         let certificate = match self.keychain.swift_certificate() {
             Ok(Some(certificate)) => certificate,
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(None),
             Err(error) => {
                 tracing::warn!(%error, "the Swift handover certificate could not be looked up");
                 return Err(FAILED_EXPORT);
@@ -571,7 +625,7 @@ impl ImportStep {
         let passphrase = uuid::Uuid::new_v4().to_string();
         let pkcs12 = self
             .keychain
-            .export_identity(&passphrase)
+            .export_identity(&certificate, &passphrase)
             .map_err(|refusal| {
                 tracing::warn!(%refusal, "the Swift handover identity was not exported");
                 if refusal.denied {
@@ -580,15 +634,36 @@ impl ImportStep {
                     FAILED_EXPORT
                 }
             })?;
-        let stored = decode_pkcs12(&pkcs12, &passphrase, &certificate).and_then(|(_, bundle)| {
-            block_on(
-                &self.runtime,
-                store_imported_identity(&*self.secrets, &bundle),
-            )
-        });
+        let (_, bundle) = decode_pkcs12(&pkcs12, &passphrase, &certificate).map_err(|error| {
+            tracing::warn!(%error, "the exported Swift handover identity was refused");
+            FAILED_EXPORT
+        })?;
+        Ok(Some(bundle))
+    }
+
+    /// Stores the identity a failed store kept, or else the one an export
+    /// brings now. A store that fails keeps the bundle for Try again; while
+    /// a stored entry is being replaced its failure counts as the prompt
+    /// for that entry denied (the `keyring` crate keeps the status in its
+    /// text only), which Always Allow fixes.
+    fn import_identity(&self) -> Result<(), &'static str> {
+        let kept = self.state().bundle.take();
+        let Some(bundle) = kept.map_or_else(|| self.export(), |bundle| Ok(Some(bundle)))? else {
+            return Ok(());
+        };
+        let stored = block_on(
+            &self.runtime,
+            store_imported_identity(&*self.secrets, &bundle),
+        );
         stored.map_err(|error| {
             tracing::warn!(%error, "the Swift handover identity was not stored");
-            FAILED_EXPORT
+            let mut state = self.state();
+            state.bundle = Some(bundle);
+            if state.items.replaces_identity {
+                DENIED_EXPORT
+            } else {
+                FAILED_EXPORT
+            }
         })
     }
 }
@@ -596,9 +671,13 @@ impl ImportStep {
 impl SwiftImport for ImportStep {
     fn status(&self) -> SwiftImportStatus {
         let state = self.state();
+        let items = state.items;
         SwiftImportStatus {
             stage: state.stage,
-            prompts: u8::from(state.read_key) + 1,
+            prompts: u8::from(items.read_key)
+                + u8::from(items.other_key)
+                + u8::from(state.bundle.is_none())
+                + u8::from(items.replaces_identity),
             failure: state.failure.map(str::to_owned),
         }
     }
@@ -608,19 +687,20 @@ impl SwiftImport for ImportStep {
         if self.state().stage == SwiftImportStage::Done {
             return self.status();
         }
-        if self.state().read_key {
+        if self.state().items.read_key {
             let key = self.keychain.read_api_key().unwrap_or_else(|refusal| {
                 tracing::warn!(%refusal, "the Swift API key was not read");
                 self.preferences.set_flag(KEY_DENIED_KEY, true);
                 None
             });
             self.preferences.set_flag(KEY_READ_KEY, true);
-            self.state().read_key = false;
+            self.state().items.read_key = false;
             self.key_read(key);
         } else {
-            self.open_key();
+            let other_key = std::mem::take(&mut self.state().items.other_key);
+            self.open_key(other_key);
         }
-        let failure = self.export().err();
+        let failure = self.import_identity().err();
         {
             let mut state = self.state();
             state.stage = if failure.is_none() {
@@ -645,10 +725,13 @@ impl SwiftImport for ImportStep {
         if self.state().stage == SwiftImportStage::Done {
             return self.status();
         }
-        if self.state().read_key {
+        // Not now brings up no prompt: a key item is left unread for this
+        // launch, whoever stored it.
+        let items = self.state().items;
+        if items.read_key || items.other_key {
             self.key_read(None);
         } else {
-            self.open_key();
+            self.open_key(false);
         }
         self.state().stage = SwiftImportStage::Waiting;
         self.gate

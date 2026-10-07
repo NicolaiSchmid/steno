@@ -20,19 +20,41 @@ pub trait SwiftKeychain: Send + Sync {
     /// [`SWIFT_IDENTITY_LABEL`](super::SWIFT_IDENTITY_LABEL), or `None`.
     /// A certificate query reads no secret, so macOS asks nothing.
     fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String>;
-    /// Whether the API key item is the Swift app's: filed under
+    /// Whose API key item is filed under
     /// [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE) and the key's
-    /// account and labelled
+    /// account: the Swift app's when it is labelled
     /// [`SWIFT_API_KEY_LABEL`](super::SWIFT_API_KEY_LABEL). An attribute
     /// query, which asks nothing.
-    fn has_swift_api_key(&self) -> Result<bool, String>;
+    fn api_key_item(&self) -> Result<ApiKeyItem, String>;
+    /// Whether a `handover-identity` entry is filed under
+    /// [`KEYRING_SERVICE`](crate::secrets::KEYRING_SERVICE). An attribute
+    /// query, which asks nothing.
+    fn has_stored_identity(&self) -> Result<bool, String>;
     /// The API key; macOS asks for the login password once unless this
     /// app is already on the item's access list. `None` when the item is
     /// gone.
     fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal>;
-    /// The identity of the certificate `swift_certificate` found, as
-    /// PKCS#12 under `passphrase`; macOS asks for the login password once.
-    fn export_identity(&self, passphrase: &str) -> Result<Vec<u8>, KeychainRefusal>;
+    /// The identity of the certificate whose DER is `certificate_der` (the
+    /// one `swift_certificate` found), as PKCS#12 under `passphrase`;
+    /// macOS asks for the login password once.
+    fn export_identity(
+        &self,
+        certificate_der: &[u8],
+        passphrase: &str,
+    ) -> Result<Vec<u8>, KeychainRefusal>;
+}
+
+/// The API key item in the keychain, by who stored it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiKeyItem {
+    /// There is none.
+    Missing,
+    /// The Swift app's, labelled
+    /// [`SWIFT_API_KEY_LABEL`](super::SWIFT_API_KEY_LABEL).
+    Swift,
+    /// Another app's under the same service and account: a desktop-id
+    /// build's, whose read may prompt.
+    Other,
 }
 
 /// A keychain read that did not happen: the user chose Deny, or the item
@@ -66,8 +88,9 @@ mod mac {
     use security_framework::os::macos::identity::SecIdentityExt as _;
     use security_framework::os::macos::keychain::SecKeychain;
     use steno_core::SecretKey;
+    use steno_handover::HandoverIdentity;
 
-    use super::{KeychainRefusal, SwiftDefaults, SwiftKeychain};
+    use super::{ApiKeyItem, KeychainRefusal, SwiftDefaults, SwiftKeychain};
     use crate::secrets::KEYRING_SERVICE;
     use crate::swift_import::{SWIFT_API_KEY_LABEL, SWIFT_DEFAULTS_DOMAIN, SWIFT_IDENTITY_LABEL};
 
@@ -117,12 +140,12 @@ mod mac {
             options
         }
 
-        /// The certificate labelled [`SWIFT_IDENTITY_LABEL`]. Certificate
-        /// queries honour the label (identity queries do not, #88), and a
-        /// second, attribute-only query checks the label of everything
-        /// the first one could have returned, as `IdentityKeychain` checks
-        /// it on the returned attributes.
-        fn certificate(&self) -> Result<Option<SecCertificate>, String> {
+        /// The certificates labelled [`SWIFT_IDENTITY_LABEL`], in the
+        /// keychain's order. Certificate queries honour the label (identity
+        /// queries do not, #88), and a second, attribute-only query checks
+        /// the label of everything the first one could have returned, as
+        /// `IdentityKeychain` checks it on the returned attributes.
+        fn certificates(&self) -> Result<Vec<SecCertificate>, String> {
             let refs = match self
                 .search()
                 .class(ItemClass::certificate())
@@ -132,7 +155,7 @@ mod mac {
                 .search()
             {
                 Ok(results) => results,
-                Err(error) if error.code() == ITEM_NOT_FOUND => return Ok(None),
+                Err(error) if error.code() == ITEM_NOT_FOUND => return Ok(Vec::new()),
                 Err(error) => return Err(format!("the certificate query failed: {error}")),
             };
             let labels = self
@@ -151,10 +174,32 @@ mod mac {
                     "the keychain returned a certificate not labelled \"{SWIFT_IDENTITY_LABEL}\""
                 ));
             }
-            Ok(refs.into_iter().find_map(|result| match result {
-                SearchResult::Ref(Reference::Certificate(certificate)) => Some(certificate),
-                _ => None,
-            }))
+            Ok(refs
+                .into_iter()
+                .filter_map(|result| match result {
+                    SearchResult::Ref(Reference::Certificate(certificate)) => Some(certificate),
+                    _ => None,
+                })
+                .collect())
+        }
+
+        /// The attributes of the generic passwords filed under
+        /// [`KEYRING_SERVICE`] and `account`; no item's data is read, so
+        /// macOS asks nothing.
+        fn passwords(&self, account: &str) -> Result<Vec<SearchResult>, String> {
+            match self
+                .search()
+                .class(ItemClass::generic_password())
+                .service(KEYRING_SERVICE)
+                .account(account)
+                .load_attributes(true)
+                .limit(Limit::All)
+                .search()
+            {
+                Ok(results) => Ok(results),
+                Err(error) if error.code() == ITEM_NOT_FOUND => Ok(Vec::new()),
+                Err(error) => Err(format!("the {account} query failed: {error}")),
+            }
         }
     }
 
@@ -178,25 +223,30 @@ mod mac {
 
     impl SwiftKeychain for LoginKeychain {
         fn swift_certificate(&self) -> Result<Option<Vec<u8>>, String> {
-            Ok(self.certificate()?.map(|certificate| certificate.to_der()))
+            Ok(self
+                .certificates()?
+                .first()
+                .map(SecCertificate::to_der))
         }
 
-        fn has_swift_api_key(&self) -> Result<bool, String> {
-            match self
-                .search()
-                .class(ItemClass::generic_password())
-                .service(KEYRING_SERVICE)
-                .account(SecretKey::LLM_API_KEY)
-                .load_attributes(true)
-                .limit(Limit::All)
-                .search()
-            {
-                Ok(results) => Ok(results
+        fn api_key_item(&self) -> Result<ApiKeyItem, String> {
+            let items = self.passwords(SecretKey::LLM_API_KEY)?;
+            Ok(
+                if items
                     .iter()
-                    .any(|result| label(result).as_deref() == Some(SWIFT_API_KEY_LABEL))),
-                Err(error) if error.code() == ITEM_NOT_FOUND => Ok(false),
-                Err(error) => Err(format!("the API key query failed: {error}")),
-            }
+                    .any(|item| label(item).as_deref() == Some(SWIFT_API_KEY_LABEL))
+                {
+                    ApiKeyItem::Swift
+                } else if items.is_empty() {
+                    ApiKeyItem::Missing
+                } else {
+                    ApiKeyItem::Other
+                },
+            )
+        }
+
+        fn has_stored_identity(&self) -> Result<bool, String> {
+            Ok(!self.passwords(HandoverIdentity::SECRET_KEY)?.is_empty())
         }
 
         fn read_api_key(&self) -> Result<Option<String>, KeychainRefusal> {
@@ -214,12 +264,21 @@ mod mac {
             }
         }
 
-        fn export_identity(&self, passphrase: &str) -> Result<Vec<u8>, KeychainRefusal> {
-            let certificate = self.certificate().map_err(failed)?.ok_or_else(|| {
-                failed(format!(
-                    "no certificate is labelled \"{SWIFT_IDENTITY_LABEL}\""
-                ))
-            })?;
+        fn export_identity(
+            &self,
+            certificate_der: &[u8],
+            passphrase: &str,
+        ) -> Result<Vec<u8>, KeychainRefusal> {
+            let certificate = self
+                .certificates()
+                .map_err(failed)?
+                .into_iter()
+                .find(|certificate| certificate.to_der() == certificate_der)
+                .ok_or_else(|| {
+                    failed(format!(
+                        "no certificate labelled \"{SWIFT_IDENTITY_LABEL}\" is the one found"
+                    ))
+                })?;
             // The first argument is the search list for the private key:
             // the default list in the product, the test's keychain there.
             let identity =
