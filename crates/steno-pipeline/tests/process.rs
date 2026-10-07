@@ -4453,4 +4453,157 @@ async fn a_row_failed_without_an_attempt_waits_a_day() {
     }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(export_retries(&world).count(id), 1);
+/// Where [`Uninstalled`] refuses while its models are missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    SpeechPrepare,
+    Transcribe,
+    DiarizerPrepare,
+}
+
+/// The fakes behind a gate that refuses at one point with
+/// `PipelineFailure::models_missing` until `installed` is set, as the
+/// app's engines refuse a model that is not on disk.
+struct Uninstalled {
+    refusal: Refusal,
+    installed: std::sync::atomic::AtomicBool,
+    engine: FakeSpeechEngine,
+    diarizer: FakeDiarizer,
+}
+
+impl Uninstalled {
+    fn check(
+        &self,
+        at: Refusal,
+        stage: PipelineStage,
+    ) -> steno_core::protocols::BoundaryResult<()> {
+        if at == self.refusal && !self.installed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(Box::new(steno_pipeline::PipelineFailure::models_missing(
+                stage,
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl steno_core::SpeechEngine for Uninstalled {
+    fn id(&self) -> &str {
+        self.engine.id()
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        self.engine.supported_languages()
+    }
+
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        self.check(Refusal::SpeechPrepare, PipelineStage::Decode)?;
+        self.engine.prepare().await
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+        hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::protocols::BoundaryResult<Vec<RawSegment>> {
+        self.check(Refusal::Transcribe, PipelineStage::Transcribe)?;
+        self.engine.transcribe(audio, hint).await
+    }
+}
+
+struct UninstalledDiarizer(Arc<Uninstalled>);
+
+#[async_trait]
+impl steno_core::Diarizer for UninstalledDiarizer {
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        self.0
+            .check(Refusal::DiarizerPrepare, PipelineStage::Diarize)?;
+        self.0.diarizer.prepare().await
+    }
+
+    async fn diarize(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::DiarizationResult> {
+        self.0.diarizer.diarize(audio).await
+    }
+}
+
+/// A run refused because a model is missing, whether the speech engine's
+/// warm-up, a transcription or the diarizer's warm-up refuses it, leaves
+/// the meeting `queued` without a reason and posts `ModelsMissing`; once
+/// the models are installed, `resume_unfinished` processes it to `ready`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are_installed() {
+    for refusal in [
+        Refusal::SpeechPrepare,
+        Refusal::Transcribe,
+        Refusal::DiarizerPrepare,
+    ] {
+        let world = world(false, None, AudioRetention::KeepForever);
+        let gate = Arc::new(Uninstalled {
+            refusal,
+            installed: false.into(),
+            engine: FakeSpeechEngine::default(),
+            diarizer: FakeDiarizer::default(),
+        });
+        let mut dependencies = with_engine(&world, gate.clone());
+        dependencies.diarizer = Arc::new(UninstalledDiarizer(gate.clone()));
+        let pipeline = ProcessingPipeline::new(dependencies);
+        let mut events = world.events.subscribe();
+        let meeting = enqueue_call(&world, &pipeline);
+        pipeline.wait_until_idle().await;
+        assert_eq!(
+            meeting_state(&world, meeting),
+            MeetingState::Queued,
+            "{refusal:?}"
+        );
+        let row = world.store.meeting(meeting).unwrap().unwrap();
+        assert_eq!(row.state.failure_reason(), None, "{refusal:?}");
+        let posted = drain(&mut events);
+        assert!(
+            posted.contains(&MeetingEvent::ModelsMissing {
+                meeting_id: meeting
+            }),
+            "{refusal:?}: {posted:?}"
+        );
+        assert!(pipeline.in_flight().is_empty(), "{refusal:?}");
+
+        gate.installed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting]);
+        pipeline.wait_until_idle().await;
+        assert_eq!(
+            meeting_state(&world, meeting),
+            MeetingState::Ready,
+            "{refusal:?}"
+        );
+    }
+}
+
+/// `process` returns the refusal itself, its kind carried through the
+/// boxed boundary error, so a caller (Process again) can tell it from a
+/// failure.
+#[tokio::test(flavor = "multi_thread")]
+async fn process_returns_the_models_missing_refusal() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let gate = Arc::new(Uninstalled {
+        refusal: Refusal::Transcribe,
+        installed: false.into(),
+        engine: FakeSpeechEngine::default(),
+        diarizer: FakeDiarizer::default(),
+    });
+    let pipeline = ProcessingPipeline::new(with_engine(&world, gate));
+    let mut meeting = call_meeting(world.now);
+    meeting.id = Uuid::new_v4();
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world
+        .store
+        .save_meeting_with_asset(&meeting, &asset)
+        .unwrap();
+    let failure = pipeline.process(asset.id).await.unwrap_err();
+    assert!(failure.is_models_missing());
+    assert_eq!(failure.stage, PipelineStage::Transcribe);
+    assert_eq!(failure.reason, "Download the speech model in Settings");
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Queued);
 }

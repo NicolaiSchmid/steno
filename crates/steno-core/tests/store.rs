@@ -4,6 +4,7 @@
 mod common;
 
 use rusqlite::{OptionalExtension as _, params};
+use steno_core::store::RETIRED_SPEECH_ENGINE_IDS;
 use steno_core::store::convert::{DbDate, DbUuid};
 use steno_core::*;
 
@@ -423,6 +424,41 @@ fn an_unknown_obsidian_field_survives_a_load_edit_save() {
         setting_row(&store, "obsidian").as_deref(),
         Some(r#"{"futureFolder":"Daily","includeAudio":true,"vaultPath":"/vault"}"#)
     );
+}
+
+/// Each engine the Swift app offered beyond Parakeet v3 becomes
+/// `parakeet-v3`, which Swift decodes too, with the notice pending once;
+/// the notice survives a save and goes when dismissed, and nothing moves
+/// again. `parakeet-v3`, an unknown id or no row change nothing.
+#[test]
+fn a_retired_speech_engine_becomes_parakeet_v3_with_one_notice() {
+    for retired in RETIRED_SPEECH_ENGINE_IDS {
+        let store = Store::in_memory().unwrap();
+        put_setting_row(&store, "speechEngineID", &format!("\"{retired}\""));
+        assert_eq!(store.speech_engine_notice().unwrap(), None);
+        assert!(store.retire_speech_engine().unwrap(), "{retired}");
+        assert_eq!(store.settings().unwrap().speech_engine_id, "parakeet-v3");
+        assert_eq!(
+            store.speech_engine_notice().unwrap().as_deref(),
+            Some(retired)
+        );
+        assert!(!store.retire_speech_engine().unwrap(), "only once");
+        let settings = store.settings().unwrap();
+        store.save_settings(&settings).unwrap();
+        assert_eq!(
+            store.speech_engine_notice().unwrap().as_deref(),
+            Some(retired),
+            "a save keeps the pending notice"
+        );
+        store.dismiss_speech_engine_notice().unwrap();
+        assert_eq!(store.speech_engine_notice().unwrap(), None);
+    }
+    for kept in [r#""parakeet-v3""#, r#""some-later-engine""#] {
+        let store = Store::in_memory().unwrap();
+        put_setting_row(&store, "speechEngineID", kept);
+        assert!(!store.retire_speech_engine().unwrap(), "{kept:?}");
+        assert_eq!(store.speech_engine_notice().unwrap(), None);
+    }
 }
 
 #[test]

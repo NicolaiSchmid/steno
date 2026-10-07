@@ -64,6 +64,11 @@ pub enum MeetingEvent {
     RetentionApplied { meeting_id: Uuid },
     /// Posted once a meeting's rows are gone.
     Deleted { meeting_id: Uuid },
+    /// Posted when a run is refused because a model it needs is not
+    /// installed: the meeting stays `queued` without a reason and is
+    /// processed once the models are installed. Rust only: the Swift
+    /// pipeline downloaded the model inside the run.
+    ModelsMissing { meeting_id: Uuid },
     /// Posted when a summary re-run or a re-export fails after the
     /// pipeline accepted it. The services start both in the background and
     /// return at once, so this is how the failure reaches the detail's
@@ -107,6 +112,7 @@ impl MeetingEvent {
             | MeetingEvent::SpeakersNeedReview { meeting_id, .. }
             | MeetingEvent::RetentionApplied { meeting_id }
             | MeetingEvent::Deleted { meeting_id }
+            | MeetingEvent::ModelsMissing { meeting_id }
             | MeetingEvent::OperationFailed { meeting_id, .. } => *meeting_id,
         }
     }

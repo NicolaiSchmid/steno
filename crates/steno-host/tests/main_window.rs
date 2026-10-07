@@ -2189,3 +2189,78 @@ fn process_again_words_a_gone_recording_for_the_platform() {
         "The recording is no longer on this computer, so the meeting cannot be processed again."
     );
 }
+
+/// A run refused for a missing model leaves the meeting queued; its
+/// progress entry then says what to do (stage `modelsMissing`), until the
+/// next run's first event. Rust only.
+#[test]
+fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            let mut meeting = sample_meeting();
+            meeting.id = uuid(0x89);
+            meeting.state = MeetingState::Queued;
+            meeting.summary = None;
+            store.save_meeting(&meeting).unwrap();
+        })
+        .build();
+    let entry = |harness: &Harness| harness.snapshot(BridgeTopic::Progress)["entries"][0].clone();
+    assert_eq!(entry(&harness)["stage"], "waiting");
+    assert_eq!(entry(&harness)["title"], "Waiting to process");
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::ModelsMissing {
+            meeting_id: uuid(0x89),
+        });
+    assert_eq!(entry(&harness)["stage"], "modelsMissing");
+    assert_eq!(
+        entry(&harness)["title"],
+        "Download the speech model in Settings"
+    );
+    harness.host.store_changed();
+    assert_eq!(
+        entry(&harness)["stage"],
+        "modelsMissing",
+        "the store's poll keeps it"
+    );
+    harness.host.apply_meeting_event(&MeetingEvent::Progress {
+        meeting_id: uuid(0x89),
+        progress: steno_core::ProcessingProgress {
+            stage: PipelineStage::Decode,
+            fraction: 0.05,
+            next_fraction: 0.1,
+            estimated_remaining_seconds: 60.0,
+            is_estimate_seeded: false,
+            lane: 0,
+            lane_count: 1,
+        },
+    });
+    assert_eq!(entry(&harness)["stage"], "decode");
+}
+
+/// A pending engine notice takes the setup banner's place, with no action
+/// to offer; dismissing it records it as seen, so the next host (the next
+/// launch) shows the setup banner again and the notice never.
+#[test]
+fn the_engine_notice_shows_once_in_the_banners_place() {
+    let seed = |store: &steno_core::Store, fakes: &steno_host::fakes::FakeServices| {
+        populate_sample(store, fakes);
+        let mut settings = store.settings().unwrap();
+        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
+        store.save_settings(&settings).unwrap();
+        assert!(store.retire_speech_engine().unwrap());
+    };
+    let harness = Harness::builder().seed(seed).build();
+    let banner = harness.snapshot(BridgeTopic::App)["setupBanner"].clone();
+    assert_eq!(banner["title"], "Steno now transcribes with Parakeet v3");
+    assert_eq!(banner["offersSummaries"], false);
+    assert_eq!(banner["offersVault"], false);
+    harness.host.setup_dismiss_banner().unwrap();
+    assert_eq!(harness.store.speech_engine_notice().unwrap(), None);
+    let after = harness.snapshot(BridgeTopic::App)["setupBanner"].clone();
+    assert_ne!(after["title"], "Steno now transcribes with Parakeet v3");
+    assert_eq!(
+        harness.store.settings().unwrap().speech_engine_id,
+        "parakeet-v3"
+    );
+}

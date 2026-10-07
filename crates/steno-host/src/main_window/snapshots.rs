@@ -26,9 +26,9 @@ use crate::labels::{
 };
 use crate::main_window::detail::{MeetingDetailViewModel, RecordingStatus};
 use crate::main_window::list::MeetingListViewModel;
-use crate::main_window::progress::ProcessingProgressModel;
+use crate::main_window::progress::{ProcessingProgressModel, ProgressEntry};
 use crate::services::RecorderStatus;
-use crate::setup::{ExportStatus, SetupBannerMessage, SummaryStatus, copy};
+use crate::setup::{ExportStatus, SetupBannerMessage, SummaryStatus, copy, engine_notice};
 use crate::summary_markdown::detail_sections;
 
 /// How many entries the page's people palette has.
@@ -73,6 +73,9 @@ pub struct AppState {
     pub requested_meeting_id: Option<Uuid>,
     pub requested_settings_section: Option<SettingsSection>,
     pub setup_banner_dismissed: bool,
+    /// The engine notice is pending (`Store::speech_engine_notice`); it
+    /// takes the setup banner's place until dismissed. Rust only.
+    pub speech_engine_notice: bool,
     pub stored_settings: Option<Settings>,
     /// The iPhone card; the Swift main window never set it (the parity list
     /// notes it), the Rust host fills it from the handover service.
@@ -81,7 +84,9 @@ pub struct AppState {
 
 /// The setup banner shows while at least one meeting exists, the
 /// configuration is incomplete and "Not now" was not pressed this launch.
-/// Deep links are the controller's pending requests as they stand.
+/// A pending engine notice shows in its place, meetings or not, with no
+/// action but its dismissal. Deep links are the controller's pending
+/// requests as they stand.
 #[must_use]
 pub fn app_snapshot(
     app: &AppState,
@@ -89,17 +94,24 @@ pub fn app_snapshot(
     version: &str,
     platform: Platform,
 ) -> AppSnapshot {
-    let banner = app
-        .stored_settings
-        .as_ref()
-        .and_then(SetupBannerMessage::of)
-        .filter(|_| has_meetings && !app.setup_banner_dismissed)
-        .map(|message| AppSetupBanner {
-            title: message.title().to_owned(),
-            body: message.body(platform).to_owned(),
-            offers_summaries: message.offers_summaries(),
-            offers_vault: message.offers_vault(),
-        });
+    let notice = app.speech_engine_notice.then(|| AppSetupBanner {
+        title: engine_notice::TITLE.to_owned(),
+        body: engine_notice::BODY.to_owned(),
+        offers_summaries: false,
+        offers_vault: false,
+    });
+    let banner = notice.or_else(|| {
+        app.stored_settings
+            .as_ref()
+            .and_then(SetupBannerMessage::of)
+            .filter(|_| has_meetings && !app.setup_banner_dismissed)
+            .map(|message| AppSetupBanner {
+                title: message.title().to_owned(),
+                body: message.body(platform).to_owned(),
+                offers_summaries: message.offers_summaries(),
+                offers_vault: message.offers_vault(),
+            })
+    });
     AppSnapshot {
         version: version.to_owned(),
         setup_banner: banner,
@@ -156,9 +168,13 @@ pub fn progress_snapshot(model: &ProcessingProgressModel) -> ProgressSnapshot {
             .into_iter()
             .map(|entry| BridgeProgressEntry {
                 meeting_id: entry.meeting_id,
-                stage: entry
-                    .stage()
-                    .map_or_else(|| "waiting".to_owned(), |stage| stage.as_str().to_owned()),
+                stage: if entry.models_missing {
+                    ProgressEntry::MODELS_MISSING_STAGE.to_owned()
+                } else {
+                    entry
+                        .stage()
+                        .map_or_else(|| "waiting".to_owned(), |stage| stage.as_str().to_owned())
+                },
                 title: entry.title(),
                 fraction: entry.fraction(),
                 estimated_remaining_seconds: entry.estimated_remaining_seconds(),

@@ -59,24 +59,47 @@ use crate::run::ProcessingRun;
 use crate::sample_clips::{self, ClipProbe, ClipStep};
 
 /// The one failure type: any error inside a stage becomes this, and
-/// [`ProcessingPipeline::process`] marks the meeting failed in one place.
+/// [`ProcessingPipeline::process`] marks the meeting failed in one place,
+/// unless the failure is [`FailureKind::ModelsMissing`].
 /// Swift: `PipelineFailure` in `Sources/StenoCore/Pipeline/PipelineStage.swift`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, thiserror::Error)]
 pub struct PipelineFailure {
     pub stage: PipelineStage,
     pub reason: String,
+    pub kind: FailureKind,
     /// Wraps a store error that another connection's lock caused
     /// ([`StoreError::is_busy`]). Rust only: Swift's failure kept no such
     /// mark, and its intake did not retry.
     busy: bool,
 }
 
+/// What a [`PipelineFailure`] means for its meeting. Rust only: the Swift
+/// pipeline downloaded a missing model inside the run.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum FailureKind {
+    /// The meeting is marked failed with the reason.
+    #[default]
+    Failed,
+    /// A model the run needs is not installed, and the run downloads
+    /// none: the meeting stays `queued` without a reason, the
+    /// [`MeetingEvent::ModelsMissing`] event says why, and
+    /// [`ProcessingPipeline::resume_unfinished`] processes it once the
+    /// models are installed.
+    ModelsMissing,
+}
+
 impl PipelineFailure {
+    /// The reason of [`PipelineFailure::models_missing`].
+    pub const MODELS_MISSING: &'static str = "Download the speech model in Settings";
+
+    /// A failure of the kind [`FailureKind::Failed`].
     #[must_use]
     pub fn new(stage: PipelineStage, reason: impl Into<String>) -> Self {
         PipelineFailure {
             stage,
             reason: reason.into(),
+            kind: FailureKind::Failed,
             busy: false,
         }
     }
@@ -88,9 +111,39 @@ impl PipelineFailure {
         self.busy
     }
 
+    /// The refusal of a speech engine or diarizer whose models are not
+    /// installed, at `stage`: [`FailureKind::ModelsMissing`] with the
+    /// reason [`Self::MODELS_MISSING`]. The engines the app's pipelines
+    /// run return it boxed; [`Self::wrapping`] keeps it.
+    ///
+    /// ```
+    /// use steno_core::PipelineStage;
+    /// use steno_pipeline::PipelineFailure;
+    ///
+    /// let refusal = PipelineFailure::models_missing(PipelineStage::Transcribe);
+    /// assert!(refusal.is_models_missing());
+    /// let boxed: steno_core::protocols::BoxError = Box::new(refusal.clone());
+    /// assert_eq!(PipelineFailure::wrapping(&boxed, PipelineStage::Decode), refusal);
+    /// ```
+    #[must_use]
+    pub fn models_missing(stage: PipelineStage) -> Self {
+        PipelineFailure {
+            stage,
+            reason: Self::MODELS_MISSING.to_owned(),
+            kind: FailureKind::ModelsMissing,
+            busy: false,
+        }
+    }
+
+    /// Whether this is [`FailureKind::ModelsMissing`].
+    #[must_use]
+    pub fn is_models_missing(&self) -> bool {
+        self.kind == FailureKind::ModelsMissing
+    }
+
     /// `error` itself when it already is a `PipelineFailure`, bare or
-    /// boxed as a boundary error (the stage it carries wins), else a
-    /// failure for `stage` describing `error`. Swift: `PipelineFailure.wrapping`.
+    /// boxed as a boundary error (the stage and kind it carries win), else
+    /// a failure for `stage` describing `error`. Swift: `PipelineFailure.wrapping`.
     #[must_use]
     pub fn wrapping<E: fmt::Display + 'static>(error: &E, stage: PipelineStage) -> Self {
         let any: &dyn Any = error;
@@ -1375,6 +1428,15 @@ impl ProcessingPipeline {
                     );
                     return;
                 }
+                if failure.is_models_missing() {
+                    tracing::info!(
+                        target: BACKGROUND_RUN_LOG,
+                        %asset_id,
+                        stage = failure.stage.as_str(),
+                        "processing waits for the models to be installed"
+                    );
+                    return;
+                }
                 // The reason can name the audio file (a decode error) or
                 // quote the model, so warn carries the stage only; the
                 // meeting row has the whole reason.
@@ -1457,13 +1519,16 @@ impl ProcessingPipeline {
 
     /// Runs every stage: `queued → processing → ready`, or `failed(reason)`
     /// with whatever was persisted so far; a panic fails the meeting too. A
-    /// failing `diarize` or `match_speakers` does not fail it: the
-    /// transcript is kept with the speakers stored for the meeting, or,
-    /// when none are stored, one unknown speaker for the diarized lane.
-    /// Once `persist` has marked the meeting `ready` nothing downgrades it,
-    /// not an error or a panic later in the run: the meeting is delivered
-    /// and its retention applied, and the panic's or the `retention`
-    /// error's failure is returned to the caller.
+    /// run refused because a model is not installed
+    /// ([`PipelineFailure::is_models_missing`]) leaves the meeting `queued`
+    /// instead, and the call returns the refusal. A failing `diarize` or
+    /// `match_speakers` does not fail it: the transcript is kept with the
+    /// speakers stored for the meeting, or, when none are stored, one
+    /// unknown speaker for the diarized lane. Once `persist` has marked the
+    /// meeting `ready` nothing downgrades it, not an error or a panic later
+    /// in the run: the meeting is delivered and its retention applied, and
+    /// the panic's or the `retention` error's failure is returned to the
+    /// caller.
     /// Once the pipeline [quits](Self::quit), a failure is returned and
     /// not persisted, and a call made after it fails at once: the meeting
     /// stays `queued` or `processing`, which the next launch's
@@ -1499,6 +1564,10 @@ impl ProcessingPipeline {
             let persisted = match until_persist {
                 Ok(asset) => asset,
                 Err(failure) if self.quitting() => return Err(failure),
+                Err(failure) if failure.is_models_missing() => {
+                    self.park(meeting_id);
+                    return Err(failure);
+                }
                 Err(failure) => {
                     // A failure after `persist` marked the meeting ready
                     // leaves it ready, and a ready meeting is delivered:
@@ -1528,6 +1597,20 @@ impl ProcessingPipeline {
             self.retention(&persisted).await
         })
         .await
+    }
+
+    /// A run refused for missing models leaves its meeting `queued`, as it
+    /// was before the run when the warm-up refused, or back from
+    /// `processing` when a later stage did, and says why with
+    /// [`MeetingEvent::ModelsMissing`]. Best effort, like the failed mark.
+    fn park(&self, meeting_id: Uuid) {
+        let _ = self
+            .store()
+            .set_state(meeting_id, MeetingState::Queued, self.now());
+        self.inner
+            .dependencies
+            .events
+            .post(MeetingEvent::ModelsMissing { meeting_id });
     }
 
     async fn process_until_persist(
@@ -2815,6 +2898,32 @@ mod tests {
             PipelineFailure::wrapping(&other, PipelineStage::Decode),
             PipelineFailure::new(PipelineStage::Decode, "no such file")
         );
+    }
+
+    /// `new` is a failure; `models_missing` keeps its kind, its stage and
+    /// its fixed reason through `wrapping`, bare and boxed.
+    #[test]
+    fn a_models_missing_refusal_keeps_its_kind_bare_or_boxed() {
+        assert_eq!(
+            PipelineFailure::new(PipelineStage::Decode, "x").kind,
+            FailureKind::Failed
+        );
+        assert!(!PipelineFailure::new(PipelineStage::Decode, "x").is_models_missing());
+        let refusal = PipelineFailure::models_missing(PipelineStage::Diarize);
+        assert_eq!(refusal.kind, FailureKind::ModelsMissing);
+        assert_eq!(refusal.reason, "Download the speech model in Settings");
+        assert_eq!(
+            refusal.to_string(),
+            "diarize: Download the speech model in Settings"
+        );
+        let boxed: BoxError = Box::new(refusal.clone());
+        for wrapped in [
+            PipelineFailure::wrapping(&refusal, PipelineStage::Decode),
+            PipelineFailure::wrapping(&boxed, PipelineStage::Decode),
+        ] {
+            assert_eq!(wrapped, refusal);
+            assert!(wrapped.is_models_missing());
+        }
     }
 
     /// `process_again` against a run that ends while it waits for its

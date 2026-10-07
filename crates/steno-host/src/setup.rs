@@ -226,6 +226,15 @@ impl SetupBannerMessage {
     }
 }
 
+/// The one-time notice of a speech engine the Swift app offered and the
+/// Rust app has none for (`Store::retire_speech_engine`): it shows in the
+/// setup banner's place until dismissed, with no action but the dismissal.
+/// Rust only.
+pub mod engine_notice {
+    pub const TITLE: &str = "Steno now transcribes with Parakeet v3";
+    pub const BODY: &str = "The speech model you chose before is not part of this version, so Steno switched to Parakeet v3, which understands 25 European languages.";
+}
+
 /// The onboarding plan's user-facing strings for the main window, in one
 /// place so the banner, the tabs and the footer cannot drift. Swift:
 /// `SetupCopy`.

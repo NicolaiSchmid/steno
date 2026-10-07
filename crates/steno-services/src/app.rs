@@ -490,6 +490,14 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let runtime = options.runtime;
     let zone = local_zone();
 
+    // A Whisper, Ultra or German engine the Swift app stored becomes
+    // Parakeet v3 before anything reads the engine; the main window shows
+    // the notice once.
+    if let Err(error) = store.retire_speech_engine() {
+        warnings.push(format!(
+            "The speech engine setting could not be updated: {error}"
+        ));
+    }
     // The speech settings and the models directory are read once, here:
     // the pipeline (and every reload, which keeps its engine when it runs
     // where the last one did) and the model service share them.
@@ -938,7 +946,8 @@ impl App {
                                 event_host.store_changed();
                             }
                             MeetingEvent::SpeakersNeedReview { .. }
-                            | MeetingEvent::Deleted { .. } => {
+                            | MeetingEvent::Deleted { .. }
+                            | MeetingEvent::ModelsMissing { .. } => {
                                 event_host.store_changed();
                             }
                             MeetingEvent::OperationFailed { .. } => {
