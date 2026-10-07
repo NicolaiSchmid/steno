@@ -5,6 +5,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[cfg(not(unix))]
+use std::io::ErrorKind;
+
+#[cfg(not(unix))]
 use unicode_normalization::UnicodeNormalization as _;
 
 use super::{AtomicFileWriter, WriteFailure};
@@ -93,11 +96,16 @@ impl LocalFolderSink {
 
     /// Whether `left` and `right` are one file under two spellings, as
     /// `anna.md` and `Anna.md` are on a case-insensitive folder (APFS and
-    /// NTFS by default). On Unix by device and inode (a symlink counts as
-    /// its target), false when either is missing. Windows has no stable file
-    /// identity in `std`, so there the paths are compared NFC-normalised and
-    /// lowercased, NTFS's default; in a rare case-sensitive directory the
-    /// stale line then stays, and nothing is lost.
+    /// NTFS by default); false when either is missing. A symlink counts as
+    /// its target. On Unix by device and inode; on Windows by the final
+    /// path name of each (`fs::canonicalize`, which gives the name as
+    /// stored, also in a case-sensitive directory). Only when Windows
+    /// cannot resolve a path for another reason are the two compared
+    /// NFC-normalised and lowercased, close to NTFS's default but not
+    /// exact (NTFS upcases `ı` to `I` and `ſ` to `S`; lowercasing keeps
+    /// them apart).
+    /// Swift: none; `removeMeetingLine` compares the paths as written
+    /// (parity note in the plan).
     #[must_use]
     pub fn same_file(&self, left: &str, right: &str) -> bool {
         #[cfg(unix)]
@@ -114,7 +122,14 @@ impl LocalFolderSink {
         #[cfg(not(unix))]
         {
             let folded = |path: &str| path.nfc().collect::<String>().to_lowercase();
-            folded(left) == folded(right)
+            match (
+                fs::canonicalize(self.path(left)),
+                fs::canonicalize(self.path(right)),
+            ) {
+                (Ok(left), Ok(right)) => left == right,
+                (Err(error), _) | (_, Err(error)) if error.kind() == ErrorKind::NotFound => false,
+                _ => folded(left) == folded(right),
+            }
         }
     }
 }

@@ -1249,9 +1249,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   runs, on one vault only the folder claim holds; the person-page merge and the temp
   sweep are not guarded across processes in either app.
 - `removeMeetingLine` should skip a listed page that is the same file as a page this
-  delivery rendered, as the Rust destination does (device and inode on Unix; Swift
-  can compare `fileResourceIdentifier`): on APFS a person renamed from `anna` to
-  `Anna` today loses this meeting's line from the one page both names refer to.
+  delivery rendered, as the Rust destination does (device and inode on Unix and the
+  final path name on Windows; Swift can compare `fileResourceIdentifier`): on APFS a
+  person renamed from `anna` to `Anna` today loses this meeting's line from the one
+  page both names refer to.
 - On Windows the Rust person pages keep off the reserved device names (`Con` becomes
   `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
   names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.
