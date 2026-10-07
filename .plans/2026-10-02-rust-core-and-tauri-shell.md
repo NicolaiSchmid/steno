@@ -3151,7 +3151,8 @@ PR off `main`.
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
 ||||||| parent of ff1dfb5e9 (docs(plans): the CoreML Parakeet download joins invariant 3, and the S1 items close)
-| The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | | open |
+||||||| parent of 6affe8721 (docs(plans): the S1 progress row names #237)
+| The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
