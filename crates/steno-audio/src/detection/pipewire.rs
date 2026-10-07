@@ -8,7 +8,8 @@
 //!
 //! A process holds the microphone while one of its `Stream/Input/Audio`
 //! nodes is linked from a source (an `Audio/Source` node, a virtual one
-//! included, or an `Audio/Duplex` device) and the node's state is not idle,
+//! included, or an `Audio/Duplex` device other than through its monitor
+//! ports, which carry what it plays) and the node's state is not idle,
 //! suspended or failed. The link, not the state alone, decides because the
 //! registry reports links with both ends on the global, and because a
 //! capture stream linked from a sink's monitor (a screen recorder taking the
@@ -39,14 +40,16 @@
 //! PipeWire's objects are single-threaded: one `steno-pw-detect` thread
 //! per source owns the connection, binds the stream nodes and the clients
 //! for their info, and writes what it learns into a shared view under a
-//! mutex. It starts with the first [`snapshot`](LiveProcessAudioActivity)
-//! or `changes()` call and ends when the source drops. Every `changes()`
+//! mutex. It starts with the first
+//! [`snapshot`](ProcessAudioActivitySource::snapshot) or `changes()` call
+//! and ends when the source drops, while it connects too. Every `changes()`
 //! receiver hears from that one thread: a message whenever a node, link
 //! or client appears or goes, or a stream node's or client's info changes,
 //! and one right away; a dropped receiver is forgotten at the next
 //! message. A lost connection ends the thread; the next call after
 //! [`RETRY_AFTER`] connects afresh, and the calls before it answer the
-//! error.
+//! error. A thread that ended without saying why (a panic) is started again
+//! by the next call.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -69,11 +72,28 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long after a lost or failed connection the next call tries again;
 /// the calls before it answer the error at once. Without a PipeWire daemon
 /// the detector's 1 s poll would otherwise start a thread every second.
-pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(5);
+const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// How long dropping the source waits for its thread to end.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// The wait on the loop once connected; the quit wakes it earlier.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
+
+/// Why a snapshot or the first view gave up on the daemon.
+fn no_answer() -> String {
+    format!(
+        "PipeWire did not answer within {} s",
+        ANSWER_TIMEOUT.as_secs()
+    )
+}
+
+/// Whether a node in `state` runs: running, or still being created (a
+/// stream's first state); idle, suspended or failed is not.
+fn is_running(state: &pw::node::NodeState<'_>) -> bool {
+    matches!(
+        state,
+        pw::node::NodeState::Running | pw::node::NodeState::Creating
+    )
+}
 
 /// The identity properties of a stream node or a client; the info's
 /// values, once read, replace the global's.
@@ -135,10 +155,22 @@ struct StreamNode {
 pub(crate) struct StreamGraph {
     /// The nodes a microphone is: sources and duplex devices.
     sources: BTreeSet<u32>,
+    /// The duplex devices among them, whose monitor ports carry playback.
+    duplex: BTreeSet<u32>,
+    /// Every monitor port (`port.monitor`).
+    monitor_ports: BTreeSet<u32>,
     streams: BTreeMap<u32, StreamNode>,
-    /// Each link's output and input node.
-    links: BTreeMap<u32, (u32, u32)>,
+    /// Each link's output node, output port (when it says) and input node.
+    links: BTreeMap<u32, Link>,
     clients: BTreeMap<u32, Who>,
+}
+
+/// One link's ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Link {
+    output: u32,
+    output_port: Option<u32>,
+    input: u32,
 }
 
 /// Whether a node's properties leave it out of the activity: Steno's own
@@ -156,6 +188,9 @@ impl StreamGraph {
         let class = props("media.class").unwrap_or_default();
         if is_source_class(class) {
             self.sources.insert(id);
+            if class == "Audio/Duplex" {
+                self.duplex.insert(id);
+            }
             return false;
         }
         let input = if class.starts_with("Stream/Input/Audio") {
@@ -203,12 +238,39 @@ impl StreamGraph {
         self.clients.entry(id).or_default().merge(Who::read(&props));
     }
 
+    /// A port global: kept only when it is a monitor port; whether it is.
+    fn add_port<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) -> bool {
+        let monitor = props("port.monitor") == Some("true");
+        if monitor {
+            self.monitor_ports.insert(id);
+        }
+        monitor
+    }
+
     /// A link global.
     fn add_link<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
-        let node = |key| props(key).and_then(|v| v.parse().ok());
-        if let (Some(output), Some(input)) = (node("link.output.node"), node("link.input.node")) {
-            self.links.insert(id, (output, input));
+        let id_of = |key| props(key).and_then(|v| v.parse().ok());
+        if let (Some(output), Some(input)) = (id_of("link.output.node"), id_of("link.input.node")) {
+            let output_port = id_of("link.output.port");
+            self.links.insert(
+                id,
+                Link {
+                    output,
+                    output_port,
+                    input,
+                },
+            );
         }
+    }
+
+    /// Whether `link` carries a microphone: from a source, and not from a
+    /// duplex device's monitor port.
+    fn carries_microphone(&self, link: &Link) -> bool {
+        self.sources.contains(&link.output)
+            && !(self.duplex.contains(&link.output)
+                && link
+                    .output_port
+                    .is_some_and(|port| self.monitor_ports.contains(&port)))
     }
 
     /// A global went away; whether the view held it.
@@ -216,6 +278,8 @@ impl StreamGraph {
         // Not short-circuiting: an id is in at most one map, and each must
         // forget it.
         self.sources.remove(&id)
+            | self.duplex.remove(&id)
+            | self.monitor_ports.remove(&id)
             | self.streams.remove(&id).is_some()
             | self.links.remove(&id).is_some()
             | self.clients.remove(&id).is_some()
@@ -250,9 +314,9 @@ impl StreamGraph {
                 && self
                     .links
                     .values()
-                    .any(|&(output, input)| input == id && self.sources.contains(&output));
+                    .any(|link| link.input == id && self.carries_microphone(link));
             let plays =
-                !stream.input && running && self.links.values().any(|&(output, _)| output == id);
+                !stream.input && running && self.links.values().any(|link| link.output == id);
             let process = processes
                 .entry(pid)
                 .or_insert_with(|| ProcessAudioActivity::new(pid, None, false));
@@ -388,12 +452,9 @@ fn announce(
                 .add_listener_local()
                 .info(move |info| {
                     let mask = info.change_mask();
-                    let running = mask.contains(pw::node::NodeChangeMask::STATE).then(|| {
-                        matches!(
-                            info.state(),
-                            pw::node::NodeState::Running | pw::node::NodeState::Creating
-                        )
-                    });
+                    let running = mask
+                        .contains(pw::node::NodeChangeMask::STATE)
+                        .then(|| is_running(&info.state()));
                     let props = info
                         .props()
                         .filter(|_| mask.contains(pw::node::NodeChangeMask::PROPS));
@@ -429,6 +490,11 @@ fn announce(
         }
         ObjectType::Link => {
             shared.update(|graph| graph.add_link(id, get));
+            return;
+        }
+        // Only monitor ports matter, so only they are a change.
+        ObjectType::Port if get("port.monitor") == Some("true") => {
+            shared.update(|graph| graph.add_port(id, get));
             return;
         }
         _ => return,
@@ -506,19 +572,17 @@ impl Connection {
         })
     }
 
-    /// Waits until the daemon has answered everything sent before.
-    fn roundtrip(&self, deadline: Instant) -> Result<(), String> {
+    /// Waits until the daemon has answered everything sent before, or the
+    /// quit arrived.
+    fn roundtrip(&self, deadline: Instant, quitting: &Cell<bool>) -> Result<(), String> {
         let pending = self.core.sync(0).map_err(failure("a PipeWire roundtrip"))?;
-        while self.local.done.get() != Some(pending) {
+        while self.local.done.get() != Some(pending) && !quitting.get() {
             if let Some(error) = self.local.failed.borrow().clone() {
                 return Err(error);
             }
             let now = Instant::now();
             if now >= deadline {
-                return Err(format!(
-                    "PipeWire did not answer within {} s",
-                    ANSWER_TIMEOUT.as_secs()
-                ));
+                return Err(no_answer());
             }
             self.main_loop
                 .loop_()
@@ -529,13 +593,8 @@ impl Connection {
 
     /// Runs the loop until the quit arrives (`None`) or the connection
     /// fails (why).
-    fn watch(&self, quit: pw::channel::Receiver<()>) -> Option<String> {
-        let quitting = Rc::new(Cell::new(false));
+    fn watch(&self, quitting: &Cell<bool>) -> Option<String> {
         let main_loop = self.main_loop.loop_();
-        let _attached = quit.attach(main_loop, {
-            let quitting = Rc::clone(&quitting);
-            move |()| quitting.set(true)
-        });
         while !quitting.get() {
             if let Some(error) = self.local.failed.borrow().clone() {
                 return Some(error);
@@ -553,11 +612,21 @@ impl Connection {
 /// failure.
 fn run(shared: &Arc<Shared>, quit: pw::channel::Receiver<()>) {
     let ended = Connection::open(shared).and_then(|connection| {
+        // Attached first, so a source dropped while this connects ends the
+        // thread within a loop pass rather than after the roundtrips.
+        let quitting = Rc::new(Cell::new(false));
+        let _attached = quit.attach(connection.main_loop.loop_(), {
+            let quitting = Rc::clone(&quitting);
+            move |()| quitting.set(true)
+        });
         let deadline = Instant::now() + ANSWER_TIMEOUT;
-        connection.roundtrip(deadline)?;
-        connection.roundtrip(deadline)?;
+        connection.roundtrip(deadline, &quitting)?;
+        connection.roundtrip(deadline, &quitting)?;
+        if quitting.get() {
+            return Ok(());
+        }
         shared.set_phase(Phase::Ready);
-        connection.watch(quit).map_or(Ok(()), Err)
+        connection.watch(&quitting).map_or(Ok(()), Err)
     });
     if let Err(error) = ended {
         tracing::warn!("meeting detection lost PipeWire: {error}");
@@ -616,7 +685,7 @@ impl Watch {
 /// of its capture streams is linked from a source and running, Steno's own
 /// capture, filters and level meters left out. One PipeWire thread per
 /// source, started by the first call and ended by the drop, serves every
-/// `changes()` receiver. The source file's module doc says why.
+/// `changes()` receiver; the `detection::pipewire` module doc says why.
 pub struct LiveProcessAudioActivity {
     shared: Arc<Shared>,
     watch: Mutex<Option<Watch>>,
@@ -653,7 +722,8 @@ impl LiveProcessAudioActivity {
     }
 
     /// Starts the thread unless it runs, or ended less than
-    /// [`RETRY_AFTER`] ago; a thread that ended is joined first.
+    /// [`RETRY_AFTER`] ago; a thread that ended is joined first, one that
+    /// finished without ending its phase (it panicked) included.
     fn ensure_watching(&self) {
         let mut watch = self.watch.lock().unwrap_or_else(PoisonError::into_inner);
         let ended = match &self.shared.lock().phase {
@@ -661,7 +731,7 @@ impl LiveProcessAudioActivity {
             Phase::Connecting | Phase::Ready => None,
         };
         match (&*watch, ended) {
-            (Some(_), None) => return,
+            (Some(running), None) if !running.thread.is_finished() => return,
             (_, Some(at)) if at.elapsed() < RETRY_AFTER => return,
             _ => {}
         }
@@ -699,10 +769,7 @@ impl ProcessAudioActivitySource for LiveProcessAudioActivity {
         match &state.phase {
             Phase::Ready => Ok(state.graph.processes()),
             Phase::Ended { error, .. } => Err(ActivityError::Failed(error.clone())),
-            Phase::Connecting => Err(ActivityError::Failed(format!(
-                "PipeWire did not answer within {} s",
-                ANSWER_TIMEOUT.as_secs()
-            ))),
+            Phase::Connecting => Err(ActivityError::Failed(no_answer())),
         }
     }
 
@@ -762,7 +829,15 @@ mod tests {
                 ("application.process.binary", "pw-cat"),
             ]),
         );
-        graph.client(21, props(&[("pipewire.sec.pid", "300")]));
+        // The compatibility layer's own client carries its own pid, so a
+        // stream's pid must come from the stream first.
+        graph.client(
+            21,
+            props(&[
+                ("application.process.id", "300"),
+                ("pipewire.sec.pid", "300"),
+            ]),
+        );
         graph
     }
 
@@ -912,6 +987,45 @@ mod tests {
         graph.remove(46);
         link(&mut graph, 47, 13, 39);
         assert_eq!(running(&graph), vec![(500, true, false)]);
+    }
+
+    #[test]
+    fn recording_a_duplex_device_s_monitor_is_not_holding_the_microphone() {
+        let mut graph = desktop();
+        assert!(!graph.add_node(13, props(&[("media.class", "Audio/Duplex")])));
+        assert!(!graph.add_port(60, props(&[("port.monitor", "false")])));
+        assert!(graph.add_port(61, props(&[("port.monitor", "true")])));
+        stream(&mut graph, 39, "Stream/Input/Audio", "20", &[]);
+        let link_from = |graph: &mut StreamGraph, id: u32, port: u32| {
+            let port = port.to_string();
+            graph.add_link(
+                id,
+                props(&[
+                    ("link.output.node", "13"),
+                    ("link.output.port", &port),
+                    ("link.input.node", "39"),
+                ]),
+            );
+        };
+        link_from(&mut graph, 48, 61);
+        assert_eq!(running(&graph), vec![(500, false, false)], "its playback");
+        link_from(&mut graph, 49, 60);
+        assert_eq!(running(&graph), vec![(500, true, false)], "its capture");
+        assert!(graph.remove(61), "a monitor port is forgotten");
+    }
+
+    #[test]
+    fn a_node_runs_while_running_or_being_created() {
+        use pw::node::NodeState;
+        for (state, runs) in [
+            (NodeState::Running, true),
+            (NodeState::Creating, true),
+            (NodeState::Idle, false),
+            (NodeState::Suspended, false),
+            (NodeState::Error("failed"), false),
+        ] {
+            assert_eq!(is_running(&state), runs, "{state:?}");
+        }
     }
 
     #[test]

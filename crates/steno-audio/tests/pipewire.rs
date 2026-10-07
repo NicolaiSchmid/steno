@@ -1526,8 +1526,9 @@ fn a_recorder_holds_the_microphone_until_it_ends_and_steno_is_not_listed() {
     );
     drop(changes);
     drop(source);
+    // Joined, but the kernel may list an exiting thread a moment longer.
     assert!(
-        thread_named("steno-pw-detect").is_none(),
+        eventually(SETTLE, || thread_named("steno-pw-detect").is_none()),
         "the source's thread ends with it: {:?}",
         threads()
     );
