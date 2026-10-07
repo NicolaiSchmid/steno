@@ -5,14 +5,19 @@
 //! - **What is counted.** Each background run of a meeting adds one to a
 //!   count in the meeting's audio folder (`.processing-runs`,
 //!   [`RecordingLayout::processing_runs`]) before it starts
-//!   (`CountedRun`). Every end the app lives through takes the run off
-//!   again: a return, ready or failed, and a panic unwinding through it
-//!   clear the count; the app's exit ([`QuitLatch::set`]) takes back each
-//!   run still going, on every pipeline that shares the latch, and leaves
-//!   the earlier ones. What is left is the runs that ended with the app:
-//!   an abort, an out-of-memory kill, a power loss. A panic the app
-//!   survives is the pipeline's to report, and counting it too would cap
-//!   it twice.
+//!   (`CountedRun`). A run that ends while the app lives (ready, failed
+//!   or panicked) clears the count, earlier crashes included. The exit
+//!   ([`QuitLatch::set`]) takes each open run back off, one each, on every
+//!   pipeline that shares the latch, so earlier crashes still count. What
+//!   is left is the runs that ended with the app: an abort, an
+//!   out-of-memory kill, a power loss. A panic the app survives is the
+//!   pipeline's to report, and counting it too would cap it twice.
+//! - **Who is charged.** Every run alive at a crash. So launch recovery
+//!   runs a meeting with a count alone, after the meetings without one
+//!   and oldest first, and counts it only when its turn comes: a meeting
+//!   that takes the app down is charged for its own crashes, and another
+//!   meeting at most once, for a run it shared with one before it had a
+//!   count.
 //! - **When it gives up.** Launch recovery resumes a meeting while fewer
 //!   than [`MAX_CRASHED_RUNS`] of its runs ended with the app, and after
 //!   that marks it failed with [`TOO_MANY_CRASHED_RUNS`], so a meeting
@@ -129,9 +134,14 @@ impl OpenRuns {
         key
     }
 
-    /// Whether the run under `key` was still open; it no longer is.
-    pub(crate) fn close(&mut self, key: u64) -> bool {
-        self.runs.remove(&key).is_some()
+    /// Ends the run under `key`, counted under `count`. Still open, it
+    /// failed or panicked before the exit, which the pipeline reports, and
+    /// the count goes. Taken back by the exit, earlier runs that ended with
+    /// the app still count, unless the run made the meeting ready.
+    pub(crate) fn close(&mut self, key: u64, count: &RunCount, succeeded: bool) {
+        if self.runs.remove(&key).is_some() || succeeded {
+            count.clear();
+        }
     }
 
     /// The exit: every open run is taken back.
@@ -175,12 +185,6 @@ impl CountedRun {
 
 impl Drop for CountedRun {
     fn drop(&mut self) {
-        // Still open: the run failed or panicked before the exit, which
-        // the pipeline reports. Closed: the exit took it back and earlier
-        // runs that ended with the app still count, unless the meeting is
-        // ready by now.
-        if self.latch.close_run(self.key) || self.succeeded {
-            self.count.clear();
-        }
+        self.latch.close_run(self.key, &self.count, self.succeeded);
     }
 }

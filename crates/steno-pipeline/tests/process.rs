@@ -1567,22 +1567,24 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     });
     let dependencies = with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default());
     let pipeline = ProcessingPipeline::new(dependencies);
-    let mut meeting = call_meeting(world.now);
-    meeting.id = Uuid::new_v4();
-    let mut asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    // An id of its own picks this run's log lines out.
-    asset.id = Uuid::new_v4();
-    pipeline.enqueue(&meeting, &asset).unwrap();
+    // Its own meeting id gives the asset an id that picks this run's log
+    // lines out.
+    let (meeting, asset) = processing_with_count(&world, 2);
+    assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting.id]);
     engine.wait_until_entered().await;
 
     let runs = runs_file(&asset);
-    assert_eq!(read_runs(&asset), "1", "the run is counted");
+    assert_eq!(read_runs(&asset), "3", "the run is counted");
     pipeline.quit();
     engine.open.notify_one();
     pipeline.wait_until_idle().await;
     assert_eq!(engine.inner.transcriptions.count(), 1, "the job failed");
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Processing);
-    assert!(!runs.exists(), "a run the exit stopped does not count");
+    assert_eq!(
+        read_runs(&asset),
+        "2",
+        "a run the exit stopped does not count, and the earlier crashes still do"
+    );
     assert!(
         !log.text().contains(&asset.id.to_string()),
         "debug only: {}",
@@ -1599,6 +1601,24 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     assert_eq!(next_launch.resume_unfinished().unwrap(), [meeting.id]);
     next_launch.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert!(!runs.exists());
+}
+
+/// A run the exit took back that still makes the meeting ready clears the
+/// count, earlier crashes included.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_the_exit_took_back_that_ends_ready_clears_the_count() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let (meeting, asset) = processing_with_count(&world, 2);
+    let (pipeline, engine) = gated_pipeline(&world, &QuitLatch::default());
+    assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting.id]);
+    engine.wait_until_entered().await;
+    pipeline.quit();
+    assert_eq!(read_runs(&asset), "2", "taken back");
+    engine.open.notify_one();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert!(!runs_file(&asset).exists());
 }
 
 /// Once the pipeline has quit, no job starts: `enqueue` saves the meeting
@@ -2315,7 +2335,7 @@ async fn launch_that_crashes(world: &World, first: Option<(&Meeting, &AudioAsset
 /// counted in the meeting's folder, a run that ended with the app leaves
 /// its count, and once three have, launch recovery marks the meeting
 /// failed with a reason the user sees and keeps the audio. Processing the
-/// meeting again (`enqueue`) starts afresh, and a run that settles clears
+/// meeting again (`enqueue`) starts afresh, and a run that ends clears
 /// the count.
 #[tokio::test(flavor = "multi_thread")]
 async fn launch_recovery_gives_up_on_a_meeting_whose_runs_ended_with_the_app() {
@@ -2426,7 +2446,7 @@ async fn reprocess_refuses_a_meeting_whose_audio_is_gone() {
 }
 
 /// Two "Process again" at once start one run: the in-flight check and the
-/// claim are one step, so the second call is refused (in flight, or
+/// claim are one step, so the second call is refused (busy, or
 /// queued by the first by the time it reads the meeting).
 #[tokio::test(flavor = "multi_thread")]
 async fn two_reprocess_calls_at_once_start_one_run() {
@@ -2458,7 +2478,7 @@ async fn two_reprocess_calls_at_once_start_one_run() {
             assert!(
                 matches!(
                     result,
-                    Ok(()) | Err(ReprocessError::InFlight(_) | ReprocessError::Unfinished { .. })
+                    Ok(()) | Err(ReprocessError::Busy(_) | ReprocessError::Unfinished { .. })
                 ),
                 "round {round}: {result:?}"
             );
@@ -2466,6 +2486,162 @@ async fn two_reprocess_calls_at_once_start_one_run() {
         world.pipeline.wait_until_idle().await;
         assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
     }
+}
+
+/// `reprocess` is refused while another operation holds the meeting, and
+/// so is `enqueue`.
+#[tokio::test(flavor = "multi_thread")]
+async fn reprocess_refuses_a_meeting_another_operation_holds() {
+    let world = world(true, None, AudioRetention::KeepForever);
+    let asset = ready_with_count(&world, 0);
+    let meeting = world.store.meeting(asset.meeting_id).unwrap().unwrap();
+    let held = world.pipeline.claim_redeliver(meeting.id).unwrap();
+    assert_eq!(
+        world.pipeline.reprocess(meeting.id),
+        Err(ReprocessError::Busy(meeting.id))
+    );
+    assert!(world.pipeline.enqueue(&meeting, &asset).is_err());
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    drop(held);
+    world.pipeline.reprocess(meeting.id).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+}
+
+/// A reprocess that fails leaves no retention stamp from the run before
+/// it, so the sweep keeps the audio a retry needs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_reprocess_leaves_the_audio_to_no_sweep() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepForever,
+        FakeSpeechEngine {
+            failure: Some("the model refused".to_owned()),
+            ..FakeSpeechEngine::default()
+        },
+        FakeDiarizer::default(),
+    );
+    let mut meeting = call_meeting(world.now);
+    meeting.state = MeetingState::Ready;
+    let mut asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepDays(7));
+    asset.expires_at = Some(world.now + Duration::days(7));
+    world
+        .store
+        .save_meeting_with_asset(&meeting, &asset)
+        .unwrap();
+
+    world.pipeline.reprocess(meeting.id).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert!(matches!(
+        meeting_state(&world, meeting.id),
+        MeetingState::Failed { .. }
+    ));
+    assert_eq!(
+        world.store.asset(meeting.id).unwrap().unwrap().expires_at,
+        None
+    );
+    RetentionSweep::new(world.store.clone())
+        .run(world.now + Duration::days(8))
+        .unwrap();
+    assert!(file_url_path(&asset.url).unwrap().exists(), "the master");
+    for sidecar in asset.sidecars_16k.values() {
+        assert!(file_url_path(sidecar).unwrap().exists(), "a sidecar");
+    }
+}
+
+/// An engine whose every transcription hangs, as one that takes the app
+/// down leaves the runs alive at the crash; it counts the transcriptions.
+#[derive(Default)]
+struct HangingEngine {
+    inner: FakeSpeechEngine,
+    entered: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl steno_core::SpeechEngine for HangingEngine {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        self.inner.supported_languages()
+    }
+
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        self.inner.prepare().await
+    }
+
+    async fn transcribe(
+        &self,
+        _audio: &steno_core::AudioBuffer16k,
+        _hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
+        self.entered
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::future::pending().await
+    }
+}
+
+/// A crash is charged to the run in flight: of two unfinished meetings
+/// that both ran when the app first went down, the one launch recovery
+/// resumes first (A) takes it down at every launch after, while the
+/// other (B) waits for its turn uncounted. Launch recovery gives up on A
+/// and processes B, which ends ready.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let mut two = [
+        processing_with_count(&world, 0),
+        processing_with_count(&world, 0),
+    ];
+    // Launch recovery takes meetings of one start time by id.
+    two.sort_by_key(|(meeting, _)| meeting.id);
+    let [(a, a_asset), (b, b_asset)] = two;
+    for asset in [&a_asset, &b_asset] {
+        std::fs::remove_file(runs_file(asset)).unwrap();
+    }
+    for launch in 1..=MAX_CRASHED_RUNS {
+        let engine = Arc::new(HangingEngine::default());
+        let pipeline = ProcessingPipeline::new(
+            with_engine(&world, engine.clone()).with_quit_latch(QuitLatch::default()),
+        );
+        assert_eq!(
+            pipeline.resume_unfinished().unwrap(),
+            [a.id, b.id],
+            "launch {launch}"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while engine.entered.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("A is transcribing");
+        assert_eq!(read_runs(&a_asset), launch.to_string(), "launch {launch}");
+        // Both ran at the first launch; B waits behind A after that.
+        assert_eq!(read_runs(&b_asset), "1", "launch {launch}");
+        // The crash: nothing ends, nothing quits.
+        drop(pipeline);
+    }
+
+    let next_launch = ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_quit_latch(QuitLatch::default()),
+    );
+    assert_eq!(next_launch.resume_unfinished().unwrap(), [b.id]);
+    next_launch.wait_until_idle().await;
+    assert_eq!(
+        meeting_state(&world, a.id),
+        MeetingState::Failed {
+            reason: TOO_MANY_CRASHED_RUNS.to_owned()
+        }
+    );
+    assert_eq!(meeting_state(&world, b.id), MeetingState::Ready);
+    assert!(!runs_file(&b_asset).exists());
 }
 
 /// A meeting saved `processing` with `crashed` runs that ended with the
@@ -2540,7 +2716,8 @@ async fn a_quit_takes_back_a_run_held_mid_transcription() {
 /// The exit reaches every pipeline that shares the latch: a reload's
 /// retired pipeline still finishing a resumed run, and the current one
 /// with a meeting processed again. Both runs are taken back, the earlier
-/// crash still counts, and a run asked for after the exit is not counted.
+/// crash still counts, and `reprocess` after the exit is refused before it
+/// saves or counts anything.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_quit_takes_back_the_runs_of_every_pipeline_on_the_latch() {
     let world = world(false, None, AudioRetention::KeepForever);
@@ -2561,12 +2738,12 @@ async fn a_quit_takes_back_the_runs_of_every_pipeline_on_the_latch() {
     assert!(!runs_file(&again).exists());
 
     let late = ready_with_count(&world, 2);
-    current.reprocess(late.meeting_id).unwrap();
-    assert!(
-        !runs_file(&late).exists(),
-        "nothing started, nothing counted"
+    assert_eq!(
+        current.reprocess(late.meeting_id),
+        Err(ReprocessError::Quitting)
     );
-    assert_eq!(meeting_state(&world, late.meeting_id), MeetingState::Queued);
+    assert_eq!(read_runs(&late), "2", "nothing started, nothing counted");
+    assert_eq!(meeting_state(&world, late.meeting_id), MeetingState::Ready);
 }
 
 /// A run that fails before any exit is the pipeline's to report: the
