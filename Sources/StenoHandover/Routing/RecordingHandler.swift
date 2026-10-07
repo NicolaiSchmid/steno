@@ -392,6 +392,9 @@ extension HandoverEngine {
 
   /// The `.failed` reason after the intake threw; the detail is logged.
   static let intakeRefused = "the intake refused the file"
+  /// The `.failed` reason a stored `.complete` receipt reads as when its
+  /// meeting is missing (`storedReceipt`).
+  static let meetingMissing = "the admitted meeting is missing"
 
   static func status(of receipt: HandoverReceipt) -> Wire.RecordingStatus {
     if receipt.state.kind == .complete {
@@ -408,19 +411,21 @@ extension HandoverEngine {
     try? await readReceipt(recordingID)
   }
 
-  /// The receipt from memory or the store, kept in memory (`remember`).
-  /// Another request may have made, loaded or advanced it while the store
-  /// read was awaited; memory wins then, also over a read that found none
-  /// or failed, so a first announce that raced another answers as a
-  /// re-announce and keeps the receipt the other made, chunks and
-  /// `.complete` included. A failed read with nothing in memory throws:
-  /// `announce` must not take it for no receipt, or it would discard the
-  /// files of a receipt only in the store and save a new one over it.
+  /// The receipt from memory or the store (`storedReceipt`, so a
+  /// `.complete` one whose meeting is missing comes back not admitted),
+  /// kept in memory (`remember`). Another request may have made, loaded or
+  /// advanced it while the store read was awaited; memory wins then, also
+  /// over a read that found none or failed, so a first announce that raced
+  /// another answers as a re-announce and keeps the receipt the other made,
+  /// chunks and `.complete` included. A failed read with nothing in memory
+  /// throws: `announce` must not take it for no receipt, or it would
+  /// discard the files of a receipt only in the store and save a new one
+  /// over it.
   func readReceipt(_ recordingID: UUID) async throws -> HandoverReceipt? {
     if let active = activeReceipts[recordingID] { return active }
     let stored: HandoverReceipt?
     do {
-      stored = try await store.handoverReceipt(recordingID: recordingID)
+      stored = try await storedReceipt(recordingID)
     } catch {
       if let active = activeReceipts[recordingID] { return active }
       throw error

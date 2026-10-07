@@ -97,13 +97,22 @@ actor HandoverEngine: RequestHandling {
   /// On start, drop inbox files no receipt accounts for (a crash between
   /// announce and the first save, a device revoked while offline), that a
   /// completed intake left behind (it copied the file before writing
-  /// `.complete`), or whose receipt has not moved in `abandonedAfter`. Best
-  /// effort.
+  /// `.complete`), or whose receipt has not moved in `abandonedAfter`. A
+  /// `.complete` receipt whose meeting is missing counts as not admitted
+  /// (`storedReceipt`), so its verified file stays for the phone's retry.
+  /// Best effort: a receipt the store cannot read keeps its files, which a
+  /// later start sweeps.
   func sweepOrphans() async {
     try? inbox.prepare()
     let cutoff = now().addingTimeInterval(-Self.abandonedAfter)
     for recordingID in inbox.recordingIDs() {
-      guard let receipt = try? await store.handoverReceipt(recordingID: recordingID) else {
+      let stored: HandoverReceipt?
+      do {
+        stored = try await storedReceipt(recordingID)
+      } catch {
+        continue
+      }
+      guard let receipt = stored else {
         inbox.discard(recordingID)
         continue
       }
@@ -111,6 +120,26 @@ actor HandoverEngine: RequestHandling {
         inbox.discard(recordingID)
       }
     }
+  }
+
+  /// The stored receipt of `recordingID`, with a `.complete` one whose
+  /// meeting row is missing read as `.failed(meetingMissing)`: not
+  /// admitted. Deleting a meeting deletes its receipt, so only an admission
+  /// whose meeting never committed leaves one behind (the separate receipt
+  /// and meeting commits of earlier releases, a crash or a full disk
+  /// between them). Its phone never got the 200 and still holds the
+  /// recording, so the receipt must neither answer 200 nor let the sweep
+  /// take the verified file; the phone's retried `complete` admits that
+  /// file again. Rust: `stored_receipt` in
+  /// `crates/steno-handover/src/engine/mod.rs`.
+  func storedReceipt(_ recordingID: UUID) async throws -> HandoverReceipt? {
+    guard var receipt = try await store.handoverReceipt(recordingID: recordingID) else {
+      return nil
+    }
+    if let meetingID = receipt.state.meetingID, try await store.meeting(id: meetingID) == nil {
+      receipt.state = .failed(Self.meetingMissing)
+    }
+    return receipt
   }
 
   // MARK: - Pairing session

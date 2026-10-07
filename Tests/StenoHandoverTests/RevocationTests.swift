@@ -309,6 +309,7 @@ import Testing
     try await before.phone.uploadAll(before.metadata, before.bytes)
     let meetingID = try await before.phone.complete(before.id).json(Wire.CompleteResponse.self)
       .meetingID
+    try await before.test.store.saveAdmittedMeeting(meetingID)
     let restarted = before.restarted()
     let (gate, engine, device) = (restarted.gate, restarted.engine, restarted.phone.device)
 
