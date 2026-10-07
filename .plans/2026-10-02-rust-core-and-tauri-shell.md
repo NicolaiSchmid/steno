@@ -1568,12 +1568,16 @@ touch lines; each fix is ported to Swift before cutover.
   file's meeting id and deleted a recording the computer does not have. The phone
   keeps the row and its file: it announces again after the backoff, and the third
   409 in a row marks the row `failed` with Retry (`failAnnounce` in
-  `mobile/src/features/sync/upload-executor.ts`). The chunk size matters only while
-  chunks arrive: a `complete` receipt announced with the same size and SHA-256 in
-  other chunks is the file the computer holds, answered 200 `complete` with every
-  chunk of the announced split, so the phone posts `complete` and gets the meeting
-  id. Format, duration and `startedAt` are not compared: under the same size and
-  SHA-256 they describe the same bytes, so a difference there loses nothing.
+  `mobile/src/features/sync/upload-executor.ts`). The chunk size matters only until
+  the receipt is `complete`: a `complete` receipt announced with the same size and
+  SHA-256 in other chunks is the file the computer holds, answered 200 `complete`
+  with every chunk of the announced split, so the phone posts `complete` and gets
+  the meeting id. The receipt keeps its own split, which `GET status` lists, so a
+  phone that reads the status before its `complete` uploads the chunks of its split
+  missing there again; each PUT on a `complete` receipt answers 204, which wastes
+  uploads and loses nothing. Format, duration and `startedAt` are not compared:
+  under the same size and SHA-256 they describe the same bytes, so a difference
+  there loses nothing.
 - Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt`
   read with `try?`, so a failed read, with no receipt in memory (after a restart),
   counts as no receipt: the sweep deletes a resumable upload, a route answers 404, and
@@ -2064,17 +2068,22 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
     `crates/steno-handover/src/engine/mod.rs` and
     `Sources/StenoHandover/Routing/HandoverEngine.swift`, the `complete` case in
     `mobile/src/features/sync/upload-executor.ts`. Found: #211.
-  - Other bytes. The same device re-announces a recording id whose receipt is
-    `complete` with another size or SHA-256. The computer takes it in as a new
-    recording, under a fresh internal receipt key and its own meeting for the same
-    phone-side recording id, and the phone deletes its copy only after that meeting
-    commits. Until then both apps answer 409 "metadata differs from the first
+  - Other bytes. The same device re-announces a recording id with metadata its
+    receipt on the computer does not match: another size or SHA-256 in any state, or
+    another chunk size before the receipt is `complete`. Every such announce is
+    answered 409, so the recording never reaches the computer. A receipt not yet
+    `complete` announced with the same size and SHA-256 in another chunk size
+    restarts its partial under the new split. An announce with another size or
+    SHA-256, against a receipt in any state, is taken in as a new recording, under a
+    fresh internal receipt key and its own meeting for the same phone-side recording
+    id, and the phone deletes its copy only after that meeting commits. Until this
+    branch lands, both apps answer 409 "metadata differs from the first
     announcement" (#224) and the phone keeps the recording; the third 409 in a row
     marks the row `failed` with Retry. Where: `Engine::reannounce` in
     `crates/steno-handover/src/engine/recording.rs` and `HandoverEngine.announce` in
     `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #224.
-  - Older device. A phone whose receipt of a recording on the computer belongs to an
-    older device id of the same phone is answered 409 "another device owns this
+  - Older device. A recording whose receipt on the computer belongs to an older
+    device id of the same phone is answered 409 "another device owns this
     recording" on every announce, so the recording never reaches the computer; it
     stays on the phone. The planned fix: an announce from another device of a
     recording id whose receipt an older device holds, not yet `complete`, takes that
