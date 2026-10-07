@@ -431,10 +431,7 @@ impl ObsidianFolderDestination {
 
     /// The folder of a first delivery: the scope's path with the ledger's
     /// collision rule ([`DeliveryLedger::claim_folder`]), each candidate
-    /// claimed by creating it under `Meetings/` (created as needed). A
-    /// candidate that is already there, made by another delivery or
-    /// another process a moment ago, is taken unless it holds this
-    /// meeting's `meeting.json`.
+    /// claimed by creating it under `Meetings/` (created as needed).
     fn claim_folder(&self, meeting: &MeetingExport) -> Result<String, ObsidianError> {
         let base = MeetingFolder::path(&meeting.meeting, self.time_zone);
         self.writing(MeetingFolder::ROOT, || {
