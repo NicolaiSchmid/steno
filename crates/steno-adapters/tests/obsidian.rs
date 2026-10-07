@@ -1208,7 +1208,6 @@ enum Second {
 #[test]
 fn two_meetings_delivered_at_once_both_keep_their_line_on_a_shared_person_page() {
     let vault = Vault::new();
-    let destination = vault.destination_with(false, Some("People"));
     let one = export();
     let mut two = one.clone();
     two.meeting.id = uuid(2);
@@ -1221,19 +1220,24 @@ fn two_meetings_delivered_at_once_both_keep_their_line_on_a_shared_person_page()
     let (paused, first_paused) = mpsc::channel();
     let (release, released) = mpsc::channel::<()>();
     let released = Mutex::new(released);
-    let first = destination.clone().with_step_hook(move |step| {
-        if step == DeliveryStep::WritingPersonPage(ANNA_PAGE) {
-            let _ = paused.send(());
-            let _ = released.lock().unwrap().recv();
-        }
-    });
+    let first = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if step == DeliveryStep::WritingPersonPage(ANNA_PAGE) {
+                let _ = paused.send(());
+                let _ = released.lock().unwrap().recv();
+            }
+        });
+    // The second names the vault `vault/../vault`: only a lock keyed by
+    // the vault itself, not by the configured path, makes it wait.
     let (events, second_events) = mpsc::channel();
     let waiting = events.clone();
-    let second = destination.with_step_hook(move |step| {
-        if step == DeliveryStep::WaitingForVault {
-            let _ = waiting.send(Second::WaitedForTheVault);
-        }
-    });
+    let second = destination_at(&vault.root.join("../vault"), false, Some("People"))
+        .with_step_hook(move |step| {
+            if step == DeliveryStep::WaitingForVault {
+                let _ = waiting.send(Second::WaitedForTheVault);
+            }
+        });
 
     let (receipt_one, receipt_two, second_first) = std::thread::scope(|scope| {
         // Moved in, so a panic here drops it and frees the first delivery.
@@ -1285,8 +1289,8 @@ fn a_folder_another_writer_claims_first_is_never_shared() {
     let their_json = ArtifactRenderer::new().render_json(&theirs).unwrap();
 
     // Another process (the Swift app, a second CLI) creates the same
-    // folder and writes its meeting.json between this delivery's lookup
-    // and its claim.
+    // folder and writes its meeting.json just before this delivery claims
+    // it.
     let root = vault.root.clone();
     let json = their_json.clone();
     let destination = vault
@@ -1366,6 +1370,72 @@ fn a_redeliver_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_o
     assert!(anna.contains(&ManagedBlock::marker(theirs.meeting.id)));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_folder_claim_that_fails_ends_the_delivery_with_its_error() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let vault = Vault::new();
+    let meetings = vault.path("Meetings");
+    fs::create_dir_all(&meetings).unwrap();
+    fs::set_permissions(&meetings, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(meetings.join("probe"), b"").is_ok() {
+        return; // root
+    }
+    // A claim error read as "taken" would try `-2`, `-3` and on forever;
+    // the hook ends such a run instead of letting it hang.
+    let claims = AtomicUsize::new(0);
+    let destination = vault
+        .destination_with(false, None)
+        .with_step_hook(move |step| {
+            if let DeliveryStep::ClaimingFolder(candidate) = step {
+                assert!(
+                    claims.fetch_add(1, Ordering::Relaxed) == 0,
+                    "a second claim, of {candidate}, after a failed one"
+                );
+            }
+        });
+    let delivered = destination.deliver_meeting(&export(), None);
+    fs::set_permissions(&meetings, fs::Permissions::from_mode(0o755)).unwrap();
+
+    match delivered {
+        Err(ObsidianError::WriteFailed { path, .. }) => {
+            assert_eq!(path, vault.path(FOLDER).to_string_lossy());
+        }
+        other => panic!("expected WriteFailed, got {other:?}"),
+    }
+    assert_eq!(vault.list("Meetings"), Vec::<String>::new());
+}
+
+#[test]
+fn a_delivery_after_one_that_panicked_holding_the_vault_still_runs() {
+    let vault = Vault::new();
+    let one = export();
+    let panicking = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(|step| {
+            if let DeliveryStep::WritingPersonPage(_) = step {
+                panic!("a delivery that stops half way");
+            }
+        });
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        panicking.deliver_meeting(&one, None)
+    }));
+    assert!(panicked.is_err(), "the hook panicked inside the delivery");
+
+    let receipt = deliver(&vault.destination_with(false, Some("People")), &one, None);
+    assert_eq!(
+        receipt.folder, FOLDER,
+        "the stopped attempt's folder is reused"
+    );
+    assert!(
+        vault
+            .text(ANNA_PAGE)
+            .contains(&ManagedBlock::marker(one.meeting.id))
+    );
+}
+
 /// `export()` with the first person and participant renamed.
 fn with_anna_named(name: &str) -> MeetingExport {
     let mut export = export();
@@ -1391,6 +1461,9 @@ fn is_case_insensitive(directory: &Path) -> bool {
 #[test]
 fn a_case_only_rename_keeps_the_meeting_on_a_page_both_spellings_name() {
     let vault = Vault::new();
+    if is_case_insensitive(&vault.root) {
+        return; // the next test runs the real thing
+    }
     let destination = vault.destination_with(false, Some("People"));
     let first = deliver(&destination, &with_anna_named("anna müller"), None);
     fs::rename(vault.path("People/anna müller.md"), vault.path(ANNA_PAGE)).unwrap();
@@ -1469,9 +1542,6 @@ fn a_case_only_rename_on_a_case_sensitive_vault_moves_the_line_to_the_new_page()
 #[test]
 fn a_person_named_after_a_windows_device_gets_a_page_windows_can_create() {
     let vault = Vault::new();
-    if is_case_insensitive(&vault.root) {
-        return; // the next test runs the real thing
-    }
     let destination = vault.destination_with(false, Some("People"));
     let receipt = deliver(&destination, &with_anna_named("Con"), None);
 
