@@ -421,7 +421,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P34 | Recordings on the phone: the mobile queue index rebuilds after a failed load, and recorder files left by the audio module are found again (#223) | handover (#223) |
 | P35 | Pairings: the identity-fingerprint guard gets a macOS test and its Swift mirror (#213 makes the pairing writes durable and the intake one transaction) | handover |
 | P36 | Secrets and files on Windows: credentials persist (after #221), and renames are durable (#242: the durable writes in `steno_pipeline::files` rename with `MOVEFILE_WRITE_THROUGH` or with std, then flush the renamed file and the folders; a failed flush answers the phone 500, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS, or on a network drive) | handover (#242) |
-| P37 | A recording through a cancelled logout: the save that a logout started is undone cleanly when the logout is cancelled (#220) | Linux desktop (#220) |
+| P37 | A recording through a cancelled logout: a cancelled logout never stops the recording; where the app saved at a query that should have been the end, the session going on brings a notice and a relaunch (#220) | Linux desktop (#220) |
 | P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic in the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
 
 **The final audio path (D9), on every platform:**
