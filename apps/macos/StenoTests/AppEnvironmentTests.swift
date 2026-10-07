@@ -43,7 +43,7 @@ final class AppEnvironmentTests: XCTestCase {
         store: store, intake: FakeHandoverIntake(), configuration: configuration,
         identity: identity)
       XCTFail("a store that cannot sync gets no listener")
-    } catch let error as AppEnvironment.StoreNotSynced {
+    } catch let error as StoreNotSynced {
       XCTAssertTrue(
         "\(error)".hasPrefix("the database could not be synced to the disk: "), "\(error)")
     }

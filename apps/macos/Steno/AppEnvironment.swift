@@ -282,7 +282,7 @@ final class AppEnvironment {
   }
 
   /// The handover listener over `identity()`, once the store's WAL is on
-  /// the disk (`MeetingStore.checkpointDurably()`). The checkpoint comes
+  /// the disk (`HandoverService.checkpointStore(_:)`). The checkpoint comes
   /// first: the intake answers a phone's retry `complete` from a stored
   /// receipt, so the listener only runs over a store whose commits are on
   /// the disk. A failed one throws `StoreNotSynced` before the identity is
@@ -293,19 +293,9 @@ final class AppEnvironment {
     store: MeetingStore, intake: any HandoverIntake, configuration: HandoverConfiguration,
     identity: () throws -> HandoverIdentity
   ) async throws -> HandoverService {
-    do {
-      try await store.checkpointDurably()
-    } catch {
-      throw StoreNotSynced(underlying: error)
-    }
+    try await HandoverService.checkpointStore(store)
     return HandoverService(
       configuration: configuration, store: store, intake: intake, identity: try identity())
-  }
-
-  /// `makeHandover`'s checkpoint failed.
-  struct StoreNotSynced: Error, CustomStringConvertible {
-    let underlying: any Error
-    var description: String { "the database could not be synced to the disk: \(underlying)" }
   }
 
   /// Beside `-steno-ui-testing`: the preview's `FakeSpeechEngine` sleeps in

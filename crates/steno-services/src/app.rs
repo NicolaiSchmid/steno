@@ -261,7 +261,7 @@ pub fn handover_intake(
 
 /// The handover listener over a loaded or minted identity, with the mac id
 /// the Phones settings show; `None`, with the reason, when the store could
-/// not sync its WAL to the disk ([`Store::checkpoint_durably`]) or the
+/// not sync its WAL to the disk ([`HandoverService::checkpoint_store`]) or the
 /// identity could not be read or stored. The checkpoint comes first: the
 /// intake answers a phone's retry `complete` from a stored receipt, so the
 /// listener only runs over a store whose commits are on the disk. A failed
@@ -274,9 +274,7 @@ fn handover_listener(
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(Arc<HandoverService>, uuid::Uuid), String> {
-    store
-        .checkpoint_durably()
-        .map_err(|error| format!("the database could not be synced to the disk: {error}"))?;
+    HandoverService::checkpoint_store(store).map_err(|error| error.to_string())?;
     let identity = block_on(
         runtime,
         steno_handover::HandoverIdentity::load_or_create(

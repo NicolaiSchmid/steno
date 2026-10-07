@@ -12,7 +12,9 @@
 //!
 //! - [`HandoverService`]: the entry point, what the host and the CLI hold.
 //!   Pairing, the device list, revocation, the listener and the receipt
-//!   stream. Nothing else constructs the listener.
+//!   stream. Nothing else constructs the listener. Both run
+//!   [`HandoverService::checkpoint_store`] first ([`StoreNotSynced`] when
+//!   it fails).
 //! - [`HandoverConfiguration`]: how the listener binds, where partial
 //!   uploads live, the pairing window and the read timeout; [`Clock`] is
 //!   the one time source.
@@ -51,4 +53,4 @@ pub use configuration::{Clock, HandoverConfiguration};
 pub use identity::{HandoverIdentity, IdentityError};
 pub use pairing::{PairingPayload, PairingPayloadError};
 pub use server::ServerMetrics;
-pub use service::{HandoverService, ListenerState};
+pub use service::{HandoverService, ListenerState, StoreNotSynced};

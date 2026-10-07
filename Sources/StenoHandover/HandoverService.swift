@@ -10,6 +10,13 @@ public enum ListenerState: Sendable, Equatable {
   case failed(String)
 }
 
+/// `HandoverService.checkpointStore(_:)` failed: the store's commits are not
+/// known to be on the disk. Rust: `StoreNotSynced`.
+public struct StoreNotSynced: Error, CustomStringConvertible {
+  public let underlying: any Error
+  public var description: String { "the database could not be synced to the disk: \(underlying)" }
+}
+
 /// The Mac side of the handover as the app and the CLI see it: one actor
 /// that owns the listener, the pairing session and the receipt stream. The
 /// app renders `beginPairing().urlString` as a QR code, lists
@@ -25,6 +32,20 @@ public actor HandoverService {
   private var server: HandoverServer?
   private nonisolated let listenerStates = Broadcast<ListenerState>(initial: .stopped)
   private nonisolated let receiptUpdates = Broadcast<[HandoverReceipt]>(initial: [])
+
+  /// The checkpoint the app and `steno dev handover serve` run before they
+  /// read the identity and build the service:
+  /// `MeetingStore.checkpointDurably()`. The intake answers a phone's retry
+  /// `complete` from a stored receipt, so a listener only runs over a store
+  /// whose commits are on the disk; on an error (`StoreNotSynced`) the
+  /// caller builds none. Rust: `HandoverService::checkpoint_store`.
+  public static func checkpointStore(_ store: MeetingStore) async throws {
+    do {
+      try await store.checkpointDurably()
+    } catch {
+      throw StoreNotSynced(underlying: error)
+    }
+  }
 
   /// `now` is the one time source: it stamps receipts and devices and
   /// decides when the pairing window has closed. Tests advance it.

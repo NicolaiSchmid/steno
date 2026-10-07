@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store, store};
+use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store, StoreError, store};
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
@@ -25,6 +25,12 @@ pub enum ListenerState {
     Listening { port: u16 },
     Failed(String),
 }
+
+/// [`HandoverService::checkpoint_store`] failed: the store's commits are
+/// not known to be on the disk. Swift: `StoreNotSynced`.
+#[derive(Debug, thiserror::Error)]
+#[error("the database could not be synced to the disk: {0}")]
+pub struct StoreNotSynced(pub StoreError);
 
 /// The computer's side of the handover: one per host, created with
 /// [`HandoverService::new`], started and stopped with the app. The fields
@@ -49,6 +55,16 @@ impl std::fmt::Debug for HandoverService {
 }
 
 impl HandoverService {
+    /// The checkpoint the app and `steno dev handover serve` run before
+    /// they read the identity and build the service:
+    /// [`Store::checkpoint_durably`]. The intake answers a phone's retry
+    /// `complete` from a stored receipt, so a listener only runs over a
+    /// store whose commits are on the disk; on an error the caller builds
+    /// none. Swift: `HandoverService.checkpointStore(_:)`.
+    pub fn checkpoint_store(store: &Store) -> Result<(), StoreNotSynced> {
+        store.checkpoint_durably().map_err(StoreNotSynced)
+    }
+
     /// The service before `start`. `now` is the one time source.
     ///
     /// ```no_run
