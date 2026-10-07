@@ -22,7 +22,7 @@ pub struct Export {
 
 impl Export {
     pub fn run(self) -> Outcome {
-        let store = self.database.open()?;
+        let store = self.database.open_to_read()?;
         let export = store.export(self.meeting_id).map_err(Failure::runtime)?;
         let out = crate::wiring::standardized(&self.out);
         std::fs::create_dir_all(&out).map_err(Failure::runtime)?;

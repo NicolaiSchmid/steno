@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
-use steno_core::{SecretKey, Settings, StenoPaths, Store};
+use steno_core::{DatabaseLock, DatabaseLockError, SecretKey, Settings, StenoPaths, Store};
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
 use steno_services::speech::SpeechSetup;
 use uuid::Uuid;
@@ -48,8 +48,50 @@ impl DatabaseOptions {
         }
     }
 
+    /// Opens the database for a command that writes, holding its lock
+    /// (`steno_core::DatabaseLock`) until the process ends; refused while
+    /// the app or another such command holds it, so the two never process
+    /// one meeting twice or fail each other's recording. Rust only: the
+    /// Swift CLI took no lock.
     pub fn open(&self) -> Result<Arc<Store>, Failure> {
+        let path = self.path()?;
+        hold_lock(&path)?;
+        steno_services::open_store(&path).map_err(Failure::runtime)
+    }
+
+    /// Opens the database for a command that only reads, without the lock,
+    /// so it runs beside the app: SQLite's WAL lets it read while the app
+    /// writes.
+    pub fn open_to_read(&self) -> Result<Arc<Store>, Failure> {
         steno_services::open_store(&self.path()?).map_err(Failure::runtime)
+    }
+}
+
+/// The database locks this process holds, kept until it exits.
+static HELD_LOCKS: std::sync::Mutex<Vec<DatabaseLock>> = std::sync::Mutex::new(Vec::new());
+
+/// Takes the lock of the database at `database` for the rest of the
+/// process; at once when this process holds it already.
+fn hold_lock(database: &Path) -> Result<(), Failure> {
+    let mut held = HELD_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let path = DatabaseLock::path_for(database);
+    if held.iter().any(|lock| lock.path() == path) {
+        return Ok(());
+    }
+    match steno_services::app::lock_database(database) {
+        Ok(lock) => {
+            held.push(lock);
+            Ok(())
+        }
+        Err(steno_services::BuildError::Locked(DatabaseLockError::Held(_))) => {
+            Err(Failure::runtime(format!(
+                "Steno is running on {}; quit it first, then run this command again.",
+                database.display()
+            )))
+        }
+        Err(error) => Err(Failure::runtime(error)),
     }
 }
 

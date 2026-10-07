@@ -341,6 +341,58 @@ fn a_run_whose_meeting_ends_failed_exits_two_and_says_why() {
     assert_eq!(process.stdout, "", "no meeting id on a failed run");
 }
 
+/// A command that writes refuses while another process (the app) holds the
+/// database's lock, and runs once it is released; one that only reads runs
+/// beside it.
+#[test]
+fn a_writing_command_refuses_while_the_app_holds_the_database() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let db = home.join("steno.sqlite");
+    let db_arg = db.to_str().unwrap();
+    assert_eq!(
+        steno(&["dev", "db", "migrate", "--db", db_arg], home).status,
+        0
+    );
+
+    let app = steno_core::DatabaseLock::acquire(&db).unwrap();
+    for args in [
+        &["dev", "db", "migrate", "--db", db_arg][..],
+        &["dev", "db", "reindex", "--db", db_arg][..],
+        &[
+            "deliver",
+            "00000000-0000-0000-0000-000000000001",
+            "--db",
+            db_arg,
+        ][..],
+    ] {
+        let refused = steno(args, home);
+        assert_eq!(refused.status, 2, "{args:?}: {}", refused.stderr);
+        assert!(
+            refused.stderr.contains("Steno is running on")
+                && refused.stderr.contains("quit it first"),
+            "{args:?}: {}",
+            refused.stderr
+        );
+    }
+    let read = steno(
+        &[
+            "export",
+            "00000000-0000-0000-0000-000000000001",
+            "--db",
+            db_arg,
+            "--out",
+            home.to_str().unwrap(),
+        ],
+        home,
+    );
+    assert!(!read.stderr.contains("Steno is running"), "{}", read.stderr);
+
+    drop(app);
+    let migrate = steno(&["dev", "db", "migrate", "--db", db_arg], home);
+    assert_eq!(migrate.status, 0, "{}", migrate.stderr);
+}
+
 #[test]
 fn relative_paths_are_taken_from_the_working_directory() {
     let home = tempfile::tempdir().unwrap();
