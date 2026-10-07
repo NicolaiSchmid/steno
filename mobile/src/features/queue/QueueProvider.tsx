@@ -29,7 +29,7 @@ export type QueueContextValue = {
 	index: QueueIndex;
 	/** False until the index was read from disk. */
 	ready: boolean;
-	/** Why the index could not be read, while it could not. */
+	/** Why the last load failed, while no load succeeded. */
 	loadError: string | null;
 	retryLoad(): void;
 	update(transform: (index: QueueIndex) => QueueIndex): Promise<QueueIndex>;

@@ -83,8 +83,8 @@ export function createQueueStore(
 		update: (transform) =>
 			enqueue(async () => {
 				await loadNow();
-				// The cause is in the log and in `loadError`; this message can
-				// reach the screen (a pairing's error line).
+				// The cause is in the log and in `loadError`; this message is
+				// user-facing in case a caller shows it.
 				if (!snapshot.ready) throw new QueueError(QUEUE_NOT_LOADED_MESSAGE);
 				const next = transform(snapshot.index);
 				if (next === snapshot.index) return next;

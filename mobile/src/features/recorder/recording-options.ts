@@ -45,8 +45,9 @@ export const RECORDING_AUDIO_MODE: Partial<AudioMode> = {
 /**
  * The smallest file the queue adopts as a recording; smaller ones stay where
  * they are. expo-audio writes a header of a few dozen bytes when it prepares
- * a file, before any audio, and a second of audio at 64 kbps is 8,000 bytes:
- * below 1 KiB a file holds less than an eighth of a second.
+ * a file, before any audio, so below 1 KiB a file holds at most a fraction of
+ * a second: an eighth at 64 kbps (8,000 bytes a second), under half a second
+ * of silence.
  */
 export const MIN_RECORDING_BYTES = 1024;
 

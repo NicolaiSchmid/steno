@@ -30,8 +30,9 @@ import { deviceIdentity } from "./pairing-store";
  * Modal: scan the Mac's QR code, pair over the pinned channel, or unpair.
  * A second scan replaces the pairing. Runs in the foreground only, because a
  * backgrounded app in the undetermined local-network state is denied silently.
- * Both wait until the queue is loaded: a pairing changes the rows' states,
- * and a write before the load is refused after the pairing itself was saved.
+ * Pairing and unpairing wait until the queue is loaded: both change the
+ * rows' states, and a write before the load is refused after the pairing
+ * itself was saved or cleared.
  */
 type Phase =
 	| { kind: "scanning" }
@@ -192,7 +193,7 @@ export function PairingSheet() {
 				{loadError ? (
 					<AppText variant="error">
 						Steno could not read the list of recordings on this phone. Pairing
-						waits until it can.
+						and unpairing wait until it can.
 					</AppText>
 				) : null}
 
