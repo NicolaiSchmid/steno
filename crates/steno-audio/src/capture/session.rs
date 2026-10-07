@@ -1001,25 +1001,24 @@ impl Core {
                 if !Self::still_rebuilding(&inner, generation) {
                     return Restart::Abandoned;
                 }
-                self.backend.start(
-                    &self.configuration.lanes(),
-                    self.configuration.input_device_uid.as_deref(),
-                    Arc::clone(sink),
-                )
+                self.backend
+                    .start(
+                        &self.configuration.lanes(),
+                        self.configuration.input_device_uid.as_deref(),
+                        Arc::clone(sink),
+                    )
+                    .or_else(|error| {
+                        if attempt < CaptureSession::RESTART_ATTEMPTS {
+                            return Err(error);
+                        }
+                        self.start_on_the_default(sink).ok_or(error)
+                    })
             };
             if let Ok(stream) = result {
                 return Restart::Started(stream, attempt);
             }
             if attempt >= CaptureSession::RESTART_ATTEMPTS {
-                let inner = self.lock();
-                if !Self::still_rebuilding(&inner, generation) {
-                    return Restart::Abandoned;
-                }
-                return self
-                    .start_on_the_default(sink)
-                    .map_or(Restart::Exhausted, |stream| {
-                        Restart::Started(stream, attempt)
-                    });
+                return Restart::Exhausted;
             }
             if !self
                 .clock
@@ -1048,7 +1047,7 @@ impl Core {
         let mut stream = self
             .backend
             .start(&self.configuration.lanes(), None, Arc::clone(sink))
-            .map_err(|error| tracing::warn!("the default input did not start either: {error}"))
+            .inspect_err(|error| tracing::warn!("the default input did not start either: {error}"))
             .ok()?;
         if let Some(input) = stream.input.as_mut()
             && input.uid != chosen
