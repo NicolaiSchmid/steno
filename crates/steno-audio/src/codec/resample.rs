@@ -85,8 +85,7 @@ impl LaneResampler {
     /// counts stay stable.
     #[must_use]
     pub fn expected_len(&self) -> usize {
-        // Lengths are exact in f64; the result is a small positive count.
-        (self.received as f64 * AudioBuffer16k::SAMPLE_RATE / f64::from(self.rate)).round() as usize
+        length_at_16k(self.received, self.rate)
     }
 
     /// How many of the samples appended so far the finished lane keeps
@@ -114,6 +113,12 @@ impl LaneResampler {
             output.resize(output.len() + (expected - self.produced), 0.0);
         }
     }
+}
+
+/// `frames` at `rate` as a 16 kHz length: `round(frames * 16000 / rate)`.
+pub(super) fn length_at_16k(frames: usize, rate: u32) -> usize {
+    // Lengths are exact in f64; the result is a small positive count.
+    (frames as f64 * AudioBuffer16k::SAMPLE_RATE / f64::from(rate.max(1))).round() as usize
 }
 
 /// The 48 kHz path: the sidecar writer's filter, frame by frame, compensated

@@ -61,6 +61,7 @@ use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
 pub use resample::LaneResampler;
+use resample::length_at_16k;
 
 use crate::writer::caf::CafReader;
 use crate::writer::{WavFile, WavStreamWriter};
@@ -153,13 +154,7 @@ impl SymphoniaAudioCodec {
             }
             Ok(())
         })?;
-        if channel >= spec.channels {
-            return Err(CodecError::ChannelMissing {
-                lane,
-                channel,
-                channels: spec.channels,
-            });
-        }
+        spec.check_channel(channel, lane)?;
         if let Some(resampler) = resampler {
             resampler.finish(&mut output);
         }
@@ -187,13 +182,7 @@ impl SymphoniaAudioCodec {
             }
             Ok(())
         })?;
-        if channel >= spec.channels {
-            return Err(CodecError::ChannelMissing {
-                lane,
-                channel,
-                channels: spec.channels,
-            });
-        }
+        spec.check_channel(channel, lane)?;
         Ok(DecodedChannel {
             sample_rate: spec.rate,
             channels: spec.channels,
@@ -248,13 +237,6 @@ impl SymphoniaAudioCodec {
     }
 }
 
-/// `frames` at `rate` as a 16 kHz length, by the exact-length rule
-/// ([`LaneResampler::expected_len`]).
-fn length_at_16k(frames: usize, rate: u32) -> usize {
-    // Lengths are exact in f64; the result is a small positive count.
-    (frames as f64 * AudioBuffer16k::SAMPLE_RATE / f64::from(rate.max(1))).round() as usize
-}
-
 /// The 16 kHz samples to reserve for `frames` at `rate`: the exact length
 /// plus a second, so the filter's tail and a frame count a little short
 /// never grow the buffer.
@@ -277,6 +259,20 @@ struct Spec {
     rate: u32,
     channels: usize,
     frames: Option<u64>,
+}
+
+impl Spec {
+    /// `ChannelMissing` when the stream has no channel `channel`.
+    fn check_channel(self, channel: usize, lane: AudioLane) -> Result<(), CodecError> {
+        if channel < self.channels {
+            return Ok(());
+        }
+        Err(CodecError::ChannelMissing {
+            lane,
+            channel,
+            channels: self.channels,
+        })
+    }
 }
 
 /// What [`Frames::stream`] hands its callback.
@@ -431,9 +427,10 @@ impl SymphoniaFrames {
                 channels: count,
                 frames: self.frames,
             };
+            let audible = count > 0 && shape.rate > 0;
             if spec != Some(packet_spec) {
                 spec = Some(packet_spec);
-                if count > 0 && shape.rate > 0 {
+                if audible {
                     each(Event::Start(packet_spec))?;
                 }
             }
@@ -443,7 +440,7 @@ impl SymphoniaFrames {
                 *buffer = SampleBuffer::<f32>::new(audio.capacity() as u64, shape);
             }
             buffer.copy_interleaved_ref(audio);
-            if count > 0 && shape.rate > 0 {
+            if audible {
                 each(Event::Frames(packet_spec, buffer.samples()))?;
             }
         }

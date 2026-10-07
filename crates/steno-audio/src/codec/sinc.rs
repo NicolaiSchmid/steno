@@ -167,13 +167,7 @@ impl SincStream {
             self.received += taken;
             // The last tap of output n reads input sample centre + half.
             while self.resampler.centre(self.next) + half < self.received {
-                output.push(self.resampler.output_at(
-                    self.next,
-                    &self.window,
-                    self.base,
-                    self.received,
-                ));
-                self.next += 1;
+                self.emit(output);
             }
             // The first tap of the next output reads centre + 1 - half.
             let keep = (self.resampler.centre(self.next) + 1).saturating_sub(half);
@@ -189,13 +183,16 @@ impl SincStream {
     pub fn finish(&mut self, output: &mut Vec<f32>) {
         let count = (self.received as f64 / self.resampler.ratio).ceil() as usize;
         while self.next < count {
-            output.push(self.resampler.output_at(
-                self.next,
-                &self.window,
-                self.base,
-                self.received,
-            ));
-            self.next += 1;
+            self.emit(output);
         }
+    }
+
+    /// Appends the next output sample from the input received so far.
+    fn emit(&mut self, output: &mut Vec<f32>) {
+        output.push(
+            self.resampler
+                .output_at(self.next, &self.window, self.base, self.received),
+        );
+        self.next += 1;
     }
 }
