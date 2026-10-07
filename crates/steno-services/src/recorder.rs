@@ -489,6 +489,8 @@ mod tests {
     use crate::testing::{
         PATIENCE, eventually, fake_dependencies, on_own_thread, synthetic_capture, temp_store,
     };
+    use steno_audio::CaptureError;
+    use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
     use steno_core::AudioLane;
     use steno_core::paths::file_url;
     use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
@@ -1056,18 +1058,15 @@ mod tests {
     /// The real writer whose first write waits for `go`, so a backend that
     /// delivers meanwhile overflows a one-frame relay.
     struct Stalled {
-        inner: steno_audio::writer::RecordingWriter,
+        inner: RecordingWriter,
         go: Option<std::sync::mpsc::Receiver<()>>,
     }
 
-    impl steno_audio::writer::RecordingWriting for Stalled {
-        fn files(&self) -> steno_audio::writer::RecordingFiles {
+    impl RecordingWriting for Stalled {
+        fn files(&self) -> RecordingFiles {
             self.inner.files()
         }
-        fn write(
-            &mut self,
-            frames: &steno_audio::writer::LaneFrames<'_>,
-        ) -> Result<(), steno_audio::CaptureError> {
+        fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
             if let Some(go) = self.go.take() {
                 let _ = go.recv_timeout(PATIENCE);
             }
@@ -1076,9 +1075,7 @@ mod tests {
         fn sync(&mut self) -> std::io::Result<()> {
             self.inner.sync()
         }
-        fn finish(
-            &mut self,
-        ) -> Result<steno_audio::writer::RecordingFiles, steno_audio::CaptureError> {
+        fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
             self.inner.finish()
         }
     }
@@ -1090,7 +1087,6 @@ mod tests {
     async fn a_stop_that_lost_frames_logs_them() {
         use steno_audio::testing::SyntheticCaptureBackend;
         use steno_audio::testing::synthetic::SyntheticOptions;
-        use steno_audio::writer::{RecordingWriter, RecordingWriting};
 
         let log = steno_pipeline::fixtures::CapturedLog::warnings();
         let harness = harness(&[]);
