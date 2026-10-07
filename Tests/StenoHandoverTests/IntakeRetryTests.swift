@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import StenoCore
 import Synchronization
 import Testing
@@ -385,6 +386,41 @@ final class ScriptedIntake: HandoverIntake, Sendable {
         #expect(try Data(contentsOf: admission.file) == bytes)
       }
       await second.stop()
+    }
+  }
+
+  /// A receipt the store cannot read is an error, not a missing receipt:
+  /// the sweep keeps the upload's files, which a later start sweeps once
+  /// the store reads again. Taken for a missing receipt, the failed read
+  /// would delete a resumable upload. The read fails because a temporary
+  /// table of the same name shadows `handoverReceipt` on the in-memory
+  /// store's one connection. Rust:
+  /// `a_failed_receipt_read_keeps_the_upload_and_answers_500`.
+  @Test func aReceiptTheStoreCannotReadKeepsTheUploadThroughTheSweep() async throws {
+    try await TestService.run(chunkSize: Self.chunkSize) { test in
+      let phone = try await Phone.pair(test.service)
+      let bytes = Phone.seededBytes(count: 2 * Self.chunkSize, seed: 83)
+      let metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: Self.chunkSize)
+      #expect(try await phone.announce(metadata).status == 201)
+      #expect(try await phone.upload(metadata.recordingID, chunk: 0, chunks[0]).status == 204)
+      let engine = test.service.engine
+
+      try await test.store.writer.write { db in
+        try db.execute(sql: "CREATE TEMP TABLE handoverReceipt (unreadable INTEGER)")
+      }
+      await engine.sweepOrphans()
+      #expect(engine.inbox.hasPartial(metadata.recordingID), "the resumable upload is kept")
+      #expect(engine.inbox.loadMetadata(metadata.recordingID) == metadata)
+
+      // Once the store reads again, the upload resumes where it stood.
+      try await test.store.writer.write { db in
+        try db.execute(sql: "DROP TABLE temp.handoverReceipt")
+      }
+      await engine.sweepOrphans()
+      #expect(engine.inbox.hasPartial(metadata.recordingID))
+      #expect(try await phone.upload(metadata.recordingID, chunk: 1, chunks[1]).status == 204)
+      #expect(try await phone.complete(metadata.recordingID).status == 200)
     }
   }
 }
