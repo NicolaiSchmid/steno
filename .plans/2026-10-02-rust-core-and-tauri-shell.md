@@ -1625,6 +1625,16 @@ touch lines; each fix is ported to Swift before cutover.
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
   `/etc/hostname` and falls back to `Steno`; the shell passes the OS computer name on
   the Mac (WP9) and on Windows (WP10).
+- Phone queue: every launch lists `Documents/queue/` and adds a row for each
+  recording file no row of the index names (`adoptRecordingFiles` in
+  `mobile/src/features/queue/queue-storage.ts`), so an unreadable index with no usable
+  temp file, a stale temp file or a row that was never saved leaves no recording
+  behind; the unreadable index is kept as `index.corrupt.json`. The new row enters
+  crash recovery, which hashes and queues it. A file whose row is `delivered` keeps
+  that row. A file left by a `delivered` row the lost index named is uploaded again:
+  the Mac answers its announce from the receipt, which is `complete`, and the
+  `complete` with the meeting id, so no second meeting is made while the receipt
+  exists; after a revoke deleted the receipt it becomes a second meeting.
 
 ### Shell
 
@@ -2011,6 +2021,7 @@ PR off `main`.
 | The handover's admission, first announce and revoke refusals leave another device's files and receipt alone, and the admission leaves no file behind (`steno-handover`) | `fix/rust-handover-admit-announce` | #219 | merged |
 | No traffic light inset under a native title bar: the sidebars' spacer and onboarding's top follow the platform (`apps/macos/web/`) | `fix/web-platform-title-inset` | #217 | merged |
 | After the intake, `admit` discards every file of the recording unless another device holds its receipt, and so do a refused `complete` and a failed first save (Swift core, the counterpart of #219) | `fix/swift-handover-admit` | #212 | open |
+| The phone rebuilds its queue index from the recording files on disk, so a lost or stale index leaves no recording behind (`mobile/`) | `fix/mobile-queue-index-rebuild` | #PR | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
