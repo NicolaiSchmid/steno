@@ -108,7 +108,7 @@ fn slug_file_name_keeps_off_windows_device_names_only_where_they_are_reserved() 
         assert_eq!(Slug::file_name_reserving(name, true), on_windows, "{name}");
         assert_eq!(
             Slug::file_name_reserving(name, false),
-            Slug::file_name_reserving(on_windows, false).replacen('_', "", 1),
+            on_windows.replacen('_', "", 1),
             "{name}: kept where the names are not reserved"
         );
     }
@@ -132,7 +132,6 @@ fn slug_file_name_keeps_off_windows_device_names_only_where_they_are_reserved() 
             "{name} is not a device name"
         );
     }
-    assert_eq!(Slug::file_name_reserving("Con", false), "Con");
     assert_eq!(
         Slug::file_name("Con"),
         if cfg!(windows) { "Con_" } else { "Con" },

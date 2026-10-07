@@ -1236,6 +1236,7 @@ fn two_meetings_delivered_at_once_both_keep_their_line_on_a_shared_person_page()
     });
 
     let (receipt_one, receipt_two, second_first) = std::thread::scope(|scope| {
+        // Moved in, so a panic here drops it and frees the first delivery.
         let release = release;
         let first_run = scope.spawn(|| first.deliver_meeting(&one, None));
         first_paused
