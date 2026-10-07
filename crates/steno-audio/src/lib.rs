@@ -11,8 +11,8 @@
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
 //!   files to 16 kHz mono a block at a time, and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
-//!   microphone, debounced into a call starting and ending, and the WASAPI
-//!   session mapping.
+//!   microphone, debounced into a call starting and ending, the WASAPI
+//!   session mapping, and on Linux the PipeWire stream view.
 //! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
 //!   bodies, the processing thread and the relay; everything on the
 //!   real-time path.
@@ -78,9 +78,9 @@
 //!
 //! # Platforms
 //!
-//! The live backend and the process-activity source are Core Audio on
-//! macOS and WASAPI on Windows; on Linux the live backend is PipeWire and
-//! the process-activity source a stub. **The Windows backend
+//! The live backend, the input device list and the process-activity
+//! source are Core Audio on macOS, PipeWire on Linux and WASAPI on Windows.
+//! **The Windows backend
 //! has not run on hardware:** no Windows machine with audio devices has
 //! run it. It is written against Microsoft's documentation, built, linted
 //! and tested on the `windows-latest` CI runner, which has no audio
