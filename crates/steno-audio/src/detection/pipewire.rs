@@ -290,6 +290,13 @@ impl State {
     fn notify(&mut self) {
         self.subscribers.retain(|s| s.send(()).is_ok());
     }
+
+    /// [`Self::notify`] once the view is current.
+    fn changed(&mut self) {
+        if matches!(self.phase, Phase::Ready) {
+            self.notify();
+        }
+    }
 }
 
 struct Shared {
@@ -304,11 +311,20 @@ impl Shared {
     }
 
     /// Applies `change` to the view and, once it is current, tells the
-    /// receivers if `change` says the view changed.
-    fn update(&self, change: impl FnOnce(&mut StreamGraph) -> bool) {
+    /// receivers; `change`'s answer.
+    fn update<R>(&self, change: impl FnOnce(&mut StreamGraph) -> R) -> R {
         let mut state = self.lock();
-        if change(&mut state.graph) && matches!(state.phase, Phase::Ready) {
-            state.notify();
+        let answer = change(&mut state.graph);
+        state.changed();
+        answer
+    }
+
+    /// A global went away: out of the view, and the receivers told if the
+    /// view held it.
+    fn forget(&self, id: u32) {
+        let mut state = self.lock();
+        if state.graph.remove(id) {
+            state.changed();
         }
     }
 
@@ -360,12 +376,7 @@ fn announce(
     let get = |key: &str| props.get(key);
     let bound = match global.type_ {
         ObjectType::Node => {
-            let mut stream = false;
-            shared.update(|graph| {
-                stream = graph.add_node(id, get);
-                true
-            });
-            if !stream {
+            if !shared.update(|graph| graph.add_node(id, get)) {
                 return;
             }
             let Ok(node) = registry.bind::<pw::node::Node, _>(global) else {
@@ -388,7 +399,6 @@ fn announce(
                         .filter(|_| mask.contains(pw::node::NodeChangeMask::PROPS));
                     shared.update(|graph| {
                         graph.node_info(id, running, props.map(|p| move |k: &str| p.get(k)));
-                        true
                     });
                 })
                 .register();
@@ -398,10 +408,7 @@ fn announce(
             }
         }
         ObjectType::Client => {
-            shared.update(|graph| {
-                graph.client(id, get);
-                true
-            });
+            shared.update(|graph| graph.client(id, get));
             let Ok(client) = registry.bind::<pw::client::Client, _>(global) else {
                 tracing::debug!("binding PipeWire client {id} for its info failed");
                 return;
@@ -411,10 +418,7 @@ fn announce(
                 .add_listener_local()
                 .info(move |info| {
                     if let Some(props) = info.props() {
-                        shared.update(|graph| {
-                            graph.client(id, |k| props.get(k));
-                            true
-                        });
+                        shared.update(|graph| graph.client(id, |k| props.get(k)));
                     }
                 })
                 .register();
@@ -424,10 +428,7 @@ fn announce(
             }
         }
         ObjectType::Link => {
-            shared.update(|graph| {
-                graph.add_link(id, get);
-                true
-            });
+            shared.update(|graph| graph.add_link(id, get));
             return;
         }
         _ => return,
@@ -490,7 +491,7 @@ impl Connection {
                 let (shared, local) = (Arc::clone(shared), Rc::clone(&local));
                 move |id| {
                     drop(local.bound.borrow_mut().remove(&id));
-                    shared.update(|graph| graph.remove(id));
+                    shared.forget(id);
                 }
             })
             .register();
