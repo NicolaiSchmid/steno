@@ -1314,6 +1314,58 @@ fn a_folder_another_writer_claims_first_is_never_shared() {
     );
 }
 
+/// Every file directly in `folder` with its bytes, by name.
+fn contents(vault: &Vault, folder: &str) -> Vec<(String, Vec<u8>)> {
+    vault
+        .list(folder)
+        .into_iter()
+        .map(|name| {
+            let bytes = vault.read(&format!("{folder}/{name}"));
+            (name, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn a_redeliver_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_own() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let mut theirs = ours.clone();
+    theirs.meeting.id = uuid(2);
+    let first = deliver(&destination, &ours, None);
+    assert_eq!(first.folder, FOLDER);
+
+    // The user removes the meeting's folder, and a meeting with the same
+    // date and title then claims its name.
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    assert_eq!(deliver(&destination, &theirs, None).folder, FOLDER);
+    let their_files = contents(&vault, FOLDER);
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(
+        vault.list(&format!("{FOLDER}-2")),
+        without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
+    );
+    assert_eq!(
+        contents(&vault, FOLDER),
+        their_files,
+        "the other meeting's notes are untouched"
+    );
+    assert!(
+        paths(&again)
+            .iter()
+            .all(|path| !path.starts_with(&format!("{FOLDER}/"))),
+        "the receipt no longer lists the other meeting's files: {:?}",
+        paths(&again)
+    );
+    let anna = vault.text(ANNA_PAGE);
+    assert!(anna.contains(&ManagedBlock::marker(ours.meeting.id)));
+    assert!(anna.contains(&ManagedBlock::marker(theirs.meeting.id)));
+}
+
 /// `export()` with the first person and participant renamed.
 fn with_anna_named(name: &str) -> MeetingExport {
     let mut export = export();

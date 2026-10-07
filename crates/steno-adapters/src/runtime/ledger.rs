@@ -92,6 +92,16 @@ impl DeliveryLedger {
                 .any(|file| file.ownership == FileOwnership::Owned && file.relative_path == path)
     }
 
+    /// Drops every listed file under `folder` from the receipt to come: the
+    /// pinned folder that now holds another meeting's `meeting.json`, whose
+    /// files are that meeting's. The previous receipt still decides
+    /// [`DeliveryLedger::may_write`].
+    /// Swift: none; Swift writes into the pinned folder whatever it holds.
+    pub fn forget_folder(&mut self, folder: &str) {
+        let prefix = format!("{}/", folder.trim_end_matches('/'));
+        self.files.retain(|path, _| !path.starts_with(&prefix));
+    }
+
     pub fn record(&mut self, path: &str, ownership: FileOwnership, data: &[u8]) {
         self.files.insert(
             path.to_owned(),

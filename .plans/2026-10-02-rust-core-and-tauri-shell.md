@@ -1253,6 +1253,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   final path name on Windows; Swift can compare `fileResourceIdentifier`): on APFS a
   person renamed from `anna` to `Anna` today loses this meeting's line from the one
   page both names refer to.
+- A redelivery should check whose `meeting.json` the pinned folder holds before it
+  writes there, as the Rust destination does: when the user moved or deleted the
+  meeting's folder and a meeting with the same date and title claimed the name since,
+  Swift writes over that meeting's notes. The Rust destination claims a folder as on a
+  first delivery (`X-2`) and drops the old folder's files from the receipt.
 - On Windows the Rust person pages keep off the reserved device names (`Con` becomes
   `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
   names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.

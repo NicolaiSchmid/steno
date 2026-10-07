@@ -229,9 +229,25 @@ impl ObsidianFolderDestination {
         };
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
-        let folder = match ledger.pinned_folder() {
-            Some(folder) => folder.to_owned(),
-            None => self.claim_folder(meeting)?,
+        // A pinned folder that now holds another meeting's `meeting.json`
+        // (this one's was moved or deleted, and a meeting with the same
+        // date and title claimed the name since) is that meeting's: this
+        // delivery claims a folder as a first one does, so it never writes
+        // over the other meeting's notes.
+        let folder = match ledger.pinned_folder().map(str::to_owned) {
+            Some(folder)
+                if self
+                    .meeting_of(&folder)
+                    .is_none_or(|owner| owner == meeting.meeting.id) =>
+            {
+                folder
+            }
+            pinned => {
+                if let Some(lost) = pinned {
+                    ledger.forget_folder(&lost);
+                }
+                self.claim_folder(meeting)?
+            }
         };
         // Swift's `lastPathComponent`: a pinned `Meetings/x/` still names `x`.
         let slug = Path::new(&folder).file_name().map_or_else(
