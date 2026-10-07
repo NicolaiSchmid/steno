@@ -1335,15 +1335,7 @@ fn a_redelivery_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_
     let vault = Vault::new();
     let destination = vault.destination_with(false, Some("People"));
     let ours = export();
-    let mut theirs = ours.clone();
-    theirs.meeting.id = uuid(2);
-    let first = deliver(&destination, &ours, None);
-    assert_eq!(first.folder, FOLDER);
-
-    // The user removes the meeting's folder, and a meeting with the same
-    // date and title then claims its name.
-    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
-    assert_eq!(deliver(&destination, &theirs, None).folder, FOLDER);
+    let first = lose_the_folder_to_another_meeting(&vault, &destination, &destination, &ours);
     let their_files = contents(&vault, FOLDER);
 
     let again = deliver(&destination, &ours, Some(&first));
@@ -1364,7 +1356,7 @@ fn a_redelivery_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_
     );
     let anna = vault.text(ANNA_PAGE);
     assert!(anna.contains(&ManagedBlock::marker(ours.meeting.id)));
-    assert!(anna.contains(&ManagedBlock::marker(theirs.meeting.id)));
+    assert!(anna.contains(&ManagedBlock::marker(uuid(2))));
 }
 
 /// The export with its first decision reworded: a change the folder note
@@ -1375,12 +1367,13 @@ fn with_a_changed_decision(export: &MeetingExport) -> MeetingExport {
     changed
 }
 
-/// `ours` delivered with `destination`, its folder removed, and `theirs`,
-/// another meeting with the same date and title, delivered into the name
-/// since. Returns `ours`' receipt.
+/// `ours` delivered with `destination`, its folder removed by the user, and
+/// another meeting with the same date and title (id 2) delivered into the
+/// name since with `theirs_with`. Returns `ours`' receipt.
 fn lose_the_folder_to_another_meeting(
     vault: &Vault,
     destination: &ObsidianFolderDestination,
+    theirs_with: &ObsidianFolderDestination,
     ours: &MeetingExport,
 ) -> DeliveryReceipt {
     let mut theirs = ours.clone();
@@ -1388,7 +1381,7 @@ fn lose_the_folder_to_another_meeting(
     let first = deliver(destination, ours, None);
     assert_eq!(first.folder, FOLDER);
     fs::remove_dir_all(vault.path(FOLDER)).unwrap();
-    let their_receipt = deliver(&vault.destination_with(false, None), &theirs, None);
+    let their_receipt = deliver(theirs_with, &theirs, None);
     assert_eq!(their_receipt.folder, FOLDER);
     first
 }
@@ -1398,7 +1391,12 @@ fn a_redelivery_that_failed_after_claiming_a_folder_writes_that_folder_the_next_
     let vault = Vault::new();
     let destination = vault.destination_with(false, Some("People"));
     let ours = export();
-    let first = lose_the_folder_to_another_meeting(&vault, &destination, &ours);
+    let first = lose_the_folder_to_another_meeting(
+        &vault,
+        &destination,
+        &vault.destination_with(false, None),
+        &ours,
+    );
     let two = format!("{FOLDER}-2");
 
     // The first redelivery claims `-2`, writes the meeting's notes there and
@@ -1446,7 +1444,12 @@ fn a_redelivery_without_its_audio_still_updates_the_folder_it_claimed() {
     let vault = Vault::new();
     let destination = vault.destination();
     let ours = vault.export_with_audio();
-    let first = lose_the_folder_to_another_meeting(&vault, &destination, &ours);
+    let first = lose_the_folder_to_another_meeting(
+        &vault,
+        &destination,
+        &vault.destination_with(false, None),
+        &ours,
+    );
     let two = format!("{FOLDER}-2");
     // The retention sweep removed the mixdown, and the audio copy left with
     // the removed folder.
@@ -1477,6 +1480,7 @@ fn a_lost_folder_drops_only_its_own_files_from_the_receipt() {
     let first = lose_the_folder_to_another_meeting(
         &vault,
         &vault.destination_with(false, Some("People")),
+        &vault.destination_with(false, None),
         &ours,
     );
     assert_eq!(
@@ -1503,34 +1507,91 @@ fn a_lost_folder_drops_only_its_own_files_from_the_receipt() {
 }
 
 #[test]
-fn a_pinned_folder_whose_meeting_json_is_missing_or_names_no_meeting_gets_a_folder_of_its_own() {
-    for damage in ["missing", "not a meeting"] {
+fn a_pinned_meeting_json_that_names_no_meeting_gets_a_folder_of_its_own() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = deliver(&destination, &ours, None);
+    fs::write(
+        vault.path(&format!("{FOLDER}/meeting.json")),
+        b"{\"meeting\": 7}\n",
+    )
+    .unwrap();
+    let left = contents(&vault, FOLDER);
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(contents(&vault, FOLDER), left, "never written over");
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+}
+
+#[test]
+fn a_deleted_meeting_json_is_written_back_in_the_same_folder() {
+    // Either note alone names the meeting: `transcript.vtt` with the folder
+    // note deleted too, then the folder note with `transcript.vtt` deleted.
+    for other in [format!("{FOLDER_SLUG}.md"), "transcript.vtt".to_owned()] {
+        let deleted = ["meeting.json".to_owned(), other];
         let vault = Vault::new();
         let destination = vault.destination_with(false, Some("People"));
         let ours = export();
         let first = deliver(&destination, &ours, None);
-        let json = vault.path(&format!("{FOLDER}/meeting.json"));
-        if damage == "missing" {
-            fs::remove_file(&json).unwrap();
-        } else {
-            fs::write(&json, b"{\"meeting\": 7}\n").unwrap();
+        for name in &deleted {
+            fs::remove_file(vault.path(&format!("{FOLDER}/{name}"))).unwrap();
         }
-        let left = contents(&vault, FOLDER);
 
         let again = deliver(&destination, &ours, Some(&first));
 
-        assert_eq!(again.folder, format!("{FOLDER}-2"), "{damage}");
+        assert_eq!(again.folder, FOLDER, "{deleted:?}: same folder");
         assert_eq!(
-            contents(&vault, FOLDER),
-            left,
-            "{damage}: never written over"
+            vault.read(&format!("{FOLDER}/meeting.json")),
+            ArtifactRenderer::new().render_json(&ours).unwrap(),
+            "{deleted:?}: written back"
         );
-        assert_eq!(
-            vault.list(&format!("{FOLDER}-2")),
-            second_folder_files(),
-            "{damage}"
+        assert!(
+            !vault.path(&format!("{FOLDER}-2")).exists(),
+            "{deleted:?}: no duplicate folder"
         );
     }
+}
+
+#[test]
+fn a_deleted_meeting_json_with_the_mixdown_swept_still_delivers() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    fs::remove_file(vault.path(&format!("{FOLDER}/meeting.json"))).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+
+    let again = deliver(&destination, &with_a_changed_decision(&ours), Some(&first));
+
+    assert_eq!(again.folder, FOLDER);
+    assert!(vault.path(&format!("{FOLDER}/audio.m4a")).exists());
+}
+
+#[test]
+fn a_folder_without_meeting_json_whose_notes_name_another_meeting_is_lost() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = lose_the_folder_to_another_meeting(
+        &vault,
+        &destination,
+        &vault.destination_with(false, None),
+        &ours,
+    );
+    fs::remove_file(vault.path(&format!("{FOLDER}/meeting.json"))).unwrap();
+    let their_files = contents(&vault, FOLDER);
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(
+        contents(&vault, FOLDER),
+        their_files,
+        "the other meeting's notes are untouched"
+    );
 }
 
 #[test]

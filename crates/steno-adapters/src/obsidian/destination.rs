@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::ManagedBlock;
 use crate::fs::{AtomicFileWriter, LocalFolderSink};
-use crate::naming::MeetingFolder;
+use crate::naming::{MeetingFolder, Note};
 use crate::rendering::{ArtifactRenderer, LinkStyle, PersonPage, RenderOptions};
 use crate::runtime::DeliveryLedger;
 
@@ -50,9 +50,9 @@ pub enum DeliveryStep<'a> {
     /// Another delivery in this process holds the vault; this one waits for
     /// it before touching anything.
     WaitingForVault,
-    /// A delivery without a folder of its own (a first one, or one whose
-    /// pinned folder no longer holds this meeting's `meeting.json`) is
-    /// about to claim this meeting folder by creating it.
+    /// A delivery without a folder of its own (a first one, or a redelivery
+    /// whose pinned folder is no longer this meeting's) is about to claim
+    /// this meeting folder by creating it.
     ClaimingFolder(&'a str),
     /// The person page at this path has been read (or found missing) and
     /// is about to be written with this meeting's line merged in.
@@ -70,6 +70,15 @@ impl std::fmt::Debug for StepHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("StepHook")
     }
+}
+
+/// The folder's basename, which every note in it is named after. Swift's
+/// `lastPathComponent`: a pinned `Meetings/x/` still names `x`.
+fn folder_slug(folder: &str) -> String {
+    Path::new(folder).file_name().map_or_else(
+        || folder.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// The lock every delivery into the vault at `vault_path` holds from start
@@ -241,19 +250,8 @@ impl ObsidianFolderDestination {
         };
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
-        // A pinned folder that is there but holds no `meeting.json` of this
-        // meeting (another meeting's, missing or not a meeting's: this one's
-        // was moved or deleted, and a meeting with the same date and title
-        // may have claimed the name since) is lost to it: this delivery
-        // claims a folder as a first one does and moves its receipt there,
-        // so the cost is a duplicate folder, never an overwrite of another
-        // meeting's notes. A folder that is gone is not lost: the delivery
-        // recreates it, as Swift's does.
         let folder = match ledger.pinned_folder().map(str::to_owned) {
-            Some(lost)
-                if self.sink.exists(&lost)
-                    && self.meeting_of(&lost)? != Some(meeting.meeting.id) =>
-            {
+            Some(lost) if self.is_lost(&lost, meeting.meeting.id)? => {
                 let claimed = self.claim_folder(meeting)?;
                 ledger.move_folder(&lost, &claimed);
                 claimed
@@ -261,11 +259,7 @@ impl ObsidianFolderDestination {
             Some(folder) => folder,
             None => self.claim_folder(meeting)?,
         };
-        // Swift's `lastPathComponent`: a pinned `Meetings/x/` still names `x`.
-        let slug = Path::new(&folder).file_name().map_or_else(
-            || folder.clone(),
-            |name| name.to_string_lossy().into_owned(),
-        );
+        let slug = folder_slug(&folder);
         let options = RenderOptions {
             link_style: LinkStyle::Wikilink,
             person_pages: self.settings.people_folder.is_some(),
@@ -455,6 +449,55 @@ impl ObsidianFolderDestination {
             },
             |folder| self.meeting_of(folder).ok().flatten(),
         )
+    }
+
+    /// The pinned folder is lost when it is there but no longer this
+    /// meeting's: its `meeting.json` names another meeting or none, or is
+    /// missing and no note's `steno_id` names this meeting. The user moved or
+    /// deleted this meeting's folder, and a meeting with the same date and
+    /// title may have claimed the name since. A lost folder is never written:
+    /// the delivery claims a folder as a first one does and moves its receipt
+    /// there, so the cost is a duplicate folder. A folder that is gone is not
+    /// lost: the delivery recreates it, as Swift's does.
+    fn is_lost(&self, folder: &str, id: Uuid) -> Result<bool, ObsidianError> {
+        if !self.sink.exists(folder) {
+            return Ok(false);
+        }
+        if self
+            .sink
+            .exists(&format!("{folder}/{}", MeetingFolder::JSON))
+        {
+            return Ok(self.meeting_of(folder)? != Some(id));
+        }
+        Ok(!self.a_note_names(folder, id))
+    }
+
+    /// Whether `transcript.vtt` (its `WEBVTT - Steno <id>` header) or the
+    /// folder note (its `steno_id` frontmatter line) in `folder` names `id`.
+    /// A note that is missing or cannot be read names no meeting.
+    fn a_note_names(&self, folder: &str, id: Uuid) -> bool {
+        let read = |name: &str| {
+            let data = self.sink.read(&format!("{folder}/{name}")).ok()??;
+            String::from_utf8(data).ok()
+        };
+        let named = |value: &str| value.trim().trim_matches('"').parse::<Uuid>().ok() == Some(id);
+        let vtt = read(MeetingFolder::VTT).is_some_and(|text| {
+            text.lines()
+                .next()
+                .and_then(|header| header.strip_prefix("WEBVTT - Steno "))
+                .is_some_and(named)
+        });
+        vtt || read(&MeetingFolder::note_file(
+            Note::Folder,
+            &folder_slug(folder),
+        ))
+        .is_some_and(|text| {
+            text.lines()
+                .skip(1)
+                .take_while(|line| *line != "---")
+                .filter_map(|line| line.strip_prefix("steno_id:"))
+                .any(named)
+        })
     }
 
     /// The meeting whose `meeting.json` is in `folder`: `None` when the
