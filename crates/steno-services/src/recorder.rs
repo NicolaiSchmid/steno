@@ -292,6 +292,7 @@ impl CaptureRecorder {
         let intake = self.intake();
         let outcome = match active.session.stop() {
             Ok(result) => {
+                log_dropped_frames(active.meeting_id, &result.statistics);
                 let duration = result.statistics.duration;
                 let statistics = result.statistics.clone();
                 let completed = block_on(
@@ -414,11 +415,15 @@ impl Recorder for CaptureRecorder {
 }
 
 /// What a saved recording warns about, every line that applies joined
-/// into one: a device that disappeared, frames the writer could not keep up
-/// with (dropped from the relay or the rings, in whole seconds, rounded up),
-/// and a call whose system audio stayed silent. Swift:
+/// into one: a device that disappeared, frames that never reached the
+/// files (in whole seconds of the lane that lost most, rounded up), and a
+/// call whose system audio stayed silent. The dropped frames name no
+/// cause, since the count holds several: the relay full behind a slow
+/// disk, ring overruns while the computer was too busy, frames a stop left
+/// undrained and, on Windows, the slips that absorb clock drift. Swift:
 /// `RecordingController.stop`, where a device loss replaced the silent-lane
-/// line; the joining and the dropped frames are Rust only.
+/// line and that line reads "The system audio lane stayed silent"; the
+/// joining and the dropped frames are Rust only.
 fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Option<String> {
     let mut lines = Vec::new();
     if statistics.ended_on_device_loss {
@@ -437,16 +442,27 @@ fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Optio
         } else {
             format!("About {seconds} seconds of the recording are")
         };
-        lines.push(format!(
-            "{amount} missing because the disk could not keep up."
-        ));
+        lines.push(format!("{amount} missing."));
     }
     if mode == CaptureMode::Call && statistics.system_lane_silent {
         lines.push(
-            "The system audio lane stayed silent. Check the system audio permission.".to_owned(),
+            "Steno heard nothing from the call's audio. Check the system audio permission."
+                .to_owned(),
         );
     }
     (!lines.is_empty()).then(|| lines.join(" "))
+}
+
+/// A `warn` line when a recording lost frames, with the meeting's id and
+/// the count per lane (counts only, the log's privacy rule). Rust only.
+fn log_dropped_frames(meeting_id: Uuid, statistics: &CaptureStatistics) {
+    if statistics.dropped_frames.values().any(|frames| *frames > 0) {
+        tracing::warn!(
+            meeting = %meeting_id,
+            dropped = ?statistics.dropped_frames,
+            "the recording lost frames"
+        );
+    }
 }
 
 /// The required permissions `permissions` reports denied, among the ones
@@ -981,18 +997,16 @@ mod tests {
     fn dropped_frames_warn_with_the_seconds_missing() {
         let mut dropped = statistics();
         dropped.dropped_frames.insert(AudioLane::Mic, 250);
-        dropped.dropped_frames.insert(AudioLane::System, 40);
+        dropped.dropped_frames.insert(AudioLane::System, 200);
         assert_eq!(
-            recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
-            Some(
-                "About 3 seconds of the recording are missing because the disk could not keep up."
-            )
+            recording_warning(CaptureMode::Call, &dropped).as_deref(),
+            Some("About 3 seconds of the recording are missing.")
         );
         dropped.dropped_frames.clear();
         dropped.dropped_frames.insert(AudioLane::Mixed, 1);
         assert_eq!(
             recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
-            Some("About 1 second of the recording is missing because the disk could not keep up.")
+            Some("About 1 second of the recording is missing.")
         );
     }
 
@@ -1008,14 +1022,35 @@ mod tests {
         assert_eq!(
             warning,
             "An audio device disappeared; the partial recording was kept. \
-             About 1 second of the recording is missing because the disk could not keep up. \
-             The system audio lane stayed silent. Check the system audio permission."
+             About 1 second of the recording is missing. \
+             Steno heard nothing from the call's audio. Check the system audio permission."
         );
         // In person there is no system lane to warn about.
         assert!(
             !recording_warning(CaptureMode::InPerson, &all)
                 .unwrap()
-                .contains("system audio")
+                .contains("call's audio")
         );
+    }
+
+    /// A recording that lost frames leaves a `warn` line with the meeting
+    /// and the counts per lane; a clean one leaves none.
+    #[test]
+    fn dropped_frames_are_logged_with_the_meeting_and_the_counts() {
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
+        let clean = Uuid::new_v4();
+        log_dropped_frames(clean, &statistics());
+        let lossy = Uuid::new_v4();
+        let mut dropped = statistics();
+        dropped.dropped_frames.insert(AudioLane::Mic, 250);
+        dropped.dropped_frames.insert(AudioLane::System, 0);
+        log_dropped_frames(lossy, &dropped);
+        let text = log.text();
+        assert!(!text.contains(&clean.to_string()), "{text}");
+        let line = text
+            .lines()
+            .find(|line| line.contains(&lossy.to_string()))
+            .unwrap_or_else(|| panic!("no line for the meeting: {text}"));
+        assert!(line.contains("Mic: 250, System: 0"), "{line}");
     }
 }
