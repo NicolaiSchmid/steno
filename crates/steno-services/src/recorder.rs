@@ -1052,4 +1052,98 @@ mod tests {
             .unwrap_or_else(|| panic!("no line for the meeting: {text}"));
         assert!(line.contains("Mic: 250, System: 0"), "{line}");
     }
+
+    /// The real writer whose first write waits for `go`, so a backend that
+    /// delivers meanwhile overflows a one-frame relay.
+    struct Stalled {
+        inner: steno_audio::writer::RecordingWriter,
+        go: Option<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl steno_audio::writer::RecordingWriting for Stalled {
+        fn files(&self) -> steno_audio::writer::RecordingFiles {
+            self.inner.files()
+        }
+        fn write(
+            &mut self,
+            frames: &steno_audio::writer::LaneFrames<'_>,
+        ) -> Result<(), steno_audio::CaptureError> {
+            if let Some(go) = self.go.take() {
+                let _ = go.recv_timeout(PATIENCE);
+            }
+            self.inner.write(frames)
+        }
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.inner.sync()
+        }
+        fn finish(
+            &mut self,
+        ) -> Result<steno_audio::writer::RecordingFiles, steno_audio::CaptureError> {
+            self.inner.finish()
+        }
+    }
+
+    /// A stop whose recording lost frames logs them with the meeting: a
+    /// backend delivers two seconds at once while the writer is stalled
+    /// behind a one-frame relay.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_that_lost_frames_logs_them() {
+        use steno_audio::testing::SyntheticCaptureBackend;
+        use steno_audio::testing::synthetic::SyntheticOptions;
+        use steno_audio::writer::{RecordingWriter, RecordingWriting};
+
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
+        let harness = harness(&[]);
+        let (go, stalled) = std::sync::mpsc::channel();
+        let stalled = Arc::new(Mutex::new(Some(stalled)));
+        let backend = Arc::new(SyntheticCaptureBackend::new(SyntheticOptions::tones(
+            &[AudioLane::Mixed],
+            &[(AudioLane::Mixed, 440.0)],
+            2.0,
+        )));
+        let make: MakeCaptureSession = {
+            let backend = backend.clone();
+            Arc::new(move |configuration| {
+                let stalled = stalled.clone();
+                CaptureSession::with_writer_factory(
+                    configuration,
+                    backend.clone(),
+                    None,
+                    1,
+                    Arc::new(steno_audio::SystemClock::new()),
+                    Arc::new(move |layout, lanes, keep_raw| {
+                        Ok(Box::new(Stalled {
+                            inner: RecordingWriter::new(layout, lanes, keep_raw)?,
+                            go: stalled.lock().unwrap().take(),
+                        }) as Box<dyn RecordingWriting>)
+                    }),
+                )
+                .map_err(|error| error.to_string())
+            })
+        };
+        let recorder = Arc::new(CaptureRecorder::new(
+            harness.store.clone(),
+            harness.recorder.pipeline.clone(),
+            make,
+            Arc::new(FakePermissions::all_granted()),
+            harness.recorder.speech_models.clone(),
+            FixedOffset::east_opt(0).unwrap(),
+            tokio::runtime::Handle::current(),
+        ));
+        start(&recorder).await;
+        let meeting_id = recorder.status().meeting_id.unwrap();
+        let finished = backend.clone();
+        tokio::task::spawn_blocking(move || finished.wait_until_finished())
+            .await
+            .unwrap();
+        go.send(()).unwrap();
+        stop(&recorder).await;
+        let text = log.text();
+        assert!(
+            text.lines()
+                .any(|line| line.contains(&meeting_id.to_string())
+                    && line.contains("the recording lost frames")),
+            "{text}"
+        );
+    }
 }
