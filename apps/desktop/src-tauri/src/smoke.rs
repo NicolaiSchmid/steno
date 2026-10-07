@@ -405,21 +405,8 @@ fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
     if !windows::keeps_on_close(label) {
         return Ok(());
     }
-    let settings = app
-        .get_webview_window(label)
-        .ok_or("Settings was gone before the close")?;
     let mounted = app.state::<Smoke>().settings_ready.load(Ordering::SeqCst);
-    settings.close().map_err(|error| error.to_string())?;
-    thread::sleep(Duration::from_millis(1000));
-    let kept = app
-        .get_webview_window(label)
-        .ok_or("closing Settings destroyed it")?;
-    if kept.is_visible().map_err(|error| error.to_string())? {
-        return Err("Settings stayed visible after a close".into());
-    }
-    // A second close of the kept window changes nothing.
-    kept.close().map_err(|error| error.to_string())?;
-    thread::sleep(Duration::from_millis(300));
+    let kept = close_twice(app, label, "Settings")?;
     let section = steno_bridge::SettingsSection::Export;
     let params = WindowParams {
         window: BridgeWindow::Settings,
@@ -466,21 +453,9 @@ fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
     if !windows::keeps_on_close(label) {
         return Ok(());
     }
-    let onboarding = app
-        .get_webview_window(label)
-        .ok_or("onboarding was gone before the close")?;
     let smoke = app.state::<Smoke>();
     let told = smoke.onboarding_closed.load(Ordering::SeqCst);
-    onboarding.close().map_err(|error| error.to_string())?;
-    thread::sleep(Duration::from_millis(1000));
-    let kept = app
-        .get_webview_window(label)
-        .ok_or("closing onboarding destroyed it")?;
-    if kept.is_visible().map_err(|error| error.to_string())? {
-        return Err("onboarding stayed visible after a close".into());
-    }
-    kept.close().map_err(|error| error.to_string())?;
-    thread::sleep(Duration::from_millis(300));
+    close_twice(app, label, "onboarding")?;
     let times = smoke.onboarding_closed.load(Ordering::SeqCst) - told;
     if times != 1 {
         return Err(format!(
@@ -489,6 +464,26 @@ fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
     }
     stderr_line!("[steno-desktop] smoke: closing onboarding kept it and told the host once");
     Ok(())
+}
+
+/// Closes the window of `label`, called `name` in the messages, and
+/// returns it once a close kept it (`windows::Kept`): still there, hidden.
+/// Then closes the kept window again, which changes nothing.
+fn close_twice(app: &AppHandle, label: &str, name: &str) -> Result<WebviewWindow, String> {
+    let window = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("{name} was gone before the close"))?;
+    window.close().map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(1000));
+    let kept = app
+        .get_webview_window(label)
+        .ok_or_else(|| format!("closing {name} destroyed it"))?;
+    if kept.is_visible().map_err(|error| error.to_string())? {
+        return Err(format!("{name} stayed visible after a close"));
+    }
+    kept.close().map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(300));
+    Ok(kept)
 }
 
 /// A panel's size is the page's alone, held each platform's way
