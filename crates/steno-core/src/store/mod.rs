@@ -169,11 +169,7 @@ impl Store {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(path)?;
-        connection.busy_timeout(BUSY_TIMEOUT)?;
-        enable_wal(&connection)?;
-        connection.pragma_update(None, "synchronous", "NORMAL")?;
-        Self::new(connection)
+        Self::new(set_up(Connection::open(path)?)?)
     }
 
     /// Opens the existing database at `path` as [`Store::open`] does, but
@@ -186,15 +182,8 @@ impl Store {
     /// migrated.
     pub fn open_without_migrating(path: impl AsRef<Path>) -> Result<Store> {
         use rusqlite::OpenFlags;
-        let connection = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_URI
-                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        connection.busy_timeout(BUSY_TIMEOUT)?;
-        enable_wal(&connection)?;
-        connection.pragma_update(None, "synchronous", "NORMAL")?;
+        let flags = OpenFlags::default().difference(OpenFlags::SQLITE_OPEN_CREATE);
+        let connection = set_up(Connection::open_with_flags(path, flags)?)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::check(&connection)?;
         Ok(Store {
@@ -291,6 +280,15 @@ impl Store {
             Ok(())
         })
     }
+}
+
+/// The file connection set up as [`Store::open`] says: the busy timeout,
+/// WAL mode and `synchronous = NORMAL`.
+fn set_up(connection: Connection) -> Result<Connection> {
+    connection.busy_timeout(BUSY_TIMEOUT)?;
+    enable_wal(&connection)?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(connection)
 }
 
 /// `PRAGMA journal_mode = WAL`, checked: the pragma answers with the mode

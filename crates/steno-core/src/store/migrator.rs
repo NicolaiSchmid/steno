@@ -97,10 +97,7 @@ fn check_with(connection: &Connection, migrations: &[Migration]) -> Result<()> {
     } else {
         Vec::new()
     };
-    let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
-    if let Some(unknown) = applied.iter().find(|identifier| !known(identifier)) {
-        return Err(StoreError::UnknownMigration(unknown.clone()));
-    }
+    refuse_unknown(&applied, migrations)?;
     match migrations
         .iter()
         .find(|migration| !applied.iter().any(|a| a == migration.identifier))
@@ -110,14 +107,21 @@ fn check_with(connection: &Connection, migrations: &[Migration]) -> Result<()> {
     }
 }
 
+/// [`StoreError::UnknownMigration`] for the first of `applied` that
+/// `migrations` lacks: a newer build migrated the database.
+fn refuse_unknown(applied: &[String], migrations: &[Migration]) -> Result<()> {
+    let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
+    match applied.iter().find(|identifier| !known(identifier)) {
+        Some(unknown) => Err(StoreError::UnknownMigration(unknown.clone())),
+        None => Ok(()),
+    }
+}
+
 /// [`migrate`] over an explicit list; tests pass one with a bad migration.
 fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
     connection.execute_batch(MIGRATIONS_TABLE)?;
     let applied = applied(connection)?;
-    let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
-    if let Some(unknown) = applied.iter().find(|identifier| !known(identifier)) {
-        return Err(StoreError::UnknownMigration(unknown.clone()));
-    }
+    refuse_unknown(&applied, migrations)?;
     if applied.len() == migrations.len() {
         return Ok(());
     }
