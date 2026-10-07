@@ -1627,19 +1627,28 @@ touch lines; each fix is ported to Swift before cutover.
   the Mac (WP9) and on Windows (WP10).
 - Phone queue (`mobile/src/features/queue/queue-storage.ts`):
   - Adoption. Every load lists `Documents/queue/` and adds a row for each recording
-    file of 1 KiB or more (`MIN_RECORDING_BYTES`; smaller holds no audio) that no row
-    names (`adoptRecordingFiles`), so an unreadable index with no usable temp file, a
-    stale temp file or a row that was never saved leaves no recording behind. The
-    unreadable index is kept as `index.corrupt.json`, and so is one whose bytes are
-    not text; a temp file that cannot be read is kept as `index.unreadable.json`.
-    Neither a failure to set them aside nor an unreadable temp file fails the load.
-    Before that the load sends a row that was never hashed back to `recording` when it
-    is `queued`, or `failed` with its file in the queue or as its own `sourceUri` in
-    `Documents/ExpoAudio/` (`reopenUnhashedRows`), and moves into the queue, without
-    replacing a file, each `recording-<UUID>.m4a` there that no `recording` row names
-    (`adoptRecorderFiles`), as `<uuid>.m4a`: a crash before the row was saved. Crash
-    recovery hashes and queues these rows. The upload planner skips a row with no
-    hash, and Retry is offered only for a failed row with one.
+    file of 1 KiB or more (`MIN_RECORDING_BYTES`; smaller holds no meaningful audio)
+    that no row names (`adoptRecordingFiles`), so a corrupt index with no usable temp
+    file, a stale temp file or a row that was never saved leaves no recording behind.
+    A corrupt index, including one whose bytes are not text, is kept as
+    `index.corrupt-<ms>.json`; a temp file that cannot be read is kept as
+    `index.unreadable-<ms>.json`. The move never replaces a file, so no copy is lost
+    to a later one. Neither a failure to set them aside nor an unreadable temp file
+    fails the load. A save whose rename fails keeps the temp file, since expo's
+    rename removes `index.json` first, and the next load reads it.
+  - Unhashed rows. Before adopting, the load settles each row that was never hashed
+    and is not `recording` (`settleUnhashedRows`). One whose file holds audio, in the
+    queue or as its own `sourceUri` in `Documents/ExpoAudio/`, goes back to
+    `recording`; a `failed` one without stays failed, and a `queued` or `unpaired`
+    one without (a Retry of an earlier version made it) fails as interrupted, with no
+    Retry. A recorder file several rows name is no row's own (an earlier version
+    wrote every recording of one run to one file), so it goes only to a `recording`
+    row. The load then moves into the queue, without replacing a file, each
+    `recording-<UUID>.m4a` there that no `recording` row names
+    (`recorderFilesToMove`), as `<uuid>.m4a`: a crash before the row was saved.
+    Crash recovery hashes and queues these rows, and fails one with no file of
+    1 KiB or more. The upload planner skips a row with no hash, and Retry is offered
+    only for a failed row with one.
   - One file per recording. The recorder prepares expo-audio with the recording
     preset (`use-recorder.ts`), which builds a new recorder at a fresh
     `recording-<UUID>.m4a`, so a failed recording's file is not overwritten by the
