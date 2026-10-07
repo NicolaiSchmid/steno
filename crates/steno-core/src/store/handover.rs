@@ -149,14 +149,25 @@ impl Store {
         self.write(|transaction| save_receipt(transaction, receipt))
     }
 
+    /// [`Store::save_handover_receipt`], on the disk when it returns
+    /// ([`Store::write_durably`]): the phone intake's `failed` receipt
+    /// after a failed admission commit, whose frames may still sit in the
+    /// WAL for recovery to replay. This commit writes over them, or voids
+    /// them when the WAL restarts, so once it returns no restart brings
+    /// the admission back. Swift: `MeetingStore.saveDurably(_:)`.
+    pub fn save_handover_receipt_durably(&self, receipt: &HandoverReceipt) -> Result<()> {
+        self.write_durably(|transaction| save_receipt(transaction, receipt))
+    }
+
     /// The phone intake's admission: the `complete` receipt, the meeting
     /// and its asset in one transaction, on the disk when it returns
     /// ([`Store::write_durably`]). The phone deletes its copy once
     /// `complete` answers 200, so no commit may hold the receipt without
     /// the meeting, and a power loss must not roll either back.
-    /// [`StoreError::ReceiptOfAnotherDevice`], and nothing written, when the
-    /// stored receipt belongs to another device than `receipt`: completed,
-    /// it would answer that device's `complete` with this meeting.
+    /// Fails with [`StoreError::ReceiptOfAnotherDevice`], writing nothing,
+    /// when the stored receipt belongs to another device than `receipt`:
+    /// completed, it would answer that device's `complete` with this
+    /// meeting.
     /// Swift: `MeetingStore.saveDurably(_:meeting:asset:)`.
     pub fn save_admission_durably(
         &self,
