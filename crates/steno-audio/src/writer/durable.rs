@@ -85,6 +85,35 @@ mod tests {
         assert_eq!(error.raw_os_error(), Some(25));
     }
 
+    /// The platform's order through [`sync`] itself: the full sync runs
+    /// once, and the fallback only after it fails. On the Mac the refused
+    /// full sync falls back to `fsync`, which succeeds on a temporary file;
+    /// elsewhere the refusal stands.
+    #[test]
+    fn the_full_sync_runs_once_and_the_fallback_only_after_it_fails() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static SUCCEEDED: AtomicUsize = AtomicUsize::new(0);
+        static REFUSED: AtomicUsize = AtomicUsize::new(0);
+
+        sync(&file(), |_| {
+            SUCCEEDED.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(SUCCEEDED.load(Ordering::Relaxed), 1);
+
+        let result = sync(&file(), |file| {
+            REFUSED.fetch_add(1, Ordering::Relaxed);
+            refused(file)
+        });
+        assert_eq!(REFUSED.load(Ordering::Relaxed), 1);
+        if cfg!(target_os = "macos") {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(25));
+        }
+    }
+
     /// The syncs and the fallback this platform has, on a real file: on
     /// the Mac this passes with the temporary directory on a WebDAV mount.
     #[test]
