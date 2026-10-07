@@ -727,14 +727,23 @@ impl CodexCredentialStore {
         let refreshed: RefreshResponse = serde_json::from_slice(&data).map_err(|_| {
             CodexCredentialError::RefreshFailed("undecodable token response".to_owned())
         })?;
-        // Overlay the new tokens on what the file holds now, not on the copy
-        // read before the round trip, so keys the CLI wrote meanwhile
-        // survive. The file decides as in [`Self::latest`], where it should
-        // hold the spent token a kept copy replaces, else the one posted:
-        // one that holds another refresh token, or none, or is gone, wins
-        // and the new tokens are dropped; one that does not parse at that
-        // moment (the CLI half way through writing it) or cannot be read
-        // gets the new tokens, kept in memory, and is not written over.
+        self.write_back(file, refreshed)
+            .map_err(RefreshFailure::from)
+    }
+
+    /// Puts `refreshed` over what the file holds now, not over `file`, the
+    /// copy read before the round trip, so keys the CLI wrote meanwhile
+    /// survive. The file decides as in [`Self::latest`]. It should hold the
+    /// spent token a kept copy replaces, else the one posted; one that
+    /// holds another refresh token, or none, or is gone, wins and the new
+    /// tokens are dropped; one that does not parse at that moment (the CLI
+    /// half way through writing it) or cannot be read gets the new tokens,
+    /// kept in memory, and is not written over.
+    fn write_back(
+        &self,
+        file: AuthFile,
+        refreshed: RefreshResponse,
+    ) -> Result<CodexCredentials, CodexCredentialError> {
         let current = self.read_document();
         let mut slot = self.lock_kept();
         let expected = match slot.as_ref() {
@@ -757,7 +766,7 @@ impl CodexCredentialStore {
                 if let Some(earlier) = slot.take() {
                     remove_left(earlier.left);
                 }
-                return Ok(other.and_then(Self::auth_file)?.credentials);
+                return other.and_then(Self::auth_file).map(|auth| auth.credentials);
             }
         };
         let mut tokens = match document.get("tokens") {
