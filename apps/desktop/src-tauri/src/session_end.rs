@@ -52,7 +52,8 @@
 //! Swift: none; `AppKit` sends a logout and a shutdown to
 //! `applicationShouldTerminate`, which Quit goes through too.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use tauri::Manager as _;
@@ -61,7 +62,7 @@ use zbus::blocking::{Connection, MessageIterator, Proxy};
 use zbus::message::Type;
 use zbus::names::{BusName, OwnedUniqueName};
 use zbus::proxy::CacheProperties;
-use zbus::zvariant::{OwnedFd, OwnedObjectPath};
+use zbus::zvariant::{OwnedFd, OwnedObjectPath, OwnedValue, Value};
 
 /// A session manager's client protocol: GNOME's, which Xfce serves under
 /// names of its own (GTK 3.24 falls back to them too).
@@ -164,7 +165,7 @@ pub fn watch(app: &tauri::AppHandle, startup_id: String) {
             "a logout saves only when a signal reaches the app or the display closes",
             move || follow_session_end(&patient(Builder::session()?)?, &startup_id, &on_end),
         );
-        let (busy, recording) = std::sync::mpsc::channel();
+        let (busy, recording) = mpsc::channel();
         app.manage(LogoutInhibitor::new(busy));
         spawn_client(
             "steno-logout-inhibitor",
@@ -393,6 +394,10 @@ const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
 const PORTAL_INHIBIT: &str = "org.freedesktop.portal.Inhibit";
 const PORTAL_REQUEST: &str = "org.freedesktop.portal.Request";
 
+/// A portal's dictionary of named values (`a{sv}`): the results of a
+/// request's `Response`, a monitor's state, the options of a call.
+type Options = HashMap<String, OwnedValue>;
+
 /// The token of the app's session monitor, which names its request and
 /// its session (`portal_paths`).
 const MONITOR_TOKEN: &str = "steno_session_monitor";
@@ -463,12 +468,9 @@ fn follow_portal(session: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()>
         .sender(owner.as_str())?
         .build();
     let signals = MessageIterator::for_match_rule(rule, session, None)?;
-    let options = std::collections::HashMap::from([
-        ("handle_token", zbus::zvariant::Value::from(MONITOR_TOKEN)),
-        (
-            "session_handle_token",
-            zbus::zvariant::Value::from(MONITOR_TOKEN),
-        ),
+    let options = HashMap::from([
+        ("handle_token", Value::from(MONITOR_TOKEN)),
+        ("session_handle_token", Value::from(MONITOR_TOKEN)),
     ]);
     let inhibit = proxy(session, owner.as_str(), PORTAL_PATH, PORTAL_INHIBIT)?;
     let request: OwnedObjectPath = inhibit.call("CreateMonitor", &("", options))?;
@@ -478,10 +480,7 @@ fn follow_portal(session: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()>
         let path = header.path().map(zbus::zvariant::ObjectPath::as_str);
         match header.member().map(zbus::names::MemberName::as_str) {
             Some("Response") if path == Some(request.as_str()) => {
-                let (response, _): (
-                    u32,
-                    std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-                ) = signal.body().deserialize()?;
+                let (response, _): (u32, Options) = signal.body().deserialize()?;
                 if response != 0 {
                     return Err(zbus::Error::Failure(format!(
                         "the portal refused the session monitor ({response})"
@@ -493,10 +492,8 @@ fn follow_portal(session: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()>
                     && header.interface().map(zbus::names::InterfaceName::as_str)
                         == Some(PORTAL_INHIBIT) =>
             {
-                let (session_handle, state): (
-                    OwnedObjectPath,
-                    std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
-                ) = signal.body().deserialize()?;
+                let (session_handle, state): (OwnedObjectPath, Options) =
+                    signal.body().deserialize()?;
                 // Another monitor's.
                 if session_handle.as_str() != monitor {
                     continue;
@@ -529,13 +526,13 @@ fn follow_portal(session: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()>
 /// Whether the recorder is busy, as the shell last told the inhibitor's
 /// client (`note_recording`), and the way to tell it. Managed state.
 pub struct LogoutInhibitor {
-    busy: std::sync::Mutex<(std::sync::mpsc::Sender<bool>, bool)>,
+    busy: Mutex<(mpsc::Sender<bool>, bool)>,
 }
 
 impl LogoutInhibitor {
-    fn new(busy: std::sync::mpsc::Sender<bool>) -> Self {
+    fn new(busy: mpsc::Sender<bool>) -> Self {
         Self {
-            busy: std::sync::Mutex::new((busy, false)),
+            busy: Mutex::new((busy, false)),
         }
     }
 
@@ -571,19 +568,16 @@ pub fn note_recording(app: &tauri::AppHandle, state: crate::recording::Recording
 /// portal off GNOME: Xfce, wlroots) refuses it. Either way the save at the
 /// end is the same. A call that fails is logged and tried again at the
 /// next recording; returns once `busy` has no sender.
-fn hold_logout_inhibitor(session: &Connection, busy: &std::sync::mpsc::Receiver<bool>) {
+fn hold_logout_inhibitor(session: &Connection, busy: &mpsc::Receiver<bool>) {
     let mut held: Option<OwnedObjectPath> = None;
     let mut calls = 0_u32;
     for busy in busy {
         match (busy, held.take()) {
             (true, None) => {
                 calls += 1;
-                let options = std::collections::HashMap::from([
-                    (
-                        "handle_token",
-                        zbus::zvariant::Value::from(format!("steno_logout_{calls}")),
-                    ),
-                    ("reason", zbus::zvariant::Value::from(INHIBIT_REASON)),
+                let options = HashMap::from([
+                    ("handle_token", Value::from(format!("steno_logout_{calls}"))),
+                    ("reason", Value::from(INHIBIT_REASON)),
                 ]);
                 match proxy(session, PORTAL, PORTAL_PATH, PORTAL_INHIBIT)
                     .and_then(|inhibit| inhibit.call("Inhibit", &("", INHIBIT_LOGOUT, options)))
@@ -613,7 +607,6 @@ fn hold_logout_inhibitor(session: &Connection, busy: &std::sync::mpsc::Receiver<
 mod tests {
     use super::*;
     use std::io::{BufRead as _, Read as _};
-    use std::sync::{Mutex, mpsc};
 
     /// GNOME's query is answered at once, Xfce's saved for first; the end
     /// saves on both.
@@ -1199,8 +1192,6 @@ mod tests {
         Closed(String),
     }
 
-    type Options = std::collections::HashMap<String, zbus::zvariant::OwnedValue>;
-
     fn option(options: &Options, key: &str) -> String {
         options
             .get(key)
@@ -1313,9 +1304,9 @@ mod tests {
     /// The portal's `session-state` for `session` to `client`, as the
     /// portal sends it, from `from`.
     fn state(from: &Connection, client: &str, session: &str, state: u32) {
-        let fields = std::collections::HashMap::from([
-            ("screensaver-active", zbus::zvariant::Value::from(false)),
-            ("session-state", zbus::zvariant::Value::from(state)),
+        let fields = HashMap::from([
+            ("screensaver-active", Value::from(false)),
+            ("session-state", Value::from(state)),
         ]);
         from.emit_signal(
             Some(client),
@@ -1361,10 +1352,7 @@ mod tests {
                 }
             );
             let (request, session) = portal_paths(&client, MONITOR_TOKEN);
-            let results = std::collections::HashMap::from([(
-                "session_handle",
-                zbus::zvariant::Value::from(session.as_str()),
-            )]);
+            let results = HashMap::from([("session_handle", Value::from(session.as_str()))]);
             portal
                 .emit_signal(
                     Some(client.as_str()),
