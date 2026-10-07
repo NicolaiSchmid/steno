@@ -123,7 +123,9 @@ fn main() {
     // the main window comes forward.
     if single_instance_available() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            actions::open(app, windows::BridgeWindow::Main);
+            if host::is_running(app) {
+                actions::open(app, windows::BridgeWindow::Main);
+            }
         }));
     }
     builder = builder
@@ -145,7 +147,11 @@ fn main() {
     let app = builder
         // One handler for every menu: the tray's on every platform and
         // the menu bar's on macOS reach the same listeners.
-        .on_menu_event(|app, event| actions::on_menu_event(app, &event))
+        .on_menu_event(|app, event| {
+            if host::is_running(app) {
+                actions::on_menu_event(app, &event);
+            }
+        })
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
@@ -157,9 +163,10 @@ fn main() {
             bridge::panel_call
         ])
         .setup(move |app| {
-            setup(app.handle(), runtime)?;
-            #[cfg(target_os = "linux")]
-            session_end::watch(app.handle(), startup_id);
+            if setup(app.handle(), runtime)? {
+                #[cfg(target_os = "linux")]
+                session_end::watch(app.handle(), startup_id);
+            }
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -168,13 +175,22 @@ fn main() {
 }
 
 /// Builds the host, the tray and the main window, opens onboarding when
-/// the host asks for it, and runs the launch sequence.
+/// the host asks for it, and runs the launch sequence. False when another
+/// process holds the database: this app then shows why and ends
+/// (`refuse_to_start`), with no host, tray or window.
 fn setup(
     handle: &tauri::AppHandle,
     runtime: &'static tokio::runtime::Runtime,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     #[cfg(not(feature = "fixture-host"))]
-    let host = host::Host::real(handle, runtime)?;
+    let host = match host::Host::real(handle, runtime) {
+        Ok(host) => host,
+        Err(error) if error.is_database_held() => {
+            refuse_to_start(handle, &error);
+            return Ok(false);
+        }
+        Err(error) => return Err(error.into()),
+    };
     #[cfg(feature = "fixture-host")]
     let host = host::Host::fixtures();
     let onboarding = host.should_open_onboarding();
@@ -192,7 +208,35 @@ fn setup(
     tray::note_login_item(handle);
     #[cfg(unix)]
     exit_on_signals(handle, runtime);
-    Ok(())
+    Ok(true)
+}
+
+/// The exit code of an app that refused to start (`refuse_to_start`).
+const REFUSED_CODE: i32 = 3;
+
+/// Another Steno holds the database (`steno_core::DatabaseLock`): another
+/// app, the old identifier's beside the new one, one the single-instance
+/// guard missed (Linux without a session bus, a failed connect on the
+/// Mac), or a `steno` command that writes. Two on one database would fail
+/// each other's recordings at launch, so this one says why and ends once
+/// the alert is closed, before it opens a window or touches the database.
+/// Its run loop has no host to shut down (`host::is_running`). Rust only:
+/// the Swift app ran a second copy beside the first.
+fn refuse_to_start(handle: &tauri::AppHandle, error: &dyn std::error::Error) {
+    use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
+
+    stderr_line!("[steno-desktop] not starting: {error}");
+    let app = handle.clone();
+    handle
+        .dialog()
+        .message(
+            "Another Steno is already open, or a steno command is running in a terminal. \
+             Quit it, then open Steno again.",
+        )
+        .title("Steno is already running")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::Ok)
+        .show(move |_| app.exit(REFUSED_CODE));
 }
 
 /// A signal that asks for the exit Quit asks for (`exit_on_signals`).
@@ -353,8 +397,12 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
     steno_services::flush_logs();
 }
 
-/// One turn of the run loop.
+/// One turn of the run loop; nothing for an app that refused to start
+/// (`refuse_to_start`), which has no host and ends without a shutdown.
 fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    if !host::is_running(app) {
+        return;
+    }
     match event {
         // Quit from either menu, an exit signal, the smoke's exit, the
         // last window closing with no tray: the shutdown runs first
