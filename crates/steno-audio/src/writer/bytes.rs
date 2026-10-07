@@ -58,9 +58,7 @@ impl WindowedFile {
             window_start: 0,
         })
     }
-}
 
-impl WindowedFile {
     fn read_window(&mut self, offset: usize, buffer: &mut [u8]) -> std::io::Result<()> {
         let end = offset + buffer.len();
         if offset >= self.window_start && end <= self.window_start + self.window.len() {

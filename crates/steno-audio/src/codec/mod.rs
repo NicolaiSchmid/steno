@@ -204,14 +204,7 @@ impl SymphoniaAudioCodec {
     /// `mixdown_path` from an open source.
     fn mix(mut frames: Frames, destination: &Path) -> Result<(), CodecError> {
         create_parent(destination)?;
-        let mut mixdown = Mixdown {
-            destination,
-            writer: None,
-            resampler: None,
-            pending: Vec::new(),
-            written: 0,
-            ints: Vec::new(),
-        };
+        let mut mixdown = Mixdown::new(destination);
         let result = frames
             .stream(|event| mixdown.take(event))
             .and_then(|_| mixdown.finish());
@@ -273,6 +266,11 @@ enum Length {
 }
 
 impl Spec {
+    /// Whether the stream has samples to take: a channel and a rate.
+    fn audible(self) -> bool {
+        self.channels > 0 && self.rate > 0
+    }
+
     /// `ChannelMissing` when the stream has no channel `channel`.
     fn check_channel(self, channel: usize, lane: AudioLane) -> Result<(), CodecError> {
         if channel < self.channels {
@@ -439,7 +437,7 @@ impl SymphoniaFrames {
                 channels: count,
                 length: Length::Declared(self.frames),
             };
-            let audible = count > 0 && shape.rate > 0;
+            let audible = packet_spec.audible();
             if spec != Some(packet_spec) {
                 spec = Some(packet_spec);
                 if audible {
@@ -456,13 +454,9 @@ impl SymphoniaFrames {
                 each(Event::Frames(packet_spec, buffer.samples()))?;
             }
         }
-        spec.filter(|spec| spec.channels > 0 && spec.rate > 0)
-            .ok_or_else(|| {
-                CodecError::UnsupportedFormat(format!(
-                    "{}: no decodable audio",
-                    self.path.display()
-                ))
-            })
+        spec.filter(|spec| spec.audible()).ok_or_else(|| {
+            CodecError::UnsupportedFormat(format!("{}: no decodable audio", self.path.display()))
+        })
     }
 }
 
@@ -525,7 +519,18 @@ struct Mixdown<'a> {
     ints: Vec<i16>,
 }
 
-impl Mixdown<'_> {
+impl<'a> Mixdown<'a> {
+    fn new(destination: &'a Path) -> Self {
+        Self {
+            destination,
+            writer: None,
+            resampler: None,
+            pending: Vec::new(),
+            written: 0,
+            ints: Vec::new(),
+        }
+    }
+
     fn take(&mut self, event: Event<'_>) -> Result<(), CodecError> {
         match event {
             Event::Start(spec) => {
@@ -609,22 +614,21 @@ impl AudioDecoder for SymphoniaAudioCodec {
             .position(|l| *l == lane)
             .ok_or(CodecError::LaneNotInAsset(lane))
             .and_then(|channel| Self::decode_path(&master_path(asset)?, channel, lane));
-        match master {
-            Ok(buffer) => Ok(buffer),
-            // Read again rather than held through the master's decode, so
-            // two copies of the lane are never alive at once.
-            Err(error) => match sidecar_samples(asset, lane) {
-                Some(samples) => {
-                    tracing::warn!(
-                        lane = lane.as_str(),
-                        %error,
-                        "the master failed to decode; taking the 16 kHz sidecar that disagreed with it"
-                    );
-                    Ok(AudioBuffer16k::new(samples))
-                }
-                None => Err(error.into()),
-            },
-        }
+        let error = match master {
+            Ok(buffer) => return Ok(buffer),
+            Err(error) => error,
+        };
+        // Read again rather than held through the master's decode, so two
+        // copies of the lane are never alive at once.
+        let Some(samples) = sidecar_samples(asset, lane) else {
+            return Err(error.into());
+        };
+        tracing::warn!(
+            lane = lane.as_str(),
+            %error,
+            "the master failed to decode; taking the 16 kHz sidecar that disagreed with it"
+        );
+        Ok(AudioBuffer16k::new(samples))
     }
 
     /// `Wav16kInt16`: there is no AAC encoder in pure Rust (see the module
@@ -651,10 +655,11 @@ impl AudioDecoder for SymphoniaAudioCodec {
 /// master's length at 16 kHz: the writer writes the master and the
 /// sidecars a frame at a time, so a finished sidecar holds the master's
 /// frames resampled. One that disagrees is not trusted, and the master,
-/// the copy that is never shorter, is decoded instead: the sidecar's 32-bit size
-/// fields wrap after 37.3 hours, and a sidecar that missed a frame the
-/// master kept (a full disk) would lose it. A master whose length cannot
-/// be read cheaply (not the writer's CAF) leaves the sidecar trusted.
+/// the copy that is never shorter, is decoded instead: the sidecar's
+/// 32-bit size fields wrap after 37.3 hours, and a sidecar that missed a
+/// frame the master kept (a full disk) would lose it. A master whose
+/// length cannot be read cheaply (not the writer's CAF) leaves the
+/// sidecar trusted.
 fn sidecar(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
     let samples = sidecar_samples(asset, lane)?;
     if let Some(master) = file_url_path(&asset.url)
@@ -769,14 +774,7 @@ mod tests {
 
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("audio.wav");
-        let mut mixdown = Mixdown {
-            destination: &destination,
-            writer: None,
-            resampler: None,
-            pending: Vec::new(),
-            written: 0,
-            ints: Vec::new(),
-        };
+        let mut mixdown = Mixdown::new(&destination);
         for event in events {
             mixdown.take(event).unwrap();
         }
