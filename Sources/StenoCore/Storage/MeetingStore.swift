@@ -85,9 +85,11 @@ public final class MeetingStore: Sendable {
   /// One write transaction whose commit is on the disk when this returns,
   /// for the commits an answer to another device depends on: the phone
   /// intake's admission, before `complete` tells the phone to delete its
-  /// copy, a pairing, whose token the phone keeps, and a revoke. The
-  /// pool's writer commits under `synchronous = NORMAL`, which syncs the
-  /// WAL only at a checkpoint, so a power loss can roll a commit back.
+  /// copy; the `failed` receipt after a failed admission commit, which
+  /// writes over that commit's frames before the intake removes its copy;
+  /// a pairing, whose token the phone keeps; and a revoke. The pool's
+  /// writer commits under `synchronous = NORMAL`, which syncs the WAL only
+  /// at a checkpoint, so a power loss can roll a commit back.
   /// This transaction runs under `synchronous = FULL` with `fullfsync` on,
   /// so its commit syncs the WAL with `F_FULLFSYNC`, which also flushes the
   /// drive's cache; the sync covers every earlier commit in the WAL too.
@@ -101,23 +103,49 @@ public final class MeetingStore: Sendable {
     async throws -> T
   {
     try await writer.writeWithoutTransaction { db in
-      let synchronous = try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? 1
-      let fullfsync = try Bool.fetchOne(db, sql: "PRAGMA fullfsync") ?? false
-      // Neither pragma fails outside a transaction, and the transaction has
-      // ended by now.
-      defer {
-        try? db.execute(sql: "PRAGMA synchronous = \(synchronous)")
-        try? db.execute(sql: "PRAGMA fullfsync = \(fullfsync ? 1 : 0)")
+      try Self.underFullSync(db) {
+        var value: T?
+        try db.inTransaction(.immediate) {
+          value = try body(db)
+          return .commit
+        }
+        return value!
       }
-      try db.execute(sql: "PRAGMA synchronous = FULL")
-      try db.execute(sql: "PRAGMA fullfsync = ON")
-      var value: T?
-      try db.inTransaction(.immediate) {
-        value = try body(db)
-        return .commit
-      }
-      return value!
     }
+  }
+
+  /// Copies every commit in the WAL into the database file and syncs both
+  /// (`checkpoint(.full)` under `synchronous = FULL` with `fullfsync` on),
+  /// so everything the store reads is on the disk when this returns. The
+  /// app runs it at launch, before the handover listener starts: after a
+  /// crash, recovery can read back a commit whose WAL sync failed, and the
+  /// intake would answer a phone's retry `complete` from that commit. A
+  /// failed sync throws, and so does a checkpoint another connection still
+  /// blocks when the busy timeout runs out (`SQLITE_BUSY`), since the
+  /// commits it could not copy are not known to be on the disk. An
+  /// in-memory store has no WAL and returns at once.
+  /// Rust: `Store::checkpoint_durably`.
+  public func checkpointDurably() async throws {
+    try await writer.writeWithoutTransaction { db in
+      try Self.underFullSync(db) { _ = try db.checkpoint(.full) }
+    }
+  }
+
+  /// `body` with the connection at `synchronous = FULL` and `fullfsync` on,
+  /// and the levels it found set back afterwards. Outside a transaction
+  /// only: SQLite refuses to change `synchronous` inside one.
+  private static func underFullSync<T>(_ db: Database, _ body: () throws -> T) throws -> T {
+    let synchronous = try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? 1
+    let fullfsync = try Bool.fetchOne(db, sql: "PRAGMA fullfsync") ?? false
+    // Neither pragma fails outside a transaction, and the transaction has
+    // ended by now.
+    defer {
+      try? db.execute(sql: "PRAGMA synchronous = \(synchronous)")
+      try? db.execute(sql: "PRAGMA fullfsync = \(fullfsync ? 1 : 0)")
+    }
+    try db.execute(sql: "PRAGMA synchronous = FULL")
+    try db.execute(sql: "PRAGMA fullfsync = ON")
+    return try body()
   }
 
   /// The meeting and its participants in one transaction;

@@ -724,6 +724,44 @@ import Testing
     #expect(try await CommitLog.synchronous(of: store) == 1)
   }
 
+  /// A durable checkpoint leaves every commit in the database file itself:
+  /// a copy of that file without its WAL holds the last commit. It runs
+  /// under `FULL` and sets `NORMAL` back, like a durable write.
+  @Test func aDurableCheckpointCopiesEveryCommitIntoTheDatabaseFile() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("steno.sqlite")
+    let store = try MeetingStore.onDisk(at: url)
+    try await store.save(SampleData.meeting())
+
+    try await store.checkpointDurably()
+    #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
+
+    let copy = directory.appendingPathComponent("copy.sqlite")
+    try FileManager.default.copyItem(at: url, to: copy)
+    let copied = try DatabaseQueue(path: copy.path)
+    #expect(
+      try await copied.read { db in try Int.fetchOne(db, sql: "SELECT count(*) FROM meeting") } == 1
+    )
+  }
+
+  /// A checkpoint another connection blocks past the busy timeout (here
+  /// none, so the test does not wait) throws `SQLITE_BUSY` and sets
+  /// `NORMAL` back; once the other connection lets go it succeeds.
+  @Test func aCheckpointAnotherConnectionBlocksThrowsBusy() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let (store, other) = try MeetingStore.withCheckpointBlocked(
+      at: directory.appendingPathComponent("steno.sqlite"))
+
+    let error = await #expect(throws: DatabaseError.self) { try await store.checkpointDurably() }
+    #expect(error?.resultCode == .SQLITE_BUSY)
+    #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
+
+    try other.release()
+    try await store.checkpointDurably()
+  }
+
   @Test func derivedIDsAreStableDistinctAndWellFormed() {
     let a = UUID(derivedFrom: SampleData.meetingID, salt: "decision-0")
     #expect(a == UUID(derivedFrom: SampleData.meetingID, salt: "decision-0"))
