@@ -605,14 +605,12 @@ mod tests {
     struct FakeSidecar {
         inner: FakeSpeechEngine,
         children: Arc<Children>,
-        child: std::sync::Mutex<bool>,
+        child: AtomicBool,
     }
 
     impl FakeSidecar {
         fn start_child(&self) {
-            let mut child = self.child.lock().unwrap();
-            if !*child {
-                *child = true;
+            if !self.child.swap(true, Ordering::SeqCst) {
                 let live = self.children.live.fetch_add(1, Ordering::SeqCst) + 1;
                 self.children.most.fetch_max(live, Ordering::SeqCst);
                 self.children.spawns.fetch_add(1, Ordering::SeqCst);
@@ -650,8 +648,7 @@ mod tests {
         }
 
         async fn release(&self) -> BoundaryResult<()> {
-            let mut child = self.child.lock().unwrap();
-            if std::mem::take(&mut *child) {
+            if self.child.swap(false, Ordering::SeqCst) {
                 self.children.live.fetch_sub(1, Ordering::SeqCst);
                 self.children.stops.fetch_add(1, Ordering::SeqCst);
             }
@@ -680,7 +677,7 @@ mod tests {
                         SpeechRuntime::OnnxSidecar => Arc::new(FakeSidecar {
                             inner: FakeSpeechEngine::default(),
                             children: children.clone(),
-                            child: std::sync::Mutex::new(false),
+                            child: AtomicBool::new(false),
                         }),
                         SpeechRuntime::CoreMlInProcess => Arc::new(FakeSpeechEngine::default()),
                     }

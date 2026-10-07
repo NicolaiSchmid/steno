@@ -373,10 +373,11 @@ impl SpeechEngines {
         match runtime {
             SpeechRuntime::OnnxSidecar => kept.sidecar.get_or_insert_with(build).clone(),
             SpeechRuntime::CoreMlInProcess => {
-                if let Some(engine) = kept.in_process.as_ref().and_then(WeakSpeechEngine::upgrade) {
-                    return engine;
-                }
-                let engine = build();
+                let engine = kept
+                    .in_process
+                    .as_ref()
+                    .and_then(WeakSpeechEngine::upgrade)
+                    .unwrap_or_else(build);
                 kept.in_process = Some(engine.downgrade());
                 engine
             }
