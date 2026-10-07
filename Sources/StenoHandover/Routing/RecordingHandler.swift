@@ -9,7 +9,10 @@ import StenoCore
 /// established; a recording belongs to the device that announced it.
 extension HandoverEngine {
   /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
-  /// recording, 200 for a known one, both with `RecordingStatus`.
+  /// recording, 200 for a known one, both with `RecordingStatus`; 409 when
+  /// another device owns it, its size or SHA-256 changed, or its chunk size
+  /// changed before it is `.complete`; a `.complete` one in other chunks of
+  /// the same bytes is 200 with every chunk of the announced split.
   func announce(_ recordingID: UUID, device: PairedDevice, body: Data) async -> HandoverResponse {
     let metadata: RecordingMetadata
     do {
@@ -28,13 +31,23 @@ extension HandoverEngine {
       guard existing.deviceID == device.id else {
         return .problem(.conflict, "another device owns this recording")
       }
-      if existing.state.kind == .complete {
-        return .json(.ok, Self.status(of: existing))
-      }
+      // Also for a `.complete` receipt: a phone told `complete` posts
+      // `complete`, and the 200 to that deletes its copy. A different file
+      // under an admitted id is refused instead, and stays on the phone.
+      let complete = existing.state.kind == .complete
       guard existing.byteCount == metadata.byteCount, existing.sha256 == metadata.sha256,
-        existing.chunkSize == metadata.chunkSize
+        complete || existing.chunkSize == metadata.chunkSize
       else {
         return .problem(.conflict, "metadata differs from the first announcement")
+      }
+      // The chunk size matters only until the receipt is `.complete`: the
+      // same bytes split otherwise are the file the computer holds. The
+      // answer lists every chunk of the phone's split, so it posts
+      // `complete`; the copy it is built from is never saved.
+      if complete {
+        var resplit = existing
+        resplit.chunkSize = metadata.chunkSize
+        return .json(.ok, Self.status(of: resplit))
       }
       var receipt = existing
       var receivedChunks: [Int]?

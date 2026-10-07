@@ -1559,6 +1559,25 @@ touch lines; each fix is ported to Swift before cutover.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
+- Re-announce: both apps compare a known recording's announced byte count and SHA-256
+  with its receipt right after the owner check, also when the receipt is `complete`,
+  and the chunk size while the receipt is not yet `complete`; a difference is 409
+  "metadata differs from the first announcement" (`Engine::reannounce`,
+  `HandoverEngine.announce`). Before, a `complete` receipt answered 200 `complete` to
+  any metadata from its owner, so the phone posted `complete`, took the earlier
+  file's meeting id and deleted a recording the computer does not have. The phone
+  keeps the row and its file: it announces again after the backoff, and the third
+  409 in a row marks the row `failed` with Retry (`failAnnounce` in
+  `mobile/src/features/sync/upload-executor.ts`). The chunk size matters only until
+  the receipt is `complete`: a `complete` receipt announced with the same size and
+  SHA-256 in other chunks is the file the computer holds, answered 200 `complete`
+  with every chunk of the announced split, so the phone posts `complete` and gets
+  the meeting id. The receipt keeps its own split, which `GET status` lists, so a
+  phone that reads the status before its `complete` uploads the chunks of its split
+  missing there again; each PUT on a `complete` receipt answers 204, which wastes
+  uploads and loses nothing. Format, duration and `startedAt` are not compared:
+  under the same size and SHA-256 they describe the same bytes, so a difference
+  there loses nothing.
 - Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt`
   read with `try?`, so a failed read, with no receipt in memory (after a restart),
   counts as no receipt: the sweep deletes a resumable upload, a route answers 404, and
@@ -1734,8 +1753,9 @@ touch lines; each fix is ported to Swift before cutover.
   - 409. Three announces in a row answered 409 (the receipt belongs to another
     device, or holds other metadata) mark the row `failed` with a message and Retry,
     instead of retrying forever (`ANNOUNCE_CONFLICTS_BEFORE_FAILED` in
-    `mobile/src/features/sync/upload-executor.ts`); the Mac taking such a receipt over
-    belongs to `fix/handover-lost-complete-answer`.
+    `mobile/src/features/sync/upload-executor.ts`); the Mac taking such a receipt over,
+    or taking other bytes in as a new recording, belongs to
+    `fix/handover-lost-complete-answer`.
 
 ### Shell
 
@@ -2066,16 +2086,44 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   Both apps. Where: `announce` in `crates/steno-handover/src/engine/recording.rs` and
   in `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #219, #212.
 - **`fix/handover-lost-complete-answer`.** Opens after
-  `fix/handover-first-announce-discard`. A `complete` the computer admitted whose
-  answer never reaches the phone (the 10 s timeout, a dropped connection, the app
-  killed or suspended) leaves the row pending with its file. When an unpair follows,
-  the revoke deletes the receipt, so the next pairing uploads the recording again and
-  the computer admits it as a second meeting. The fix needs a durable record of
-  admitted recording ids and hashes that outlives the revoke (a schema migration), so
-  its timing waits on the stable plan's rollback-window rule. Both apps. Where:
-  `revoke` in `crates/steno-handover/src/engine/mod.rs` and
-  `Sources/StenoHandover/Routing/HandoverEngine.swift`, the `complete` case in
-  `mobile/src/features/sync/upload-executor.ts`. Found: #211.
+  `fix/handover-first-announce-discard`. Three parts, both apps; they share the
+  branch because each changes which receipt an announce lands on.
+  - Lost answer. A `complete` the computer admitted whose answer never reaches the
+    phone (the 10 s timeout, a dropped connection, the app killed or suspended)
+    leaves the row pending with its file. When an unpair follows, the revoke deletes
+    the receipt, so the next pairing uploads the recording again and the computer
+    admits it as a second meeting. The fix needs a durable record of admitted
+    recording ids and hashes that outlives the revoke (a schema migration), so its
+    timing waits on the stable plan's rollback-window rule. Where: `revoke` in
+    `crates/steno-handover/src/engine/mod.rs` and
+    `Sources/StenoHandover/Routing/HandoverEngine.swift`, the `complete` case in
+    `mobile/src/features/sync/upload-executor.ts`. Found: #211.
+  - Other bytes. The same device re-announces a recording id with metadata its
+    receipt on the computer does not match: another size or SHA-256 in any state, or
+    another chunk size before the receipt is `complete`. Every such announce is
+    answered 409, so the recording never reaches the computer. A receipt not yet
+    `complete` announced with the same size and SHA-256 in another chunk size
+    restarts its partial under the new split. An announce with another size or
+    SHA-256, against a receipt in any state, is taken in as a new recording, under a
+    fresh internal receipt key and its own meeting for the same phone-side recording
+    id, and the phone deletes its copy only after that meeting commits. Until this
+    branch lands, both apps answer 409 "metadata differs from the first
+    announcement" (#224) and the phone keeps the recording; the third 409 in a row
+    marks the row `failed` with Retry. Where: `Engine::reannounce` in
+    `crates/steno-handover/src/engine/recording.rs` and `HandoverEngine.announce` in
+    `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #224.
+  - Older device. A recording whose receipt on the computer belongs to an older
+    device id of the same phone is answered 409 "another device owns this
+    recording" on every announce, so the recording never reaches the computer; it
+    stays on the phone. The planned fix: an announce from another device of a
+    recording id whose receipt an older device holds, not yet `complete`, takes that
+    receipt over instead of the 409 when, and only when, its size and SHA-256 match
+    the receipt's. The hash match is the deciding condition: it proves the bytes are
+    the same recording, which is what makes the takeover safe, so no check that the
+    new device replaced the old one is needed. An announce with other bytes is taken
+    in as a new recording, as in the part above. Where: the 409 of `reannounce` (also
+    reached from `announce`) in `crates/steno-handover/src/engine/recording.rs` and of
+    `announce` in `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #223.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
@@ -2153,6 +2201,7 @@ PR off `main`.
 | No traffic light inset under a native title bar: the sidebars' spacer and onboarding's top follow the platform (`apps/macos/web/`) | `fix/web-platform-title-inset` | #217 | merged |
 | After the intake, `admit` discards every file of the recording unless another device holds its receipt, and so do a refused `complete` and a failed first save (Swift core, the counterpart of #219) | `fix/swift-handover-admit` | #212 | open |
 | The phone rebuilds its queue index from the recording files on disk and the recorder's directory, gives every recording its own file, saves nothing after a failed load, and fails a row after repeated announce 409s (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | open |
+| A re-announce of a `complete` recording with another size or hash is answered 409, so the phone keeps its file, and the same bytes in other chunks are answered `complete` (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
