@@ -76,6 +76,40 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     migrate_with(connection, MIGRATIONS)
 }
 
+/// Applies nothing: fails when the database records an identifier this
+/// build does not know ([`StoreError::UnknownMigration`], as [`migrate`]
+/// does) or lacks one this build would apply
+/// ([`StoreError::PendingMigration`], the first of them). For a process
+/// that must not migrate under another one; see
+/// [`Store::open_without_migrating`](super::Store::open_without_migrating).
+pub(crate) fn check(connection: &Connection) -> Result<()> {
+    check_with(connection, MIGRATIONS)
+}
+
+fn check_with(connection: &Connection, migrations: &[Migration]) -> Result<()> {
+    let has_table: bool = connection.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'grdb_migrations'",
+        [],
+        |row| row.get::<_, i64>(0).map(|count| count > 0),
+    )?;
+    let applied = if has_table {
+        applied(connection)?
+    } else {
+        Vec::new()
+    };
+    let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
+    if let Some(unknown) = applied.iter().find(|identifier| !known(identifier)) {
+        return Err(StoreError::UnknownMigration(unknown.clone()));
+    }
+    match migrations
+        .iter()
+        .find(|migration| !applied.iter().any(|a| a == migration.identifier))
+    {
+        Some(pending) => Err(StoreError::PendingMigration(pending.identifier.to_owned())),
+        None => Ok(()),
+    }
+}
+
 /// [`migrate`] over an explicit list; tests pass one with a bad migration.
 fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
     connection.execute_batch(MIGRATIONS_TABLE)?;
@@ -149,6 +183,31 @@ mod tests {
             sql: "INSERT INTO child (id, parentID) VALUES (1, 42), (2, 43);",
         },
     ];
+
+    /// The check applies nothing and names the first version missing, or
+    /// the first one this build does not know.
+    #[test]
+    fn the_check_names_what_is_missing_or_unknown_and_applies_nothing() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        assert!(matches!(
+            check_with(&connection, BROKEN),
+            Err(StoreError::PendingMigration(first)) if first == "v1"
+        ));
+        migrate_with(&mut connection, &BROKEN[..1]).unwrap();
+        assert!(matches!(
+            check_with(&connection, BROKEN),
+            Err(StoreError::PendingMigration(next)) if next == "v2"
+        ));
+        assert_eq!(applied(&connection).unwrap(), ["v1"], "nothing applied");
+        check_with(&connection, &BROKEN[..1]).unwrap();
+        connection
+            .execute("INSERT INTO grdb_migrations (identifier) VALUES ('v9')", [])
+            .unwrap();
+        assert!(matches!(
+            check_with(&connection, &BROKEN[..1]),
+            Err(StoreError::UnknownMigration(newer)) if newer == "v9"
+        ));
+    }
 
     #[test]
     fn a_migration_breaking_a_foreign_key_rolls_back() {

@@ -119,3 +119,76 @@ fn recorded_identifiers_are_honoured() {
         "{error}"
     );
 }
+
+/// A database every migration but the newest has reached, in WAL mode as
+/// the app leaves it.
+fn database_one_version_behind(path: &std::path::Path) {
+    let mut connection = rusqlite::Connection::open(path).unwrap();
+    let _: String = connection
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .unwrap();
+    let transaction = connection.transaction().unwrap();
+    transaction
+        .execute_batch("CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
+        .unwrap();
+    let (_, older) = migrator::MIGRATIONS.split_last().unwrap();
+    for migration in older {
+        transaction.execute_batch(migration.sql).unwrap();
+        transaction
+            .execute(
+                "INSERT INTO grdb_migrations (identifier) VALUES (?1)",
+                [migration.identifier],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+}
+
+/// Opening without migrating reads a database at this build's version,
+/// refuses one an older build left (naming the version it lacks) and one a
+/// newer build migrated, and changes neither; a missing file is not
+/// created.
+#[test]
+fn opening_without_migrating_applies_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let current = directory.path().join("current.sqlite");
+    drop(Store::open(&current).unwrap());
+    let store = Store::open_without_migrating(&current).unwrap();
+    assert_eq!(
+        store.applied_migrations().unwrap(),
+        ["v1", "v2", "v3", "v4"]
+    );
+
+    let behind = directory.path().join("behind.sqlite");
+    database_one_version_behind(&behind);
+    let error = Store::open_without_migrating(&behind).expect_err("an older schema is refused");
+    assert!(
+        matches!(error, steno_core::StoreError::PendingMigration(ref id) if id == "v4"),
+        "{error}"
+    );
+    let applied: Vec<String> = rusqlite::Connection::open(&behind)
+        .unwrap()
+        .prepare("SELECT identifier FROM grdb_migrations ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(applied, ["v1", "v2", "v3"], "nothing was migrated");
+
+    rusqlite::Connection::open(&current)
+        .unwrap()
+        .execute(
+            "INSERT INTO grdb_migrations (identifier) VALUES ('v99')",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        Store::open_without_migrating(&current),
+        Err(steno_core::StoreError::UnknownMigration(ref id)) if id == "v99"
+    ));
+
+    let missing = directory.path().join("missing.sqlite");
+    assert!(Store::open_without_migrating(&missing).is_err());
+    assert!(!missing.exists(), "a missing database is not created");
+}
