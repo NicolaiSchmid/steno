@@ -120,7 +120,7 @@ fn take_lock(database: &Path, keep: bool) -> Result<Lock, Failure> {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = DatabaseLock::path_for(database);
-    if held.iter().any(|(held, _)| held == &path) {
+    if held.iter().any(|(taken, _)| *taken == path) {
         return Ok(Lock::Taken(None));
     }
     match steno_services::lock_database(database, std::time::Duration::ZERO) {
