@@ -60,7 +60,8 @@ impl Slug {
     /// `.`, trailing spaces dropped as Windows drops them) is a reserved
     /// device name gets a `_` after the stem: `Con` becomes `Con_`, `nul.tar`
     /// `nul_.tar`. The list is Microsoft's "Naming Files, Paths, and
-    /// Namespaces"; the page's `.md` does not change the check.
+    /// Namespaces", plus `CONIN$` and `CONOUT$`; the page's `.md` does not
+    /// change the check.
     #[must_use]
     pub fn file_name_reserving(text: &str, device_names_reserved: bool) -> String {
         let name = Self::sanitized_file_name(text);
@@ -76,11 +77,14 @@ impl Slug {
         }
     }
 
-    /// `CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9` and `LPT1` to `LPT9`
-    /// (the digit also `¹ ² ³`), in any case.
+    /// `CON`, `PRN`, `AUX`, `NUL`, `CONIN$`, `CONOUT$`, `COM1` to `COM9`
+    /// and `LPT1` to `LPT9` (the digit also `¹ ² ³`), in any case.
     fn is_reserved_device_name(stem: &str) -> bool {
         let upper = stem.to_ascii_uppercase();
-        if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        if matches!(
+            upper.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) {
             return true;
         }
         let Some(digit) = upper
