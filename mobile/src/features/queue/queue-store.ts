@@ -22,6 +22,9 @@ export type QueueSnapshot = {
 	loadError: string | null;
 };
 
+export const QUEUE_NOT_LOADED_MESSAGE =
+	"Steno could not read the list of recordings on this phone";
+
 export type QueueStore = {
 	snapshot(): QueueSnapshot;
 	/** Calls `listener` after every change; returns the unsubscribe. */
@@ -80,11 +83,9 @@ export function createQueueStore(
 		update: (transform) =>
 			enqueue(async () => {
 				await loadNow();
-				if (!snapshot.ready) {
-					throw new QueueError(
-						`the recordings list is not loaded: ${snapshot.loadError}`,
-					);
-				}
+				// The cause is in the log and in `loadError`; this message can
+				// reach the screen (a pairing's error line).
+				if (!snapshot.ready) throw new QueueError(QUEUE_NOT_LOADED_MESSAGE);
 				const next = transform(snapshot.index);
 				if (next === snapshot.index) return next;
 				await storage.save(next);
