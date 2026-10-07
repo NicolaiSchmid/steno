@@ -352,6 +352,8 @@ fn a_writing_command_refuses_while_the_app_holds_the_database() {
     let db_arg = db.to_str().unwrap();
     let migrate = ["dev", "db", "migrate", "--db", db_arg];
     assert_eq!(steno(&migrate, home).status, 0);
+    let wav = fixtures_root().join("audio/sweep-3s.wav");
+    let audio = home.join("audio");
 
     let app = steno_core::DatabaseLock::acquire(&db).unwrap();
     for args in [
@@ -363,32 +365,123 @@ fn a_writing_command_refuses_while_the_app_holds_the_database() {
             "--db",
             db_arg,
         ][..],
+        &[
+            "process",
+            wav.to_str().unwrap(),
+            "--db",
+            db_arg,
+            "--audio-folder",
+            audio.to_str().unwrap(),
+        ][..],
     ] {
         let refused = steno(args, home);
         assert_eq!(refused.status, 2, "{args:?}: {}", refused.stderr);
         assert!(
-            refused.stderr.contains("Steno is running on")
-                && refused.stderr.contains("quit it first"),
+            refused.stderr.contains(&format!(
+                "Steno, or another steno command, is using {db_arg}; quit it first"
+            )),
             "{args:?}: {}",
             refused.stderr
         );
     }
-    let read = steno(
-        &[
-            "export",
-            "00000000-0000-0000-0000-000000000001",
-            "--db",
-            db_arg,
-            "--out",
-            home.to_str().unwrap(),
-        ],
-        home,
-    );
-    assert!(!read.stderr.contains("Steno is running"), "{}", read.stderr);
+    assert!(!audio.exists(), "the refused process copied nothing");
+    let read = export_beside(&db, home);
+    assert!(!read.stderr.contains("quit it first"), "{}", read.stderr);
 
     drop(app);
     let migrated = steno(&migrate, home);
     assert_eq!(migrated.status, 0, "{}", migrated.stderr);
+}
+
+/// `steno export` of a meeting that is not there, on `db`.
+fn export_beside(db: &Path, home: &Path) -> Run {
+    steno(
+        &[
+            "export",
+            "00000000-0000-0000-0000-000000000001",
+            "--db",
+            db.to_str().unwrap(),
+            "--out",
+            home.join("out").to_str().unwrap(),
+        ],
+        home,
+    )
+}
+
+/// The migrations `db` records, read without the store (which migrates).
+fn applied_migrations(db: &Path) -> Vec<String> {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .prepare("SELECT identifier FROM grdb_migrations ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// A command that only reads, beside the app, opens the database without
+/// migrating it: it runs on a database at this build's version and changes
+/// nothing, and refuses one an older app still runs on rather than migrate
+/// the schema under it.
+#[test]
+fn a_reading_command_beside_the_app_never_migrates() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let current = home.join("current.sqlite");
+    let migrate = steno(
+        &["dev", "db", "migrate", "--db", current.to_str().unwrap()],
+        home,
+    );
+    assert_eq!(migrate.status, 0, "{}", migrate.stderr);
+    let before = applied_migrations(&current);
+    let _app = steno_core::DatabaseLock::acquire(&current).unwrap();
+    let read = export_beside(&current, home);
+    assert!(
+        read.stderr.contains("not found"),
+        "it opened the database and looked the meeting up: {}",
+        read.stderr
+    );
+    assert_eq!(applied_migrations(&current), before);
+
+    // What an older app left: every migration but the newest.
+    let older = home.join("older.sqlite");
+    {
+        let mut connection = rusqlite::Connection::open(&older).unwrap();
+        let _: String = connection
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        transaction
+            .execute_batch("CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
+            .unwrap();
+        let (_, migrations) = steno_core::store::migrator::MIGRATIONS
+            .split_last()
+            .unwrap();
+        for migration in migrations {
+            transaction.execute_batch(migration.sql).unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO grdb_migrations (identifier) VALUES (?1)",
+                    [migration.identifier],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+    let before = applied_migrations(&older);
+    let _older_app = steno_core::DatabaseLock::acquire(&older).unwrap();
+    let refused = export_beside(&older, home);
+    assert_eq!(refused.status, 2, "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains(&format!(
+            "Steno is running an older version on {}; quit it first, then run this command again.",
+            older.display()
+        )),
+        "{}",
+        refused.stderr
+    );
+    assert_eq!(applied_migrations(&older), before, "nothing was migrated");
 }
 
 #[test]

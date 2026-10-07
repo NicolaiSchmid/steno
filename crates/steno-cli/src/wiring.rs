@@ -5,8 +5,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args;
-use steno_core::{DatabaseLock, DatabaseLockError, SecretKey, Settings, StenoPaths, Store};
+use steno_core::{
+    DatabaseLock, DatabaseLockError, SecretKey, Settings, StenoPaths, Store, StoreError,
+};
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
+use steno_services::BuildError;
 use steno_services::speech::SpeechSetup;
 use uuid::Uuid;
 
@@ -50,49 +53,79 @@ impl DatabaseOptions {
 
     /// Opens the database for a command that writes, holding its lock
     /// (`steno_core::DatabaseLock`) until the process ends; refused while
-    /// the app or another such command holds it, so the two never process
+    /// the app or another steno command holds it, so the two never process
     /// one meeting twice or fail each other's recording. Rust only: the
     /// Swift CLI took no lock.
     pub fn open(&self) -> Result<Arc<Store>, Failure> {
         let path = self.path()?;
-        hold_lock(&path)?;
-        steno_services::open_store(&path).map_err(Failure::runtime)
+        match hold_lock(&path)? {
+            Lock::Taken => steno_services::open_store(&path).map_err(Failure::runtime),
+            Lock::Held => Err(Failure::runtime(format!(
+                "Steno, or another steno command, is using {}; quit it first, then run this command again.",
+                path.display()
+            ))),
+        }
     }
 
-    /// Opens the database for a command that only reads, without the lock,
-    /// so it runs beside the app: SQLite's WAL lets it read while the app
-    /// writes.
+    /// Opens the database for a command that only reads. With no app on
+    /// it, as [`DatabaseOptions::open`] does, holding the lock; beside the
+    /// app, which holds it, without the lock and without migrating
+    /// (`Store::open_without_migrating`), so a newer CLI never changes the
+    /// schema under an older app: SQLite's WAL lets it read while the app
+    /// writes. Refused beside an app older than this build. Rust only.
     pub fn open_to_read(&self) -> Result<Arc<Store>, Failure> {
-        steno_services::open_store(&self.path()?).map_err(Failure::runtime)
+        let path = self.path()?;
+        match hold_lock(&path)? {
+            Lock::Taken => steno_services::open_store(&path).map_err(Failure::runtime),
+            Lock::Held => match Store::open_without_migrating(&path) {
+                Ok(store) => Ok(Arc::new(store)),
+                Err(StoreError::PendingMigration(_)) => Err(Failure::runtime(format!(
+                    "Steno is running an older version on {}; quit it first, then run this command again.",
+                    path.display()
+                ))),
+                Err(error) => Err(Failure::runtime(error)),
+            },
+        }
     }
 }
 
-/// The database locks this process holds, kept until it exits.
-static HELD_LOCKS: std::sync::Mutex<Vec<DatabaseLock>> = std::sync::Mutex::new(Vec::new());
+/// Whether [`hold_lock`] holds the database's lock for this process.
+#[derive(Debug, PartialEq, Eq)]
+enum Lock {
+    /// This process holds it, or runs on a filesystem without locks.
+    Taken,
+    /// Another process (the app, another steno command) holds it.
+    Held,
+}
+
+/// The database locks this process holds, kept until it exits, by lock
+/// file; `None` for one on a filesystem without locks.
+static HELD_LOCKS: std::sync::Mutex<Vec<(PathBuf, Option<DatabaseLock>)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// Takes the lock of the database at `database` for the rest of the
-/// process; nothing to do when this process holds it already.
-fn hold_lock(database: &Path) -> Result<(), Failure> {
+/// process, at once or not at all; nothing to do when this process holds
+/// it already. On a filesystem without locks the command runs without it
+/// and says so once.
+fn hold_lock(database: &Path) -> Result<Lock, Failure> {
     let mut held = HELD_LOCKS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let path = DatabaseLock::path_for(database);
-    if held.iter().any(|lock| lock.path() == path) {
-        return Ok(());
+    if held.iter().any(|(held, _)| held == &path) {
+        return Ok(Lock::Taken);
     }
-    match steno_services::lock_database(database, std::time::Duration::ZERO) {
-        Ok(lock) => {
-            held.push(lock);
-            Ok(())
+    let lock = match steno_services::lock_database(database, std::time::Duration::ZERO) {
+        Ok(lock) => Some(lock),
+        Err(BuildError::Lock(DatabaseLockError::Held(_))) => return Ok(Lock::Held),
+        Err(BuildError::Lock(error @ DatabaseLockError::Unsupported { .. })) => {
+            eprintln!("Running without the database lock: {error}");
+            None
         }
-        Err(steno_services::BuildError::Lock(DatabaseLockError::Held(_))) => {
-            Err(Failure::runtime(format!(
-                "Steno is running on {}; quit it first, then run this command again.",
-                database.display()
-            )))
-        }
-        Err(error) => Err(Failure::runtime(error)),
-    }
+        Err(error) => return Err(Failure::runtime(error)),
+    };
+    held.push((path, lock));
+    Ok(Lock::Taken)
 }
 
 /// The engine ids the Swift CLI knew; `--engine` lists them in its error
@@ -275,6 +308,23 @@ mod tests {
         assert_eq!(standardized(Path::new("vault")), cwd.join("vault"));
         let root = cwd.ancestors().last().unwrap().to_path_buf();
         assert_eq!(standardized(&root.join("..")), root);
+    }
+
+    /// A command that opens the database twice holds its lock once: the
+    /// second open must not find its own process in the way.
+    #[test]
+    fn opening_twice_in_one_process_holds_the_lock_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = DatabaseOptions {
+            database_path: Some(dir.path().join("steno.sqlite")),
+        };
+        options.open().unwrap();
+        options.open().unwrap();
+        options.open_to_read().unwrap();
+        assert!(matches!(
+            DatabaseLock::acquire(&dir.path().join("steno.sqlite")),
+            Err(DatabaseLockError::Held(_))
+        ));
     }
 
     /// `--engine` over the models directory `<dir>/models-\xff` (a name

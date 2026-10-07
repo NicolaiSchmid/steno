@@ -4773,6 +4773,7 @@ version = "0.1.0-rc.2"
 dependencies = [
  "chrono",
  "clap",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
