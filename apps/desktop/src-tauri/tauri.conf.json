@@ -80,7 +80,10 @@
         "depends": [
           "libayatana-appindicator3-1"
         ],
-        "desktopTemplate": "linux/steno-desktop.desktop"
+        "desktopTemplate": "linux/steno-desktop.desktop",
+        "files": {
+          "/usr/lib/systemd/user/app-steno\\x2ddesktop@autostart.service.d/10-steno.conf": "linux/autostart-stop-timeout.conf"
+        }
       },
       "appimage": {
         "bundleMediaFramework": false
