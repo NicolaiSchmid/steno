@@ -237,10 +237,18 @@ export function useUploadCoordinator(): UploadCoordinator {
 						return rest;
 					});
 				}
-				void executor.uploadFinished(event).finally(tick);
+				void executor
+					.uploadFinished(event)
+					.catch((error) => console.warn("[sync] upload event failed", error))
+					.finally(tick);
 			}),
+			// While the queue cannot be loaded the update rejects and the chunk
+			// mark is dropped; the Mac's status restores it at the next announce.
 			link.addListener("uploadFailed", (event) => {
-				void executor.uploadFailed(event).finally(tick);
+				void executor
+					.uploadFailed(event)
+					.catch((error) => console.warn("[sync] upload event failed", error))
+					.finally(tick);
 			}),
 		];
 		return () => {

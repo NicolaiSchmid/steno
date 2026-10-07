@@ -327,6 +327,26 @@ describe("useUploadCoordinator", () => {
 		expect(h.reachable()).toBe(false);
 	});
 
+	it("catches a background upload event whose queue update fails", async () => {
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			await mount(queued("a"), A);
+			fake.update = async () => {
+				throw new Error("The recordings list could not be read");
+			};
+			await act(async () => fake.emit("uploadFinished", finished("a")));
+			await act(async () => fake.emit("uploadFailed", cancelled("a")));
+			await settle();
+			expect(
+				warn.mock.calls.filter(
+					([message]) => message === "[sync] upload event failed",
+				),
+			).toHaveLength(2);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	describe("while a re-pairing is still saving", () => {
 		it("plans nothing under the old pairing, then uploads to the new Mac", async () => {
 			const h = await mount(queued("a", "bb"), A);
