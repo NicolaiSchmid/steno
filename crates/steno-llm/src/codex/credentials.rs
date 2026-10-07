@@ -123,8 +123,9 @@ pub type Now = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
 /// Reads and refreshes `$CODEX_HOME/auth.json` the way the Codex CLI does,
 /// so the two stay signed in together. Every read goes back to the file
-/// (the CLI may have rotated the tokens meanwhile); a refresh is written
-/// back atomically over the file's latest contents with every unknown key
+/// (the CLI may have rotated the tokens meanwhile), except while a failed
+/// write-back's tokens are kept (below). A refresh is written back
+/// atomically over the file's latest contents with every unknown key
 /// preserved, because refresh tokens rotate and the CLI would otherwise be
 /// signed out. Concurrent callers share one refresh: the second waits for
 /// the first and then reads the file it wrote, so two refreshes never spend
@@ -135,8 +136,10 @@ pub type Now = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 /// keeps the document in memory: the posted refresh token is spent, so
 /// the new tokens are the only sign-in left. Every later call writes it
 /// again first and uses it instead of the file for as long as the file
-/// still holds the spent token. Rust differs: Swift throws the write
-/// error and the tokens are lost.
+/// still holds the spent token. The CLI and the Swift app read only the
+/// file, so until a write lands they see the spent token, and a refresh
+/// they post with it fails. Rust differs: Swift throws the write error and
+/// the tokens are lost.
 pub struct CodexCredentialStore {
     home: PathBuf,
     /// The error instead when the default client could not be built.
@@ -150,24 +153,27 @@ pub struct CodexCredentialStore {
     /// without posting the dead token again.
     refresh_lock: tokio::sync::Mutex<Option<SpentToken>>,
     /// The refreshed document the file could not take; set and taken
-    /// only under `refresh_lock`.
-    unwritten: std::sync::Mutex<Option<Unwritten>>,
+    /// only under `refresh_lock`. A std mutex: it is never held across an
+    /// `.await`, only around a file write, which blocks as briefly as the
+    /// write always has.
+    kept: std::sync::Mutex<Option<Kept>>,
 }
 
 /// Refreshed tokens whose write-back failed. Never `Debug`: it holds the
 /// tokens.
-struct Unwritten {
-    file: AuthFile,
-    /// The refresh token the file still holds, spent, which `file`
+struct Kept {
+    auth: AuthFile,
+    /// The refresh token the file still holds, spent, which `auth`
     /// replaces. A file holding any other is newer and wins.
     replaces: String,
-    /// Temporaries failed renames left, each a whole copy of a refreshed
-    /// document; removed once a write lands.
-    left: Vec<PathBuf>,
+    /// The temporary the latest failed rename left, a whole copy of the
+    /// newest refreshed document; removed once a write lands.
+    left: Option<PathBuf>,
 }
 
-/// Why the write-back failed: the redacted reason, and the temporary a
-/// failed rename left with the whole document in it.
+/// Why the write-back failed: the io error and the file's path, never a
+/// token, and the temporary a failed rename left with the whole document
+/// in it.
 struct WriteFailure {
     detail: String,
     left: Option<PathBuf>,
@@ -334,7 +340,7 @@ impl CodexCredentialStore {
             client_id: Self::CODEX_CLIENT_ID.to_owned(),
             now: Arc::new(Utc::now),
             refresh_lock: tokio::sync::Mutex::new(None),
-            unwritten: std::sync::Mutex::new(None),
+            kept: std::sync::Mutex::new(None),
         }
     }
 
@@ -413,7 +419,7 @@ impl CodexCredentialStore {
         &self,
         usable: impl Fn(&CodexCredentials) -> bool,
     ) -> Result<CodexCredentials, CodexCredentialError> {
-        if self.kept().is_none() {
+        if self.lock_kept().is_none() {
             let file = self.read()?;
             if usable(&file.credentials) {
                 return Ok(file.credentials);
@@ -473,71 +479,98 @@ impl CodexCredentialStore {
 
     // File
 
-    fn kept(&self) -> std::sync::MutexGuard<'_, Option<Unwritten>> {
-        self.unwritten
+    fn lock_kept(&self) -> std::sync::MutexGuard<'_, Option<Kept>> {
+        self.kept
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The file, or the tokens a failed write-back kept in memory while
-    /// the file still holds the spent token they replace (or cannot be
-    /// read, the CLI writing it); those are written again first. A file
-    /// that holds any other token, or none, was changed by the CLI or the
-    /// user since and is the truth: the kept tokens and their temporaries
-    /// go.
+    /// the file still holds the spent token they replace; those are put
+    /// over the file's current contents (so keys the CLI changed meanwhile
+    /// survive) and written again first. A file that does not parse (as
+    /// while the CLI writes it) or cannot be read gets the kept tokens for
+    /// this call, and is not written over. A file that parses and holds
+    /// any other token, or none, was changed by the CLI or the user since
+    /// and is the truth: the kept tokens and their temporary go.
     fn latest(&self) -> Result<AuthFile, CodexCredentialError> {
-        let file = self.read();
-        let mut unwritten = self.kept();
-        let Some(kept) = unwritten.take() else {
-            return file;
+        let document = self.read_document();
+        let mut slot = self.lock_kept();
+        let Some(mut kept) = slot.take() else {
+            return document.and_then(Self::auth_file);
         };
-        match &file {
-            Ok(file) if file.credentials.refresh_token == kept.replaces => {}
-            Err(CodexCredentialError::Malformed(_)) => {}
-            _ => {
-                remove_all(&kept.left);
-                return file;
+        let mut document = match document {
+            Ok(document) if refresh_token_in(&document) == Some(kept.replaces.as_str()) => document,
+            Err(CodexCredentialError::Malformed(_)) => {
+                let latest = kept.auth.clone();
+                *slot = Some(kept);
+                return Ok(latest);
+            }
+            other => {
+                remove_left(kept.left.as_deref());
+                return other.and_then(Self::auth_file);
+            }
+        };
+        for key in ["tokens", "last_refresh"] {
+            if let Some(value) = kept.auth.document.get(key) {
+                document.insert(key.to_owned(), value.clone());
             }
         }
-        let latest = kept.file.clone();
-        *unwritten = self.write_kept(kept);
+        if let Ok(auth) = Self::auth_file(document) {
+            kept.auth = auth;
+        }
+        let latest = kept.auth.clone();
+        *slot = self.write_kept(kept);
         Ok(latest)
     }
 
-    /// Writes `kept.file`: `None` once it landed, with the temporaries
-    /// earlier failures left removed, else `kept` with the one this
-    /// failure left, to be written again on the next call.
-    fn write_kept(&self, mut kept: Unwritten) -> Option<Unwritten> {
-        match self.write(&kept.file.document) {
+    /// Writes `kept.auth`. Returns `None` once the write lands, after
+    /// removing the temporary an earlier failure left; else `kept`, with
+    /// this failure's temporary in place of the earlier one (it holds the
+    /// same tokens or newer), to be written on the next call.
+    fn write_kept(&self, mut kept: Kept) -> Option<Kept> {
+        match self.write(&kept.auth.document) {
             Ok(()) => {
-                remove_all(&kept.left);
+                remove_left(kept.left.as_deref());
                 None
             }
             Err(failure) => {
                 tracing::warn!(
-                    "{}; the new Codex sign-in is kept in memory and written on the next call",
+                    "{}. Kept in memory; the next call writes it again.",
                     failure.detail
                 );
-                kept.left.extend(failure.left);
+                if let Some(left) = failure.left {
+                    remove_left(kept.left.as_deref());
+                    kept.left = Some(left);
+                }
                 Some(kept)
             }
         }
     }
 
     fn read(&self) -> Result<AuthFile, CodexCredentialError> {
-        let path = self.file_path();
-        let bytes = match std::fs::read(&path) {
+        self.read_document().and_then(Self::auth_file)
+    }
+
+    /// The file as a JSON object: `NotSignedIn` when it is missing,
+    /// `Malformed` when it cannot be read or does not parse as one.
+    fn read_document(&self) -> Result<Map<String, Value>, CodexCredentialError> {
+        let bytes = match std::fs::read(self.file_path()) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Err(CodexCredentialError::NotSignedIn);
             }
             Err(error) => return Err(CodexCredentialError::Malformed(error.to_string())),
         };
-        let Ok(Value::Object(document)) = serde_json::from_slice::<Value>(&bytes) else {
-            return Err(CodexCredentialError::Malformed(
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(Value::Object(document)) => Ok(document),
+            _ => Err(CodexCredentialError::Malformed(
                 "not a JSON object".to_owned(),
-            ));
-        };
+            )),
+        }
+    }
+
+    fn auth_file(document: Map<String, Value>) -> Result<AuthFile, CodexCredentialError> {
         let credentials = Self::credentials_in(&document)?;
         Ok(AuthFile {
             document,
@@ -635,7 +668,7 @@ impl CodexCredentialStore {
             "client_id": self.client_id,
             "refresh_token": file.credentials.refresh_token,
         });
-        // No client (no CA certificates): a failure like a dropped
+        // No client (no trusted root certificates): a failure like a dropped
         // connection, which leaves the sign-in as it is.
         let http = transport::client(&self.http)
             .map_err(|error| CodexCredentialError::RefreshFailed(error.to_string()))?;
@@ -731,14 +764,16 @@ impl CodexCredentialStore {
             Value::String(steno_core::json::format_date((self.now)())),
         );
         let credentials = Self::credentials_in(&document)?;
-        // A write that fails keeps them for the next call.
-        let mut unwritten = self.kept();
-        let (replaces, left) = match unwritten.take() {
+        // A write that fails keeps them for the next call. After an
+        // earlier failed write the file still holds that refresh's spent
+        // token, so `replaces` stays the earlier one.
+        let mut slot = self.lock_kept();
+        let (replaces, left) = match slot.take() {
             Some(earlier) => (earlier.replaces, earlier.left),
-            None => (file.credentials.refresh_token, Vec::new()),
+            None => (file.credentials.refresh_token, None),
         };
-        *unwritten = self.write_kept(Unwritten {
-            file: AuthFile {
+        *slot = self.write_kept(Kept {
+            auth: AuthFile {
                 document,
                 credentials: credentials.clone(),
             },
@@ -759,8 +794,8 @@ impl CodexCredentialStore {
 
     /// Temp file beside the target with mode 0600, synced, then `rename`,
     /// then the folder synced: readers see the old or the new file, never
-    /// a partial one, the mode never opens up on the way, and once this
-    /// returns the new tokens survive a power loss. A temporary that could
+    /// a partial one, the mode never opens up on the way, and, where both
+    /// syncs succeed, the new tokens survive a power loss. A temporary that could
     /// not be written whole holds no usable copy and is removed. A rename
     /// that fails leaves the temporary, mode 0600, with the new tokens in
     /// it, in case the app quits before a later write lands; that write
@@ -815,9 +850,14 @@ impl CodexCredentialStore {
     }
 }
 
-/// Removes the temporaries failed renames left.
-fn remove_all(paths: &[PathBuf]) {
-    for path in paths {
+/// Removes the temporary a failed rename left.
+fn remove_left(path: Option<&Path>) {
+    if let Some(path) = path {
         let _ = std::fs::remove_file(path);
     }
+}
+
+/// The refresh token an `auth.json` document holds, if any.
+fn refresh_token_in(document: &Map<String, Value>) -> Option<&str> {
+    document.get("tokens")?.get("refresh_token")?.as_str()
 }
