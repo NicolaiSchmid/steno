@@ -1079,8 +1079,27 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The audio device list is empty off the Mac, so Settings > Recording offers only the
   default input: WASAPI enumerates (WP10a) but the services do not read it yet, and
   PipeWire has no list.
-- The pipeline's `decode` reads a whole lane through symphonia (see Audio); the one
-  buffer alive at a time rule holds, the buffer is the full lane.
+- The pipeline's `decode` streams a lane (see "The decoder streams" under Audio);
+  the one buffer alive at a time rule holds, and the buffer is the 16 kHz lane
+  (460 MB for two hours) plus a working set under a megabyte, as in Swift.
+- Launch recovery stops resuming a meeting whose processing keeps ending the app.
+  Swift resumed every unfinished meeting at every launch. Each background run is
+  counted in the meeting's folder (`.processing-runs`, `crates/steno-pipeline/src/runs.rs`)
+  and the count settled when the process sees the run end (its return, a panic
+  unwinding through it, the exit, which takes back its own run); after three runs
+  that ended with the process (an abort, an out-of-memory kill), `resume_unfinished`
+  marks the meeting failed ("Steno closed unexpectedly 3 times while processing this
+  recording, so it was not tried again. The recording is kept."), clears any
+  retention stamp so the sweep keeps the audio, and `enqueue` or `reprocess` starts
+  the count afresh. A file, not a column, so no migration.
+- There is no "Process again" action yet: `ProcessingPipeline::reprocess` is its
+  entry point, and the bridge method, host, web UI and Swift side are their own
+  item. Until then a Mac call's lanes can be processed again as a new meeting with
+  `steno process <audio folder>/<MEETING-UUID>/mic.wav --system-lane
+  <audio folder>/<MEETING-UUID>/system.wav --source mac-call` (an in-person
+  recording: `steno process <audio folder>/<MEETING-UUID>/mixed.wav`); a phone
+  recording (`recording.m4a`) has no such path, since `steno process` takes 16 kHz
+  WAV only.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
   under 5 % of the mic lane's speech and under ten seconds is diarized on the mic lane
   (`pipeline::diarized_lane_after_transcription`, `tap_carried_no_conversation`); the
@@ -1148,10 +1167,28 @@ parity item until a plan says otherwise:
   small AAC encoder (`fdk-aac` is non-free; `ffmpeg` is too large), accept
   WAV for the optional export, or encode through the platform (AudioToolbox
   on the Mac, Media Foundation on Windows) behind a `cfg`.
-- **Whole-file decode.** The decoder reads a lane to one `Vec<f32>` at the
-  source rate before resampling; the AVFoundation codec converted in 32 768
-  frame chunks. A two-hour 48 kHz lane is 1.4 GB transiently. Chunk the
-  symphonia path before the Linux release.
+- **The decoder streams, as the AVFoundation codec's 32 768-frame chunks
+  did.** A CAF master is read 32 768 frames at a time through the crate's
+  CAF chunk walk, other files a packet at a time through symphonia, the
+  sidecar a block at a time; each block is resampled as it arrives
+  (`LaneResampler` in `crates/steno-audio/src/codec/resample.rs`), and the
+  mixdown writes as it goes. Measured on a synthetic two-hour two-lane 48 kHz
+  master (2.8 GB on disk; `STENO_CODEC_MEMORY_SECONDS=7200` in
+  `crates/steno-audio/tests/codec_memory.rs`): a lane's decode peaks at
+  0.63 MiB beyond its 439 MiB (460 MB) 16 kHz output, the mixdown at
+  0.74 MiB, where the whole-file decoder held the file and every channel
+  (about 5.5 GB). The samples are the whole-file decoder's bit for bit
+  (`tests/codec_streaming.rs`, which keeps it as the reference). One
+  difference from that decoder, and from Swift: a rate or channel count
+  that changes mid-file starts the lane again at the change.
+- **A sidecar is taken only when it is as long as the master.** Swift's
+  codec took any non-empty sidecar. The Rust `decode` reads the master
+  CAF's frame count from its header and decodes the master when the
+  sidecar is not exactly a third of it: the sidecar's 32-bit size fields
+  wrap after 37.3 hours (a wrapped header can still parse and claim a
+  short lane), and a sidecar that missed the master's last frame on a full
+  disk would lose it. A master that is not the writer's CAF leaves the
+  sidecar trusted.
 - **Resampling.** 48 kHz masters go through the writer's exact 3:1 FIR
   with its group delay dropped, so the decode is zero-phase on the master's
   time; other rates (the phone's 44.1 kHz) through a 64-tap, 128-phase
@@ -2073,8 +2110,7 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   system lane is the whole default sink (Steno's own output included; leaving it out
   was weighed and not done, see the note), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
-  list and no meeting detection, the latencies are unmeasured on real hardware, and
-  the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
+  list and no meeting detection, and the latencies are unmeasured on real hardware.
   Where: the Linux items under "Audio". Found: #166, #176.
 - **First Linux release.** A default move can go unreported on PipeWire before 1.6.9
   (pipewire#5445, fixed upstream by 06de0ed2 on `master` and b784720b on `1.6`; seen
