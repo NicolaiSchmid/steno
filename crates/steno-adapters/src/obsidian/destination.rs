@@ -50,8 +50,9 @@ pub enum DeliveryStep<'a> {
     /// Another delivery in this process holds the vault; this one waits for
     /// it before touching anything.
     WaitingForVault,
-    /// A first delivery is about to claim this meeting folder by creating
-    /// it.
+    /// A delivery without a folder of its own (a first one, or one whose
+    /// pinned folder no longer holds this meeting's `meeting.json`) is
+    /// about to claim this meeting folder by creating it.
     ClaimingFolder(&'a str),
     /// The person page at this path has been read (or found missing) and
     /// is about to be written with this meeting's line merged in.
@@ -219,7 +220,7 @@ impl ObsidianFolderDestination {
     }
 
     /// [`Destination::deliver`] without the boundary error wrapper and on
-    /// the calling thread; the CLI calls it directly. Blocks while another
+    /// the calling thread, where the tests call it. Blocks while another
     /// delivery into the same vault runs in this process (`vault_lock`).
     pub fn deliver_meeting(
         &self,
@@ -240,19 +241,17 @@ impl ObsidianFolderDestination {
         };
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
-        // A pinned folder that now holds another meeting's `meeting.json`
-        // (this one's was moved or deleted, and a meeting with the same
-        // date and title claimed the name since) is that meeting's: this
-        // delivery claims a folder as a first one does, so it never writes
-        // over the other meeting's notes.
+        // A pinned folder that is there but no longer holds this meeting's
+        // `meeting.json` (this one's was moved or deleted, and a meeting
+        // with the same date and title may have claimed the name since) is
+        // lost to it: this delivery claims a folder as a first one does and
+        // moves its receipt there, so it never writes over the other
+        // meeting's notes.
         let folder = match ledger.pinned_folder().map(str::to_owned) {
-            Some(lost)
-                if self
-                    .meeting_of(&lost)
-                    .is_some_and(|owner| owner != meeting.meeting.id) =>
-            {
-                ledger.forget_folder(&lost);
-                self.claim_folder(meeting)?
+            Some(lost) if self.is_lost(&lost, meeting.meeting.id)? => {
+                let claimed = self.claim_folder(meeting)?;
+                ledger.move_folder(&lost, &claimed);
+                claimed
             }
             Some(folder) => folder,
             None => self.claim_folder(meeting)?,
@@ -429,9 +428,11 @@ impl ObsidianFolderDestination {
         Ok(())
     }
 
-    /// The folder of a first delivery: the scope's path with the ledger's
-    /// collision rule ([`DeliveryLedger::claim_folder`]), each candidate
-    /// claimed by creating it under `Meetings/` (created as needed).
+    /// The folder of a delivery without one: the scope's path with the
+    /// ledger's collision rule ([`DeliveryLedger::claim_folder`]), each
+    /// candidate claimed by creating it under `Meetings/` (created as
+    /// needed). A candidate whose `meeting.json` cannot be read counts as
+    /// taken.
     fn claim_folder(&self, meeting: &MeetingExport) -> Result<String, ObsidianError> {
         let base = MeetingFolder::path(&meeting.meeting, self.time_zone);
         self.writing(MeetingFolder::ROOT, || {
@@ -447,22 +448,37 @@ impl ObsidianFolderDestination {
                     created => self.writing(candidate, || created.map(|()| true)),
                 }
             },
-            |folder| self.meeting_of(folder),
+            |folder| self.meeting_of(folder).ok().flatten(),
         )
     }
 
-    /// The meeting whose `meeting.json` is in `folder`, if any.
-    fn meeting_of(&self, folder: &str) -> Option<Uuid> {
-        let data = self
-            .sink
-            .read(&format!("{folder}/{}", MeetingFolder::JSON))
+    /// Whether the pinned `folder` is there but holds no `meeting.json` of
+    /// `meeting_id`: the file is another meeting's, missing or not a
+    /// meeting's. Writing there could overwrite another meeting's notes,
+    /// so the delivery claims a folder of its own instead; the cost is a
+    /// duplicate folder, never an overwrite. A folder that is gone is not
+    /// lost: the delivery recreates it, as Swift's does.
+    fn is_lost(&self, folder: &str, meeting_id: Uuid) -> Result<bool, ObsidianError> {
+        Ok(self.sink.exists(folder) && self.meeting_of(folder)? != Some(meeting_id))
+    }
+
+    /// The meeting whose `meeting.json` is in `folder`: `None` when the
+    /// file is missing or names no meeting. Any other read error is
+    /// [`ObsidianError::ReadFailed`], so a file another program holds open
+    /// fails the delivery instead of passing for another meeting's.
+    fn meeting_of(&self, folder: &str) -> Result<Option<Uuid>, ObsidianError> {
+        let path = format!("{folder}/{}", MeetingFolder::JSON);
+        let Some(data) = self.reading(&path, || self.sink.read(&path))? else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_slice::<serde_json::Value>(&data)
             .ok()
-            .flatten()?;
-        let probe: serde_json::Value = serde_json::from_slice(&data).ok()?;
-        probe
-            .pointer("/meeting/id")?
-            .as_str()
-            .and_then(|id| Uuid::parse_str(id).ok())
+            .and_then(|probe| {
+                probe
+                    .pointer("/meeting/id")?
+                    .as_str()
+                    .and_then(|id| Uuid::parse_str(id).ok())
+            }))
     }
 
     /// An `audio` or `audio.<ext>` file in the meeting folder, listed in the
@@ -554,7 +570,9 @@ impl Destination for ObsidianFolderDestination {
     /// [`ObsidianFolderDestination::deliver_meeting`] on tokio's blocking
     /// pool: it waits on the vault lock and does blocking file I/O (the
     /// `fsync`ed writes, the audio copy), which would otherwise park a
-    /// runtime worker. A panic inside it unwinds here, as it did inline.
+    /// runtime worker. A panic inside it is raised again here, so the
+    /// pipeline's `catch_unwind` still sees it. A task the runtime
+    /// cancelled at shutdown comes back as an error.
     async fn deliver(
         &self,
         meeting: &MeetingExport,

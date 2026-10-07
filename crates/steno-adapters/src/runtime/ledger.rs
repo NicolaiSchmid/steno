@@ -24,6 +24,9 @@ pub struct DeliveryLedger {
     /// or file paths would leave the root. A moved vault, a scratch run or a
     /// tampered receipt does not pin a folder or protect a file here.
     previous: Option<DeliveryReceipt>,
+    /// The folder a redelivery claimed in place of its pinned one
+    /// ([`DeliveryLedger::move_folder`]), written as on a first delivery.
+    claimed: Option<String>,
     files: BTreeMap<String, DeliveredFile>,
 }
 
@@ -47,6 +50,7 @@ impl DeliveryLedger {
         DeliveryLedger {
             root: root.to_owned(),
             previous,
+            claimed: None,
             files,
         }
     }
@@ -80,26 +84,36 @@ impl DeliveryLedger {
         self.previous.iter().flat_map(|receipt| &receipt.files)
     }
 
-    /// Whether an owned path may be opened for writing: on first delivery
-    /// always; on re-export when the receipt lists it as owned or nothing is
-    /// there yet. A file the app never wrote is never opened for writing.
+    /// Whether an owned path may be opened for writing: on a first delivery
+    /// always, as is any path directly in the folder a redelivery claimed
+    /// ([`DeliveryLedger::move_folder`]); otherwise when the receipt lists
+    /// it as owned or nothing is there yet. A file the app never wrote is
+    /// never opened for writing.
     #[must_use]
     pub fn may_write(&self, path: &str, exists: bool) -> bool {
         self.is_first_delivery()
             || !exists
             || self
+                .claimed
+                .as_deref()
+                .is_some_and(|folder| Self::name_in(path, folder).is_some())
+            || self
                 .previous_files()
                 .any(|file| file.ownership == FileOwnership::Owned && file.relative_path == path)
     }
 
-    /// Drops every listed file under `folder` from the receipt to come: the
-    /// pinned folder that now holds another meeting's `meeting.json`, whose
-    /// files are that meeting's. The previous receipt still decides
-    /// [`DeliveryLedger::may_write`].
+    /// Moves the receipt to come from `from`, the pinned folder that no
+    /// longer holds this meeting's `meeting.json` (another meeting's, or
+    /// none), to `to`, the folder this delivery claimed. It drops every
+    /// listed file under `from`, since this delivery no longer writes
+    /// there. [`DeliveryLedger::may_write`] then allows any path directly
+    /// under `to`, as on a first delivery: the claim gave a new folder or
+    /// one holding this meeting's `meeting.json`.
     /// Swift: none; Swift writes into the pinned folder whatever it holds.
-    pub fn forget_folder(&mut self, folder: &str) {
-        let prefix = format!("{}/", folder.trim_end_matches('/'));
+    pub fn move_folder(&mut self, from: &str, to: &str) {
+        let prefix = format!("{}/", from.trim_end_matches('/'));
         self.files.retain(|path, _| !path.starts_with(&prefix));
+        self.claimed = Some(to.to_owned());
     }
 
     pub fn record(&mut self, path: &str, ownership: FileOwnership, data: &[u8]) {
@@ -129,11 +143,16 @@ impl DeliveryLedger {
     /// satisfies `name`.
     #[must_use]
     pub fn lists(&self, folder: &str, name: impl Fn(&str) -> bool) -> bool {
-        let prefix = format!("{folder}/");
-        self.files.keys().any(|path| {
-            path.strip_prefix(&prefix)
-                .is_some_and(|child| !child.contains('/') && name(child))
-        })
+        self.files
+            .keys()
+            .any(|path| Self::name_in(path, folder).is_some_and(&name))
+    }
+
+    /// The file name of `path` when it sits directly in `folder`.
+    fn name_in<'a>(path: &'a str, folder: &str) -> Option<&'a str> {
+        path.strip_prefix(folder)?
+            .strip_prefix('/')
+            .filter(|name| !name.contains('/'))
     }
 
     /// The receipt of this delivery: every file by path, with the renderer
@@ -198,8 +217,11 @@ impl DeliveryLedger {
             && components.all(|component| matches!(component, Component::Normal(_)))
     }
 
-    /// [`DeliveryLedger::claim_folder`] with `exists` as the claim, the
-    /// lookup Swift's `resolveFolder` does.
+    /// [`DeliveryLedger::claim_folder`] with a lookup for the claim: a
+    /// candidate that does not exist counts as claimed, and nothing is
+    /// created. No delivery calls it; the tests pin the collision rule
+    /// through it.
+    /// Swift: `DeliveryLedger.resolveFolder`.
     #[must_use]
     pub fn resolve_folder(
         base: &str,
@@ -216,10 +238,12 @@ impl DeliveryLedger {
         folder
     }
 
-    /// The folder of a first delivery: `base`, with `-2`, `-3`, … appended
-    /// while the candidate is taken, that is, already there and holding
-    /// another meeting's `meeting.json` (or none); a candidate holding
-    /// `meeting_id` is a crashed attempt and is reused. `claim` creates the
+    /// The folder of a delivery without one (a first delivery, or a
+    /// redelivery whose pinned folder no longer holds this meeting's
+    /// `meeting.json`): `base`, with `-2`, `-3`, … appended while the
+    /// candidate is taken, that is, already there and holding another
+    /// meeting's `meeting.json` (or none); a candidate holding `meeting_id`
+    /// is a crashed or failed attempt and is reused. `claim` creates the
     /// candidate and says whether it was new (`Ok(true)`, the folder is
     /// this delivery's) or something was already at the path (`Ok(false)`,
     /// which `meeting_of` then decides). Creating is the claim, so two
