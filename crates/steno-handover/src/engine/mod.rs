@@ -673,7 +673,7 @@ impl Engine {
     /// upload. Every discard of the engine goes through here,
     /// [`Engine::discard_own_while_revoked`] or
     /// [`Engine::discard_and_forget_own`], except the sweep before the
-    /// listener starts.
+    /// listener starts and the first announce's ([`Engine::open_files`]).
     ///
     /// The check and the discard are one step under the files lock. Files
     /// are created only under the same lock, for a device that `revoked`
@@ -691,18 +691,13 @@ impl Engine {
     ///   first announce's stays in the store only, so another phone's
     ///   announce is answered 409.
     /// - Another phone's receipt in memory before the check, its files not
-    ///   open yet. The check skips, this device's files stay, and that
-    ///   phone's `begin` keeps the old partial.
+    ///   open yet. The check skips and this device's files stay, until
+    ///   that phone's [`Engine::open_files`] discards them.
     /// - A second revoke between [`Engine::reopen_missing_files`] and the
     ///   re-announce's write, which then keeps the receipt out of memory:
     ///   the reopened partial and sidecar belong to no receipt in memory or
-    ///   the store until the next start's sweep, and a later first announce
-    ///   of the recording id keeps that partial.
-    ///
-    /// A first announce that finds no receipt and discards every file of
-    /// its recording id before `begin` closes the last two; the plan's
-    /// "Open after the port" item owned by
-    /// `fix/handover-first-announce-discard` tracks it.
+    ///   the store until the next start's sweep, or until a first announce
+    ///   of the recording id discards them ([`Engine::open_files`]).
     ///
     /// Swift: `inbox.discard` in `RecordingHandler`, by the recording id
     /// alone; the "Files by recording id" parity note in
@@ -763,17 +758,47 @@ impl Engine {
     }
 
     /// Opens the files of a recording whose receipt this request just made
-    /// for `device_id`: an empty partial (or the one there, never
-    /// truncated) and the metadata sidecar, under the files lock
-    /// ([`Engine::discard_own`]). `None`, with nothing opened, when the
+    /// for `device_id`, a first announce that found no receipt in memory or
+    /// the store: an empty partial and the metadata sidecar, under the files
+    /// lock ([`Engine::discard_own`]). `None`, with nothing opened, when the
     /// device was revoked since its receipt read ([`Engine::files_for`]).
-    /// Swift: `inbox.begin` in `RecordingHandler.announce`.
+    ///
+    /// Every file of the recording id goes first while memory holds this
+    /// device's receipt of it with no chunk in it: no byte there is one
+    /// this upload needs, and whatever is there belongs to no receipt (a
+    /// verified file left by an intake failure whose receipt a revoke
+    /// deleted after a restart, a partial a refusal or a second revoke
+    /// left). Kept, `begin` would add this upload's chunks to an old
+    /// partial, and `complete` would hand an old verified file to the
+    /// intake without hashing it. No live upload of another device can be
+    /// in those files: a device's recording routes read its receipt into
+    /// memory before they touch a file, memory drops it only when that
+    /// device is revoked, and `change` made this receipt only because
+    /// memory held none, so only a revoked device's request can still be
+    /// at work on them: its answer is a refusal or an error, after which
+    /// the phone keeps its recording, or the 200 of an admission whose
+    /// intake opened the verified file before the discard and copies it
+    /// whole (the open file outlives its name). While memory holds another
+    /// device's receipt by now (this one was revoked and paired again
+    /// meanwhile), or a chunk in this one (a re-announce of the same phone
+    /// answered first and the phone sent a chunk), nothing goes.
+    /// Swift: `inbox.discard` and `inbox.begin` in
+    /// `RecordingHandler.announce`.
     pub(crate) fn open_files(
         &self,
         metadata: &RecordingMetadata,
         device_id: Uuid,
     ) -> Option<std::io::Result<()>> {
         let _files = self.files_for(device_id)?;
+        let recording_id = metadata.recording_id;
+        let fresh = self
+            .state()
+            .active_receipts
+            .get(&recording_id)
+            .is_some_and(|held| held.device_id == device_id && held.received_chunks.is_empty());
+        if fresh {
+            self.inbox.discard(recording_id);
+        }
         Some(self.inbox.begin(metadata))
     }
 
