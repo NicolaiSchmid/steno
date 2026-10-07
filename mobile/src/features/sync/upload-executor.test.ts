@@ -827,11 +827,20 @@ describe("an announce the Mac keeps refusing with 409", () => {
 		expect(h.mac.calls).toEqual(["announce a", "announce a", "announce a"]);
 		expect(h.files.present.has("a.m4a")).toBe(true);
 
-		// Retry: the Mac takes it now.
+		// Retry: the count starts again, so one more 409 only retries, and
+		// then the Mac takes it.
+		h.mac.announceScript = [409];
 		h.state.index = resetForUpload(h.state.index, "a");
+		expect(await h.drive()).toMatchObject({ kind: "wait" });
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
+		h.advance(60_000);
 		await h.drive();
 		expect(h.row("a")).toMatchObject({ state: "uploading", lastError: null });
-		expect(h.mac.calls.slice(3)).toEqual(["announce a", "chunk a/0"]);
+		expect(h.mac.calls.slice(3)).toEqual([
+			"announce a",
+			"announce a",
+			"chunk a/0",
+		]);
 	});
 
 	it("starts counting again after an announce the Mac takes", async () => {
