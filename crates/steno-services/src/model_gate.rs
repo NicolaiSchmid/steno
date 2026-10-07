@@ -2,12 +2,11 @@
 //! the app's pipelines run, each behind a gate that refuses a call while
 //! its models are not installed. The refusal is
 //! [`PipelineFailure::models_missing`], so the meeting stays `queued`
-//! without a reason and is processed once Settings installed the models
-//! ([`ModelStoreSpeechModels`](crate::speech::ModelStoreSpeechModels)
-//! then calls `resume_unfinished`). Downloads start from Settings and
-//! onboarding only ([`ResumeAfterInstall`]). The speech sidecar's own install is turned off as
-//! well (`SidecarConfig::install_models`), so a file removed between the
-//! gate's check and the child's load is refused too, never fetched; its
+//! without a reason and is processed once Settings or onboarding installed
+//! the models ([`ResumeAfterInstall`] then calls `resume_unfinished`). The
+//! speech sidecar's own install is turned off as well
+//! (`SidecarConfig::install_models`), so a file removed between the gate's
+//! check and the child's load is refused too, never fetched; its
 //! `NotInstalled` is the same refusal. The CLI's engines keep downloading
 //! on first use. Rust only: the Swift pipeline downloaded inside the run.
 
@@ -189,7 +188,7 @@ impl<M: SpeechModels> SpeechModels for ResumeAfterInstall<M> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
 
@@ -271,7 +270,7 @@ mod tests {
     /// a failed one does not.
     #[test]
     fn an_install_resumes_the_waiting_meetings_and_a_failed_one_does_not() {
-        let resumed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resumed = Arc::new(AtomicUsize::new(0));
         let models = ResumeAfterInstall::new(steno_host::fakes::FakeSpeechModels::default(), {
             let resumed = resumed.clone();
             Box::new(move || {
