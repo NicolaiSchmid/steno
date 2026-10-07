@@ -1575,9 +1575,7 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     pipeline.enqueue(&meeting, &asset).unwrap();
     engine.wait_until_entered().await;
 
-    let runs = RecordingLayout::from_asset(&asset)
-        .unwrap()
-        .processing_runs();
+    let runs = runs_file(&asset);
     assert_eq!(
         std::fs::read_to_string(&runs).unwrap(),
         "1",
@@ -2285,12 +2283,16 @@ async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
     pipeline.wait_until_idle().await;
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
     assert!(
-        !RecordingLayout::from_asset(&asset)
-            .unwrap()
-            .processing_runs()
-            .exists(),
+        !runs_file(&asset).exists(),
         "a panic the process survives is not a run that ended with the app"
     );
+}
+
+/// The asset's `.processing-runs`.
+fn runs_file(asset: &AudioAsset) -> PathBuf {
+    RecordingLayout::from_asset(asset)
+        .unwrap()
+        .processing_runs()
 }
 
 /// A launch whose run of the meeting never ends: the run is left
@@ -2325,8 +2327,7 @@ async fn launch_recovery_gives_up_on_a_meeting_whose_runs_ended_with_the_app() {
     let world = world(false, None, AudioRetention::KeepForever);
     let meeting = call_meeting(world.now);
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
-    let layout = RecordingLayout::from_asset(&asset).unwrap();
-    let runs = layout.processing_runs();
+    let runs = runs_file(&asset);
 
     assert_eq!(
         launch_that_crashes(&world, Some((&meeting, &asset))).await,
@@ -2413,9 +2414,7 @@ async fn launch_recovery_resumes_a_meeting_below_the_limit_and_clears_its_count(
         .store
         .save_meeting_with_asset(&processing, &asset)
         .unwrap();
-    let runs = RecordingLayout::from_asset(&asset)
-        .unwrap()
-        .processing_runs();
+    let runs = runs_file(&asset);
     std::fs::write(&runs, (MAX_UNSETTLED_RUNS - 1).to_string()).unwrap();
 
     assert_eq!(world.pipeline.resume_unfinished().unwrap(), [meeting.id]);
@@ -2437,9 +2436,7 @@ async fn a_corrupt_run_count_never_blocks_processing() {
         .store
         .save_meeting_with_asset(&processing, &asset)
         .unwrap();
-    let runs = RecordingLayout::from_asset(&asset)
-        .unwrap()
-        .processing_runs();
+    let runs = runs_file(&asset);
     std::fs::write(&runs, b"\xff not a count").unwrap();
 
     assert_eq!(world.pipeline.resume_unfinished().unwrap(), [meeting.id]);
@@ -2469,9 +2466,7 @@ async fn a_meeting_given_up_on_keeps_its_audio_through_the_sweep() {
     };
     let given_up = stamped(Uuid::new_v4(), MeetingState::Processing);
     let ready = stamped(Uuid::new_v4(), MeetingState::Ready);
-    let runs = RecordingLayout::from_asset(&given_up)
-        .unwrap()
-        .processing_runs();
+    let runs = runs_file(&given_up);
     std::fs::write(&runs, MAX_UNSETTLED_RUNS.to_string()).unwrap();
 
     assert_eq!(

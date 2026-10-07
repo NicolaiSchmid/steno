@@ -811,10 +811,11 @@ impl ProcessingPipeline {
                 continue;
             }
             let runs = Runs::of(&asset);
-            if runs.unsettled() >= MAX_UNSETTLED_RUNS {
+            let unsettled = runs.unsettled();
+            if unsettled >= MAX_UNSETTLED_RUNS {
                 tracing::warn!(
                     meeting_id = %meeting.id,
-                    runs = runs.unsettled(),
+                    runs = unsettled,
                     "processing ended with the app too often; marked failed"
                 );
                 // Processing it again needs the audio: a stamp left from
