@@ -8,7 +8,7 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()`, `launch()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`] |
+//! | [`app`] | [`AppOptions`], [`build`], [`App`] with `host()`, `launch()` and `shutdown()`, [`ExitGate`](app::ExitGate), [`SHUTDOWN_PATIENCE`](app::SHUTDOWN_PATIENCE), [`BuildError`], [`open_store`], [`lock_database`] with [`LOCK_PATIENCE`](app::LOCK_PATIENCE) |
 //! | [`pipeline`] | [`CurrentPipeline`](pipeline::CurrentPipeline), the swappable [`ProcessingPipeline`](steno_pipeline::ProcessingPipeline) with the [`BuiltEngine`](pipeline::BuiltEngine) it was built with, and [`HostPipeline`](pipeline::HostPipeline), the host's `Pipeline` over it and the retention sweep |
 //! | [`recorder`] | The host's `Recorder` over the capture session and the Mac intake |
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
