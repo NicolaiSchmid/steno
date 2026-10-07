@@ -677,7 +677,7 @@ describe("a complete sent before an unpair and answered after it", () => {
 	}
 
 	/** Pairs again, as the pairing sheet does after a scan. */
-	function repair(h: ReturnType<typeof harness>) {
+	function pairAgain(h: ReturnType<typeof harness>) {
 		return commitPairing(
 			{
 				mac: {
@@ -713,14 +713,14 @@ describe("a complete sent before an unpair and answered after it", () => {
 		expect(h.files.removed).toEqual(["a.m4a"]);
 		expect(h.executor.inFlight.size).toBe(0);
 
-		await repair(h);
+		await pairAgain(h);
 		expect(h.row("a")?.state).toBe("delivered");
 		const calls = h.mac.calls.length;
 		expect(await h.drive()).toEqual({ kind: "idle" });
 		expect(h.mac.calls).toHaveLength(calls);
 	});
 
-	it("a refused complete leaves the row unpaired with its file, and a new pairing uploads it", async () => {
+	it("a 401 to that complete leaves the row unpaired with its file, and a new pairing uploads it", async () => {
 		const { h, answer, completing } = await unpairDuringComplete();
 		// The unpair's revoke reached the Mac before the recording was admitted.
 		h.mac.revoked = true;
@@ -731,11 +731,55 @@ describe("a complete sent before an unpair and answered after it", () => {
 		expect(h.files.removed).toEqual([]);
 		expect(h.files.present.has("a.m4a")).toBe(true);
 
-		await repair(h);
+		await pairAgain(h);
 		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 0 });
+		// The new pairing's token is accepted.
 		h.mac.revoked = false;
 		await h.drive();
 		expect(h.mac.calls.at(-1)).toBe("complete a");
+		expect(h.row("a")?.state).toBe("delivered");
+	});
+
+	it("after a new pairing, nothing uploads until the old complete answers, and its 200 delivers the row", async () => {
+		const { h, answer, completing } = await unpairDuringComplete();
+		await pairAgain(h);
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 0 });
+		const calls = h.mac.calls.length;
+		expect(await h.drive()).toEqual({ kind: "idle" });
+		expect(h.mac.calls).toHaveLength(calls);
+
+		answer();
+		await completing;
+		expect(h.row("a")).toMatchObject({
+			state: "delivered",
+			meetingID: "meeting-a",
+			lastError: null,
+		});
+		expect(h.files.removed).toEqual(["a.m4a"]);
+		expect(h.executor.inFlight.size).toBe(0);
+		expect(await h.drive()).toEqual({ kind: "idle" });
+		expect(h.mac.calls).toHaveLength(calls);
+	});
+
+	it("after a new pairing, a 401 to the old complete backs off and the new pairing uploads the row", async () => {
+		const { h, answer, completing } = await unpairDuringComplete();
+		await pairAgain(h);
+		// The old token is revoked; the 401 is not the new pairing's.
+		h.mac.revoked = true;
+		answer();
+		await completing;
+		expect(h.pairing.token).toBe("new-token");
+		expect(h.row("a")).toMatchObject({
+			state: "queued",
+			attempts: 1,
+			lastError: "Retrying",
+		});
+		expect(h.files.present.has("a.m4a")).toBe(true);
+
+		h.mac.revoked = false;
+		h.advance(5_000);
+		await h.drive();
+		expect(h.mac.calls.slice(-2)).toEqual(["announce a", "complete a"]);
 		expect(h.row("a")?.state).toBe("delivered");
 	});
 });

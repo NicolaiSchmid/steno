@@ -90,8 +90,8 @@ describe("state machine", () => {
 	});
 
 	it("rejects illegal transitions", () => {
-		expect(() => setState(queued, "a", "delivered")).toThrow(
-			/illegal transition queued -> delivered/,
+		expect(() => setState(queued, "a", "recording")).toThrow(
+			/illegal transition queued -> recording/,
 		);
 		const delivered = setState(
 			setState(queued, "a", "uploading"),
@@ -99,10 +99,9 @@ describe("state machine", () => {
 			"delivered",
 		);
 		expect(() => setState(delivered, "a", "queued")).toThrow(QueueError);
-		expect(() => setState(queued, "a", "recording")).toThrow(QueueError);
 	});
 
-	it("allows failed back to queued only, and unpaired back to queued or on to delivered", () => {
+	it("allows failed back to queued only, and unpaired to queued or delivered", () => {
 		const failed = setState(queued, "a", "failed", { lastError: "422" });
 		expect(() => setState(failed, "a", "uploading")).toThrow(QueueError);
 		expect(() => setState(failed, "a", "delivered")).toThrow(QueueError);
@@ -114,12 +113,17 @@ describe("state machine", () => {
 		expect(
 			setState(unpaired, "a", "delivered", { meetingID: "m" }).recordings[0],
 		).toMatchObject({ state: "delivered", meetingID: "m" });
-		expect(resetForUpload(unpaired, "a").recordings[0]).toMatchObject({
+		const requeued = resetForUpload(unpaired, "a");
+		expect(requeued.recordings[0]).toMatchObject({
 			state: "queued",
 			attempts: 0,
 			nextAttemptAt: null,
 			lastError: null,
 		});
+		// The same answer after a new pairing queued the row again.
+		expect(
+			setState(requeued, "a", "delivered", { meetingID: "m" }).recordings[0],
+		).toMatchObject({ state: "delivered", meetingID: "m" });
 	});
 
 	it("treats a same-state call as a patch and never lets the patch change the id or state", () => {
@@ -147,7 +151,7 @@ describe("every transition", () => {
 	/** The plan's state machine, written out independently of the code's table. */
 	const LEGAL: Record<SyncState, readonly SyncState[]> = {
 		recording: ["queued", "failed"],
-		queued: ["uploading", "unpaired", "failed"],
+		queued: ["uploading", "unpaired", "failed", "delivered"],
 		uploading: ["queued", "delivered", "failed", "unpaired"],
 		failed: ["queued"],
 		unpaired: ["queued", "delivered"],

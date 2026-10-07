@@ -66,6 +66,13 @@ describe("planNext", () => {
 		).toEqual({ kind: "idle" });
 	});
 
+	it("does not announce a queued recording while its complete is still out", () => {
+		const index = addRecording(EMPTY_INDEX, rec("a", "x"));
+		expect(
+			planNext(index, true, new Set([taskIDs.complete("a")]), now),
+		).toEqual({ kind: "idle" });
+	});
+
 	it("skips a recording that has no hash yet", () => {
 		const index = addRecording(EMPTY_INDEX, { ...rec("a", "x"), sha256: null });
 		expect(planNext(index, true, new Set(), now)).toEqual({
