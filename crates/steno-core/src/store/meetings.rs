@@ -347,9 +347,8 @@ impl Store {
     /// A speaker the user confirmed keeps its confirmation when its id
     /// comes back (ids derive from the meeting id and the cluster label, so
     /// a re-run's do), and every person who had a confirmed speaker here
-    /// has their voice recomputed, so a person whose speaker vanished no
-    /// longer carries its embedding and one whose speaker came back carries
-    /// the new one. A first write recomputes nothing, as in Swift. Rust only: Swift's
+    /// has their voice recomputed from the speakers now stored. A first
+    /// write recomputes nothing, as in Swift. Rust only: Swift's
     /// `replaceTranscript` replaces the assignments too
     /// (`.plans/2026-09-29-speaker-calibration.md`, decision 5).
     pub fn replace_transcript(

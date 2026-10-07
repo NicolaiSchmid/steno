@@ -473,7 +473,8 @@ impl Diarization {
             speakers: vec![Speaker {
                 id,
                 meeting_id,
-                cluster_label: ROOM_SPEAKER_LABEL.to_owned(),
+                // The first label a diarizer hands out.
+                cluster_label: "Speaker 1".to_owned(),
                 assignment: SpeakerAssignment::Unknown,
                 embedding: None,
                 sample_clip_range: None,
@@ -491,10 +492,6 @@ impl Diarization {
         }
     }
 }
-
-/// The label of [`Diarization::one_room_speaker`]'s speaker, the first
-/// label a diarizer hands out.
-const ROOM_SPEAKER_LABEL: &str = "Speaker 1";
 
 /// Whether the summarize stage stores the meeting's template with the
 /// summary.
@@ -634,10 +631,10 @@ pub const OPERATION_PANICKED: &str = "the operation stopped unexpectedly";
 /// claimed operation always ends in a result and a failure is posted. The
 /// panic message itself goes to stderr through the panic hook, as any
 /// panic's does.
-async fn unless_it_panics<T>(
+async fn unless_it_panics(
     stage: PipelineStage,
-    work: impl Future<Output = Result<T>>,
-) -> Result<T> {
+    work: impl Future<Output = Result<()>>,
+) -> Result<()> {
     use futures_util::FutureExt as _;
     std::panic::AssertUnwindSafe(work)
         .catch_unwind()
@@ -901,9 +898,9 @@ impl ProcessingPipeline {
     /// with whatever was persisted so far; a panic before `persist` fails
     /// the meeting too. A failing `diarize` or `match_speakers` does not:
     /// the transcript is kept with one unknown speaker for the room lane.
-    /// Once `persist` has marked the
-    /// meeting `ready` nothing downgrades it: a `retention` error is
-    /// returned to the caller and the meeting stays ready and delivered.
+    /// Once `persist` has marked the meeting `ready` nothing downgrades it:
+    /// a `retention` error is returned to the caller and the meeting stays
+    /// ready and delivered.
     /// Once the pipeline [quits](Self::quit), a failure is returned and
     /// not persisted, and a call made after it fails at once: the meeting
     /// stays `queued` or `processing`, which the next launch's
@@ -1750,21 +1747,20 @@ impl ProcessingPipeline {
                 }) + output.usage,
             );
             updated.updated_at = now;
-            let written = match template_column {
-                Template::AsStored => store.replace_summary(
-                    &updated,
-                    &output.tasks,
-                    &output.decisions,
-                    &output.speaker_names,
-                ),
-                Template::Chosen => store.replace_summary_with_template(
-                    &updated,
-                    &output.tasks,
-                    &output.decisions,
-                    &output.speaker_names,
-                ),
+            let replace = match template_column {
+                Template::AsStored => Store::replace_summary,
+                Template::Chosen => Store::replace_summary_with_template,
             };
-            attributing(PipelineStage::Summarize, written)?;
+            attributing(
+                PipelineStage::Summarize,
+                replace(
+                    store,
+                    &updated,
+                    &output.tasks,
+                    &output.decisions,
+                    &output.speaker_names,
+                ),
+            )?;
             Ok(updated)
         })
         .await
