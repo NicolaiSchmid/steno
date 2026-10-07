@@ -10,7 +10,9 @@ publish.workspace = true
 
 [features]
 # The fakes in `testing`: every protocol with a deterministic implementation
-# so the pipeline, the CLI and the shell test without models or a network.
+# so the pipeline, the CLI and the shell test without models or a network;
+# and `Store::probe_commits`, which reads each write transaction's pragmas
+# right before it commits.
 testing = []
 
 [dependencies]

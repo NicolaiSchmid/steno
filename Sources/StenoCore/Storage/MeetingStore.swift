@@ -95,6 +95,8 @@ public final class MeetingStore: Sendable {
   /// This transaction runs under `synchronous = FULL` with `fullfsync` on,
   /// so its commit syncs the WAL with `F_FULLFSYNC`, which also flushes the
   /// drive's cache; the sync covers every earlier commit in the WAL too.
+  /// That costs one WAL fsync per commit, plus a flush of the drive's cache,
+  /// all while the writer is held, so other writes wait for it.
   /// SQLite refuses to change `synchronous` inside a transaction, so the
   /// levels are set before `BEGIN` and set back once the transaction has
   /// committed or rolled back, in the same writer access: no other write

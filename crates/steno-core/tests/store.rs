@@ -751,6 +751,7 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
 
     let inside = store
         .write_durably(|transaction| {
+            // A no-op change, so the commit writes a frame to the WAL.
             transaction.execute("UPDATE setting SET value = value", [])?;
             sync_levels(transaction)
         })

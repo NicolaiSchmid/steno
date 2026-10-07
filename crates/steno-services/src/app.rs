@@ -731,7 +731,7 @@ mod tests {
     use crate::testing::{PATIENCE, built, fake_dependencies, on_own_thread, temp_store};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_phone_intake_enqueues_through_the_pipeline_current_at_admission() {
+    async fn the_phone_intake_enqueues_durably_through_the_pipeline_current_at_admission() {
         let (dir, store) = temp_store();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);

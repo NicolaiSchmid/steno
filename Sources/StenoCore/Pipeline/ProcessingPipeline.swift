@@ -84,9 +84,9 @@ public actor ProcessingPipeline {
   var now: Date { dependencies.now() }
 
   /// Writes `Meeting(.queued)` plus the asset in one transaction and starts
-  /// `process` in the background. The app (Mac recordings) calls this,
-  /// `RecordingIntake` (phone) `enqueueDurably`. Throws when the asset or
-  /// the meeting is already in flight.
+  /// `process` in the background. The app (Mac recordings) calls this, and
+  /// `RecordingIntake` (phone) calls `enqueueDurably`. Throws when the asset
+  /// or the meeting is already in flight.
   public func enqueue(_ meeting: Meeting, asset: AudioAsset) async throws {
     try await enqueue(meeting, asset: asset, durably: false)
   }

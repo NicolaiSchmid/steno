@@ -782,9 +782,10 @@ impl ProcessingPipeline {
     }
 
     /// Writes `Meeting(queued)` plus the asset in one transaction and starts
-    /// `process` in the background. The app (Mac recordings) calls this, the
-    /// phone intake [`ProcessingPipeline::enqueue_durably`]. Fails when the
-    /// asset or the meeting is already in flight. Needs a `tokio` runtime.
+    /// `process` in the background. The app (Mac recordings) calls this,
+    /// and the phone intake calls [`ProcessingPipeline::enqueue_durably`].
+    /// Fails when the asset or the meeting is already in flight. Needs a
+    /// `tokio` runtime.
     /// Once the pipeline [quits](Self::quit), the meeting is saved and stays
     /// `queued` for the next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {

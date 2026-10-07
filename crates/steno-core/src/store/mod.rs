@@ -270,11 +270,13 @@ impl Store {
     /// on, so its commit syncs the WAL (with `F_FULLFSYNC` on Apple
     /// platforms, which also flushes the drive's cache) instead of leaving
     /// that to the next checkpoint; the sync covers every earlier commit
-    /// in the WAL too. SQLite refuses to change `synchronous` inside a
-    /// transaction, so the levels are set before `BEGIN` and set back once
-    /// the transaction has ended, committed, rolled back or unwound by a
-    /// panic, all under one hold of the lock: no other write runs under
-    /// them. Swift: `MeetingStore.writeDurably`.
+    /// in the WAL too. That costs one WAL fsync per commit, plus a flush
+    /// of the drive's cache on Apple platforms, all while the lock is held,
+    /// so other writes wait for it. SQLite refuses to change `synchronous`
+    /// inside a transaction, so the levels are set before `BEGIN` and set
+    /// back once the transaction has ended (committed, rolled back or
+    /// unwound by a panic), all under one hold of the lock: no other write
+    /// runs under them. Swift: `MeetingStore.writeDurably`.
     pub fn write_durably<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut connection = FullSync::hold(self.lock())?;
         self.commit_on(&mut connection, body)
@@ -302,6 +304,7 @@ impl Store {
     /// and the connection's pragmas then. One probe per store; a second
     /// call is ignored. `probe` must not call the store: the lock is held.
     #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
     pub fn probe_commits(&self, probe: impl Fn(&Connection) + Send + Sync + 'static) {
         let _ = self.commit_probe.set(Box::new(probe));
     }
@@ -377,9 +380,9 @@ impl<'a> FullSync<'a> {
 }
 
 impl Drop for FullSync<'_> {
-    /// Neither pragma fails outside a transaction, and the transaction has
-    /// ended by now.
     fn drop(&mut self) {
+        // Neither pragma fails outside a transaction, and the transaction
+        // has ended by now.
         let _ = self
             .connection
             .pragma_update(None, "synchronous", self.synchronous);
