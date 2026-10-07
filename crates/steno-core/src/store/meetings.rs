@@ -444,9 +444,9 @@ impl Store {
     /// the rows named, for the caller to remove.
     ///
     /// The store commits with `synchronous = NORMAL`, so the delete need
-    /// not be on disk when this returns: a power loss or OS crash can roll
-    /// it back after the caller removed the files, as in the Swift app. A
-    /// delete that must be on disk first would commit through
+    /// not be on the disk when this returns: a power loss or OS crash can
+    /// roll it back after the caller removed the files, as in the Swift
+    /// app. A delete that must be on the disk first would commit through
     /// [`Store::write_durably`].
     pub fn delete_meeting(&self, id: Uuid) -> Result<DeletedMeeting> {
         self.write(|transaction| {

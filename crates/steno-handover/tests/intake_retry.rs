@@ -34,8 +34,8 @@ fn meeting_id() -> Uuid {
 
 /// The computer comes back over `first`'s store and inbox with `intake`
 /// (behind [`common::taking`], as the real intake takes the file), and the
-/// phone resumes with the token it holds. The identity is new, so
-/// the phone pins the new fingerprint.
+/// phone resumes with the token it holds. The identity is new, so the
+/// phone pins the new fingerprint.
 async fn restart(
     first: &TestService,
     phone: &Phone,

@@ -75,9 +75,10 @@ pub enum StoreError {
     /// the meeting's files.
     #[error("meeting {0} is {1} and cannot be deleted")]
     MeetingBusy(Uuid, MeetingStateKind),
-    /// `save_admission_durably` for a recording whose receipt belongs to
-    /// another device: the admitting phone was revoked and another one
-    /// announced the same recording id.
+    /// The phone intake's admission of a recording whose receipt belongs
+    /// to another device, raised at the intake's own read and by
+    /// `save_admission_durably`: the admitting phone was revoked and
+    /// another one announced the same recording id.
     #[error("recording {0} belongs to another device")]
     ReceiptOfAnotherDevice(Uuid),
     /// The database has a migration this build does not know: a newer app

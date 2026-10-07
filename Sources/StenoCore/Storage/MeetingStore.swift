@@ -12,9 +12,10 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   case meetingBusy(UUID, MeetingState.Kind)
   /// `resolvePerson(named:)` with nothing but whitespace.
   case blankPersonName
-  /// `saveDurably(_:meeting:asset:)` for a recording whose receipt belongs
-  /// to another device: the admitting phone was revoked and another one
-  /// announced the same recording id.
+  /// The phone intake's admission of a recording whose receipt belongs to
+  /// another device, thrown at `RecordingIntake.admit`'s own read and by
+  /// `saveDurably(_:meeting:asset:)`: the admitting phone was revoked and
+  /// another one announced the same recording id.
   case receiptOfAnotherDevice(UUID)
 
   public var description: String {
