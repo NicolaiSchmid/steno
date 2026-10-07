@@ -765,7 +765,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   defaults), without the auto-stop grace after a call ends and without the meeting
   detection prompt; the detector and the capture session exist, the policy is WP5's
   and the panel WP8's.
-- The recorder watches each recording on its own thread (the stable plan's P8): a
+- The recorder watches each recording on its own thread (the stable plan's P18 and P20): a
   session that fails on its own (a device that stayed lost, a write that failed) is
   saved and queued at once with `deviceLost` or `failed` and the status says why, as
   Swift's `RecordingController.observe` did (`CaptureResult::failure` carries the
@@ -774,7 +774,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   of recording left, and a stop that saves before the disk fills (Rust only). A panic
   in the shell leaves `crash-<UTC time>.log` in the support directory, and one in the
   speech sidecar `crash-<UTC time>-sidecar.log`, the newest 20 kept
-  (`steno_core::crash_log`), since an app opened from the Finder or at login has no
+  (`steno_core::crash_log`, P38), since an app opened from the Finder or at login has no
   stderr anyone reads.
 - `STENO_MODELS_DIR` names the models directory for the app (without one in its
   settings), the CLI, the `transcribe` example and the FLEURS test alike; the ONNX
