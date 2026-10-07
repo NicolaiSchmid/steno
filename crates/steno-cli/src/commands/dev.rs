@@ -1298,6 +1298,8 @@ impl Handover {
             std::env::temp_dir().join(format!("steno-handover-{}", uuid::Uuid::new_v4()))
         });
         let store = Arc::new(steno_core::Store::in_memory().map_err(Failure::runtime)?);
+        // The app's launch checkpoint, so no listener skips it.
+        steno_handover::HandoverService::checkpoint_store(&store).map_err(Failure::runtime)?;
         let intake = Arc::new(steno_core::testing::FakeHandoverIntake::default());
         let identity =
             steno_handover::HandoverIdentity::mint(&format!("Steno on {name}"), Utc::now())
