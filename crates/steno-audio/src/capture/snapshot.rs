@@ -74,4 +74,13 @@ impl DeviceSnapshot {
         }
         None
     }
+
+    /// [`Self::difference`] in the microphone alone: what the Mac's and
+    /// WASAPI's re-check on the fallback reports. The other fields have
+    /// notifications of their own, and one bad read of them (an empty
+    /// default output, a rate of 0) would cost a rebuild every re-check.
+    #[must_use]
+    pub fn input_difference(&self, baseline: &DeviceSnapshot) -> Option<DeviceChangeReason> {
+        (self.input_uid != baseline.input_uid).then_some(DeviceChangeReason::DefaultInputChanged)
+    }
 }

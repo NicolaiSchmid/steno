@@ -50,7 +50,8 @@
 //! does, resolves the devices again and compares them with what the
 //! capture started on ([`DeviceSnapshot::difference`]); a capture on the
 //! fallback also resolves them every
-//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification. A
+//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification and
+//! looks only for another microphone ([`DeviceSnapshot::input_difference`]). A
 //! capture thread whose stream fails (`AUDCLNT_E_DEVICE_INVALIDATED` after
 //! a format change or an unplug) stops and tells the watcher, which
 //! reports the lost device when nothing else differs. The sink gets one
@@ -158,6 +159,15 @@ struct WatchState {
     ready: bool,
 }
 
+/// What the watcher judges: a settled burst of notifications, with the
+/// stream that failed meanwhile, if any, or the re-check while the
+/// microphone records the fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Judged {
+    Notification { failed: Option<StreamSource> },
+    Recheck,
+}
+
 #[derive(Default)]
 struct Watcher {
     state: Mutex<WatchState>,
@@ -205,15 +215,14 @@ impl Watcher {
 
     /// The watcher thread's loop once registered: marks it ready, answers
     /// `start` through `ready`, then hands every settled burst to `judge`
-    /// with the stream that failed meanwhile, if any, outside the lock,
-    /// until stopped. With `recheck`, `judge` also runs, with `None` and
-    /// `false` for "not notified", each time that long passes without a
-    /// notification.
+    /// as a [`Judged::Notification`], outside the lock, until stopped. With
+    /// `recheck`, `judge` also gets a [`Judged::Recheck`] each time that
+    /// long passes without a notification.
     fn watch(
         &self,
         ready: &SyncSender<()>,
         recheck: Option<Duration>,
-        mut judge: impl FnMut(Option<StreamSource>, bool),
+        mut judge: impl FnMut(Judged),
     ) {
         let mut state = self.lock();
         state.ready = true;
@@ -237,7 +246,7 @@ impl Watcher {
                 state = next;
                 if waited.timed_out() && state.pending.is_none() && !state.stop {
                     drop(state);
-                    judge(None, false);
+                    judge(Judged::Recheck);
                     state = self.lock();
                 }
                 continue;
@@ -255,7 +264,7 @@ impl Watcher {
             state.pending = None;
             let failed = state.failed.take();
             drop(state);
-            judge(failed, true);
+            judge(Judged::Notification { failed });
             state = self.lock();
         }
     }
@@ -378,6 +387,38 @@ impl LiveCaptureBackend {
     /// unannounced (or before the watcher registered) is found; the macOS
     /// backend's value.
     pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
+
+    /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
+    /// capture on the fallback, none otherwise.
+    fn recheck_for(is_fallback: bool) -> Option<Duration> {
+        is_fallback.then_some(Self::FALLBACK_RECHECK)
+    }
+
+    /// What a judgement reports of the endpoints `resolved` now against
+    /// `baseline` (`None` for either when the enumerator could not be
+    /// read): after a notification their first difference, else the
+    /// failed stream's device gone; on a re-check only another microphone
+    /// ([`DeviceSnapshot::input_difference`]).
+    fn judgement(
+        judged: Judged,
+        resolved: Option<&DeviceSnapshot>,
+        baseline: Option<&DeviceSnapshot>,
+    ) -> Option<DeviceChangeReason> {
+        let compared = resolved.zip(baseline);
+        match judged {
+            Judged::Notification { failed } => compared
+                .and_then(|(resolved, baseline)| resolved.difference(baseline))
+                .or_else(|| {
+                    failed.map(|source| match source {
+                        StreamSource::Microphone => DeviceChangeReason::InputDeviceGone,
+                        StreamSource::System => DeviceChangeReason::OutputDeviceGone,
+                    })
+                }),
+            Judged::Recheck => {
+                compared.and_then(|(resolved, baseline)| resolved.input_difference(baseline))
+            }
+        }
+    }
 
     /// No capture running.
     #[must_use]
@@ -544,25 +585,18 @@ fn run_watcher(
             .ok()
     });
     let baseline = enumerator.as_ref().map(|e| probe.baseline(e));
-    let recheck = probe
-        .is_fallback
-        .then_some(LiveCaptureBackend::FALLBACK_RECHECK);
-    watcher.watch(ready, recheck, |failed, notified| {
+    let recheck = LiveCaptureBackend::recheck_for(probe.is_fallback);
+    watcher.watch(ready, recheck, |judged| {
         // The WASAPI reads run outside the lock.
-        let difference = match (&enumerator, &baseline) {
-            (Some(enumerator), Some(baseline)) => probe.resolve(enumerator).difference(baseline),
-            _ => None,
-        };
-        let reason = difference.or_else(|| {
-            failed.map(|source| match source {
-                StreamSource::Microphone => DeviceChangeReason::InputDeviceGone,
-                StreamSource::System => DeviceChangeReason::OutputDeviceGone,
-            })
-        });
+        let resolved = baseline
+            .as_ref()
+            .and(enumerator.as_ref())
+            .map(|enumerator| probe.resolve(enumerator));
+        let reason = LiveCaptureBackend::judgement(judged, resolved.as_ref(), baseline.as_ref());
         if let Some(reason) = reason {
             tracing::info!("device change reported: {reason:?}");
             sink.report_device_change(reason);
-        } else if notified {
+        } else if judged != Judged::Recheck {
             tracing::info!("ignored device notification");
         }
     });
@@ -988,7 +1022,7 @@ mod tests {
             let watcher = Arc::clone(&watcher);
             let stopped = Arc::clone(&stopped);
             std::thread::spawn(move || {
-                watcher.watch(&ready, None, |_, _| {
+                watcher.watch(&ready, None, |_| {
                     let _ = entered.send(());
                     let _ = gate.recv_timeout(WAIT);
                     let _ = judged.send(stopped.load(Ordering::SeqCst));
@@ -1019,8 +1053,8 @@ mod tests {
     }
 
     /// A capture on the fallback judges the endpoints again with no
-    /// notification, as "not notified"; one on the endpoint it asked for
-    /// waits for a notification.
+    /// notification, as a re-check; one on the endpoint it asked for waits
+    /// for a notification.
     #[test]
     fn only_a_capture_on_the_fallback_rechecks_without_a_notification() {
         for recheck in [Some(Duration::from_millis(50)), None] {
@@ -1030,8 +1064,8 @@ mod tests {
             let thread = {
                 let watcher = Arc::clone(&watcher);
                 std::thread::spawn(move || {
-                    watcher.watch(&ready, recheck, |failed, notified| {
-                        let _ = judged.send((failed, notified));
+                    watcher.watch(&ready, recheck, |judgement| {
+                        let _ = judged.send(judgement);
                     });
                 })
             };
@@ -1039,12 +1073,15 @@ mod tests {
                 .recv_timeout(WAIT)
                 .expect("the watcher reached its loop");
             if recheck.is_some() {
-                assert_eq!(judgements.recv_timeout(WAIT), Ok((None, false)));
-                assert_eq!(judgements.recv_timeout(WAIT), Ok((None, false)));
+                assert_eq!(judgements.recv_timeout(WAIT), Ok(Judged::Recheck));
+                assert_eq!(judgements.recv_timeout(WAIT), Ok(Judged::Recheck));
             } else {
                 assert!(judgements.recv_timeout(Duration::from_millis(300)).is_err());
                 watcher.note();
-                assert_eq!(judgements.recv_timeout(WAIT), Ok((None, true)));
+                assert_eq!(
+                    judgements.recv_timeout(WAIT),
+                    Ok(Judged::Notification { failed: None })
+                );
             }
             watcher.stop_and_join(thread);
         }
@@ -1067,7 +1104,7 @@ mod tests {
                 // baseline.
                 let opened = gate.recv_timeout(WAIT).is_ok();
                 let mut judged = false;
-                watcher.watch(&ready, None, |_, _| judged = true);
+                watcher.watch(&ready, None, |_| judged = true);
                 let _ = done.send((opened, judged));
             })
         };
@@ -1078,5 +1115,78 @@ mod tests {
             Ok((true, false)),
             "stop did not wait for the start-up, and nothing was judged"
         );
+    }
+
+    /// Only a capture on the fallback is re-checked.
+    #[test]
+    fn the_recheck_runs_on_the_fallback_alone() {
+        assert_eq!(
+            LiveCaptureBackend::recheck_for(true),
+            Some(LiveCaptureBackend::FALLBACK_RECHECK)
+        );
+        assert_eq!(LiveCaptureBackend::recheck_for(false), None);
+    }
+
+    /// A notification reports the first difference, else the failed
+    /// stream's device gone; a re-check only another microphone, so a bad
+    /// read of the outputs costs no rebuild, and an unreadable enumerator
+    /// reports nothing but a failed stream.
+    #[test]
+    fn a_recheck_reports_another_microphone_alone() {
+        let baseline = DeviceSnapshot {
+            output_uid: Some("speakers".into()),
+            default_output_uid: None,
+            input_uid: Some("built-in".into()),
+            output_alive: true,
+            input_alive: true,
+            sample_rate: SAMPLE_RATE,
+        };
+        let back = DeviceSnapshot {
+            input_uid: Some("usb-microphone".into()),
+            ..baseline.clone()
+        };
+        let misread = DeviceSnapshot {
+            output_uid: None,
+            ..baseline.clone()
+        };
+        let quiet = Judged::Notification { failed: None };
+        let failed = Judged::Notification {
+            failed: Some(StreamSource::Microphone),
+        };
+        let table = [
+            (quiet, Some(&baseline), None),
+            (
+                quiet,
+                Some(&back),
+                Some(DeviceChangeReason::DefaultInputChanged),
+            ),
+            (
+                quiet,
+                Some(&misread),
+                Some(DeviceChangeReason::DefaultOutputChanged),
+            ),
+            (
+                failed,
+                Some(&baseline),
+                Some(DeviceChangeReason::InputDeviceGone),
+            ),
+            (failed, None, Some(DeviceChangeReason::InputDeviceGone)),
+            (quiet, None, None),
+            (Judged::Recheck, Some(&baseline), None),
+            (
+                Judged::Recheck,
+                Some(&back),
+                Some(DeviceChangeReason::DefaultInputChanged),
+            ),
+            (Judged::Recheck, Some(&misread), None),
+            (Judged::Recheck, None, None),
+        ];
+        for (judged, resolved, reported) in table {
+            assert_eq!(
+                LiveCaptureBackend::judgement(judged, resolved, Some(&baseline)),
+                reported,
+                "{judged:?} of {resolved:?}"
+            );
+        }
     }
 }

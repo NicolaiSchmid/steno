@@ -17,10 +17,11 @@
 //! thread, then the devices are resolved again and compared with what the
 //! capture started on ([`DeviceSnapshot::difference`]); a capture on the
 //! fallback also resolves them every
-//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification. Nothing
-//! changed means the burst is logged and ignored; otherwise the sink gets one
-//! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
-//! `start` again. Nothing here runs on the IO thread except
+//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification and
+//! looks only for another microphone ([`DeviceSnapshot::input_difference`]).
+//! Nothing changed means the burst is logged and ignored; otherwise the
+//! sink gets one [`DeviceChangeReason`] and the session rebuilds by calling
+//! `stop()` and `start` again. Nothing here runs on the IO thread except
 //! [`io_proc`], which only calls [`deliver`].
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
@@ -59,8 +60,8 @@ use super::hal::{
 use super::{AudioDeviceInfo, AudioDevices, chosen_or_default};
 use crate::SAMPLE_RATE;
 use crate::capture::{
-    CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceSnapshot, LaneSource,
-    NominalSampleRate, StreamLayout,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
+    LaneSource, NominalSampleRate, StreamLayout,
 };
 use crate::realtime::{BufferView, LaneFrameSink, deliver};
 
@@ -297,8 +298,28 @@ impl LiveCaptureBackend {
         }
     }
 
+    /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
+    /// capture on the fallback, none otherwise.
+    fn recheck_for(is_fallback: bool) -> Option<Duration> {
+        is_fallback.then_some(Self::FALLBACK_RECHECK)
+    }
+
+    /// What a judgement reports of the devices `resolved` now: after a
+    /// notification their first difference from `baseline`, on a re-check
+    /// only another microphone ([`DeviceSnapshot::input_difference`]).
+    fn judgement(
+        judged: Judged,
+        resolved: &DeviceSnapshot,
+        baseline: &DeviceSnapshot,
+    ) -> Option<DeviceChangeReason> {
+        match judged {
+            Judged::Notification(_) => resolved.difference(baseline),
+            Judged::Recheck => resolved.input_difference(baseline),
+        }
+    }
+
     /// Resolves the devices (the HAL reads, outside the watcher's lock)
-    /// and reports their first difference from `baseline`.
+    /// and reports what [`Self::judgement`] finds.
     fn judge(judged: Judged, probe: &DeviceProbe, baseline: &DeviceSnapshot, sink: &LaneFrameSink) {
         let what = match judged {
             Judged::Notification(selector) => {
@@ -306,7 +327,7 @@ impl LiveCaptureBackend {
             }
             Judged::Recheck => "fallback re-check".to_owned(),
         };
-        match probe.resolve().difference(baseline) {
+        match Self::judgement(judged, &probe.resolve(), baseline) {
             // Every `FALLBACK_RECHECK`, so not logged.
             None if judged == Judged::Recheck => {}
             None => tracing::info!("ignored {what}"),
@@ -504,7 +525,7 @@ impl CaptureBackend for LiveCaptureBackend {
             std::thread::Builder::new()
                 .name("steno-devices".into())
                 .spawn(move || {
-                    let recheck = is_fallback.then_some(LiveCaptureBackend::FALLBACK_RECHECK);
+                    let recheck = LiveCaptureBackend::recheck_for(is_fallback);
                     LiveCaptureBackend::watch(&watcher, recheck, |judged| {
                         LiveCaptureBackend::judge(judged, &probe, &baseline, &sink);
                     });
@@ -630,5 +651,66 @@ mod tests {
             Ok(Judged::Notification(kAudioHardwarePropertyDevices))
         );
         stop(&watcher, thread);
+    }
+
+    /// Only a capture on the fallback is re-checked.
+    #[test]
+    fn the_recheck_runs_on_the_fallback_alone() {
+        assert_eq!(
+            LiveCaptureBackend::recheck_for(true),
+            Some(LiveCaptureBackend::FALLBACK_RECHECK)
+        );
+        assert_eq!(LiveCaptureBackend::recheck_for(false), None);
+    }
+
+    /// A notification reports the first difference; a re-check only
+    /// another microphone, so a bad read of the outputs costs no rebuild.
+    #[test]
+    fn a_recheck_reports_another_microphone_alone() {
+        let baseline = DeviceSnapshot {
+            output_uid: Some("speakers".into()),
+            default_output_uid: Some("speakers".into()),
+            input_uid: Some("built-in".into()),
+            output_alive: true,
+            input_alive: true,
+            sample_rate: 48_000.0,
+        };
+        let back = DeviceSnapshot {
+            input_uid: Some("usb-microphone".into()),
+            ..baseline.clone()
+        };
+        let misread = DeviceSnapshot {
+            default_output_uid: None,
+            sample_rate: 0.0,
+            ..baseline.clone()
+        };
+        let notified = Judged::Notification(kAudioHardwarePropertyDevices);
+        let table = [
+            (notified, &baseline, None),
+            (
+                notified,
+                &back,
+                Some(DeviceChangeReason::DefaultInputChanged),
+            ),
+            (
+                notified,
+                &misread,
+                Some(DeviceChangeReason::DefaultOutputChanged),
+            ),
+            (Judged::Recheck, &baseline, None),
+            (
+                Judged::Recheck,
+                &back,
+                Some(DeviceChangeReason::DefaultInputChanged),
+            ),
+            (Judged::Recheck, &misread, None),
+        ];
+        for (judged, resolved, reported) in table {
+            assert_eq!(
+                LiveCaptureBackend::judgement(judged, resolved, &baseline),
+                reported,
+                "{judged:?} of {resolved:?}"
+            );
+        }
     }
 }
