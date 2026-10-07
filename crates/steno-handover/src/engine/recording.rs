@@ -138,6 +138,7 @@ impl Engine {
                 "another device owns this recording",
             );
         }
+        let recording_id = receipt.recording_id;
         // Also for a `complete` receipt: the phone answered `complete` posts
         // `complete`, and that 200 deletes its copy. A different file under
         // an admitted id is refused instead, and stays on the phone.
@@ -150,7 +151,6 @@ impl Engine {
                 "metadata differs from the first announcement",
             );
         }
-        let recording_id = receipt.recording_id;
         if receipt.state.kind() == HandoverStateKind::Complete {
             return HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt));
         }
