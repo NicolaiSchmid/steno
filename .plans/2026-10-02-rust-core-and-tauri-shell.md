@@ -136,7 +136,7 @@ Linux first (no Swift app competes there), then on the Mac once the parity list 
 empty, then on Windows once its capture backend passes the capture tests. Cutover on
 the Mac is a release that ships the Tauri app as an ordinary Sparkle update, reading the
 same database and settings; `.plans/2026-10-07-stable-promotion.md` gives it the new
-identifier `com.nicolaischmid.steno` (its D5).
+identifier `com.nicolaischmid.steno.desktop` (its D5).
 
 Parity list (kept at the end of this file): every user-visible behaviour of the Swift
 app, ticked when the Rust app matches it on the Mac. Feature PRs on the Swift app add a
@@ -512,7 +512,7 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   installer bundles, and `.github/workflows/desktop-release.yml`: a manual run that
   builds the bundles on the three platforms, unsigned, as workflow artifacts.
 - **WP9 Mac cutover and signed releases.** The blocking list of
-  `.plans/2026-10-07-stable-promotion.md` (D3) closed, the identifier `com.nicolaischmid.steno` (its D5), Sparkle handoff, Swift app removed, web
+  `.plans/2026-10-07-stable-promotion.md` (D3) closed, the identifier `com.nicolaischmid.steno.desktop` (its D5), Sparkle handoff, Swift app removed, web
   app moved to `apps/web`, Swift rows removed from `AGENTS.md`; `cargo deny` with a
   licence allow list in CI; the signing key for the updater artifacts, notarisation,
   and the tag-triggered release workflow that publishes the bundles and the updater

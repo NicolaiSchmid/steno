@@ -6,7 +6,7 @@ changes this plan in these places:
 - the opening gate (every unticked parity line) becomes its blocking list (its
   D3: nothing that can lose data ships), and this plan's one pull request
   becomes its packages;
-- step 1's bundle id becomes `com.nicolaischmid.steno` (its D5), so the app no
+- step 1's bundle id becomes `com.nicolaischmid.steno.desktop` (its D5), so the app no
   longer keeps the Swift app's id;
 - step 2's beta staging and signing, and all of step 3 (distribution), become
   its "Release mechanics" and "The Sparkle handoff"; step 2's frozen `appcast`

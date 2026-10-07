@@ -1,9 +1,9 @@
 # Stable promotion: the Tauri app becomes the Steno release
 
-Status: planned 2026-10-07, not started. Nicolai confirmed D1, D2, D4, D7, D8,
-D10 and D13 on 2026-10-07, answered D3, D5, D6 and D9 with changes the plan
-follows, and decided D11. The choices still open are marked **To confirm** and collected in
-Order step 1. The decision table at the head of "Decisions" shows what changed.
+Status: planned 2026-10-07, not started. Nicolai confirmed every decision on
+2026-10-07: D1, D2, D4, D7, D8, D10, D12 and D13 as proposed, D3, D5, D6 and D9
+with the changes the plan follows, and D11 as his own. The decision table at the
+head of "Decisions" shows what changed.
 
 Nicolai decided on 2026-10-07 to promote the Tauri app from beta to stable:
 release tags and the build pipeline produce the Tauri app, the landing page
@@ -16,7 +16,7 @@ places:
 
 - the opening gate (every unticked parity line) becomes the blocking list below
   (D3), and its one pull request becomes the packages below;
-- step 1's bundle id becomes `com.nicolaischmid.steno` (D5), so the app no longer
+- step 1's bundle id becomes `com.nicolaischmid.steno.desktop` (D5), so the app no longer
   keeps the Swift app's id;
 - step 2's beta staging and signing, and all of step 3 (distribution), become
   "Release mechanics" and "The Sparkle handoff"; step 2's frozen `appcast`
@@ -126,11 +126,12 @@ Forge and atlas.
   filed under the service string `uno.schmid.steno.mac` (`KEYRING_SERVICE`), in
   the Keychain, in the Windows credential store, and on Linux in the Secret
   Service once #221 lands. It stays, so no secret moves.
-- **`com.nicolaischmid.steno` is also the iOS app's production bundle id**
-  (`mobile/app.config.ts`). The Mac app needs no provisioning profile, so the
-  developer account allows both. App Store Connect offers an iOS app on Apple
-  silicon Macs unless that is turned off; a Mac that ran both would hold two
-  apps with one bundle id, whose TCC rows and Launch Services entries collide.
+- **`com.nicolaischmid.steno` is the iOS app's production bundle id**
+  (`mobile/app.config.ts`). App Store Connect offers an iOS app on Apple
+  silicon Macs, so a desktop app with the same id would collide with it (TCC
+  rows, Launch Services). The desktop app therefore takes
+  `com.nicolaischmid.steno.desktop` (D5), and the iOS app's availability needs
+  no change.
 - **Both desktop pre-releases published without manual steps** (runs
   37349614159 and 37425455820). That covers the `publish` job and an MSI for an
   `-rc.N` version, so the **WP9b.** item about the first `desktop-v*` tag is
@@ -215,14 +216,14 @@ Forge and atlas.
 | D2 | 0.11.0 | as recommended | Confirmed |
 | D3 | the blocking list gates data loss, core flows and silent failures | "we should never loose any data" | Changed: every data-loss path blocks (P1 to P38) |
 | D4 | `SMAppService`, the Swift registration carrying over | as recommended | Confirmed; with D5 the app registers itself (S6) |
-| D5 | `uno.schmid.steno.mac` on the Mac, `uno.schmid.steno.desktop` elsewhere | "it should be com.nicolaischmid.steno" | Changed; directories and iOS availability **To confirm** |
+| D5 | `uno.schmid.steno.mac` on the Mac, `uno.schmid.steno.desktop` elsewhere | "it should be com.nicolaischmid.steno", then "Desktop gets .desktop" | Changed: `com.nicolaischmid.steno.desktop`; directories decoupled; confirmed |
 | D6 | Linux and Windows listed once gated | "also omarchy and nixos users" | Changed: GNOME, Omarchy and NixOS, X1 to X8 |
 | D7 | the cask follows stable releases only | as recommended | Confirmed |
 | D8 | one frozen handoff item | as recommended | Confirmed |
-| D9 | the parity differences accepted | "audio processing stable and ideally the final version" | Changed: A1 to A9 before the first candidate; the final choices **To confirm** |
+| D9 | the parity differences accepted | "audio processing stable and ideally the final version" | Changed: A1 to A9 before the first candidate; the final choices confirmed |
 | D10 | `steno-macos` | as recommended | Confirmed |
 | D11 | none | the lost-complete fix before stable | New, decided by Nicolai |
-| D12 | the dogfood: five meetings in three days | follows from D9 | New, **To confirm** |
+| D12 | the dogfood: five meetings in three days | confirmed as proposed | New, confirmed |
 | D13 | none | "Write beside" | New, confirmed |
 
 A confirmed decision states the choice. A changed or new decision also states
@@ -253,11 +254,13 @@ why and the alternative.
   `[workspace.dependencies]`), not through `tauri-plugin-autostart`'s Launch
   Agent. With D5, the new app registers itself (S6). Linux and Windows keep the
   plugin, with X3's changes.
-- **D5 The app's identifier becomes `com.nicolaischmid.steno`.** Changed.
-  Nicolai: "it should be com.nicolaischmid.steno."
-  - **Reading:** one identifier on every platform, replacing both old ones, set
-    in `tauri.conf.json`. Alternative: per-platform identifiers, which leave the
-    Linux and Windows directories where they are.
+- **D5 The app's identifier becomes `com.nicolaischmid.steno.desktop`.**
+  Changed, confirmed 2026-10-07. Nicolai: "it should be com.nicolaischmid.steno",
+  then, on the iOS app sharing that id: "Desktop gets .desktop."
+  - **One identifier on every platform,** `com.nicolaischmid.steno.desktop`,
+    replacing both old ones, set in `tauri.conf.json`. The iOS app keeps
+    `com.nicolaischmid.steno`. Alternative, not taken: per-platform
+    identifiers.
   - **What it costs, stated plainly:**
     - every Swift user grants microphone, system audio and calendar once more;
     - macOS asks once for the API key and once for the handover key, each time
@@ -267,17 +270,14 @@ why and the alternative.
     - Tauri's per-identifier directories start empty, and the one thing in them
       that matters, the panel anchor, is read back once;
     - on a Mac that also holds a Swift identity, phones paired only with a
-      desktop-id build pair again, since the Swift identity wins (S6);
-    - the iOS app shares the identifier.
-  - **Directories: decouple, do not move.** **To confirm.** The panel anchor
+      desktop-id build pair again, since the Swift identity wins (S6).
+  - **Directories: decouple, do not move.** Confirmed 2026-10-07 ("Stop
+    depending on the ID"). The panel anchor
     moves into the support directory (`Steno/panel-anchor.json`), read once from
     the desktop-id build's config directory when the new file is missing. Then
     nothing that matters is named after the identifier, and a later id change
-    costs nothing. Alternative: move the old directories once at first launch,
-    on all three platforms.
-  - **The iOS app.** **To confirm.** Nicolai turns off Mac availability for the
-    iOS app in App Store Connect before the stable tag, so no Mac runs both.
-    Alternative: the desktop identifier becomes `com.nicolaischmid.steno.desktop`.
+    costs nothing. Alternative, not taken: move the old directories once at
+    first launch.
   - **Mobile's native identifiers are not touched.**
 - **D6 Linux targets GNOME, Omarchy and NixOS; Windows ships unlisted.**
   Changed. Nicolai: "yes. but i also wanna target omarchy and nixos users."
@@ -305,7 +305,7 @@ why and the alternative.
     cutover. A1 to A9 land before `0.11.0-rc.1`, so the rehearsals run on the
     final pipeline. A fix found during the candidates becomes a new candidate
     and restarts the stability count (G2).
-  - **The remaining differences, each made final.** **To confirm.**
+  - **The remaining differences, each made final.** Confirmed 2026-10-07.
 
     | Difference | Choice | Why |
     |---|---|---|
@@ -340,7 +340,7 @@ why and the alternative.
   tag. Alternative: ship the fix after stable, with the migration inside the
   rollback window.
 - **D12 The stability count is ten real meetings on the Mac and five on each
-  Linux target to be listed.** New, **To confirm.** Ten meetings cover a working
+  Linux target to be listed.** New, confirmed 2026-10-07. Ten meetings cover a working
   week's calls on the Mac, the platform with every Swift user; five per Linux
   target cover its capture and session paths. The rules are in G2.
   Alternative: more meetings, or a number of days of daily use.
@@ -473,8 +473,8 @@ after the port".
 
 Each package lands in one or more pull requests off `main`, reviewed and merged
 by merge commit; a pull request may close several rows (#220: P5, P37 and X1; #222: A7, A8 and P19's Linux half).
-Steps marked **Nicolai** need him: secrets, settings on GitHub and App Store
-Connect, his machines and the phone. The letters: S for the Mac and the release,
+Steps marked **Nicolai** need him: secrets, settings on GitHub, his machines
+and the phone. The letters: S for the Mac and the release,
 A for the audio path, P for the other data-loss fixes, X for the Linux targets.
 Every package is written in parallel except where a dependency is named:
 
@@ -556,7 +556,7 @@ Every package is written in parallel except where a dependency is named:
     shows the record each time, and the phone uploads without a restart.
 - **S6 The new identifier and the import** (`feat/desktop-identifier`).
   - **Identifier.** `tauri.conf.json` sets `identifier` to
-    `com.nicolaischmid.steno` (D5). `Info.plist` carries the Swift
+    `com.nicolaischmid.steno.desktop` (D5). `Info.plist` carries the Swift
     `SUPublicEDKey` (`RxaX7phoHvb7M0P4yaOC7zngDo+lqlOE6Iq89UtOuQI=`), inert in
     the Tauri app. `panel-anchor.json` moves into the support directory, read
     once from the desktop-id build's config directory. The desktop README's
@@ -810,7 +810,7 @@ an install needs a newer build installed by hand (Rollback).
   summary's notes, become `releases/download/v<version>`.
 - **macOS bundle job.**
   - `check-bundle.sh --signed --handoff <build>` fails unless all of these hold:
-    - `CFBundleIdentifier` is `com.nicolaischmid.steno`;
+    - `CFBundleIdentifier` is `com.nicolaischmid.steno.desktop`;
     - `SUPublicEDKey` is the Swift key;
     - `CFBundleVersion` equals `<build>`;
     - the designated requirement names team `KQB68F43PW`;
@@ -915,9 +915,9 @@ and also:
 - `url ".../releases/download/v#{version}/Steno_#{version}_aarch64.dmg"`;
 - `livecheck` for stable versions only, keeping the anchor:
   `/^v?(\d+(?:\.\d+)+)$/`;
-- `zap` adds `~/Library/Application Support/com.nicolaischmid.steno`,
-  `~/Library/WebKit/com.nicolaischmid.steno`,
-  `~/Library/Caches/com.nicolaischmid.steno` and
+- `zap` adds `~/Library/Application Support/com.nicolaischmid.steno.desktop`,
+  `~/Library/WebKit/com.nicolaischmid.steno.desktop`,
+  `~/Library/Caches/com.nicolaischmid.steno.desktop` and
   `~/Library/Preferences/com.nicolaischmid.steno.plist`, and keeps the `uno.*`
   entries;
 - the caveat says Steno updates itself.
@@ -926,7 +926,7 @@ and also:
 
 The AUR package is X6; its first push is **Nicolai**'s, in G3. In S7,
 `flake.nix`'s macOS output gets the new URL, checks for
-`Contents/MacOS/steno-desktop` and `bundleId = "com.nicolaischmid.steno"`, and
+`Contents/MacOS/steno-desktop` and `bundleId = "com.nicolaischmid.steno.desktop"`, and
 its UPDATES text names Settings' automatic-check switch; X7 adds the Linux
 outputs. The flake bump stays a manual PR made from the job summary.
 
@@ -961,7 +961,7 @@ read-only store.
 
 Sparkle mounts the DMG, swaps the bundle at the host's path (usually
 `/Applications/Steno.app`), deletes the old one and relaunches it. From then on
-that path holds `com.nicolaischmid.steno`.
+that path holds `com.nicolaischmid.steno.desktop`.
 
 ### First launch after the handoff
 
@@ -1110,7 +1110,7 @@ except case e.
      again (P9) runs it; record a second call.
 
   Pass when:
-  - the app relaunches as `com.nicolaischmid.steno`, and launch at login starts
+  - the app relaunches as `com.nicolaischmid.steno.desktop`, and launch at login starts
     it once; `~/Library/LaunchAgents` holds no Steno plist, and with launch at
     login off a login starts nothing;
   - the panel opens where it was moved (the anchor read from the old
@@ -1144,7 +1144,7 @@ except case e.
   Case a's checks, the proof on the real bundles that Sparkle hands over across
   bundle ids:
   - the bundle at the Swift app's path now has `CFBundleIdentifier`
-    `com.nicolaischmid.steno`, `CFBundleExecutable` `steno-desktop`, the
+    `com.nicolaischmid.steno.desktop`, `CFBundleExecutable` `steno-desktop`, the
     candidate's build number and the Swift `SUPublicEDKey`;
   - `codesign --verify --deep --strict` passes, and `codesign -d -r-` names team
     `KQB68F43PW`;
@@ -1160,7 +1160,7 @@ except case e.
      builds), and relaunch.
   3. Check for Updates and install.
   4. Pass when:
-     - the app comes back as `com.nicolaischmid.steno`, and the meeting is
+     - the app comes back as `com.nicolaischmid.steno.desktop`, and the meeting is
        listed;
      - the import step comes first and shows its note; then two keychain
        prompts appear, each asking for the login password, one for the API key
@@ -1273,7 +1273,7 @@ except case e.
   `releases/latest/download/appcast.xml` show the 0.11.0 item:
   - in two fresh accounts, `v0.10.0-rc.2` and `v0.9.0-rc.1` each record one
     meeting, then take 0.11.0 through Check for Updates with no `SUFeedURL`
-    default. Pass: each relaunches as `com.nicolaischmid.steno` 0.11.0, lists
+    default. Pass: each relaunches as `com.nicolaischmid.steno.desktop` 0.11.0, lists
     the meeting, and shows only R3's prompts;
   - a 0.11.0 install's Check for Updates reports up to date against
     `desktop-stable` (HTTP 200);
@@ -1291,7 +1291,7 @@ except case e.
        `Contents/MacOS/steno-desktop`;
   - **Nix on the Mac:** on Forge or Nicolai's Mac, the flake bump branch builds,
     and its `result/Applications/Steno.app/Contents/Info.plist` names
-    `steno-desktop`, `com.nicolaischmid.steno` and 0.11.0;
+    `steno-desktop`, `com.nicolaischmid.steno.desktop` and 0.11.0;
   - **Linux:** on the GNOME, Omarchy and NixOS machines, each gate's step 0,
     from the last candidate to `v0.11.0`, and one recording.
 
@@ -1408,9 +1408,8 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
 
 ## Order of operations and gates
 
-1. **Nicolai answers the "To confirm" items:** D5's directories and the iOS
-   app's Mac availability, D9's final choices and D12. The call-mode row of
-   D9 closes from A9's check in step 2.
+1. **Every decision is confirmed** (2026-10-07). The call-mode row of D9
+   closes from A9's check in step 2.
 2. **Every package is written,** in parallel except for the dependencies under
    "Work packages": S1 to S7, A1 to A9, P1 to P38, X1 to X7. Any further gap the
    data-loss audit finds joins the P table: before G1 it lands with the others;
@@ -1451,7 +1450,6 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
      repos/NicolaiSchmid/steno/environments/appcast --jq
      '[.protection_rules[].type]'` includes `required_reviewers` and
      `branch_policy`;
-   - turns off Mac availability for the iOS app in App Store Connect (D5);
    - has his AUR account ready for the first push (X6).
 7. **Bump to `0.11.0` on a fresh commit and tag it.** This publishes the full
    release as "latest", creates `desktop-stable`, moves `desktop-beta` to
