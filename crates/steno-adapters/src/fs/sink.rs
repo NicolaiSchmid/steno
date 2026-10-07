@@ -4,12 +4,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[cfg(not(unix))]
-use std::io::ErrorKind;
-
-#[cfg(not(unix))]
-use unicode_normalization::UnicodeNormalization as _;
-
 use super::{AtomicFileWriter, WriteFailure};
 
 /// The local file system under one folder, addressed by paths relative to
@@ -122,12 +116,15 @@ impl LocalFolderSink {
         }
         #[cfg(not(unix))]
         {
+            use std::io::ErrorKind;
+            use unicode_normalization::UnicodeNormalization as _;
             let folded = |path: &str| path.nfc().collect::<String>().to_lowercase();
             match (
                 fs::canonicalize(self.path(left)),
                 fs::canonicalize(self.path(right)),
             ) {
                 (Ok(left), Ok(right)) => left == right,
+                // Either path missing gives false, whatever the other gave.
                 (Err(error), _) | (_, Err(error)) if error.kind() == ErrorKind::NotFound => false,
                 _ => folded(left) == folded(right),
             }

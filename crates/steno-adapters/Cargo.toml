@@ -30,6 +30,7 @@ uuid.workspace = true
 [dev-dependencies]
 # The doctests render the core's sample export.
 steno-core = { path = "../steno-core", features = ["testing"] }
+# The integration tests drive the step hook (`with_step_hook`).
 steno-adapters = { path = ".", features = ["testing"] }
 tempfile.workspace = true
 
