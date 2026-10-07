@@ -246,15 +246,9 @@ pub mod stop_timeout {
                 .map(PathBuf::from)
                 .filter(|path| path.is_absolute())
         };
-        let config = absolute("XDG_CONFIG_HOME")
-            .or_else(|| absolute("HOME").map(|home| home.join(".config")))?;
-        Some(
-            config
-                .join("systemd")
-                .join("user")
-                .join(format!("{UNIT}.d"))
-                .join(FILE_NAME),
-        )
+        absolute("XDG_CONFIG_HOME")
+            .or_else(|| absolute("HOME").map(|home| home.join(".config")))
+            .map(|config| config.join(format!("systemd/user/{UNIT}.d/{FILE_NAME}")))
     }
 
     /// Writes the drop-in at `path` unless it already holds `CONTENTS`;
@@ -412,15 +406,11 @@ mod tests {
         use super::super::stop_timeout::*;
 
         fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
-            let pairs: Vec<(String, OsString)> = pairs
-                .iter()
-                .map(|(name, value)| ((*name).to_owned(), (*value).into()))
-                .collect();
             move |name| {
                 pairs
                     .iter()
-                    .find(|(key, _)| key == name)
-                    .map(|(_, value)| value.clone())
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| value.into())
             }
         }
 
