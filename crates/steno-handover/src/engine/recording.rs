@@ -96,13 +96,12 @@ impl Engine {
         // Only the announce that made the receipt opens the files, so the
         // sidecar is the metadata of the receipt memory holds; first it
         // discards the files of the recording id that no receipt owns
-        // (`Engine::open_files`). The place in
-        // line goes to the save whatever `open_files` did, and nothing
-        // between `change` and the save yields. A failed opening leaves the
-        // receipt saved without files, so the phone's retried announce
-        // reopens them as a re-announce. A device revoked since its receipt
-        // read opens none and is answered 401: its receipt stayed out of
-        // memory.
+        // (`Engine::open_files`). The place in line goes to the save
+        // whatever `open_files` did, and nothing between `change` and the
+        // save yields. A failed opening leaves the receipt saved without
+        // files, so the phone's retried announce reopens them as a
+        // re-announce. A device revoked since its receipt read opens none
+        // and is answered 401: its receipt stayed out of memory.
         let opened = self.open_files(&metadata, device.id);
         let saved = self.save(receipt.clone(), place).await;
         let Some(opened) = opened else {
