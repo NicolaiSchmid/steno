@@ -82,6 +82,7 @@ import Testing
     let chunkSize = 64 * 1024
     try await TestService.run(chunkSize: chunkSize, start: false) { test in
       let held = HeldSave(store: test.store)
+      defer { held.release() }
       let engine = Self.engine(test, saveReceipt: held.save)
       let phone = try await EngineClient.paired(test, engine: engine)
       let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 62)
@@ -91,9 +92,14 @@ import Testing
       #expect(try await phone.announce(metadata).code == 201)
 
       let first = Task { await phone.upload(id, chunk: 1, chunks[1]) }
-      try await until { held.isHolding }
+      await held.held()
       let second = Task { await phone.upload(id, chunk: 0, chunks[0]) }
-      try await until { await engine.activeReceipts[id]?.receivedChunks == [0, 1] }
+      // Chunk 0's save waits in the engine behind the held one, so no seam
+      // signals its landing in memory. A starved runner can take seconds to
+      // get there; the test's time limit bounds the wait.
+      try await until(within: .seconds(60)) {
+        await engine.activeReceipts[id]?.receivedChunks == [0, 1]
+      }
       // Give chunk 0's save the time an in-memory write takes to overtake.
       try await Task.sleep(for: .milliseconds(200))
       #expect(held.reachedStore.isEmpty, "no receipt save overtakes the held one")

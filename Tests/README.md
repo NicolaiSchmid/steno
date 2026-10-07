@@ -37,4 +37,4 @@ on its way to the store, for the write order), `HeldWrite` (chunk writes
 that hold one after its bytes landed, for a chunk that lands during a
 `complete`), `HeldIntake` (the fake intake with its first admission held,
 for a revoke during the intake) and `until` (polls a condition the test
-waits on, failing after five seconds).
+waits on, failing after five seconds or a longer bound the test gives).

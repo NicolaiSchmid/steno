@@ -12,12 +12,12 @@ import Synchronization
 final class HeldSave: Sendable {
   private struct State {
     var armed = true
-    var isHolding = false
     var reachedStore: [[Int]] = []
   }
 
   private let store: MeetingStore
   private let state = Mutex(State())
+  private let (heldSignal, heldContinuation) = AsyncStream<Void>.makeStream()
   private let (released, releasing) = AsyncStream<Void>.makeStream()
 
   init(store: MeetingStore) {
@@ -27,19 +27,21 @@ final class HeldSave: Sendable {
   func save(_ receipt: HandoverReceipt) async throws {
     let (hold, record) = state.withLock { state in
       let hold = state.armed && !receipt.receivedChunks.isEmpty
-      if hold { (state.armed, state.isHolding) = (false, true) }
+      if hold { state.armed = false }
       return (hold, !state.armed)
     }
     if hold {
+      heldContinuation.yield()
       for await _ in released {}
-      state.withLock { $0.isHolding = false }
     }
     if record { state.withLock { $0.reachedStore.append(receipt.receivedChunks) } }
     try await store.save(receipt)
   }
 
-  /// Whether a save is held now.
-  var isHolding: Bool { state.withLock { $0.isHolding } }
+  /// Returns once the first save that lists a chunk is held.
+  func held() async {
+    for await _ in heldSignal { return }
+  }
 
   /// The chunk set of the held save and of every later one, in the order
   /// they went on to the store.
