@@ -1640,7 +1640,8 @@ the branch of a follow-up pull request, or **Unowned** (no package or release ha
 Then it says what is open, where it lives (pointing to this plan where the plan already
 covers it) and which pull requests found it. The pull request that fixes an item deletes it.
 Whatever its owner, an item that can lose a recording, a transcript, a note or a pairing
-blocks the stable release (`.plans/2026-10-07-stable-promotion.md`, D3).
+blocks the stable release (`.plans/2026-10-07-stable-promotion.md`, D3). An item that a table of
+that plan names belongs to that package (S, A, P or X), whatever its label here.
 
 - **WP9b.** The unticked lines of the parity list; which of them block the stable
   release, and which follow it, is the blocking list of
