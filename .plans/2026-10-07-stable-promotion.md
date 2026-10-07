@@ -1,8 +1,8 @@
 # Stable promotion: the Tauri app becomes the Steno release
 
-Status: planned 2026-10-07, not started. Nicolai confirmed D1, D2, D4, D7, D8 and
-D10 on 2026-10-07, answered D3, D5, D6 and D9 with changes the plan follows, and
-decided D11. The choices still open are marked **To confirm** and collected in
+Status: planned 2026-10-07, not started. Nicolai confirmed D1, D2, D4, D7, D8,
+D10 and D13 on 2026-10-07, answered D3, D5, D6 and D9 with changes the plan
+follows, and decided D11. The choices still open are marked **To confirm** and collected in
 Order step 1. The decision table at the head of "Decisions" shows what changed.
 
 Nicolai decided on 2026-10-07 to promote the Tauri app from beta to stable:
@@ -223,7 +223,7 @@ Forge and atlas.
 | D10 | `steno-macos` | as recommended | Confirmed |
 | D11 | none | the lost-complete fix before stable | New, decided by Nicolai |
 | D12 | the dogfood: five meetings in three days | follows from D9 | New, **To confirm** |
-| D13 | none | not yet asked (raised by the export audit) | New, **To confirm** |
+| D13 | none | "Write beside" | New, confirmed |
 
 A confirmed decision states the choice. A changed or new decision also states
 why and the alternative.
@@ -345,12 +345,13 @@ why and the alternative.
   target cover its capture and session paths. The rules are in G2.
   Alternative: more meetings, or a number of days of daily use.
 - **D13 A re-export never overwrites a note the user edited in the vault.** New,
-  **To confirm.** The export audit found that a re-export replaces the meeting's
-  note whole, so an edit made in Obsidian is lost. This is a scope question:
-  either the export keeps an edited note (it writes the new version beside it,
-  or skips it and says so), or Steno owns the note and the README says edits
-  belong in Steno. Recommendation: keep the edited note and write the new
-  version beside it (P30). Alternative: Steno owns the note.
+  confirmed 2026-10-07. Nicolai: "Write beside." The export audit found that a
+  re-export replaces the meeting's note whole, so an edit made in Obsidian is
+  lost. If a note changed since Steno wrote it, Steno leaves it alone, writes
+  the new version beside it as `<name> (Steno <date>).md`, and shows a warning
+  (P30). Carrying the edited note's `[x]` task ticks over into the new version is
+  not part of it. Alternative, not taken: Steno owns the note and the README
+  says edits belong in Steno.
 
 ## What blocks the stable release
 
@@ -389,14 +390,14 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s, in the `.deb`, the AUR and Nix packages and written by the app for the AppImage (for the generator's `app-steno\x2ddesktop@autostart.service` under uwsm and Plasma, named after the Linux product name `steno-desktop`; GNOME starts autostart apps in its own `app-gnome-steno\x2ddesktop-<pid>.scope`, whose drop-in directory `app-gnome-steno\x2ddesktop-.scope.d` gets one too if its stop timeout is under 20 s); the save logs its duration at `warn`, so it shows under the default filter; on Windows, `ShutdownBlockReasonCreate` while recording | Linux desktop (with #220) |
 | P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux | Linux desktop |
 | P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
-| P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221 | audio (with #221) |
+| P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221. During #221's move from `secrets.json`, the API key in the file wins until the move has finished; the handover identity never takes the file's copy | audio (with #221) |
 | P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess`, a `meeting.processAgain` bridge method and its button, and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`); a meeting refused for missing models stays queued and resumes once they install | pipeline, store and export (`wp-pse-*`) |
 | P10 | A meeting's whole result: a diarizer or speaker-match failure fails the meeting. It merges without diarization instead | pipeline, store and export (`wp-pse-*`) |
 | P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | pipeline, store and export (`wp-pse-*`) |
 | P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
 | P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard) |
 | P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | pipeline, store and export (`wp-pse-*`) |
-| P15 | Anything two processes write at once: one exclusive lock per data directory for the app's lifetime; a second process (the Swift app on the same database, the CLI, a Linux session with no D-Bus for the single-instance guard) skips the resume, the sweep and the intake | capture and recovery (`wp-cap-*`) (`steno.lock`) |
+| P15 | Anything two processes write at once: one exclusive lock per data directory for the app's lifetime (#225). A second app instance is refused outright with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run; on the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs | capture and recovery (`wp-cap-*`) (#225) |
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
 | P17 | A local recording's folder: a failed enqueue saves the asset row, so the folder is not orphaned; the recorder's rebuild thread survives a panic | capture and recovery (`wp-cap-*`) |
 | P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
@@ -404,14 +405,14 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P20 | A recording that fills the disk: a free-space check before and during recording, with a warning | capture and recovery (`wp-cap-*`) |
 | P21 | The unsynced tail of a recording: periodic `sync_data` on the master | capture and recovery (`wp-cap-*`) |
 | P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`) | capture and recovery (`wp-cap-*`) |
-| P23 | Audio the relay dropped: a warning, with the drop count on the meeting | capture and recovery (`wp-cap-*`) |
+| P23 | Audio the relay dropped: a warning at stop and a log line; no stored count, since a column would need a migration | capture and recovery (`wp-cap-*`) |
 | P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio |
 | P25 | A recording or a processing run stopped by an update: updates wait while either runs | Linux desktop |
 | P26 | A person page: a case-only rename of a person loses the page on a case-insensitive disk | pipeline, store and export (`wp-pse-*`) |
 | P27 | Notes written at once to one vault: deliveries are serialised per vault | pipeline, store and export (`wp-pse-*`) |
 | P28 | A note never written: a delivery left Pending is resumed at launch | pipeline, store and export (`wp-pse-*`) |
 | P29 | A note on Windows: names that Windows reserves (`CON`, `NUL`, ...) are escaped | pipeline, store and export (`wp-pse-*`) |
-| P30 | A note the user edited: a re-export does not overwrite it (D13) | pipeline, store and export (`wp-pse-*`) (after D13) |
+| P30 | A note the user edited: a re-export writes the new version beside it as `<name> (Steno <date>).md` and warns, leaving the edited note alone; task ticks are not carried over (D13) | pipeline, store and export (`wp-pse-*`) |
 | P31 | Settings the other app wrote: a settings save upserts and keeps keys it does not know | pipeline, store and export (`wp-pse-*`) |
 | P32 | Preferences, the panel anchor and the Codex sign-in: each is written atomically, and the Codex `auth.json` is synced | pipeline, store and export (`wp-pse-*`) |
 | P33 | Another phone's upload: the first announce's discard, and a re-announce whose hash differs, leave other devices' files alone; an old device's 409 hands over cleanly (with P2) | handover (#219, #212) |
@@ -419,7 +420,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P35 | Pairings: the pairing writes are durable and the intake runs in one transaction (beyond #213, which makes the receipt and meeting commits durable); the identity-fingerprint guard gets a macOS test and its Swift mirror | handover |
 | P36 | Secrets and files on Windows: credentials persist, and renames are durable | handover |
 | P37 | A recording through a cancelled logout: the save that a logout started is undone cleanly when the logout is cancelled (#220) | Linux desktop (#220) |
-| P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks append a dated line to `crash.log` in the support directory on every platform | capture and recovery (`wp-cap-*`) |
+| P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic under the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
 
 **The final audio path (D9), on every platform:**
 
@@ -1394,7 +1395,7 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
 ## Order of operations and gates
 
 1. **Nicolai answers the "To confirm" items:** D5's directories and the iOS
-   app's Mac availability, D9's final choices, D12 and D13. The call-mode row of
+   app's Mac availability, D9's final choices and D12. The call-mode row of
    D9 closes from A9's check in step 2.
 2. **Every package is written,** in parallel except for the dependencies under
    "Work packages": S1 to S7, A1 to A9, P1 to P38, X1 to X7. Any further gap the
@@ -1420,7 +1421,7 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
      - a recording more than 10 s shorter than the time from start to stop;
      - a lane with no transcript segment while it carried speech;
      - a job that fails and is not fixed by Process again (P9);
-     - a crash: a line in `crash.log` in the support directory dated within the
+     - a crash: a `crash-<UTC>.log` in the support directory dated within the
        count's window (P38), or any
        `steno-desktop` or `steno-speech-sidecar` report in
        `~/Library/Logs/DiagnosticReports` or in `coredumpctl list`.
