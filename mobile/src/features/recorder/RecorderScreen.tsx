@@ -1,7 +1,5 @@
-import { stenoLink } from "@modules/steno-link/native";
 import { useNavigation } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { File } from "expo-file-system";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -9,7 +7,6 @@ import { AppText } from "@/components/AppText";
 import { PressableScale } from "@/components/PressableScale";
 import { usePairing } from "@/features/pairing/PairingProvider";
 import { useQueue } from "@/features/queue/QueueProvider";
-import { queuedFile } from "@/features/queue/queue-files";
 import {
 	addRecording,
 	findRecording,
@@ -28,6 +25,7 @@ import { RecordButton } from "./RecordButton";
 import { RecordingList } from "./RecordingList";
 import { CHUNK_SIZE, recordingFileName } from "./recording-options";
 import { applyRecovery, planRecovery } from "./recovery";
+import { expoRecoveryFiles } from "./recovery-files";
 import { useRecorder } from "./use-recorder";
 
 /** The "Today" / "Yesterday" labels refresh once a minute. */
@@ -100,15 +98,7 @@ export function RecorderScreen() {
 	useEffect(() => {
 		if (!ready || recoveredOnce.current) return;
 		recoveredOnce.current = true;
-		void planRecovery(index, {
-			size: (fileName) => {
-				const file = queuedFile(fileName);
-				return file.exists ? file.size : 0;
-			},
-			adopt: (sourceUri, fileName) =>
-				new File(sourceUri).move(queuedFile(fileName), { overwrite: true }),
-			sha256: (fileName) => stenoLink().sha256(queuedFile(fileName).uri),
-		})
+		void planRecovery(index, expoRecoveryFiles)
 			.then((patches) =>
 				patches.length > 0
 					? update((current) => applyRecovery(current, patches))

@@ -24,12 +24,18 @@ function files(overrides: Partial<RecoveryFiles> = {}): RecoveryFiles {
 	};
 }
 
-/** Files keyed by URI or queue file name; `adopt` moves between them. */
-function disk(initial: Record<string, number>) {
+/**
+ * Files keyed by URI or queue file name; `adopt` moves between them. A null
+ * size is a file whose size cannot be read.
+ */
+function disk(initial: Record<string, number | null>) {
 	const sizes = new Map(Object.entries(initial));
 	const moves: [string, string][] = [];
 	const api: RecoveryFiles = {
-		size: (fileName) => sizes.get(fileName) ?? 0,
+		size: (fileName) => {
+			const size = sizes.get(fileName);
+			return size === undefined ? 0 : size;
+		},
 		adopt: async (sourceUri, fileName) => {
 			const size = sizes.get(sourceUri);
 			if (size === undefined) throw new Error(`missing ${sourceUri}`);
@@ -136,15 +142,10 @@ describe("planRecovery", () => {
 		expect(patch).toMatchObject({ kind: "queued", durationSeconds: 42 });
 	});
 
-	it("fails a recording with a missing, empty or header-only file or an unreadable size", async () => {
+	it("fails a recording with a missing, empty or header-only file", async () => {
 		for (const broken of [
 			files({ size: () => 0 }),
 			files({ size: () => MIN_RECORDING_BYTES - 1 }),
-			files({
-				size: () => {
-					throw new Error("stat");
-				},
-			}),
 			files({
 				size: () => 0,
 				adopt: async () => {
@@ -160,6 +161,31 @@ describe("planRecovery", () => {
 				},
 			]);
 		}
+	});
+
+	it("leaves a row alone, adopting nothing, while its queue file's size cannot be read", async () => {
+		const unknown = disk({ "a.m4a": null, [SOURCE]: 2_000 });
+		expect(await planRecovery(interrupted, unknown.api)).toEqual([]);
+		expect(unknown.moves).toEqual([]);
+		const throwing = files({
+			size: () => {
+				throw new Error("stat");
+			},
+			adopt: async () => {
+				throw new Error("adopted");
+			},
+		});
+		expect(await planRecovery(interrupted, throwing)).toEqual([]);
+	});
+
+	it("leaves a row alone when the adopted file's size cannot be read", async () => {
+		const d = disk({ [SOURCE]: 80_000 });
+		const api = {
+			...d.api,
+			size: (name: string) => (d.moves.length ? null : d.api.size(name)),
+		};
+		expect(await planRecovery(interrupted, api)).toEqual([]);
+		expect(d.moves).toEqual([[SOURCE, "a.m4a"]]);
 	});
 
 	it("fails a recording whose hash cannot be computed", async () => {

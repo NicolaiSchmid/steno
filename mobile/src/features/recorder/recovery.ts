@@ -13,21 +13,27 @@ import { MIN_RECORDING_BYTES } from "./recording-options";
  * that `sourceUri`: recovery moves the file into the queue directory, hashes
  * it and queues it (the duration is estimated from the bit rate). A row with
  * no file of `MIN_RECORDING_BYTES` or more, in the queue or at its
- * `sourceUri`, is marked failed so the user sees why nothing arrived. The
- * queue storage adds rows in the same state for recording files the index
- * did not list (`adoptRecordingFiles`), so they are hashed and queued here too.
+ * `sourceUri`, is marked failed so the user sees why nothing arrived. A row
+ * whose queue file exists but whose size cannot be read is left as it is, so
+ * nothing replaces that file and a later launch tries again. The queue
+ * storage adds rows in the same state for recording files the index did not
+ * list (`adoptRecordingFiles`), so they are hashed and queued here too.
  *
  * Two phases so the async file work never races a recording that starts in
  * the meantime: `planRecovery` inspects a snapshot, `applyRecovery` patches
  * only rows that are still `recording` when the index is next written.
  */
 export type RecoveryFiles = {
-	/** Bytes of the queued file, 0 when missing. */
-	size(fileName: string): number;
 	/**
-	 * Moves the recorder's file to `Documents/queue/<fileName>`, replacing a
-	 * file there (only ever one below `MIN_RECORDING_BYTES`, which holds no
-	 * meaningful audio); throws when missing.
+	 * Bytes of the queued file: 0 when missing, null when it exists but its
+	 * size cannot be read.
+	 */
+	size(fileName: string): number | null;
+	/**
+	 * Moves the recorder's file, found by the name in `sourceUri`, to
+	 * `Documents/queue/<fileName>`. It replaces only a file there read as
+	 * below `MIN_RECORDING_BYTES`, which holds no meaningful audio, and throws
+	 * when the recorder's file is missing or the queue file may hold audio.
 	 */
 	adopt(sourceUri: string, fileName: string): Promise<void>;
 	sha256(fileName: string): Promise<string>;
@@ -58,15 +64,22 @@ export async function planRecovery(
 	for (const rec of index.recordings) {
 		if (rec.state !== "recording") continue;
 		const { recordingID } = rec;
-		let byteCount = sizeOrZero(files, rec.fileName);
-		if (byteCount < MIN_RECORDING_BYTES && rec.sourceUri) {
+		let byteCount = sizeOrUnknown(files, rec.fileName);
+		if (
+			byteCount !== null &&
+			byteCount < MIN_RECORDING_BYTES &&
+			rec.sourceUri
+		) {
 			try {
 				await files.adopt(rec.sourceUri, rec.fileName);
-				byteCount = sizeOrZero(files, rec.fileName);
+				byteCount = sizeOrUnknown(files, rec.fileName);
 			} catch {
 				byteCount = 0;
 			}
 		}
+		// The file is there but its size is unknown: hashing it would queue a
+		// wrong byte count, and failing it would leave it behind.
+		if (byteCount === null) continue;
 		if (byteCount < MIN_RECORDING_BYTES) {
 			patches.push({
 				recordingID,
@@ -98,11 +111,12 @@ export async function planRecovery(
 	return patches;
 }
 
-function sizeOrZero(files: RecoveryFiles, fileName: string): number {
+/** A size that throws is unknown too. */
+function sizeOrUnknown(files: RecoveryFiles, fileName: string): number | null {
 	try {
 		return files.size(fileName);
 	} catch {
-		return 0;
+		return null;
 	}
 }
 
