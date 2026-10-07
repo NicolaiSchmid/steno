@@ -607,8 +607,9 @@ fn a_failed_start_leaves_the_backend_ready_to_start_again() {
         ),
         "no lanes fails once the graph is read"
     );
+    // Joined, but the kernel may list an exiting thread a moment longer.
     assert!(
-        thread_named("steno-pipewire").is_none(),
+        eventually(SETTLE, || thread_named("steno-pipewire").is_none()),
         "the failed start joined its thread: {:?}",
         threads()
     );
