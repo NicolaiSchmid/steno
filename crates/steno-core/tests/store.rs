@@ -3,7 +3,7 @@
 
 mod common;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use steno_core::store::convert::{DbDate, DbUuid};
 use steno_core::*;
 
@@ -283,22 +283,16 @@ fn settings_round_trip_one_row_per_property() {
     assert_eq!(rows.len(), 13, "one row per non-nil property");
 }
 
-fn setting_rows(store: &Store) -> Vec<(String, String)> {
+fn setting_row(store: &Store, key: &str) -> Option<String> {
     store
         .read(|connection| {
-            let mut statement =
-                connection.prepare("SELECT key, value FROM setting ORDER BY key")?;
-            let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            Ok(connection
+                .query_row("SELECT value FROM setting WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .optional()?)
         })
         .unwrap()
-}
-
-fn setting_row(store: &Store, key: &str) -> Option<String> {
-    setting_rows(store)
-        .into_iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v)
 }
 
 fn put_setting_row(store: &Store, key: &str, value: &str) {

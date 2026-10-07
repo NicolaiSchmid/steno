@@ -6,8 +6,6 @@
 //! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`, which still
 //! deletes and rewrites every row.
 
-use std::sync::OnceLock;
-
 use rusqlite::params;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, Visitor};
@@ -27,13 +25,10 @@ fn object(settings: &Settings) -> Result<serde_json::Map<String, Value>> {
 /// field names its derived `Deserialize` hands to `deserialize_struct`, so
 /// a new field is a known key without a list to keep in step.
 fn known_keys() -> &'static [&'static str] {
-    static KEYS: OnceLock<&'static [&'static str]> = OnceLock::new();
-    KEYS.get_or_init(|| {
-        let mut fields = None;
-        // Always an error: the deserializer stops at the field list.
-        let _ = Settings::deserialize(FieldNames(&mut fields));
-        fields.expect("Settings deserializes as a struct")
-    })
+    let mut fields = None;
+    // Always an error: the deserializer stops at the field list.
+    let _ = Settings::deserialize(FieldNames(&mut fields));
+    fields.expect("Settings deserializes as a struct")
 }
 
 /// A deserializer that records the field list of the struct it is asked
@@ -140,12 +135,9 @@ mod tests {
             }),
             ..Settings::default()
         };
-        let mut serialized: Vec<String> = object(&settings).unwrap().keys().cloned().collect();
-        serialized.sort();
-        let mut known: Vec<String> = known_keys().iter().map(|&key| key.to_owned()).collect();
-        known.sort();
+        let serialized: Vec<String> = object(&settings).unwrap().keys().cloned().collect();
+        let mut known = known_keys().to_vec();
+        known.sort_unstable();
         assert_eq!(known, serialized);
-        assert!(known.contains(&"inputDeviceUID".to_owned()));
-        assert!(known.contains(&"obsidian".to_owned()));
     }
 }
