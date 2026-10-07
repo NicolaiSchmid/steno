@@ -2198,6 +2198,9 @@ impl ProcessingPipeline {
                     .filter(|speaker| !speaker.assignment.is_confirmed())
                     .map(|speaker| speaker.id)
                     .collect();
+            // The export is owed before the meeting is ready, so an exit
+            // in between leaves a `pending` row for the next launch.
+            self.inner.dependencies.dispatcher.announce(meeting.id);
             attributing(
                 PipelineStage::Persist,
                 store.set_state(meeting.id, MeetingState::Ready, now),

@@ -943,8 +943,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   `resume_unfinished`, the launch delivers again every ready meeting whose delivery is
   still `pending`, or failed before the launch
   (`ProcessingPipeline::redeliver_unfinished`, `Store::meetings_with_unfinished_deliveries`;
-  `exports_left_unfinished_are_delivered_again_at_launch`). A meeting that became ready
-  but whose dispatcher never wrote a row stays without an export until "Export again".
+  `exports_left_unfinished_are_delivered_again_at_launch`). `persist` announces the
+  export (`DeliveryDispatcher::announce`, a `pending` row per configured destination)
+  before it marks the meeting ready, so an exit between the two is found too
+  (`the_export_is_announced_before_the_meeting_is_ready`).
   The pipelines a reload builds share one set of claims (`PipelineClaims`, as they share
   the `QuitLatch`), so the new pipeline refuses a meeting the retired one still
   processes or delivers

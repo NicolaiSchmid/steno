@@ -111,6 +111,30 @@ impl DeliveryCoordinator {
 
 #[async_trait]
 impl DeliveryDispatcher for DeliveryCoordinator {
+    /// A `Pending` row for each configured destination, keeping a stored
+    /// row's receipt and last attempt. Settings that do not load write
+    /// nothing: `deliver_all` fails the rows then.
+    fn announce(&self, meeting_id: Uuid) {
+        let Ok(settings) = self.store.settings() else {
+            return;
+        };
+        let existing = self.store.deliveries(meeting_id).unwrap_or_default();
+        for destination in (self.destinations)(&settings) {
+            let stored = existing
+                .iter()
+                .find(|delivery| delivery.destination_id == destination.id());
+            let delivery = Delivery {
+                id: Delivery::id_for(meeting_id, destination.id()),
+                meeting_id,
+                destination_id: destination.id().to_owned(),
+                status: DeliveryStatus::Pending,
+                last_attempt_at: stored.and_then(|delivery| delivery.last_attempt_at),
+                receipt: stored.and_then(|delivery| delivery.receipt.clone()),
+            };
+            let _ = self.store.save_delivery(&delivery);
+        }
+    }
+
     async fn deliver_all(&self, meeting_id: Uuid) -> Vec<Delivery> {
         let existing = self.store.deliveries(meeting_id).unwrap_or_default();
         let settings = match self.store.settings() {

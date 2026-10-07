@@ -3304,3 +3304,41 @@ async fn pipelines_that_share_claims_refuse_each_others_meetings() {
     drop(held);
     assert_eq!(replacement.in_flight(), Vec::<Uuid>::new());
 }
+
+/// A dispatcher that records the meeting's state when the export is
+/// announced and delivers nothing, as if the app ended right after
+/// `persist`.
+struct AnnouncedOnly {
+    store: Arc<Store>,
+    seen: Mutex<Vec<MeetingState>>,
+}
+
+#[async_trait]
+impl DeliveryDispatcher for AnnouncedOnly {
+    async fn deliver_all(&self, _meeting_id: Uuid) -> Vec<Delivery> {
+        Vec::new()
+    }
+
+    fn announce(&self, meeting_id: Uuid) {
+        let state = self.store.meeting(meeting_id).unwrap().unwrap().state;
+        self.seen.lock().unwrap().push(state);
+    }
+}
+
+/// `persist` announces the export before it marks the meeting ready, so
+/// an exit between the two leaves rows the next launch delivers again.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_export_is_announced_before_the_meeting_is_ready() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let dispatcher = Arc::new(AnnouncedOnly {
+        store: world.store.clone(),
+        seen: Mutex::new(Vec::new()),
+    });
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.dispatcher = dispatcher.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let id = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, id), MeetingState::Ready);
+    assert_eq!(*dispatcher.seen.lock().unwrap(), [MeetingState::Processing]);
+}
