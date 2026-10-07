@@ -102,10 +102,25 @@ export type UploadExecutor = {
 	): Promise<void>;
 };
 
+/**
+ * Announces answered 409 in a row before the row is `failed`. The Mac
+ * answers an announce 409 when its receipt for the id belongs to another
+ * device or holds other metadata; neither changes by retrying, so after
+ * these the user sees a failed row and its Retry instead of a row that
+ * waits forever.
+ */
+export const ANNOUNCE_CONFLICTS_BEFORE_FAILED = 3;
+
+export const ANNOUNCE_CONFLICT_MESSAGE =
+	"The Mac keeps refusing this recording; it stays on this phone";
+
 export function createUploadExecutor(
 	deps: ExecutorDependencies,
 ): UploadExecutor {
 	const inFlight = new Set<string>();
+	// Announce 409s in a row, by recording; any other announce outcome
+	// clears the count. In memory: a relaunch starts counting again.
+	const announceConflicts = new Map<string, number>();
 	// The token each chunk in the background session was started with, so
 	// its 401 is judged against the pairing it was sent under. A chunk
 	// started before a relaunch has none.
@@ -139,6 +154,34 @@ export function createUploadExecutor(
 		});
 	};
 
+	// A 409 that is the last of `ANNOUNCE_CONFLICTS_BEFORE_FAILED` in a row
+	// fails the row; anything else is a `fail`.
+	const failAnnounce = async (
+		recordingID: string,
+		error: unknown,
+		token: string,
+	) => {
+		const count =
+			error instanceof HandoverError && error.status === 409
+				? (announceConflicts.get(recordingID) ?? 0) + 1
+				: 0;
+		if (count < ANNOUNCE_CONFLICTS_BEFORE_FAILED) {
+			if (count > 0) announceConflicts.set(recordingID, count);
+			else announceConflicts.delete(recordingID);
+			await fail(recordingID, error, token);
+			return;
+		}
+		announceConflicts.delete(recordingID);
+		await deps.update((current) => {
+			const rec = findRecording(current, recordingID);
+			return rec && isPending(rec)
+				? setState(current, recordingID, "failed", {
+						lastError: ANNOUNCE_CONFLICT_MESSAGE,
+					})
+				: current;
+		});
+	};
+
 	const execute = async (
 		action: Action,
 		session: MacSession,
@@ -164,6 +207,7 @@ export function createUploadExecutor(
 						session,
 						metadataFor(rec, deviceName),
 					);
+					announceConflicts.delete(rec.recordingID);
 					await deps.update((current) =>
 						setState(
 							syncChunks(current, rec.recordingID, result.receivedChunks),
@@ -173,7 +217,7 @@ export function createUploadExecutor(
 						),
 					);
 				} catch (error) {
-					await fail(rec.recordingID, error, session.token);
+					await failAnnounce(rec.recordingID, error, session.token);
 				} finally {
 					inFlight.delete(id);
 				}

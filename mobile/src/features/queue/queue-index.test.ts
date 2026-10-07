@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
 	addRecording,
+	canRetry,
 	chunkPlan,
 	EMPTY_INDEX,
+	findRecording,
 	markChunk,
 	type NewRecording,
 	nextRetryAt,
@@ -393,8 +395,35 @@ describe("nextUploadable", () => {
 		expect(nextRetryAt(index, now)).toBeNull();
 	});
 
+	it("skips a pending row with no hash", () => {
+		const index = addRecording(build(), {
+			...rec("unhashed", "2026-09-25T05:00:00.000Z"),
+			sha256: null,
+		});
+		expect(nextUploadable(index, now)?.recordingID).toBe("old");
+	});
+
 	it("is null for an empty index", () => {
 		expect(nextUploadable(EMPTY_INDEX, now)).toBeNull();
+	});
+});
+
+describe("canRetry", () => {
+	it("is true only for a failed row with a hash", () => {
+		const index = setState(
+			addRecording(
+				addRecording(EMPTY_INDEX, rec("a", "2026-09-25T08:00:00.000Z")),
+				{ ...rec("b", "2026-09-25T09:00:00.000Z"), sha256: null },
+				"recording",
+			),
+			"b",
+			"failed",
+		);
+		const failed = setState(index, "a", "failed");
+		expect(canRetry(findRecording(failed, "a"))).toBe(true);
+		expect(canRetry(findRecording(failed, "b"))).toBe(false);
+		expect(canRetry(findRecording(index, "a"))).toBe(false);
+		expect(canRetry(null)).toBe(false);
 	});
 });
 

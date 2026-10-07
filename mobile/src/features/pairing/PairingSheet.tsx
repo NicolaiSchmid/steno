@@ -30,6 +30,9 @@ import { deviceIdentity } from "./pairing-store";
  * Modal: scan the Mac's QR code, pair over the pinned channel, or unpair.
  * A second scan replaces the pairing. Runs in the foreground only, because a
  * backgrounded app in the undetermined local-network state is denied silently.
+ * Pairing and unpairing wait until the queue is loaded: both change the
+ * rows' states, and a write before the load is refused after the pairing
+ * itself was saved or cleared.
  */
 type Phase =
 	| { kind: "scanning" }
@@ -45,7 +48,7 @@ export function PairingSheet() {
 	const navigation = useNavigation();
 	const [permission, requestPermission] = useCameraPermissions();
 	const { pairing, replace, clear } = usePairing();
-	const { update } = useQueue();
+	const { ready, loadError, update } = useQueue();
 	const discovery = useMacDiscovery();
 	const [phase, setPhase] = useState<Phase>({ kind: "scanning" });
 	const busy = useRef(false);
@@ -98,7 +101,7 @@ export function PairingSheet() {
 	);
 
 	const onUnpair = useCallback(async () => {
-		if (!pairing || busy.current) return;
+		if (!pairing || !ready || busy.current) return;
 		busy.current = true;
 		try {
 			try {
@@ -117,12 +120,13 @@ export function PairingSheet() {
 		} finally {
 			busy.current = false;
 		}
-	}, [pairing, clear, update, navigation]);
+	}, [pairing, ready, clear, update, navigation]);
 
 	const cameraDenied =
 		permission !== null && !permission.granted && !permission.canAskAgain;
 	const networkDenied = discovery.browser?.policyDenied === true;
-	const scanning = phase.kind === "scanning" || phase.kind === "error";
+	const scanning =
+		ready && (phase.kind === "scanning" || phase.kind === "error");
 
 	return (
 		<SafeAreaView className="flex-1 bg-background" edges={["bottom"]}>
@@ -186,6 +190,13 @@ export function PairingSheet() {
 					)}
 				</View>
 
+				{loadError ? (
+					<AppText variant="error">
+						Steno could not read the list of recordings on this phone. Pairing
+						and unpairing wait until it can.
+					</AppText>
+				) : null}
+
 				{networkDenied ? (
 					<AppText variant="error">
 						Local network access is off. Allow it for Steno in Settings, then
@@ -214,6 +225,8 @@ export function PairingSheet() {
 					<PressableScale
 						accessibilityLabel={`Unpair from ${pairing.mac.macName}`}
 						accessibilityRole="button"
+						accessibilityState={{ disabled: !ready }}
+						disabled={!ready}
 						onPress={() => void onUnpair()}
 					>
 						<View className="items-center rounded-2xl border border-border py-3">

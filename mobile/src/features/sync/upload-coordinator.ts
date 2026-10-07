@@ -58,9 +58,6 @@ export function planNext(
 			? { kind: "wait", until: retryAt.toISOString() }
 			: { kind: "idle" };
 	}
-	// Not finalised yet (no hash); the recorder patches it in shortly.
-	if (rec.sha256 === null) return { kind: "idle" };
-
 	if (rec.state === "queued") {
 		// A `complete` still out (sent before an unpair, the row queued again
 		// by a new pairing) settles the row first: its 200 delivers it and

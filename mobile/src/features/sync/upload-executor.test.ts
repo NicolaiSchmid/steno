@@ -21,6 +21,8 @@ import {
 import type { CompleteResult, MacSession } from "./recording-client";
 import { planNext, taskIDs } from "./upload-coordinator";
 import {
+	ANNOUNCE_CONFLICT_MESSAGE,
+	ANNOUNCE_CONFLICTS_BEFORE_FAILED,
 	createUploadExecutor,
 	type ExecutorDependencies,
 	type RecordingClient,
@@ -69,6 +71,11 @@ class FakeMac implements RecordingClient {
 	verifying = false;
 	/** Announces that fail with a transport error before succeeding. */
 	unreachableAnnounces = 0;
+	/**
+	 * Answers for the next announces, in order: 409 (the receipt belongs to
+	 * another device) or a transport error; then the Mac answers normally.
+	 */
+	announceScript: (409 | "unreachable")[] = [];
 	/** While set, `complete` is sent but answers only once it resolves. */
 	completeGate: Promise<void> | null = null;
 	startUploadError: Error | null = null;
@@ -112,6 +119,13 @@ class FakeMac implements RecordingClient {
 		if (this.revoked) throw new HandoverError("unauthorized", 401, "revoked");
 		if (this.unreachableAnnounces > 0) {
 			this.unreachableAnnounces -= 1;
+			throw new HandoverError("unreachable", null, "Wi-Fi is off");
+		}
+		const scripted = this.announceScript.shift();
+		if (scripted === 409) {
+			throw new HandoverError("server", 409, "The Mac answered 409");
+		}
+		if (scripted === "unreachable") {
 			throw new HandoverError("unreachable", null, "Wi-Fi is off");
 		}
 		this.announced.push(metadata);
@@ -782,6 +796,83 @@ describe("a complete sent before an unpair and answered after it", () => {
 		await h.drive();
 		expect(h.mac.calls.slice(-2)).toEqual(["announce a", "complete a"]);
 		expect(h.row("a")?.state).toBe("delivered");
+	});
+});
+
+describe("an announce the Mac keeps refusing with 409", () => {
+	it("fails the row after three in a row, and Retry announces again", async () => {
+		expect(ANNOUNCE_CONFLICTS_BEFORE_FAILED).toBe(3);
+		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+		h.mac.announceScript = [409, 409, 409];
+
+		expect(await h.drive()).toMatchObject({ kind: "wait" });
+		expect(h.row("a")).toMatchObject({
+			state: "queued",
+			attempts: 1,
+			lastError: "The Mac answered 409",
+		});
+		h.advance(60_000);
+		expect(await h.drive()).toMatchObject({ kind: "wait" });
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 2 });
+
+		h.advance(60_000);
+		expect(await h.drive()).toEqual({ kind: "idle" });
+		expect(h.row("a")).toMatchObject({
+			state: "failed",
+			lastError: ANNOUNCE_CONFLICT_MESSAGE,
+		});
+		// Nothing is retried behind the user's back.
+		h.advance(60 * 60_000);
+		expect(await h.drive()).toEqual({ kind: "idle" });
+		expect(h.mac.calls).toEqual(["announce a", "announce a", "announce a"]);
+		expect(h.files.present.has("a.m4a")).toBe(true);
+
+		// Retry: the count starts again, so one more 409 only retries, and
+		// then the Mac takes it.
+		h.mac.announceScript = [409];
+		h.state.index = resetForUpload(h.state.index, "a");
+		expect(await h.drive()).toMatchObject({ kind: "wait" });
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
+		h.advance(60_000);
+		await h.drive();
+		expect(h.row("a")).toMatchObject({ state: "uploading", lastError: null });
+		expect(h.mac.calls.slice(3)).toEqual([
+			"announce a",
+			"announce a",
+			"chunk a/0",
+		]);
+	});
+
+	it("starts counting again after an announce the Mac takes", async () => {
+		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+		h.mac.announceScript = [409, 409];
+		for (let i = 0; i < 2; i++) {
+			expect(await h.drive()).toMatchObject({ kind: "wait" });
+			h.advance(60 * 60_000);
+		}
+		// The third announce is taken; the chunk cannot start, so the row
+		// goes back to `queued` and announces again.
+		h.mac.startUploadError = new Error("no disk");
+		expect(await h.drive()).toMatchObject({ kind: "wait" });
+		expect(h.mac.calls.slice(-2)).toEqual(["announce a", "chunk a/0"]);
+		h.mac.startUploadError = null;
+		h.mac.announceScript = [409];
+		h.advance(60 * 60_000);
+		expect(await h.drive()).toMatchObject({ kind: "wait" });
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 4 });
+	});
+
+	it("counts only 409s in a row, for each recording", async () => {
+		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+		h.mac.announceScript = [409, 409, "unreachable", 409, 409];
+		for (let i = 0; i < 5; i++) {
+			expect(await h.drive()).toMatchObject({ kind: "wait" });
+			expect(h.row("a")?.state).toBe("queued");
+			h.advance(60 * 60_000);
+		}
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 5 });
+		await h.drive();
+		expect(h.row("a")?.state).toBe("uploading");
 	});
 });
 

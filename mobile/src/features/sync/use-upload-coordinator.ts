@@ -12,7 +12,11 @@ import { usePairing } from "@/features/pairing/PairingProvider";
 import { deviceIdentity } from "@/features/pairing/pairing-store";
 import { useQueue } from "@/features/queue/QueueProvider";
 import { queuedFile } from "@/features/queue/queue-files";
-import { findRecording, resetForUpload } from "@/features/queue/queue-index";
+import {
+	canRetry,
+	findRecording,
+	resetForUpload,
+} from "@/features/queue/queue-index";
 import {
 	announce,
 	complete,
@@ -233,10 +237,18 @@ export function useUploadCoordinator(): UploadCoordinator {
 						return rest;
 					});
 				}
-				void executor.uploadFinished(event).finally(tick);
+				void executor
+					.uploadFinished(event)
+					.catch((error) => console.warn("[sync] upload event failed", error))
+					.finally(tick);
 			}),
+			// While the queue cannot be loaded the update rejects and the chunk
+			// mark is dropped; the Mac's status restores it at the next announce.
 			link.addListener("uploadFailed", (event) => {
-				void executor.uploadFailed(event).finally(tick);
+				void executor
+					.uploadFailed(event)
+					.catch((error) => console.warn("[sync] upload event failed", error))
+					.finally(tick);
 			}),
 		];
 		return () => {
@@ -283,7 +295,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 	const retryNow = useCallback(
 		(recordingID: string) => {
 			void update((current) =>
-				findRecording(current, recordingID)?.state === "failed"
+				canRetry(findRecording(current, recordingID))
 					? resetForUpload(current, recordingID)
 					: current,
 			).then(() => {

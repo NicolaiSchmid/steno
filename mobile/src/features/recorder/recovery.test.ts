@@ -5,7 +5,14 @@ import {
 	EMPTY_INDEX,
 	setState,
 } from "@/features/queue/queue-index";
-import { applyRecovery, planRecovery, type RecoveryFiles } from "./recovery";
+import { MIN_RECORDING_BYTES } from "./recording-options";
+import {
+	applyRecovery,
+	INTERRUPTED_MESSAGE,
+	planRecovery,
+	type RecoveryFiles,
+	UNREADABLE_MESSAGE,
+} from "./recovery";
 
 const SOURCE = "file:///docs/ExpoAudio/recording-123.m4a";
 
@@ -18,12 +25,18 @@ function files(overrides: Partial<RecoveryFiles> = {}): RecoveryFiles {
 	};
 }
 
-/** Files keyed by URI or queue file name; `adopt` moves between them. */
-function disk(initial: Record<string, number>) {
+/**
+ * Files keyed by URI or queue file name; `adopt` moves between them. A null
+ * size is a file whose size cannot be read.
+ */
+function disk(initial: Record<string, number | null>) {
 	const sizes = new Map(Object.entries(initial));
 	const moves: [string, string][] = [];
 	const api: RecoveryFiles = {
-		size: (fileName) => sizes.get(fileName) ?? 0,
+		size: (fileName) => {
+			const size = sizes.get(fileName);
+			return size === undefined ? 0 : size;
+		},
 		adopt: async (sourceUri, fileName) => {
 			const size = sizes.get(sourceUri);
 			if (size === undefined) throw new Error(`missing ${sourceUri}`);
@@ -82,9 +95,17 @@ describe("planRecovery", () => {
 			{
 				recordingID: "a",
 				kind: "failed",
-				lastError: "Recording was interrupted before it was saved",
+				lastError: INTERRUPTED_MESSAGE,
 			},
 		]);
+	});
+
+	it("replaces a queued file that holds only a header with the recorder's file", async () => {
+		const d = disk({ "a.m4a": 40, [SOURCE]: 80_000 });
+		expect(await planRecovery(interrupted, d.api)).toMatchObject([
+			{ kind: "queued", byteCount: 80_000, sha256: "sha(a.m4a)" },
+		]);
+		expect(d.moves).toEqual([[SOURCE, "a.m4a"]]);
 	});
 
 	it("fails a row without a source when the queued file is missing", async () => {
@@ -122,14 +143,10 @@ describe("planRecovery", () => {
 		expect(patch).toMatchObject({ kind: "queued", durationSeconds: 42 });
 	});
 
-	it("fails a recording with a missing or empty file or an unreadable size", async () => {
+	it("fails a recording with a missing, empty or header-only file", async () => {
 		for (const broken of [
 			files({ size: () => 0 }),
-			files({
-				size: () => {
-					throw new Error("stat");
-				},
-			}),
+			files({ size: () => MIN_RECORDING_BYTES - 1 }),
 			files({
 				size: () => 0,
 				adopt: async () => {
@@ -141,10 +158,66 @@ describe("planRecovery", () => {
 				{
 					recordingID: "a",
 					kind: "failed",
-					lastError: "Recording was interrupted before it was saved",
+					lastError: INTERRUPTED_MESSAGE,
 				},
 			]);
 		}
+	});
+
+	it("leaves a row in `recording`, adopting nothing, while its queue file's size cannot be read", async () => {
+		const unreadable = [{ recordingID: "a", kind: "unreadable" }];
+		const unknown = disk({ "a.m4a": null, [SOURCE]: 2_000 });
+		expect(await planRecovery(interrupted, unknown.api)).toEqual(unreadable);
+		expect(unknown.moves).toEqual([]);
+		const throwing = files({
+			size: () => {
+				throw new Error("stat");
+			},
+			adopt: async () => {
+				throw new Error("adopted");
+			},
+		});
+		expect(await planRecovery(interrupted, throwing)).toEqual(unreadable);
+	});
+
+	it("leaves a row in `recording` when the adopted file's size is null or throws", async () => {
+		for (const unreadable of [
+			() => null,
+			() => {
+				throw new Error("stat");
+			},
+		]) {
+			const d = disk({ [SOURCE]: 80_000 });
+			const api = {
+				...d.api,
+				size: (name: string) =>
+					d.moves.length ? unreadable() : d.api.size(name),
+			};
+			expect(await planRecovery(interrupted, api)).toEqual([
+				{ recordingID: "a", kind: "unreadable" },
+			]);
+			expect(d.moves).toEqual([[SOURCE, "a.m4a"]]);
+		}
+	});
+
+	it("reads the queue file again when adopt refuses it, so audio written since is queued", async () => {
+		/** A queue file that reads as `size` by the time `adopt` looks at it. */
+		const refusing = (size: number | null): RecoveryFiles => {
+			const d = disk({ "a.m4a": 40, [SOURCE]: 80_000 });
+			return {
+				...d.api,
+				adopt: async () => {
+					d.sizes.set("a.m4a", size);
+					throw new Error("may hold audio, not replaced");
+				},
+			};
+		};
+		expect(await planRecovery(interrupted, refusing(16_000))).toMatchObject([
+			{ kind: "queued", byteCount: 16_000, sha256: "sha(a.m4a)" },
+		]);
+		expect(await planRecovery(interrupted, refusing(null))).toEqual([
+			{ recordingID: "a", kind: "unreadable" },
+		]);
 	});
 
 	it("fails a recording whose hash cannot be computed", async () => {
@@ -189,6 +262,29 @@ describe("applyRecovery", () => {
 		expect(failed.recordings[0]).toMatchObject({
 			state: "failed",
 			lastError: "gone",
+		});
+	});
+
+	it("notes an unreadable row in `recording`, and clears the note once it is queued", () => {
+		const noted = applyRecovery(interrupted, [
+			{ recordingID: "a", kind: "unreadable" },
+		]);
+		expect(noted.recordings[0]).toMatchObject({
+			state: "recording",
+			lastError: UNREADABLE_MESSAGE,
+		});
+		const next = applyRecovery(noted, [
+			{
+				recordingID: "a",
+				kind: "queued",
+				byteCount: 5,
+				sha256: "H",
+				durationSeconds: 1,
+			},
+		]);
+		expect(next.recordings[0]).toMatchObject({
+			state: "queued",
+			lastError: null,
 		});
 	});
 
