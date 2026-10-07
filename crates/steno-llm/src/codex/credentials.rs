@@ -157,8 +157,8 @@ pub struct CodexCredentialStore {
 /// Refreshed tokens whose write-back failed. Never `Debug`: it holds the
 /// tokens.
 struct Unwritten {
-    document: Map<String, Value>,
-    /// The refresh token the file still holds, spent, which `document`
+    file: AuthFile,
+    /// The refresh token the file still holds, spent, which `file`
     /// replaces. A file holding any other is newer and wins.
     replaces: String,
     /// Temporaries failed renames left, each a whole copy of a refreshed
@@ -182,6 +182,7 @@ struct SpentToken {
 
 /// The whole document plus what Steno read from it, kept so unknown keys
 /// survive a write-back.
+#[derive(Clone)]
 struct AuthFile {
     document: Map<String, Value>,
     credentials: CodexCredentials,
@@ -498,26 +499,16 @@ impl CodexCredentialStore {
                 return file;
             }
         }
-        let credentials = match Self::credentials_in(&kept.document) {
-            Ok(credentials) => credentials,
-            Err(error) => {
-                *unwritten = Some(kept);
-                return Err(error);
-            }
-        };
-        let document = kept.document.clone();
+        let latest = kept.file.clone();
         *unwritten = self.write_kept(kept);
-        Ok(AuthFile {
-            document,
-            credentials,
-        })
+        Ok(latest)
     }
 
-    /// Writes `kept.document`: `None` once it landed, with the temporaries
+    /// Writes `kept.file`: `None` once it landed, with the temporaries
     /// earlier failures left removed, else `kept` with the one this
     /// failure left, to be written again on the next call.
     fn write_kept(&self, mut kept: Unwritten) -> Option<Unwritten> {
-        match self.write(&kept.document) {
+        match self.write(&kept.file.document) {
             Ok(()) => {
                 remove_all(&kept.left);
                 None
@@ -639,7 +630,6 @@ impl CodexCredentialStore {
 
     async fn refresh_once(&self, file: AuthFile) -> Result<CodexCredentials, RefreshFailure> {
         let secrets = file.credentials.secrets();
-        let posted = file.credentials.refresh_token.clone();
         let body = serde_json::json!({
             "grant_type": "refresh_token",
             "client_id": self.client_id,
@@ -741,15 +731,17 @@ impl CodexCredentialStore {
             Value::String(steno_core::json::format_date((self.now)())),
         );
         let credentials = Self::credentials_in(&document)?;
-        // A write that fails keeps the document for the next call: the
-        // posted token is spent, so these tokens are the only sign-in left.
+        // A write that fails keeps them for the next call.
         let mut unwritten = self.kept();
         let (replaces, left) = match unwritten.take() {
             Some(earlier) => (earlier.replaces, earlier.left),
-            None => (posted, Vec::new()),
+            None => (file.credentials.refresh_token, Vec::new()),
         };
         *unwritten = self.write_kept(Unwritten {
-            document,
+            file: AuthFile {
+                document,
+                credentials: credentials.clone(),
+            },
             replaces,
             left,
         });
