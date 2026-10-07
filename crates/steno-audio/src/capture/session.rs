@@ -559,7 +559,7 @@ impl Core {
             2.0,
             Box::new(move |reason| {
                 if let Some(core) = weak.upgrade() {
-                    core.device_changed(reason);
+                    core.device_changed_in(recording, reason);
                 }
             }),
         ));
@@ -824,6 +824,16 @@ impl Core {
     fn device_changed(self: &Arc<Self>, reason: DeviceChangeReason) {
         let mut inner = self.lock();
         self.begin_rebuild(&mut inner, reason);
+    }
+
+    /// [`Self::device_changed`] for a report from the backend of
+    /// `recording`: one an older recording's backend left in its handler
+    /// past that recording's stop reaches nothing.
+    fn device_changed_in(self: &Arc<Self>, recording: usize, reason: DeviceChangeReason) {
+        let mut inner = self.lock();
+        if inner.recordings_started == recording {
+            self.begin_rebuild(&mut inner, reason);
+        }
     }
 
     /// [`Self::device_changed`] under the caller's guard.
