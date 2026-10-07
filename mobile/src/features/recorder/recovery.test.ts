@@ -5,7 +5,13 @@ import {
 	EMPTY_INDEX,
 	setState,
 } from "@/features/queue/queue-index";
-import { applyRecovery, planRecovery, type RecoveryFiles } from "./recovery";
+import { MIN_RECORDING_BYTES } from "./recording-options";
+import {
+	applyRecovery,
+	INTERRUPTED_MESSAGE,
+	planRecovery,
+	type RecoveryFiles,
+} from "./recovery";
 
 const SOURCE = "file:///docs/ExpoAudio/recording-123.m4a";
 
@@ -82,9 +88,17 @@ describe("planRecovery", () => {
 			{
 				recordingID: "a",
 				kind: "failed",
-				lastError: "Recording was interrupted before it was saved",
+				lastError: INTERRUPTED_MESSAGE,
 			},
 		]);
+	});
+
+	it("replaces a queued file that holds only a header with the recorder's file", async () => {
+		const d = disk({ "a.m4a": 40, [SOURCE]: 80_000 });
+		expect(await planRecovery(interrupted, d.api)).toMatchObject([
+			{ kind: "queued", byteCount: 80_000, sha256: "sha(a.m4a)" },
+		]);
+		expect(d.moves).toEqual([[SOURCE, "a.m4a"]]);
 	});
 
 	it("fails a row without a source when the queued file is missing", async () => {
@@ -122,9 +136,10 @@ describe("planRecovery", () => {
 		expect(patch).toMatchObject({ kind: "queued", durationSeconds: 42 });
 	});
 
-	it("fails a recording with a missing or empty file or an unreadable size", async () => {
+	it("fails a recording with a missing, empty or header-only file or an unreadable size", async () => {
 		for (const broken of [
 			files({ size: () => 0 }),
+			files({ size: () => MIN_RECORDING_BYTES - 1 }),
 			files({
 				size: () => {
 					throw new Error("stat");
@@ -141,7 +156,7 @@ describe("planRecovery", () => {
 				{
 					recordingID: "a",
 					kind: "failed",
-					lastError: "Recording was interrupted before it was saved",
+					lastError: INTERRUPTED_MESSAGE,
 				},
 			]);
 		}

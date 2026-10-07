@@ -5,13 +5,15 @@ import {
 	setState,
 } from "@/features/queue/queue-index";
 import { errorMessage } from "@/lib/error-message";
+import { MIN_RECORDING_BYTES } from "./recording-options";
 
 /**
  * A row still in `recording` at launch means the app died mid-recording.
  * While recording, expo-audio writes to its own directory, so the row carries
  * that `sourceUri`: recovery moves the file into the queue directory, hashes
- * it and queues it (the duration is estimated from the bit rate). A row whose
- * file is nowhere is marked failed so the user sees why nothing arrived. The
+ * it and queues it (the duration is estimated from the bit rate). A row with
+ * no file of `MIN_RECORDING_BYTES` or more, in the queue or at its
+ * `sourceUri`, is marked failed so the user sees why nothing arrived. The
  * queue storage adds rows in the same state for recording files the index
  * did not list (`adoptRecordingFiles`), so they are hashed and queued here too.
  *
@@ -22,7 +24,11 @@ import { errorMessage } from "@/lib/error-message";
 export type RecoveryFiles = {
 	/** Bytes of the queued file, 0 when missing. */
 	size(fileName: string): number;
-	/** Moves the recorder's file to `Documents/queue/<fileName>`; throws when missing. */
+	/**
+	 * Moves the recorder's file to `Documents/queue/<fileName>`, replacing a
+	 * file there (only ever one below `MIN_RECORDING_BYTES`, which holds no
+	 * meaningful audio); throws when missing.
+	 */
 	adopt(sourceUri: string, fileName: string): Promise<void>;
 	sha256(fileName: string): Promise<string>;
 };
@@ -37,6 +43,10 @@ export type RecoveryPatch =
 	  }
 	| { recordingID: string; kind: "failed"; lastError: string };
 
+/** Shown on a row whose recording no file holds. */
+export const INTERRUPTED_MESSAGE =
+	"Recording was interrupted before it was saved";
+
 /** Mono AAC at 64 kbps: bytes per second of audio. */
 const ESTIMATED_BYTES_PER_SECOND = 64_000 / 8;
 
@@ -49,7 +59,7 @@ export async function planRecovery(
 		if (rec.state !== "recording") continue;
 		const { recordingID } = rec;
 		let byteCount = sizeOrZero(files, rec.fileName);
-		if (byteCount === 0 && rec.sourceUri) {
+		if (byteCount < MIN_RECORDING_BYTES && rec.sourceUri) {
 			try {
 				await files.adopt(rec.sourceUri, rec.fileName);
 				byteCount = sizeOrZero(files, rec.fileName);
@@ -57,11 +67,11 @@ export async function planRecovery(
 				byteCount = 0;
 			}
 		}
-		if (byteCount === 0) {
+		if (byteCount < MIN_RECORDING_BYTES) {
 			patches.push({
 				recordingID,
 				kind: "failed",
-				lastError: "Recording was interrupted before it was saved",
+				lastError: INTERRUPTED_MESSAGE,
 			});
 			continue;
 		}
