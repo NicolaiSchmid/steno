@@ -30,7 +30,7 @@
 
 use std::sync::OnceLock;
 
-use glib::{LogField, LogLevel, LogWriterOutput};
+use gio::glib::{self, LogField, LogLevel, LogWriterOutput};
 
 /// The app the writer saves, set once the app is built (`watch`); a loss
 /// before that has no recording to save.
