@@ -2730,9 +2730,18 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   down under the app: the session clients ran against fakes on a private bus, the lost
   display under Xvfb and headless sway, and real logouts only in xfce4-session 4.20.4
   (X11, and Wayland under labwc); GNOME's logout dialog for the inhibitor is read from
-  gnome-session's source only. Where: `apps/desktop/src-tauri/src/session_end.rs`,
+  gnome-session's source only. The writer recognises GDK's lost-display lines by GTK
+  3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. Where:
+  `apps/desktop/src-tauri/src/session_end.rs`,
   `apps/desktop/src-tauri/src/display_lost.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203, #220.
+- **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
+  (issue #160). The app works around it on Linux by destroying no window while it
+  runs (a closed Settings or onboarding window is kept and loads afresh when opened
+  again, #220); the leak itself is not fixed and not yet reported to WebKitGTK. To
+  do: report it there with a reproduction outside the app, and drop the workaround
+  once a fixed WebKitGTK ships. Where: `apps/desktop/src-tauri/src/windows.rs`
+  (`Kept`), `apps/desktop/README.md`. Found: #172, #220.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included; leaving it out
   was weighed and not done, see the note).
@@ -2901,6 +2910,7 @@ PR off `main`.
 | The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
 | On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
 | Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
+| A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
