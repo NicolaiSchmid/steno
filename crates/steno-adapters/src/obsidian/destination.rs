@@ -381,8 +381,12 @@ impl ObsidianFolderDestination {
     /// skipped and a page that is not UTF-8 text is left as it is; neither
     /// fails the delivery, since there is nothing of ours to correct in the
     /// first case and no safe way to in the second. An unchanged page is not
-    /// rewritten. The path stays in the receipt either way, as every file
-    /// the app wrote does.
+    /// rewritten. A listed page that is the same file as a rendered one
+    /// ([`LocalFolderSink::same_file`]) is not stale: on a case-insensitive
+    /// vault a person renamed from `anna` to `Anna` renders `Anna.md`, which
+    /// is the receipt's `anna.md`, and removing the line there would drop
+    /// it from the page just written. The path stays in the receipt either
+    /// way, as every file the app wrote does.
     fn remove_meeting_line(
         &self,
         rendered: &HashSet<String>,
@@ -390,6 +394,9 @@ impl ObsidianFolderDestination {
         ledger: &mut DeliveryLedger,
     ) -> Result<(), ObsidianError> {
         for path in &ledger.stale_managed_pages(rendered) {
+            if rendered.iter().any(|page| self.sink.same_file(path, page)) {
+                continue;
+            }
             let Some(existing) = self.reading(path, || self.sink.read(path))? else {
                 continue;
             };

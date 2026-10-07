@@ -4,6 +4,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(not(unix))]
+use unicode_normalization::UnicodeNormalization as _;
+
 use super::{AtomicFileWriter, WriteFailure};
 
 /// The local file system under one folder, addressed by paths relative to
@@ -86,5 +89,34 @@ impl LocalFolderSink {
     /// process or another, exactly one succeeds.
     pub fn create_new_directory(&self, relative: &str) -> std::io::Result<()> {
         fs::create_dir(self.path(relative))
+    }
+
+    /// Whether `left` and `right` are one file under two spellings, as on a
+    /// case-insensitive folder (APFS and NTFS by default) where `anna.md`
+    /// and `Anna.md` are the same page. On Unix by device and inode, so a
+    /// case-sensitive folder keeps two such names two files and a symlink
+    /// counts as its target; false when either is missing. Windows has no
+    /// stable file identity in `std`, so there the two paths are compared
+    /// NFC-normalised and lowercased, which is NTFS's default and folds a
+    /// rare case-sensitive directory's two pages into one: the stale line
+    /// then stays, nothing is lost.
+    #[must_use]
+    pub fn same_file(&self, left: &str, right: &str) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            match (
+                fs::metadata(self.path(left)),
+                fs::metadata(self.path(right)),
+            ) {
+                (Ok(left), Ok(right)) => left.dev() == right.dev() && left.ino() == right.ino(),
+                _ => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let folded = |path: &str| path.nfc().collect::<String>().to_lowercase();
+            folded(left) == folded(right)
+        }
     }
 }

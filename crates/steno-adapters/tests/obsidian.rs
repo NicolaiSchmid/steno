@@ -1312,3 +1312,103 @@ fn a_folder_another_writer_claims_first_is_never_shared() {
         without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
     );
 }
+
+/// `export()` with the first person and participant renamed.
+fn with_anna_named(name: &str) -> MeetingExport {
+    let mut export = export();
+    name.clone_into(&mut export.persons[0].display_name);
+    name.clone_into(&mut export.participants[0].display_name);
+    export
+}
+
+/// Whether the folder at `directory` treats names that differ in case as
+/// one (APFS and NTFS by default; not ext4).
+fn is_case_insensitive(directory: &Path) -> bool {
+    let probe = directory.join("case-probe");
+    fs::write(&probe, b"").unwrap();
+    let insensitive = directory.join("CASE-PROBE").exists();
+    fs::remove_file(&probe).unwrap();
+    insensitive
+}
+
+/// A case-insensitive folder played on any Unix: the old spelling is a
+/// symlink to the page the new one names, so both are one file as `anna`
+/// and `Anna` are on APFS.
+#[cfg(unix)]
+#[test]
+fn a_case_only_rename_keeps_the_meeting_on_a_page_both_spellings_name() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let first = deliver(&destination, &with_anna_named("anna müller"), None);
+    fs::rename(vault.path("People/anna müller.md"), vault.path(ANNA_PAGE)).unwrap();
+    std::os::unix::fs::symlink("Anna Müller.md", vault.path("People/anna müller.md")).unwrap();
+
+    let second = deliver(&destination, &with_anna_named("Anna Müller"), Some(&first));
+
+    let marker = ManagedBlock::marker(export().meeting.id);
+    assert!(vault.text(ANNA_PAGE).contains(&marker));
+    assert!(
+        fs::symlink_metadata(vault.path("People/anna müller.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the old spelling is not written as a page of its own"
+    );
+    assert!(
+        vault.text("People/anna müller.md").contains(&marker),
+        "the one page keeps the meeting"
+    );
+    assert_eq!(
+        managed(&second),
+        [
+            ANNA_PAGE,
+            "People/Nicolai Schmid.md",
+            "People/anna müller.md"
+        ]
+    );
+}
+
+/// The same rename on the real folder where it is case-insensitive (the
+/// macOS and Windows runners); a case-sensitive one has the next test.
+#[test]
+fn a_case_only_rename_on_a_case_insensitive_vault_keeps_the_meeting_on_the_page() {
+    let vault = Vault::new();
+    if !is_case_insensitive(&vault.root) {
+        return;
+    }
+    let destination = vault.destination_with(false, Some("People"));
+    let first = deliver(&destination, &with_anna_named("anna müller"), None);
+    deliver(&destination, &with_anna_named("Anna Müller"), Some(&first));
+
+    let pages = vault.list("People");
+    assert_eq!(pages.len(), 2, "one page per person: {pages:?}");
+    assert!(
+        vault
+            .text(ANNA_PAGE)
+            .contains(&ManagedBlock::marker(export().meeting.id)),
+        "the renamed person's page keeps the meeting"
+    );
+}
+
+#[test]
+fn a_case_only_rename_on_a_case_sensitive_vault_moves_the_line_to_the_new_page() {
+    let vault = Vault::new();
+    if is_case_insensitive(&vault.root) {
+        return;
+    }
+    let destination = vault.destination_with(false, Some("People"));
+    let first = deliver(&destination, &with_anna_named("anna müller"), None);
+    deliver(&destination, &with_anna_named("Anna Müller"), Some(&first));
+
+    assert_eq!(
+        vault.list("People"),
+        ["Anna Müller.md", "Nicolai Schmid.md", "anna müller.md"],
+        "two names, two pages"
+    );
+    let marker = ManagedBlock::marker(export().meeting.id);
+    assert!(vault.text(ANNA_PAGE).contains(&marker));
+    assert!(
+        !vault.text("People/anna müller.md").contains(&marker),
+        "the old page is another file and loses the line"
+    );
+}
