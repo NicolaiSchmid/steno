@@ -91,15 +91,13 @@ impl LocalFolderSink {
         fs::create_dir(self.path(relative))
     }
 
-    /// Whether `left` and `right` are one file under two spellings, as on a
-    /// case-insensitive folder (APFS and NTFS by default) where `anna.md`
-    /// and `Anna.md` are the same page. On Unix by device and inode, so a
-    /// case-sensitive folder keeps two such names two files and a symlink
-    /// counts as its target; false when either is missing. Windows has no
-    /// stable file identity in `std`, so there the two paths are compared
-    /// NFC-normalised and lowercased, which is NTFS's default and folds a
-    /// rare case-sensitive directory's two pages into one: the stale line
-    /// then stays, nothing is lost.
+    /// Whether `left` and `right` are one file under two spellings, as
+    /// `anna.md` and `Anna.md` are on a case-insensitive folder (APFS and
+    /// NTFS by default). On Unix by device and inode (a symlink counts as
+    /// its target), false when either is missing. Windows has no stable file
+    /// identity in `std`, so there the paths are compared NFC-normalised and
+    /// lowercased, NTFS's default; in a rare case-sensitive directory the
+    /// stale line then stays, and nothing is lost.
     #[must_use]
     pub fn same_file(&self, left: &str, right: &str) -> bool {
         #[cfg(unix)]
