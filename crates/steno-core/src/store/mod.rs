@@ -254,12 +254,7 @@ impl Store {
     /// writer waits on the busy timeout instead of failing with
     /// `database is locked`.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let mut connection = self.lock();
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let value = body(&transaction)?;
-        self.before_commit(&transaction);
-        transaction.commit()?;
-        Ok(value)
+        self.commit_on(&mut self.lock(), body)
     }
 
     /// [`Store::write`] whose commit is on the disk when it returns, for
@@ -276,9 +271,22 @@ impl Store {
     /// them. Swift: `MeetingStore.writeDurably`.
     pub fn write_durably<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut connection = FullSync::hold(self.lock())?;
+        self.commit_on(&mut connection, body)
+    }
+
+    /// The `IMMEDIATE` transaction of [`Store::write`] on `connection`,
+    /// committed when `body` returns `Ok`.
+    fn commit_on<T>(
+        &self,
+        connection: &mut Connection,
+        body: impl FnOnce(&Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = body(&transaction)?;
-        self.before_commit(&transaction);
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(probe) = self.commit_probe.get() {
+            probe(&transaction);
+        }
         transaction.commit()?;
         Ok(value)
     }
@@ -290,15 +298,6 @@ impl Store {
     #[cfg(any(test, feature = "testing"))]
     pub fn probe_commits(&self, probe: impl Fn(&Connection) + Send + Sync + 'static) {
         let _ = self.commit_probe.set(Box::new(probe));
-    }
-
-    fn before_commit(&self, transaction: &Transaction<'_>) {
-        #[cfg(any(test, feature = "testing"))]
-        if let Some(probe) = self.commit_probe.get() {
-            probe(transaction);
-        }
-        #[cfg(not(any(test, feature = "testing")))]
-        let _ = transaction;
     }
 
     /// The migration identifiers recorded in `grdb_migrations`, in
