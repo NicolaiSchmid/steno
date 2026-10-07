@@ -134,8 +134,8 @@ default and the feature is opt-in, for UI work without a database.
 Platform backends behind traits, two implementations before generalising: `Capture`
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
 `SecretStore` (Keychain and the Windows credential store via `keyring`; the Secret
-Service over `zbus` on Linux, a 0600 file where no provider runs), `Updater` (Tauri updater on every
-platform; Sparkle retires at cutover).
+Service over `zbus` on Linux, a 0600 file where no provider runs or the keyring stays
+locked), `Updater` (Tauri updater on every platform; Sparkle retires at cutover).
 
 ## Transition
 
@@ -922,11 +922,41 @@ still has to draw the window side. `[ ]` is not ported yet.
   crate sets no label, where Swift wrote "Steno <key>"; lookups ignore it. The CLI and
   the app do not read each other on macOS and Windows, as Keychain and the file did
   not. On Linux the app keeps its secrets in the Secret Service (`SecretServiceStore`:
-  attributes `service` and `username`, label "Steno <key>"). On first use it moves what
-  the file holds into the service and deletes the file, so from then on the CLI reads
-  `STENO_<KEY>` or a file of its own, as on the Mac. With no provider on the session
-  bus, or a keyring the user leaves locked, the app keeps every secret in the file for
-  that run, and the two share it (a write is atomic under a lock).
+  attributes `service` and `username`, label "Steno <key>"), chosen once per process on
+  a thread of the store's own; a read never asks for the keyring's password (only that
+  choice and a write do), and a read made while the prompt is up fails, after which
+  `App::launch` builds the pipeline again and the host reads the key again once the
+  keyring opens (the handover stays off until the next start). The first launch with a
+  provider copies the file's entries into the service, reads them back and marks the
+  file (`"movedToSecretService": true`); a later launch whose own connection reads
+  every value back deletes the entries, and writes again any the provider lost. Before
+  the mark, a key both hold takes the file's value, except the handover identity, which
+  keeps the service's. After the mark, the file is no store: a key it lacks is an error
+  (`KeyringUnavailable::NotOpened`), not `None`, and a write fails, so a run that cannot
+  open the keyring neither mints an identity nor drops the API key. The CLI then reads
+  `STENO_<KEY>`, as on the Mac (an entry written into the file later is the app's to take
+  over at its next start). A value with a line break (the identity's PEM) is stored
+  base64 behind `steno-base64:`, as GNOME Keyring's unencrypted file (Omarchy's
+  default) rejects a whole keyring over one. A build
+  from before the mark cannot parse the marked file and fails every secret read and
+  write (no summaries key, no handover) rather than minting. With no provider, no
+  default collection, or a keyring the user leaves locked before the first move, the
+  app keeps every secret in the file for that run, shared with the CLI under the lock.
+  Tested against a fake Secret Service on a private `dbus-daemon` and once against
+  GNOME Keyring 50; `KWallet` and `KeePassXC` are untried (the manual checks are in
+  #221).
+- Handover identity guard, every platform: the identity's SHA-256 fingerprint is
+  recorded outside the secret store and the settings, in `handover-identity.json`
+  under the support directory (`steno.handoverIdentityFingerprint`, written
+  atomically; `FingerprintFile`), and every write of the identity goes through
+  `HandoverIdentity::store`, which records it. `HandoverIdentity::load_or_create`
+  returns `IdentityError::Unavailable` and mints nothing when the secret store cannot
+  be read, when it holds no identity while a fingerprint is recorded or a phone is
+  paired, or when the identity's fingerprint is not the recorded one; the handover is
+  then off for the run. It mints only with no phone paired, no fingerprint and no
+  identity. A rollback to the Swift app leaves the file alone; a lost record is
+  rewritten from the identity found while the paired phones, which the Swift app keeps,
+  hold the guard. Swift keeps its own identity in the Keychain and has no guard.
 - A summary re-run or a re-export the pipeline refuses (meeting busy, no LLM set up)
   is the call's error, as in Swift; one that fails after it started, a panic included,
   posts `MeetingEvent::OperationFailed`, a Rust addition (Swift awaited the call), and
