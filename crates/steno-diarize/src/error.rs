@@ -7,14 +7,16 @@
 use std::fmt;
 
 use crate::backend::BackendError;
-use crate::models::ModelError;
 
 /// What the diarizer reports when it cannot run.
 #[derive(Debug, thiserror::Error)]
 pub enum DiarizeError {
-    /// A model file could not be fetched or verified.
+    /// The ONNX models could not be installed: a download that failed or
+    /// was cut off, a file that failed its checksum, a folder that could
+    /// not be written ([`crate::models::ensure`]).
+    #[cfg(feature = "onnx")]
     #[error(transparent)]
-    Model(#[from] ModelError),
+    Model(#[from] steno_speech::SpeechError),
     /// A model loaded but is not the one the pipeline expects: its
     /// metadata or its declared shapes disagree with what the pipeline
     /// decodes.

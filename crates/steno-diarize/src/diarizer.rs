@@ -84,20 +84,24 @@ impl ModelDiarizer {
         }
     }
 
-    /// The ONNX Runtime backend over the model store: the two model files
-    /// are fetched on first use. `threads` is the intra-op thread count of
-    /// each session; zero lets ONNX Runtime decide.
+    /// The ONNX Runtime backend over `store`, `steno-speech`'s model store
+    /// (Steno's: the models directory's `onnx/` folder, with the speech
+    /// settings' mirror): the two model files are installed on first use
+    /// ([`crate::models::ensure`]). A load that fails, a download cut off
+    /// included, is tried again by the next call; a cut-off download
+    /// resumes there. `threads` is the intra-op thread count of each
+    /// session; zero lets ONNX Runtime decide.
     ///
     /// ```no_run
-    /// use steno_core::StenoPaths;
-    /// use steno_diarize::{DiarizerConfig, ModelDiarizer, ModelStore};
+    /// use steno_diarize::{DiarizerConfig, ModelDiarizer};
+    /// use steno_speech::ModelStore;
     ///
-    /// let store = ModelStore::for_paths(&StenoPaths::new("/tmp/steno-support"));
+    /// let store = ModelStore::in_models_directory("/tmp/steno-support/Models".as_ref());
     /// let diarizer = ModelDiarizer::onnx(DiarizerConfig::default(), store, 4);
     /// ```
     #[cfg(feature = "onnx")]
     #[must_use]
-    pub fn onnx(config: DiarizerConfig, store: crate::models::ModelStore, threads: usize) -> Self {
+    pub fn onnx(config: DiarizerConfig, store: steno_speech::ModelStore, threads: usize) -> Self {
         ModelDiarizer::new(
             config,
             Box::new(move || {

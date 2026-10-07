@@ -51,9 +51,9 @@ pub struct SpeechSettings {
     /// the probe costs no job), and the encoder runs on the CPU for the rest
     /// of the app's run. Ignored elsewhere.
     pub directml_on_windows: bool,
-    /// A mirror the speech models (Silero VAD and the Parakeet export) are
-    /// fetched from instead of their hosts ([`ModelStore::with_mirror`]);
-    /// the diarizer's models keep their hosts. `None` uses the hosts.
+    /// A mirror the ONNX models (Silero VAD, the Parakeet export and the
+    /// diarizer's two models) are fetched from instead of their hosts
+    /// ([`ModelStore::with_mirror`]). `None` uses the hosts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_mirror: Option<String>,
 }

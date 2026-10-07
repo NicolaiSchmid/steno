@@ -1,16 +1,18 @@
 //! The ONNX backend on the repository's two-voice `say` fixture: two
 //! speakers, as the Swift model test expects. Ignored because it needs the
-//! model files; set `STENO_MODELS_DIR` to a directory holding them or
-//! allow the download (about 32 MB).
+//! model files: set `STENO_MODELS_DIR` to a models directory holding
+//! `onnx/diarization/`, or allow the download (about 32 MB) into it or,
+//! without the variable, into the default models directory
+//! (`steno_speech::ModelStore::from_environment`).
 
 #![cfg(feature = "onnx")]
 
 use std::path::PathBuf;
 
 use steno_core::AudioBuffer16k;
-use steno_diarize::models::ModelStore;
 use steno_diarize::onnx::OnnxBackend;
 use steno_diarize::{DiarizerConfig, Pipeline};
+use steno_speech::ModelStore;
 
 fn fixture(name: &str) -> AudioBuffer16k {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -27,10 +29,7 @@ fn fixture(name: &str) -> AudioBuffer16k {
 }
 
 fn store() -> ModelStore {
-    ModelStore::new(std::env::var_os("STENO_MODELS_DIR").map_or_else(
-        || std::env::temp_dir().join("steno-diarize-models"),
-        PathBuf::from,
-    ))
+    ModelStore::from_environment()
 }
 
 #[test]

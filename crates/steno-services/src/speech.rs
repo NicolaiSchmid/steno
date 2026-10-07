@@ -248,12 +248,6 @@ pub fn coreml_parakeet_installed(directory: &Path) -> bool {
     })
 }
 
-/// The diarization models beside the speech ones.
-#[must_use]
-pub fn diarize_store(speech: &ModelStore) -> steno_diarize::models::ModelStore {
-    steno_diarize::models::ModelStore::new(speech.root().join("diarization"))
-}
-
 /// The engine `engine_id` names, where [`SpeechSetup::runtime`] runs it:
 /// on the Mac, by default, the `CoreML` Parakeet v3 on the Neural Engine;
 /// otherwise [`sidecar_engine`], the fp32 ONNX export of the same model.
@@ -309,7 +303,7 @@ pub(crate) type BuildEngine = Box<dyn Fn(SpeechRuntime) -> Arc<dyn SpeechEngine>
 /// while a pipeline runs on it ([`WeakSpeechEngine`]): a reload back to it
 /// while a retired pipeline still transcribes gets the same engine, and
 /// its model is freed once no pipeline holds it. The diarizer, which
-/// depends on the models directory alone, is built with this value.
+/// depends on the setup's model store alone, is built with this value.
 ///
 /// ```no_run
 /// use steno_core::{Settings, StenoPaths};
@@ -349,7 +343,7 @@ impl SpeechEngines {
     /// Engines from `build` instead, for the tests.
     pub(crate) fn with_builder(setup: SpeechSetup, build: BuildEngine) -> Self {
         SpeechEngines {
-            diarizer: diarizer(&setup.models_directory),
+            diarizer: diarizer(&setup),
             setup,
             build,
             kept: std::sync::Mutex::default(),
@@ -385,8 +379,8 @@ impl SpeechEngines {
         }
     }
 
-    /// The diarizer every pipeline runs, built over the models directory
-    /// ([`diarizer`]).
+    /// The diarizer every pipeline runs, built over the setup's model
+    /// store ([`diarizer`]).
     #[must_use]
     pub fn diarizer(&self) -> Arc<dyn Diarizer> {
         self.diarizer.clone()
@@ -514,13 +508,17 @@ impl SpeechEngine for LanguageTaggingEngine {
     }
 }
 
-/// The ONNX diarizer under `models_directory`, loading its two models on
-/// first use.
+/// The ONNX diarizer over [`SpeechSetup::model_store`], the store and
+/// mirror the speech models install through: it loads its two models on
+/// first use, installing them into `<models directory>/onnx/diarization/`
+/// first when a file is missing (`steno_diarize::models`). A load that
+/// fails, a download cut off included, fails that call only; the next
+/// call tries again and resumes the download.
 #[must_use]
-pub fn diarizer(models_directory: &Path) -> Arc<dyn Diarizer> {
+pub fn diarizer(setup: &SpeechSetup) -> Arc<dyn Diarizer> {
     Arc::new(ModelDiarizer::onnx(
         DiarizerConfig::default(),
-        diarize_store(&ModelStore::in_models_directory(models_directory)),
+        setup.model_store(),
         ONNX_THREADS,
     ))
 }
@@ -530,7 +528,8 @@ pub fn diarizer(models_directory: &Path) -> Arc<dyn Diarizer> {
 /// `CoreML` model (installed by the Swift app); elsewhere, and on the Mac
 /// with the sidecar chosen, the ONNX export with Silero VAD in front.
 pub struct ModelStoreSpeechModels {
-    /// The ONNX store, with the speech settings' mirror.
+    /// The ONNX store, with the speech settings' mirror: the speech models
+    /// and the diarizer's.
     pub speech: ModelStore,
     /// The `CoreML` Parakeet's directory.
     pub coreml: PathBuf,
@@ -561,19 +560,14 @@ impl ModelStoreSpeechModels {
         self.runs_on_coreml(PARAKEET_V3)
     }
 
-    fn speech_asset(asset: ModelAsset) -> Option<steno_speech::ModelAsset> {
+    /// The asset of the ONNX store behind a row: the fp32 Parakeet export,
+    /// or the diarizer's two models.
+    fn onnx_asset(asset: ModelAsset) -> Option<steno_speech::ModelAsset> {
         match asset {
             ModelAsset::ParakeetV3 => Some(steno_speech::ModelAsset::parakeet_v3_fp32()),
+            ModelAsset::OfflineDiarizer => Some(steno_diarize::models::asset()),
             _ => None,
         }
-    }
-
-    fn diarizer_paths(&self) -> [PathBuf; 2] {
-        let store = diarize_store(&self.speech);
-        [
-            store.path(&steno_diarize::models::PYANNOTE_SEGMENTATION_3_0),
-            store.path(&steno_diarize::models::WESPEAKER_RESNET34_LM),
-        ]
     }
 
     fn size_of(path: &Path) -> i64 {
@@ -586,6 +580,43 @@ impl ModelStoreSpeechModels {
             })
         }
         i64::try_from(walk(path)).unwrap_or(i64::MAX)
+    }
+
+    /// Installs `assets` into the ONNX store one after another, reporting
+    /// the fraction of all their bytes and the file under way, then
+    /// `(1.0, "Installed")`.
+    fn install(
+        &self,
+        assets: &[steno_speech::ModelAsset],
+        progress: &mut dyn FnMut(f64, &str),
+    ) -> BoundaryResult<()> {
+        let total = assets
+            .iter()
+            .map(steno_speech::ModelAsset::total_size)
+            .sum::<u64>()
+            .max(1);
+        let mut throttle = ProgressThrottle::default();
+        let mut received_before: u64 = 0;
+        for asset in assets {
+            self.speech.ensure(asset, &mut |report| {
+                let earlier_files: u64 = asset
+                    .files
+                    .iter()
+                    .take_while(|f| f.name != report.file)
+                    .map(|f| f.size)
+                    .sum();
+                #[allow(clippy::cast_precision_loss)]
+                let fraction = ((received_before + earlier_files + report.received) as f64
+                    / total as f64)
+                    .min(1.0);
+                if throttle.forwards(fraction, report.file) {
+                    progress(fraction, report.file);
+                }
+            })?;
+            received_before += asset.total_size();
+        }
+        progress(1.0, "Installed");
+        Ok(())
     }
 }
 
@@ -605,12 +636,9 @@ impl SpeechModels for ModelStoreSpeechModels {
 
     fn is_installed(&self, asset: ModelAsset) -> bool {
         match asset {
-            ModelAsset::OfflineDiarizer => self.diarizer_paths().iter().all(|path| path.is_file()),
             // The `CoreML` model, or the export with Silero VAD.
             ModelAsset::ParakeetV3 => self.engine_installed(PARAKEET_V3),
-            other => {
-                Self::speech_asset(other).is_some_and(|asset| self.speech.is_installed(&asset))
-            }
+            other => Self::onnx_asset(other).is_some_and(|asset| self.speech.is_installed(&asset)),
         }
     }
 
@@ -621,11 +649,8 @@ impl SpeechModels for ModelStoreSpeechModels {
             return None;
         }
         Some(match asset {
-            ModelAsset::OfflineDiarizer => {
-                self.diarizer_paths().iter().map(|p| Self::size_of(p)).sum()
-            }
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Self::size_of(&self.coreml),
-            other => Self::size_of(&self.speech.directory(&Self::speech_asset(other)?)),
+            other => Self::size_of(&self.speech.directory(&Self::onnx_asset(other)?)),
         })
     }
 
@@ -636,50 +661,15 @@ impl SpeechModels for ModelStoreSpeechModels {
     ) -> BoundaryResult<()> {
         match asset {
             ModelAsset::OfflineDiarizer => {
-                let store = diarize_store(&self.speech);
-                progress(0.0, "Segmentation model");
-                store.ensure(&steno_diarize::models::PYANNOTE_SEGMENTATION_3_0)?;
-                progress(0.5, "Speaker embedding model");
-                store.ensure(&steno_diarize::models::WESPEAKER_RESNET34_LM)?;
-                progress(1.0, "Installed");
-                Ok(())
+                self.install(&[steno_diarize::models::asset()], progress)
             }
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Err(
                 "This build cannot download the CoreML Parakeet v3 model; install it from the Steno Mac app."
                     .into(),
             ),
-            ModelAsset::ParakeetV3 => {
-                // Silero VAD (640 KB) too, so the ONNX engine is ready
-                // offline once the row says Installed.
-                let assets = steno_speech::ModelAsset::all();
-                let total = assets
-                    .iter()
-                    .map(steno_speech::ModelAsset::total_size)
-                    .sum::<u64>()
-                    .max(1);
-                let mut throttle = ProgressThrottle::default();
-                let mut received_before: u64 = 0;
-                for asset in &assets {
-                    self.speech.ensure(asset, &mut |report| {
-                        let earlier_files: u64 = asset
-                            .files
-                            .iter()
-                            .take_while(|f| f.name != report.file)
-                            .map(|f| f.size)
-                            .sum();
-                        #[allow(clippy::cast_precision_loss)]
-                        let fraction = ((received_before + earlier_files + report.received) as f64
-                            / total as f64)
-                            .min(1.0);
-                        if throttle.forwards(fraction, report.file) {
-                            progress(fraction, report.file);
-                        }
-                    })?;
-                    received_before += asset.total_size();
-                }
-                progress(1.0, "Installed");
-                Ok(())
-            }
+            // Silero VAD (640 KB) too, so the ONNX engine is ready offline
+            // once the row says Installed.
+            ModelAsset::ParakeetV3 => self.install(&steno_speech::ModelAsset::all(), progress),
             other => Err(format!("{} has no Rust engine yet", other.as_str()).into()),
         }
     }
@@ -689,14 +679,6 @@ impl SpeechModels for ModelStoreSpeechModels {
     /// downloaded either way.
     fn remove(&self, asset: ModelAsset) -> BoundaryResult<()> {
         match asset {
-            ModelAsset::OfflineDiarizer => {
-                for path in self.diarizer_paths() {
-                    if path.exists() {
-                        std::fs::remove_file(&path)?;
-                    }
-                }
-                Ok(())
-            }
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
                 match std::fs::remove_dir_all(&self.coreml) {
                     Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.into()),
@@ -704,7 +686,7 @@ impl SpeechModels for ModelStoreSpeechModels {
                 }
             }
             other => {
-                let asset = Self::speech_asset(other)
+                let asset = Self::onnx_asset(other)
                     .ok_or_else(|| format!("{} has no Rust engine yet", other.as_str()))?;
                 Ok(self.speech.remove(&asset)?)
             }
@@ -817,12 +799,10 @@ pub(crate) mod testing {
         }
     }
 
-    /// The two ONNX diarizer models, as placeholder files.
+    /// The two ONNX diarizer models, each a sparse file of its manifest
+    /// size.
     pub fn install_onnx_diarizer(models: &ModelStoreSpeechModels) {
-        for path in models.diarizer_paths() {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(path, b"onnx").unwrap();
-        }
+        install_speech_asset(models, &steno_diarize::models::asset());
     }
 
     /// `asset`'s files in the speech store, each a sparse file of its
@@ -1013,6 +993,74 @@ mod tests {
                 .speech
                 .is_installed(&steno_speech::ModelAsset::silero_vad())
         );
+    }
+
+    /// The diarizer's row reads its asset in the ONNX store,
+    /// `onnx/diarization/`: installed only once both files have their
+    /// manifest size (a file cut short does not count), its size theirs,
+    /// and removing it deletes the folder.
+    #[test]
+    fn the_diarizer_row_reads_its_asset_in_the_onnx_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = testing::models_in(dir.path());
+        let asset = steno_diarize::models::asset();
+        let folder = dir.path().join("onnx").join("diarization");
+        assert_eq!(models.speech.directory(&asset), folder);
+        assert!(!models.is_installed(ModelAsset::OfflineDiarizer));
+        testing::install_onnx_diarizer(&models);
+        assert!(models.is_installed(ModelAsset::OfflineDiarizer));
+        assert_eq!(
+            models.installed_size(ModelAsset::OfflineDiarizer),
+            Some(i64::try_from(asset.total_size()).unwrap())
+        );
+        let embedding = &asset.files[1];
+        std::fs::File::options()
+            .write(true)
+            .open(folder.join(&embedding.name))
+            .unwrap()
+            .set_len(embedding.size - 1)
+            .unwrap();
+        assert!(!models.is_installed(ModelAsset::OfflineDiarizer));
+        assert_eq!(models.installed_size(ModelAsset::OfflineDiarizer), None);
+        models.remove(ModelAsset::OfflineDiarizer).unwrap();
+        assert!(!folder.exists());
+    }
+
+    /// The diarizer's download in Settings goes through the ONNX store
+    /// with the speech settings' mirror, reporting the file under way: here
+    /// a mirror that serves junk of the first file's size, which fails its
+    /// checksum and installs nothing.
+    #[test]
+    fn the_diarizer_download_goes_through_the_mirror() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = steno_diarize::models::asset();
+        let first = &asset.files[0];
+        let models = ModelStoreSpeechModels::new(&testing::setup(
+            dir.path(),
+            SpeechSettings {
+                models_mirror: Some(junk_mirror(usize::try_from(first.size).unwrap())),
+                ..SpeechSettings::default()
+            },
+        ));
+        let mut reports = Vec::new();
+        let error = models
+            .download(ModelAsset::OfflineDiarizer, &mut |fraction, file| {
+                reports.push((fraction, file.to_owned()));
+            })
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("sha256") && error.contains(&first.name),
+            "{error}"
+        );
+        assert!(
+            !reports.is_empty()
+                && reports
+                    .iter()
+                    .all(|(fraction, file)| *file == first.name && *fraction < 1.0),
+            "{reports:?}"
+        );
+        assert!(!models.is_installed(ModelAsset::OfflineDiarizer));
     }
 
     /// A mirror on 127.0.0.1 that answers every request with `len` bytes

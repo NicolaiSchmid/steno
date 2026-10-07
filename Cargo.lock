@@ -4864,14 +4864,12 @@ dependencies = [
  "rustfft",
  "serde",
  "serde_json",
- "sha2",
  "steno-core",
  "steno-speech",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "ureq",
 ]
 
 [[package]]

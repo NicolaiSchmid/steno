@@ -18,7 +18,7 @@ use ort::value::Tensor;
 use crate::backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 use crate::error::DiarizeError;
 use crate::fbank::{Fbank, FbankConfig};
-use crate::models::{ModelStore, PYANNOTE_SEGMENTATION_3_0, WESPEAKER_RESNET34_LM};
+use crate::models::ModelPaths;
 use crate::to_f64;
 
 /// Fbank frames the embedding model is given at least; under that the
@@ -53,22 +53,20 @@ impl std::fmt::Debug for OnnxBackend {
 }
 
 impl OnnxBackend {
-    /// Loads both models from the store, fetching them when needed.
-    pub fn from_store(store: &ModelStore, threads: usize) -> Result<Self, DiarizeError> {
-        let segmentation = store.ensure(&PYANNOTE_SEGMENTATION_3_0)?;
-        let embedding = store.ensure(&WESPEAKER_RESNET34_LM)?;
-        OnnxBackend::load(&segmentation, &embedding, threads)
+    /// Loads both models from `store`, installing them first when a file
+    /// is missing ([`crate::models::ensure`]).
+    pub fn from_store(
+        store: &steno_speech::ModelStore,
+        threads: usize,
+    ) -> Result<Self, DiarizeError> {
+        OnnxBackend::load(&crate::models::ensure(store)?, threads)
     }
 
     /// Loads the two model files. `threads` is the intra-op thread count
     /// of each session; zero lets ONNX Runtime decide.
-    pub fn load(
-        segmentation: &Path,
-        embedding: &Path,
-        threads: usize,
-    ) -> Result<Self, DiarizeError> {
-        let segmentation = session(segmentation, threads)?;
-        let embedding = session(embedding, threads)?;
+    pub fn load(paths: &ModelPaths, threads: usize) -> Result<Self, DiarizeError> {
+        let segmentation = session(&paths.segmentation, threads)?;
+        let embedding = session(&paths.embedding, threads)?;
         let geometry = geometry_of(&segmentation)?;
         let metadata = embedding.metadata().map_err(DiarizeError::backend)?;
         let framework = metadata.custom("framework").unwrap_or_default();

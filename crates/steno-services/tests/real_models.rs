@@ -60,7 +60,7 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     }
     let speech_store = setup.model_store();
     let engine = steno_services::speech::speech_engine(&settings.speech_engine_id, &setup);
-    let diarizer = steno_services::speech::diarizer(&models);
+    let diarizer = steno_services::speech::diarizer(&setup);
     let vault = dir.path().join("vault");
     let destination: Arc<dyn Destination> = Arc::new(FakeDestination::new(&vault));
     let dispatcher = Arc::new(steno_adapters::DeliveryCoordinator::with_destinations(

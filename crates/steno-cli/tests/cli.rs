@@ -592,15 +592,21 @@ fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
     let home = home.path();
     let models = home.join("models");
 
-    // The diarizer's two files in `--models-dir`.
+    // The diarizer's two files in `--models-dir`, each a sparse file of
+    // its manifest size.
     let diarization = models.join("onnx").join("diarization");
     std::fs::create_dir_all(&diarization).unwrap();
-    let diarizer_files = [
-        diarization.join(steno_diarize::models::PYANNOTE_SEGMENTATION_3_0.file_name),
-        diarization.join(steno_diarize::models::WESPEAKER_RESNET34_LM.file_name),
-    ];
-    for file in &diarizer_files {
-        std::fs::write(file, b"onnx").unwrap();
+    let asset = steno_diarize::models::asset();
+    let diarizer_files: Vec<_> = asset
+        .files
+        .iter()
+        .map(|file| diarization.join(&file.name))
+        .collect();
+    for (path, file) in diarizer_files.iter().zip(&asset.files) {
+        std::fs::File::create(path)
+            .unwrap()
+            .set_len(file.size)
+            .unwrap();
     }
     let list = dev_models(home, &["list"]);
     assert!(

@@ -886,7 +886,8 @@ struct SweepCluster {
 
 impl DiarizeSweep {
     async fn run(self) -> Outcome {
-        let store = steno_speech::ModelStore::in_models_directory(&self.models.directory()?);
+        // The app's store: the models directory's `onnx/`, with the mirror.
+        let store = self.models.setup()?.model_store();
         let mut runs = Vec::new();
         for threshold in &self.thresholds {
             let config = DiarizerConfig {
@@ -895,11 +896,8 @@ impl DiarizeSweep {
                 refines_clusters: !self.no_refinement,
                 ..DiarizerConfig::default()
             };
-            let diarizer = ModelDiarizer::onnx(
-                config,
-                steno_services::speech::diarize_store(&store),
-                steno_services::speech::ONNX_THREADS,
-            );
+            let diarizer =
+                ModelDiarizer::onnx(config, store.clone(), steno_services::speech::ONNX_THREADS);
             for file in &self.files {
                 let samples = WavFile::read_16k_mono(file)
                     .map_err(|e| Failure::runtime(format!("{}: {e}", file.display())))?;
