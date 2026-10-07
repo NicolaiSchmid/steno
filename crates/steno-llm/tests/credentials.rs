@@ -761,11 +761,15 @@ async fn a_refresh_that_cannot_connect_names_the_cause() {
 
 /// Answers the refresh with `access` and `rt_2` after turning `auth.json`
 /// into a non-empty directory, so the rename of the write-back fails.
-#[cfg(unix)]
+/// Later refreshes get `access` and `rt_3`, with the directory left as it
+/// is.
 fn occupy_the_file_during_the_refresh(home: &CodexHome, access: &str) {
     let file = home.file();
     let access = access.to_owned();
     home.server.respond(Arc::new(move |_| {
+        if file.is_dir() {
+            return Some(scripts.token_refresh(&access, Some("rt_3"), None));
+        }
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         std::fs::write(file.join("occupied"), b"x").unwrap();
@@ -773,17 +777,32 @@ fn occupy_the_file_during_the_refresh(home: &CodexHome, access: &str) {
     }));
 }
 
+/// The names of the temporaries failed renames left in `home`.
+fn leftovers(home: &CodexHome) -> Vec<String> {
+    file_names(home.directory.path())
+        .into_iter()
+        .filter(|name| name.starts_with(".auth.json.steno-"))
+        .collect()
+}
+
+/// The refresh tokens the store posted, in order.
+fn posted_refresh_tokens(home: &CodexHome) -> Vec<serde_json::Value> {
+    home.server
+        .requests()
+        .iter()
+        .map(|request| refresh_body(request)["refresh_token"].clone())
+        .collect()
+}
+
 /// A rename that fails still answers with the new tokens, which the store
 /// keeps in memory, and leaves the temporary file with them in it in case
 /// the app quits first. Once the file can be written again, the next
-/// call writes the kept tokens, removes the temporary and posts nothing:
-/// the posted refresh token is spent.
-#[cfg(unix)]
+/// call writes the kept tokens over the file's current contents, removes
+/// the temporary and posts nothing: the posted refresh token is spent.
 #[tokio::test]
 async fn a_failed_rename_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
     let home = CodexHome::new().await;
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
-    let original = std::fs::read(home.file()).unwrap();
     let fresh = CodexHome::access_token(3_600, "plus");
     occupy_the_file_during_the_refresh(&home, &fresh);
     let store = home.store();
@@ -802,9 +821,16 @@ async fn a_failed_rename_keeps_the_new_sign_in_and_writes_it_on_the_next_call() 
     assert_eq!(kept["tokens"]["refresh_token"], "rt_2");
     assert_eq!(kept["tokens"]["access_token"], json!(fresh));
 
-    // The file is back as it was, with the spent token.
+    // The file is back with the spent token, and a key the CLI wrote
+    // meanwhile.
     std::fs::remove_dir_all(home.file()).unwrap();
-    std::fs::write(home.file(), &original).unwrap();
+    home.write(AuthFile {
+        extra: vec![
+            ("written_by_cli".to_owned(), json!("yes")),
+            ("agent_identity".to_owned(), json!({"keep": true})),
+        ],
+        ..AuthFile::default().access(&CodexHome::access_token(10, "plus"))
+    });
     let again = store.current().await.unwrap();
     assert_eq!(again.refresh_token, "rt_2");
     assert_eq!(
@@ -814,7 +840,106 @@ async fn a_failed_rename_keeps_the_new_sign_in_and_writes_it_on_the_next_call() 
     );
     assert_eq!(home.document()["tokens"]["refresh_token"], "rt_2");
     assert_eq!(home.document()["agent_identity"], json!({"keep": true}));
+    assert_eq!(home.document()["written_by_cli"], "yes");
     assert_eq!(file_names(home.directory.path()), ["auth.json"]);
+}
+
+/// A rename that keeps failing leaves one temporary, not one per call:
+/// the second refresh's replaces the first's, since it holds newer tokens.
+#[tokio::test]
+async fn a_rename_that_keeps_failing_leaves_only_the_newest_temporary() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    occupy_the_file_during_the_refresh(&home, &CodexHome::access_token(10, "plus"));
+    let store = home.store();
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    let first = leftovers(&home);
+    assert_eq!(first.len(), 1, "{first:?}");
+    // The kept tokens expire too, and the next call refreshes them.
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_3");
+    assert_eq!(
+        posted_refresh_tokens(&home),
+        [json!("rt_original"), json!("rt_2")]
+    );
+    let second = leftovers(&home);
+    assert_eq!(second.len(), 1, "{second:?}");
+    assert_ne!(first, second);
+    let kept: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.directory.path().join(&second[0])).unwrap())
+            .unwrap();
+    assert_eq!(kept["tokens"]["refresh_token"], "rt_3");
+}
+
+/// A file that does not parse (the CLI half way through writing it) gets
+/// the kept tokens for that call and is not written over; once it holds
+/// the spent token again, the next call writes them.
+#[tokio::test]
+async fn a_file_that_does_not_parse_gets_the_kept_sign_in_without_being_written() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let fresh = CodexHome::access_token(3_600, "plus");
+    occupy_the_file_during_the_refresh(&home, &fresh);
+    let store = home.store();
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    std::fs::remove_dir_all(home.file()).unwrap();
+    let half_written = br#"{"tokens": {"refresh_tok"#;
+    std::fs::write(home.file(), half_written).unwrap();
+    let credentials = store.current().await.unwrap();
+    assert_eq!(credentials.refresh_token, "rt_2");
+    assert_eq!(credentials.access_token, fresh);
+    assert_eq!(std::fs::read(home.file()).unwrap(), half_written);
+    assert_eq!(leftovers(&home).len(), 1, "the temporary stays");
+
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    assert_eq!(home.document()["tokens"]["refresh_token"], "rt_2");
+    assert_eq!(file_names(home.directory.path()), ["auth.json"]);
+    assert_eq!(home.server.request_count(), 1);
+}
+
+/// A file that parses but holds another refresh token wins even when
+/// Steno cannot read a sign-in from it (here no account id): the kept
+/// tokens go and the file is left as it is.
+#[tokio::test]
+async fn a_parsed_file_with_another_token_wins_even_when_it_is_unreadable_to_steno() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    occupy_the_file_during_the_refresh(&home, &CodexHome::access_token(3_600, "plus"));
+    let store = home.store();
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    std::fs::remove_dir_all(home.file()).unwrap();
+    home.write(AuthFile {
+        id: None,
+        account_id: None,
+        ..AuthFile::default().refresh("rt_edited")
+    });
+    let edited = std::fs::read(home.file()).unwrap();
+    let error = store.current().await.unwrap_err();
+    assert!(
+        matches!(error, CodexCredentialError::Malformed(_)),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(home.file()).unwrap(), edited);
+    assert_eq!(file_names(home.directory.path()), ["auth.json"]);
+    assert_eq!(home.server.request_count(), 1);
+}
+
+/// A `codex logout` after a failed write-back stays signed out: the kept
+/// tokens and their temporary go.
+#[tokio::test]
+async fn a_logout_after_a_failed_write_stays_signed_out() {
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    occupy_the_file_during_the_refresh(&home, &CodexHome::access_token(3_600, "plus"));
+    let store = home.store();
+    assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
+    std::fs::remove_dir_all(home.file()).unwrap();
+    assert_eq!(
+        store.current().await.unwrap_err(),
+        CodexCredentialError::NotSignedIn
+    );
+    assert_eq!(file_names(home.directory.path()), Vec::<String>::new());
+    assert_eq!(home.server.request_count(), 1);
 }
 
 /// A sign-in file that cannot be written at all (the folder is read-only)
@@ -838,8 +963,9 @@ async fn a_failed_write_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
     home.server
         .enqueue([scripts.token_refresh(&fresh, Some("rt_2"), None)]);
     let store = home.store();
-    let credentials = store.current().await.unwrap();
+    let result = store.current().await;
     std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let credentials = result.unwrap();
     assert_eq!(credentials.access_token, fresh);
     assert_eq!(credentials.refresh_token, "rt_2");
     assert_eq!(
@@ -860,10 +986,51 @@ async fn a_failed_write_keeps_the_new_sign_in_and_writes_it_on_the_next_call() {
     assert_eq!(home.document()["tokens"]["access_token"], json!(fresh));
 }
 
+/// A second refresh while the write keeps failing posts the kept token,
+/// not the spent one, and its tokens are what the file gets once it can
+/// be written.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_second_refresh_while_the_write_keeps_failing_posts_the_kept_token() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let home = CodexHome::new().await;
+    home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
+    let directory = home.directory.path().to_owned();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+    if std::fs::File::create(directory.join("probe")).is_ok() {
+        // Root writes past the mode; nothing to test.
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        return;
+    }
+    let fresh = CodexHome::access_token(3_600, "plus");
+    home.server.enqueue([
+        scripts.token_refresh(&CodexHome::access_token(10, "plus"), Some("rt_2"), None),
+        scripts.token_refresh(&fresh, Some("rt_3"), None),
+    ]);
+    let store = home.store();
+    let first = store.current().await;
+    let second = store.current().await;
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(first.unwrap().refresh_token, "rt_2");
+    assert_eq!(second.unwrap().refresh_token, "rt_3");
+    assert_eq!(
+        home.document()["tokens"]["refresh_token"],
+        "rt_original",
+        "nothing was written"
+    );
+
+    assert_eq!(store.current().await.unwrap().access_token, fresh);
+    assert_eq!(
+        posted_refresh_tokens(&home),
+        [json!("rt_original"), json!("rt_2")]
+    );
+    assert_eq!(home.document()["tokens"]["refresh_token"], "rt_3");
+    assert_eq!(file_names(&directory), ["auth.json"]);
+}
+
 /// A file the user changed after a failed write-back (a new `codex
 /// login`) wins over the tokens kept in memory, and the temporary they
 /// left goes.
-#[cfg(unix)]
 #[tokio::test]
 async fn a_new_login_after_a_failed_write_wins_over_the_kept_sign_in() {
     let home = CodexHome::new().await;
