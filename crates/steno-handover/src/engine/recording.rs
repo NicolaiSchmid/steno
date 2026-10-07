@@ -709,19 +709,51 @@ mod tests {
         );
     }
 
-    /// Y's receipt as Y's first announce makes it at its `change`.
-    fn made(recording_id: Uuid, y: &PairedDevice, now: DateTime<Utc>) -> HandoverReceipt {
-        HandoverReceipt {
+    /// Phone Y's first announce of `ours`, whose read found no receipt,
+    /// from the files lock to its save as `Engine::announce` runs it, with
+    /// `meanwhile` editing the receipt memory holds between its `change`
+    /// and its opening, as requests on other threads that take no files
+    /// lock would. Returns what the opening returned.
+    async fn first_announce(
+        engine: &Engine,
+        ours: &RecordingMetadata,
+        y: &PairedDevice,
+        meanwhile: impl FnOnce(&mut HandoverReceipt),
+    ) -> Option<std::io::Result<()>> {
+        let recording_id = ours.recording_id;
+        let now = (engine.now)();
+        let made = HandoverReceipt {
             recording_id,
             device_id: y.id,
             state: HandoverState::Receiving,
-            byte_count: 3,
-            sha256: vec![7; 32],
-            chunk_size: 64 * 1024,
+            byte_count: ours.byte_count,
+            sha256: ours.sha256.clone(),
+            chunk_size: ours.chunk_size,
             received_chunks: Vec::new(),
             created_at: now,
             updated_at: now,
-        }
+        };
+        let (receipt, place, opened) = {
+            let files = engine.files();
+            let (receipt, place) = engine
+                .change(
+                    recording_id,
+                    |held| held.map_or(Ok(made), |_| Err(())),
+                    |_| {},
+                )
+                .unwrap();
+            meanwhile(
+                engine
+                    .state()
+                    .active_receipts
+                    .get_mut(&recording_id)
+                    .unwrap(),
+            );
+            let opened = engine.open_files(&files, ours, y.id);
+            (receipt, place, opened)
+        };
+        engine.save(receipt, place).await.unwrap();
+        opened
     }
 
     #[tokio::test]
@@ -804,28 +836,14 @@ mod tests {
         engine.inbox.begin(&theirs).unwrap();
         std::fs::write(engine.inbox.partial(recording_id), [9; 4]).unwrap();
 
-        let (receipt, place, opened) = {
-            let files = engine.files();
-            let (receipt, place) = engine
-                .change(
-                    recording_id,
-                    |held| held.map_or(Ok(made(recording_id, &y, now)), |_| Err(())),
-                    |_| {},
-                )
-                .unwrap();
-            let written_back = HandoverReceipt {
+        let opened = first_announce(&engine, &metadata(recording_id, 3, "Y"), &y, |held| {
+            *held = HandoverReceipt {
                 device_id: x.id,
                 byte_count: theirs.byte_count,
-                ..receipt.clone()
+                ..held.clone()
             };
-            engine
-                .state()
-                .active_receipts
-                .insert(recording_id, written_back);
-            let opened = engine.open_files(&files, &metadata(recording_id, 3, "Y"), y.id);
-            (receipt, place, opened)
-        };
-        engine.save(receipt, place).await.unwrap();
+        })
+        .await;
 
         assert!(opened.is_none(), "Y's announce is answered 401");
         assert_eq!(
@@ -863,28 +881,10 @@ mod tests {
         engine.inbox.prepare().unwrap();
         std::fs::write(engine.inbox.verified(recording_id, ours.format), [5; 8]).unwrap();
 
-        let (receipt, place, opened) = {
-            let files = engine.files();
-            let (receipt, place) = engine
-                .change(
-                    recording_id,
-                    |held| held.map_or(Ok(made(recording_id, &y, now)), |_| Err(())),
-                    |_| {},
-                )
-                .unwrap();
-            engine
-                .state()
-                .active_receipts
-                .get_mut(&recording_id)
-                .unwrap()
-                .received_chunks
-                .push(0);
-            let opened = engine.open_files(&files, &ours, y.id);
-            (receipt, place, opened)
-        };
-        engine.save(receipt, place).await.unwrap();
-
-        opened.unwrap().unwrap();
+        first_announce(&engine, &ours, &y, |held| held.received_chunks.push(0))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(
             !engine.inbox.has_verified(recording_id, ours.format),
             "the waiting verified file is gone"
