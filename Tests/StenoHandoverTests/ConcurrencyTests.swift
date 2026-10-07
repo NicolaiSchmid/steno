@@ -444,8 +444,8 @@ import Testing
     // the same recording id and sends chunk 0. The verify then answers 401
     // and finds the other phone's receipt in memory, so its refusal keeps
     // that receipt, its partial and its sidecar, and the other phone's
-    // upload completes. Gone, they would be answered 404 "announce again",
-    // and the other phone would send every chunk again.
+    // upload completes. Had they gone, the other phone would be answered
+    // 404 "announce again" and would send every chunk again.
     let chunkSize = 64 * 1024
     try await TestService.run(chunkSize: chunkSize, start: false) { test in
       let held = HeldHash()

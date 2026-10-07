@@ -15,6 +15,8 @@ struct MovingIntake: HandoverIntake {
   func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws -> UUID {
     let taken = directory.appendingPathComponent(file.lastPathComponent)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    // A later admission of the same recording id (another phone's, after a
+    // revoke) replaces the earlier one's file.
     try? FileManager.default.removeItem(at: taken)
     try FileManager.default.moveItem(at: file, to: taken)
     do {
