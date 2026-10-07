@@ -22,6 +22,8 @@ chrono-tz.workspace = true
 iana-time-zone.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# `Destination::deliver` runs the blocking delivery under `spawn_blocking`.
+tokio.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
 
@@ -30,7 +32,6 @@ uuid.workspace = true
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-adapters = { path = ".", features = ["testing"] }
 tempfile.workspace = true
-tokio.workspace = true
 
 [lints]
 workspace = true

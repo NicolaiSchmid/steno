@@ -208,9 +208,9 @@ impl ObsidianFolderDestination {
             .map_err(|_| ObsidianError::VaultNotWritable(self.settings.vault_path.clone()))
     }
 
-    /// [`Destination::deliver`] without the boundary error wrapper; the CLI
-    /// calls it directly. Blocks while another delivery into the same vault
-    /// runs in this process (`vault_lock`).
+    /// [`Destination::deliver`] without the boundary error wrapper and on
+    /// the calling thread; the CLI calls it directly. Blocks while another
+    /// delivery into the same vault runs in this process (`vault_lock`).
     pub fn deliver_meeting(
         &self,
         meeting: &MeetingExport,
@@ -546,11 +546,28 @@ impl Destination for ObsidianFolderDestination {
         Ok(self.validate_vault()?)
     }
 
+    /// [`ObsidianFolderDestination::deliver_meeting`] on tokio's blocking
+    /// pool: it waits on the vault lock and does blocking file I/O (the
+    /// `fsync`ed writes, the audio copy), which would otherwise park a
+    /// runtime worker. A panic inside it unwinds here, as it did inline.
     async fn deliver(
         &self,
         meeting: &MeetingExport,
         previous: Option<&DeliveryReceipt>,
     ) -> BoundaryResult<DeliveryReceipt> {
-        Ok(self.deliver_meeting(meeting, previous)?)
+        let destination = self.clone();
+        let meeting = meeting.clone();
+        let previous = previous.cloned();
+        let delivered = tokio::task::spawn_blocking(move || {
+            destination.deliver_meeting(&meeting, previous.as_ref())
+        })
+        .await;
+        match delivered {
+            Ok(receipt) => Ok(receipt?),
+            Err(error) => match error.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                Err(cancelled) => Err(cancelled.into()),
+            },
+        }
     }
 }
