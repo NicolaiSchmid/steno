@@ -304,22 +304,7 @@ impl CaptureRecorder {
                     ),
                 );
                 match completed {
-                    Ok(_) => {
-                        let mut warning = None;
-                        if active.mode == CaptureMode::Call && statistics.system_lane_silent {
-                            warning = Some(
-                                "The system audio lane stayed silent. Check the system audio permission."
-                                    .to_owned(),
-                            );
-                        }
-                        if statistics.ended_on_device_loss {
-                            warning = Some(
-                                "An audio device disappeared; the partial recording was kept."
-                                    .to_owned(),
-                            );
-                        }
-                        Ok(warning)
-                    }
+                    Ok(_) => Ok(recording_warning(active.mode, &statistics)),
                     Err(error) => Err(format!("Recording could not be saved: {error}")),
                 }
             }
@@ -423,6 +408,47 @@ impl Recorder for CaptureRecorder {
         self.inner().status.denied_permissions = denied;
         self.notify();
     }
+}
+
+/// What a saved recording warns about, every line that applies joined
+/// into one: a device that disappeared, frames the writer could not keep up
+/// with (dropped from the relay or the rings, in whole seconds, rounded up),
+/// and a call whose system audio stayed silent. Swift:
+/// `RecordingController.stop`, where a device loss replaced the silent-lane
+/// line; the joining and the dropped frames are Rust only.
+fn recording_warning(
+    mode: CaptureMode,
+    statistics: &steno_audio::CaptureStatistics,
+) -> Option<String> {
+    let mut lines = Vec::new();
+    if statistics.ended_on_device_loss {
+        lines.push("An audio device disappeared; the partial recording was kept.".to_owned());
+    }
+    let dropped = statistics
+        .dropped_frames
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    if dropped > 0 {
+        let seconds = dropped.div_ceil(CaptureSession::gap_frames(std::time::Duration::from_secs(
+            1,
+        )));
+        let amount = if seconds == 1 {
+            "About 1 second of the recording is".to_owned()
+        } else {
+            format!("About {seconds} seconds of the recording are")
+        };
+        lines.push(format!(
+            "{amount} missing because the disk could not keep up."
+        ));
+    }
+    if mode == CaptureMode::Call && statistics.system_lane_silent {
+        lines.push(
+            "The system audio lane stayed silent. Check the system audio permission.".to_owned(),
+        );
+    }
+    (!lines.is_empty()).then(|| lines.join(" "))
 }
 
 /// The required permissions `permissions` reports denied, among the ones
@@ -931,6 +957,72 @@ mod tests {
         assert_eq!(
             denied_permissions(Platform::Macos, &system_audio),
             [PermissionKind::SystemAudio]
+        );
+    }
+
+    fn statistics() -> steno_audio::CaptureStatistics {
+        steno_audio::CaptureStatistics {
+            duration: 60.0,
+            dropped_frames: std::collections::BTreeMap::new(),
+            system_lane_silent: false,
+            ended_on_device_loss: false,
+            device_changes: 0,
+            gap_seconds: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_clean_recording_warns_about_nothing() {
+        assert_eq!(recording_warning(CaptureMode::Call, &statistics()), None);
+    }
+
+    /// Frames the writer could not keep up with are a warning, in whole
+    /// seconds of the lane that lost most, rounded up.
+    #[test]
+    fn dropped_frames_warn_with_the_seconds_missing() {
+        let mut dropped = statistics();
+        dropped
+            .dropped_frames
+            .insert(steno_core::AudioLane::Mic, 250);
+        dropped
+            .dropped_frames
+            .insert(steno_core::AudioLane::System, 40);
+        assert_eq!(
+            recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
+            Some(
+                "About 3 seconds of the recording are missing because the disk could not keep up."
+            )
+        );
+        dropped.dropped_frames.clear();
+        dropped
+            .dropped_frames
+            .insert(steno_core::AudioLane::Mixed, 1);
+        assert_eq!(
+            recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
+            Some("About 1 second of the recording is missing because the disk could not keep up.")
+        );
+    }
+
+    /// Every warning that applies is kept: a device loss no longer hides a
+    /// silent system lane or a gap.
+    #[test]
+    fn every_warning_that_applies_is_joined() {
+        let mut all = statistics();
+        all.ended_on_device_loss = true;
+        all.system_lane_silent = true;
+        all.dropped_frames.insert(steno_core::AudioLane::Mic, 100);
+        let warning = recording_warning(CaptureMode::Call, &all).unwrap();
+        assert_eq!(
+            warning,
+            "An audio device disappeared; the partial recording was kept. \
+             About 1 second of the recording is missing because the disk could not keep up. \
+             The system audio lane stayed silent. Check the system audio permission."
+        );
+        // In person there is no system lane to warn about.
+        assert!(
+            !recording_warning(CaptureMode::InPerson, &all)
+                .unwrap()
+                .contains("system audio")
         );
     }
 }
