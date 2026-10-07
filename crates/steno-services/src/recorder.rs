@@ -80,7 +80,8 @@ fn fallback_warning(input: &str) -> String {
 }
 
 /// The note after a recording that ended on the fallback `input`, so a
-/// recording nobody watched still says which microphone it heard.
+/// recording nobody watched still says which microphone it heard; joined
+/// after [`recording_warning`]'s lines.
 fn fallback_note(input: &str) -> String {
     format!("Recorded from {input}. The microphone chosen in Settings was not available.")
 }
@@ -388,14 +389,16 @@ impl CaptureRecorder {
         let _ = active.notice_thread.join();
         // Read once the notice thread is gone: its last rebuild's input.
         let outcome = outcome.map(|warning| {
-            warning.or_else(|| {
-                active
-                    .fallback_input
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_deref()
-                    .map(fallback_note)
-            })
+            let note = active
+                .fallback_input
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_deref()
+                .map(fallback_note);
+            [warning, note]
+                .into_iter()
+                .flatten()
+                .reduce(|warning, note| format!("{warning} {note}"))
         });
         let mut inner = self.inner();
         inner.status.state = RecordingState::Idle;
