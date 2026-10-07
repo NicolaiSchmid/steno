@@ -19,13 +19,11 @@ import type { RecoveryFiles } from "./recovery";
  * empty.
  */
 export const expoRecoveryFiles: RecoveryFiles = {
+	// A throw here, from creating the queue directory or checking the file,
+	// reads as an unknown size in `planRecovery`.
 	size(fileName) {
-		try {
-			const file = queuedFile(fileName);
-			return file.exists ? sizeOf(file) : 0;
-		} catch {
-			return null;
-		}
+		const file = queuedFile(fileName);
+		return file.exists ? sizeOf(file) : 0;
 	},
 	async adopt(sourceUri, fileName) {
 		const source = new File(recorderDirectory(), new File(sourceUri).name);
@@ -47,8 +45,7 @@ export const expoRecoveryFiles: RecoveryFiles = {
  */
 function sizeOf(file: File): number | null {
 	try {
-		const size: number | null = file.size;
-		return size ?? null;
+		return file.size ?? null;
 	} catch {
 		return null;
 	}
