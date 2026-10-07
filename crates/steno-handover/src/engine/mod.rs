@@ -242,6 +242,13 @@ impl State {
             .is_some_and(|receipt| receipt.device_id != device_id)
     }
 
+    /// The receipts memory holds, oldest first.
+    fn receipts_snapshot(&self) -> Vec<HandoverReceipt> {
+        let mut receipts: Vec<HandoverReceipt> = self.active_receipts.values().cloned().collect();
+        receipts.sort_by_key(|receipt| (receipt.created_at, receipt.recording_id));
+        receipts
+    }
+
     /// Drops the receipt of `recording_id` on behalf of `device_id`; false,
     /// with nothing dropped, when memory holds another device's receipt of
     /// it ([`State::holds_another_devices`]).
@@ -288,8 +295,9 @@ pub struct Engine {
     state: Mutex<State>,
     /// Held while a recording's inbox files are created
     /// ([`Engine::open_files`], [`Engine::reopen_missing_files`]) and while
-    /// [`Engine::discard_own`] and [`Engine::discard_and_forget_own`] check
-    /// memory and discard; see there.
+    /// [`Engine::discard_own`], [`Engine::discard_own_while_revoked`] and
+    /// [`Engine::discard_and_forget_own`] check memory and discard; see
+    /// there.
     files: Mutex<()>,
 }
 
@@ -635,14 +643,15 @@ impl Engine {
     /// Receipts touched since start, oldest first.
     #[must_use]
     pub fn receipts_snapshot(&self) -> Vec<HandoverReceipt> {
-        let state = self.state();
-        let mut receipts: Vec<HandoverReceipt> = state.active_receipts.values().cloned().collect();
-        receipts.sort_by_key(|receipt| (receipt.created_at, receipt.recording_id));
-        receipts
+        self.state().receipts_snapshot()
     }
 
+    /// Sends the receipts memory holds to the observers. The snapshot and
+    /// the send are one step under the state lock, so a publisher whose
+    /// snapshot is older never sends after a newer one.
     fn publish_receipts(&self) {
-        self.receipts.send_replace(self.receipts_snapshot());
+        let state = self.state();
+        self.receipts.send_replace(state.receipts_snapshot());
     }
 
     /// Drops the receipt of `recording_id` from memory on behalf of
@@ -660,7 +669,8 @@ impl Engine {
     /// Discards every inbox file of `recording_id` on behalf of
     /// `device_id`, unless memory holds another device's receipt of it
     /// ([`State::holds_another_devices`]): those files are that phone's
-    /// upload. Every discard of the engine goes through here or
+    /// upload. Every discard of the engine goes through here,
+    /// [`Engine::discard_own_while_revoked`] or
     /// [`Engine::discard_and_forget_own`], except the sweep before the
     /// listener starts.
     ///
@@ -680,6 +690,24 @@ impl Engine {
     pub(crate) fn discard_own(&self, recording_id: Uuid, device_id: Uuid) {
         let _files = self.files();
         if !self.state().holds_another_devices(recording_id, device_id) {
+            self.inbox.discard(recording_id);
+        }
+    }
+
+    /// [`Engine::discard_own`] while `revoked` holds `device_id`, with that
+    /// check in the same step under the files lock: a check outside it
+    /// would let the device pair again and its new pairing's announce open
+    /// its files in between, and the discard would take them. Swift: the
+    /// `refusal` after the verify in `RecordingHandler.complete`, which
+    /// discards by the recording id alone, revoked or not.
+    pub(crate) fn discard_own_while_revoked(&self, recording_id: Uuid, device_id: Uuid) {
+        let _files = self.files();
+        let discard = {
+            let state = self.state();
+            state.revoked.contains(&device_id)
+                && !state.holds_another_devices(recording_id, device_id)
+        };
+        if discard {
             self.inbox.discard(recording_id);
         }
     }

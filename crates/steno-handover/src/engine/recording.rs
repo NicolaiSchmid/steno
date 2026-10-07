@@ -498,15 +498,13 @@ impl Engine {
     /// only be the revoked phone's (an announce that passed the gate before
     /// the revoke), and it goes. Once the device paired again it is the new
     /// pairing's upload, and it stays; so does another phone's upload of the
-    /// same recording id ([`Engine::discard_own`]).
+    /// same recording id ([`Engine::discard_own_while_revoked`]).
     fn revoked_during_the_verify(
         &self,
         recording_id: Uuid,
         device: &PairedDevice,
     ) -> HandoverResponse {
-        if self.state().revoked.contains(&device.id) {
-            self.discard_own(recording_id, device.id);
-        }
+        self.discard_own_while_revoked(recording_id, device.id);
         Self::unauthorized()
     }
 
