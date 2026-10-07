@@ -1671,6 +1671,20 @@ still has to draw the window side. `[ ]` is not ported yet.
 - On Windows the Rust person pages keep off the reserved device names (`Con` becomes
   `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
   names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.
+- A re-export keeps a note the user edited in the vault (decided by Nicolai on
+  2026-10-07, D13 of `.plans/2026-10-07-stable-promotion.md`): when an owned file on disk
+  no longer has the hash the previous receipt recorded, the Rust destination leaves it,
+  writes the new render beside it as `<name> (Steno <date>).md` (the same copy again
+  while that copy is unedited, a numbered one once the user edits it too), keeps the
+  note's old hash in the receipt so the next delivery sees the edit as well, and adds a
+  warning to the receipt (`DeliveryReceipt::warnings`, absent from the JSON when empty).
+  The detail's export line and `steno deliver` then show it ("<note> was edited in the
+  vault, so it was kept; the new version is <copy>."). The audio copy is not checked, and a person page's managed block stays Steno's
+  to rewrite, as before, while everything outside it stays the user's. Swift overwrites
+  an edited note; a rolled-back Swift app does so again, and ignores the `warnings` key.
+  Tests: `reexport_keeps_an_edited_note_writes_the_new_one_beside_it_and_recreates_a_deleted_one`,
+  `an_unedited_reexport_has_no_warnings_and_no_warnings_key`,
+  `an_export_line_shows_the_warnings_of_the_receipt_it_delivered`.
 
 ### Audio
 
