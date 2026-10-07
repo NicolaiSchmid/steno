@@ -211,7 +211,7 @@ export function RecorderScreen() {
 							the list can be read.
 						</AppText>
 						<PressableScale
-							accessibilityLabel="Try reading the recordings again"
+							accessibilityLabel="Read the list of recordings again"
 							accessibilityRole="button"
 							hitSlop={HIT_SLOP}
 							onPress={retryLoad}

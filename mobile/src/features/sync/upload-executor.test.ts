@@ -834,6 +834,25 @@ describe("an announce the Mac keeps refusing with 409", () => {
 		expect(h.mac.calls.slice(3)).toEqual(["announce a", "chunk a/0"]);
 	});
 
+	it("starts counting again after an announce the Mac takes", async () => {
+		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+		h.mac.announceScript = [409, 409];
+		for (let i = 0; i < 2; i++) {
+			expect(await h.drive()).toMatchObject({ kind: "wait" });
+			h.advance(60 * 60_000);
+		}
+		// The third announce is taken; the chunk cannot start, so the row
+		// goes back to `queued` and announces again.
+		h.mac.startUploadError = new Error("no disk");
+		expect(await h.drive()).toMatchObject({ kind: "wait" });
+		expect(h.mac.calls.slice(-2)).toEqual(["announce a", "chunk a/0"]);
+		h.mac.startUploadError = null;
+		h.mac.announceScript = [409];
+		h.advance(60 * 60_000);
+		expect(await h.drive()).toMatchObject({ kind: "wait" });
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 4 });
+	});
+
 	it("counts only 409s in a row, for each recording", async () => {
 		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
 		h.mac.announceScript = [409, 409, "unreachable", 409, 409];

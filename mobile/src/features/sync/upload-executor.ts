@@ -112,7 +112,7 @@ export type UploadExecutor = {
 export const ANNOUNCE_CONFLICTS_BEFORE_FAILED = 3;
 
 export const ANNOUNCE_CONFLICT_MESSAGE =
-	"Your Mac keeps refusing this recording. It stays on this phone; tap Retry to send it again.";
+	"The Mac keeps refusing this recording; it stays on this phone";
 
 export function createUploadExecutor(
 	deps: ExecutorDependencies,
