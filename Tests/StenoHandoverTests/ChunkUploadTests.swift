@@ -284,18 +284,17 @@ import Testing
     }
   }
 
-  @Test func aReAnnounceOfACompleteRecordingWithOtherMetadataIs409() async throws {
+  @Test func aReAnnounceWithOtherMetadataIs409WhileReceivingAndOnceComplete() async throws {
     // A different file under an admitted id is not answered `complete`: the
     // phone would post `complete`, take its 200 and delete a recording the
     // computer does not have. The phone keeps a recording answered 409 and
-    // announces it again after its backoff.
+    // announces it again after its backoff, until the third 409 in a row
+    // marks it `failed` with Retry.
     let intake = FakeHandoverIntake(meetingID: Self.meetingID)
     try await TestService.run(chunkSize: Self.chunkSize, intake: intake) { test in
       let phone = try await Phone.pair(test.service)
       let bytes = Phone.seededBytes(count: 2 * Self.chunkSize + 1, seed: 7)
       let metadata = phone.metadata(for: bytes)
-      try await phone.uploadAll(metadata, bytes)
-      #expect(try await phone.complete(metadata.recordingID).status == 200)
 
       var flipped = bytes
       flipped[0] ^= 1
@@ -305,15 +304,14 @@ import Testing
       longer.byteCount += 1
       var smallerChunks = metadata
       smallerChunks.chunkSize = Self.chunkSize / 2
-      for (what, changed) in [
-        ("sha256", otherHash), ("byteCount", longer), ("chunkSize", smallerChunks),
-      ] {
-        let refused = try await phone.announce(changed)
-        #expect(refused.status == 409, "\(what)")
-        #expect(
-          try refused.json(Wire.Problem.self).error
-            == "metadata differs from the first announcement", "\(what)")
-      }
+      let changed = [("sha256", otherHash), ("byteCount", longer), ("chunkSize", smallerChunks)]
+
+      #expect(try await phone.announce(metadata).status == 201)
+      try await Self.expectMetadataDiffers(phone, changed, "receiving")
+      try await phone.uploadAll(metadata, bytes)
+      #expect(try await phone.complete(metadata.recordingID).status == 200)
+
+      try await Self.expectMetadataDiffers(phone, changed, "complete")
       #expect(
         !test.service.engine.inbox.hasPartial(metadata.recordingID), "no partial is reopened")
       let again = try await phone.announce(metadata)
@@ -322,6 +320,20 @@ import Testing
         try again.json(Wire.RecordingStatus.self)
           == Wire.RecordingStatus(state: .complete, receivedChunks: [0, 1, 2]))
       #expect(await intake.admissions.count == 1, "no second admission")
+    }
+  }
+
+  /// Announces each `changed` copy of a recording's metadata and expects the
+  /// 409 that keeps the phone's file; `state` names the receipt's state.
+  private static func expectMetadataDiffers(
+    _ phone: Phone, _ changed: [(String, RecordingMetadata)], _ state: String
+  ) async throws {
+    for (what, metadata) in changed {
+      let refused = try await phone.announce(metadata)
+      #expect(refused.status == 409, "\(state): \(what)")
+      #expect(
+        (try? refused.json(Wire.Problem.self))?.error
+          == "metadata differs from the first announcement", "\(state): \(what)")
     }
   }
 
