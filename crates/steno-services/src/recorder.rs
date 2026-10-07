@@ -297,6 +297,29 @@ const FILES_NOT_FINISHED: &str =
 /// The status line of a stop whose meeting could not be stored.
 const MEETING_NOT_STORED: &str = "Recording could not be saved: Steno could not store the meeting.";
 
+/// What a stop says when the meeting could not be stored. A meeting
+/// another process moved on is not this recorder's to keep; otherwise the
+/// recording stays on disk and the meeting `recording`, and the next
+/// launch recovers it.
+fn not_saved(meeting_id: Uuid, error: &LocalRecordingIntakeError) -> &'static str {
+    log_not_saved(meeting_id, intake_kind(error));
+    if matches!(error, LocalRecordingIntakeError::NotRecording(..)) {
+        MEETING_NOT_STORED
+    } else {
+        KEPT_FOR_THE_NEXT_LAUNCH
+    }
+}
+
+/// The status line of a stop whose recording stays on disk and its
+/// meeting `recording`, for the next launch to recover.
+const KEPT_FOR_THE_NEXT_LAUNCH: &str = "The recording is kept, but it could not be saved right now. \
+     Steno will process it the next time it starts.";
+
+/// The status warning of a stop whose capture failed and whose files were
+/// recovered.
+const RECOVERED_AFTER_A_FAILURE: &str =
+    "Recording stopped because of an error; the audio up to that point was kept.";
+
 /// The warning of a recording with `minutes` left; a recording the floor
 /// `stops` ([`DiskWatch::stops`]) is promised the stop, one it does not
 /// (the Mac's) is asked for room instead.
@@ -317,6 +340,9 @@ const STOPPED_FOR_SPACE: &str =
 struct Active {
     session: Arc<CaptureSession>,
     meeting_id: Uuid,
+    /// The audio folder the capture writes into, for a recovery after a
+    /// failed stop: the settings may name another by then.
+    audio_folder: PathBuf,
     mode: CaptureMode,
     /// The latest lane levels, written by the forwarding thread.
     levels: Arc<Mutex<Option<LaneLevels>>>,
@@ -404,6 +430,14 @@ struct Inner {
     /// Set by [`CaptureRecorder::stop_for_quit`]: the app is ending, so
     /// no recording starts any more.
     quitting: bool,
+}
+
+/// The meeting source a capture in `mode` records.
+fn source(mode: CaptureMode) -> MeetingSource {
+    match mode {
+        CaptureMode::Call => MeetingSource::MacCall,
+        CaptureMode::InPerson => MeetingSource::MacInPerson,
+    }
 }
 
 /// dBFS to the `0...1` RMS the bridge carries.
@@ -705,16 +739,7 @@ impl CaptureRecorder {
         let started_at = Utc::now();
         let intake = self.intake();
         let meeting = intake
-            .begin(
-                match mode {
-                    CaptureMode::Call => MeetingSource::MacCall,
-                    CaptureMode::InPerson => MeetingSource::MacInPerson,
-                },
-                None,
-                None,
-                &[],
-                started_at,
-            )
+            .begin(source(mode), None, None, &[], started_at)
             .map_err(|_| refused("meeting", "Steno could not create the meeting."))?;
         let begun = BegunMeeting {
             intake: &intake,
@@ -759,6 +784,7 @@ impl CaptureRecorder {
             inner.active = Some(Active {
                 session,
                 meeting_id,
+                audio_folder: audio_folder.clone(),
                 mode,
                 levels: shared,
                 level_thread,
@@ -971,16 +997,33 @@ impl CaptureRecorder {
                 );
                 match completed {
                     Ok(_) => Ok((recording_warning(active.mode, &statistics), ended)),
-                    Err(error) => {
-                        log_not_saved(active.meeting_id, intake_kind(&error));
-                        Err(MEETING_NOT_STORED)
-                    }
+                    Err(error) => Err(not_saved(active.meeting_id, &error)),
                 }
             }
-            Err(error) => {
-                log_not_saved(active.meeting_id, failure_kind(&error));
-                let _ = intake.fail(active.meeting_id, FILES_NOT_FINISHED);
-                Err(FILES_NOT_FINISHED)
+            // The writer failed and took the asset with it, but what it
+            // wrote may still be on disk: recovered as an interrupted
+            // recording is at launch, else the meeting fails as before.
+            Err(failure) => {
+                log_not_saved(active.meeting_id, failure_kind(&failure));
+                let recovered = block_on(
+                    &self.runtime,
+                    crate::recovery::recover(
+                        &intake,
+                        &active.audio_folder,
+                        active.meeting_id,
+                        source(active.mode),
+                    ),
+                );
+                match recovered {
+                    Ok(_) => Ok((Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error)),
+                    Err(crate::recovery::RecoveryError::NotSaved(error)) => {
+                        Err(not_saved(active.meeting_id, &error))
+                    }
+                    Err(crate::recovery::RecoveryError::Unrecoverable(_)) => {
+                        let _ = intake.fail(active.meeting_id, FILES_NOT_FINISHED);
+                        Err(FILES_NOT_FINISHED)
+                    }
+                }
             }
         };
         drop(active.session);
@@ -2038,6 +2081,116 @@ mod tests {
             "nothing was downloaded"
         );
         stop(&harness.recorder).await;
+    }
+
+    /// A file writer that dies after `frames` frames, as a writer thread
+    /// that panics does: its files stay as a kill leaves them, and the
+    /// session's `stop()` fails without an asset.
+    struct DyingWriter {
+        inner: steno_audio::writer::RecordingWriter,
+        left: usize,
+        died: Arc<AtomicBool>,
+    }
+
+    impl steno_audio::writer::RecordingWriting for DyingWriter {
+        fn files(&self) -> steno_audio::writer::RecordingFiles {
+            self.inner.files()
+        }
+
+        fn write(
+            &mut self,
+            frames: &steno_audio::writer::LaneFrames<'_>,
+        ) -> Result<(), steno_audio::CaptureError> {
+            if self.left == 0 {
+                self.died.store(true, Ordering::SeqCst);
+                panic!("the writer dies");
+            }
+            self.left -= 1;
+            self.inner.write(frames)
+        }
+
+        fn finish(
+            &mut self,
+        ) -> Result<steno_audio::writer::RecordingFiles, steno_audio::CaptureError> {
+            self.inner.finish()
+        }
+    }
+
+    /// The synthetic capture, its writer [dying](DyingWriter) after
+    /// `frames` frames.
+    fn dying_capture(frames: usize, died: Arc<AtomicBool>) -> MakeCaptureSession {
+        Arc::new(move |configuration: CaptureConfiguration| {
+            let lanes = configuration.lanes();
+            let mut options = steno_audio::testing::synthetic::SyntheticOptions::tones(
+                &lanes,
+                &[(steno_core::AudioLane::Mic, 440.0)],
+                600.0,
+            );
+            options.real_time = true;
+            let died = died.clone();
+            CaptureSession::with_writer_factory(
+                configuration,
+                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+                None,
+                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                Arc::new(steno_audio::SystemClock::new()),
+                Arc::new(move |layout, lanes, keep_raw| {
+                    Ok(Box::new(DyingWriter {
+                        inner: steno_audio::writer::RecordingWriter::new(layout, lanes, keep_raw)?,
+                        left: frames,
+                        died: died.clone(),
+                    })
+                        as Box<dyn steno_audio::writer::RecordingWriting>)
+                }),
+            )
+            .map_err(|error| error.to_string())
+        })
+    }
+
+    /// A stop whose capture failed (the writer died and took the asset)
+    /// keeps what the writer wrote: the meeting is recovered from the
+    /// master on disk and queued with the `failed` end reason, and the
+    /// recorder says the audio was kept, rather than failing the meeting.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_whose_capture_failed_keeps_what_was_written() {
+        let died = Arc::new(AtomicBool::new(false));
+        let harness = harness_capturing(
+            models_with(&[]),
+            "parakeet-v3",
+            platform_rule(SpeechSettings::default()),
+            dying_capture(20, died.clone()),
+        );
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        eventually("the writer died", || died.load(Ordering::SeqCst)).await;
+        stop(&harness.recorder).await;
+
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Idle);
+        assert_eq!(status.error, None);
+        assert_eq!(status.warning.as_deref(), Some(RECOVERED_AFTER_A_FAILURE));
+        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.end_reason, Some(RecordingEndReason::Failed));
+        assert!(
+            !matches!(
+                meeting.state.kind(),
+                steno_core::MeetingStateKind::Recording | steno_core::MeetingStateKind::Failed
+            ),
+            "{:?}",
+            meeting.state
+        );
+        assert_eq!(
+            meeting.duration,
+            9_600.0 / steno_audio::SAMPLE_RATE,
+            "20 frames"
+        );
+        let asset = harness.store.asset(meeting_id).unwrap().unwrap();
+        assert_eq!(asset.lanes, vec![steno_core::AudioLane::Mixed]);
+        assert!(
+            asset
+                .sidecars_16k
+                .contains_key(&steno_core::AudioLane::Mixed)
+        );
     }
 
     #[test]
