@@ -18,9 +18,12 @@
 //! The samples are those one pass over the whole file gives, bit for bit:
 //! `tests/codec_streaming.rs` holds the decoder against its whole-file
 //! form, `tests/codec_memory.rs` bounds the working set. A stream whose
-//! rate or channel count changes mid-file starts the lane again at the
-//! change (the whole-file form did that on a channel count change, and
-//! resampled everything at the last rate on a rate change).
+//! rate or channel count changes mid-file keeps what came before: each
+//! shape's samples are resampled at their own rate and appended, so the
+//! lane keeps all of the file, as Swift's one decode did.
+//!
+//! `decode` takes the sidecar only when it is the master's length at
+//! 16 kHz, and falls back to it when the master then fails.
 //!
 //! Where symphonia cannot follow AVFoundation, documented here and in the
 //! plan's parity list:
@@ -135,30 +138,13 @@ impl SymphoniaAudioCodec {
         lane: AudioLane,
     ) -> Result<AudioBuffer16k, CodecError> {
         let mut frames = Frames::open(path)?;
-        let mut output = Vec::new();
-        let mut resampler = None;
+        let mut decode = LaneDecode::new(channel);
         let spec = frames.stream(|event| {
-            match event {
-                Event::Start(spec) => {
-                    output = Vec::with_capacity(frames_at_16k(frames_hint(spec), spec.rate));
-                    resampler = Some(LaneResampler::new(spec.rate));
-                }
-                Event::Frames(spec, samples) => {
-                    if let Some(resampler) = resampler.as_mut()
-                        && channel < spec.channels
-                    {
-                        let lane = samples.iter().skip(channel).step_by(spec.channels);
-                        resampler.push(lane.copied(), &mut output);
-                    }
-                }
-            }
+            decode.take(event);
             Ok(())
         })?;
         spec.check_channel(channel, lane)?;
-        if let Some(resampler) = resampler {
-            resampler.finish(&mut output);
-        }
-        Ok(AudioBuffer16k::new(output))
+        Ok(AudioBuffer16k::new(decode.finish()))
     }
 
     /// One channel at the source rate, whole: for the tests and the bench
@@ -173,7 +159,9 @@ impl SymphoniaAudioCodec {
         let mut samples = Vec::new();
         let spec = frames.stream(|event| {
             match event {
-                Event::Start(spec) => samples = Vec::with_capacity(frames_hint(spec)),
+                // At the source rate, so a rate change cannot be kept
+                // whole: the last shape wins.
+                Event::Start(spec) => samples = Vec::with_capacity(reserved_frames(spec)),
                 Event::Frames(spec, block) => {
                     if channel < spec.channels {
                         samples.extend(block.iter().skip(channel).step_by(spec.channels));
@@ -210,10 +198,12 @@ impl SymphoniaAudioCodec {
     /// WAV to `destination`, a block at a time. A failure removes what was
     /// written.
     pub fn mixdown_path(source: &Path, destination: &Path) -> Result<(), CodecError> {
-        let mut frames = Frames::open(source)?;
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, &e))?;
-        }
+        Self::mix(Frames::open(source)?, destination)
+    }
+
+    /// `mixdown_path` from an open source.
+    fn mix(mut frames: Frames, destination: &Path) -> Result<(), CodecError> {
+        create_parent(destination)?;
         let mut mixdown = Mixdown {
             destination,
             writer: None,
@@ -244,21 +234,42 @@ fn frames_at_16k(frames: usize, rate: u32) -> usize {
     length_at_16k(frames, rate) + AudioBuffer16k::SAMPLE_RATE as usize
 }
 
-/// The frames to reserve for: the container's count, but never more than
-/// `MAX_HINT` (a corrupt header should not reserve gigabytes).
-fn frames_hint(spec: Spec) -> usize {
-    /// Five hours at 48 kHz.
-    const MAX_HINT: u64 = 5 * 3_600 * 48_000;
-    usize::try_from(spec.frames.unwrap_or(0).min(MAX_HINT)).unwrap_or(0)
+/// The frames to reserve for a stream: its length, but a length the
+/// container declares is capped at five hours at the stream's rate (a
+/// corrupt header must not reserve gigabytes, and a failed allocation
+/// aborts the app), so the 16 kHz reservation stays under five hours at
+/// 16 kHz whatever the rate. A length measured from the file is not
+/// capped.
+fn reserved_frames(spec: Spec) -> usize {
+    /// Five hours, in seconds.
+    const MAX_DECLARED_SECONDS: u64 = 5 * 3_600;
+    match spec.length {
+        Length::Measured(frames) => frames,
+        Length::Declared(frames) => usize::try_from(
+            frames
+                .unwrap_or(0)
+                .min(MAX_DECLARED_SECONDS * u64::from(spec.rate)),
+        )
+        .unwrap_or(0),
+    }
 }
 
-/// A stream's shape: hertz, interleaved channels, and the frame count the
-/// container declares, if it does.
+/// A stream's shape: hertz, interleaved channels, and its length in
+/// frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Spec {
     rate: u32,
     channels: usize,
-    frames: Option<u64>,
+    length: Length,
+}
+
+/// How a stream's frame count is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Length {
+    /// From the file's size: the crate's CAF reader.
+    Measured(usize),
+    /// From the container's header, if it says (symphonia): not trusted.
+    Declared(Option<u64>),
 }
 
 impl Spec {
@@ -278,8 +289,8 @@ impl Spec {
 /// What [`Frames::stream`] hands its callback.
 #[derive(Clone, Copy)]
 enum Event<'a> {
-    /// The stream begins, or begins again with a new shape: drop what was
-    /// taken so far.
+    /// The stream begins, or goes on with a new shape: what was taken so
+    /// far is finished at the old one.
     Start(Spec),
     /// Interleaved frames.
     Frames(Spec, &'a [f32]),
@@ -312,9 +323,9 @@ impl Frames {
     }
 
     /// Runs `each` over the whole file and returns the stream's last
-    /// shape. A change of shape mid-stream starts it again: the whole-file
-    /// decoder dropped what it had read when the channel count changed,
-    /// and resampling earlier samples at a later rate would be noise.
+    /// shape. A change of shape mid-stream is a new `Start`: resampling
+    /// earlier samples at a later rate would be noise, so each shape's
+    /// samples are taken at their own.
     fn stream(
         &mut self,
         mut each: impl FnMut(Event<'_>) -> Result<(), CodecError>,
@@ -325,7 +336,7 @@ impl Frames {
                 let spec = Spec {
                     rate: reader.sample_rate() as u32,
                     channels: reader.channel_count(),
-                    frames: Some(reader.frame_count() as u64),
+                    length: Length::Measured(reader.frame_count()),
                 };
                 if spec.rate == 0 {
                     return Err(CodecError::UnsupportedFormat("a CAF at 0 Hz".into()));
@@ -351,6 +362,7 @@ struct SymphoniaFrames {
     format: Box<dyn FormatReader>,
     decoder: Box<dyn Decoder>,
     track_id: u32,
+    /// The track's frame count, as its header declares it.
     frames: Option<u64>,
 }
 
@@ -425,7 +437,7 @@ impl SymphoniaFrames {
             let packet_spec = Spec {
                 rate: shape.rate,
                 channels: count,
-                frames: self.frames,
+                length: Length::Declared(self.frames),
             };
             let audible = count > 0 && shape.rate > 0;
             if spec != Some(packet_spec) {
@@ -454,6 +466,52 @@ impl SymphoniaFrames {
     }
 }
 
+/// One channel's decode between blocks: the 16 kHz lane so far and the
+/// current shape's resampler.
+struct LaneDecode {
+    channel: usize,
+    output: Vec<f32>,
+    resampler: Option<LaneResampler>,
+}
+
+impl LaneDecode {
+    fn new(channel: usize) -> Self {
+        Self {
+            channel,
+            output: Vec::new(),
+            resampler: None,
+        }
+    }
+
+    fn take(&mut self, event: Event<'_>) {
+        match event {
+            Event::Start(spec) => match self.resampler.replace(LaneResampler::new(spec.rate)) {
+                // A new shape: what came before stays, resampled at its
+                // own rate.
+                Some(earlier) => earlier.finish(&mut self.output),
+                None => self
+                    .output
+                    .reserve(frames_at_16k(reserved_frames(spec), spec.rate)),
+            },
+            Event::Frames(spec, samples) => {
+                if let Some(resampler) = self.resampler.as_mut()
+                    && self.channel < spec.channels
+                {
+                    let lane = samples.iter().skip(self.channel).step_by(spec.channels);
+                    resampler.push(lane.copied(), &mut self.output);
+                }
+            }
+        }
+    }
+
+    fn finish(mut self) -> Vec<f32> {
+        if let Some(resampler) = self.resampler.take() {
+            resampler.finish(&mut self.output);
+        }
+        self.output
+    }
+}
+
 /// The mixdown's state between blocks: the mono lane resampled, held back
 /// until settled, then written.
 struct Mixdown<'a> {
@@ -462,7 +520,7 @@ struct Mixdown<'a> {
     resampler: Option<LaneResampler>,
     /// 16 kHz samples not yet written.
     pending: Vec<f32>,
-    /// 16 kHz samples written since the stream started.
+    /// 16 kHz samples written since the current shape started.
     written: usize,
     ints: Vec<i16>,
 }
@@ -471,13 +529,16 @@ impl Mixdown<'_> {
     fn take(&mut self, event: Event<'_>) -> Result<(), CodecError> {
         match event {
             Event::Start(spec) => {
-                // A new shape starts the file again, as it starts the lane.
-                self.writer = Some(
-                    WavStreamWriter::create(self.destination, 16_000)
-                        .map_err(|e| CodecError::Io(e.to_string()))?,
-                );
+                // A new shape: what came before is finished and written at
+                // its own rate, and the file goes on.
+                self.finish_shape()?;
+                if self.writer.is_none() {
+                    self.writer = Some(
+                        WavStreamWriter::create(self.destination, 16_000)
+                            .map_err(|e| CodecError::Io(e.to_string()))?,
+                    );
+                }
                 self.resampler = Some(LaneResampler::new(spec.rate));
-                self.pending.clear();
                 self.written = 0;
                 Ok(())
             }
@@ -515,11 +576,17 @@ impl Mixdown<'_> {
             .map_err(|e| CodecError::Io(e.to_string()))
     }
 
-    fn finish(&mut self) -> Result<(), CodecError> {
+    /// Flushes the current shape's resampler into the file.
+    fn finish_shape(&mut self) -> Result<(), CodecError> {
         if let Some(resampler) = self.resampler.take() {
             resampler.finish(&mut self.pending);
             self.write(self.pending.len())?;
         }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), CodecError> {
+        self.finish_shape()?;
         self.writer
             .as_mut()
             .map_or(Ok(()), WavStreamWriter::finish)
@@ -529,16 +596,35 @@ impl Mixdown<'_> {
 
 #[async_trait]
 impl AudioDecoder for SymphoniaAudioCodec {
+    /// The sidecar when it agrees with the master, else the master; a
+    /// master that then fails (an I/O error mid-file, a channel it lacks)
+    /// falls back to the sidecar after all, which beats no transcript.
     async fn decode(&self, asset: &AudioAsset, lane: AudioLane) -> BoundaryResult<AudioBuffer16k> {
         if let Some(samples) = sidecar(asset, lane) {
             return Ok(AudioBuffer16k::new(samples));
         }
-        let channel = asset
+        let master = asset
             .lanes
             .iter()
             .position(|l| *l == lane)
-            .ok_or(CodecError::LaneNotInAsset(lane))?;
-        Ok(Self::decode_path(&master_path(asset)?, channel, lane)?)
+            .ok_or(CodecError::LaneNotInAsset(lane))
+            .and_then(|channel| Self::decode_path(&master_path(asset)?, channel, lane));
+        match master {
+            Ok(buffer) => Ok(buffer),
+            // Read again rather than held through the master's decode, so
+            // two copies of the lane are never alive at once.
+            Err(error) => match sidecar_samples(asset, lane) {
+                Some(samples) => {
+                    tracing::warn!(
+                        lane = lane.as_str(),
+                        %error,
+                        "the master failed to decode; taking the 16 kHz sidecar that disagreed with it"
+                    );
+                    Ok(AudioBuffer16k::new(samples))
+                }
+                None => Err(error.into()),
+            },
+        }
     }
 
     /// `Wav16kInt16`: there is no AAC encoder in pure Rust (see the module
@@ -549,34 +635,28 @@ impl AudioDecoder for SymphoniaAudioCodec {
 
     async fn mixdown(&self, asset: &AudioAsset, to: &Path) -> BoundaryResult<()> {
         let source = master_path(asset)?;
-        if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| io_error(parent, &e))?;
-        }
         if to.exists() {
             std::fs::remove_file(to).map_err(|e| io_error(to, &e))?;
         }
-        if asset.format == AudioFormat::Wav16kInt16 {
-            std::fs::copy(&source, to).map_err(|e| io_error(to, &e))?;
-            return Ok(());
+        if asset.format != AudioFormat::Wav16kInt16 {
+            return Ok(Self::mixdown_path(&source, to)?);
         }
-        Ok(Self::mixdown_path(&source, to)?)
+        create_parent(to)?;
+        std::fs::copy(&source, to).map_err(|e| io_error(to, &e))?;
+        Ok(())
     }
 }
 
-/// The lane's 16 kHz sidecar, when it reads, is not empty and is as long
-/// as the master: the writer writes the master and the sidecars a frame at
-/// a time, so a finished sidecar holds exactly a third of the master's
-/// frames. One that disagrees is not trusted, and the master, the copy
-/// that is never shorter, is decoded instead: the sidecar's 32-bit size
+/// The lane's 16 kHz sidecar, when it reads, is not empty and is the
+/// master's length at 16 kHz: the writer writes the master and the
+/// sidecars a frame at a time, so a finished sidecar holds the master's
+/// frames resampled. One that disagrees is not trusted, and the master,
+/// the copy that is never shorter, is decoded instead: the sidecar's 32-bit size
 /// fields wrap after 37.3 hours, and a sidecar that missed a frame the
 /// master kept (a full disk) would lose it. A master whose length cannot
 /// be read cheaply (not the writer's CAF) leaves the sidecar trusted.
 fn sidecar(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
-    let path = file_url_path(asset.sidecars_16k.get(&lane)?)?;
-    let samples = WavFile::read_16k_mono(&path).ok()?;
-    if samples.is_empty() {
-        return None;
-    }
+    let samples = sidecar_samples(asset, lane)?;
     if let Some(master) = file_url_path(&asset.url)
         && let Ok(reader) = CafReader::open(&master)
     {
@@ -596,12 +676,143 @@ fn sidecar(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
     Some(samples)
 }
 
+/// The lane's 16 kHz sidecar when it reads and is not empty, whatever its
+/// length.
+fn sidecar_samples(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
+    let path = file_url_path(asset.sidecars_16k.get(&lane)?)?;
+    WavFile::read_16k_mono(&path)
+        .ok()
+        .filter(|samples| !samples.is_empty())
+}
+
 /// The asset's master as a path; the URL must be a file URL.
 fn master_path(asset: &AudioAsset) -> Result<PathBuf, CodecError> {
     file_url_path(&asset.url)
         .ok_or_else(|| CodecError::Io(format!("not a file URL: {}", asset.url)))
 }
 
+/// Creates the folder `path` goes in, if needed.
+fn create_parent(path: &Path) -> Result<(), CodecError> {
+    match path.parent() {
+        Some(parent) => std::fs::create_dir_all(parent).map_err(|e| io_error(parent, &e)),
+        None => Ok(()),
+    }
+}
+
 fn io_error(path: &Path, error: &std::io::Error) -> CodecError {
     CodecError::Io(format!("{}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::writer::CafStreamWriter;
+
+    fn spec(rate: u32, channels: usize) -> Spec {
+        Spec {
+            rate,
+            channels,
+            length: Length::Declared(None),
+        }
+    }
+
+    /// A length the container declares reserves at most five hours at
+    /// 16 kHz, whatever the rate; a length measured from the file
+    /// reserves all of it.
+    #[test]
+    fn a_declared_length_reserves_at_most_five_hours() {
+        let five_hours = 5 * 3_600 * 16_000;
+        for rate in [8_000, 44_100, 48_000, 96_000] {
+            let declared = Spec {
+                length: Length::Declared(Some(u64::MAX / 2)),
+                ..spec(rate, 1)
+            };
+            let reserved = frames_at_16k(reserved_frames(declared), rate);
+            assert_eq!(reserved, five_hours + 16_000, "{rate} Hz");
+        }
+        let six_hours = 6 * 3_600 * 48_000;
+        let measured = Spec {
+            length: Length::Measured(six_hours),
+            ..spec(48_000, 2)
+        };
+        assert_eq!(reserved_frames(measured), six_hours);
+        assert_eq!(reserved_frames(spec(48_000, 1)), 0, "no length declared");
+    }
+
+    /// A rate and channel count that change mid-stream keep what came
+    /// before: each shape's samples are resampled at their own rate and
+    /// appended, in the lane and in the mixdown, as one decode of the
+    /// whole file in Swift kept them all.
+    #[test]
+    fn a_shape_change_mid_stream_appends_to_the_lane() {
+        let first: Vec<f32> = (0..4_800).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let second: Vec<f32> = (0..4_410).map(|i| (i as f32 * 0.02).sin() * 0.25).collect();
+        let stereo: Vec<f32> = second.iter().flat_map(|&s| [s, s]).collect();
+        let events = [
+            Event::Start(spec(48_000, 1)),
+            Event::Frames(spec(48_000, 1), &first),
+            Event::Start(spec(44_100, 2)),
+            Event::Frames(spec(44_100, 2), &stereo),
+        ];
+        let expected = [
+            SymphoniaAudioCodec::to_16k(&first, 48_000),
+            SymphoniaAudioCodec::to_16k(&second, 44_100),
+        ]
+        .concat();
+        assert_eq!(expected.len(), 1_600 + 1_600);
+
+        let mut decode = LaneDecode::new(0);
+        for event in events {
+            decode.take(event);
+        }
+        assert_eq!(decode.finish(), expected);
+
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("audio.wav");
+        let mut mixdown = Mixdown {
+            destination: &destination,
+            writer: None,
+            resampler: None,
+            pending: Vec::new(),
+            written: 0,
+            ints: Vec::new(),
+        };
+        for event in events {
+            mixdown.take(event).unwrap();
+        }
+        mixdown.finish().unwrap();
+        let written = WavFile::read_16k_mono(&destination).unwrap();
+        let rounded: Vec<f32> = expected
+            .iter()
+            .map(|&s| f32::from((s.clamp(-1.0, 1.0) * 32767.0).round() as i16) / 32768.0)
+            .collect();
+        assert_eq!(written, rounded);
+    }
+
+    /// A mixdown that fails mid-stream removes what it wrote: the master is
+    /// cut short under the open reader, after its first block, as a disk
+    /// error mid-file would stop it.
+    #[test]
+    fn a_mixdown_that_fails_mid_stream_removes_its_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let master = directory.path().join("recording.caf");
+        let frames = 3 * Frames::CAF_BLOCK;
+        let mut writer = CafStreamWriter::create(&master, 48_000.0, 2).unwrap();
+        writer.write(&vec![0.25f32; 2 * frames], frames).unwrap();
+        writer.finish().unwrap();
+        let source = Frames::open(&master).unwrap();
+        assert!(matches!(source, Frames::Caf { .. }));
+        let length = std::fs::metadata(&master).unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&master)
+            .unwrap()
+            .set_len(length - 2 * (Frames::CAF_BLOCK * 2 * 4) as u64 + 4)
+            .unwrap();
+
+        let destination = directory.path().join("audio.wav");
+        let error = SymphoniaAudioCodec::mix(source, &destination).unwrap_err();
+        assert!(matches!(error, CodecError::Io(_)), "{error:?}");
+        assert!(!destination.exists(), "the partial mixdown is removed");
+    }
 }
