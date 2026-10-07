@@ -7,7 +7,9 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError, TryLockError};
 
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
+use steno_core::content_hash::sha256;
 use steno_core::paths::file_url_path;
 use steno_core::{
     AudioFormat, BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport,
@@ -131,6 +133,9 @@ pub struct ObsidianFolderDestination {
     /// The tests' [`DeliveryStep`] hook; `None` outside them.
     #[cfg(feature = "testing")]
     steps: Option<StepHook>,
+    /// The wall clock that dates a copy written beside an edited note;
+    /// tests pin it.
+    now: fn() -> DateTime<Utc>,
 }
 
 impl ObsidianFolderDestination {
@@ -182,7 +187,16 @@ impl ObsidianFolderDestination {
             sink,
             #[cfg(feature = "testing")]
             steps: None,
+            now: Utc::now,
         }
+    }
+
+    /// The same destination dating the copies it writes beside edited
+    /// notes with `now`: the tests pin the clock.
+    #[must_use]
+    pub fn with_now(mut self, now: fn() -> DateTime<Utc>) -> Self {
+        self.now = now;
+        self
     }
 
     /// The same destination naming its calls after `platform`: the golden
@@ -275,11 +289,8 @@ impl ObsidianFolderDestination {
             // meeting's; one that holds a file stays.
             let _ = fs::remove_dir(self.sink.path(&folder));
         }
-        let warnings = written?;
-        Ok(DeliveryReceipt {
-            warnings,
-            ..ledger.receipt(&folder, ArtifactRenderer::VERSION)
-        })
+        written?;
+        Ok(ledger.receipt(&folder, ArtifactRenderer::VERSION))
     }
 
     /// The meeting folder of this delivery, and whether this delivery
@@ -309,13 +320,13 @@ impl ObsidianFolderDestination {
     }
 
     /// Writes the meeting's files into `folder`, its person pages and its
-    /// audio copy; returns the receipt's warnings.
+    /// audio copy; what it could not do goes into the receipt's warnings.
     fn write_meeting(
         &self,
         meeting: &MeetingExport,
         folder: &str,
         ledger: &mut DeliveryLedger,
-    ) -> Result<Vec<String>, ObsidianError> {
+    ) -> Result<(), ObsidianError> {
         let slug = folder_slug(folder);
         let options = RenderOptions {
             link_style: LinkStyle::Wikilink,
@@ -337,7 +348,7 @@ impl ObsidianFolderDestination {
                 underlying: error.to_string(),
             })?;
         for artifact in artifacts {
-            self.write_owned(
+            self.write_note(
                 ledger,
                 &format!("{folder}/{}", artifact.file_name),
                 &artifact.data,
@@ -348,11 +359,10 @@ impl ObsidianFolderDestination {
             let pages = renderer.render_person_pages(meeting, &options, Some(&slug));
             self.write_person_pages(people_folder, pages, meeting.meeting.id, ledger)?;
         }
-        let mut warnings = Vec::new();
         if self.settings.include_audio && !self.copy_audio(meeting, folder, ledger)? {
-            warnings.push(Self::NO_AUDIO_WARNING.to_owned());
+            ledger.warn(Self::NO_AUDIO_WARNING.to_owned());
         }
-        Ok(warnings)
+        Ok(())
     }
 
     /// Writes every rendered page into `people_folder`: whole when the page
@@ -445,6 +455,62 @@ impl ObsidianFolderDestination {
             &data,
         )?;
         Ok(true)
+    }
+
+    /// [`write_owned`](Self::write_owned) for a note the user may edit in
+    /// the vault (every rendered file but the audio copy). When the file on
+    /// disk no longer has the hash the previous delivery wrote, the user
+    /// changed it: it is left as it is, the new render goes beside it
+    /// (`<name> (Steno <date>).md`, the same copy again while that copy is
+    /// unedited), and the receipt carries a warning that says so. The
+    /// receipt keeps the note's old hash, so the next delivery sees the edit
+    /// too. Rust only: Swift overwrites the note.
+    fn write_note(
+        &self,
+        ledger: &mut DeliveryLedger,
+        path: &str,
+        data: &[u8],
+    ) -> Result<(), ObsidianError> {
+        let Some(delivered) = ledger.delivered_hash(path).map(<[u8]>::to_vec) else {
+            return self.write_owned(ledger, path, data);
+        };
+        let Some(on_disk) = self.reading(path, || self.sink.read(path))? else {
+            return self.write_owned(ledger, path, data);
+        };
+        if sha256(&on_disk) == delivered {
+            return self.write_owned(ledger, path, data);
+        }
+        let beside = self.copy_beside(ledger, path)?;
+        self.writing(&beside, || self.sink.write(data, &beside))?;
+        ledger.record(&beside, FileOwnership::Owned, data);
+        ledger.warn(format!(
+            "{path} was edited in the vault, so it was kept; the new version is {beside}."
+        ));
+        Ok(())
+    }
+
+    /// Where the new render of the edited note at `path` goes: the copy an
+    /// earlier delivery wrote beside it while that copy is unchanged, else
+    /// a new one dated today, numbered when that name is taken.
+    fn copy_beside(&self, ledger: &DeliveryLedger, path: &str) -> Result<String, ObsidianError> {
+        if let Some(copy) = ledger.copy_beside(path) {
+            let unchanged = self
+                .reading(&copy.relative_path, || self.sink.read(&copy.relative_path))?
+                .is_none_or(|bytes| sha256(&bytes) == copy.sha256);
+            if unchanged {
+                return Ok(copy.relative_path.clone());
+            }
+        }
+        let date = (self.now)()
+            .with_timezone(&self.time_zone)
+            .format("%Y-%m-%d");
+        let mut candidate = DeliveryLedger::new_copy_beside(path, &date.to_string());
+        let mut number = 2;
+        while self.sink.exists(&candidate) {
+            candidate = DeliveryLedger::new_copy_beside(path, &format!("{date} {number}"));
+            number += 1;
+        }
+        Ok(candidate)
     }
 
     fn write_owned(

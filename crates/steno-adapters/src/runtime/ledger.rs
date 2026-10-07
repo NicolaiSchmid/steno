@@ -28,6 +28,7 @@ pub struct DeliveryLedger {
     /// ([`DeliveryLedger::move_folder`]), written as on a first delivery.
     claimed: Option<String>,
     files: BTreeMap<String, DeliveredFile>,
+    warnings: Vec<String>,
 }
 
 impl DeliveryLedger {
@@ -52,6 +53,7 @@ impl DeliveryLedger {
             previous,
             claimed: None,
             files,
+            warnings: Vec::new(),
         }
     }
 
@@ -162,7 +164,8 @@ impl DeliveryLedger {
     }
 
     /// The receipt of this delivery: every file by path, with the renderer
-    /// version the destination rendered with.
+    /// version the destination rendered with and the warnings it gave
+    /// ([`Self::warn`]).
     #[must_use]
     pub fn receipt(&self, folder: &str, renderer_version: i64) -> DeliveryReceipt {
         DeliveryReceipt {
@@ -170,8 +173,45 @@ impl DeliveryLedger {
             folder: folder.to_owned(),
             files: self.files.values().cloned().collect(),
             renderer_version,
-            warnings: Vec::new(),
+            warnings: self.warnings.clone(),
         }
+    }
+
+    /// The hash an owned file at `path` had when the previous delivery
+    /// wrote it; `None` on a first delivery or for a path it did not own.
+    #[must_use]
+    pub fn delivered_hash(&self, path: &str) -> Option<&[u8]> {
+        self.previous_files()
+            .find(|file| file.ownership == FileOwnership::Owned && file.relative_path == path)
+            .map(|file| file.sha256.as_slice())
+    }
+
+    /// The copy an earlier delivery wrote beside `path` because the note
+    /// there had been edited (`<stem> (Steno <time>).<extension>`), when the
+    /// previous receipt lists one; the newest by name.
+    #[must_use]
+    pub fn copy_beside(&self, path: &str) -> Option<&DeliveredFile> {
+        let (stem, extension) = split_extension(path);
+        let prefix = format!("{stem} (Steno ");
+        let suffix = format!("){extension}");
+        self.previous_files()
+            .filter(|file| file.ownership == FileOwnership::Owned)
+            .filter(|file| {
+                file.relative_path.starts_with(&prefix) && file.relative_path.ends_with(&suffix)
+            })
+            .max_by(|left, right| left.relative_path.cmp(&right.relative_path))
+    }
+
+    /// The path of a new copy beside `path`, stamped `stamp`.
+    #[must_use]
+    pub fn new_copy_beside(path: &str, stamp: &str) -> String {
+        let (stem, extension) = split_extension(path);
+        format!("{stem} (Steno {stamp}){extension}")
+    }
+
+    /// Adds `warning` to the receipt this delivery returns.
+    pub fn warn(&mut self, warning: String) {
+        self.warnings.push(warning);
     }
 
     /// Two spellings of one root: trailing slashes, `.` and `..` components
@@ -274,6 +314,16 @@ impl DeliveryLedger {
             suffix += 1;
         }
         Ok(candidate)
+    }
+}
+
+/// `path` split before the extension of its last component: `("a/b", ".md")`
+/// for `a/b.md`, `("a/b", "")` without one.
+fn split_extension(path: &str) -> (&str, &str) {
+    let name_start = path.rfind('/').map_or(0, |slash| slash + 1);
+    match path[name_start..].rfind('.') {
+        Some(dot) if dot > 0 => path.split_at(name_start + dot),
+        _ => (path, ""),
     }
 }
 
