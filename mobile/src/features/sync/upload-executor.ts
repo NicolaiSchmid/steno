@@ -209,6 +209,12 @@ export function createUploadExecutor(
 				try {
 					const result = await deps.client.complete(session, rec.recordingID);
 					if (result.kind === "complete") {
+						// The row is delivered also when an unpair moved it to
+						// `unpaired`, or a new pairing queued it again, while the
+						// request was out: the Mac admitted the meeting, so the phone
+						// keeps no copy to upload again. The planner announces nothing
+						// for the row until this answer lands, so no new upload reads
+						// the file removed here.
 						await deps.update((current) =>
 							setState(current, rec.recordingID, "delivered", {
 								meetingID: result.meetingID,

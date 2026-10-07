@@ -117,8 +117,9 @@ export type PairingForgetDependencies = Omit<
  * background session: the Mac may have been away when asked to revoke the
  * token, and would take them when it comes back. The rows are `unpaired`
  * before the cancel, so the cancelled chunks' failures leave them alone.
- * When the clear or the queue write fails, the cancel still runs, and then
- * the error rejects.
+ * The cancel does not reach a `complete`, a pinned request: its answer
+ * still settles the row. When the clear or the queue write fails, the
+ * cancel still runs, and then the error rejects.
  */
 export async function forgetPairing(
 	deps: PairingForgetDependencies,

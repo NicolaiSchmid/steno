@@ -90,8 +90,8 @@ describe("state machine", () => {
 	});
 
 	it("rejects illegal transitions", () => {
-		expect(() => setState(queued, "a", "delivered")).toThrow(
-			/illegal transition queued -> delivered/,
+		expect(() => setState(queued, "a", "recording")).toThrow(
+			/illegal transition queued -> recording/,
 		);
 		const delivered = setState(
 			setState(queued, "a", "uploading"),
@@ -99,21 +99,31 @@ describe("state machine", () => {
 			"delivered",
 		);
 		expect(() => setState(delivered, "a", "queued")).toThrow(QueueError);
-		expect(() => setState(queued, "a", "recording")).toThrow(QueueError);
 	});
 
-	it("allows failed and unpaired back to queued only", () => {
+	it("allows failed back to queued only, unpaired to queued or delivered, and a re-queued row to delivered", () => {
 		const failed = setState(queued, "a", "failed", { lastError: "422" });
 		expect(() => setState(failed, "a", "uploading")).toThrow(QueueError);
+		expect(() => setState(failed, "a", "delivered")).toThrow(QueueError);
 		expect(setState(failed, "a", "queued").recordings[0]?.state).toBe("queued");
 		const unpaired = setState(queued, "a", "unpaired");
-		expect(() => setState(unpaired, "a", "delivered")).toThrow(QueueError);
-		expect(resetForUpload(unpaired, "a").recordings[0]).toMatchObject({
+		expect(() => setState(unpaired, "a", "uploading")).toThrow(QueueError);
+		expect(() => setState(unpaired, "a", "failed")).toThrow(QueueError);
+		// A `complete` sent before the unpair and answered after it.
+		expect(
+			setState(unpaired, "a", "delivered", { meetingID: "m" }).recordings[0],
+		).toMatchObject({ state: "delivered", meetingID: "m" });
+		const requeued = resetForUpload(unpaired, "a");
+		expect(requeued.recordings[0]).toMatchObject({
 			state: "queued",
 			attempts: 0,
 			nextAttemptAt: null,
 			lastError: null,
 		});
+		// The same answer after a new pairing queued the row again.
+		expect(
+			setState(requeued, "a", "delivered", { meetingID: "m" }).recordings[0],
+		).toMatchObject({ state: "delivered", meetingID: "m" });
 	});
 
 	it("treats a same-state call as a patch and never lets the patch change the id or state", () => {
@@ -141,10 +151,10 @@ describe("every transition", () => {
 	/** The plan's state machine, written out independently of the code's table. */
 	const LEGAL: Record<SyncState, readonly SyncState[]> = {
 		recording: ["queued", "failed"],
-		queued: ["uploading", "unpaired", "failed"],
+		queued: ["uploading", "unpaired", "failed", "delivered"],
 		uploading: ["queued", "delivered", "failed", "unpaired"],
 		failed: ["queued"],
-		unpaired: ["queued"],
+		unpaired: ["queued", "delivered"],
 		delivered: [],
 	};
 	/** A legal path from `recording` into every state. */

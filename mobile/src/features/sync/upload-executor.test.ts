@@ -2,6 +2,7 @@ import type { RecordingMetadata, RecordingStatus } from "@modules/steno-link";
 import { HandoverError } from "@modules/steno-link/native";
 import { describe, expect, it, vi } from "vitest";
 
+import { commitPairing, forgetPairing } from "@/features/pairing/pairing-flow";
 import type { Chunk } from "@/features/queue/queue-index";
 import {
 	addRecording,
@@ -68,6 +69,8 @@ class FakeMac implements RecordingClient {
 	verifying = false;
 	/** Announces that fail with a transport error before succeeding. */
 	unreachableAnnounces = 0;
+	/** While set, `complete` is sent but answers only once it resolves. */
+	completeGate: Promise<void> | null = null;
 	startUploadError: Error | null = null;
 
 	private guard(recordingID: string) {
@@ -133,6 +136,7 @@ class FakeMac implements RecordingClient {
 		recordingID: string,
 	): Promise<CompleteResult> => {
 		this.calls.push(`complete ${recordingID}`);
+		if (this.completeGate) await this.completeGate;
 		this.guard(recordingID);
 		if (this.statusOf(recordingID).state !== "verifying" || this.verifying) {
 			return { kind: "missing-chunks" };
@@ -632,6 +636,152 @@ describe("a 401 to a pairing since replaced keeps the new one", () => {
 		await h.executor.refreshUploading(session, h.state.index);
 		expect(h.mac.calls).toEqual(["status a"]);
 		expect(h.row("bb")?.state).toBe("uploading");
+	});
+});
+
+describe("a complete sent before an unpair and answered after it", () => {
+	/**
+	 * Uploads every chunk of "a", then sends its `complete` and holds the
+	 * answer. While it is held, the user unpairs (`forgetPairing`: the
+	 * pairing is cleared and the pending rows become `unpaired`).
+	 */
+	async function unpairDuringComplete() {
+		const h = harness(addRecording(EMPTY_INDEX, rec("a", CHUNK)));
+		await h.drive();
+		await h.finishChunk("a", 0);
+		let answer!: () => void;
+		h.mac.completeGate = new Promise((resolve) => {
+			answer = resolve;
+		});
+		const action = planNext(
+			h.state.index,
+			true,
+			h.executor.inFlight,
+			h.clock.now,
+		);
+		expect(action).toEqual({ kind: "complete", recordingID: "a" });
+		const completing = h.executor.execute(action, session, h.state.index);
+		expect(h.mac.calls.at(-1)).toBe("complete a");
+
+		await forgetPairing({
+			clear: async () => {
+				h.pairing.token = null;
+			},
+			update: async (transform) => {
+				h.state.index = transform(h.state.index);
+			},
+			cancelAllUploads: async () => {},
+		});
+		expect(h.row("a")?.state).toBe("unpaired");
+		return { h, answer, completing };
+	}
+
+	/** Pairs again, as the pairing sheet does after a scan. */
+	function pairAgain(h: ReturnType<typeof harness>) {
+		return commitPairing(
+			{
+				mac: {
+					macID: "0f8fad5b-d9cb-469f-a165-70867728950e",
+					macName: "Studio",
+					fingerprint: "FP",
+					pairedAt: "2026-09-25T10:05:00.000Z",
+				},
+				token: "new-token",
+			},
+			{
+				replace: async (pairing) => {
+					h.pairing.token = pairing.token;
+				},
+				update: async (transform) => {
+					h.state.index = transform(h.state.index);
+				},
+				cancelAllUploads: async () => {},
+			},
+		);
+	}
+
+	it("a 200 marks the row delivered and deletes the file, and a new pairing does not upload it again", async () => {
+		const { h, answer, completing } = await unpairDuringComplete();
+		answer();
+		await completing;
+
+		expect(h.row("a")).toMatchObject({
+			state: "delivered",
+			meetingID: "meeting-a",
+			lastError: null,
+		});
+		expect(h.files.removed).toEqual(["a.m4a"]);
+		expect(h.executor.inFlight.size).toBe(0);
+
+		await pairAgain(h);
+		expect(h.row("a")?.state).toBe("delivered");
+		const calls = h.mac.calls.length;
+		expect(await h.drive()).toEqual({ kind: "idle" });
+		expect(h.mac.calls).toHaveLength(calls);
+	});
+
+	it("a 401 to that complete leaves the row unpaired with its file, and a new pairing uploads it", async () => {
+		const { h, answer, completing } = await unpairDuringComplete();
+		// The unpair's revoke reached the Mac before the recording was admitted.
+		h.mac.revoked = true;
+		answer();
+		await completing;
+
+		expect(h.row("a")).toMatchObject({ state: "unpaired", meetingID: null });
+		expect(h.files.removed).toEqual([]);
+		expect(h.files.present.has("a.m4a")).toBe(true);
+
+		await pairAgain(h);
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 0 });
+		// The Mac accepts the new pairing (the fake checks no token).
+		h.mac.revoked = false;
+		await h.drive();
+		expect(h.mac.calls.at(-1)).toBe("complete a");
+		expect(h.row("a")?.state).toBe("delivered");
+	});
+
+	it("after a new pairing, nothing uploads until the old complete answers, and its 200 delivers the row", async () => {
+		const { h, answer, completing } = await unpairDuringComplete();
+		await pairAgain(h);
+		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 0 });
+		const calls = h.mac.calls.length;
+		expect(await h.drive()).toEqual({ kind: "idle" });
+		expect(h.mac.calls).toHaveLength(calls);
+
+		answer();
+		await completing;
+		expect(h.row("a")).toMatchObject({
+			state: "delivered",
+			meetingID: "meeting-a",
+			lastError: null,
+		});
+		expect(h.files.removed).toEqual(["a.m4a"]);
+		expect(h.executor.inFlight.size).toBe(0);
+		expect(await h.drive()).toEqual({ kind: "idle" });
+		expect(h.mac.calls).toHaveLength(calls);
+	});
+
+	it("after a new pairing, a 401 to the old complete backs off and the new pairing uploads the row", async () => {
+		const { h, answer, completing } = await unpairDuringComplete();
+		await pairAgain(h);
+		// The old token is revoked; the 401 is not the new pairing's.
+		h.mac.revoked = true;
+		answer();
+		await completing;
+		expect(h.pairing.token).toBe("new-token");
+		expect(h.row("a")).toMatchObject({
+			state: "queued",
+			attempts: 1,
+			lastError: "Retrying",
+		});
+		expect(h.files.present.has("a.m4a")).toBe(true);
+
+		// The Mac accepts the new pairing (the fake checks no token).
+		h.mac.revoked = false;
+		h.advance(5_000);
+		await h.drive();
+		expect(h.mac.calls.slice(-2)).toEqual(["announce a", "complete a"]);
+		expect(h.row("a")?.state).toBe("delivered");
 	});
 });
 

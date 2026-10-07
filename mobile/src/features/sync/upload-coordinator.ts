@@ -11,9 +11,10 @@ import {
  * `use-upload-coordinator.ts` executes the action and feeds results back
  * into the queue index; nothing here performs I/O.
  *
- * One recording at a time, oldest first; announce before any chunk; at most
- * two chunks in flight; complete only when every chunk is uploaded and
- * nothing is in flight.
+ * One recording at a time, oldest first; announce before any chunk, and a
+ * queued row only while neither its announce nor its complete is in flight;
+ * at most two chunks in flight; complete only when every chunk is uploaded
+ * and nothing is in flight.
  */
 export type Action =
 	| { kind: "idle" }
@@ -61,7 +62,11 @@ export function planNext(
 	if (rec.sha256 === null) return { kind: "idle" };
 
 	if (rec.state === "queued") {
-		return inFlight.has(taskIDs.announce(rec.recordingID))
+		// A `complete` still out (sent before an unpair, the row queued again
+		// by a new pairing) settles the row first: its 200 delivers it and
+		// deletes the file a new upload would read.
+		return inFlight.has(taskIDs.announce(rec.recordingID)) ||
+			inFlight.has(taskIDs.complete(rec.recordingID))
 			? { kind: "idle" }
 			: { kind: "announce", recordingID: rec.recordingID };
 	}
