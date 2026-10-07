@@ -760,22 +760,22 @@ async fn a_refresh_that_cannot_connect_names_the_cause() {
 }
 
 /// A rename that fails (here `auth.json` became a non-empty directory
-/// during the round trip) removes the temporary file, which holds live
-/// tokens, and so names no leftover file. A remove that fails as well
-/// cannot be provoked here: nothing runs between the write and the
-/// rename, and taking write access from the directory is ignored for root.
+/// during the round trip) keeps the temporary file, which holds the only
+/// live tokens since the posted refresh token is spent, and the error names
+/// that file, never what it holds.
 #[cfg(unix)]
 #[tokio::test]
-async fn a_failed_rename_leaves_no_temporary_file() {
+async fn a_failed_rename_keeps_the_temporary_file_and_names_it() {
     let home = CodexHome::new().await;
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     let fresh = CodexHome::access_token(3_600, "plus");
+    let fresh_for_responder = fresh.clone();
     let file = home.file();
     home.server.respond(Arc::new(move |_| {
         std::fs::remove_file(&file).unwrap();
         std::fs::create_dir(&file).unwrap();
         std::fs::write(file.join("occupied"), b"x").unwrap();
-        Some(scripts.token_refresh(&fresh, Some("rt_2"), None))
+        Some(scripts.token_refresh(&fresh_for_responder, Some("rt_2"), None))
     }));
     let error = home.store().current().await.unwrap_err();
     assert!(
@@ -783,9 +783,21 @@ async fn a_failed_rename_leaves_no_temporary_file() {
         "{error:?}"
     );
     let entries = file_names(home.directory.path());
-    assert_eq!(entries, ["auth.json"], "no temporary file is left");
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert!(entries.contains(&"auth.json".to_owned()), "{entries:?}");
+    let temporary = entries
+        .iter()
+        .find(|name| name.starts_with(".auth.json.steno-"))
+        .expect("the temporary file stays");
+    let kept: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.directory.path().join(temporary)).unwrap())
+            .unwrap();
+    assert_eq!(kept["tokens"]["refresh_token"], "rt_2");
+    assert_eq!(kept["tokens"]["access_token"], json!(fresh));
     let detail = error.detail().unwrap();
-    assert!(!detail.contains(".auth.json.steno-"), "{detail}");
+    assert!(detail.contains(temporary.as_str()), "{detail}");
+    assert!(!detail.contains("rt_2"), "{detail}");
+    assert!(!detail.contains(&fresh), "{detail}");
 }
 
 /// What the CLI wrote during the round trip survives the write-back.

@@ -653,9 +653,13 @@ impl CodexCredentialStore {
         ))
     }
 
-    /// Temp file beside the target with mode 0600, then `rename`: readers
-    /// see the old or the new file, never a partial one, and the mode never
-    /// opens up on the way.
+    /// Temp file beside the target with mode 0600, synced, then `rename`,
+    /// then the folder synced: readers see the old or the new file, never
+    /// a partial one, the mode never opens up on the way, and once this
+    /// returns the new tokens survive a power loss (the posted refresh
+    /// token is spent, so losing them would sign the user out). A rename
+    /// that fails keeps the temporary, which holds the only live tokens,
+    /// and the error names it, never what it holds.
     fn write(&self, document: &Map<String, Value>) -> Result<(), CodexCredentialError> {
         let text = crate::wire::swift_pretty(&Value::Object(document.clone()));
         let temporary = self
@@ -670,26 +674,34 @@ impl CodexCredentialStore {
         }
         let written = options.open(&temporary).and_then(|mut file| {
             use std::io::Write;
-            file.write_all(text.as_bytes())
+            file.write_all(text.as_bytes())?;
+            // A sync that fails still leaves every byte for every reader:
+            // renaming the file in place is then the best chance the new
+            // tokens have, better than the old file whose refresh token is
+            // spent.
+            let _ = file.sync_all();
+            Ok(())
         });
         if written.is_err() {
+            // A part of the document is no copy of the tokens to keep.
             let _ = std::fs::remove_file(&temporary);
             return Err(CodexCredentialError::RefreshFailed(
                 "could not write the sign-in file".to_owned(),
             ));
         }
         if let Err(error) = std::fs::rename(&temporary, self.file_path()) {
-            // The posted refresh token is spent by now, so a temporary file
-            // that stays behind holds the only live tokens: name it, never
-            // what it holds.
-            let left = match std::fs::remove_file(&temporary) {
-                Err(left) if left.kind() != std::io::ErrorKind::NotFound => {
-                    format!("; the new sign-in is left in {}", temporary.display())
-                }
-                _ => String::new(),
-            };
-            let detail = format!("could not replace the sign-in file: {error}{left}");
+            let detail = format!(
+                "could not replace the sign-in file: {error}; the new sign-in is left in {}",
+                temporary.display()
+            );
             return Err(CodexCredentialError::RefreshFailed(detail));
+        }
+        // The rename itself survives a power loss once the folder is
+        // synced; Windows cannot open a folder for that, and NTFS logs the
+        // rename in its journal.
+        #[cfg(unix)]
+        if let Ok(folder) = std::fs::File::open(&self.home) {
+            let _ = folder.sync_all();
         }
         Ok(())
     }
