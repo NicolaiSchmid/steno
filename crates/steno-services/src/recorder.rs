@@ -416,8 +416,10 @@ impl Recorder for CaptureRecorder {
 
 /// What a saved recording warns about, every line that applies joined
 /// into one: a device that disappeared, frames that never reached the
-/// files (in whole seconds of the lane that lost most, rounded up), and a
-/// call whose system audio stayed silent. The dropped frames name no
+/// files (in seconds of the lane that lost most, rounded to the nearest
+/// second, so from half a second on: a lone 10 ms drift slip is not worth
+/// a warning, and the log line keeps every count), and a call whose system
+/// audio stayed silent. The dropped frames name no
 /// cause, since the count holds several: the relay full behind a slow
 /// disk, ring overruns while the computer was too busy, frames a stop left
 /// undrained and, on Windows, the slips that absorb clock drift. Swift:
@@ -435,8 +437,8 @@ fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Optio
         .max()
         .copied()
         .unwrap_or(0);
-    if dropped > 0 {
-        let seconds = dropped.div_ceil(FRAMES_PER_SECOND);
+    let seconds = (dropped + FRAMES_PER_SECOND / 2) / FRAMES_PER_SECOND;
+    if seconds > 0 {
         lines.push(if seconds == 1 {
             "About 1 second of the recording is missing.".to_owned()
         } else {
@@ -992,8 +994,8 @@ mod tests {
         assert_eq!(recording_warning(CaptureMode::Call, &statistics()), None);
     }
 
-    /// Lost frames are a warning, in whole seconds of the lane that lost
-    /// most, rounded up.
+    /// Lost frames are a warning, in seconds of the lane that lost most,
+    /// rounded to the nearest second: 2.5 s reads 3.
     #[test]
     fn dropped_frames_warn_with_the_seconds_missing() {
         let mut dropped = statistics();
@@ -1004,11 +1006,22 @@ mod tests {
             Some("About 3 seconds of the recording are missing.")
         );
         dropped.dropped_frames.clear();
-        dropped.dropped_frames.insert(AudioLane::Mixed, 1);
+        dropped.dropped_frames.insert(AudioLane::Mixed, 50);
         assert_eq!(
             recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
             Some("About 1 second of the recording is missing.")
         );
+    }
+
+    /// Under half a second lost is no warning: one 10 ms slip, as Windows'
+    /// drift correction makes, or 490 ms.
+    #[test]
+    fn under_half_a_second_lost_warns_about_nothing() {
+        for frames in [1, 49] {
+            let mut dropped = statistics();
+            dropped.dropped_frames.insert(AudioLane::Mic, frames);
+            assert_eq!(recording_warning(CaptureMode::InPerson, &dropped), None);
+        }
     }
 
     /// Every warning that applies is kept: a device loss no longer hides a
