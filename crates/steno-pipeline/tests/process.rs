@@ -3445,20 +3445,11 @@ async fn pipelines_that_share_the_in_flight_set_refuse_each_others_meetings() {
     let id = enqueue_call(&world, &world.pipeline);
     world.pipeline.wait_until_idle().await;
     let in_flight = InFlight::default();
-    let retired = ProcessingPipeline::new(
-        world
-            .pipeline
-            .dependencies()
-            .clone()
-            .with_in_flight(in_flight.clone()),
-    );
-    let replacement = ProcessingPipeline::new(
-        world
-            .pipeline
-            .dependencies()
-            .clone()
-            .with_in_flight(in_flight),
-    );
+    let sharing = || {
+        let dependencies = world.pipeline.dependencies().clone();
+        ProcessingPipeline::new(dependencies.with_in_flight(in_flight.clone()))
+    };
+    let (retired, replacement) = (sharing(), sharing());
 
     let held = retired.claim_redeliver(id).unwrap();
     assert_eq!(replacement.in_flight(), vec![id]);
