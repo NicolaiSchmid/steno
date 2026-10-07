@@ -546,6 +546,40 @@ fn a_denied_key_read_leaves_the_key_empty_and_the_identity_still_comes_over() {
     );
 }
 
+/// While the gate hides the key (before the step, after Not now), a
+/// cleared key field or a keyless preset saves no key: the write never
+/// reaches the store, so the Swift app's item stays, and the gate stays
+/// shut. A key the user types goes through.
+#[test]
+fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
+    let step = step(FakeKeychain::swift_app(), None);
+    let key = SecretKey::llm_api_key();
+    let write = |value: Option<&str>| {
+        RUNTIME
+            .block_on(step.graph.secrets.set_secret(&key, value))
+            .unwrap();
+    };
+    for skipped in [false, true] {
+        if skipped {
+            step.import.skip();
+        }
+        write(None);
+        write(Some(""));
+        assert_eq!(
+            read(&*step.raw, &key).as_deref(),
+            Some("sk-swift"),
+            "skipped: {skipped}"
+        );
+        assert_eq!(read(&*step.graph.secrets, &key), None, "skipped: {skipped}");
+    }
+    write(Some("sk-typed"));
+    assert_eq!(read(&*step.raw, &key).as_deref(), Some("sk-typed"));
+    assert_eq!(read(&*step.graph.secrets, &key).as_deref(), Some("sk-typed"));
+    // Open now: a cleared field removes the key, as without an import.
+    write(None);
+    assert_eq!(read(&*step.raw, &key), None);
+}
+
 #[test]
 fn skipping_the_step_counts_as_both_denied_and_the_next_launch_asks_again() {
     let step = step(FakeKeychain::swift_app(), None);

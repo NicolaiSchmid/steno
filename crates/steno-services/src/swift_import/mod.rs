@@ -394,9 +394,21 @@ impl SecretStore for GatedSecrets {
     }
 
     /// A key the user saves goes to the store, which answers from then on.
+    /// While the gate is not open, a `None` or empty API key never reaches
+    /// the store: the form showed no key because the gate hid it, so a
+    /// cleared field or a keyless preset would otherwise delete the item
+    /// the Swift app shares, which a rollback still reads. The gate stays
+    /// as it is.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+        if key.as_str() != SecretKey::LLM_API_KEY {
+            return self.inner.set_secret(key, value).await;
+        }
+        let saving = value.is_some_and(|value| !value.is_empty());
+        if !saving && *self.gate.key() != KeyGate::Open {
+            return Ok(());
+        }
         self.inner.set_secret(key, value).await?;
-        if key.as_str() == SecretKey::LLM_API_KEY {
+        if saving {
             *self.gate.key() = KeyGate::Open;
         }
         Ok(())
