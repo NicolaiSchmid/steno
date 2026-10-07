@@ -166,8 +166,8 @@ impl QuitLatch {
 /// too) and that release take one lock, so a warm-up never overlaps a
 /// release. Clones share the engine and its claims; [`new`](Self::new)
 /// starts with none. The services hand a clone to each pipeline a reload
-/// builds over the same engine, and keep a [`WeakSpeechEngine`] to find
-/// it again while a pipeline still runs on it. Rust only: Swift has no
+/// builds over the same engine, and keep the sidecar's for the run and a
+/// [`WeakSpeechEngine`] to the in-process one. Rust only: Swift has no
 /// release.
 ///
 /// ```
@@ -244,6 +244,21 @@ impl SharedSpeechEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// Counts a job as needing the engine until the claim is dropped or
+    /// handed to [`ProcessingPipeline::finish_speech`].
+    fn claim(&self) -> SpeechClaim {
+        *self.claim_count() += 1;
+        SpeechClaim {
+            engine: self.clone(),
+        }
+    }
+
+    /// The lock the warm-ups and the release take, shared by every
+    /// pipeline over this engine.
+    async fn preparing(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.preparing.lock().await
+    }
 }
 
 impl Deref for SharedSpeechEngine {
@@ -293,8 +308,9 @@ impl WeakSpeechEngine {
 #[derive(Clone)]
 pub struct PipelineDependencies {
     pub decoder: Arc<dyn AudioDecoder>,
-    /// The speech engine with its claims; [`new`](Self::new) gives it
-    /// claims of its own.
+    /// The speech engine with its claims: [`new`](Self::new) gives it
+    /// claims of its own; [`with_speech_engine`](Self::with_speech_engine)
+    /// shares the caller's.
     pub speech_engine: SharedSpeechEngine,
     pub diarizer: Arc<dyn Diarizer>,
     pub speaker_memory: Arc<dyn SpeakerMemory>,
@@ -614,12 +630,6 @@ impl ProcessingPipeline {
         &self.inner.dependencies.speech_engine
     }
 
-    /// The lock the warm-ups and the release take, shared by every
-    /// pipeline over the same speech engine.
-    async fn preparing(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.speech_engine().0.preparing.lock().await
-    }
-
     fn now(&self) -> DateTime<Utc> {
         (self.inner.dependencies.now)()
     }
@@ -793,7 +803,7 @@ impl ProcessingPipeline {
     /// `decode` for the engine and `diarize` for the diarizer, as the
     /// Swift `warmUp` in `ProcessingPipeline.swift` attributes them.
     pub async fn warm_up(&self) -> Result<()> {
-        let _guard = self.preparing().await;
+        let _guard = self.speech_engine().preparing().await;
         let dependencies = &self.inner.dependencies;
         attributing(
             PipelineStage::Decode,
@@ -812,7 +822,7 @@ impl ProcessingPipeline {
     /// set resident until the job is done, outside any claim. Rust only:
     /// Swift's `warmUp` loads both.
     pub async fn warm_up_diarizer(&self) -> Result<()> {
-        let _guard = self.preparing().await;
+        let _guard = self.speech_engine().preparing().await;
         attributing(
             PipelineStage::Diarize,
             self.inner.dependencies.diarizer.prepare().await,
@@ -871,7 +881,7 @@ impl ProcessingPipeline {
         asset: &AudioAsset,
         meeting: Meeting,
     ) -> Result<AudioAsset> {
-        let claim = self.claim_speech();
+        let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
             self.warm_up().await?;
             attributing(
@@ -924,15 +934,6 @@ impl ProcessingPipeline {
         self.persist(&current, asset).await
     }
 
-    /// Counts a job as needing the speech engine until the claim is
-    /// dropped or handed to [`finish_speech`](Self::finish_speech).
-    fn claim_speech(&self) -> SpeechClaim {
-        *self.speech_engine().claim_count() += 1;
-        SpeechClaim {
-            engine: self.speech_engine().clone(),
-        }
-    }
-
     /// Ends `claim` and releases the speech engine when no other job, on
     /// this pipeline or another over the same engine, is between its
     /// warm-up and its last lane. Another claim seen before
@@ -948,7 +949,7 @@ impl ProcessingPipeline {
         if *self.speech_engine().claim_count() > 0 {
             return;
         }
-        let _guard = self.preparing().await;
+        let _guard = self.speech_engine().preparing().await;
         if *self.speech_engine().claim_count() > 0 {
             return;
         }
