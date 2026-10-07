@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::files::{Access, create_dir_all_durably, replace_file, set_aside};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use steno_core::protocols::BoundaryResult;
 use steno_host::services::{AudioDevices, Clock, FolderUsage, InputDevice, Preferences};
-use steno_pipeline::files::{Access, create_dir_all_durably, replace_file, set_aside};
 
 /// `Utc::now`.
 #[derive(Debug, Default)]
@@ -262,5 +262,29 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), br#"{"seen":true}"#);
         assert_eq!(names(directory.path()), vec!["preferences.json"]);
+    }
+
+    /// A file that does not parse and cannot be moved aside (its folder
+    /// is read-only) stays as it is and is never written.
+    #[cfg(unix)]
+    #[test]
+    fn a_corrupt_file_that_cannot_be_moved_aside_is_never_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("support");
+        std::fs::create_dir(&folder).unwrap();
+        let path = folder.join("preferences.json");
+        std::fs::write(&path, b"{\"seen\": tr").unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+        if std::fs::File::create(folder.join("probe")).is_ok() {
+            // Root writes past the mode; nothing to test.
+            return;
+        }
+        let preferences = FilePreferences::new(&path);
+        preferences.set_flag("onboarded", true);
+        assert!(preferences.flag("onboarded"), "the run still has its flag");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"seen\": tr");
+        assert_eq!(names(&folder), vec!["preferences.json"]);
     }
 }

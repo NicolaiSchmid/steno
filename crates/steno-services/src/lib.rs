@@ -17,7 +17,7 @@
 //! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring and the 0600 secrets file behind `SecretStore` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
-//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, the CLI's `meeting.json` |
+//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, the CLI's `meeting.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the platform
