@@ -1258,9 +1258,12 @@ still has to draw the window side. `[ ]` is not ported yet.
   meeting's folder and a meeting with the same date and title claimed the name since,
   Swift writes over that meeting's notes. The Rust destination claims and writes a
   folder as a first delivery would (`X-2`) and drops the old folder's files from the
-  receipt. It does the same when the pinned folder
-  is there but its `meeting.json` is missing or unreadable as a meeting: a duplicate
-  folder, never an overwrite.
+  receipt. It does the same when the pinned folder's `meeting.json` names no meeting,
+  or is missing and neither `transcript.vtt` nor the folder note carries this
+  meeting's `steno_id`: a duplicate folder, never an overwrite. A `meeting.json` that
+  cannot be read fails the delivery. One that only this meeting lost is written back
+  in place, as in Swift. With person pages off, the meeting's lines on its listed
+  pages keep linking the old folder's note until a delivery with person pages on.
 - On Windows the Rust person pages keep off the reserved device names (`Con` becomes
   `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
   names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.
