@@ -22,7 +22,7 @@ use steno_core::{AudioRetention, Settings, Store};
 
 use crate::labels::retention_footnote;
 use crate::services::{CodexModel, CodexModelsError, Services, permission_is_required};
-use crate::settings::llm::{CodexStatus, LlmPreset, LlmSettingsViewModel, url_host};
+use crate::settings::llm::{CodexStatus, KeyRead, LlmPreset, LlmSettingsViewModel, url_host};
 use crate::settings::obsidian::ObsidianSettingsViewModel;
 use crate::settings::snapshots as settings_snapshots;
 use crate::setup::{llm_configured, vault_configured};
@@ -147,8 +147,9 @@ impl OnboardingViewModel {
 
     /// Permissions, the retention sentence and the setup rows. The page 2
     /// rows load once: a later `load` ("Check again" on page 1) refreshes
-    /// the permissions and keeps whatever was typed on page 2.
-    pub fn load(&mut self, store: &Store, services: &Services, secret: Option<String>) {
+    /// the permissions and keeps whatever was typed on page 2, so it
+    /// ignores `key`.
+    pub fn load(&mut self, store: &Store, services: &Services, key: KeyRead) {
         for step in &mut self.steps {
             step.state = services.permissions.state(step.kind);
         }
@@ -159,7 +160,7 @@ impl OnboardingViewModel {
             return;
         }
         self.loaded = true;
-        self.llm.load(store, services, secret);
+        self.llm.load(store, services, key);
         if self.llm.is_configured {
             self.setup_states.insert(
                 OnboardingSetupStepKind::Summaries,

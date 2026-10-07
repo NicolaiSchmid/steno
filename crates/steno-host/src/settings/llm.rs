@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use steno_bridge::Platform;
-use steno_core::protocols::{BoundaryResult, SecretKey};
+use steno_core::protocols::{BoundaryResult, SecretKey, SecretPlace};
 use steno_core::{LlmProvider, Settings, Store, string_enum};
 
 use super::{SectionError, update_settings};
@@ -159,6 +159,34 @@ pub enum CodexStatus {
     Unavailable(String),
 }
 
+/// The stored API key as a read of the secret store found it. A read that
+/// failed (a locked keyring) is not an absent key: the form starts empty,
+/// says why, and a save leaves the stored key alone until the user types
+/// one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyRead {
+    Present(String),
+    Absent,
+    /// Why the read failed.
+    Unreadable(String),
+}
+
+impl KeyRead {
+    /// The message the section shows over [`KeyRead::Unreadable`]'s reason.
+    pub const UNREADABLE: &'static str =
+        "The saved API key could not be read. Saving keeps it unless you type a new one.";
+}
+
+impl<E: std::fmt::Display> From<Result<Option<String>, E>> for KeyRead {
+    fn from(read: Result<Option<String>, E>) -> Self {
+        match read {
+            Ok(Some(key)) => KeyRead::Present(key),
+            Ok(None) => KeyRead::Absent,
+            Err(error) => KeyRead::Unreadable(error.to_string()),
+        }
+    }
+}
+
 /// Swift: `LLMSettingsViewModel.TestResult`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestResult {
@@ -206,6 +234,13 @@ pub struct LlmSettingsViewModel {
     pub codex_model: String,
     codex_context_tokens: i64,
     stored: Option<Stored>,
+    /// Where the secret store keeps the key, as it said at the last load.
+    pub key_place: Option<SecretPlace>,
+    /// Why the last load could not read the stored key; `None` once read.
+    key_unreadable: Option<String>,
+    /// Whether the user changed the key field since the last load or save;
+    /// a save writes the key only then.
+    key_edited: bool,
     /// A probe asked for (by Test, or by a save of a configured endpoint)
     /// and not yet begun; the host takes it with [`Self::begin_pending_probe`]
     /// and runs it outside its lock.
@@ -235,6 +270,9 @@ impl LlmSettingsViewModel {
             codex_model: String::new(),
             codex_context_tokens: Settings::DEFAULT_CODEX_CONTEXT_TOKENS,
             stored: None,
+            key_place: None,
+            key_unreadable: None,
+            key_edited: false,
             probe_pending: false,
         }
     }
@@ -248,7 +286,15 @@ impl LlmSettingsViewModel {
             .is_some_and(|key| !key.is_empty())
     }
 
-    pub fn load(&mut self, store: &Store, services: &Services, secret: Option<String>) {
+    pub fn load(&mut self, store: &Store, services: &Services, key: KeyRead) {
+        let (secret, unreadable) = match key {
+            KeyRead::Present(key) => (Some(key), None),
+            KeyRead::Absent => (None, None),
+            KeyRead::Unreadable(reason) => (None, Some(reason)),
+        };
+        self.key_unreadable = unreadable;
+        self.key_edited = false;
+        self.key_place = services.secrets.place();
         let settings = match store.settings() {
             Ok(settings) => settings,
             Err(error) => {
@@ -256,6 +302,7 @@ impl LlmSettingsViewModel {
                 return;
             }
         };
+        self.show_unreadable_key();
         self.preset = LlmPreset::infer_from_settings(&settings);
         let endpoint_preset = LlmPreset::infer_from_url(settings.llm_base_url.as_deref());
         self.base_url_text = settings
@@ -287,6 +334,21 @@ impl LlmSettingsViewModel {
         }
         if self.preset == LlmPreset::Codex {
             self.refresh_codex_status(services);
+        }
+    }
+
+    /// The read failure, as the section's error, while the key is unread;
+    /// gone once it reads.
+    fn show_unreadable_key(&mut self) {
+        match &self.key_unreadable {
+            Some(reason) => {
+                self.errors.error = Some(KeyRead::UNREADABLE.to_owned());
+                self.errors.details = Some(reason.clone());
+            }
+            None if self.errors.error.as_deref() == Some(KeyRead::UNREADABLE) => {
+                self.errors.clear();
+            }
+            None => {}
         }
     }
 
@@ -560,20 +622,28 @@ impl LlmSettingsViewModel {
             return;
         }
         let draft = self.draft();
-        match Self::store(&draft, store, services, now) {
+        match Self::store(&draft, self.key_edited, store, services, now) {
             Ok(settings) => {
                 self.is_configured = llm_configured(&settings);
                 self.stored = Some(draft);
                 self.errors.clear();
+                if self.key_edited {
+                    self.key_edited = false;
+                    self.key_unreadable = None;
+                }
+                self.show_unreadable_key();
             }
             Err(error) => self.errors.fail("Settings could not be saved.", error),
         }
     }
 
-    /// The settings, the key in the secret store, then the pipeline rebuilt
-    /// on them; the settings as written.
+    /// The settings, the key in the secret store when the user edited it,
+    /// then the pipeline rebuilt on them; the settings as written. Swift
+    /// wrote the key on every save; an untouched field is not a reason to
+    /// write, and over a key that could not be read it would delete it.
     fn store(
         draft: &Stored,
+        write_key: bool,
         store: &Store,
         services: &Services,
         now: DateTime<Utc>,
@@ -593,11 +663,13 @@ impl LlmSettingsViewModel {
                 settings.codex_confirmed_at = None;
             }
         })?;
-        crate::host::block_on(
-            services
-                .secrets
-                .set_secret(&SecretKey::llm_api_key(), draft.api_key.as_deref()),
-        )?;
+        if write_key {
+            crate::host::block_on(
+                services
+                    .secrets
+                    .set_secret(&SecretKey::llm_api_key(), draft.api_key.as_deref()),
+            )?;
+        }
         services.pipeline.reload()?;
         Ok(settings)
     }
@@ -670,6 +742,7 @@ impl LlmSettingsViewModel {
             self.context_tokens_text.clone_from(tokens);
         }
         if let Some(key) = &update.api_key {
+            self.key_edited |= *key != self.api_key;
             self.api_key.clone_from(key);
         }
     }

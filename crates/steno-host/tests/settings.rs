@@ -22,6 +22,7 @@ use steno_core::paths::file_url;
 use steno_core::protocols::{SecretKey, SecretStore as _};
 use steno_core::{AudioRetention, LlmProvider};
 use steno_host::services::{CodexModel, LoginItemStatus};
+use steno_host::settings::KeyRead;
 use steno_host::speech::ModelAsset;
 
 /// Swift: `pageReadyPublishesEveryTopicOnce` and `testOverviewSubtitles`.
@@ -902,6 +903,71 @@ fn update(
         context_tokens: tokens.map(str::to_owned),
         api_key: key.map(str::to_owned),
     }
+}
+
+/// A key the secret store could not read (a locked keyring) shows as
+/// unreadable, a save of the other fields keeps it, and the section shows
+/// it once the store answers again (`Host::secrets_changed`).
+#[test]
+fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
+    let block_on = |future| {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(future)
+    };
+    let harness = Harness::builder()
+        .seed(move |_, fakes| {
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap()
+                .block_on(
+                    fakes
+                        .secrets
+                        .set_secret(&SecretKey::llm_api_key(), Some("sk-stored")),
+                )
+                .unwrap();
+            fakes.secrets.fail_reads(Some("the keyring is locked"));
+        })
+        .build();
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["error"], KeyRead::UNREADABLE);
+    assert_eq!(summaries["errorDetails"], "the keyring is locked");
+    assert_eq!(summaries["hasAPIKey"], false);
+
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        harness.store.settings().unwrap().llm_model.as_deref(),
+        Some("gpt-4.1-mini")
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["error"],
+        KeyRead::UNREADABLE,
+        "still not read"
+    );
+    harness.fakes.secrets.fail_reads(None);
+    assert_eq!(
+        block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
+            .unwrap()
+            .as_deref(),
+        Some("sk-stored"),
+        "the saves left the key alone"
+    );
+
+    harness.host.secrets_changed();
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["hasAPIKey"], true);
+    assert!(summaries.get("error").is_none(), "{summaries}");
 }
 
 /// Swift: `testLLMValidatesAndSavesSettingsAndKey`, `testLLMInvalidInputSavesNothing`,
