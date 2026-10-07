@@ -23,7 +23,7 @@ pub(crate) fn io_error(path: &Path, error: &std::io::Error) -> CaptureError {
     CaptureError::WriterFailed(format!("{}: {error}", path.display()))
 }
 
-pub use caf::{CafFile, CafReadError, CafStreamWriter};
+pub use caf::{CafFile, CafHeader, CafReadError, CafStreamWriter};
 pub use recording_writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
 pub use resampler::Resampler48kTo16k;
 pub use wav::{WavFile, WavReadError, WavStreamWriter};

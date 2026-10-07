@@ -141,4 +141,4 @@ pub use detection::{
     MeetingDetector, MeetingEvent, ProcessAudioActivity, ProcessAudioActivitySource,
 };
 pub use realtime::LaneFrameSink;
-pub use writer::{CafFile, RecordingWriter, WavFile};
+pub use writer::{CafFile, CafHeader, RecordingWriter, WavFile};

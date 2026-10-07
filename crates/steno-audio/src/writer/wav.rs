@@ -3,8 +3,8 @@
 //! count). Swift: `Sources/StenoAudio/Writer/WAVStreamWriter.swift` and
 //! `WAVFile.swift`.
 
-use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::bytes::{ReadAt, WindowedFile};
@@ -122,6 +122,51 @@ impl WavStreamWriter {
     pub fn duration(&self) -> f64 {
         let samples = self.samples_written as f64;
         samples / f64::from(self.sample_rate)
+    }
+
+    /// Finishes a sidecar whose writer died before [`Self::finish`]: the
+    /// sizes come from the file's length, whole samples only (a sample cut
+    /// short at the end is cut off), and the file is synced. Only a file
+    /// whose header is this writer's at 16 kHz, sizes aside, is touched (the
+    /// rate every sidecar has, and [`WavFile::read_16k_mono`] demands); a finished
+    /// one is written back as it was. Returns the samples it holds. Crash
+    /// recovery calls it, so the lane reads from its sidecar rather than
+    /// being rebuilt from the master. Rust only: Swift had no recovery.
+    pub fn recover(path: &Path) -> Result<usize, WavReadError> {
+        let io = |e: std::io::Error| WavReadError::Io(format!("{}: {e}", path.display()));
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(io)?;
+        let length = file.metadata().map_err(io)?.len();
+        let mut header = [0u8; Self::HEADER_SIZE];
+        if length < Self::HEADER_SIZE as u64 {
+            return Err(WavReadError::Malformed("shorter than its header".into()));
+        }
+        file.read_exact(&mut header).map_err(io)?;
+        let sample_rate = 16_000;
+        let expected = Self::header(sample_rate, 0);
+        // Everything but the two sizes: RIFF size at 4, data size at 40.
+        if header[..4] != expected[..4] || header[8..40] != expected[8..40] {
+            return Err(WavReadError::Malformed(
+                "not a 16 kHz 16-bit mono sidecar header".into(),
+            ));
+        }
+        let bytes = length - Self::HEADER_SIZE as u64;
+        let samples = usize::try_from(bytes / Self::BYTES_PER_SAMPLE as u64)
+            .map_err(|_| WavReadError::Malformed("too long for a WAV file".into()))?;
+        let data_size = samples * Self::BYTES_PER_SAMPLE;
+        if u32::try_from(Self::RIFF_SIZE_BEFORE_DATA + data_size).is_err() {
+            return Err(WavReadError::Malformed("too long for a WAV file".into()));
+        }
+        file.set_len((Self::HEADER_SIZE + data_size) as u64)
+            .map_err(io)?;
+        file.seek(SeekFrom::Start(0)).map_err(io)?;
+        file.write_all(&Self::header(sample_rate, samples))
+            .map_err(io)?;
+        file.sync_all().map_err(io)?;
+        Ok(samples)
     }
 
     /// The 44-byte RIFF, `fmt ` and `data` headers for a 16-bit mono file.

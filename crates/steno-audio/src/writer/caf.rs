@@ -10,7 +10,7 @@
 //! no AudioToolbox, so the writer and its tests run on every OS.
 
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::bytes::{ReadAt, WindowedFile};
@@ -332,16 +332,7 @@ impl CafLayout {
         let Some((start, count)) = samples else {
             return Err(CafReadError::Malformed("no data chunk".into()));
         };
-        let wanted = CafStreamWriter::FLOAT_LITTLE_ENDIAN_FLAGS;
-        if &format_id != b"lpcm"
-            || flags & wanted != wanted
-            || bits != CafStreamWriter::BYTES_PER_SAMPLE * 8
-        {
-            return Err(CafReadError::UnsupportedFormat(format!(
-                "{} flags {flags} {bits}-bit; need Float32 little-endian",
-                String::from_utf8_lossy(&format_id)
-            )));
-        }
+        check_format(format_id, flags, bits)?;
         let channels = channel_count.max(1);
         Ok(Self {
             sample_rate,
@@ -416,6 +407,156 @@ impl CafReader {
         self.position += frames;
         Ok(frames)
     }
+}
+
+/// Float32 little-endian linear PCM, the one format the readers take.
+fn check_format(format_id: [u8; 4], flags: u32, bits: usize) -> Result<(), CafReadError> {
+    let wanted = CafStreamWriter::FLOAT_LITTLE_ENDIAN_FLAGS;
+    if &format_id != b"lpcm"
+        || flags & wanted != wanted
+        || bits != CafStreamWriter::BYTES_PER_SAMPLE * 8
+    {
+        return Err(CafReadError::UnsupportedFormat(format!(
+            "{} flags {flags} {bits}-bit; need Float32 little-endian",
+            String::from_utf8_lossy(&format_id)
+        )));
+    }
+    Ok(())
+}
+
+/// What a CAF's chunk headers say, read without its samples: the format
+/// and how many whole frames the file holds. Crash recovery rebuilds a
+/// recording from it, and reading the master itself would mean 1.4 GB an
+/// hour. The same format rules as [`CafFile`]; a chunk header is read with
+/// a seek and the `desc` body is the only body read. Rust only: Swift had
+/// no recovery.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CafHeader {
+    /// Hertz.
+    pub sample_rate: f64,
+    /// Interleaved channels, at least one.
+    pub channel_count: usize,
+    /// The byte offset of the first sample.
+    pub data_offset: u64,
+    /// Whole frames on disk: up to the `data` chunk's size, or to the end
+    /// of the file while that size is -1. A frame cut short by a kill or a
+    /// full disk does not count.
+    pub frame_count: u64,
+    /// The `data` chunk's size is still -1: the writer never finished.
+    pub unfinished: bool,
+}
+
+impl CafHeader {
+    /// Reads the header of the file at `path`.
+    pub fn read(path: &Path) -> Result<Self, CafReadError> {
+        let io = |e: std::io::Error| CafReadError::Io(format!("{}: {e}", path.display()));
+        let mut file = File::open(path).map_err(io)?;
+        let length = file.metadata().map_err(io)?.len();
+        Self::read_from(&mut file, length).map_err(|error| match error {
+            CafReadError::Io(message) => CafReadError::Io(format!("{}: {message}", path.display())),
+            other => other,
+        })
+    }
+
+    /// Reads the header from `reader`, a CAF of `length` bytes.
+    pub fn read_from(reader: &mut (impl Read + Seek), length: u64) -> Result<Self, CafReadError> {
+        let mut magic = [0u8; 8];
+        if length < magic.len() as u64 {
+            return Err(CafReadError::Malformed("missing caff header".into()));
+        }
+        read_at(reader, 0, &mut magic)?;
+        if &magic[..4] != b"caff" {
+            return Err(CafReadError::Malformed("missing caff header".into()));
+        }
+        let chunk_header = CafStreamWriter::CHUNK_HEADER_SIZE as u64;
+        let edit = CafStreamWriter::EDIT_COUNT_SIZE as u64;
+        let mut offset = CafStreamWriter::FILE_HEADER_SIZE as u64;
+        let mut format: Option<(f64, u32, usize, usize, [u8; 4])> = None;
+        let mut samples: Option<(u64, u64, bool)> = None;
+        while samples.is_none() && offset + chunk_header <= length {
+            let mut header = [0u8; CafStreamWriter::CHUNK_HEADER_SIZE];
+            read_at(reader, offset, &mut header)?;
+            let kind: [u8; 4] = header[..4].try_into().unwrap_or(*b"????");
+            let size = i64::from_be_bytes(header[4..].try_into().unwrap_or([0; 8]));
+            let body = offset + chunk_header;
+            match &kind {
+                b"desc" => {
+                    let mut desc = [0u8; CafStreamWriter::DESC_CHUNK_SIZE];
+                    let short = u64::try_from(size).map_or(true, |size| size < desc.len() as u64);
+                    if short || body + desc.len() as u64 > length {
+                        return Err(CafReadError::Malformed("desc chunk too short".into()));
+                    }
+                    read_at(reader, body, &mut desc)?;
+                    format = Some((
+                        f64::from_bits(be_u64(&desc, 0)),
+                        be_u32(&desc, 12),
+                        be_u32(&desc, 24) as usize,
+                        be_u32(&desc, 28) as usize,
+                        desc[8..12].try_into().unwrap_or(*b"????"),
+                    ));
+                }
+                b"data" => {
+                    if body + edit > length {
+                        return Err(CafReadError::Malformed("data chunk too short".into()));
+                    }
+                    let available = length - body - edit;
+                    let count = match u64::try_from(size) {
+                        Ok(size) => size.saturating_sub(edit).min(available),
+                        Err(_) => available,
+                    };
+                    samples = Some((body + edit, count, size < 0));
+                }
+                _ => {}
+            }
+            let Ok(size) = u64::try_from(size) else {
+                break;
+            };
+            offset = body.saturating_add(size);
+        }
+        let Some((sample_rate, flags, channel_count, bits, format_id)) = format else {
+            return Err(CafReadError::Malformed("no desc chunk".into()));
+        };
+        let Some((data_offset, count, unfinished)) = samples else {
+            return Err(CafReadError::Malformed("no data chunk".into()));
+        };
+        check_format(format_id, flags, bits)?;
+        if channel_count == 0 {
+            return Err(CafReadError::Malformed("no channels".into()));
+        }
+        let bytes_per_frame = (CafStreamWriter::BYTES_PER_SAMPLE * channel_count) as u64;
+        Ok(Self {
+            sample_rate,
+            channel_count,
+            data_offset,
+            frame_count: count / bytes_per_frame,
+            unfinished,
+        })
+    }
+
+    /// Seconds in the whole frames.
+    #[must_use]
+    pub fn duration(&self) -> f64 {
+        // Exact in f64 for any recording.
+        let frames = self.frame_count as f64;
+        frames / self.sample_rate
+    }
+}
+
+/// Fills `buffer` from `offset`; a short read is an error.
+fn read_at(
+    reader: &mut (impl Read + Seek),
+    offset: u64,
+    buffer: &mut [u8],
+) -> Result<(), CafReadError> {
+    reader
+        .seek(SeekFrom::Start(offset))
+        .and_then(|_| reader.read_exact(buffer))
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => {
+                CafReadError::Malformed("a chunk runs past the end".into())
+            }
+            _ => CafReadError::Io(e.to_string()),
+        })
 }
 
 fn be_u32(data: &[u8], offset: usize) -> u32 {
