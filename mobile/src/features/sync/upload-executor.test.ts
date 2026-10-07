@@ -733,7 +733,7 @@ describe("a complete sent before an unpair and answered after it", () => {
 
 		await pairAgain(h);
 		expect(h.row("a")).toMatchObject({ state: "queued", attempts: 0 });
-		// The new pairing's token is accepted.
+		// The Mac accepts the new pairing (the fake checks no token).
 		h.mac.revoked = false;
 		await h.drive();
 		expect(h.mac.calls.at(-1)).toBe("complete a");
@@ -776,6 +776,7 @@ describe("a complete sent before an unpair and answered after it", () => {
 		});
 		expect(h.files.present.has("a.m4a")).toBe(true);
 
+		// The Mac accepts the new pairing (the fake checks no token).
 		h.mac.revoked = false;
 		h.advance(5_000);
 		await h.drive();

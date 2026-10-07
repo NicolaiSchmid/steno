@@ -101,7 +101,7 @@ describe("state machine", () => {
 		expect(() => setState(delivered, "a", "queued")).toThrow(QueueError);
 	});
 
-	it("allows failed back to queued only, and unpaired to queued or delivered", () => {
+	it("allows failed back to queued only, unpaired to queued or delivered, and a re-queued row to delivered", () => {
 		const failed = setState(queued, "a", "failed", { lastError: "422" });
 		expect(() => setState(failed, "a", "uploading")).toThrow(QueueError);
 		expect(() => setState(failed, "a", "delivered")).toThrow(QueueError);
