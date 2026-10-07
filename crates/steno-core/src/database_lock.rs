@@ -62,10 +62,7 @@ impl DatabaseLock {
     /// Where the lock of the database at `database` lives.
     #[must_use]
     pub fn path_for(database: &Path) -> PathBuf {
-        database
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join(Self::FILE_NAME)
+        database.with_file_name(Self::FILE_NAME)
     }
 
     /// Takes the lock of the database at `database` without waiting,
