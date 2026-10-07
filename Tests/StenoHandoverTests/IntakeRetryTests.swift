@@ -352,7 +352,8 @@ final class ScriptedIntake: HandoverIntake, Sendable {
       let intake = FakeHandoverIntake(meetingID: Self.meetingID)
       let now = first.now
       let second = HandoverService(
-        configuration: first.service.configuration, store: first.store, intake: intake,
+        configuration: first.service.configuration, store: first.store,
+        intake: first.moving(intake),
         identity: try TestIdentity.load(), now: { now })
       try await second.start()
       defer { Task { await second.stop() } }
