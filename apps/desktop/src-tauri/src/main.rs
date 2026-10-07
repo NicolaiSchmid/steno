@@ -168,7 +168,7 @@ fn main() {
         .manage(smoke::Smoke::default())
         .manage(panels::Panels::default())
         .manage(windows::Pages::default())
-        .manage(windows::Retired::default())
+        .manage(windows::Kept::default())
         .manage(updater::Updates::default())
         .manage(TrayAtClose::default())
         .manage(steno_services::app::ExitGate::default())
@@ -531,6 +531,14 @@ fn save_before_end(app: &tauri::AppHandle) {
     shut_down_before_exit(app);
 }
 
+/// The onboarding window closed, kept or destroyed: the host counts its
+/// pages as seen (`Host::onboarding_window_closed`), and a smoke run counts
+/// the close.
+fn onboarding_closed(app: &tauri::AppHandle) {
+    app.state::<smoke::Smoke>().note_onboarding_closed();
+    host::host(app).onboarding_window_closed();
+}
+
 /// One turn of the run loop; nothing for an app that refused to start
 /// (`refuse_to_start`), which has no host and ends without a shutdown.
 fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
@@ -590,40 +598,44 @@ fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             }
         }
         // Settings or onboarding closes on Linux: kept, not destroyed
-        // (`windows::retires_on_close`, #160); the host hears of
-        // onboarding's close as it does of a destroyed window.
+        // (`windows::keeps_on_close`, #160); the host hears of
+        // onboarding's close as it does of a destroyed window. A window
+        // that could not be kept is destroyed, so the close still happens.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::CloseRequested { api, .. },
             ..
-        } if windows::retires_on_close(&label) => {
+        } if windows::keeps_on_close(&label) => {
             api.prevent_close();
             let Some(window) = app.get_webview_window(&label) else {
                 return;
             };
-            match windows::retire(app, &window) {
-                Ok(true) if label == BridgeWindow::Onboarding.as_str() => {
-                    host::host(app).onboarding_window_closed();
-                }
+            match windows::keep(app, &window) {
+                Ok(true) if label == BridgeWindow::Onboarding.as_str() => onboarding_closed(app),
                 Ok(_) => {}
                 Err(error) => {
-                    stderr_line!("[steno-desktop] keeping the {label} window failed: {error}");
+                    stderr_line!(
+                        "[steno-desktop] keeping the {label} window failed, so it closes: {error}"
+                    );
+                    if let Err(error) = window.destroy() {
+                        stderr_line!("[steno-desktop] closing the {label} window failed: {error}");
+                    }
                 }
             }
         }
         // A window is gone: its page no longer listens; a destroyed main
         // window with no tray ends the process (`exits_when_destroyed`). A
-        // kept window (`windows::Retired`) is destroyed only as the app
-        // ends, and the host heard of its close when it was kept.
+        // kept window (`windows::Kept`) is destroyed only as the app ends,
+        // and the host heard of its close when it was kept.
         tauri::RunEvent::WindowEvent {
             label,
             event: tauri::WindowEvent::Destroyed,
             ..
         } => {
             app.state::<windows::Pages>().gone(&label);
-            let kept = app.state::<windows::Retired>().forget(&label);
+            let kept = app.state::<windows::Kept>().forget(&label);
             if label == BridgeWindow::Onboarding.as_str() && !kept {
-                host::host(app).onboarding_window_closed();
+                onboarding_closed(app);
             }
             if exits_when_destroyed(&label, || tray_at_close(app)) {
                 actions::quit(app);
@@ -725,7 +737,7 @@ fn tray_at_close(app: &tauri::AppHandle) -> bool {
 /// while a tray can bring it back, as the Swift main window closes behind
 /// the menu bar item (and the tray's recorder commands keep a window to go
 /// through). Settings and onboarding are kept on Linux
-/// (`windows::retires_on_close`); every other close destroys the window.
+/// (`windows::keeps_on_close`); every other close destroys the window.
 fn hides_on_close(label: &str, has_tray: bool) -> bool {
     label == BridgeWindow::Main.as_str() && has_tray
 }

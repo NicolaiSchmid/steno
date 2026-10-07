@@ -10,8 +10,8 @@
 //! (`keeps_its_size`), a second prompt reached the prompt's window, both
 //! panels hid, closing main hid it rather than destroying it, and on Linux
 //! closing Settings kept it and opening it again on a section loaded a
-//! fresh page there (`windows::Retired`); 1
-//! otherwise; a value that is not a positive number ends the run at once
+//! fresh page there, and closing onboarding kept it and told the host once
+//! (`windows::Kept`); 1 otherwise; a value that is not a positive number ends the run at once
 //! with 2. Screenshots of the Xvfb root during the wait are the review
 //! evidence; the windows carry what the host's database holds (nothing on a
 //! fresh runner, synthetic data with the fixture host), the prompts name
@@ -55,6 +55,9 @@ pub struct Smoke {
     /// How many times a Settings page sent `page.ready`: a kept window
     /// opened again mounts a new one.
     settings_ready: AtomicUsize,
+    /// How many times the host heard that onboarding closed
+    /// (`onboarding_closed` in `main.rs`).
+    onboarding_closed: AtomicUsize,
     tray_built: AtomicBool,
     /// The size each panel's page last reported, checked against the
     /// window at the end.
@@ -66,6 +69,11 @@ impl Smoke {
     /// platform has one.
     pub fn note_tray(&self) {
         self.tray_built.store(true, Ordering::SeqCst);
+    }
+
+    /// The host heard that onboarding closed (`main.rs`).
+    pub fn note_onboarding_closed(&self) {
+        self.onboarding_closed.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Whether this is a smoke run (`arm`).
@@ -128,7 +136,8 @@ impl Smoke {
         }
     }
 
-    fn outcome(&self, checks: Result<(), String>) -> Outcome {
+    /// The run's verdict; `checks` is the panels' and the windows' (`arm`).
+    fn outcome(&self, checks: Result<(), Outcome>) -> Outcome {
         match (
             self.main_ready.load(Ordering::SeqCst),
             self.main_snapshots.load(Ordering::SeqCst),
@@ -140,7 +149,7 @@ impl Smoke {
             (true, 0, ..) => Outcome::NoSnapshot,
             (true, _, false, ..) => Outcome::RequestLost,
             (true, _, true, false, _) => Outcome::NoTray,
-            (true, _, true, true, Err(problem)) => Outcome::PanelsFailed(problem),
+            (true, _, true, true, Err(failed)) => failed,
             (true, snapshots, true, true, Ok(())) => Outcome::Ok { snapshots },
         }
     }
@@ -165,9 +174,12 @@ pub enum Outcome {
     /// `tray::build` failed (the error was logged at startup).
     NoTray,
     /// A panel did not show, take its page's size, keep it, take a second
-    /// prompt or hide, or main did not hide on close; the message says
-    /// which.
+    /// prompt or hide; the message says which.
     PanelsFailed(String),
+    /// Main did not hide on close, or on Linux Settings or onboarding was
+    /// not kept on a close, or Settings did not open again on its section;
+    /// the message says which.
+    WindowsFailed(String),
 }
 
 impl Outcome {
@@ -187,6 +199,7 @@ impl Outcome {
                  after its page.ready in {seconds}s"
             ),
             Outcome::PanelsFailed(problem) => format!("FAILED, panels: {problem}"),
+            Outcome::WindowsFailed(problem) => format!("FAILED, windows: {problem}"),
             Outcome::NoSnapshot => format!(
                 "FAILED, page.ready from main but no snapshot reached it in {seconds}s: \
                  the bridge host did not answer"
@@ -280,8 +293,13 @@ pub fn arm(app: &AppHandle) {
     thread::spawn(move || {
         thread::sleep(Duration::from_secs(seconds));
         let checks = check_panels(&handle)
-            .and_then(|()| check_main_hides(&handle))
-            .and_then(|()| check_settings_reopens(&handle));
+            .map_err(Outcome::PanelsFailed)
+            .and_then(|()| {
+                check_main_hides(&handle)
+                    .and_then(|()| check_settings_reopens(&handle))
+                    .and_then(|()| check_onboarding_is_kept(&handle))
+                    .map_err(Outcome::WindowsFailed)
+            });
         let outcome = handle.state::<Smoke>().outcome(checks);
         stderr_line!("[steno-desktop] smoke: {}", outcome.message(seconds));
         handle.exit(outcome.exit_code());
@@ -378,13 +396,13 @@ fn check_main_hides(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// On Linux closing Settings keeps the window (`windows::Retired`), and
+/// On Linux closing Settings keeps the window (`windows::Kept`), and
 /// opening it again on a section loads a fresh page on that section, as a
 /// new window would: the window is visible, shows the section's route and
 /// a new page sent `page.ready`. Elsewhere a close destroys it, as before.
 fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
     let label = BridgeWindow::Settings.as_str();
-    if !windows::retires_on_close(label) {
+    if !windows::keeps_on_close(label) {
         return Ok(());
     }
     let settings = app
@@ -436,6 +454,40 @@ fn check_settings_reopens(app: &AppHandle) -> Result<(), String> {
     stderr_line!(
         "[steno-desktop] smoke: closing Settings kept it, and it opened again on {section}"
     );
+    Ok(())
+}
+
+/// On Linux closing onboarding keeps the window, hidden, and the host hears
+/// of the close once, as it did of a destroyed window (`onboarding_closed`
+/// in `main.rs`), so onboarding counts as seen; a second close of the kept
+/// window tells it nothing. Elsewhere a close destroys it, as before.
+fn check_onboarding_is_kept(app: &AppHandle) -> Result<(), String> {
+    let label = BridgeWindow::Onboarding.as_str();
+    if !windows::keeps_on_close(label) {
+        return Ok(());
+    }
+    let onboarding = app
+        .get_webview_window(label)
+        .ok_or("onboarding was gone before the close")?;
+    let smoke = app.state::<Smoke>();
+    let told = smoke.onboarding_closed.load(Ordering::SeqCst);
+    onboarding.close().map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(1000));
+    let kept = app
+        .get_webview_window(label)
+        .ok_or("closing onboarding destroyed it")?;
+    if kept.is_visible().map_err(|error| error.to_string())? {
+        return Err("onboarding stayed visible after a close".into());
+    }
+    kept.close().map_err(|error| error.to_string())?;
+    thread::sleep(Duration::from_millis(300));
+    let times = smoke.onboarding_closed.load(Ordering::SeqCst) - told;
+    if times != 1 {
+        return Err(format!(
+            "closing onboarding twice told the host {times} times, not once"
+        ));
+    }
+    stderr_line!("[steno-desktop] smoke: closing onboarding kept it and told the host once");
     Ok(())
 }
 
@@ -543,18 +595,24 @@ mod tests {
         smoke.note_ready("main");
         smoke.note_snapshot("main", BridgeTopic::App, &app_requesting(SMOKE_MEETING));
         smoke.note_tray();
-        assert_eq!(
-            smoke.outcome(Err("the bubble panel was not visible".into())),
-            Outcome::PanelsFailed("the bubble panel was not visible".into())
-        );
+        let hidden = Outcome::PanelsFailed("the bubble panel was not visible".into());
+        assert_eq!(smoke.outcome(Err(hidden.clone())), hidden);
+        let destroyed = Outcome::WindowsFailed("closing Settings destroyed it".into());
+        assert_eq!(smoke.outcome(Err(destroyed.clone())), destroyed);
         assert_eq!(Outcome::NoTray.exit_code(), 1);
         assert_eq!(Outcome::RequestLost.exit_code(), 1);
         assert_eq!(Outcome::PanelsFailed(String::new()).exit_code(), 1);
+        assert_eq!(Outcome::WindowsFailed(String::new()).exit_code(), 1);
         assert!(Outcome::NoTray.message(5).contains("tray icon"));
         assert!(
             Outcome::PanelsFailed("x".into())
                 .message(5)
                 .contains("panels: x")
+        );
+        assert!(
+            Outcome::WindowsFailed("x".into())
+                .message(5)
+                .contains("windows: x")
         );
         // The page's verdicts come first: a missing tray never masks them.
         let page_less = Smoke::default();

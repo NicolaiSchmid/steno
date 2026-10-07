@@ -6,7 +6,7 @@
 //! mounted yet waits in `Pages` and is published on its `page.ready`.
 //!
 //! On Linux a closed Settings or onboarding window is kept, not destroyed
-//! (`Retired`): `WebKitGTK` leaks a file descriptor for every webview
+//! (`Kept`): `WebKitGTK` leaks a file descriptor for every webview
 //! destroyed (#160), so a long session that opens Settings often would run
 //! out of them. The kept window drops its page (`about:blank`) and hides;
 //! opened again, it loads its route as a new window would, with the query
@@ -98,8 +98,12 @@ pub fn open(
 ) -> tauri::Result<WebviewWindow> {
     let spec = Spec::of(window);
     if let Some(existing) = app.get_webview_window(window.as_str()) {
-        if let Some(document) = app.state::<Retired>().revive(window.as_str()) {
+        let kept = app.state::<Kept>();
+        // Kept until the navigation went out, so a failed one leaves the
+        // next open to try again.
+        if let Some(document) = kept.document(window.as_str()) {
             existing.navigate(reopened(&document, window, query))?;
+            kept.forget(window.as_str());
         }
         existing.show()?;
         existing.set_focus()?;
@@ -157,7 +161,10 @@ pub fn open_requested(
     let pages = app.state::<Pages>();
     // A kept window opens as a new one, its section in the route.
     let existed = app.get_webview_window(params.window.as_str()).is_some()
-        && !app.state::<Retired>().holds(params.window.as_str());
+        && app
+            .state::<Kept>()
+            .document(params.window.as_str())
+            .is_none();
     match params.window {
         BridgeWindow::Onboarding => {
             open(app, BridgeWindow::Onboarding, None, None).map_err(failed)?;
@@ -286,21 +293,21 @@ pub fn request(
     }
 }
 
-/// Whether closing the window of `label` keeps it instead (`retire`):
+/// Whether closing the window of `label` keeps it instead (`keep`):
 /// Settings and onboarding on Linux, against `WebKitGTK`'s leak (#160). Main
 /// has its own rule (`hides_on_close` in `main.rs`); the panels only ever
 /// hide.
-pub fn retires_on_close(label: &str) -> bool {
+pub fn keeps_on_close(label: &str) -> bool {
     cfg!(target_os = "linux")
         && (label == BridgeWindow::Settings.as_str() || label == BridgeWindow::Onboarding.as_str())
 }
 
-/// The windows kept after a close (`retires_on_close`), each with the
+/// The windows kept after a close (`keeps_on_close`), each with the app
 /// document it showed, for its next `open`. Managed state.
 #[derive(Debug, Default)]
-pub struct Retired(Mutex<HashMap<String, Url>>);
+pub struct Kept(Mutex<HashMap<String, Url>>);
 
-impl Retired {
+impl Kept {
     /// Notes `label` as kept, showing `document`; false when it already
     /// was, which keeps the document it showed then (a second close finds
     /// `about:blank`).
@@ -315,36 +322,59 @@ impl Retired {
         true
     }
 
-    /// Whether the window of `label` is kept.
-    pub fn holds(&self, label: &str) -> bool {
-        self.0.lock().is_ok_and(|kept| kept.contains_key(label))
+    /// The document the kept window of `label` showed; none when it is not
+    /// kept.
+    fn document(&self, label: &str) -> Option<Url> {
+        self.0.lock().ok()?.get(label).cloned()
     }
 
-    /// The document the kept window of `label` showed, which it stops
-    /// being kept for: it opens again.
-    fn revive(&self, label: &str) -> Option<Url> {
-        self.0.lock().ok()?.remove(label)
-    }
-
-    /// The window of `label` was destroyed; whether it was kept.
+    /// The window of `label` is no longer kept: it opened again, or it was
+    /// destroyed. Whether it was kept.
     pub fn forget(&self, label: &str) -> bool {
-        self.revive(label).is_some()
+        self.0
+            .lock()
+            .is_ok_and(|mut kept| kept.remove(label).is_some())
     }
 }
 
-/// Keeps `window` after its close as a new one would start (`Retired`):
-/// its page is gone (`Pages::gone`), it hides, and it shows `about:blank`,
-/// so its next `open` loads a fresh document. False when it was kept
-/// already (a second close), which changes nothing.
-pub fn retire(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<bool> {
+/// Keeps `window` after its close in the state a new window starts in
+/// (`Kept`): its page is gone (`Pages::gone`), it hides, and it shows
+/// `about:blank`, so its next `open` loads a fresh document. False when it
+/// was kept already (a second close), which changes nothing. On an error
+/// it is not kept, and the caller destroys it.
+pub fn keep(app: &AppHandle, window: &WebviewWindow) -> tauri::Result<bool> {
     let label = window.label();
-    if !app.state::<Retired>().note(label, window.url()?) {
+    let main = || {
+        app.get_webview_window(BridgeWindow::Main.as_str())
+            .and_then(|main| main.url().ok())
+    };
+    let document = app_document(window.url()?, main)
+        .ok_or_else(|| std::io::Error::other("the window shows no document of the app"))?;
+    let kept = app.state::<Kept>();
+    if !kept.note(label, document) {
         return Ok(false);
     }
     app.state::<Pages>().gone(label);
-    window.hide()?;
-    window.navigate(Url::parse("about:blank").expect("a URL"))?;
+    let hidden = window
+        .hide()
+        .and_then(|()| window.navigate(Url::parse("about:blank").expect("a URL")));
+    if let Err(error) = hidden {
+        kept.forget(label);
+        return Err(error);
+    }
     Ok(true)
+}
+
+/// The app's document `shown` is; main's (`main`) when `shown` is the
+/// `about:blank` of a window closed again before its reopened page
+/// loaded; none when neither shows one.
+fn app_document(shown: Url, main: impl FnOnce() -> Option<Url>) -> Option<Url> {
+    let blank = |url: &Url| url.as_str() == "about:blank";
+    if blank(&shown) {
+        main().filter(|main| !blank(main))
+    } else {
+        Some(shown)
+    }
 }
 
 /// What a kept window loads when it opens again: the document it showed
@@ -435,31 +465,52 @@ mod tests {
     #[test]
     fn settings_and_onboarding_are_kept_on_linux_only() {
         let linux = cfg!(target_os = "linux");
-        assert_eq!(retires_on_close("settings"), linux);
-        assert_eq!(retires_on_close("onboarding"), linux);
+        assert_eq!(keeps_on_close("settings"), linux);
+        assert_eq!(keeps_on_close("onboarding"), linux);
         for label in ["main", "prompt", "bubble", "other"] {
-            assert!(!retires_on_close(label), "{label}");
+            assert!(!keeps_on_close(label), "{label}");
         }
     }
 
-    /// A kept window is noted once, opens again once, and is forgotten
-    /// with its document.
+    /// A kept window is noted once, keeps its document until it is
+    /// forgotten, and is kept anew after that.
     #[test]
-    fn a_kept_window_opens_again_once() {
-        let retired = Retired::default();
+    fn a_kept_window_is_noted_once_until_it_is_forgotten() {
+        let kept = Kept::default();
         let document = Url::parse("tauri://localhost/index.html#/settings?section=export").unwrap();
-        assert!(!retired.holds("settings"));
-        assert!(retired.note("settings", document.clone()));
+        assert_eq!(kept.document("settings"), None);
+        assert!(kept.note("settings", document.clone()));
         let blank = Url::parse("about:blank").unwrap();
-        assert!(!retired.note("settings", blank), "kept twice");
-        assert!(retired.holds("settings"));
-        assert!(!retired.holds("onboarding"));
-        assert_eq!(retired.revive("settings"), Some(document.clone()));
-        assert_eq!(retired.revive("settings"), None);
-        assert!(!retired.forget("settings"));
-        assert!(retired.note("onboarding", document));
-        assert!(retired.forget("onboarding"));
-        assert!(!retired.holds("onboarding"));
+        assert!(!kept.note("settings", blank), "kept twice");
+        assert_eq!(kept.document("settings"), Some(document.clone()));
+        assert_eq!(kept.document("settings"), Some(document.clone()));
+        assert_eq!(kept.document("onboarding"), None);
+        assert!(kept.forget("settings"));
+        assert_eq!(kept.document("settings"), None);
+        assert!(!kept.forget("settings"));
+        assert!(kept.note("onboarding", document));
+        assert!(kept.forget("onboarding"));
+        assert_eq!(kept.document("onboarding"), None);
+    }
+
+    /// A window keeps the app document it shows; one closed while it still
+    /// shows `about:blank` takes main's, and none is kept without one.
+    #[test]
+    fn a_kept_window_keeps_an_app_document() {
+        let url = |text: &str| Url::parse(text).unwrap();
+        let settings = url("tauri://localhost/index.html#/settings");
+        let main = url("tauri://localhost/index.html#/main");
+        let blank = url("about:blank");
+        assert_eq!(
+            app_document(settings.clone(), || panic!("main was asked")),
+            Some(settings)
+        );
+        assert_eq!(
+            app_document(blank.clone(), || Some(main.clone())),
+            Some(main)
+        );
+        assert_eq!(app_document(blank.clone(), || None), None);
+        assert_eq!(app_document(blank.clone(), || Some(blank.clone())), None);
     }
 
     /// A kept window loads its own route with the new query on the
