@@ -497,6 +497,9 @@ impl std::fmt::Debug for AggregateDevice {
     }
 }
 
+/// How the UID of every private aggregate Steno creates begins.
+pub const AGGREGATE_UID_PREFIX: &str = "uno.schmid.steno.aggregate.";
+
 impl AggregateDevice {
     pub fn new(
         name: &str,
@@ -505,7 +508,7 @@ impl AggregateDevice {
         tap_uids: &[String],
     ) -> Result<Self, CaptureError> {
         let uid = format!(
-            "uno.schmid.steno.aggregate.{}",
+            "{AGGREGATE_UID_PREFIX}{}",
             steno_core::json::uuid_string(uuid::Uuid::new_v4())
         );
         let sub_devices: Vec<Retained<NSObject>> = sub_device_uids
