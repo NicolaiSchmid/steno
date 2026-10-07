@@ -1201,14 +1201,16 @@ parity item until a plan says otherwise:
   back to a plain `fsync` when the filesystem refuses `F_FULLFSYNC` (a
   WebDAV mount answers ENOTTY), as SQLite does (`writer::durable`). A
   periodic sync that fails even so is logged once, tried again at the next
-  interval and handed back at the stop beside the recording, which ends
-  `Failed` with it; only a failed write cuts the recording short. A close
-  whose sync fails is a failure too. The relay between the processing
-  thread and the writer holds 2000 frames (20 s) instead of 200. A
-  recording that lost frames says how many seconds are missing beside the
-  other warnings, which are now joined (a device loss no longer hides a
-  silent call), and logs the counts per lane at `warn`. Swift synced at
-  the close alone, with a plain `fsync`, held 2 s and showed one warning.
+  interval and handed back at the stop beside the whole recording; a sync
+  failure is reported only when nothing else ended the recording (a failed
+  write or close, a device loss), and only a failed write cuts the
+  recording short. A close whose sync fails is a failure too. The relay
+  between the processing thread and the writer holds 2000 frames (20 s)
+  instead of 200. A recording that lost frames says how many seconds are
+  missing beside the other warnings, which are now joined (a device loss no
+  longer hides a silent call), and logs the counts per lane at `warn`.
+  Swift synced at the close alone, with a plain `fsync`, its relay held
+  2 s and it showed one warning.
 
 What the Windows backend (WP10a, `capture::live::wasapi`) does differently
 from the macOS one, each a parity item until a Windows machine has checked
