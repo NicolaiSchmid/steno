@@ -44,9 +44,11 @@
 //! node (by UID, its `node.name`, or the default source) and the default
 //! sink. A UID that names no source the capture can record (one saved on
 //! a Mac, a microphone unplugged since it was chosen) records the default
-//! source, with a warning, and the capture then follows the default as
-//! one without a UID does; a rebuild's restart tries the UID again. The
-//! stream asks for 48 kHz `f32` with one `AUXn` channel per
+//! source (the fallback), with a warning, and the capture then follows the
+//! default as one without a UID does, until the chosen source, or one of
+//! its ports, is announced again: that is a change too, so the rebuild's
+//! restart records the chosen source again. The stream asks for 48 kHz
+//! `f32` with one `AUXn` channel per
 //! linked port; PipeWire's adapter resamples whatever the graph runs at,
 //! so the rate is always [`SAMPLE_RATE`] and never a mismatch. The stream
 //! is connected without `AUTOCONNECT`, so the session manager leaves it
@@ -422,25 +424,8 @@ impl Shared {
             return;
         };
         match global.type_ {
-            // The chosen source announced (again) is a change: a capture
-            // standing in with the default then returns to it.
-            ObjectType::Node => {
-                if self
-                    .graph
-                    .borrow_mut()
-                    .add_node(global.id, |k| props.get(k))
-                {
-                    self.changed();
-                }
-            }
-            ObjectType::Port => {
-                if self
-                    .graph
-                    .borrow_mut()
-                    .add_port(global.id, |k| props.get(k))
-                {
-                    self.changed();
-                }
+            ObjectType::Node | ObjectType::Port => {
+                self.add_object(&global.type_, global.id, |k| props.get(k));
             }
             ObjectType::Metadata
                 if self.reads_defaults
@@ -477,6 +462,33 @@ impl Shared {
             }
             _ => {}
         }
+    }
+
+    /// A node or a port global into the graph, its properties read
+    /// through `props`. The chosen source, or one of its ports, announced
+    /// again is a change: a capture recording the fallback then returns to
+    /// it. Other types are not kept.
+    fn add_object<'a>(&self, kind: &ObjectType, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
+        let mut graph = self.graph.borrow_mut();
+        let chosen = match kind {
+            ObjectType::Node => graph.add_node(id, props),
+            ObjectType::Port => graph.add_port(id, props),
+            _ => false,
+        };
+        drop(graph);
+        if chosen {
+            self.changed();
+        }
+    }
+
+    /// From now on the graph serves the capture that resolved `targets`
+    /// for `uid`, the UID asked for (not the source recorded in its
+    /// place, so that source's return is a change): returns the baseline
+    /// its later snapshots are compared with ([`Graph::track`]).
+    fn track(&self, targets: &Targets, uid: Option<&str>) -> DeviceSnapshot {
+        let mut graph = self.graph.borrow_mut();
+        graph.track(targets, uid);
+        graph.snapshot(targets, uid, Lost::NONE)
     }
 
     /// A registry global went away: a node or a port out of the graph, or
@@ -817,11 +829,7 @@ impl Capture {
             })
             .register()
             .map_err(failed("the capture stream's state callback"))?;
-        let baseline = {
-            let mut graph = connection.shared.graph.borrow_mut();
-            graph.track(&targets, input_device_uid);
-            graph.snapshot(&targets, input_device_uid, Lost::NONE)
-        };
+        let baseline = connection.shared.track(&targets, input_device_uid);
         Ok(Capture {
             _rt_listener: rt_listener,
             _state_listener: state_listener,
@@ -1442,6 +1450,44 @@ mod tests {
             layout: None,
             input: None,
         }
+    }
+
+    /// A capture that records the default source in place of a missing
+    /// chosen one: the chosen node announced, or one of its ports, is a
+    /// pending change (so the rebuild returns to it); another app's node
+    /// or the default source's ports are not.
+    #[test]
+    fn the_chosen_source_announced_again_is_a_change() {
+        fn props<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<&'a str> {
+            move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+        }
+        let source = |name| [("node.name", name), ("media.class", "Audio/Source")];
+        let port = |node| [("node.id", node), ("port.direction", "out")];
+        let shared = Shared::default();
+        shared.add_object(&ObjectType::Node, 41, props(&source("built-in")));
+        shared.add_object(&ObjectType::Port, 55, props(&port("41")));
+        shared.graph.borrow_mut().set_default(
+            Some(graph::DEFAULT_SOURCE_KEY),
+            Some(r#"{"name":"built-in"}"#),
+        );
+        let asked = Some("usb-mic");
+        let targets = {
+            let graph = shared.graph.borrow();
+            graph
+                .resolve(&[AudioLane::Mixed], graph.known_source(asked))
+                .unwrap()
+        };
+        let baseline = shared.track(&targets, asked);
+        assert_eq!(baseline.input_uid.as_deref(), Some("built-in"));
+        shared.add_object(&ObjectType::Node, 90, props(&source("an-app")));
+        shared.add_object(&ObjectType::Port, 56, props(&port("41")));
+        assert_eq!(shared.due(), None, "nothing the capture asked for");
+
+        shared.add_object(&ObjectType::Node, 42, props(&source("usb-mic")));
+        assert!(shared.due().is_some(), "the chosen node is back");
+        shared.pending.set(None);
+        shared.add_object(&ObjectType::Port, 57, props(&port("42")));
+        assert!(shared.due().is_some(), "and its port");
     }
 
     #[test]
