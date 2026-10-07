@@ -21,7 +21,7 @@ use base64::engine::general_purpose::STANDARD;
 use common::{
     EngineDevice, Phone, TestService, chunks, fake_intake, metadata_for, seeded_bytes, sha256,
 };
-use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
+use steno_core::{AudioFormat, HandoverState, HandoverStateKind, RecordingMetadata};
 use steno_handover::upload::MetadataValidation;
 use steno_handover::wire;
 use uuid::Uuid;
@@ -565,6 +565,68 @@ async fn announce_after_complete_reports_complete_with_every_chunk() {
         !test.inbox().has_partial(metadata.recording_id),
         "no partial is reopened"
     );
+    test.stop().await;
+}
+
+#[tokio::test]
+async fn a_re_announce_of_a_complete_recording_with_other_metadata_is_409() {
+    // A different file under an admitted id is not answered `complete`: the
+    // phone would post `complete`, take its 200 and delete a recording the
+    // computer does not have. The phone keeps a recording answered 409 and
+    // announces it again after its backoff.
+    let intake = fake_intake(meeting_id());
+    let test = TestService::with_intake(CHUNK_SIZE, intake.clone()).await;
+    let phone = Phone::pair(&test).await;
+    let bytes = seeded_bytes(2 * CHUNK_SIZE as usize + 1, 7);
+    let metadata = phone.metadata(&bytes, CHUNK_SIZE);
+    phone.upload_all(&metadata, &bytes).await;
+    assert_eq!(phone.complete(metadata.recording_id).await.status, 200);
+
+    let mut flipped = bytes.clone();
+    flipped[0] ^= 1;
+    let changes = [
+        (
+            "sha256",
+            RecordingMetadata {
+                sha256: sha256(&flipped),
+                ..metadata.clone()
+            },
+        ),
+        (
+            "byteCount",
+            RecordingMetadata {
+                byte_count: metadata.byte_count + 1,
+                ..metadata.clone()
+            },
+        ),
+        (
+            "chunkSize",
+            RecordingMetadata {
+                chunk_size: CHUNK_SIZE / 2,
+                ..metadata.clone()
+            },
+        ),
+    ];
+    for (what, changed) in &changes {
+        let refused = phone.announce(changed).await;
+        assert_eq!(refused.status, 409, "{what}");
+        assert_eq!(
+            refused.json::<wire::Problem>().error,
+            "metadata differs from the first announcement",
+            "{what}"
+        );
+    }
+    assert!(
+        !test.inbox().has_partial(metadata.recording_id),
+        "no partial is reopened"
+    );
+    let again = phone.announce(&metadata).await;
+    assert_eq!(again.status, 200, "the same file is still complete");
+    assert_eq!(
+        again.json::<wire::RecordingStatus>(),
+        status(HandoverStateKind::Complete, vec![0, 1, 2])
+    );
+    assert_eq!(intake.admissions.count(), 1, "no second admission");
     test.stop().await;
 }
 
