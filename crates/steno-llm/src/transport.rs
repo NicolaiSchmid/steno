@@ -151,7 +151,7 @@ pub fn default_http_client() -> Result<reqwest::Client, LlmError> {
 
 /// The plain failure for a client builder's error `chain`.
 #[must_use]
-pub fn http_client_unavailable(chain: &str) -> LlmError {
+pub(crate) fn http_client_unavailable(chain: &str) -> LlmError {
     LlmError::HttpClientUnavailable(if chain.contains("No CA certificates") {
         "no TLS certificates were found on this computer".to_owned()
     } else {
