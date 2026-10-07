@@ -232,8 +232,8 @@ extension HandoverEngine {
 
   /// Whether memory holds the receipt of `recordingID` for a device other
   /// than `device`: another phone announced the same recording id after
-  /// `device` was revoked, so the files in the inbox are that phone's upload
-  /// and the receipt is its own. The caller checks and removes files in one
+  /// `device` was revoked, so the files in the inbox are taken as that
+  /// phone's upload and the receipt is its own. The caller checks and removes files in one
   /// actor step, with no suspension in between, so no announce lands between
   /// the two.
   private func ownedByAnotherDevice(_ recordingID: UUID, device: PairedDevice) -> Bool {
@@ -319,12 +319,13 @@ extension HandoverEngine {
   /// and a partial and sidecar that a re-announce opened during the intake,
   /// after the intake took the verified file. When another device announced
   /// the same recording id meanwhile (this one was revoked during the
-  /// intake), only the verified file goes, and the rest is that phone's
-  /// upload (`ownedByAnotherDevice`); no other request creates the verified
-  /// file while this `complete` holds the `completing` mark. A replayed
-  /// complete returns the same id through the early `.complete` check. On
-  /// failure the verified file stays for the phone's retry and the reason
-  /// is fixed text, because the error may name the file's path.
+  /// intake), only the verified file goes, if the intake left it, and the
+  /// rest is that phone's upload (`ownedByAnotherDevice`); no other request
+  /// creates the verified file while this `complete` holds the `completing`
+  /// mark. A replayed complete returns the same id through the early
+  /// `.complete` check. On failure the verified file stays for the phone's
+  /// retry and the reason is fixed text, because the error may name the
+  /// file's path.
   private func admit(
     _ file: URL, metadata: RecordingMetadata, device: PairedDevice,
     receipt: inout HandoverReceipt
