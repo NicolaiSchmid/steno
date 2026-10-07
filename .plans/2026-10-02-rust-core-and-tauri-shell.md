@@ -1139,23 +1139,26 @@ still has to draw the window side. `[ ]` is not ported yet.
   "Admission" item). Only then does the intake delete the upload and hand the saved
   meeting to the pipeline (`ProcessingPipeline::enqueue_saved`, `enqueueSaved`, which
   write nothing); a pipeline that cannot take it leaves the meeting `queued` for the
-  next launch's resume, the admission stands, and both apps log it. A failed commit
-  is not proof that nothing committed: when the WAL sync at the commit fails, its
-  frames stay in the WAL and recovery after a crash replays them. So the intake saves
-  the receipt `failed` durably first (`Store::save_handover_receipt_durably`,
-  `MeetingStore.saveDurably(_:)`), whose commit writes over those frames or voids
-  them, and removes the copy only once that save succeeds; otherwise the copy stays,
-  an orphan at worst, and a replayed admission still finds its master. The phone
-  keeps its copy either way. The intake completes only a receipt of the admitting
-  device: its read and, again, the admission's transaction refuse another device's
-  receipt under the same recording id (`StoreError::ReceiptOfAnotherDevice`,
-  `MeetingStoreError.receiptOfAnotherDevice`) and leave that receipt as it is, the
-  copy removed. The intake's writes run outside the engine's line of store writes, so
-  between its read and its commit the admitting phone can be revoked and another
-  phone announce the id; completed, that phone's receipt would answer its `complete`
-  with this meeting and it would delete a recording never admitted. Every production
-  wiring goes through it (`RecordingIntake::over`,
-  `steno_services::app::handover_intake`, Swift's
+  next launch's resume, the admission stands, and both apps log the failed enqueue. A
+  failed commit is not proof that nothing committed: when the WAL sync at the commit
+  fails, its frames stay in the WAL and recovery after a crash replays them. So the
+  intake saves the receipt `failed` durably first
+  (`Store::save_handover_receipt_durably`, `MeetingStore.saveDurably(_:)`), whose
+  commit writes over those frames or voids them, and removes the copy only once that
+  save succeeds; otherwise the copy stays, an orphan at worst, and a replayed
+  admission still finds its master. The phone keeps its copy either way. Orphan
+  masters (a crash after the copy, a failed save that fails too) are not cleaned up or
+  offered for re-import yet; the capture recovery's scan of audio folders without a
+  meeting row owns them (`fix/recovery-adopts-orphans`, stacked on #233). The intake
+  completes only a receipt of the admitting device: its read and, again, the
+  admission's transaction refuse another device's receipt under the same recording id
+  (`StoreError::ReceiptOfAnotherDevice`, `MeetingStoreError.receiptOfAnotherDevice`)
+  and leave that receipt as it is, the copy removed. The intake's writes run outside
+  the engine's line of store writes, so between its read and its commit the admitting
+  phone can be revoked and another phone announce the id; completed, that phone's
+  receipt would answer its `complete` with this meeting and it would delete a
+  recording never admitted. Every production wiring goes through it
+  (`RecordingIntake::over`, `steno_services::app::handover_intake`, Swift's
   `RecordingIntake.init(currentPipeline:)`, which `AppEnvironment.makeIntake` and
   `init(pipeline:)` go through).
 - The pairing's save and the revoke's delete are durable too
@@ -1172,11 +1175,25 @@ still has to draw the window side. `[ ]` is not ported yet.
   `Store::probe_commits` behind `testing`, Swift's `CommitLog` over the writer's
   trace), make the admission's commit fail with a trigger, the `failed` save too, and
   check that the `failed` receipt commits under `FULL` while the copy is still there;
-  a power loss itself is not tested, nor a failing WAL sync (that needs a fault
-  injecting SQLite VFS, which only a probe outside the repository ran, #213). The Rust
+  a power loss itself is not tested, nor a failing WAL sync (that needs a
+  fault-injecting SQLite VFS; the probe in #213's description ran one outside the
+  repository). The Rust
   store also turns `checkpoint_fullfsync` on (`Store::open`), which the bundled SQLite
   leaves off and Apple's system SQLite under GRDB has on, so a checkpoint on a Mac
   cannot undo a durable commit.
+- At launch, before the handover listener exists, both apps checkpoint the store
+  durably (`Store::checkpoint_durably`, `MeetingStore.checkpointDurably()`:
+  `wal_checkpoint(FULL)` under `FULL` with `fullfsync`), so every commit the store
+  reads is in the synced database file. After a crash, recovery can read back an
+  admission whose WAL sync failed (Linux keeps a page whose fsync failed in its cache,
+  marked clean), and the intake answers a retried `complete` from a stored `complete`
+  receipt without a write of its own; the checkpoint puts that admission on the disk
+  first. A checkpoint that fails, or that another connection still blocks when the
+  busy timeout runs out (`SQLITE_BUSY`), keeps the handover off until the next launch
+  with a startup warning; the rest of the app runs (`handover_listener` in
+  `crates/steno-services/src/app.rs`, `AppEnvironment.makeHandover`). Tests hold
+  another connection's write lock so the checkpoint fails, and expect no listener and
+  no identity read.
 
 ### Adapters
 
@@ -2351,7 +2368,7 @@ PR off `main`.
 | A re-announce of a `complete` recording with another size or hash is answered 409, so the phone keeps its file, and the same bytes in other chunks are answered `complete` (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | open |
 | A first announce, one that finds no receipt in memory or the store, discards every inbox file of the recording id before it opens its own, so an old verified file is never admitted unhashed; Swift's announce answers a failed receipt read with 500 (`steno-handover`, Swift core) | `fix/handover-first-announce-discard` | #239 | open |
 | The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
-| The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable (both apps) | `fix/handover-durable-intake` | #213 | open |
+| The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
