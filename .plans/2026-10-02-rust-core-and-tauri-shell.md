@@ -1634,8 +1634,11 @@ touch lines; each fix is ported to Swift before cutover.
   non-empty `recording-<UUID>.m4a` in expo-audio's `Documents/ExpoAudio/` that no
   `recording` row names as its `sourceUri` (`adoptRecorderFiles`), as `<uuid>.m4a`:
   a crash before the row was saved, or a failed row whose file stayed there. The new
-  rows enter crash recovery, which hashes and queues them. No load runs while the
-  recorder writes: recording starts only once the queue is loaded, and a load runs
+  rows enter crash recovery, which hashes and queues them. Every recording gets its own
+  file there: the recorder prepares expo-audio with the recording preset
+  (`use-recorder.ts`), which builds a new recorder at a fresh `recording-<UUID>.m4a`,
+  so a failed recording's file is not overwritten by the next one in the same app run.
+  No load runs while the recorder writes: recording starts only once the queue is loaded, and a load runs
   only until one succeeds. A load that fails saves nothing (`queue-store.ts`): the
   index stays as it is on disk, every update first loads again and rejects while that
   fails, the app loads again when it comes to the foreground, and the recorder screen
