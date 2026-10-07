@@ -36,9 +36,10 @@ struct Active {
     levels: Arc<Mutex<Option<LaneLevels>>>,
     /// The forwarding thread, joined once the session is dropped.
     level_thread: JoinHandle<()>,
-    /// The warning while the default input stands in for the chosen
-    /// microphone ([`input_warning`]), kept apart from the status's own so
-    /// a rebuild can set and clear it; written by `notice_thread`.
+    /// The warning while the default input records in place of the chosen
+    /// microphone ([`fallback_warning`]), kept apart from the status's own
+    /// so a rebuild can set and clear it; written at the start and by
+    /// `notice_thread`, cleared by `clear_messages`.
     input_warning: Arc<Mutex<Option<String>>>,
     /// Re-reads the microphone after each rebuild, joined once the session
     /// is dropped.
@@ -59,13 +60,16 @@ fn linear(db: f32) -> f64 {
 }
 
 /// The warning while `stream` records the default input in place of the
-/// chosen microphone, naming the one it records. Rust only: Swift fails the
-/// start when the chosen microphone is missing.
-fn input_warning(stream: Option<&CaptureStream>) -> Option<String> {
+/// chosen microphone (the fallback), naming the one it records. Rust only:
+/// Swift fails the start when the chosen microphone is missing.
+fn fallback_warning(stream: Option<&CaptureStream>) -> Option<String> {
     let input = stream?.input.as_ref().filter(|input| input.is_fallback)?;
+    let recording = input
+        .name
+        .as_deref()
+        .unwrap_or("the system default microphone");
     Some(format!(
-        "Recording from {} because the chosen microphone is not connected.",
-        input.name
+        "Recording from {recording} because the chosen microphone is not available."
     ))
 }
 
@@ -259,28 +263,31 @@ impl CaptureRecorder {
         };
         // A rebuild may record another microphone; the thread holds the
         // session weakly, so dropping it ends the notices and the thread.
-        let input_warning = Arc::new(Mutex::new(input_warning(session.stream().as_ref())));
+        let input_warning = Arc::new(Mutex::new(fallback_warning(session.stream().as_ref())));
         let notice_thread = {
             let (warning, session, hook) =
                 (input_warning.clone(), Arc::downgrade(&session), self.hook());
-            std::thread::spawn(move || {
-                while let Ok(notice) = notices.recv() {
-                    if !matches!(notice, CaptureNotice::DeviceResumed { .. }) {
-                        continue;
+            std::thread::Builder::new()
+                .name("steno-notices".into())
+                .spawn(move || {
+                    while let Ok(notice) = notices.recv() {
+                        if !matches!(notice, CaptureNotice::DeviceResumed { .. }) {
+                            continue;
+                        }
+                        let Some(session) = session.upgrade() else {
+                            return;
+                        };
+                        *warning
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            fallback_warning(session.stream().as_ref());
+                        drop(session);
+                        if let Some(hook) = &hook {
+                            hook();
+                        }
                     }
-                    let Some(session) = session.upgrade() else {
-                        return;
-                    };
-                    *warning
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                        self::input_warning(session.stream().as_ref());
-                    drop(session);
-                    if let Some(hook) = &hook {
-                        hook();
-                    }
-                }
-            })
+                })
+                .expect("spawn the notice thread")
         };
         {
             let mut inner = self.inner();
@@ -830,20 +837,21 @@ mod tests {
         stop(&in_process.recorder).await;
     }
 
-    /// A rebuild that records the default input in place of the chosen
-    /// microphone shows a warning naming the one recorded, until it is
-    /// dismissed or the recording stops.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_recording_on_a_stand_in_microphone_names_it_in_a_warning() {
-        let input = |name: &str, is_fallback| steno_audio::CaptureInput {
-            uid: name.to_lowercase(),
-            name: name.to_owned(),
+    /// A microphone input for the warning tests: `None` names none.
+    fn input(name: Option<&str>, is_fallback: bool) -> steno_audio::CaptureInput {
+        steno_audio::CaptureInput {
+            uid: name.unwrap_or("default").to_lowercase(),
+            name: name.map(str::to_owned),
             is_fallback,
-        };
-        let (chosen, stand_in) = (
-            input("USB Microphone", false),
-            input("Built-in Audio", true),
-        );
+        }
+    }
+
+    /// A harness whose capture records on `first` and, after one device
+    /// change 0.3 s in, on `after`.
+    fn harness_on_inputs(
+        first: steno_audio::CaptureInput,
+        after: steno_audio::CaptureInput,
+    ) -> Harness {
         let capture: MakeCaptureSession = Arc::new(move |configuration: CaptureConfiguration| {
             let stream = |input: &steno_audio::CaptureInput| CaptureStream {
                 input: Some(input.clone()),
@@ -856,8 +864,8 @@ mod tests {
             )
             .real_time(true)
             .change_device_after(0.3)
-            .stream(stream(&chosen))
-            .stream_after_restart(stream(&stand_in));
+            .stream(stream(&first))
+            .stream_after_restart(stream(&after));
             CaptureSession::with_backend(
                 configuration,
                 Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
@@ -867,26 +875,77 @@ mod tests {
             )
             .map_err(|error| error.to_string())
         });
-        let harness = harness_capturing(
+        harness_capturing(
             models_with(&[]),
             "parakeet-v3",
             platform_rule(SpeechSettings::default()),
             capture,
+        )
+    }
+
+    /// A rebuild that records the default input in place of the chosen
+    /// microphone shows a warning naming the one recorded, until it is
+    /// dismissed or the recording stops. The stop joins the thread that
+    /// sets it: the hook it calls is held up, and its handle on the warning
+    /// is gone once `stop` returns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_on_a_stand_in_microphone_names_it_in_a_warning() {
+        let harness = harness_on_inputs(
+            input(Some("USB Microphone"), false),
+            input(Some("Built-in Audio"), true),
         );
+        harness.recorder.on_change(Arc::new(|| {
+            if std::thread::current().name() == Some("steno-notices") {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }));
         let warning = || harness.recorder.status().warning;
         start(&harness.recorder).await;
         assert_eq!(warning(), None, "the chosen microphone records");
         eventually("the rebuild's stand-in is named", || {
             warning().as_deref()
                 == Some(
-                    "Recording from Built-in Audio because the chosen microphone is not connected.",
+                    "Recording from Built-in Audio because the chosen microphone is not available.",
                 )
         })
         .await;
         harness.recorder.clear_messages();
         assert_eq!(warning(), None, "dismissed");
+        let held = Arc::downgrade(
+            &harness
+                .recorder
+                .inner()
+                .active
+                .as_ref()
+                .unwrap()
+                .input_warning,
+        );
         stop(&harness.recorder).await;
         assert_eq!(warning(), None, "nothing left after the stop");
+        assert_eq!(held.strong_count(), 0, "the notice thread was joined");
+    }
+
+    /// A recording that starts on the default input in place of the chosen
+    /// microphone warns at once, and names the system default when the
+    /// input has no name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_that_starts_on_a_stand_in_microphone_warns_at_once() {
+        let harness = harness_on_inputs(input(Some("Built-in Audio"), true), input(None, true));
+        let warning = || harness.recorder.status().warning;
+        start(&harness.recorder).await;
+        assert_eq!(
+            warning().as_deref(),
+            Some("Recording from Built-in Audio because the chosen microphone is not available.")
+        );
+        eventually("the unnamed stand-in reads as the default", || {
+            warning().as_deref()
+                == Some(
+                    "Recording from the system default microphone because the chosen \
+                     microphone is not available.",
+                )
+        })
+        .await;
+        stop(&harness.recorder).await;
     }
 
     /// Quitting stops the recording with `quit` and saves it: the meeting

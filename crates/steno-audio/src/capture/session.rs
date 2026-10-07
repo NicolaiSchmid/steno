@@ -24,7 +24,12 @@
 //! `Failed(DeviceLost)`. A chosen microphone that is gone fails no restart:
 //! the live backends then record the default input and say so in
 //! [`CaptureStream::input`], which [`CaptureSession::stream`] hands out
-//! (see [`CaptureBackend::start`]).
+//! (see [`CaptureBackend::start`]). One that is connected but does not open
+//! is the session's to replace: when the start, or a rebuild's last
+//! restart, fails on it, the session starts the backend once more without
+//! a UID and marks that input as the fallback, so the recording ends only
+//! when the default input cannot be opened either (Rust only: Swift fails
+//! the start, and ends the recording after its restarts).
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole
@@ -573,11 +578,15 @@ impl Core {
                 }
             }),
         ));
-        let stream = match self.backend.start(
-            &lanes,
-            self.configuration.input_device_uid.as_deref(),
-            Arc::clone(&sink),
-        ) {
+        let started = self
+            .backend
+            .start(
+                &lanes,
+                self.configuration.input_device_uid.as_deref(),
+                Arc::clone(&sink),
+            )
+            .or_else(|error| self.start_on_the_default(&sink).ok_or(error));
+        let stream = match started {
             Ok(stream) => stream,
             Err(error) => {
                 let mut writer = writer;
@@ -975,10 +984,11 @@ impl Core {
         (unaccounted, peak)
     }
 
-    /// `start` again, `RESTART_BACKOFF` apart on the clock: `Started` with
-    /// the attempt that succeeded, `Exhausted` after `RESTART_ATTEMPTS`
-    /// failures, `Abandoned` when `stop()` cancelled a sleep or the
-    /// recording is gone.
+    /// `start` again, `RESTART_BACKOFF` apart on the clock, and once more on
+    /// the default input after the last failure (`start_on_the_default`):
+    /// `Started` with the attempt that succeeded (the last one for the
+    /// default), `Exhausted` when that failed too, `Abandoned` when `stop()`
+    /// cancelled a sleep or the recording is gone.
     fn restart_backend(
         &self,
         sink: &Arc<LaneFrameSink>,
@@ -1001,7 +1011,15 @@ impl Core {
                 return Restart::Started(stream, attempt);
             }
             if attempt >= CaptureSession::RESTART_ATTEMPTS {
-                return Restart::Exhausted;
+                let inner = self.lock();
+                if !Self::still_rebuilding(&inner, generation) {
+                    return Restart::Abandoned;
+                }
+                return self
+                    .start_on_the_default(sink)
+                    .map_or(Restart::Exhausted, |stream| {
+                        Restart::Started(stream, attempt)
+                    });
             }
             if !self
                 .clock
@@ -1014,6 +1032,34 @@ impl Core {
             }
         }
         Restart::Exhausted
+    }
+
+    /// The default input in place of a chosen microphone whose `start`
+    /// failed although it may be connected (a device still settling after
+    /// it was plugged in, one another app holds, a link that stalls):
+    /// `start` with no UID, its input marked as the fallback unless it is
+    /// the chosen one after all; `None` without a chosen microphone or when
+    /// this start fails too (the caller keeps the chosen one's error). A
+    /// backend started without a UID watches for no chosen device, so this
+    /// cannot loop; the next rebuild asks for the chosen one again. Called
+    /// with the mutex held, as every `backend.start`.
+    fn start_on_the_default(&self, sink: &Arc<LaneFrameSink>) -> Option<CaptureStream> {
+        let chosen = self.configuration.input_device_uid.as_deref()?;
+        let mut stream = self
+            .backend
+            .start(&self.configuration.lanes(), None, Arc::clone(sink))
+            .map_err(|error| tracing::warn!("the default input did not start either: {error}"))
+            .ok()?;
+        if let Some(input) = stream.input.as_mut()
+            && input.uid != chosen
+        {
+            tracing::warn!(
+                "the input device {chosen} did not start; recording from the default input {}",
+                input.uid
+            );
+            input.is_fallback = true;
+        }
+        Some(stream)
     }
 
     /// The new processing thread on the kept sink and relay, built for

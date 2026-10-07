@@ -249,7 +249,9 @@ pub enum DeviceChangeReason {
     /// The default output device moved; the system lane follows it once
     /// the session rebuilt the capture.
     DefaultOutputChanged,
-    /// The default input device moved.
+    /// The input the capture would record now moved: the default input,
+    /// or a chosen microphone that came back while the default was
+    /// recorded in its place.
     DefaultInputChanged,
     /// The output device the capture started on is gone.
     OutputDeviceGone,

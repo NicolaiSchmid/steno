@@ -425,8 +425,7 @@ impl Graph {
             name: self
                 .nodes
                 .get(&mic.node)
-                .and_then(|node| node.description.clone())
-                .unwrap_or_else(|| mic.name.clone()),
+                .and_then(|node| node.description.clone()),
             is_fallback: uid.is_some() && self.known_source(uid).is_none(),
         })
     }
@@ -877,7 +876,7 @@ mod tests {
             graph.input(&targets, asked),
             Some(CaptureInput {
                 uid: BUILT_IN_MIC.to_owned(),
-                name: BUILT_IN_MIC.to_owned(),
+                name: None,
                 is_fallback: true,
             })
         );

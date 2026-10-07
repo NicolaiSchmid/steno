@@ -15,8 +15,10 @@
 //! aggregate leaving 48 kHz) arrive on the HAL's notification thread and
 //! are coalesced for [`LiveCaptureBackend::COALESCE_DELAY`] on a watcher
 //! thread, then the devices are resolved again and compared with what the
-//! capture started on ([`DeviceSnapshot::difference`]). Nothing changed
-//! means the burst is logged and ignored; otherwise the sink gets one
+//! capture started on ([`DeviceSnapshot::difference`]); a capture on the
+//! fallback also resolves them every
+//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification. Nothing
+//! changed means the burst is logged and ignored; otherwise the sink gets one
 //! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
 //! `start` again. Nothing here runs on the IO thread except
 //! [`io_proc`], which only calls [`deliver`].
@@ -117,8 +119,9 @@ unsafe extern "C-unwind" fn io_proc(
 
 /// The input a capture asked for `uid` records now ([`chosen_or_default`]):
 /// the chosen device while it is connected and has input channels, else
-/// the default input. `None` when no input resolves at all.
-fn chosen_or_default_input(uid: Option<&str>) -> (Option<AudioDeviceInfo>, bool) {
+/// the default input, with `true` beside it. `None` when no input resolves
+/// at all.
+fn chosen_or_default_input(uid: Option<&str>) -> Option<(AudioDeviceInfo, bool)> {
     chosen_or_default(
         uid,
         |uid| AudioDevices::device(uid).ok().flatten(),
@@ -146,7 +149,8 @@ impl DeviceProbe {
         let output = AudioDevices::default_system_output().ok();
         let input = self
             .mic_id
-            .and_then(|_| chosen_or_default_input(self.input_device_uid.as_deref()).0);
+            .and_then(|_| chosen_or_default_input(self.input_device_uid.as_deref()))
+            .map(|(device, _)| device);
         DeviceSnapshot {
             output_uid: output.map(|d| d.uid),
             default_output_uid: AudioDevices::default_output_uid(),
@@ -165,6 +169,14 @@ struct WatchState {
     /// The last notification's selector and arrival, `None` once judged.
     pending: Option<(AudioObjectPropertySelector, Instant)>,
     stop: bool,
+}
+
+/// What the watcher judges: a settled burst of notifications, or the
+/// re-check while the capture records the fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Judged {
+    Notification(AudioObjectPropertySelector),
+    Recheck,
 }
 
 struct Watcher {
@@ -214,6 +226,14 @@ impl LiveCaptureBackend {
     /// resolved once. A Bluetooth profile switch fires several within it.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
+    /// How often a capture that records the fallback resolves the devices
+    /// without a notification. A chosen device can come back with no
+    /// notification of its own: one that read no input channels for a
+    /// moment while the device list changed, one that settled after its
+    /// `Devices` notification, or one that came back before the
+    /// listeners were registered.
+    pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -228,28 +248,36 @@ impl LiveCaptureBackend {
     }
 
     /// The watcher thread: waits for a notification, lets the burst settle
-    /// for `COALESCE_DELAY` after the last one, then resolves the devices
-    /// and reports the first difference. It belongs to one `start`:
-    /// `stop()` raises `WatchState::stop` and joins it before the backend
-    /// can start again, so a report never reaches a later capture (Swift
-    /// compared a generation counter instead; the join makes that
-    /// unnecessary here).
-    fn watch(
-        watcher: &Watcher,
-        probe: &DeviceProbe,
-        baseline: &DeviceSnapshot,
-        sink: &LaneFrameSink,
-    ) {
+    /// for `COALESCE_DELAY` after the last one, then hands it to `judge`,
+    /// outside the lock; with `recheck`, also each time that long passes
+    /// without a notification. It belongs to one `start`: `stop()` raises
+    /// `WatchState::stop` and joins it before the backend can start again,
+    /// so a report never reaches a later capture (Swift compared a
+    /// generation counter instead; the join makes that unnecessary here).
+    fn watch(watcher: &Watcher, recheck: Option<Duration>, mut judge: impl FnMut(Judged)) {
         let mut state = watcher.lock();
         loop {
             if state.stop {
                 return;
             }
             let Some((selector, last)) = state.pending else {
-                state = watcher
+                let Some(recheck) = recheck else {
+                    state = watcher
+                        .condvar
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    continue;
+                };
+                let (next, waited) = watcher
                     .condvar
-                    .wait(state)
+                    .wait_timeout(state, recheck)
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state = next;
+                if waited.timed_out() && state.pending.is_none() && !state.stop {
+                    drop(state);
+                    judge(Judged::Recheck);
+                    state = watcher.lock();
+                }
                 continue;
             };
             let due = last + Self::COALESCE_DELAY;
@@ -264,17 +292,28 @@ impl LiveCaptureBackend {
             }
             state.pending = None;
             drop(state);
-            // The HAL reads run outside the lock.
-            let snapshot = probe.resolve();
-            let name = hal::selector_name(selector);
-            match snapshot.difference(baseline) {
-                None => tracing::info!("ignored device notification {name}"),
-                Some(reason) => {
-                    tracing::info!("device notification {name} reported {reason:?}");
-                    sink.report_device_change(reason);
-                }
-            }
+            judge(Judged::Notification(selector));
             state = watcher.lock();
+        }
+    }
+
+    /// Resolves the devices (the HAL reads, outside the watcher's lock)
+    /// and reports their first difference from `baseline`.
+    fn judge(judged: Judged, probe: &DeviceProbe, baseline: &DeviceSnapshot, sink: &LaneFrameSink) {
+        let what = match judged {
+            Judged::Notification(selector) => {
+                format!("device notification {}", hal::selector_name(selector))
+            }
+            Judged::Recheck => "fallback re-check".to_owned(),
+        };
+        match probe.resolve().difference(baseline) {
+            // Every `FALLBACK_RECHECK`, so not logged.
+            None if judged == Judged::Recheck => {}
+            None => tracing::info!("ignored {what}"),
+            Some(reason) => {
+                tracing::info!("{what} reported {reason:?}");
+                sink.report_device_change(reason);
+            }
         }
     }
 }
@@ -302,8 +341,8 @@ impl CaptureBackend for LiveCaptureBackend {
         let output = AudioDevices::default_system_output()
             .map_err(|_| CaptureError::OutputDeviceUnavailable)?;
         let (mic, is_fallback) = if needs_mic {
-            let (resolved, is_fallback) = chosen_or_default_input(input_device_uid);
-            let device = resolved.ok_or(CaptureError::InputDeviceUnavailable)?;
+            let (device, is_fallback) = chosen_or_default_input(input_device_uid)
+                .ok_or(CaptureError::InputDeviceUnavailable)?;
             if is_fallback {
                 tracing::warn!(
                     "the input device {} is not connected; recording from the default input {}",
@@ -465,7 +504,10 @@ impl CaptureBackend for LiveCaptureBackend {
             std::thread::Builder::new()
                 .name("steno-devices".into())
                 .spawn(move || {
-                    LiveCaptureBackend::watch(&watcher, &probe, &baseline, &sink);
+                    let recheck = is_fallback.then_some(LiveCaptureBackend::FALLBACK_RECHECK);
+                    LiveCaptureBackend::watch(&watcher, recheck, |judged| {
+                        LiveCaptureBackend::judge(judged, &probe, &baseline, &sink);
+                    });
                 })
                 .map_err(|e| CaptureError::BackendFailed(format!("device watcher: {e}")))?
         };
@@ -486,7 +528,7 @@ impl CaptureBackend for LiveCaptureBackend {
             layout: Some(layout),
             input: mic.map(|mic| CaptureInput {
                 uid: mic.uid,
-                name: mic.name,
+                name: Some(mic.name).filter(|name| !name.is_empty()),
                 is_fallback,
             }),
         })
@@ -527,5 +569,66 @@ impl Drop for LiveCaptureBackend {
     /// in order instead of leaving it to field destruction order.
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// Runs the watch loop on its own thread; every judgement goes to the
+    /// returned receiver.
+    fn watching(
+        recheck: Option<Duration>,
+    ) -> (
+        Arc<Watcher>,
+        JoinHandle<()>,
+        std::sync::mpsc::Receiver<Judged>,
+    ) {
+        let watcher = Arc::new(Watcher {
+            state: Mutex::new(WatchState::default()),
+            condvar: Condvar::new(),
+        });
+        let (judged, judgements) = channel();
+        let thread = {
+            let watcher = Arc::clone(&watcher);
+            std::thread::spawn(move || {
+                LiveCaptureBackend::watch(&watcher, recheck, |judgement| {
+                    let _ = judged.send(judgement);
+                });
+            })
+        };
+        (watcher, thread, judgements)
+    }
+
+    fn stop(watcher: &Watcher, thread: JoinHandle<()>) {
+        watcher.lock().stop = true;
+        watcher.condvar.notify_all();
+        thread.join().unwrap();
+    }
+
+    /// A capture on the fallback judges the devices again with no
+    /// notification, so a chosen device that came back unannounced is
+    /// found; one on the device it asked for waits for a notification.
+    #[test]
+    fn only_a_capture_on_the_fallback_rechecks_without_a_notification() {
+        let (watcher, thread, judgements) = watching(Some(Duration::from_millis(50)));
+        assert_eq!(judgements.recv_timeout(WAIT), Ok(Judged::Recheck));
+        assert_eq!(judgements.recv_timeout(WAIT), Ok(Judged::Recheck));
+        stop(&watcher, thread);
+
+        let (watcher, thread, judgements) = watching(None);
+        assert!(judgements.recv_timeout(Duration::from_millis(300)).is_err());
+        watcher.lock().pending = Some((kAudioHardwarePropertyDevices, Instant::now()));
+        watcher.condvar.notify_all();
+        assert_eq!(
+            judgements.recv_timeout(WAIT),
+            Ok(Judged::Notification(kAudioHardwarePropertyDevices))
+        );
+        stop(&watcher, thread);
     }
 }

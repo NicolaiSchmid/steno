@@ -48,10 +48,12 @@
 //! removed or changing state) wakes a watcher thread, which coalesces a
 //! burst for [`LiveCaptureBackend::COALESCE_DELAY`] as the macOS backend
 //! does, resolves the devices again and compares them with what the
-//! capture started on ([`DeviceSnapshot::difference`]). A capture thread
-//! whose stream fails (`AUDCLNT_E_DEVICE_INVALIDATED` after a format change
-//! or an unplug) stops and tells the watcher, which reports the lost
-//! device when nothing else differs. The sink gets one
+//! capture started on ([`DeviceSnapshot::difference`]); a capture on the
+//! fallback also resolves them every
+//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification. A
+//! capture thread whose stream fails (`AUDCLNT_E_DEVICE_INVALIDATED` after
+//! a format change or an unplug) stops and tells the watcher, which
+//! reports the lost device when nothing else differs. The sink gets one
 //! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
 //! `start` again.
 //!
@@ -204,8 +206,15 @@ impl Watcher {
     /// The watcher thread's loop once registered: marks it ready, answers
     /// `start` through `ready`, then hands every settled burst to `judge`
     /// with the stream that failed meanwhile, if any, outside the lock,
-    /// until stopped.
-    fn watch(&self, ready: &SyncSender<()>, mut judge: impl FnMut(Option<StreamSource>)) {
+    /// until stopped. With `recheck`, `judge` also runs, with `None` and
+    /// `false` for "not notified", each time that long passes without a
+    /// notification.
+    fn watch(
+        &self,
+        ready: &SyncSender<()>,
+        recheck: Option<Duration>,
+        mut judge: impl FnMut(Option<StreamSource>, bool),
+    ) {
         let mut state = self.lock();
         state.ready = true;
         let _ = ready.send(());
@@ -214,10 +223,23 @@ impl Watcher {
                 break;
             }
             let Some(last) = state.pending else {
-                state = self
+                let Some(recheck) = recheck else {
+                    state = self
+                        .condvar
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    continue;
+                };
+                let (next, waited) = self
                     .condvar
-                    .wait(state)
+                    .wait_timeout(state, recheck)
                     .unwrap_or_else(PoisonError::into_inner);
+                state = next;
+                if waited.timed_out() && state.pending.is_none() && !state.stop {
+                    drop(state);
+                    judge(None, false);
+                    state = self.lock();
+                }
                 continue;
             };
             let due = last + LiveCaptureBackend::COALESCE_DELAY;
@@ -233,7 +255,7 @@ impl Watcher {
             state.pending = None;
             let failed = state.failed.take();
             drop(state);
-            judge(failed);
+            judge(failed, true);
             state = self.lock();
         }
     }
@@ -246,6 +268,8 @@ struct DeviceProbe {
     needs_system: bool,
     /// `None`: the default capture endpoint.
     input_device_uid: Option<String>,
+    /// The microphone records the fallback, so the watcher re-checks.
+    is_fallback: bool,
     mic_endpoint_id: Option<String>,
     render_endpoint_id: Option<String>,
 }
@@ -280,8 +304,7 @@ impl DeviceProbe {
     fn resolve(&self, enumerator: &Enumerator) -> DeviceSnapshot {
         let input_uid = if self.needs_mic {
             chosen_or_default_input(enumerator, self.input_device_uid.as_deref())
-                .0
-                .and_then(|endpoint| endpoint.id().ok())
+                .and_then(|(endpoint, _)| endpoint.id().ok())
         } else {
             None
         };
@@ -350,6 +373,12 @@ impl LiveCaptureBackend {
     /// resolved once; the macOS backend's value.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
+    /// How often a capture that records the fallback resolves the devices
+    /// without a notification, so a selected endpoint that becomes active
+    /// unannounced (or before the watcher registered) is found; the macOS
+    /// backend's value.
+    pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
+
     /// No capture running.
     #[must_use]
     pub fn new() -> Self {
@@ -369,7 +398,7 @@ impl LiveCaptureBackend {
 fn chosen_or_default_input(
     enumerator: &Enumerator,
     uid: Option<&str>,
-) -> (Option<com::Endpoint>, bool) {
+) -> Option<(com::Endpoint, bool)> {
     chosen_or_default(
         uid,
         |uid| enumerator.endpoint(uid).ok(),
@@ -390,8 +419,8 @@ fn open(
     let mut input = None;
     let (client, endpoint_id, loopback) = match source {
         StreamSource::Microphone => {
-            let (endpoint, is_fallback) = chosen_or_default_input(&enumerator, input_device_uid);
-            let endpoint = endpoint.ok_or(CaptureError::InputDeviceUnavailable)?;
+            let (endpoint, is_fallback) = chosen_or_default_input(&enumerator, input_device_uid)
+                .ok_or(CaptureError::InputDeviceUnavailable)?;
             let id = endpoint.id().ok();
             if is_fallback {
                 tracing::warn!(
@@ -401,7 +430,7 @@ fn open(
                 );
             }
             input = id.clone().map(|uid| CaptureInput {
-                name: endpoint.friendly_name().unwrap_or_else(|| uid.clone()),
+                name: endpoint.friendly_name(),
                 uid,
                 is_fallback,
             });
@@ -515,7 +544,10 @@ fn run_watcher(
             .ok()
     });
     let baseline = enumerator.as_ref().map(|e| probe.baseline(e));
-    watcher.watch(ready, |failed| {
+    let recheck = probe
+        .is_fallback
+        .then_some(LiveCaptureBackend::FALLBACK_RECHECK);
+    watcher.watch(ready, recheck, |failed, notified| {
         // The WASAPI reads run outside the lock.
         let difference = match (&enumerator, &baseline) {
             (Some(enumerator), Some(baseline)) => probe.resolve(enumerator).difference(baseline),
@@ -530,7 +562,7 @@ fn run_watcher(
         if let Some(reason) = reason {
             tracing::info!("device change reported: {reason:?}");
             sink.report_device_change(reason);
-        } else {
+        } else if notified {
             tracing::info!("ignored device notification");
         }
     });
@@ -780,6 +812,10 @@ impl CaptureBackend for LiveCaptureBackend {
             needs_mic: mic.is_some(),
             needs_system: system.is_some(),
             input_device_uid: input_device_uid.map(str::to_owned),
+            is_fallback: mic
+                .as_ref()
+                .and_then(|m| m.input.as_ref())
+                .is_some_and(|input| input.is_fallback),
             mic_endpoint_id: mic.as_ref().and_then(|m| m.endpoint_id.clone()),
             render_endpoint_id: system.as_ref().and_then(|s| s.endpoint_id.clone()),
         };
@@ -880,7 +916,7 @@ impl AudioDevices {
                 let is_default_output = !is_input && is_default(default_output.as_deref());
                 devices.push(AudioDeviceInfo {
                     id: u32::try_from(devices.len()).unwrap_or(u32::MAX),
-                    name: endpoint.friendly_name().unwrap_or_else(|| uid.clone()),
+                    name: endpoint.friendly_name(),
                     input_channels: if is_input { channels } else { 0 },
                     output_channels: if is_input { 0 } else { channels },
                     nominal_sample_rate: f64::from(rate),
@@ -952,7 +988,7 @@ mod tests {
             let watcher = Arc::clone(&watcher);
             let stopped = Arc::clone(&stopped);
             std::thread::spawn(move || {
-                watcher.watch(&ready, |_| {
+                watcher.watch(&ready, None, |_, _| {
                     let _ = entered.send(());
                     let _ = gate.recv_timeout(WAIT);
                     let _ = judged.send(stopped.load(Ordering::SeqCst));
@@ -982,6 +1018,38 @@ mod tests {
         );
     }
 
+    /// A capture on the fallback judges the endpoints again with no
+    /// notification, as "not notified"; one on the endpoint it asked for
+    /// waits for a notification.
+    #[test]
+    fn only_a_capture_on_the_fallback_rechecks_without_a_notification() {
+        for recheck in [Some(Duration::from_millis(50)), None] {
+            let watcher = Arc::new(Watcher::default());
+            let (ready, answered) = sync_channel(1);
+            let (judged, judgements) = channel();
+            let thread = {
+                let watcher = Arc::clone(&watcher);
+                std::thread::spawn(move || {
+                    watcher.watch(&ready, recheck, |failed, notified| {
+                        let _ = judged.send((failed, notified));
+                    });
+                })
+            };
+            answered
+                .recv_timeout(WAIT)
+                .expect("the watcher reached its loop");
+            if recheck.is_some() {
+                assert_eq!(judgements.recv_timeout(WAIT), Ok((None, false)));
+                assert_eq!(judgements.recv_timeout(WAIT), Ok((None, false)));
+            } else {
+                assert!(judgements.recv_timeout(Duration::from_millis(300)).is_err());
+                watcher.note();
+                assert_eq!(judgements.recv_timeout(WAIT), Ok((None, true)));
+            }
+            watcher.stop_and_join(thread);
+        }
+    }
+
     /// A watcher still in its start-up calls when `stop()` comes is not
     /// waited for; once they return it exits without judging the burst
     /// that is pending.
@@ -999,7 +1067,7 @@ mod tests {
                 // baseline.
                 let opened = gate.recv_timeout(WAIT).is_ok();
                 let mut judged = false;
-                watcher.watch(&ready, |_| judged = true);
+                watcher.watch(&ready, None, |_, _| judged = true);
                 let _ = done.send((opened, judged));
             })
         };

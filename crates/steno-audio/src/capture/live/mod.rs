@@ -94,20 +94,26 @@ impl AudioDeviceInfo {
 
 /// The microphone a capture asked for `uid` records now: what `chosen`
 /// finds for `uid` while it is `usable`, else what `default` finds while
-/// it is `usable`; `true` beside it when that default stands in for a
-/// chosen one. The Mac and Windows backends pick with it at `start` and in
-/// every snapshot, so a chosen device coming back reads as a change;
-/// PipeWire picks in its graph (`Graph::known_source`).
+/// it is `usable`, with `true` beside it when it is the default recorded
+/// in place of a chosen one (the fallback, [`CaptureInput::is_fallback`]);
+/// `None` when neither is usable. The Mac and Windows backends pick with
+/// it at `start` and in every snapshot, so a chosen device coming back
+/// reads as a change; PipeWire picks in its graph
+/// (`Graph::followed_source`).
+///
+/// [`CaptureInput::is_fallback`]: crate::capture::CaptureInput::is_fallback
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) fn chosen_or_default<D>(
     uid: Option<&str>,
     chosen: impl FnOnce(&str) -> Option<D>,
     default: impl FnOnce() -> Option<D>,
     usable: impl Fn(&D) -> bool,
-) -> (Option<D>, bool) {
+) -> Option<(D, bool)> {
     match uid.map(|uid| chosen(uid).filter(&usable)) {
-        Some(Some(device)) => (Some(device), false),
-        asked => (default().filter(&usable), asked.is_some()),
+        Some(Some(device)) => Some((device, false)),
+        asked => default()
+            .filter(&usable)
+            .map(|device| (device, asked.is_some())),
     }
 }
 
@@ -154,7 +160,7 @@ mod tests {
     use super::chosen_or_default;
 
     #[test]
-    fn a_missing_chosen_device_is_stood_in_for_by_the_default() {
+    fn the_default_stands_in_for_a_missing_chosen_device() {
         let connected = ["usb", "built-in", "speakers"];
         let pick = |uid, default| {
             chosen_or_default(
@@ -164,15 +170,15 @@ mod tests {
                 |&device| device != "speakers",
             )
         };
-        assert_eq!(pick(Some("usb"), "built-in"), (Some("usb"), false));
-        assert_eq!(pick(Some("gone"), "built-in"), (Some("built-in"), true));
+        assert_eq!(pick(Some("usb"), "built-in"), Some(("usb", false)));
+        assert_eq!(pick(Some("gone"), "built-in"), Some(("built-in", true)));
         assert_eq!(
             pick(Some("speakers"), "built-in"),
-            (Some("built-in"), true),
+            Some(("built-in", true)),
             "a chosen device it cannot record counts as missing"
         );
-        assert_eq!(pick(None, "built-in"), (Some("built-in"), false));
-        assert_eq!(pick(Some("gone"), "speakers"), (None, true));
-        assert_eq!(pick(None, "speakers"), (None, false));
+        assert_eq!(pick(None, "built-in"), Some(("built-in", false)));
+        assert_eq!(pick(Some("gone"), "speakers"), None);
+        assert_eq!(pick(None, "speakers"), None);
     }
 }

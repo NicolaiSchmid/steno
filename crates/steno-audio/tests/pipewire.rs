@@ -42,7 +42,10 @@
 //! it with its pid and goes when it ends, with a change for both, while
 //! Steno's own capture is never listed. An unknown microphone UID records the default
 //! source, says so in the stream and follows default moves; a chosen
-//! microphone announced later is a change, and the restart records it.
+//! microphone announced later is a change, and the restart records it. A
+//! chosen source that is listed but never runs (its owner stopped) leaves
+//! the recording on the default source, at the start and after the
+//! rebuild its arrival causes.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -67,14 +70,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use steno_audio::capture::{ChannelRef, DeviceChangeReason};
+use steno_audio::capture::{
+    CaptureConfiguration, CaptureMode, CaptureNotice, CaptureSession, CaptureState, ChannelRef,
+    DeviceChangeReason,
+};
 use steno_audio::testing::rt::CountingAllocator;
 use steno_audio::writer::WavStreamWriter;
 use steno_audio::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, LaneFrameSink, LiveCaptureBackend,
-    SAMPLE_RATE,
+    SAMPLE_RATE, SystemClock,
 };
 use steno_core::AudioLane;
+use uuid::Uuid;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -535,7 +542,7 @@ fn in_person_records_only_the_microphone_by_its_uid() {
 fn test_mic_standing_in() -> CaptureInput {
     CaptureInput {
         uid: MIC.to_owned(),
-        name: "Steno test microphone".to_owned(),
+        name: Some("Steno test microphone".to_owned()),
         is_fallback: true,
     }
 }
@@ -592,6 +599,118 @@ fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
     later.destroy();
     assert_eq!(next_report(&reasons), DeviceChangeReason::InputDeviceGone);
     stop_and_check_teardown(&backend, &sink);
+}
+
+/// A source whose owner stopped answering (SIGSTOP right after it is
+/// listed): connected, so it is chosen, but its link never runs. The child
+/// is resumed and killed when dropped, by the PID recorded here.
+struct StalledSource {
+    child: Child,
+}
+
+impl StalledSource {
+    const NAME: &str = "steno-test-mic-stalled";
+
+    fn create() -> Self {
+        let child = Command::new("pw-loopback")
+            .args([
+                "--capture-props",
+                "node.name=steno-test-stalled-in media.class=Audio/Sink audio.position=[MONO]",
+                "--playback-props",
+                &format!(
+                    "node.name={} media.class=Audio/Source audio.position=[MONO]",
+                    Self::NAME
+                ),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("pw-loopback");
+        let source = Self { child };
+        let listed = || inputs().iter().any(|device| device.uid == Self::NAME);
+        assert!(eventually(SETTLE, listed), "the stalled source is listed");
+        assert!(tool("kill", &["-STOP", &source.child.id().to_string()]));
+        source
+    }
+}
+
+impl Drop for StalledSource {
+    fn drop(&mut self) {
+        let _ = tool("kill", &["-CONT", &self.child.id().to_string()]);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let gone = || !inputs().iter().any(|device| device.uid == Self::NAME);
+        let _ = eventually(SETTLE, gone);
+    }
+}
+
+/// A session asking for [`StalledSource::NAME`] on the live backend.
+fn session_choosing_the_stalled_source(directory: &Path) -> CaptureSession {
+    let mut configuration = CaptureConfiguration::new(CaptureMode::InPerson, directory);
+    configuration.input_device_uid = Some(StalledSource::NAME.to_owned());
+    CaptureSession::with_backend(
+        configuration,
+        Arc::new(LiveCaptureBackend::new()),
+        None,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        Arc::new(SystemClock::new()),
+    )
+    .expect("the session")
+}
+
+/// A chosen source that is connected but does not run never costs the
+/// recording while the default source works. At the start, its failed
+/// start is followed by one on the default. During a recording on the
+/// fallback, its arrival is a change whose restarts all fail on it, and
+/// the last is followed by one on the default, so the recording goes on.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let session = session_choosing_the_stalled_source(directory.path());
+    let input = |session: &CaptureSession| {
+        session
+            .stream()
+            .and_then(|stream| stream.input)
+            .map(|input| (input.uid, input.is_fallback))
+    };
+    let on_the_fallback = Some((MIC.to_owned(), true));
+    {
+        let _stalled = StalledSource::create();
+        session
+            .start(Uuid::new_v4())
+            .expect("the start on the default");
+        assert_eq!(input(&session), on_the_fallback, "at the start");
+        let result = session.stop().expect("the first recording");
+        assert!(!result.statistics.ended_on_device_loss);
+    }
+
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).expect("the start");
+    assert_eq!(input(&session), on_the_fallback, "missing at the start");
+    let _stalled = StalledSource::create();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut seen = Vec::new();
+    while !matches!(seen.last(), Some(CaptureNotice::DeviceResumed { .. })) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match notices.recv_timeout(left) {
+            Ok(notice) => seen.push(notice),
+            Err(_) => panic!("no resume within 40 s: {seen:?}, {:?}", session.state()),
+        }
+    }
+    println!("notices: {seen:?}");
+    assert_eq!(
+        seen.first(),
+        Some(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DefaultInputChanged
+        )),
+        "its arrival"
+    );
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    assert_eq!(input(&session), on_the_fallback, "after the rebuild");
+    let result = session.stop().expect("the second recording");
+    assert!(!result.statistics.ended_on_device_loss);
 }
 
 #[test]

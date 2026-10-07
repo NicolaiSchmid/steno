@@ -150,7 +150,7 @@ fn an_unknown_microphone_records_the_default_input() {
             stream.input,
             Some(CaptureInput {
                 uid: default.uid.clone(),
-                name: default.name.clone(),
+                name: Some(default.name.clone()),
                 is_fallback: true,
             })
         );
