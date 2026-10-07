@@ -3040,7 +3040,7 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   gnome-session's source only. The writer recognises GDK's lost-display lines by GTK
   3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. The 5 s stop timeout of an
   autostarted app under systemd is raised to 20 s by a drop-in
-  (`fix/desktop-autostart-stop-timeout`, the shutdown items). Where:
+  (#227, the shutdown items). Where:
   `apps/desktop/src-tauri/src/session_end.rs`,
   `apps/desktop/src-tauri/src/display_lost.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203, #220.
@@ -3220,7 +3220,7 @@ PR off `main`.
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
 | The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | open |
-| An autostarted app gets the time its save needs at logout: the systemd drop-in for the autostart unit's stop timeout, in the `.deb` and written by the app; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | | in review |
+| An autostarted app gets the time its save needs at logout: the systemd drop-in for the autostart unit's stop timeout, in the `.deb` and written by the app; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
