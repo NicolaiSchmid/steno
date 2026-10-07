@@ -1386,27 +1386,39 @@ still has to draw the window side. `[ ]` is not ported yet.
     running; a real xfce4-session 4.20.4 logout on X11 and on Wayland (labwc 0.9.7),
     and its Quit Program and Save Session under a recording on X11, in a container.
   - An autostarted app on a desktop that runs XDG autostart through systemd (KDE
-    Plasma, uwsm sessions such as Omarchy's; GNOME 50's gnome-session starts the
-    entries itself) is the unit `app-steno\x2ddesktop@autostart.service`, which
-    `systemd-xdg-autostart-generator` writes with `TimeoutStopSec=5s`, and Launch at
-    login is on by default: at a logout or a compositor's end the app was SIGKILLed
-    5 s after SIGTERM, before a save that needs `SHUTDOWN_PATIENCE` (10 s) plus
-    `EXIT_GRACE` (2 s). A drop-in, `apps/desktop/src-tauri/linux/autostart-stop-timeout.conf`
-    (`TimeoutStopSec=20s`), is installed by the `.deb` under `/usr/lib/systemd/user/`
-    (checked by `check-bundle.sh`) and written by the app into the user's
-    `$XDG_CONFIG_HOME/systemd/user/` whenever Launch at login is on, at launch and when
-    it is switched on, removed when it is switched off, with a reload of the user
-    manager after a change (`stop_timeout` in `autostart.rs`), so the AppImage and
-    earlier installs get it. The AUR and Nix packages must ship the same file. Each
-    shutdown logs its duration. Under a real systemd user manager in a 1-CPU container,
-    the generated unit's `TimeoutStopUSec` went from 5 s to 20 s with either copy, a
-    stand-in needing 8 s after SIGTERM was killed at 5 s without the drop-in and
-    finished with it, and the debug app, stopped as the unit while recording, saved in
-    0.25 s with the meeting `queued`. A reboot saves inside logind's delay; on Omarchy
-    the delay is 15 s and the user manager then gets 5 s (`user@.service`), which no
-    drop-in for this unit can raise, so that path depends on the delay lock. A save
-    still needs to fit in the compositor's own stop when the app runs in its unit
-    rather than its own (uwsm's `wayland-wm@.service`, `TimeoutStopSec=10`).
+    Plasma, uwsm sessions such as Omarchy's) is the unit
+    `app-steno\x2ddesktop@autostart.service`, which `systemd-xdg-autostart-generator`
+    writes with `TimeoutStopSec=5s`. On GNOME the app runs in
+    `app-gnome-steno\x2ddesktop-<pid>.scope`, at login and from the dash alike, and
+    gnome-session's `app-gnome-.scope.d/override.conf` gives that scope 5 s too.
+    Either way systemd kills the app 5 s after SIGTERM, before a save that needs
+    `SHUTDOWN_PATIENCE` (10 s) plus `EXIT_GRACE` (2 s), and Launch at login is on by
+    default. Two drop-ins in `apps/desktop/src-tauri/linux/` raise the timeout to 20 s:
+    `[Service]` as `10-steno.conf` for the unit, `[Scope]` as `zz-steno.conf` for the
+    scope, named to sort after `override.conf`. The `.deb` installs both under
+    `/usr/lib/systemd/user/` (checked by `check-bundle.sh`); the app writes them under
+    `~/.config/systemd/user/` whatever `XDG_CONFIG_HOME` says, the scope's at every
+    launch and the unit's while Launch at login is on, and reloads the user manager
+    after a write, never after a removal (`stop_timeout.rs`). Launch at login turned
+    off while the app runs as the unit (its cgroup) is marked and goes after the
+    exit's save (`autostart.rs`): removing the entry earlier lets any reload unload
+    the running unit, and the session's end then sends no SIGTERM. The AUR and Nix
+    packages ship the files under stable plan X6 and X7. Each shutdown logs its
+    duration at `warn`. Measured under a real systemd 255 user manager in a 1-CPU
+    container, with a stand-in that needs 8 s after SIGTERM: the unit and the scope
+    (with `override.conf`) killed it at 5 s without the drop-ins and let it finish
+    with them. A debug build with 8 s added before its save wrote both drop-ins at
+    launch and reloaded, so the running unit and the running scope took 20 s; stopped
+    as the uwsm-style unit (`graphical-session.target` stopped) and in the scope, it
+    saved in about 8.1 s each time, the meeting `queued` with its duration. With
+    Launch at login turned off mid-recording as the unit and an unrelated
+    `daemon-reload` after it, the unit stayed loaded with 20 s and its `PartOf`, the
+    session's end saved the same way, and then the entry and the unit's drop-in were
+    gone; turned off outside the unit, both went at once. A reboot saves inside logind's delay; on Omarchy the delay is
+    15 s and the user manager then gets 5 s (`user@.service`), which no drop-in for
+    this unit can raise, so that path depends on the delay lock. A save still needs
+    to fit in the compositor's own stop when the app runs in its unit rather than its
+    own (uwsm's `wayland-wm@.service`, `TimeoutStopSec=10`).
   - Once the shutdown has begun, or an exit signal has arrived (the signal task calls
     `Host::quit_pipeline` before its request waits for the main thread), the pipeline
     starts no job and persists no job's failure (`ProcessingPipeline::quit`): a job the
@@ -3039,8 +3051,8 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   (X11, and Wayland under labwc); GNOME's logout dialog for the inhibitor is read from
   gnome-session's source only. The writer recognises GDK's lost-display lines by GTK
   3.24.52's wording; a GTK that rewords them falls back to the unsaved exit. The 5 s stop timeout of an
-  autostarted app under systemd is raised to 20 s by a drop-in
-  (#227, the shutdown items). Where:
+  autostarted app under systemd, and of GNOME's app scope, is raised to 20 s by
+  drop-ins (#227, the shutdown items). Where:
   `apps/desktop/src-tauri/src/session_end.rs`,
   `apps/desktop/src-tauri/src/display_lost.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203, #220.
@@ -3220,7 +3232,7 @@ PR off `main`.
 | Stable plan A12: an undecodable AAC packet (an error or a panic) becomes silence of its length, the decoder starting fresh, counted with the silence's seconds (`AudioBuffer16k::damage`), recorded in `damaged-audio.json` by the app and the CLI and shown as the detail's `audioWarning`; more than half of the packets damaged fails (`steno-audio`, `steno-pipeline`, `steno-services`, `steno-host`, `steno-cli`, bridge) | `fix/decoder-skip-bad-packets` | #264 | open |
 | The speech sidecar in a systemd scope of its own on Linux, so systemd-oomd can kill it without the recorder (P6 of `.plans/2026-10-07-stable-promotion.md`) | `fix/desktop-sidecar-own-scope` | #260 | open |
 | The Mac downloads the CoreML Parakeet from Settings; no pipeline run downloads a model, a refused meeting stays queued and resumes after the install; Whisper, Ultra and DE become Parakeet v3 with one notice; the diarizer is described as its ONNX models (S1 of `.plans/2026-10-07-stable-promotion.md`) | `feat/rust-mac-speech-models` | #237 | open |
-| An autostarted app gets the time its save needs at logout: the systemd drop-in for the autostart unit's stop timeout, in the `.deb` and written by the app; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | in review |
+| An autostarted app, and one in GNOME's app scope, gets the time its save needs when the session ends: systemd drop-ins for the stop timeout, in the `.deb` and written by the app; Launch at login turned off while the app runs as the autostart unit goes at the exit; each shutdown logs its duration | `fix/desktop-autostart-stop-timeout` | #227 | in review |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
