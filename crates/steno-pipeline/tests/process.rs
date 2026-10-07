@@ -2605,6 +2605,29 @@ async fn an_ordinary_failure_clears_the_count() {
     assert!(!runs_file(&asset).exists());
 }
 
+/// A panic the pipeline catches fails the meeting like any stage failure
+/// and is reported as one: the count goes, earlier crashes included, so
+/// the one run is never counted as a crash too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_caught_panic_clears_the_count() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let pipeline = ProcessingPipeline::new(with_engine(
+        &world,
+        Arc::new(PanickingEngine(std::collections::BTreeSet::new())),
+    ));
+    let (meeting, asset) = processing_with_count(&world, 2);
+    assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting.id]);
+    pipeline.wait_until_idle().await;
+    let MeetingState::Failed { reason } = meeting_state(&world, meeting.id) else {
+        panic!("the panic fails the meeting");
+    };
+    assert!(
+        reason.contains(steno_pipeline::OPERATION_PANICKED),
+        "{reason}"
+    );
+    assert!(!runs_file(&asset).exists());
+}
+
 /// `reprocess` starts the count afresh: mid-run it holds this run only,
 /// not the crashes before.
 #[tokio::test(flavor = "multi_thread")]
