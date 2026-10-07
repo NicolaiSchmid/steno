@@ -205,11 +205,7 @@ impl Store {
         let connection = set_up(Connection::open_with_flags(path, flags)?)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::check(&connection)?;
-        Ok(Store {
-            connection: Mutex::new(connection),
-            #[cfg(any(test, feature = "testing"))]
-            commit_probe: std::sync::OnceLock::new(),
-        })
+        Ok(Self::over(connection))
     }
 
     /// A private in-memory database; tests use this.
@@ -220,11 +216,17 @@ impl Store {
     fn new(mut connection: Connection) -> Result<Store> {
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::migrate(&mut connection)?;
-        Ok(Store {
+        Ok(Self::over(connection))
+    }
+
+    /// The store over a connection that is set up and at the current
+    /// schema.
+    fn over(connection: Connection) -> Store {
+        Store {
             connection: Mutex::new(connection),
             #[cfg(any(test, feature = "testing"))]
             commit_probe: std::sync::OnceLock::new(),
-        })
+        }
     }
 
     /// A panic while a caller held the connection has already rolled its
