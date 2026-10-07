@@ -262,6 +262,15 @@ export function chunkPlan(byteCount: number, chunkSize: number): Chunk[] {
 	return chunks;
 }
 
+/**
+ * Whether Retry applies to `rec`: a `failed` row with a hash. One without a
+ * hash was never finalised and cannot be announced; the next load sends it
+ * through crash recovery when its file is still on disk.
+ */
+export function canRetry(rec: QueuedRecording | null): boolean {
+	return rec?.state === "failed" && rec.sha256 !== null;
+}
+
 export function isPending(rec: QueuedRecording): boolean {
 	return rec.state === "queued" || rec.state === "uploading";
 }
@@ -288,14 +297,17 @@ function isDue(rec: QueuedRecording, now: Date): boolean {
 
 /**
  * The oldest pending recording whose backoff has elapsed, or null. Oldest
- * first so a long meeting never starves behind a newer short one.
+ * first so a long meeting never starves behind a newer short one. A row
+ * with no hash cannot be announced and is skipped, so it never holds up the
+ * rows behind it; the next load sends it through crash recovery
+ * (`reopenUnhashedRows` in `queue-storage.ts`).
  */
 export function nextUploadable(
 	index: QueueIndex,
 	now: Date,
 ): QueuedRecording | null {
 	const due = index.recordings
-		.filter((r) => isPending(r) && isDue(r, now))
+		.filter((r) => isPending(r) && r.sha256 !== null && isDue(r, now))
 		.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
 	return due[0] ?? null;
 }

@@ -12,7 +12,11 @@ import { usePairing } from "@/features/pairing/PairingProvider";
 import { deviceIdentity } from "@/features/pairing/pairing-store";
 import { useQueue } from "@/features/queue/QueueProvider";
 import { queuedFile } from "@/features/queue/queue-files";
-import { findRecording, resetForUpload } from "@/features/queue/queue-index";
+import {
+	canRetry,
+	findRecording,
+	resetForUpload,
+} from "@/features/queue/queue-index";
 import {
 	announce,
 	complete,
@@ -283,7 +287,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 	const retryNow = useCallback(
 		(recordingID: string) => {
 			void update((current) =>
-				findRecording(current, recordingID)?.state === "failed"
+				canRetry(findRecording(current, recordingID))
 					? resetForUpload(current, recordingID)
 					: current,
 			).then(() => {

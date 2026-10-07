@@ -73,10 +73,18 @@ describe("planNext", () => {
 		).toEqual({ kind: "idle" });
 	});
 
-	it("skips a recording that has no hash yet", () => {
-		const index = addRecording(EMPTY_INDEX, { ...rec("a", "x"), sha256: null });
-		expect(planNext(index, true, new Set(), now)).toEqual({
+	it("skips a recording with no hash, so it never holds up a newer one", () => {
+		const hashless = addRecording(EMPTY_INDEX, {
+			...rec("a", "2026-09-25T08:00:00.000Z"),
+			sha256: null,
+		});
+		expect(planNext(hashless, true, new Set(), now)).toEqual({
 			kind: "idle",
+		});
+		const index = addRecording(hashless, rec("b", "2026-09-25T09:00:00.000Z"));
+		expect(planNext(index, true, new Set(), now)).toEqual({
+			kind: "announce",
+			recordingID: "b",
 		});
 	});
 

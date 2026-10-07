@@ -2,7 +2,7 @@ import { FlatList, View } from "react-native";
 
 import { AppText } from "@/components/AppText";
 import { PressableScale } from "@/components/PressableScale";
-import type { QueuedRecording } from "@/features/queue/queue-index";
+import { canRetry, type QueuedRecording } from "@/features/queue/queue-index";
 import { HIT_SLOP } from "@/lib/motion";
 import {
 	formatBytes,
@@ -103,7 +103,7 @@ function RecordingRow({
 					<AppText className="flex-1" variant="error">
 						{recording.lastError ?? "Upload failed"}
 					</AppText>
-					{recording.state === "failed" ? (
+					{canRetry(recording) ? (
 						<PressableScale
 							accessibilityLabel="Retry upload"
 							accessibilityRole="button"
