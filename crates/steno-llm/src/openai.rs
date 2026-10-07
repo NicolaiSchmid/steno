@@ -504,7 +504,7 @@ mod tests {
         );
         assert_eq!(
             reason.to_string(),
-            "no TLS certificates were found on this computer"
+            "no trusted root certificates were found on this computer"
         );
         assert!(!reason.is_retryable());
         client.http = Err(reason.clone());

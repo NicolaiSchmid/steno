@@ -139,8 +139,8 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
 
 /// The HTTP client both clients and the credential store share by default:
 /// [`http_client_builder`] with reqwest's default settings. Building it
-/// fails where the system has no CA certificates (a minimal Linux
-/// install): the clients then keep the [`LlmError::HttpClientUnavailable`]
+/// fails where the system has no trusted root certificates (a minimal
+/// Linux install): the clients then keep the [`LlmError::HttpClientUnavailable`]
 /// and answer every request with it, so the app still starts and records,
 /// and only the summaries fail.
 pub fn default_http_client() -> Result<reqwest::Client, LlmError> {
@@ -153,7 +153,7 @@ pub fn default_http_client() -> Result<reqwest::Client, LlmError> {
 #[must_use]
 pub(crate) fn http_client_unavailable(chain: &str) -> LlmError {
     LlmError::HttpClientUnavailable(if chain.contains("No CA certificates") {
-        "no TLS certificates were found on this computer".to_owned()
+        "no trusted root certificates were found on this computer".to_owned()
     } else {
         format!("the HTTP client could not be built: {chain}")
     })
