@@ -245,8 +245,9 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
     assert!(seen.contains(&CaptureState::Stopping));
 
     // The state carries the finalised partial recording; `stop()` returns
-    // the same one.
+    // the same one, with what ended it.
     let result = session.stop().unwrap();
+    assert_eq!(result.failure, Some(CaptureError::DeviceLost));
     assert_eq!(
         *seen.last().unwrap(),
         CaptureState::Failed {
@@ -2662,6 +2663,11 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
     })
     .expect("stop() returns the recording");
     assert!(master_of(&result).frame_count() < backend.delivered());
+    assert!(
+        matches!(&result.failure, Some(CaptureError::WriterFailed(detail)) if detail.contains("DiskFull")),
+        "the result carries the failure: {:?}",
+        result.failure
+    );
     match session.state() {
         CaptureState::Failed {
             error: CaptureError::WriterFailed(detail),

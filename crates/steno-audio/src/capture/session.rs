@@ -634,10 +634,15 @@ impl Core {
                 // The writer thread reports this; finalising joins that
                 // thread, so it runs on its own, as Swift's `Task` did.
                 if let Some(core) = on_error.upgrade() {
-                    std::thread::Builder::new()
+                    let spawned = std::thread::Builder::new()
                         .name("steno-wfail".into())
-                        .spawn(move || core.writer_failed(&error, recording))
-                        .expect("spawn writer failure thread");
+                        .spawn(move || core.writer_failed(&error, recording));
+                    // No thread to finalise on: the state stays
+                    // `Recording` with nothing written, and `stop()` still
+                    // returns the recording with the write's failure in it.
+                    if let Err(spawn) = spawned {
+                        tracing::error!(%spawn, "a write failed and the recording could not be ended");
+                    }
                 }
             }),
         );
@@ -723,13 +728,15 @@ impl Core {
         );
         let finished = self.finish();
         // Closing the files can fail on a full disk; the master is still
-        // readable to its last frame, so the result comes back and the
-        // state carries the failure instead of `stop()` throwing it away.
+        // readable to its last frame, so the result comes back with the
+        // failure in it and the state carries it too.
         let state = match &finished {
-            Ok((_, None)) => CaptureState::Idle,
-            Ok((result, Some(error))) => CaptureState::Failed {
-                error: error.clone(),
-                recording: Some(Box::new(result.clone())),
+            Ok(result) => match &result.failure {
+                None => CaptureState::Idle,
+                Some(error) => CaptureState::Failed {
+                    error: error.clone(),
+                    recording: Some(Box::new(result.clone())),
+                },
             },
             Err(error) => CaptureState::Failed {
                 error: error.clone(),
@@ -738,22 +745,22 @@ impl Core {
         };
         self.set_state(&mut self.lock(), &state);
         unwinding.disarm();
-        finished.map(|(result, _)| result)
+        finished
     }
 
     /// Rebuild abandoned and joined, backend off, rings drained, relay
     /// drained, files closed, asset built. The asset is built even when
-    /// closing the files fails (its paths are fixed at start and the
-    /// duration is what the master holds); the failure comes back beside
-    /// it: a failed write or close, else the device loss that ended the
-    /// recording, else a sync that failed while recording.
-    /// `WriterFailed` with no asset when there is nothing to hand out:
+    /// a write or closing the files failed (its paths are fixed at start
+    /// and the duration is what the master holds); the failure comes back
+    /// in [`CaptureResult::failure`]: a failed write or close, else the
+    /// device loss that ended the recording, else a sync that failed while
+    /// recording. `WriterFailed` with no asset when there is nothing to hand out:
     /// the writer thread died and took the writer with it, or the master is
     /// gone from disk (its folder deleted while recording; an unlinked file
     /// still writes and closes without an error). The caller has set the
     /// state to `Stopping`; the threads are stopped with the lock released
     /// (see the module doc).
-    fn finish(&self) -> Result<(CaptureResult, Option<CaptureError>), CaptureError> {
+    fn finish(&self) -> Result<CaptureResult, CaptureError> {
         let mut active = self
             .lock()
             .active
@@ -853,7 +860,11 @@ impl Core {
             retention: AudioRetention::KeepForever,
             expires_at: None,
         };
-        Ok((CaptureResult { asset, statistics }, failure))
+        Ok(CaptureResult {
+            asset,
+            statistics,
+            failure,
+        })
     }
 
     // Device changes
@@ -892,10 +903,19 @@ impl Core {
         // Spawned under the lock so the handle is in place before any
         // `finish()` can look for it; the thread's first step waits for
         // the lock.
-        let thread = std::thread::Builder::new()
+        let thread = match std::thread::Builder::new()
             .name("steno-rebuild".into())
             .spawn(move || core.rebuild(generation, &token))
-            .expect("spawn rebuild thread");
+        {
+            Ok(thread) => thread,
+            // Never a panic here: this runs on the backend's thread (the
+            // PipeWire loop's on Linux), which a panic would end without a
+            // word. The recording goes on with the devices it had.
+            Err(spawn) => {
+                tracing::error!(%spawn, ?reason, "a device change could not be followed");
+                return;
+            }
+        };
         active.rebuild = Some(Rebuild { cancel, thread });
         inner.rebuild_generation = generation;
         Self::emit(inner, CaptureNotice::DeviceChanged(reason));
@@ -1224,8 +1244,11 @@ impl Core {
         }
         let unwinding = Unwinding::arm(self, CaptureError::DeviceLost);
         let state = match self.finish() {
-            Ok((result, failure)) => CaptureState::Failed {
-                error: failure.unwrap_or(CaptureError::DeviceLost),
+            Ok(mut result) => CaptureState::Failed {
+                error: result
+                    .failure
+                    .get_or_insert(CaptureError::DeviceLost)
+                    .clone(),
                 recording: Some(Box::new(result)),
             },
             Err(error) => CaptureState::Failed {
@@ -1251,7 +1274,10 @@ impl Core {
         }
         let failure = as_writer_failure(error.clone());
         let unwinding = Unwinding::arm(self, failure.clone());
-        let result = self.finish().ok().map(|(result, _)| Box::new(result));
+        let result = self.finish().ok().map(|mut result| {
+            result.failure = Some(failure.clone());
+            Box::new(result)
+        });
         let mut inner = self.lock();
         self.set_state(
             &mut inner,
