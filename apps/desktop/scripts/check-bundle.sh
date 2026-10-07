@@ -10,8 +10,8 @@
 # <types> is the comma-separated list Tauri's `--bundles` takes:
 #
 #   deb       deb/*.deb, unpacked with dpkg-deb -x, into usr/bin/; also
-#             the autostart unit's stop timeout drop-in under
-#             usr/lib/systemd/user/
+#             the stop timeout drop-ins for the autostart unit and GNOME's
+#             scope under usr/lib/systemd/user/
 #   appimage  appimage/*.AppImage, unpacked with --appimage-extract, into
 #             usr/bin/
 #   app       macos/*.app, into Contents/MacOS/. With --signed, also the
@@ -88,17 +88,25 @@ side_by_side() {
   no_host_paths "$dir/$app" "$dir/$sidecar"
 }
 
+# drop_in <path below usr/lib/systemd/user/> <file in src-tauri/linux/>:
+# the unpacked .deb holds that file there, byte for byte.
+drop_in() {
+  local target="usr/lib/systemd/user/$1"
+  cmp -s "$scratch/deb/$target" "$root/apps/desktop/src-tauri/linux/$2" \
+    || die "the .deb does not install linux/$2 as /$target"
+  echo "ok: the .deb installs /$target"
+}
+
 check_deb() {
   local deb
   deb="$(one "$bundle/deb/*.deb")"
   dpkg-deb -x "$deb" "$scratch/deb"
   side_by_side "$scratch/deb/usr/bin" steno-desktop "$sidecar_name"
-  # The stop timeout for the unit systemd makes from the autostart entry
-  # (`stop_timeout` in apps/desktop/src-tauri/src/autostart.rs).
-  local drop_in='usr/lib/systemd/user/app-steno\x2ddesktop@autostart.service.d/10-steno.conf'
-  cmp -s "$scratch/deb/$drop_in" "$root/apps/desktop/src-tauri/linux/autostart-stop-timeout.conf" \
-    || die "the .deb does not install linux/autostart-stop-timeout.conf as /$drop_in"
-  echo "ok: the .deb installs /$drop_in"
+  # The stop timeout drop-ins for the unit systemd makes from the autostart
+  # entry and for GNOME's scope (apps/desktop/src-tauri/src/stop_timeout.rs);
+  # `\x2d` is literal, as systemd names the directories.
+  drop_in 'app-steno\x2ddesktop@autostart.service.d/10-steno.conf' autostart-service-stop-timeout.conf
+  drop_in 'app-gnome-steno\x2ddesktop-.scope.d/zz-steno.conf' gnome-scope-stop-timeout.conf
 }
 
 check_appimage() {

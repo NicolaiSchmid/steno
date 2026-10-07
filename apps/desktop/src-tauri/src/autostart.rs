@@ -13,11 +13,15 @@
 //! (`STENO_LOGIN_ITEM=managed`, `packaged`), the status is `Managed` and
 //! nothing here changes the registration; only an entry an earlier build
 //! wrote goes, at launch, or at the exit while the app runs as the unit
-//! made from it (`at_launch`, `at_exit`).
+//! made from it (`remove_earlier_entry`, `remove_earlier_entry_at_exit`).
 //!
-//! On Linux the entry also gets a systemd drop-in (`stop_timeout`): a
-//! session that runs XDG autostart through systemd stops the unit it makes
-//! from the entry 5 s after SIGTERM, less than a save can take.
+//! On Linux the entry comes with the systemd drop-ins that give the app
+//! the time its save needs when the session stops it (`stop_timeout`).
+//! Launch at login turned off while the app runs as the unit a desktop
+//! made from the entry goes off when the app exits (`OFF_AT_EXIT`):
+//! removing the entry then would let any reload of the user manager
+//! unload the running unit, and the session's end would stop the app
+//! without the SIGTERM that saves its recording.
 //!
 //! Swift: `LoginItemController.swift`, `LoginItemStatus` in `AppProtocols.swift`.
 
@@ -28,6 +32,8 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt};
 
 use crate::bridge::{BridgeError, failed};
 use crate::packaged;
+#[cfg(target_os = "linux")]
+use crate::stop_timeout;
 
 /// The status from the plugin's answer; a registration the plugin could
 /// not read is `NotFound`, its reason logged.
@@ -48,11 +54,15 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
     tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None)
 }
 
-/// The registration; `Managed` while the system starts the app at login.
+/// The login item as the user set it: `Managed` while the system starts
+/// the app at login; on Linux, an entry that goes at the exit
+/// (`OFF_AT_EXIT`) is already off.
 pub fn status(app: &AppHandle) -> LoginItemStatus {
-    status_unless_managed(packaged::login_item_is_managed(), || {
+    let status = status_unless_managed(packaged::login_item_is_managed(), || {
         app.autolaunch().is_enabled()
-    })
+    });
+    let marked = cfg!(target_os = "linux") && off_at_exit(app).is_some_and(|mark| mark.exists());
+    with_off_at_exit(status, marked)
 }
 
 /// `Managed` when `managed`, without asking the plugin; else the
@@ -75,32 +85,43 @@ pub fn switchable(status: LoginItemStatus) -> bool {
 
 /// Registers or removes the login item; a plugin failure is `failed`,
 /// which the page shows as it would any other refused command. Changes
-/// nothing while the system manages the login item. On Linux the stop
-/// timeout's drop-in follows the entry (`stop_timeout::keep`).
+/// nothing while the system manages the login item. On Linux the drop-ins
+/// follow (`stop_timeout::sync`), and turning it off while the app runs as
+/// the autostart unit only marks it to go at the exit (`OFF_AT_EXIT`);
+/// turning it on again clears the mark.
 pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), BridgeError> {
     change_unless_managed(packaged::login_item_is_managed(), || {
+        #[cfg(target_os = "linux")]
+        {
+            let deferred = !enabled && stop_timeout::runs_as_autostart_unit();
+            mark_off_at_exit(app, deferred)?;
+            if deferred {
+                tracing::info!("Launch at login goes off when the app exits");
+                return Ok(());
+            }
+        }
         let result = if enabled {
             enable(app)
         } else {
             app.autolaunch().disable()
         };
-        result?;
+        result.map_err(failed)?;
         #[cfg(target_os = "linux")]
-        stop_timeout::keep(enabled);
+        stop_timeout::sync(Some(enabled));
         Ok(())
     })
 }
 
-/// `change` unless `managed`, its failure as `failed`.
-fn change_unless_managed<E: std::fmt::Display>(
+/// `change` unless `managed`.
+fn change_unless_managed(
     managed: bool,
-    change: impl FnOnce() -> Result<(), E>,
+    change: impl FnOnce() -> Result<(), BridgeError>,
 ) -> Result<(), BridgeError> {
     if managed {
         tracing::debug!("launch at login is the system's; the login item stays as it is");
         return Ok(());
     }
-    change().map_err(failed)
+    change()
 }
 
 /// Writes the login item: on Linux outside an `AppImage` the entry that
@@ -125,27 +146,58 @@ fn writes_own_entry(appimage: Option<&std::ffi::OsStr>) -> bool {
 /// entry an earlier build wrote goes, now or at the exit
 /// (`packaged::remove_earlier_entry`).
 #[cfg(target_os = "linux")]
-pub fn at_launch(app: &AppHandle) {
+pub fn remove_earlier_entry(app: &AppHandle) {
     packaged::remove_earlier_entry(&app.package_info().name);
 }
 
-/// At launch, on Linux: the stop timeout's drop-in follows the login item
-/// as it stands, so an entry written before the drop-in existed, or by an
-/// older release, gets it too, and one the user removed loses it. Nothing
-/// happens when the entry could not be read, or while the system manages
-/// the login item.
+/// The file that marks Launch at login to go off at the exit, in the
+/// app's config directory. A file rather than a flag, so the choice
+/// outlives a kill or a crash before the exit (`at_launch`). Linux only.
+const OFF_AT_EXIT: &str = "launch-at-login-off-at-exit";
+
+fn off_at_exit(app: &AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager as _;
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|directory| directory.join(OFF_AT_EXIT))
+}
+
+/// Sets (`on`) or clears the mark; a failure is `failed`, so the switch
+/// stays where it was.
 #[cfg(target_os = "linux")]
-pub fn keep_stop_timeout_at_launch(app: &AppHandle) {
-    match status(app) {
-        LoginItemStatus::Enabled => stop_timeout::keep(true),
-        LoginItemStatus::NotRegistered => stop_timeout::keep(false),
-        _ => {}
+fn mark_off_at_exit(app: &AppHandle, on: bool) -> Result<(), BridgeError> {
+    let mark = off_at_exit(app).ok_or_else(|| failed("the app has no config directory"))?;
+    set_mark(&mark, on).map_err(|error| failed(error.kind()))
+}
+
+/// Creates (`on`) or removes the file at `mark`; removing none is fine.
+#[cfg(target_os = "linux")]
+fn set_mark(mark: &std::path::Path, on: bool) -> std::io::Result<()> {
+    if on {
+        if let Some(directory) = mark.parent() {
+            std::fs::create_dir_all(directory)?;
+        }
+        std::fs::write(mark, b"")
+    } else {
+        match std::fs::remove_file(mark) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The plugin's status with the mark: an entry marked to go is off.
+fn with_off_at_exit(status: LoginItemStatus, marked: bool) -> LoginItemStatus {
+    match status {
+        LoginItemStatus::Enabled if marked => LoginItemStatus::NotRegistered,
+        status => status,
     }
 }
 
 /// An update's relaunch is about to exit (`updater`): the next process
-/// runs on in the same unit, so an entry that waits for the exit stays
-/// for it.
+/// runs on in the same unit, so the mark, and an earlier build's entry
+/// that waits for the exit, stay for it.
 #[cfg(target_os = "linux")]
 static RELAUNCHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -155,16 +207,117 @@ pub fn relaunching() {
     RELAUNCHING.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// After the shutdown of an exit, on Linux: an entry marked to go goes
+/// now, with the autostart unit's drop-in, and no reload, so the unit
+/// stays as it is until it has stopped. Not for an update's relaunch, nor
+/// while the system manages the login item.
+#[cfg(target_os = "linux")]
+pub fn turn_off_at_exit(app: &AppHandle) {
+    if packaged::login_item_is_managed() {
+        return;
+    }
+    let Some(mark) = off_at_exit(app).filter(|mark| mark.exists()) else {
+        return;
+    };
+    if RELAUNCHING.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    if let Err(error) = app.autolaunch().disable() {
+        tracing::warn!(
+            "Launch at login could not be turned off at the exit; it goes at the next launch"
+        );
+        tracing::debug!(%error, "turning Launch at login off at the exit");
+        return;
+    }
+    stop_timeout::remove_autostart();
+    if let Err(error) = set_mark(&mark, false) {
+        tracing::debug!(%error, "clearing the mark of Launch at login");
+    }
+}
+
 /// After the shutdown of an exit, on Linux: an earlier build's entry that
 /// waited for the exit, because the app ran as the unit made from it,
 /// goes now (`packaged::remove_earlier_entry_at_exit`). Not for an
 /// update's relaunch; an Xfce query's relaunch never runs as that unit.
 #[cfg(target_os = "linux")]
-pub fn at_exit(app: &AppHandle) {
+pub fn remove_earlier_entry_at_exit(app: &AppHandle) {
     packaged::remove_earlier_entry_at_exit(
         &app.package_info().name,
         RELAUNCHING.load(std::sync::atomic::Ordering::Relaxed),
     );
+}
+
+/// What the launch does with the login item and its drop-ins on Linux.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtLaunch {
+    /// The entry stands, marked or not: its drop-in is installed.
+    Keep,
+    /// An entry marked to go at an exit that never came (a kill, a crash),
+    /// and the app no longer runs as its unit: it goes now.
+    TurnOff,
+    /// No entry: its drop-in goes, and a mark left behind.
+    Drop,
+    /// The entry could not be read: only GNOME's drop-in is installed.
+    Leave,
+}
+
+/// The step for the plugin's `status`, whether the entry is `marked` to go
+/// at the exit, and whether the app runs as the autostart unit.
+#[cfg(target_os = "linux")]
+fn at_launch(status: LoginItemStatus, marked: bool, as_autostart_unit: bool) -> AtLaunch {
+    match status {
+        LoginItemStatus::Enabled if marked && !as_autostart_unit => AtLaunch::TurnOff,
+        LoginItemStatus::Enabled => AtLaunch::Keep,
+        LoginItemStatus::NotRegistered => AtLaunch::Drop,
+        _ => AtLaunch::Leave,
+    }
+}
+
+/// At launch, on Linux: the drop-ins follow the login item as it stands
+/// (`at_launch`), so an entry written before the drop-ins existed, or by
+/// an older release, gets them too, and one the user removed loses its
+/// own. While the system manages the login item, only GNOME's drop-in.
+#[cfg(target_os = "linux")]
+pub fn sync_at_launch(app: &AppHandle) {
+    if packaged::login_item_is_managed() {
+        stop_timeout::sync(None);
+        return;
+    }
+    let mark = off_at_exit(app);
+    let marked = mark.as_ref().is_some_and(|mark| mark.exists());
+    let manager = app.autolaunch();
+    let step = at_launch(
+        status_from_plugin(manager.is_enabled()),
+        marked,
+        stop_timeout::runs_as_autostart_unit(),
+    );
+    let clear = || {
+        if let Some(mark) = &mark
+            && let Err(error) = set_mark(mark, false)
+        {
+            tracing::debug!(%error, "clearing the mark of Launch at login");
+        }
+    };
+    match step {
+        AtLaunch::Keep => stop_timeout::sync(Some(true)),
+        AtLaunch::TurnOff => match manager.disable() {
+            Ok(()) => {
+                clear();
+                stop_timeout::sync(Some(false));
+            }
+            Err(error) => {
+                tracing::warn!("Launch at login could not be turned off; it stays on");
+                tracing::debug!(%error, "turning Launch at login off at launch");
+                stop_timeout::sync(Some(true));
+            }
+        },
+        AtLaunch::Drop => {
+            clear();
+            stop_timeout::sync(Some(false));
+        }
+        AtLaunch::Leave => stop_timeout::sync(None),
+    }
 }
 
 /// Where the user manages login items; `None` where there is no such
@@ -205,137 +358,6 @@ impl steno_host::services::LoginItem for ShellLoginItem {
     }
 }
 
-/// The systemd drop-in that gives an autostarted Steno the time its save
-/// needs. A systemd session (KDE Plasma, uwsm sessions such as Omarchy's;
-/// not GNOME, whose session starts the entries itself) runs the entries in
-/// `~/.config/autostart` as units `systemd-xdg-autostart-generator` makes,
-/// each with `TimeoutStopSec=5s`: at a logout, or when the compositor
-/// ends, systemd sends SIGTERM and SIGKILLs the app 5 s later, while the
-/// save it runs on SIGTERM may take up to `SHUTDOWN_PATIENCE` (ten
-/// seconds) and the process ends `EXIT_GRACE` (two) after it at the
-/// latest. The drop-in raises the timeout to 20 s
-/// (`linux/autostart-stop-timeout.conf`). The `.deb` installs the same
-/// file under `/usr/lib/systemd/user`; this copy, in the user's own unit
-/// directory, covers the `AppImage` and installs from before the drop-in.
-/// Rust only: the Swift app is a macOS login item.
-#[cfg(target_os = "linux")]
-pub mod stop_timeout {
-    use std::ffi::OsString;
-    use std::io;
-    use std::path::{Path, PathBuf};
-
-    /// The unit the generator makes from the plugin's entry,
-    /// `steno-desktop.desktop` (the Linux product name in
-    /// `tauri.linux.conf.json`): `app-<name>@autostart.service`, the name
-    /// escaped as systemd escapes a unit name, `-` as `\x2d`.
-    pub const UNIT: &str = "app-steno\\x2ddesktop@autostart.service";
-
-    /// The drop-in's file name in the unit's `.d` directory.
-    pub const FILE_NAME: &str = "10-steno.conf";
-
-    /// The drop-in, byte for byte the file the `.deb` installs.
-    pub const CONTENTS: &str = include_str!("../linux/autostart-stop-timeout.conf");
-
-    /// Where the user manager reads the user's own drop-ins for the unit:
-    /// `$XDG_CONFIG_HOME/systemd/user`, else `$HOME/.config/systemd/user`,
-    /// as systemd resolves it (a relative `XDG_CONFIG_HOME` counts as
-    /// unset). `None` without either.
-    pub fn path(lookup: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
-        let absolute = |name: &str| {
-            lookup(name)
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-        };
-        absolute("XDG_CONFIG_HOME")
-            .or_else(|| absolute("HOME").map(|home| home.join(".config")))
-            .map(|config| config.join(format!("systemd/user/{UNIT}.d/{FILE_NAME}")))
-    }
-
-    /// Writes the drop-in at `path` unless it already holds `CONTENTS`;
-    /// true when it wrote. Atomic: a temporary file in the same directory
-    /// (systemd reads only `*.conf` there), renamed over the old one.
-    pub fn install(path: &Path) -> io::Result<bool> {
-        if std::fs::read(path).is_ok_and(|current| current == CONTENTS.as_bytes()) {
-            return Ok(false);
-        }
-        let directory = path
-            .parent()
-            .ok_or_else(|| io::Error::other("the drop-in has no directory"))?;
-        std::fs::create_dir_all(directory)?;
-        let temporary = directory.join(format!(".{FILE_NAME}.{}.tmp", std::process::id()));
-        let written =
-            std::fs::write(&temporary, CONTENTS).and_then(|()| std::fs::rename(&temporary, path));
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temporary);
-        }
-        written.map(|()| true)
-    }
-
-    /// Removes the drop-in at `path`, and its directory when that is left
-    /// empty; true when there was one.
-    pub fn remove(path: &Path) -> io::Result<bool> {
-        match std::fs::remove_file(path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        }
-        if let Some(directory) = path.parent() {
-            // Fails, and stays, when it holds a drop-in of the user's own.
-            let _ = std::fs::remove_dir(directory);
-        }
-        Ok(true)
-    }
-
-    /// Installs the drop-in for an entry that is on, removes it for one
-    /// that is off, and has the user manager reload when that changed
-    /// anything, so a session already running takes the new timeout.
-    /// A failure is logged and changes nothing else: the login item works
-    /// without the drop-in.
-    pub fn keep(on: bool) {
-        let Some(path) = path(|name| std::env::var_os(name)) else {
-            tracing::warn!("no config directory for the autostart unit's stop timeout");
-            return;
-        };
-        let changed = if on { install(&path) } else { remove(&path) };
-        match changed {
-            Ok(true) => {
-                tracing::info!(path = %path.display(), on, "the autostart unit's stop timeout changed");
-                reload_user_manager();
-            }
-            Ok(false) => {}
-            Err(error) => tracing::warn!(
-                %error,
-                path = %path.display(),
-                on,
-                "the autostart unit's stop timeout could not be changed"
-            ),
-        }
-    }
-
-    /// Asks the systemd user manager on the session bus to reload its
-    /// units (`systemctl --user daemon-reload`), on a thread of its own so
-    /// a slow bus holds nothing. Without a user manager on the bus the
-    /// drop-in takes effect when the next one starts, at the next login.
-    fn reload_user_manager() {
-        use crate::session_end::{patient, spawn_client};
-        spawn_client(
-            "steno-reload",
-            "the autostart unit's stop timeout waits for the next login",
-            || {
-                patient(zbus::blocking::connection::Builder::session()?)?.call_method(
-                    Some("org.freedesktop.systemd1"),
-                    "/org/freedesktop/systemd1",
-                    Some("org.freedesktop.systemd1.Manager"),
-                    "Reload",
-                    &(),
-                )?;
-                tracing::debug!("the systemd user manager reloaded its units");
-                Ok(())
-            },
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,9 +390,9 @@ mod tests {
             status_unless_managed(false, || Ok::<bool, String>(true)),
             LoginItemStatus::Enabled
         );
-        let changed = || -> Result<(), String> { panic!("the plugin changed it") };
+        let changed = || -> Result<(), BridgeError> { panic!("the plugin changed it") };
         assert!(change_unless_managed(true, changed).is_ok());
-        let refused = change_unless_managed(false, || Err("no stable path")).unwrap_err();
+        let refused = change_unless_managed(false, || Err(failed("no stable path"))).unwrap_err();
         assert_eq!(refused.message, "no stable path");
         assert!(!switchable(LoginItemStatus::Managed));
         assert!(switchable(LoginItemStatus::Enabled));
@@ -398,125 +420,51 @@ mod tests {
         }
     }
 
+    /// An entry marked to go at the exit reads as off; nothing else
+    /// changes.
+    #[test]
+    fn a_marked_entry_reads_as_off() {
+        use LoginItemStatus::{Enabled, NotFound, NotRegistered};
+        assert_eq!(with_off_at_exit(Enabled, true), NotRegistered);
+        assert_eq!(with_off_at_exit(Enabled, false), Enabled);
+        for status in [NotRegistered, NotFound] {
+            assert_eq!(with_off_at_exit(status, true), status);
+            assert_eq!(with_off_at_exit(status, false), status);
+        }
+    }
+
+    /// The launch keeps a standing entry's drop-in, also for a marked
+    /// entry while the app runs as its unit; turns a marked entry off once
+    /// it does not; drops the drop-in without an entry; and changes
+    /// nothing for an entry it could not read.
     #[cfg(target_os = "linux")]
-    mod stop_timeout {
-        use std::ffi::OsString;
-        use std::path::{Path, PathBuf};
-
-        use super::super::stop_timeout::*;
-
-        fn lookup(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<OsString> {
-            move |name| {
-                pairs
-                    .iter()
-                    .find(|(key, _)| *key == name)
-                    .map(|(_, value)| value.into())
+    #[test]
+    fn the_launch_follows_the_entry_and_its_mark() {
+        use LoginItemStatus::{Enabled, NotFound, NotRegistered};
+        for as_unit in [false, true] {
+            assert_eq!(at_launch(Enabled, false, as_unit), AtLaunch::Keep);
+            for marked in [false, true] {
+                assert_eq!(at_launch(NotRegistered, marked, as_unit), AtLaunch::Drop);
+                assert_eq!(at_launch(NotFound, marked, as_unit), AtLaunch::Leave);
             }
         }
+        assert_eq!(at_launch(Enabled, true, true), AtLaunch::Keep);
+        assert_eq!(at_launch(Enabled, true, false), AtLaunch::TurnOff);
+    }
 
-        fn scratch(name: &str) -> PathBuf {
-            let root = std::env::temp_dir()
-                .join(format!("steno-stop-timeout-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
-            std::fs::create_dir_all(&root).unwrap();
-            root
-        }
-
-        fn drop_in(root: &Path) -> PathBuf {
-            path(lookup(&[("HOME", root.to_str().unwrap())])).unwrap()
-        }
-
-        /// The unit name is the generator's for the entry the plugin
-        /// writes: `app-`, the desktop file's name without `.desktop`,
-        /// escaped (`-` as `\x2d`), `@autostart.service`. The name is the
-        /// Linux product name.
-        #[test]
-        fn the_unit_is_the_one_the_generator_makes_from_the_entry() {
-            let config: serde_json::Value =
-                serde_json::from_str(include_str!("../tauri.linux.conf.json")).unwrap();
-            let entry = config["productName"].as_str().unwrap();
-            assert_eq!(entry, "steno-desktop");
-            let escaped = entry.replace('-', "\\x2d");
-            assert_eq!(UNIT, format!("app-{escaped}@autostart.service"));
-        }
-
-        #[test]
-        fn the_drop_in_raises_the_stop_timeout_above_the_save() {
-            let line = CONTENTS
-                .lines()
-                .skip_while(|line| *line != "[Service]")
-                .find_map(|line| line.strip_prefix("TimeoutStopSec="))
-                .unwrap();
-            let seconds: u64 = line.strip_suffix('s').unwrap().parse().unwrap();
-            let save = steno_services::app::SHUTDOWN_PATIENCE + crate::EXIT_GRACE;
-            assert!(std::time::Duration::from_secs(seconds) >= save * 3 / 2);
-        }
-
-        #[test]
-        fn the_path_follows_the_config_home_as_systemd_does() {
-            let suffix = format!("systemd/user/{UNIT}.d/10-steno.conf");
-            assert_eq!(
-                path(lookup(&[("HOME", "/home/u"), ("XDG_CONFIG_HOME", "/cfg")])),
-                Some(PathBuf::from("/cfg").join(&suffix))
-            );
-            assert_eq!(
-                path(lookup(&[("HOME", "/home/u"), ("XDG_CONFIG_HOME", "cfg")])),
-                Some(PathBuf::from("/home/u/.config").join(&suffix))
-            );
-            assert_eq!(path(lookup(&[("HOME", "home")])), None);
-            assert_eq!(path(lookup(&[])), None);
-        }
-
-        #[test]
-        fn install_writes_once_and_remove_cleans_up() {
-            let root = scratch("cycle");
-            let file = drop_in(&root);
-            assert!(install(&file).unwrap());
-            assert_eq!(std::fs::read_to_string(&file).unwrap(), CONTENTS);
-            assert!(!install(&file).unwrap(), "the same contents are left alone");
-            let directory = file.parent().unwrap();
-            assert_eq!(
-                std::fs::read_dir(directory).unwrap().count(),
-                1,
-                "no temporary file stays"
-            );
-
-            std::fs::write(&file, "[Service]\nTimeoutStopSec=5s\n").unwrap();
-            assert!(install(&file).unwrap(), "other contents are replaced");
-            assert_eq!(std::fs::read_to_string(&file).unwrap(), CONTENTS);
-
-            assert!(remove(&file).unwrap());
-            assert!(!directory.exists(), "the empty directory goes with it");
-            assert!(!remove(&file).unwrap(), "removing twice is fine");
-            std::fs::remove_dir_all(&root).unwrap();
-        }
-
-        #[test]
-        fn remove_leaves_the_users_own_drop_ins() {
-            let root = scratch("own");
-            let file = drop_in(&root);
-            install(&file).unwrap();
-            let own = file.with_file_name("20-mine.conf");
-            std::fs::write(&own, "[Service]\nNice=5\n").unwrap();
-            assert!(remove(&file).unwrap());
-            assert!(own.exists());
-            std::fs::remove_dir_all(&root).unwrap();
-        }
-
-        #[test]
-        fn an_unwritable_directory_is_an_error_not_a_panic() {
-            use std::os::unix::fs::PermissionsExt as _;
-            let root = scratch("locked");
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o500)).unwrap();
-            let file = drop_in(&root);
-            let result = install(&file);
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-            // Root ignores the mode, and there the write goes through.
-            match result {
-                Err(_) => assert!(!file.exists()),
-                Ok(wrote) => assert!(wrote && file.exists()),
-            }
-            std::fs::remove_dir_all(&root).unwrap();
-        }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_mark_is_set_and_cleared() {
+        let root = std::env::temp_dir().join(format!("steno-off-at-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mark = root.join("config").join(OFF_AT_EXIT);
+        set_mark(&mark, false).unwrap();
+        set_mark(&mark, true).unwrap();
+        assert!(mark.exists());
+        set_mark(&mark, true).unwrap();
+        set_mark(&mark, false).unwrap();
+        assert!(!mark.exists());
+        set_mark(&mark, false).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

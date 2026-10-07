@@ -49,7 +49,7 @@ libc.workspace = true
 gdk.workspace = true
 gio.workspace = true
 # The logout and shutdown clients (`session_end`) and the user manager's
-# reload after the autostart unit's stop timeout changes (`autostart`).
+# reload after a stop timeout drop-in changes (`stop_timeout`).
 zbus.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

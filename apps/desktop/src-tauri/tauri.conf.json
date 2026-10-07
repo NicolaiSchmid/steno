@@ -82,7 +82,8 @@
         ],
         "desktopTemplate": "linux/steno-desktop.desktop",
         "files": {
-          "/usr/lib/systemd/user/app-steno\\x2ddesktop@autostart.service.d/10-steno.conf": "linux/autostart-stop-timeout.conf"
+          "/usr/lib/systemd/user/app-steno\\x2ddesktop@autostart.service.d/10-steno.conf": "linux/autostart-service-stop-timeout.conf",
+          "/usr/lib/systemd/user/app-gnome-steno\\x2ddesktop-.scope.d/zz-steno.conf": "linux/gnome-scope-stop-timeout.conf"
         }
       },
       "appimage": {

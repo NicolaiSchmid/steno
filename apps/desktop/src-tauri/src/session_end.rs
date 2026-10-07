@@ -855,7 +855,7 @@ fn hold_logout_inhibitor(session: &Connection, busy: &mpsc::Receiver<bool>) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{BufRead as _, Read as _};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -983,7 +983,7 @@ mod tests {
 
     /// A private bus: `dbus-daemon` on a socket of its own, ended with the
     /// value.
-    struct Daemon {
+    pub(crate) struct Daemon {
         child: std::process::Child,
         address: String,
     }
@@ -992,7 +992,7 @@ mod tests {
         /// None when `dbus-daemon` is not installed, unless
         /// `STENO_REQUIRE_DBUS_TEST` asks for it (CI on Linux), which fails
         /// the test instead.
-        fn start() -> Option<Self> {
+        pub(crate) fn start() -> Option<Self> {
             let spawned = std::process::Command::new("dbus-daemon")
                 .args(["--session", "--nofork", "--nopidfile", "--print-address=1"])
                 .arg(format!(
@@ -1022,11 +1022,11 @@ mod tests {
             })
         }
 
-        fn builder(&self) -> Builder<'_> {
+        pub(crate) fn builder(&self) -> Builder<'_> {
             Builder::address(self.address.as_str()).unwrap()
         }
 
-        fn connect(&self) -> Connection {
+        pub(crate) fn connect(&self) -> Connection {
             patient(self.builder()).unwrap()
         }
     }

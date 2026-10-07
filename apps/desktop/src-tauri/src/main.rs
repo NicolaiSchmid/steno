@@ -15,9 +15,10 @@
 //! and on a packaged install `packaged`),
 //! updates (`updater`), the OS permissions (`permissions`), the `steno:`
 //! links (`deep_links`), the native dialogs (`dialogs`), the single
-//! instance, on Linux the logout and shutdown clients (`session_end`), and
-//! on a Wayland session the `XWayland` backend the panels need
-//! (`display`). Every one is a thin module over a Tauri plugin or an
+//! instance, on Linux the logout and shutdown clients (`session_end`) and
+//! the systemd drop-ins for the stop timeout (`stop_timeout`), and on a
+//! Wayland session the `XWayland` backend the panels need (`display`).
+//! Every one is a thin module over a Tauri plugin or an
 //! OS API with its rules in plain functions the tests cover. Everything
 //! that is on the wire (errors, topics, windows, sections, params) is the
 //! `steno-bridge` crate's type; the shell adds only what it needs on top
@@ -94,6 +95,8 @@ mod recording;
 #[cfg(target_os = "linux")]
 mod session_end;
 mod smoke;
+#[cfg(target_os = "linux")]
+mod stop_timeout;
 mod tray;
 mod updater;
 mod windows;
@@ -234,12 +237,12 @@ fn setup(
         windows::open(handle, windows::BridgeWindow::Onboarding, None, None)?;
     }
     #[cfg(target_os = "linux")]
-    autostart::at_launch(handle);
+    autostart::remove_earlier_entry(handle);
     host::host(handle).launch(runtime);
     // The launch may have registered the login item.
     tray::note_login_item(handle);
     #[cfg(target_os = "linux")]
-    autostart::keep_stop_timeout_at_launch(handle);
+    autostart::sync_at_launch(handle);
     #[cfg(unix)]
     exit_on_signals(handle, runtime);
     Ok(true)
@@ -546,17 +549,22 @@ fn onboarding_closed(app: &tauri::AppHandle) {
 }
 
 /// What every exit runs once (`ExitGate`): the host's shutdown
-/// (`Host::shutdown_action`), timed (`timed`), then, on Linux, an
-/// autostart entry an earlier build wrote that waited for the exit goes
-/// (`autostart::at_exit`): only once the save is over, since until then
-/// the unit the app runs as needs the entry.
+/// (`Host::shutdown_action`), timed (`timed`), then, on Linux, Launch at
+/// login turned off while the app ran as the autostart unit goes off
+/// (`autostart::turn_off_at_exit`), and an autostart entry an earlier
+/// build wrote that waited for the exit goes
+/// (`autostart::remove_earlier_entry_at_exit`): only once the save is
+/// over, since until then the unit the app runs as needs the entry.
 fn exit_action(app: &tauri::AppHandle) -> impl FnOnce() + Send + 'static {
     let shutdown = timed(host::host(app).shutdown_action());
     #[cfg(target_os = "linux")]
     let app = app.clone();
     then(shutdown, move || {
         #[cfg(target_os = "linux")]
-        autostart::at_exit(&app);
+        {
+            autostart::turn_off_at_exit(&app);
+            autostart::remove_earlier_entry_at_exit(&app);
+        }
     })
 }
 
