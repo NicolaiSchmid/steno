@@ -73,7 +73,12 @@ extension HandoverEngine {
     do {
       try await persist(receipt)
     } catch {
-      inbox.discard(recordingID)
+      // A revoke while the save waited lets another phone announce the same
+      // recording id; its files and receipt stay. Checked after the save,
+      // in the same actor step as the discard.
+      if !ownedByAnotherDevice(recordingID, device: device) {
+        inbox.discard(recordingID)
+      }
       return .internalError("saving the receipt", error)
     }
     return .json(.created, Self.status(of: receipt))

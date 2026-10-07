@@ -482,6 +482,44 @@ import Testing
   }
 
   @Test(.timeLimit(.minutes(1)))
+  func aFailedFirstSaveOfARevokedPhoneLeavesAnotherPhonesFilesAlone() async throws {
+    // The phone's first announce opens the partial and sidecar, and its
+    // receipt save is held on its way to the store. The phone is revoked
+    // (its files go; the store delete waits behind the held save), and
+    // another phone, paired before, announces the same recording id. The
+    // held save then fails, and its cleanup finds the other phone's
+    // receipt in memory and leaves that phone's partial and sidecar alone.
+    // Had they gone, its chunk 0 would be answered 404 "announce again".
+    let chunkSize = 64 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let held = HeldSave(store: test.store, failing: true) { $0.receivedChunks.isEmpty }
+      defer { held.release() }
+      let engine = Self.engine(test, saveReceipt: held.save)
+      let phone = try await EngineClient.paired(test, engine: engine)
+      let other = try await EngineClient.paired(test, engine: engine, deviceName: "Other iPhone")
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 74)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: chunkSize)
+      let id = metadata.recordingID
+
+      let announcing = Task { try await phone.announce(metadata) }
+      await held.held()
+      let revoking = Task { try await engine.revoke(phone.device.id) }
+      try await until { await engine.revoking[phone.device.id] != nil }
+      let otherAnnouncing = Task { try await other.announce(metadata) }
+      try await until { await engine.activeReceipts[id]?.deviceID == other.device.id }
+      held.release()
+      #expect(try await announcing.value.code == 500, "the phone's receipt save failed")
+      try await revoking.value
+      #expect(try await otherAnnouncing.value.code == 201)
+
+      #expect(engine.inbox.hasPartial(id), "the other phone's partial stays")
+      #expect(engine.inbox.loadMetadata(id) == metadata, "and so does its sidecar")
+      #expect(await other.upload(id, chunk: 0, chunks[0]).code == 204)
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
   func aLateChunkOfARevokedPhoneStaysOutOfAnotherPhonesReceipt() async throws {
     // Chunk 0 is held after its file write while the phone is revoked (its
     // receipt and partial go) and another phone pairs and announces the
