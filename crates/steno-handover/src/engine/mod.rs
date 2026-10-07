@@ -242,6 +242,17 @@ impl State {
             .is_some_and(|receipt| receipt.device_id != device_id)
     }
 
+    /// Drops the receipt of `recording_id` on behalf of `device_id`; false,
+    /// with nothing dropped, when memory holds another device's receipt of
+    /// it ([`State::holds_another_devices`]).
+    fn forget_own(&mut self, recording_id: Uuid, device_id: Uuid) -> bool {
+        if self.holds_another_devices(recording_id, device_id) {
+            return false;
+        }
+        self.active_receipts.remove(&recording_id);
+        true
+    }
+
     /// Keeps `receipt` as the live copy, unless its device was revoked.
     fn remember(&mut self, receipt: &HandoverReceipt) {
         if !self.revoked.contains(&receipt.device_id) {
@@ -640,14 +651,10 @@ impl Engine {
     /// row, if any, stays. Swift: `HandoverEngine.forget`, which goes by the
     /// recording id alone.
     pub(crate) fn forget_own(&self, recording_id: Uuid, device_id: Uuid) {
-        {
-            let mut state = self.state();
-            if state.holds_another_devices(recording_id, device_id) {
-                return;
-            }
-            state.active_receipts.remove(&recording_id);
+        let forgot = self.state().forget_own(recording_id, device_id);
+        if forgot {
+            self.publish_receipts();
         }
-        self.publish_receipts();
     }
 
     /// Discards every inbox file of `recording_id` on behalf of
@@ -686,12 +693,9 @@ impl Engine {
     pub(crate) fn discard_and_forget_own(&self, recording_id: Uuid, device_id: Uuid) {
         {
             let _files = self.files();
-            {
-                let mut state = self.state();
-                if state.holds_another_devices(recording_id, device_id) {
-                    return;
-                }
-                state.active_receipts.remove(&recording_id);
+            let forgot = self.state().forget_own(recording_id, device_id);
+            if !forgot {
+                return;
             }
             self.inbox.discard(recording_id);
         }
