@@ -241,12 +241,11 @@ export function reopenUnhashedRows(
 	const sources = index.recordings.flatMap((r) =>
 		r.sourceUri ? [fileNameOf(r.sourceUri)] : [],
 	);
-	const ownRecorderFile = (r: QueuedRecording) => {
-		const name = r.sourceUri ? fileNameOf(r.sourceUri) : null;
+	const ownRecorderFile = ({ sourceUri }: QueuedRecording) => {
+		if (!sourceUri) return false;
+		const name = fileNameOf(sourceUri);
 		return (
-			name !== null &&
-			inRecorder.has(name) &&
-			sources.filter((n) => n === name).length === 1
+			inRecorder.has(name) && sources.filter((n) => n === name).length === 1
 		);
 	};
 	const reopens = (r: QueuedRecording) =>
