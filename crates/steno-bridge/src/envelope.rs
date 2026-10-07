@@ -376,10 +376,11 @@ string_enum! {
     }
 }
 
-/// Swift: none; the Swift app is the Mac. `steno_core`'s type itself: the
-/// Tauri shell sets its raw value as `window.__STENO_PLATFORM__` before the
-/// page's scripts run, and a page with nothing set is the Swift app's.
+/// Swift: none; the Swift app is the Mac. `steno_core`'s type, re-exported:
+/// the Tauri shell sets its raw value as `window.__STENO_PLATFORM__` before
+/// the page's scripts run, and a page with nothing set is the Swift app's.
 /// [`PermissionKind::for_platform`] lists its permissions.
+///
 pub use steno_core::Platform;
 
 #[cfg(test)]

@@ -22,7 +22,7 @@ string_enum! {
         /// computer); then the mic lane is diarized like a room
         /// (`steno_pipeline::pipeline::diarized_lane_after_transcription`).
         MacCall = "macCall",
-        /// One `mixed` room lane from the Mac microphone, fully diarized.
+        /// One `mixed` room lane from the computer's microphone, fully diarized.
         MacInPerson = "macInPerson",
         /// One `mixed` lane recorded by the phone and handed over.
         Phone = "phone",

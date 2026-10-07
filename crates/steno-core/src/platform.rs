@@ -6,9 +6,10 @@ string_enum! {
     /// The OS the app runs on, which decides the words a user reads ("this
     /// Mac" or "this computer", Finder or File Explorer, "Mac call" or
     /// "Linux call"), the shortcut keys (⌘ or Ctrl) and the permissions
-    /// onboarding asks for. Every recording is made on the machine that
-    /// runs the app (a phone's arrives as [`MeetingSource::Phone`]), so
-    /// this is also the platform a call was recorded on.
+    /// onboarding asks for. The app records every call on the machine it
+    /// runs on (a phone's arrives as [`MeetingSource::Phone`]; `steno
+    /// process` takes a file as recorded here), so this is also the
+    /// platform a call was recorded on.
     ///
     /// [`MeetingSource::Phone`]: crate::MeetingSource::Phone
     pub enum Platform {
