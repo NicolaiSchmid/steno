@@ -1079,9 +1079,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   did.
 - On the Mac, Parakeet v3 is the `CoreML` model the Swift app installs; Settings and
   `steno dev models` report its directory, and this build cannot download it.
-- The audio device list is empty off the Mac, so Settings > Recording offers only the
-  default input: WASAPI enumerates (WP10a) but the services do not read it yet, and
-  PipeWire has no list.
+- The audio device list comes from the live backend on every platform
+  (`PlatformAudioDevices`: Core Audio, the PipeWire registry, WASAPI); a failed
+  enumeration is logged, and Settings shows Swift's "Microphones could not be listed."
+  over an empty list. Rust differs: a chosen microphone the list lacks (unplugged, or a
+  UID saved on another computer) stays selected and is listed as "Microphone not
+  connected" (`recording_devices` in `steno-host`), where the Swift picker shows no
+  entry for it.
 - The pipeline's `decode` streams a lane (see "Streamed decode and mixdown" under
   Audio); the one buffer alive at a time rule holds, and the buffer is the 16 kHz lane
   (460 MB for two hours) plus a working set under a megabyte, as in Swift.
@@ -1517,14 +1521,29 @@ item to settle before the Linux release:
 - **Latencies are the ports' `SPA_PARAM_Latency` lower bounds**: the
   microphone port's capture side plus the sink's first playback port's
   playback side, in frames of the first cycle. Null devices report zero, so
-  CI checks the parsing and the arithmetic, not real numbers. Measure the
-  far-end delay on a laptop with ALSA and with a Bluetooth headset.
-- **`start` waits for the first cycle** and fails after 3 s without one;
-  the Mac's returns before any callback. Linking the sink's monitor keeps
+  CI checks the parsing and the arithmetic, not real numbers; `start` logs
+  both at `info`. No real hardware has measured them yet: see "Measuring
+  the latencies on real hardware" below.
+- **`start` waits for the first cycle**, and that is kept: the latencies
+  are counted in frames of the cycle (the quantum, 1024 or 2048 frames on
+  the private daemon depending on what else runs, and only known once the
+  stream runs), a graph that never runs (a driver that does not start)
+  fails the start with an error instead of beginning a silent recording,
+  and a link the server refuses after creating it fails the start rather
+  than the first seconds of the meeting. It fails after `START_TIMEOUT`
+  (3 s) without a cycle; a tighter bound would fail Bluetooth sinks, which
+  take 1 to 2 s to start. The Mac's returns before any callback, WASAPI's
+  once both streams started (at most 10 s). Linking the sink's monitor keeps
   the sink running, so cycles arrive with nothing playing (the Mac's call
-  mode waits for an output client). The session holds its mutex across
-  `backend.start()`, so its callers, `state()` included, wait as long: 1
-  to 2 s for a Bluetooth sink, against the Mac's 200 ms at most.
+  mode waits for an output client). The cost, measured on the private
+  daemon over the 24 starts of one run of the live tests at a load
+  average of 9: the first cycle comes 2 to 43 ms after the links, and the
+  whole `start` (connection, two roundtrips, links, first cycle,
+  latencies) takes 6 to 47 ms, 26 ms in the median; `start` logs its
+  length at `info`, the first cycle's wait at `debug`. The session holds its
+  mutex across `backend.start()`, so its callers, `state()` included, wait
+  as long: expected 1 to 2 s for a Bluetooth sink, against the Mac's 200 ms
+  at most.
 - **Device changes read differently.** A lost connection or stream loses
   both lanes and reads as `OutputDeviceGone` (`InputDeviceGone` in
   person). A lost link (one removed from outside included) reads as the
@@ -1648,16 +1667,90 @@ item to settle before the Linux release:
   stalled stderr holds neither the capture thread nor `stop()`. Only log
   lines are queued: the shell's `stderr_line!` and the CLI's progress
   lines still write to stderr directly.
-- **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
-  names no Linux node, so a synced or copied settings file shows the input
-  device as unavailable and the user picks again. A virtual source (a null
-  sink with `media.class = Audio/Source/Virtual`) records from its monitor
-  output, the only output it has.
-- **No input device list and no meeting detection on Linux yet.**
-  `AudioDevices` (the picker) and the live `ProcessAudioActivitySource`
-  (the detector) are macOS-only. The PipeWire registry holds both: the
-  `Audio/Source` nodes, and the `Stream/Input/Audio` nodes with their
-  `application.process.id`. A follow-up package adds them.
+- **Device UIDs are `node.name`s, and an unknown one records the
+  default.** A UID that names no source the capture can record (a Core
+  Audio UID from a synced or copied settings file, a USB microphone
+  unplugged since it was chosen) records the default source, with a
+  warning in the log, and the capture then follows the default as one
+  without a UID does; Settings lists the stored device as "Microphone not
+  connected" until the user picks again or it comes back. A rebuild's
+  restart tries the UID again, so a chosen microphone that goes away during
+  a recording reads as `InputDeviceGone` and the recording goes on, after
+  the gap, on the default source. The Mac and Windows backends fail the
+  start with `InputDeviceUnavailable` instead, as Swift does, and a
+  microphone lost during a recording ends it there after the rebuild's
+  retries. A virtual source (a null sink with
+  `media.class = Audio/Source/Virtual`) records from its monitor output,
+  the only output it has.
+- **The input device list** (`capture::live::pipewire::AudioDevices`) is
+  every source the capture's UID lookup accepts (`Audio/Source` nodes,
+  virtual sources, duplex devices), named by `node.description`, else
+  `node.nick`, the default marked from the `default` metadata. One short
+  connection per call on a thread of its own, bounded by `START_TIMEOUT`.
+  It binds the `default` metadata like a capture does, and closes only
+  after a second roundtrip: the daemon holds a client's messages until the
+  session manager answered the bind's ping (`pw_impl_client_set_busy` in
+  `global_bind`), so a list leaves no bind pending unless WirePlumber
+  stalls past the deadline (see "A default move can go unreported"). The
+  rate reads 0 and `is_running_somewhere` is not read.
+- **Meeting detection** (`detection::pipewire`, the Linux
+  `LiveProcessAudioActivity`) reads the registry from one PipeWire thread
+  per source, which starts with the first call and ends when the source
+  drops, so every `changes()` receiver shares it (unlike Windows, no thread
+  per detector start). A process holds the microphone while one of its
+  `Stream/Input/Audio` nodes is linked from a source and not idle,
+  suspended or failed: the registry reports links with both ends on the
+  global, and a stream recording a sink's monitor (a screen recorder) runs
+  too without holding a microphone. Left out: Steno's own capture (by its
+  `node.name`, so a `steno record` beside the app is no call), a filter's
+  or loopback's halves (`node.link-group`: an echo canceller's capture
+  stream holds the real microphone for as long as it exists) and level
+  meters (`stream.monitor`). The pid is the node's
+  `application.process.id`, else its client's, else the client's
+  `pipewire.sec.pid`; the `bundle_id` is `application.process.binary`,
+  else `application.name`. Native clients report their binary
+  (`pw-record` reports `pw-cat`); PulseAudio clients, which most call apps
+  and browsers are, report theirs through pipewire-pulse, so a call in a
+  browser tab names the browser's binary, not the call service. Swift has
+  no list of call apps (the prompt names any holder, by the app name its
+  bundle id resolves to), so none needs Linux names; what WP9b needs on
+  Linux is a display name for a binary name, from the app's `.desktop`
+  entry or `application.name`. A lost connection ends the thread; calls
+  within `RETRY_AFTER` (5 s) answer the error, the next connects afresh.
+
+#### Measuring the latencies on real hardware
+
+No Linux machine with real audio devices has measured the capture's
+latencies; the private daemon's null devices report zero. On a Linux
+laptop with PipeWire and WirePlumber, run these once with the built-in
+speakers and microphone and once with a Bluetooth headset in its headset
+(call) profile, in a quiet room, with the speakers loud enough to hear the
+clicks (hold the headset's earpiece against its microphone):
+
+1. Build once: `scripts/setup-linux.sh`, then
+   `cargo build --release -p steno-cli`.
+2. Note the versions and devices: `pipewire --version`,
+   `wireplumber --version`, `wpctl status` (the default sink and source
+   carry a `*`) and `target/release/steno dev audio-devices` (the inputs
+   with their UIDs).
+3. Write a click track, one 1 ms click a second for ten seconds:
+   `python3 -c 'import wave,struct; w=wave.open("/tmp/click.wav","wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(48000); w.writeframes(b"".join(struct.pack("<h", 20000 if i % 48000 < 48 else 0) for i in range(480000)))'`
+4. Record a call and play the clicks two seconds into it, so the first
+   click reaches both lanes, then read the log without the level lines:
+   `RUST_LOG=steno_audio=debug target/release/steno dev capture-spike --lanes call --seconds 8 --out /tmp/steno-latency > /tmp/steno-latency.log 2>&1 & sleep 2; pw-play /tmp/click.wav; wait; grep -v dBFS /tmp/steno-latency.log`
+5. Note from the log: the `info` line "the PipeWire capture runs N ms
+   after start: input latency A frames, output latency B frames", the
+   `debug` line "the first cycle, C frames, came D ms after linking", and
+   the `onset mic` and `onset system` lines (an `onset mic` of -1 means
+   the microphone did not hear the clicks: louder, or closer). The round trip of a click through the speakers
+   and the microphone is `onset mic` minus `onset system`; the reported
+   latency is (A + B) / 48 000 s. The echo canceller needs the reported
+   one below the round trip, with the room's share (a few ms) and the
+   Speex tail (200 ms) covering the rest.
+6. Repeat step 4 three times per device and note the spread.
+
+Send the numbers with the device names and versions; they settle whether
+the lower bounds are right on ALSA and Bluetooth.
 
 ### Handover
 
@@ -2207,10 +2300,11 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   services (WP6b)". Found: #185, #203.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included; leaving it out
-  was weighed and not done, see the note), a Mac device
-  UID names no Linux node, `start` waits for the first cycle, there is no input device
-  list and no meeting detection, and the latencies are unmeasured on real hardware.
+  was weighed and not done, see the note).
   Where: the Linux items under "Audio". Found: #166, #176.
+- **First Linux release.** The capture's latencies are unmeasured on real hardware:
+  Nicolai runs "Measuring the latencies on real hardware" in the Linux list under
+  "Audio" on a laptop with ALSA and with a Bluetooth headset. Found: #176.
 - **First Linux release.** A default move can go unreported on PipeWire before 1.6.9
   (pipewire#5445, fixed upstream by 06de0ed2 on `master` and b784720b on `1.6`; seen
   with 1.6.5 and WirePlumber 0.5.14). Check the versions the release's distributions
@@ -2242,10 +2336,9 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   #185.
 - **First Windows release.** No Windows machine has run the WASAPI backend: the
   `--ignored` tests in `crates/steno-audio/tests/live_windows.rs`, a real call over
-  process loopback, a device switch while recording, the two-clock slip rate and
-  detection by executable name; and the services do not read the WASAPI device list
-  yet, so Settings > Recording offers only the default input. Where: the Windows list
-  under "Audio". Found: #175, #186.
+  process loopback, a device switch while recording, the two-clock slip rate,
+  detection by executable name and the device list Settings > Recording now shows.
+  Where: the Windows list under "Audio". Found: #175, #186.
 - **First Windows release.** The `.msi` and NSIS installers are not code-signed (no
   certificate), so SmartScreen asks before the first install. Where:
   `.github/workflows/desktop-release.yml`, the WP9a paragraph. Found: #184.
