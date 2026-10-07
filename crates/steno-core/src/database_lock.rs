@@ -69,7 +69,6 @@ pub enum DatabaseLockError {
 /// ```
 #[derive(Debug)]
 pub struct DatabaseLock {
-    path: PathBuf,
     /// Holds the lock; closing it releases the lock.
     _file: File,
 }
@@ -104,7 +103,7 @@ impl DatabaseLock {
         let deadline = Instant::now() + patience;
         loop {
             match file.try_lock() {
-                Ok(()) => return Ok(DatabaseLock { path, _file: file }),
+                Ok(()) => return Ok(DatabaseLock { _file: file }),
                 Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(RETRY_INTERVAL);
                 }
@@ -118,12 +117,6 @@ impl DatabaseLock {
                 }
             }
         }
-    }
-
-    /// The lock file.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 
@@ -171,9 +164,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let database = dir.path().join("steno.sqlite");
         let first = DatabaseLock::acquire(&database).unwrap();
-        assert_eq!(first.path(), dir.path().join("steno.lock"));
         match DatabaseLock::acquire(&database) {
-            Err(DatabaseLockError::Held(path)) => assert_eq!(path, first.path()),
+            Err(DatabaseLockError::Held(path)) => assert_eq!(path, dir.path().join("steno.lock")),
             other => panic!("expected Held, got {other:?}"),
         }
         drop(first);
