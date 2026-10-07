@@ -694,10 +694,10 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
     let mut seen = Vec::new();
     while !matches!(seen.last(), Some(CaptureNotice::DeviceResumed { .. })) {
         let left = deadline.saturating_duration_since(Instant::now());
-        match notices.recv_timeout(left) {
-            Ok(notice) => seen.push(notice),
-            Err(_) => panic!("no resume within 40 s: {seen:?}, {:?}", session.state()),
-        }
+        let Ok(notice) = notices.recv_timeout(left) else {
+            panic!("no resume within 40 s: {seen:?}, {:?}", session.state());
+        };
+        seen.push(notice);
     }
     println!("notices: {seen:?}");
     assert_eq!(
