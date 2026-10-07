@@ -759,10 +759,23 @@ async fn a_refresh_that_cannot_connect_names_the_cause() {
     assert!(detail.contains("Connect"), "the cause is kept: {detail}");
 }
 
-/// A rename that fails (here `auth.json` became a non-empty directory
-/// during the round trip) still answers with the new tokens, which the
-/// store keeps in memory, and leaves the temporary file with them in it in
-/// case the app quits first. Once the file can be written again, the next
+/// Answers the refresh with `access` and `rt_2` after turning `auth.json`
+/// into a non-empty directory, so the rename of the write-back fails.
+#[cfg(unix)]
+fn occupy_the_file_during_the_refresh(home: &CodexHome, access: &str) {
+    let file = home.file();
+    let access = access.to_owned();
+    home.server.respond(Arc::new(move |_| {
+        std::fs::remove_file(&file).unwrap();
+        std::fs::create_dir(&file).unwrap();
+        std::fs::write(file.join("occupied"), b"x").unwrap();
+        Some(scripts.token_refresh(&access, Some("rt_2"), None))
+    }));
+}
+
+/// A rename that fails still answers with the new tokens, which the store
+/// keeps in memory, and leaves the temporary file with them in it in case
+/// the app quits first. Once the file can be written again, the next
 /// call writes the kept tokens, removes the temporary and posts nothing:
 /// the posted refresh token is spent.
 #[cfg(unix)]
@@ -772,14 +785,7 @@ async fn a_failed_rename_keeps_the_new_sign_in_and_writes_it_on_the_next_call() 
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     let original = std::fs::read(home.file()).unwrap();
     let fresh = CodexHome::access_token(3_600, "plus");
-    let fresh_for_responder = fresh.clone();
-    let file = home.file();
-    home.server.respond(Arc::new(move |_| {
-        std::fs::remove_file(&file).unwrap();
-        std::fs::create_dir(&file).unwrap();
-        std::fs::write(file.join("occupied"), b"x").unwrap();
-        Some(scripts.token_refresh(&fresh_for_responder, Some("rt_2"), None))
-    }));
+    occupy_the_file_during_the_refresh(&home, &fresh);
     let store = home.store();
     let credentials = store.current().await.unwrap();
     assert_eq!(credentials.access_token, fresh);
@@ -863,14 +869,7 @@ async fn a_new_login_after_a_failed_write_wins_over_the_kept_sign_in() {
     let home = CodexHome::new().await;
     home.write(AuthFile::default().access(&CodexHome::access_token(10, "plus")));
     let fresh = CodexHome::access_token(3_600, "plus");
-    let fresh_for_responder = fresh.clone();
-    let file = home.file();
-    home.server.respond(Arc::new(move |_| {
-        std::fs::remove_file(&file).unwrap();
-        std::fs::create_dir(&file).unwrap();
-        std::fs::write(file.join("occupied"), b"x").unwrap();
-        Some(scripts.token_refresh(&fresh_for_responder, Some("rt_2"), None))
-    }));
+    occupy_the_file_during_the_refresh(&home, &fresh);
     let store = home.store();
     assert_eq!(store.current().await.unwrap().refresh_token, "rt_2");
     std::fs::remove_dir_all(home.file()).unwrap();
