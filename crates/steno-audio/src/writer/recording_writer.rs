@@ -60,6 +60,11 @@ pub trait RecordingWriting: Send {
     fn files(&self) -> RecordingFiles;
     /// One frame for every lane.
     fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError>;
+    /// Makes what the master holds so far durable (`fdatasync`), so a power
+    /// loss keeps it; the writer thread calls it every
+    /// [`SYNC_INTERVAL_FRAMES`](super::writer_thread::SYNC_INTERVAL_FRAMES)
+    /// frames. A failure is a write failure.
+    fn sync(&mut self) -> Result<(), CaptureError>;
     /// Patches the headers and closes the files; once.
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError>;
 }
@@ -190,6 +195,13 @@ impl RecordingWriting for RecordingWriter {
             raw_mic.write(raw, FRAME_SIZE)?;
         }
         Ok(())
+    }
+
+    /// Syncs the master alone: it is what a recovered recording is rebuilt
+    /// from, and the 16 kHz sidecars and the raw microphone are derived from
+    /// the same audio (the close syncs every file).
+    fn sync(&mut self) -> Result<(), CaptureError> {
+        self.master.sync()
     }
 
     /// Closes every file, the master first. A failure on one file still

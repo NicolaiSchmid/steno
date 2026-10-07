@@ -119,6 +119,15 @@ impl CafStreamWriter {
         Ok(())
     }
 
+    /// Makes every frame written so far durable (`sync_data`: the samples
+    /// and the file size, not the timestamps). Nothing after `finish`.
+    pub fn sync(&mut self) -> Result<(), CaptureError> {
+        match &self.file {
+            Some(file) => file.sync_data().map_err(|e| io_error(&self.path, &e)),
+            None => Ok(()),
+        }
+    }
+
     /// Patches the data chunk size (edit count plus samples), flushes and
     /// closes.
     pub fn finish(&mut self) -> Result<(), CaptureError> {

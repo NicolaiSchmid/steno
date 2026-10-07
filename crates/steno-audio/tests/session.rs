@@ -310,6 +310,28 @@ fn a_silent_system_lane_is_reported_in_statistics_and_levels() {
     assert!(master.channels[0].iter().any(|s| *s != 0.0));
 }
 
+/// The default relay rides out a writer stalled for 15 s: every frame of
+/// three channels (two lanes and the raw microphone) fits with nothing
+/// draining it, so a slow sync or a sleeping disk drops nothing.
+#[test]
+fn the_default_relay_holds_fifteen_seconds_with_the_writer_stalled() {
+    let frames_per_second = CaptureSession::gap_frames(Duration::from_secs(1));
+    let relay = steno_audio::realtime::FrameRelay::new(
+        3,
+        steno_audio::FRAME_SIZE,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+    );
+    let zeros = vec![0.0f32; steno_audio::FRAME_SIZE];
+    for frame in 0..15 * frames_per_second {
+        assert!(relay.begin_frame(), "frame {frame} refused");
+        for channel in 0..3 {
+            relay.write(channel, &zeros);
+        }
+        relay.end_frame();
+    }
+    assert_eq!(relay.dropped_frames(), [0, 0, 0]);
+}
+
 /// One frame of relay headroom against a backend that delivers two seconds
 /// in milliseconds: the writer falls behind, and every frame it missed is
 /// counted against the master that was written, on every lane alike.
@@ -700,6 +722,9 @@ impl RecordingWriting for FaultyWriter {
         }
         self.inner.write(frames)
     }
+    fn sync(&mut self) -> Result<(), CaptureError> {
+        self.inner.sync()
+    }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
         let files = self.inner.finish()?;
         if self.fail_finish {
@@ -910,6 +935,9 @@ fn a_writer_thread_that_died_ends_failed_and_the_session_starts_again() {
             self.1 += 1;
             assert!(self.1 < 10, "writer panics on purpose");
             self.0.write(frames)
+        }
+        fn sync(&mut self) -> Result<(), CaptureError> {
+            self.0.sync()
         }
         fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
             self.0.finish()
@@ -2043,6 +2071,12 @@ impl RecordingWriting for FullFrom {
         }
         self.0.write(frames)
     }
+    fn sync(&mut self) -> Result<(), CaptureError> {
+        if self.1.load(Ordering::SeqCst) {
+            return Err(CaptureError::WriterFailed("DiskFull".into()));
+        }
+        self.0.sync()
+    }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
         self.0.finish()
     }
@@ -2309,6 +2343,9 @@ impl RecordingWriting for HeldWrites {
             let _ = self.release.recv_timeout(RECV);
         }
         self.inner.write(frames)
+    }
+    fn sync(&mut self) -> Result<(), CaptureError> {
+        self.inner.sync()
     }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
         self.inner.finish()
