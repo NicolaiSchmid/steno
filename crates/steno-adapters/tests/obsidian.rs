@@ -1331,7 +1331,7 @@ fn contents(vault: &Vault, folder: &str) -> Vec<(String, Vec<u8>)> {
 }
 
 #[test]
-fn a_redeliver_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_own() {
+fn a_redelivery_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_own() {
     let vault = Vault::new();
     let destination = vault.destination_with(false, Some("People"));
     let ours = export();
@@ -1368,6 +1368,197 @@ fn a_redeliver_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_o
     let anna = vault.text(ANNA_PAGE);
     assert!(anna.contains(&ManagedBlock::marker(ours.meeting.id)));
     assert!(anna.contains(&ManagedBlock::marker(theirs.meeting.id)));
+}
+
+/// The export with its first decision reworded: a change the folder note
+/// shows and the folder name does not.
+fn with_a_changed_decision(export: &MeetingExport) -> MeetingExport {
+    let mut changed = export.clone();
+    changed.decisions[0].text = "Die Aufteilung wird verschoben.".to_owned();
+    changed
+}
+
+/// `ours` delivered with `destination`, its folder removed, and `theirs`,
+/// another meeting with the same date and title, delivered into the name
+/// since. Returns `ours`' receipt.
+fn lose_the_folder_to_another_meeting(
+    vault: &Vault,
+    destination: &ObsidianFolderDestination,
+    ours: &MeetingExport,
+) -> DeliveryReceipt {
+    let mut theirs = ours.clone();
+    theirs.meeting.id = uuid(2);
+    let first = deliver(destination, ours, None);
+    assert_eq!(first.folder, FOLDER);
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    let their_receipt = deliver(&vault.destination_with(false, None), &theirs, None);
+    assert_eq!(their_receipt.folder, FOLDER);
+    first
+}
+
+#[test]
+fn a_redelivery_that_failed_after_claiming_a_folder_writes_that_folder_the_next_time() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = lose_the_folder_to_another_meeting(&vault, &destination, &ours);
+    let two = format!("{FOLDER}-2");
+
+    // The first redelivery claims `-2`, writes the meeting's notes there and
+    // then fails on a person page that is not UTF-8.
+    let mut latin1 = b"# Anna M".to_vec();
+    latin1.push(0xFC);
+    latin1.extend(b"ller\n");
+    fs::write(vault.path(ANNA_PAGE), &latin1).unwrap();
+    assert!(matches!(
+        destination.deliver_meeting(&ours, Some(&first)),
+        Err(ObsidianError::ReadFailed { .. })
+    ));
+    assert_eq!(
+        vault.list(&two),
+        without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
+    );
+
+    // The page is fixed and the meeting changed; the receipt is still the
+    // one pinned at the lost folder.
+    fs::write(vault.path(ANNA_PAGE), b"# Anna\n").unwrap();
+    let changed = with_a_changed_decision(&ours);
+    let again = deliver(&destination, &changed, Some(&first));
+
+    assert_eq!(again.folder, two);
+    let expected: Vec<String> = without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
+        .into_iter()
+        .map(|name| format!("{two}/{name}"))
+        .collect();
+    let listed: Vec<String> = paths(&again)
+        .into_iter()
+        .filter(|path| path.starts_with(&format!("{two}/")))
+        .collect();
+    assert_eq!(listed, expected, "every file of the claimed folder");
+    assert!(
+        vault
+            .text(&format!("{two}/{FOLDER_SLUG}-2.md"))
+            .contains("Die Aufteilung wird verschoben."),
+        "the folder note has the change"
+    );
+    assert_eq!(
+        vault.read(&format!("{two}/meeting.json")),
+        ArtifactRenderer::new().render_json(&changed).unwrap()
+    );
+}
+
+#[test]
+fn a_redelivery_without_its_audio_still_updates_the_folder_it_claimed() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = lose_the_folder_to_another_meeting(&vault, &destination, &ours);
+    let two = format!("{FOLDER}-2");
+    // The retention sweep removed the mixdown, and the audio copy left with
+    // the removed folder.
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+
+    assert_eq!(
+        destination.deliver_meeting(&ours, Some(&first)),
+        Err(ObsidianError::AudioUnavailable)
+    );
+    let changed = with_a_changed_decision(&ours);
+    assert_eq!(
+        destination.deliver_meeting(&changed, Some(&first)),
+        Err(ObsidianError::AudioUnavailable),
+        "the audio is gone for good"
+    );
+    assert!(
+        vault
+            .text(&format!("{two}/{FOLDER_SLUG}-2.md"))
+            .contains("Die Aufteilung wird verschoben."),
+        "every other file was written, as the error says"
+    );
+}
+
+#[test]
+fn a_lost_folder_drops_only_its_own_files_from_the_receipt() {
+    let vault = Vault::new();
+    let ours = export();
+    let first = lose_the_folder_to_another_meeting(
+        &vault,
+        &vault.destination_with(false, Some("People")),
+        &ours,
+    );
+    assert_eq!(
+        managed(&first),
+        ["People/Anna Müller.md", "People/Nicolai Schmid.md"]
+    );
+
+    // With people off the person pages are not rendered, so only the
+    // ledger carries them into the receipt.
+    let again = deliver(&vault.destination_with(false, None), &ours, Some(&first));
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(
+        managed(&again),
+        managed(&first),
+        "the person pages stay listed"
+    );
+    assert!(
+        paths(&again)
+            .iter()
+            .all(|path| !path.starts_with(&format!("{FOLDER}/"))),
+        "{:?}",
+        paths(&again)
+    );
+}
+
+#[test]
+fn a_pinned_folder_whose_meeting_json_is_missing_or_names_no_meeting_gets_a_folder_of_its_own() {
+    for damage in ["missing", "not a meeting"] {
+        let vault = Vault::new();
+        let destination = vault.destination_with(false, Some("People"));
+        let ours = export();
+        let first = deliver(&destination, &ours, None);
+        let json = vault.path(&format!("{FOLDER}/meeting.json"));
+        if damage == "missing" {
+            fs::remove_file(&json).unwrap();
+        } else {
+            fs::write(&json, b"{\"meeting\": 7}\n").unwrap();
+        }
+        let left = contents(&vault, FOLDER);
+
+        let again = deliver(&destination, &ours, Some(&first));
+
+        assert_eq!(again.folder, format!("{FOLDER}-2"), "{damage}");
+        assert_eq!(
+            contents(&vault, FOLDER),
+            left,
+            "{damage}: never written over"
+        );
+        assert_eq!(
+            vault.list(&format!("{FOLDER}-2")),
+            without_audio(meeting_files(&format!("{FOLDER_SLUG}-2"))),
+            "{damage}"
+        );
+    }
+}
+
+#[test]
+fn a_pinned_meeting_json_that_cannot_be_read_fails_the_delivery() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = deliver(&destination, &ours, None);
+    // A directory in its place: reading it fails with an error other than
+    // a missing file on every platform.
+    let json = vault.path(&format!("{FOLDER}/meeting.json"));
+    fs::remove_file(&json).unwrap();
+    fs::create_dir(&json).unwrap();
+
+    match destination.deliver_meeting(&ours, Some(&first)) {
+        Err(ObsidianError::ReadFailed { path, .. }) => assert_eq!(Path::new(&path), json),
+        other => panic!("expected ReadFailed, got {other:?}"),
+    }
+    assert!(
+        !vault.path(&format!("{FOLDER}-2")).exists(),
+        "no folder claimed"
+    );
 }
 
 #[cfg(unix)]
@@ -1433,6 +1624,86 @@ fn a_delivery_after_one_that_panicked_holding_the_vault_still_runs() {
         vault
             .text(ANNA_PAGE)
             .contains(&ManagedBlock::marker(one.meeting.id))
+    );
+}
+
+#[test]
+fn a_delivery_waiting_for_one_that_panics_holding_the_vault_still_runs() {
+    let vault = Vault::new();
+    let one = export();
+    let (paused, first_paused) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let panicking = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if let DeliveryStep::WritingPersonPage(_) = step {
+                let _ = paused.send(());
+                let _ = released.lock().unwrap().recv();
+                panic!("a delivery that stops half way");
+            }
+        });
+    let (waiting, second_waits) = mpsc::channel();
+    let second = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if step == DeliveryStep::WaitingForVault {
+                let _ = waiting.send(());
+            }
+        });
+
+    let (panicked, receipt) = std::thread::scope(|scope| {
+        let release = release;
+        let first_run = scope.spawn(|| panicking.deliver_meeting(&one, None));
+        first_paused
+            .recv_timeout(STEP_LIMIT)
+            .expect("the first delivery reaches the page");
+        let second_run = scope.spawn(|| second.deliver_meeting(&one, None));
+        second_waits
+            .recv_timeout(STEP_LIMIT)
+            .expect("the second delivery waits for the vault");
+        release.send(()).unwrap();
+        (first_run.join().is_err(), second_run.join())
+    });
+
+    assert!(panicked, "the hook panicked inside the first delivery");
+    let receipt = receipt
+        .expect("the waiting delivery takes the poisoned lock")
+        .unwrap();
+    assert_eq!(receipt.folder, FOLDER);
+    assert!(
+        vault
+            .text(ANNA_PAGE)
+            .contains(&ManagedBlock::marker(one.meeting.id))
+    );
+}
+
+#[tokio::test]
+async fn destination_deliver_runs_off_the_runtime_thread_and_raises_a_panic_again() {
+    use steno_core::Destination as _;
+
+    let vault = Vault::new();
+    let test_thread = std::thread::current().id();
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if let DeliveryStep::WritingPersonPage(_) = step {
+                assert_ne!(
+                    std::thread::current().id(),
+                    test_thread,
+                    "the delivery runs on the blocking pool"
+                );
+                panic!("a delivery that stops half way");
+            }
+        });
+    let delivered = tokio::spawn(async move { destination.deliver(&export(), None).await }).await;
+
+    let panic = delivered
+        .expect_err("the panic reaches the caller")
+        .into_panic();
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"a delivery that stops half way")
     );
 }
 

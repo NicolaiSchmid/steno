@@ -272,6 +272,37 @@ fn claiming_a_folder_tries_each_candidate_once_and_stops_at_a_failed_claim() {
 }
 
 #[test]
+fn moving_the_folder_drops_its_files_and_writes_the_claimed_one_as_on_a_first_delivery() {
+    let previous = receipt(
+        ROOT,
+        &[
+            (NOTE, FileOwnership::Owned),
+            (ANNA, FileOwnership::ManagedBlock),
+        ],
+    );
+    let mut ledger = DeliveryLedger::new(Some(&previous), ROOT);
+    let claimed = format!("{LEDGER_FOLDER}-2");
+    ledger.move_folder(LEDGER_FOLDER, &claimed);
+
+    assert_eq!(
+        ledger.files().keys().collect::<Vec<_>>(),
+        [ANNA],
+        "only the lost folder's files leave"
+    );
+    assert!(ledger.may_write(&format!("{claimed}/meeting.json"), true));
+    assert!(
+        !ledger.may_write(&format!("{claimed}/sub/notes.md"), true),
+        "directly in the claimed folder only"
+    );
+    assert!(
+        !ledger.may_write(&format!("{claimed}0/meeting.json"), true),
+        "a sibling with the same prefix is not the claimed folder"
+    );
+    assert!(!ledger.may_write(AUDIO, true), "the lost folder: as before");
+    assert_eq!(ledger.receipt(&claimed, 1).folder, claimed);
+}
+
+#[test]
 fn folder_path_joins_root_and_folder() {
     let receipt = receipt("/vault/", &[]);
     assert_eq!(
