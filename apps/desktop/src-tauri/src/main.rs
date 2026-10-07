@@ -237,10 +237,10 @@ enum Refusal {
     /// The Swift app runs: its launch and this one's would fail each
     /// other's live recording, and it takes no lock to say so.
     OlderSteno,
-    /// Another process holds the database: another app, the old
-    /// identifier's beside the new one, one the single-instance guard
-    /// missed (Linux without a session bus, a failed connect on the Mac),
-    /// or a `steno` command.
+    /// Another process holds the database: another app (an app under the
+    /// old identifier beside one under the new, one the single-instance
+    /// guard missed: Linux without a session bus, a failed connect on the
+    /// Mac), or a `steno` command.
     DatabaseHeld,
 }
 
@@ -272,10 +272,8 @@ fn refusal_before_build(running: impl FnOnce(&str) -> bool) -> Option<Refusal> {
     running(SWIFT_BUNDLE_ID).then_some(Refusal::OlderSteno)
 }
 
-/// Whether an app with `bundle_id` runs on this Mac that is not a copy of
-/// this executable (after the cutover this app carries the Swift app's
-/// bundle id; a second copy of it meets the database lock instead).
-/// Always false elsewhere.
+/// Whether an app with `bundle_id` runs on this Mac; always false
+/// elsewhere.
 #[cfg(not(feature = "fixture-host"))]
 fn platform_app_running(bundle_id: &str) -> bool {
     #[cfg(target_os = "macos")]
@@ -283,20 +281,11 @@ fn platform_app_running(bundle_id: &str) -> bool {
         use objc2_app_kit::NSRunningApplication;
         use objc2_foundation::NSString;
 
-        let own = std::env::current_exe()
-            .ok()
-            .and_then(|path| Some(path.file_name()?.to_string_lossy().into_owned()));
         NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(
             bundle_id,
         ))
-        .iter()
-        .any(|app| {
-            let executable = app
-                .executableURL()
-                .and_then(|url| url.lastPathComponent())
-                .map(|name| name.to_string());
-            executable.is_none() || executable != own
-        })
+        .count()
+            != 0
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -762,6 +751,13 @@ mod tests {
         );
         assert_eq!(refusal_before_build(|_| false), None);
         assert_eq!(Refusal::OlderSteno.title(), "An older Steno is running");
+    }
+
+    /// The Mac's query answers false for a bundle id no app carries.
+    #[cfg(all(target_os = "macos", not(feature = "fixture-host")))]
+    #[test]
+    fn an_app_that_is_not_running_reads_as_not_running() {
+        assert!(!platform_app_running("com.nicolaischmid.steno.no-such-app"));
     }
 
     #[test]
