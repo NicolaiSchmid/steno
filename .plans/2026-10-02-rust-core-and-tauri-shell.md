@@ -1315,21 +1315,31 @@ parity item until a plan says otherwise:
   does not open (still settling after it was plugged in, held by another
   app, a link that never runs) fails the backend's `start`; the session
   then starts it once more without a UID, at the start and after a
-  rebuild's last restart, and marks that input as the fallback. The
-  recorder then sets the recording snapshot's `warning` to "Recording from
-  <name> because the chosen microphone is not available." (or "from the
-  system default microphone" when the input has no name) until a rebuild
-  returns to the chosen one, the user dismisses it or the recording stops.
-  Each backend watches for the chosen device (the Mac's device list,
-  PipeWire's registry, WASAPI's endpoint notifications, and on the Mac and
-  WASAPI a re-check every 5 s while on the fallback); its return reads as
+  rebuild's last restart, and marks that input as the fallback. A rebuild
+  tries the default already after its first failed restart when the
+  stream it replaces was on the fallback (the default worked a moment
+  ago), or when the chosen microphone was linked but did not run
+  (`CaptureError::DidNotRun`, PipeWire's 3 s first-cycle deadline): the
+  gap is then one failed start long (about 3.5 s of wall time on
+  PipeWire), inside the 10 s the silence for a gap fills, so the master
+  stays on wall time. After all four restarts it was about 14 s on
+  PipeWire, 4 s of it missing from the master. The recorder sets the recording snapshot's
+  `warning` to "Recording from <name>. The microphone chosen in Settings
+  is not available." (or "from the system default microphone" when the
+  input has no name) until a rebuild returns to the chosen one, the user
+  dismisses it or the recording stops; a recording that ended on the
+  fallback leaves "Recorded from <name>. The microphone chosen in Settings
+  was not available." Each backend watches for the chosen device (the
+  Mac's device list, PipeWire's registry, WASAPI's endpoint notifications,
+  and on the Mac and WASAPI a re-check every 5 s while on the fallback,
+  which looks only for another microphone); its return reads as
   `DefaultInputChanged`, and the rebuild records it again. A fallback the
   session chose watches for nothing: the next rebuild asks for the chosen
   microphone again. A Bluetooth headset gone for a second while it changes
-  profile is recorded on the default input meanwhile, instead of a gap or
-  the end of the recording. A chosen microphone that is missing or cannot
-  be opened no longer ends a recording while the default input can be
-  opened. Settings lists the stored device as "Microphone not connected"
+  profile is recorded on the default input meanwhile, with a short gap at
+  each switch, where four failed restarts used to end the recording. A
+  chosen microphone that is missing or cannot be opened no longer ends a
+  recording while the default input can be opened. Settings lists the stored device as "Microphone not connected"
   until the user picks again or it comes back. Swift keeps its behaviour
   until the cutover.
 - **Steno's own aggregates are not inputs.** On the Mac,
@@ -1714,13 +1724,14 @@ item to settle before the Linux release:
 - **The input device list** (`capture::live::pipewire::AudioDevices`) is
   every source the capture's UID lookup accepts (`Audio/Source` nodes,
   virtual sources, duplex devices), named by `node.description`, else
-  `node.nick`. One short connection per call on a thread of its own, one
+  `node.nick`, else its `node.name`. One short connection per call on a thread of its own, one
   roundtrip, bounded by `START_TIMEOUT`. It does not bind the `default`
   metadata, so no device is marked the default (Settings shows none): a
   bind dropped before the session manager answered its ping, as a list
   during a WirePlumber stall would leave one, stops the metadata's events
-  for every client (see "A default move can go unreported"), a capture
-  standing in with the default source included; a live test lists with
+  for every client (see "A default move can go unreported"). That
+  includes a capture recording the default source as the fallback. A
+  live test lists with
   WirePlumber stopped and checks a capture still hears the next move. The
   rate reads 0 and `is_running_somewhere` is not read.
 - **Meeting detection** (`detection::pipewire`, the Linux

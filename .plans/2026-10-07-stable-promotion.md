@@ -402,7 +402,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
 | P17 | A local recording's folder: a failed enqueue saves the asset row, so the folder is not orphaned; the recorder's rebuild thread survives a panic | capture and recovery (`wp-cap-*`) |
 | P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
-| P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform (Core Audio, PipeWire and WASAPI in #222), also when the chosen device is connected but does not open, and the recording returns to it once it is back | audio (#222) |
+| P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform (Core Audio, PipeWire and WASAPI in #222), also when the chosen device is connected but does not open, and the recording returns to it once it is back, or at the next device change when it did not open | audio (#222) |
 | P20 | A recording that fills the disk: a free-space check before and during recording, with a warning | capture and recovery (`wp-cap-*`) |
 | P21 | The unsynced tail of a recording: periodic `sync_data` on the master | capture and recovery (`wp-cap-*`) |
 | P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`) | capture and recovery (`wp-cap-*`) |
