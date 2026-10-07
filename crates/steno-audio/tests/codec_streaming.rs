@@ -361,8 +361,10 @@ async fn the_phones_aac_and_mp3_decode_as_before() {
 }
 
 /// The recording writer's own call, with every kind of sidecar the
-/// decoder can find: finished, missing, unfinished (zero sizes), empty,
-/// stereo and at the wrong rate; all but the first fall back to the master.
+/// decoder can find: finished, float, missing, unfinished (zero sizes),
+/// empty, stereo and at the wrong rate; all but the first two fall back to
+/// the master. (A sidecar whose length disagrees with the master's is the
+/// one case the two decoders part on, on purpose: `tests/codec.rs`.)
 #[tokio::test]
 async fn sidecars_and_the_writers_master_decode_as_before() {
     let directory = scratch();
@@ -412,7 +414,8 @@ async fn sidecars_and_the_writers_master_decode_as_before() {
     let wrong_rate = directory.path().join("wrong-rate.wav");
     write_wav(&wrong_rate, 48_000, &[signal(34, 900, 48e3)], false);
     let float = directory.path().join("float.wav");
-    write_wav(&float, 16_000, &[signal(35, 20_001, 16e3)], true);
+    // As long as the master, so the decoder takes it.
+    write_wav(&float, 16_000, &[signal(35, 48_000, 16e3)], true);
     let missing = directory.path().join("missing.wav");
     for (name, path) in [
         ("unfinished", &unfinished),

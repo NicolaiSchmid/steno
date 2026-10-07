@@ -1,11 +1,11 @@
 //! The program's [`AudioDecoder`] for real recordings, in pure Rust.
 //! Swift: `Sources/StenoAudio/Codec/AVFoundationAudioCodec.swift`.
 //!
-//! `decode` returns the lane's 16 kHz sidecar when it is present and
-//! complete, else reads the master (the crate's own CAF reader for the
-//! writer's masters, `symphonia` for CAF, WAV, m4a/AAC and mp3) and
-//! resamples channel n (lane n of the master) to 16 kHz mono: the exact
-//! 3:1 FIR for 48 kHz material, a windowed-sinc polyphase resampler
+//! `decode` returns the lane's 16 kHz sidecar when it is present, complete
+//! and as long as the master, else reads the master (the crate's own CAF
+//! reader for the writer's masters, `symphonia` for CAF, WAV, m4a/AAC and
+//! mp3) and resamples channel n (lane n of the master) to 16 kHz mono: the
+//! exact 3:1 FIR for 48 kHz material, a windowed-sinc polyphase resampler
 //! ([`sinc::SincResampler`]) for every other rate (the phone records
 //! 44.1 kHz).
 //!
@@ -248,12 +248,18 @@ impl SymphoniaAudioCodec {
     }
 }
 
+/// `frames` at `rate` as a 16 kHz length, by the exact-length rule
+/// ([`LaneResampler::expected_len`]).
+fn length_at_16k(frames: usize, rate: u32) -> usize {
+    // Lengths are exact in f64; the result is a small positive count.
+    (frames as f64 * AudioBuffer16k::SAMPLE_RATE / f64::from(rate.max(1))).round() as usize
+}
+
 /// The 16 kHz samples to reserve for `frames` at `rate`: the exact length
 /// plus a second, so the filter's tail and a frame count a little short
 /// never grow the buffer.
 fn frames_at_16k(frames: usize, rate: u32) -> usize {
-    (frames as f64 * AudioBuffer16k::SAMPLE_RATE / f64::from(rate.max(1))).round() as usize
-        + AudioBuffer16k::SAMPLE_RATE as usize
+    length_at_16k(frames, rate) + AudioBuffer16k::SAMPLE_RATE as usize
 }
 
 /// The frames to reserve for: the container's count, but never more than
@@ -527,11 +533,7 @@ impl Mixdown<'_> {
 #[async_trait]
 impl AudioDecoder for SymphoniaAudioCodec {
     async fn decode(&self, asset: &AudioAsset, lane: AudioLane) -> BoundaryResult<AudioBuffer16k> {
-        if let Some(sidecar) = asset.sidecars_16k.get(&lane)
-            && let Some(path) = file_url_path(sidecar)
-            && let Ok(samples) = WavFile::read_16k_mono(&path)
-            && !samples.is_empty()
-        {
+        if let Some(samples) = sidecar(asset, lane) {
             return Ok(AudioBuffer16k::new(samples));
         }
         let channel = asset
@@ -562,6 +564,39 @@ impl AudioDecoder for SymphoniaAudioCodec {
         }
         Ok(Self::mixdown_path(&source, to)?)
     }
+}
+
+/// The lane's 16 kHz sidecar, when it reads, is not empty and is as long
+/// as the master: the writer writes the master and the sidecars a frame at
+/// a time, so a finished sidecar holds exactly a third of the master's
+/// frames. One that disagrees is not trusted, and the master, the copy
+/// that is never shorter, is decoded instead: the sidecar's 32-bit size
+/// fields wrap after 37.3 hours, and a sidecar that missed a frame the
+/// master kept (a full disk) would lose it. A master whose length cannot
+/// be read cheaply (not the writer's CAF) leaves the sidecar trusted.
+fn sidecar(asset: &AudioAsset, lane: AudioLane) -> Option<Vec<f32>> {
+    let path = file_url_path(asset.sidecars_16k.get(&lane)?)?;
+    let samples = WavFile::read_16k_mono(&path).ok()?;
+    if samples.is_empty() {
+        return None;
+    }
+    if let Some(master) = file_url_path(&asset.url)
+        && let Ok(reader) = CafReader::open(&master)
+    {
+        // The rate is a whole number of hertz for any recording.
+        let rate = reader.sample_rate() as u32;
+        let expected = length_at_16k(reader.frame_count(), rate);
+        if rate > 0 && samples.len() != expected {
+            tracing::warn!(
+                lane = lane.as_str(),
+                sidecar = samples.len(),
+                master = expected,
+                "the 16 kHz sidecar disagrees with the master's length; decoding the master"
+            );
+            return None;
+        }
+    }
+    Some(samples)
 }
 
 /// The asset's master as a path; the URL must be a file URL.
