@@ -8,7 +8,8 @@ import {
 import { type PlatformOS, platform as platformSchema } from "@/bridge/contract";
 
 /**
- * The OS the page runs on and everything the page words or binds for it:
+ * The OS the page runs on and everything the page words, binds or lays out
+ * for it:
  * the machine ("this Mac", "this computer"), the file manager (Finder,
  * File Explorer), where the privacy switches live, where Steno sits while
  * no window is open, the shortcut keys (⌘F on the Mac, Ctrl+F elsewhere),
@@ -141,9 +142,9 @@ const READS_CALENDAR: Record<PlatformOS, boolean> = {
 
 /**
  * Whether the window's title bar lies over the top of the page, so the
- * page leaves the traffic lights their room: the sidebar's header-high
+ * page leaves the traffic lights their room: the sidebars' header-high
  * spacer and onboarding's 52 px top. On the Mac the Swift windows and the
- * Tauri shell's (`TitleBarStyle::Overlay` in
+ * Tauri shell's windows (`TitleBarStyle::Overlay` in
  * `apps/desktop/src-tauri/src/windows.rs`) paint the page up to the top
  * edge; on Windows and Linux the shell keeps the native title bar above
  * the page, and the inset would be an empty band.
@@ -261,7 +262,7 @@ export interface Platform {
 	words: PlatformWords;
 	/** Whether Steno reads a calendar here (see `READS_CALENDAR`). */
 	readsCalendar: boolean;
-	/** Whether the page leaves room for the traffic lights (`TITLE_BAR_INSET`). */
+	/** Whether the page leaves room for the traffic lights (see `TITLE_BAR_INSET`). */
 	titleBarInset: boolean;
 	/**
 	 * Whether the page answers the Record shortcut itself. The Swift app's

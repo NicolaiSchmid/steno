@@ -60,7 +60,7 @@ describe("the title bar inset", () => {
 
 	describe.each(ONBOARDING_PAGES)(
 		"at the top of onboarding's %s page",
-		(_, query, testId) => {
+		(_page, query, testId) => {
 			it.each(PLATFORMS)("on %s", async (_, platform, inset) => {
 				const harness = await createBridgeHarness(query);
 				renderWithBridge(<OnboardingWindow />, harness, platform);
