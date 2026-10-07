@@ -65,8 +65,9 @@ pub trait RecordingWriting: Send {
     /// thread calls it every
     /// [`SYNC_INTERVAL_FRAMES`](super::writer_thread::SYNC_INTERVAL_FRAMES)
     /// frames. A failure is logged once and handed back at the close, and
-    /// the recording goes on; only a failed write ends it. Rust only: Swift
-    /// synced at the close alone.
+    /// the recording goes on; only a failed write ends it, and a sync
+    /// failure is reported only when nothing else ended the recording. Rust
+    /// only: Swift synced at the close alone.
     fn sync(&mut self) -> std::io::Result<()>;
     /// Patches the headers, syncs and closes the files; once. A sync that
     /// fails here, the Mac's `fsync` fallback too, is a failure: the audio

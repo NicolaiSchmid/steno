@@ -175,10 +175,12 @@ pub enum CaptureState {
     },
     /// `stop` is tearing down.
     Stopping,
-    /// `recording` is `None` when the start produced nothing, and the
+    /// `recording` is `None` when the start produced nothing, the
     /// finalised partial recording when a device stayed lost or the writer
-    /// failed mid-meeting; `stop()` returns the same value or fails when it
-    /// is `None`.
+    /// failed mid-meeting, and the whole recording when a close failed or,
+    /// with nothing else ending the recording, a sync failed while
+    /// recording; `stop()` returns the same value or fails when it is
+    /// `None`.
     Failed {
         /// What ended the recording.
         error: CaptureError,

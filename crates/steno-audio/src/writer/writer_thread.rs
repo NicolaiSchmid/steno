@@ -9,13 +9,14 @@
 //! `F_FULLFSYNC` on the Mac, a plain `fsync` where a filesystem refuses
 //! that), so a power loss or a kernel crash loses about the last 5 s of a
 //! recording, more while the writer is behind, not everything still in the
-//! page cache. A sync that fails even so is logged once, kept for
-//! [`WriterThread::take_error`] (what was written may not be on disk) and
-//! tried again at the next interval; the writes go on. Rust only: Swift
+//! page cache. A sync that fails even so is logged once, kept apart for
+//! [`WriterThread::take_sync_error`] (what was written may not be on disk)
+//! and tried again at the next interval; the writes go on, and the session
+//! reports it only when nothing else ended the recording. Rust only: Swift
 //! synced at the close alone.
 //!
-//! A write error is kept (for [`WriterThread::take_error`], in place of a
-//! failed sync's), reported once and stops further writes; the loop keeps
+//! A write error is kept (for [`WriterThread::take_error`]), reported once
+//! and stops further writes; the loop keeps
 //! draining so the relay never fills. The lane slices handed to the writer
 //! sit in a stack array sized by [`AudioLane::ALL`], so a drained frame
 //! allocates nothing (not a real-time requirement here, the thread does
@@ -60,9 +61,11 @@ struct Worker {
     on_levels: LevelsHandler,
     on_error: ErrorHandler,
     failed: Arc<AtomicBool>,
-    /// The write error, else the first failed sync's, kept for whoever
-    /// closes the files.
+    /// The write error, kept for whoever closes the files.
     error: Option<CaptureError>,
+    /// The first failed sync's error, kept apart from `error` so it never
+    /// stands in for what ended the recording.
+    sync_error: Option<CaptureError>,
     last_generation: usize,
     /// Frames written since the last sync.
     unsynced_frames: usize,
@@ -102,8 +105,7 @@ impl Worker {
     /// Syncs the master after every [`SYNC_INTERVAL_FRAMES`] frames
     /// written. The first failure is kept and logged by its kind and OS
     /// code alone (the log's privacy rule: no path); later ones are not,
-    /// and the next interval tries again. Only a sync after a successful
-    /// write gets here, so `error` holds nothing but a failed sync's.
+    /// and the next interval tries again.
     fn sync_if_due(&mut self) {
         self.unsynced_frames += 1;
         if self.unsynced_frames < SYNC_INTERVAL_FRAMES {
@@ -111,14 +113,14 @@ impl Worker {
         }
         self.unsynced_frames = 0;
         if let Err(error) = self.writer.sync()
-            && self.error.is_none()
+            && self.sync_error.is_none()
         {
             tracing::warn!(
                 kind = ?error.kind(),
                 os_error = ?error.raw_os_error(),
                 "the recording could not be synced to disk; the writes go on"
             );
-            self.error = Some(io_error(&self.writer.files().master, &error));
+            self.sync_error = Some(io_error(&self.writer.files().master, &error));
         }
     }
 
@@ -171,6 +173,7 @@ impl WriterThread {
             on_error,
             failed: Arc::clone(&failed),
             error: None,
+            sync_error: None,
             last_generation: 0,
             unsynced_frames: 0,
         };
@@ -217,11 +220,18 @@ impl WriterThread {
         self.join();
     }
 
-    /// The write error, else the first failed sync's, once the thread is
-    /// stopped; `None` while the loop runs, after the writer was taken, or
-    /// when every write and sync succeeded.
+    /// The write error, once the thread is stopped; `None` while the loop
+    /// runs, after the writer was taken, or when every write succeeded.
     pub fn take_error(&mut self) -> Option<CaptureError> {
         self.worker.as_mut().and_then(|worker| worker.error.take())
+    }
+
+    /// The first failed sync's error, as [`take_error`](Self::take_error)
+    /// hands out the write error; `None` when every sync succeeded.
+    pub fn take_sync_error(&mut self) -> Option<CaptureError> {
+        self.worker
+            .as_mut()
+            .and_then(|worker| worker.sync_error.take())
     }
 
     /// The writer, once the thread is stopped (or was never started), so
@@ -263,8 +273,8 @@ mod tests {
         syncs: Vec<usize>,
     }
 
-    /// Counts the writes and syncs; every sync fails when `fail_syncs` is set, with
-    /// what a WebDAV mount on the Mac answers both syncs (ENOTTY).
+    /// Counts the writes and syncs; every sync fails when `fail_syncs` is
+    /// set, with the ENOTTY a WebDAV mount on the Mac answers `F_FULLFSYNC`.
     struct Recording {
         seen: Arc<Mutex<Seen>>,
         fail_syncs: bool,
@@ -314,12 +324,13 @@ mod tests {
     /// Three sync intervals and part of a fourth.
     const FRAMES: usize = 3 * SYNC_INTERVAL_FRAMES + 10;
 
-    /// What a run did: what the fake saw, the errors reported, the error
-    /// kept for the close, and the `warn` lines.
+    /// What a run did: what the fake saw, the errors reported, the write
+    /// and sync errors kept for the close, and the `warn` lines.
     struct Run {
         seen: Seen,
         reported: Vec<CaptureError>,
         kept: Option<CaptureError>,
+        kept_sync: Option<CaptureError>,
         log: String,
     }
 
@@ -366,6 +377,7 @@ mod tests {
             seen: std::mem::take(&mut *seen.lock().unwrap()),
             reported: reported.lock().unwrap().clone(),
             kept: thread.take_error(),
+            kept_sync: thread.take_sync_error(),
             log: String::from_utf8(log.0.lock().unwrap().clone()).unwrap(),
         }
     }
@@ -376,6 +388,7 @@ mod tests {
         assert!(run.reported.is_empty(), "{:?}", run.reported);
         assert_eq!(run.seen.syncs, [500, 1000, 1500]);
         assert!(run.kept.is_none(), "{:?}", run.kept);
+        assert!(run.kept_sync.is_none(), "{:?}", run.kept_sync);
         assert_eq!(run.log, "");
     }
 
@@ -383,17 +396,19 @@ mod tests {
     /// nor shortens the recording: every frame is written, nothing is
     /// reported while recording, and every interval tries the sync again.
     /// The failure is logged once, by kind and OS code, and kept for the
-    /// close, since what was written may not be on disk.
+    /// close apart from the write error, since what was written may not be
+    /// on disk but nothing ended the recording.
     #[test]
     fn a_failed_sync_keeps_the_writes_going_is_logged_once_and_kept() {
         let run = run(true);
         assert!(run.reported.is_empty(), "{:?}", run.reported);
         assert_eq!(run.seen.writes, FRAMES);
         assert_eq!(run.seen.syncs, [500, 1000, 1500]);
+        assert!(run.kept.is_none(), "{:?}", run.kept);
         assert!(
-            matches!(&run.kept, Some(CaptureError::WriterFailed(message)) if message.starts_with("master.caf: ")),
+            matches!(&run.kept_sync, Some(CaptureError::WriterFailed(message)) if message.starts_with("master.caf: ")),
             "{:?}",
-            run.kept
+            run.kept_sync
         );
         let lines: Vec<&str> = run.log.lines().collect();
         assert_eq!(lines.len(), 1, "{}", run.log);

@@ -334,73 +334,139 @@ fn the_default_relay_holds_twenty_seconds_with_the_writer_stalled() {
     assert_eq!(relay.dropped_frames(), [0, 0, 0]);
 }
 
-/// The real writer on a filesystem where every sync fails, the plain
-/// `fsync` the Mac falls back to as well: the periodic syncs and the
-/// close's, after the real close has written everything.
-struct SyncRefused(RecordingWriter);
+/// The real writer on a filesystem where every periodic sync fails, the
+/// plain `fsync` the Mac falls back to as well; with `close_too` the
+/// close's sync fails too, after the real close has written everything.
+struct SyncRefused {
+    writer: RecordingWriter,
+    close_too: bool,
+}
 
 impl RecordingWriting for SyncRefused {
     fn files(&self) -> RecordingFiles {
-        self.0.files()
+        self.writer.files()
     }
     fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
-        self.0.write(frames)
+        self.writer.write(frames)
     }
     fn sync(&mut self) -> std::io::Result<()> {
         Err(std::io::ErrorKind::Unsupported.into())
     }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
-        self.0.finish()?;
-        Err(CaptureError::WriterFailed("the close's sync failed".into()))
+        let files = self.writer.finish()?;
+        if self.close_too {
+            return Err(CaptureError::WriterFailed("the close's sync failed".into()));
+        }
+        Ok(files)
     }
+}
+
+/// A session over [`SyncRefused`] writers.
+fn sync_refused_session(
+    mode: CaptureMode,
+    directory: &Path,
+    backend: Arc<SyntheticCaptureBackend>,
+    clock: Arc<dyn Clock>,
+    close_too: bool,
+) -> CaptureSession {
+    CaptureSession::with_writer_factory(
+        configuration(mode, directory, false),
+        backend,
+        passthrough(),
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        clock,
+        Arc::new(move |layout, lanes, keep_raw| {
+            Ok(Box::new(SyncRefused {
+                writer: RecordingWriter::new(layout, lanes, keep_raw)?,
+                close_too,
+            }) as Box<dyn RecordingWriting>)
+        }),
+    )
+    .unwrap()
 }
 
 /// A sync that always fails cuts nothing short: 8 s delivered (past the
 /// first sync, at 5 s) are all in the master, and the stop hands the
-/// recording back. It ends `Failed` with that recording, on the first
-/// sync's error, since what was written may not be on disk.
+/// recording back. With nothing else ending the recording it ends `Failed`
+/// with that recording on the first sync's error, since what was written
+/// may not be on disk; a close that fails as well comes first.
 #[test]
 fn a_failing_sync_keeps_the_whole_recording_and_says_so() {
-    let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
-        &[AudioLane::Mixed],
-        8.0,
-    )));
-    let session = CaptureSession::with_writer_factory(
-        configuration(CaptureMode::InPerson, directory.path(), false),
-        backend.clone(),
-        None,
-        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-        Arc::new(SystemClock::new()),
-        Arc::new(|layout, lanes, keep_raw| {
-            Ok(
-                Box::new(SyncRefused(RecordingWriter::new(layout, lanes, keep_raw)?))
-                    as Box<dyn RecordingWriting>,
-            )
-        }),
-    )
-    .unwrap();
-    let states = session.states();
-    session.start(Uuid::new_v4()).unwrap();
-    backend.wait_until_finished();
-    let result = session.stop().unwrap();
-    let seen = collect_states(&states, until_failed);
-    match seen.last() {
-        Some(CaptureState::Failed {
-            error: CaptureError::WriterFailed(detail),
-            recording,
-        }) => {
-            assert!(detail.ends_with("unsupported"), "{detail}");
-            assert_eq!(recording.as_deref(), Some(&result));
+    for (close_too, expected) in [(false, "unsupported"), (true, "the close's sync failed")] {
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+            &[AudioLane::Mixed],
+            8.0,
+        )));
+        let session = sync_refused_session(
+            CaptureMode::InPerson,
+            directory.path(),
+            backend.clone(),
+            Arc::new(SystemClock::new()),
+            close_too,
+        );
+        let states = session.states();
+        session.start(Uuid::new_v4()).unwrap();
+        backend.wait_until_finished();
+        let result = session.stop().unwrap();
+        let seen = collect_states(&states, until_failed);
+        match seen.last() {
+            Some(CaptureState::Failed {
+                error: CaptureError::WriterFailed(detail),
+                recording,
+            }) => {
+                assert!(detail.ends_with(expected), "{detail}");
+                assert_eq!(recording.as_deref(), Some(&result));
+            }
+            _ => panic!("expected Failed(WriterFailed): {:?}", kinds(&seen)),
         }
-        _ => panic!("expected Failed(WriterFailed): {:?}", kinds(&seen)),
+        assert_eq!(master_of(&result).frame_count(), 800 * FRAME_SIZE);
+        assert!(
+            result.statistics.dropped_frames.values().all(|n| *n == 0),
+            "{:?}",
+            result.statistics.dropped_frames
+        );
     }
-    assert_eq!(master_of(&result).frame_count(), 800 * FRAME_SIZE);
-    assert!(
-        result.statistics.dropped_frames.values().all(|n| *n == 0),
-        "{:?}",
-        result.statistics.dropped_frames
+}
+
+/// A failed sync never stands in for what ended the recording: syncs
+/// refused from the first one, at 5 s, then a device lost for good at 6 s
+/// end `DeviceLost`, with all 6 s in the master.
+#[test]
+fn refused_syncs_then_a_device_loss_end_device_lost() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 10.0)
+            .change_device_after(6.0)
+            .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS),
+    ));
+    let session = sync_refused_session(
+        CaptureMode::Call,
+        directory.path(),
+        backend,
+        clock.clone(),
+        false,
     );
+    let states = session.states();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
+    let seen = collect_states(&states, until_failed);
+    let result = session.stop().unwrap();
+    assert_eq!(
+        *seen.last().unwrap(),
+        CaptureState::Failed {
+            error: CaptureError::DeviceLost,
+            recording: Some(Box::new(result.clone()))
+        }
+    );
+    assert!(result.statistics.ended_on_device_loss);
+    assert_eq!(master_of(&result).frame_count(), 600 * FRAME_SIZE);
 }
 
 /// One frame of relay headroom against a backend that delivers two seconds

@@ -401,9 +401,11 @@ impl CaptureSession {
     /// failure or a device loss is finalising, waits for it and answers from
     /// its outcome; `InvalidState` when a `start()` came in first. A write or
     /// close that fails during the teardown leaves the state `Failed` with the
-    /// recording that is returned. Fails with `WriterFailed`, and leaves the
-    /// state `Failed`, when the master is gone from disk or the writer thread
-    /// died.
+    /// recording that is returned, and so does a sync that failed while
+    /// recording: the recording is whole, part of it may not have reached the
+    /// disk, and a sync failure is reported only when nothing else ended the
+    /// recording. Fails with `WriterFailed`, and leaves the state `Failed`,
+    /// when the master is gone from disk or the writer thread died.
     pub fn stop(&self) -> Result<CaptureResult, CaptureError> {
         self.core.stop()
     }
@@ -723,7 +725,10 @@ impl Core {
     /// drained, files closed, asset built. The asset is built even when
     /// closing the files fails (its paths are fixed at start and the
     /// duration is what the master holds); the failure comes back beside
-    /// it. `WriterFailed` with no asset when there is nothing to hand out:
+    /// it: a failed write or close, else the device loss that ended the
+    /// recording, else a sync that failed while recording, so a sync
+    /// failure is reported only when nothing else ended the recording.
+    /// `WriterFailed` with no asset when there is nothing to hand out:
     /// the writer thread died and took the writer with it, or the master is
     /// gone from disk (its folder deleted while recording; an unlinked file
     /// still writes and closes without an error). The caller has set the
@@ -761,9 +766,10 @@ impl Core {
         writer_thread.stop();
         // A write that failed during this drain went to `writer_failed`,
         // which ignores it once the state is `Stopping`; it comes back
-        // beside the asset instead, as a failed close does, and so does a
-        // sync that failed while recording.
+        // beside the asset instead, as a failed close does. A sync that
+        // failed while recording is kept apart, behind both.
         let write_failure = writer_thread.take_error();
+        let sync_failure = writer_thread.take_sync_error();
         let mut writer = writer_thread.take_writer().ok_or_else(writer_lost)?;
         // Read before `clear()`, which zeroes the ring overrun counts. Whole
         // frames still in the rings never reached the relay: a restarted
@@ -773,7 +779,15 @@ impl Core {
         let undrained = active.sink.available_to_read() / FRAME_SIZE;
         active.sink.clear();
         let closing = writer.finish().err();
-        let failure = write_failure.or(closing).map(as_writer_failure);
+        let failure = write_failure
+            .or(closing)
+            .map(as_writer_failure)
+            .or_else(|| {
+                active
+                    .ended_on_device_loss
+                    .then_some(CaptureError::DeviceLost)
+            })
+            .or(sync_failure);
         let files = writer.files();
         if matches!(files.master.try_exists(), Ok(false)) {
             return Err(CaptureError::WriterFailed(format!(
