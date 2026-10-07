@@ -11,12 +11,12 @@
 )]
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use chrono::{TimeZone as _, Utc};
-use steno_core::{BoundaryResult, SecretKey, SecretStore};
-use steno_handover::HandoverIdentity;
+use steno_core::{BoundaryResult, PairedDevice, SecretKey, SecretStore, Store};
 use steno_handover::identity::hex;
+use steno_handover::{FingerprintRecord, HandoverIdentity, IdentityError, Unavailability};
 use x509_parser::prelude::*;
 
 fn repository() -> PathBuf {
@@ -146,40 +146,223 @@ impl SecretStore for MemorySecrets {
     }
 }
 
+/// A fingerprint record in memory.
+#[derive(Default)]
+struct MemoryRecord(Mutex<Option<String>>);
+
+impl MemoryRecord {
+    fn get(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl FingerprintRecord for MemoryRecord {
+    fn recorded(&self) -> BoundaryResult<Option<String>> {
+        Ok(self.get())
+    }
+
+    fn record(&self, fingerprint: &str) -> BoundaryResult<()> {
+        *self.0.lock().unwrap() = Some(fingerprint.to_owned());
+        Ok(())
+    }
+}
+
+/// The three inputs of `load_or_create`, empty.
+#[derive(Default)]
+struct Places {
+    secrets: MemorySecrets,
+    record: MemoryRecord,
+    store: Option<Store>,
+}
+
+impl Places {
+    fn new() -> Self {
+        Places {
+            store: Some(Store::in_memory().unwrap()),
+            ..Places::default()
+        }
+    }
+
+    fn store(&self) -> &Store {
+        self.store.as_ref().unwrap()
+    }
+
+    async fn load(&self, name: &str) -> Result<HandoverIdentity, IdentityError> {
+        HandoverIdentity::load_or_create(
+            &self.secrets,
+            &self.record,
+            self.store(),
+            name,
+            Utc::now(),
+        )
+        .await
+    }
+
+    fn pair_a_phone(&self) {
+        let device = PairedDevice {
+            id: uuid::Uuid::from_u128(1),
+            name: "Phone".to_owned(),
+            paired_at: Utc::now(),
+            last_seen_at: None,
+        };
+        self.store()
+            .save_paired_device(&device, &[1u8; 32])
+            .unwrap();
+    }
+
+    fn stored_pem(&self) -> Option<String> {
+        self.secrets
+            .values
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(key, _)| *key == HandoverIdentity::secret_key())
+            .map(|(_, value)| value.clone())
+    }
+}
+
 #[tokio::test]
 async fn load_or_create_mints_once_and_reloads_the_same_identity() {
-    let secrets = Arc::new(MemorySecrets::default());
-    let now = Utc::now();
-    let first = HandoverIdentity::load_or_create(secrets.as_ref(), "Steno on Test Mac", now)
-        .await
-        .unwrap();
-    let stored = secrets
-        .secret(&HandoverIdentity::secret_key())
-        .await
-        .unwrap()
-        .expect("the identity was stored");
+    let places = Places::new();
+    let first = places.load("Steno on Test Mac").await.unwrap();
+    let stored = places.stored_pem().expect("the identity was stored");
     assert!(stored.starts_with("-----BEGIN CERTIFICATE-----"));
     assert_eq!(HandoverIdentity::secret_key().as_str(), "handover-identity");
+    assert_eq!(
+        places.record.get(),
+        Some(hex(&first.fingerprint())),
+        "the mint records the fingerprint"
+    );
 
-    let second = HandoverIdentity::load_or_create(secrets.as_ref(), "Another name", now)
-        .await
-        .unwrap();
+    let second = places.load("Another name").await.unwrap();
     assert_eq!(
         second.fingerprint(),
         first.fingerprint(),
         "loaded, not minted"
     );
     assert_eq!(second.mac_id(), first.mac_id());
-    assert_eq!(*secrets.reads.lock().unwrap(), 3);
+    assert_eq!(*places.secrets.reads.lock().unwrap(), 2);
 
     // A stored secret that does not parse is an error, never a re-mint
     // (which would re-pair every phone).
-    secrets
+    places
+        .secrets
         .set_secret(&HandoverIdentity::secret_key(), Some("garbage"))
         .await
         .unwrap();
-    let error = HandoverIdentity::load_or_create(secrets.as_ref(), "x", now)
-        .await
-        .unwrap_err();
+    let error = places.load("x").await.unwrap_err();
     assert!(error.to_string().contains("certificate"), "{error}");
+}
+
+#[tokio::test]
+async fn with_a_phone_paired_a_missing_identity_is_unavailable_not_minted() {
+    let places = Places::new();
+    places.pair_a_phone();
+    let error = places.load("x").await.unwrap_err();
+    assert!(
+        matches!(error, IdentityError::Unavailable(Unavailability::Missing)),
+        "{error}"
+    );
+    assert_eq!(places.stored_pem(), None, "nothing minted");
+    assert_eq!(places.record.get(), None);
+}
+
+#[tokio::test]
+async fn with_a_fingerprint_recorded_a_missing_identity_is_unavailable_not_minted() {
+    let places = Places::new();
+    places.record.record("ab12").unwrap();
+    let error = places.load("x").await.unwrap_err();
+    assert!(
+        matches!(error, IdentityError::Unavailable(Unavailability::Missing)),
+        "{error}"
+    );
+    assert_eq!(places.stored_pem(), None, "nothing minted");
+    assert_eq!(places.record.get().as_deref(), Some("ab12"));
+}
+
+#[tokio::test]
+async fn an_identity_with_another_fingerprint_is_unavailable_and_both_stay() {
+    let places = Places::new();
+    let paired = places.load("x").await.unwrap();
+    let other_pem = HandoverIdentity::mint("y", Utc::now())
+        .unwrap()
+        .to_pem()
+        .unwrap();
+    places
+        .secrets
+        .set_secret(&HandoverIdentity::secret_key(), Some(&other_pem))
+        .await
+        .unwrap();
+    let error = places.load("x").await.unwrap_err();
+    assert!(
+        matches!(error, IdentityError::Unavailable(Unavailability::Replaced)),
+        "{error}"
+    );
+    assert_eq!(places.record.get(), Some(hex(&paired.fingerprint())));
+    assert_eq!(places.stored_pem(), Some(other_pem), "neither is replaced");
+}
+
+/// A rollback that lost the record keeps the paired phones and the
+/// identity: the next load keeps the identity and records it again.
+#[tokio::test]
+async fn an_identity_found_without_a_record_is_kept_and_recorded_again() {
+    let places = Places::new();
+    let identity = HandoverIdentity::mint("x", Utc::now()).unwrap();
+    places
+        .secrets
+        .set_secret(
+            &HandoverIdentity::secret_key(),
+            Some(&identity.to_pem().unwrap()),
+        )
+        .await
+        .unwrap();
+    places.pair_a_phone();
+    let loaded = places.load("x").await.unwrap();
+    assert_eq!(loaded.fingerprint(), identity.fingerprint());
+    assert_eq!(places.record.get(), Some(hex(&identity.fingerprint())));
+}
+
+/// A secret store that cannot be read (a locked keyring) is unavailable,
+/// and nothing is minted, whatever else holds.
+#[tokio::test]
+async fn an_unreadable_secret_store_is_unavailable_not_minted() {
+    struct Locked;
+    #[steno_core::async_trait]
+    impl SecretStore for Locked {
+        async fn secret(&self, _key: &SecretKey) -> BoundaryResult<Option<String>> {
+            Err("the keyring is locked".into())
+        }
+        async fn set_secret(&self, _key: &SecretKey, _value: Option<&str>) -> BoundaryResult<()> {
+            panic!("nothing is written");
+        }
+    }
+    let places = Places::new();
+    let error =
+        HandoverIdentity::load_or_create(&Locked, &places.record, places.store(), "x", Utc::now())
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            IdentityError::Unavailable(Unavailability::Unreadable(_))
+        ),
+        "{error}"
+    );
+    assert!(error.to_string().contains("locked"), "{error}");
+    assert_eq!(places.record.get(), None);
+}
+
+#[tokio::test]
+async fn store_writes_the_identity_and_records_its_fingerprint() {
+    let places = Places::new();
+    let identity = HandoverIdentity::mint("x", Utc::now()).unwrap();
+    identity
+        .store(&places.secrets, &places.record)
+        .await
+        .unwrap();
+    assert_eq!(places.record.get(), Some(hex(&identity.fingerprint())));
+    assert_eq!(places.stored_pem(), Some(identity.to_pem().unwrap()));
+    places.pair_a_phone();
+    let loaded = places.load("x").await.unwrap();
+    assert_eq!(loaded.fingerprint(), identity.fingerprint());
 }

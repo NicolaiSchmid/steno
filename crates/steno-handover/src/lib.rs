@@ -52,7 +52,7 @@ pub mod upload;
 pub mod wire;
 
 pub use configuration::{Clock, HandoverConfiguration};
-pub use identity::{HandoverIdentity, IdentityError};
+pub use identity::{FingerprintRecord, HandoverIdentity, IdentityError, Unavailability};
 pub use pairing::{PairingPayload, PairingPayloadError};
 pub use server::ServerMetrics;
 pub use service::{HandoverService, ListenerState, StoreNotSynced};
