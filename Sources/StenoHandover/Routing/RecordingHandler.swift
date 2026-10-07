@@ -12,7 +12,8 @@ extension HandoverEngine {
   /// recording, 200 for a known one, both with `RecordingStatus`; 409 when
   /// another device owns it, its size or SHA-256 changed, or its chunk size
   /// changed before it is `.complete`; a `.complete` one in other chunks of
-  /// the same bytes is 200 with every chunk of the announced split.
+  /// the same bytes is 200 with every chunk of the announced split; 500 with
+  /// nothing opened when the store cannot read the receipt.
   func announce(_ recordingID: UUID, device: PairedDevice, body: Data) async -> HandoverResponse {
     let metadata: RecordingMetadata
     do {
@@ -27,7 +28,13 @@ extension HandoverEngine {
       return .problem(.badRequest, problem)
     }
 
-    if let existing = await receipt(recordingID) {
+    let known: HandoverReceipt?
+    do {
+      known = try await readReceipt(recordingID)
+    } catch {
+      return .internalError("reading the receipt", error)
+    }
+    if let existing = known {
       guard existing.deviceID == device.id else {
         return .problem(.conflict, "another device owns this recording")
       }
@@ -73,6 +80,22 @@ extension HandoverEngine {
       return .json(.ok, Self.status(of: receipt))
     }
 
+    // No receipt in memory or the store: every file of the recording id
+    // goes before `begin`, in the same actor step as the read's last look
+    // at memory and the `remember` in `persist`. Whatever is there belongs
+    // to no receipt (a verified file left by an intake failure whose
+    // receipt a revoke deleted after a restart, the files a revoked phone's
+    // re-announce opened before the revoke's delete committed). Kept,
+    // `begin` would add this upload's chunks to an old partial, and
+    // `complete` would hand an old verified file to the intake unhashed.
+    // No live upload of another device can be in them: a device's
+    // recording routes read its receipt into memory before they touch a
+    // file, and memory drops it only when that device is revoked, so only
+    // a revoked device's request can still be at work on them: its answer
+    // is a refusal or an error, after which the phone keeps its recording,
+    // or the 200 of an admission whose intake copied the verified file
+    // before this.
+    inbox.discard(recordingID)
     do {
       try inbox.begin(metadata)
     } catch {
@@ -376,15 +399,29 @@ extension HandoverEngine {
     return Wire.RecordingStatus(state: receipt.state.kind, receivedChunks: receipt.receivedChunks)
   }
 
+  /// The receipt from memory or the store, kept in memory (`remember`); a
+  /// failed store read counts as none (`readReceipt` throws it).
+  func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
+    try? await readReceipt(recordingID)
+  }
+
   /// The receipt from memory or the store, kept in memory (`remember`).
   /// Another request may have made, loaded or advanced it while the store
   /// read was awaited; memory wins then, also over a read that found none
   /// or failed, so a first announce that raced another answers as a
   /// re-announce and keeps the receipt the other made, chunks and
-  /// `.complete` included.
-  func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
+  /// `.complete` included. A failed read with nothing in memory throws:
+  /// `announce` must not take it for no receipt, or it would discard the
+  /// files of a receipt only in the store and save a new one over it.
+  func readReceipt(_ recordingID: UUID) async throws -> HandoverReceipt? {
     if let active = activeReceipts[recordingID] { return active }
-    let stored = try? await store.handoverReceipt(recordingID: recordingID)
+    let stored: HandoverReceipt?
+    do {
+      stored = try await store.handoverReceipt(recordingID: recordingID)
+    } catch {
+      if let active = activeReceipts[recordingID] { return active }
+      throw error
+    }
     if let active = activeReceipts[recordingID] { return active }
     guard let stored else { return nil }
     remember(stored)

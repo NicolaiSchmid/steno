@@ -422,6 +422,49 @@ import Testing
     #expect(!gate.timedOut, "nothing waited on the held save")
   }
 
+  /// A revoked phone still passes the gate until the revoke's delete
+  /// commits. Its re-announce in that window reads the row and opens files
+  /// that belong to no receipt in memory, and its chunk lands in them before
+  /// its save fails on the deleted device. Another phone's first announce of
+  /// the same recording id discards those files, so its upload starts from
+  /// an empty partial and its `complete` admits its own bytes.
+  @Test(.timeLimit(.minutes(1)))
+  func anotherPhonesFirstAnnounceDiscardsWhatARevokedReannounceOpened() async throws {
+    let gated = try await Gated()
+    defer { gated.remove() }
+    let (gate, engine, phone, id) = (gated.gate, gated.engine, gated.phone, gated.id)
+    let chunks = Phone.chunks(of: gated.bytes, size: Gated.chunkSize)
+    #expect(try await phone.announce(gated.metadata).code == 201)
+
+    gate.deviceDelete.arm()
+    let revoking = Task { try await gated.service.revoke(phone.device.id) }
+    await gate.deviceDelete.held()
+    #expect(!engine.inbox.hasPartial(id), "the revoke discarded the files")
+    // Its save queues behind the held delete.
+    let announcing = Task { try await phone.announce(gated.metadata) }
+    try await until { engine.inbox.hasPartial(id) }
+    #expect(
+      await phone.upload(id, chunk: 1, chunks[1]).code == 404,
+      "memory holds no receipt to fold the chunk into")
+    gate.deviceDelete.release()
+    try await revoking.value
+    #expect(try await announcing.value.code == 500, "its save fails on the deleted device")
+    #expect(try Data(contentsOf: engine.inbox.partial(id)).count == 2 * Gated.chunkSize)
+
+    let other = try await EngineClient.paired(gated.test, deviceName: "Other iPhone")
+    let bytes = Phone.seededBytes(count: Gated.chunkSize, seed: 97)
+    let metadata = Phone.metadata(
+      for: bytes, deviceName: "Other iPhone", recordingID: id, chunkSize: Gated.chunkSize)
+    #expect(try await other.announce(metadata).code == 201)
+    #expect(try Data(contentsOf: engine.inbox.partial(id)).isEmpty, "its partial starts empty")
+    #expect(engine.inbox.loadMetadata(id) == metadata)
+    try await other.uploadAll(metadata, bytes)
+    #expect(await other.complete(id).code == 200)
+    let admissions = await gated.intake.admissions.entries
+    #expect(try Data(contentsOf: try #require(admissions.first?.file)) == bytes)
+    #expect(!gate.timedOut, "nothing waited on the held delete")
+  }
+
   /// A revoke whose delete fails after it discarded the files of a
   /// `complete` in its verify leaves that `complete` refused, even after the
   /// phone announced again: the files it was verifying are gone.
