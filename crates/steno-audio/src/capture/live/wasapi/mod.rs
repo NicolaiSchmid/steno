@@ -88,7 +88,7 @@ use std::time::{Duration, Instant};
 use steno_core::AudioLane;
 
 use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThread};
-use super::AudioDeviceInfo;
+use super::{AudioDeviceInfo, chosen_or_default};
 use crate::SAMPLE_RATE;
 use crate::capture::split_streams::{StreamSizes, far_end_latencies};
 use crate::capture::{
@@ -268,7 +268,7 @@ impl DeviceProbe {
 
     /// The devices as they are now, in [`DeviceSnapshot`]'s terms: the
     /// default render endpoint (`eConsole`, the one both loopbacks follow),
-    /// the microphone as [`chosen_or_default`] picks it (so the explicit
+    /// the microphone as [`chosen_or_default_input`] picks it (so the explicit
     /// one coming back reads as a change, as on the Mac), whether the
     /// endpoints the capture started on are still active.
     /// `default_output_uid` stays empty: no stream opens the
@@ -279,7 +279,7 @@ impl DeviceProbe {
     /// instead, which the capture thread reports as the device gone.
     fn resolve(&self, enumerator: &Enumerator) -> DeviceSnapshot {
         let input_uid = if self.needs_mic {
-            chosen_or_default(enumerator, self.input_device_uid.as_deref())
+            chosen_or_default_input(enumerator, self.input_device_uid.as_deref())
                 .0
                 .and_then(|endpoint| endpoint.id().ok())
         } else {
@@ -363,26 +363,19 @@ impl LiveCaptureBackend {
     }
 }
 
-/// The capture endpoint a capture asked for `uid` records now: the chosen
-/// one while it is active, else the active default; `true` beside it when
-/// that default stands in for a chosen one.
-fn chosen_or_default(enumerator: &Enumerator, uid: Option<&str>) -> (Option<com::Endpoint>, bool) {
-    let chosen = uid.map(|uid| {
-        enumerator
-            .endpoint(uid)
-            .ok()
-            .filter(com::Endpoint::is_active)
-    });
-    match chosen {
-        Some(Some(endpoint)) => (Some(endpoint), false),
-        chosen => (
-            enumerator
-                .default_endpoint(EndpointFlow::Capture)
-                .ok()
-                .filter(com::Endpoint::is_active),
-            chosen.is_some(),
-        ),
-    }
+/// The capture endpoint a capture asked for `uid` records now
+/// ([`chosen_or_default`]): the chosen one while it is active, else the
+/// active default.
+fn chosen_or_default_input(
+    enumerator: &Enumerator,
+    uid: Option<&str>,
+) -> (Option<com::Endpoint>, bool) {
+    chosen_or_default(
+        uid,
+        |uid| enumerator.endpoint(uid).ok(),
+        || enumerator.default_endpoint(EndpointFlow::Capture).ok(),
+        com::Endpoint::is_active,
+    )
 }
 
 /// Joins COM and opens the stream `source` needs on this thread. The
@@ -397,7 +390,7 @@ fn open(
     let mut input = None;
     let (client, endpoint_id, loopback) = match source {
         StreamSource::Microphone => {
-            let (endpoint, is_fallback) = chosen_or_default(&enumerator, input_device_uid);
+            let (endpoint, is_fallback) = chosen_or_default_input(&enumerator, input_device_uid);
             let endpoint = endpoint.ok_or(CaptureError::InputDeviceUnavailable)?;
             let id = endpoint.id().ok();
             if is_fallback {

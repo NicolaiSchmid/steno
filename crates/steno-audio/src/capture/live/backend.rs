@@ -54,7 +54,7 @@ use steno_core::AudioLane;
 use super::hal::{
     self, AggregateDevice, Id, IoProc, OSStatus, ProcessTap, PropertyListener, SYSTEM,
 };
-use super::{AudioDeviceInfo, AudioDevices};
+use super::{AudioDeviceInfo, AudioDevices, chosen_or_default};
 use crate::SAMPLE_RATE;
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceSnapshot, LaneSource,
@@ -115,26 +115,16 @@ unsafe extern "C-unwind" fn io_proc(
     0
 }
 
-/// The input a capture asked for `uid` records now: the chosen device while
-/// it is connected and has input channels, else the default input; `true`
-/// beside it when that default stands in for a chosen device. `None` when
-/// no input resolves at all.
+/// The input a capture asked for `uid` records now ([`chosen_or_default`]):
+/// the chosen device while it is connected and has input channels, else
+/// the default input. `None` when no input resolves at all.
 fn chosen_or_default_input(uid: Option<&str>) -> (Option<AudioDeviceInfo>, bool) {
-    let chosen = uid.map(|uid| {
-        AudioDevices::device(uid)
-            .ok()
-            .flatten()
-            .filter(AudioDeviceInfo::is_input)
-    });
-    match chosen {
-        Some(Some(device)) => (Some(device), false),
-        chosen => (
-            AudioDevices::default_input()
-                .ok()
-                .filter(AudioDeviceInfo::is_input),
-            chosen.is_some(),
-        ),
-    }
+    chosen_or_default(
+        uid,
+        |uid| AudioDevices::device(uid).ok().flatten(),
+        || AudioDevices::default_input().ok(),
+        AudioDeviceInfo::is_input,
+    )
 }
 
 /// The HAL reads behind one [`DeviceSnapshot`], fixed at `start` so every
@@ -311,21 +301,20 @@ impl CaptureBackend for LiveCaptureBackend {
 
         let output = AudioDevices::default_system_output()
             .map_err(|_| CaptureError::OutputDeviceUnavailable)?;
-        let mut mic: Option<AudioDeviceInfo> = None;
-        let mut is_fallback = false;
-        if needs_mic {
-            let (resolved, fallback) = chosen_or_default_input(input_device_uid);
+        let (mic, is_fallback) = if needs_mic {
+            let (resolved, is_fallback) = chosen_or_default_input(input_device_uid);
             let device = resolved.ok_or(CaptureError::InputDeviceUnavailable)?;
-            if fallback {
+            if is_fallback {
                 tracing::warn!(
                     "the input device {} is not connected; recording from the default input {}",
                     input_device_uid.unwrap_or_default(),
                     device.uid
                 );
             }
-            is_fallback = fallback;
-            mic = Some(device);
-        }
+            (Some(device), is_fallback)
+        } else {
+            (None, false)
+        };
 
         let tap = if needs_tap {
             let own = hal::own_process_object()?;
