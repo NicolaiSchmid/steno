@@ -772,9 +772,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   failure to Stop too); and the free space under the recordings folder is read every
   5 s (`DiskWatch`, `fs4`): no start below 512 MiB free, a warning under 30 minutes
   of recording left, and a stop that saves before the disk fills (Rust only). A panic
-  in the shell leaves `crash-<UTC time>.log` in the support directory, the newest 20
-  kept (`steno_services::crash_log`), since an app opened from the Finder or at login
-  has no stderr anyone reads.
+  in the shell leaves `crash-<UTC time>.log` in the support directory, and one in the
+  speech sidecar `crash-<UTC time>-sidecar.log`, the newest 20 kept
+  (`steno_core::crash_log`), since an app opened from the Finder or at login has no
+  stderr anyone reads.
 - `STENO_MODELS_DIR` names the models directory for the app (without one in its
   settings), the CLI, the `transcribe` example and the FLEURS test alike; the ONNX
   models sit in its `onnx/` (`steno_speech::ModelStore::in_models_directory`).
