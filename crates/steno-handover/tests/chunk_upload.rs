@@ -21,7 +21,7 @@ use base64::engine::general_purpose::STANDARD;
 use common::{
     EngineDevice, Phone, TestService, chunks, fake_intake, metadata_for, seeded_bytes, sha256,
 };
-use steno_core::{AudioFormat, HandoverState, HandoverStateKind, RecordingMetadata};
+use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
 use steno_handover::upload::MetadataValidation;
 use steno_handover::wire;
 use uuid::Uuid;
@@ -584,31 +584,18 @@ async fn a_re_announce_of_a_complete_recording_with_other_metadata_is_409() {
 
     let mut flipped = bytes.clone();
     flipped[0] ^= 1;
-    let changes = [
-        (
-            "sha256",
-            RecordingMetadata {
-                sha256: sha256(&flipped),
-                ..metadata.clone()
-            },
-        ),
-        (
-            "byteCount",
-            RecordingMetadata {
-                byte_count: metadata.byte_count + 1,
-                ..metadata.clone()
-            },
-        ),
-        (
-            "chunkSize",
-            RecordingMetadata {
-                chunk_size: CHUNK_SIZE / 2,
-                ..metadata.clone()
-            },
-        ),
-    ];
-    for (what, changed) in &changes {
-        let refused = phone.announce(changed).await;
+    let mut other_hash = metadata.clone();
+    other_hash.sha256 = sha256(&flipped);
+    let mut longer = metadata.clone();
+    longer.byte_count += 1;
+    let mut smaller_chunks = metadata.clone();
+    smaller_chunks.chunk_size = CHUNK_SIZE / 2;
+    for (what, changed) in [
+        ("sha256", other_hash),
+        ("byteCount", longer),
+        ("chunkSize", smaller_chunks),
+    ] {
+        let refused = phone.announce(&changed).await;
         assert_eq!(refused.status, 409, "{what}");
         assert_eq!(
             refused.json::<wire::Problem>().error,
