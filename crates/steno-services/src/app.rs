@@ -1059,18 +1059,7 @@ mod tests {
         let layout = steno_core::RecordingLayout::new(&dir.path().join("audio"), meeting.id);
         let lanes = [steno_core::AudioLane::Mic, steno_core::AudioLane::System];
         let mut writer = steno_audio::RecordingWriter::new(&layout, &lanes, false).unwrap();
-        let silence = [0.0f32; steno_audio::FRAME_SIZE];
-        for _ in 0..100 {
-            steno_audio::writer::RecordingWriting::write(
-                &mut writer,
-                &steno_audio::writer::LaneFrames {
-                    frame_count: steno_audio::FRAME_SIZE,
-                    lanes: &[&silence, &silence],
-                    raw_mic: None,
-                },
-            )
-            .unwrap();
-        }
+        crate::testing::write_frames(&mut writer, 100);
         drop(writer);
 
         let host = Arc::new(app.host().unwrap());

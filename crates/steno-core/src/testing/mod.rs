@@ -29,6 +29,7 @@
 //! - [`sample_data`]: the meeting, person and export the fakes share.
 //! - [`database_one_version_behind`] and [`recorded_migrations`]: a
 //!   database an older build left, and its migrations, without the store.
+//! - [`WriteLockHold`]: another connection's write transaction, held.
 //!
 //! # Example
 //!
@@ -81,7 +82,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use thiserror::Error;
 
 pub use call_log::CallLog;
-pub use databases::{database_one_version_behind, recorded_migrations};
+pub use databases::{WriteLockHold, database_one_version_behind, recorded_migrations};
 pub use fake_delivery::{Admission, FakeDestination, FakeHandoverIntake, Transient};
 pub use fake_llm::{Exhausted, FakeLanguageModel, FakeSummarizer, PassthroughCleaner};
 pub use fake_speech::{DiarizationFn, FakeDiarizer, FakeSpeechEngine, TranscribeCall};

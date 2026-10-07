@@ -533,6 +533,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use steno_core::PipelineStage;
+    use steno_core::testing::WriteLockHold;
 
     use super::*;
 
@@ -684,25 +685,6 @@ mod tests {
         assert!(!enqueued.load(Ordering::SeqCst));
     }
 
-    /// Another connection's write transaction on the same database, held
-    /// until the returned sender is dropped or sent to.
-    fn hold_the_write_lock(path: &Path) -> std::sync::mpsc::Sender<()> {
-        let other = Store::open(path).unwrap();
-        let (release, released) = std::sync::mpsc::channel::<()>();
-        let (held, holding) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            other
-                .write(|_| {
-                    held.send(()).unwrap();
-                    let _ = released.recv();
-                    Ok(())
-                })
-                .unwrap();
-        });
-        holding.recv().unwrap();
-        release
-    }
-
     /// A Mac recording `begin` wrote, and what its capture handed back.
     fn a_recording(store: &Arc<Store>, dir: &Path) -> (Meeting, RecordingResult) {
         let at = DateTime::parse_from_rfc3339("2026-09-24T09:00:00Z")
@@ -774,11 +756,11 @@ mod tests {
             .unwrap();
 
         let (meeting, result) = a_recording(&store, dir.path());
-        let release = Mutex::new(Some(hold_the_write_lock(&path)));
+        let hold = Mutex::new(Some(WriteLockHold::new(&path)));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let enqueue = committing_enqueue(store.clone(), calls.clone(), move |_| {
             // The first commit found the lock; the next one will not.
-            release.lock().unwrap().take();
+            hold.lock().unwrap().take();
         });
         let intake = LocalRecordingIntake::new(
             store.clone(),
@@ -799,7 +781,7 @@ mod tests {
         assert!(store.asset(meeting.id).unwrap().is_some());
 
         let (meeting, result) = a_recording(&store, dir.path());
-        let release = hold_the_write_lock(&path);
+        let hold = WriteLockHold::new(&path);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let intake = LocalRecordingIntake::new(
             store.clone(),
@@ -808,7 +790,7 @@ mod tests {
             FixedOffset::east_opt(0).unwrap(),
         );
         let error = intake.complete(meeting.id, result, None).await.unwrap_err();
-        drop(release);
+        drop(hold);
         assert!(error.is_busy(), "{error}");
         assert_eq!(
             calls.load(Ordering::SeqCst),

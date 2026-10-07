@@ -316,17 +316,15 @@ pub fn reconcile_interrupted(
 mod tests {
     use std::sync::Mutex;
 
-    use steno_audio::testing::AudioFixtures;
-    use steno_audio::writer::{
-        CafStreamWriter, LaneFrames, RecordingWriter, RecordingWriting, WavFile,
-    };
+    use steno_audio::writer::{CafStreamWriter, RecordingWriter, RecordingWriting as _, WavFile};
     use steno_audio::{FRAME_SIZE, SAMPLE_RATE};
+    use steno_core::testing::WriteLockHold;
     use steno_core::{MeetingState, MeetingStateKind};
     use steno_pipeline::RetentionSweep;
 
     use super::*;
     use crate::pipeline::CurrentPipeline;
-    use crate::testing::{current_pipeline, fake_dependencies, temp_store};
+    use crate::testing::{current_pipeline, fake_dependencies, temp_store, write_frames};
 
     struct Harness {
         dir: tempfile::TempDir,
@@ -385,22 +383,6 @@ mod tests {
 
         fn state(&self, meeting: &Meeting) -> MeetingState {
             self.store.meeting(meeting.id).unwrap().unwrap().state
-        }
-    }
-
-    /// `frames` frames of a tone on every lane of `writer`.
-    fn write_frames(writer: &mut RecordingWriter, frames: usize) {
-        let lanes = writer.lanes().len();
-        let tone = AudioFixtures::tone(440.0, 0.01, 0.5);
-        let slices: Vec<&[f32]> = (0..lanes).map(|_| &tone[..FRAME_SIZE]).collect();
-        for _ in 0..frames {
-            writer
-                .write(&LaneFrames {
-                    frame_count: FRAME_SIZE,
-                    lanes: &slices,
-                    raw_mic: None,
-                })
-                .unwrap();
         }
     }
 
@@ -603,27 +585,14 @@ mod tests {
             end_reason: RecordingEndReason::Manual,
         };
 
-        let other = Store::open(harness.dir.path().join("steno.sqlite")).unwrap();
-        let (release, released) = std::sync::mpsc::channel::<()>();
-        let (held, holding) = std::sync::mpsc::channel();
-        let holder = std::thread::spawn(move || {
-            other
-                .write(|_| {
-                    held.send(()).unwrap();
-                    let _ = released.recv();
-                    Ok(())
-                })
-                .unwrap();
-        });
-        holding.recv().unwrap();
+        let hold = WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
         let error = harness
             .intake()
             .complete(meeting.id, result, None)
             .await
             .unwrap_err();
         assert!(error.is_busy(), "{error}");
-        drop(release);
-        holder.join().unwrap();
+        drop(hold);
         assert_eq!(harness.state(&meeting), MeetingState::Recording);
 
         let reconciled = harness.reconcile(std::slice::from_ref(&meeting), &an_hour_later());

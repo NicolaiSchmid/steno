@@ -1,6 +1,6 @@
 //! What the unit tests share: a store in a temp directory, the
-//! pipeline's dependencies over core's fakes, and the waits that fail a
-//! test instead of hanging it.
+//! pipeline's dependencies over core's fakes, frames for a recording
+//! writer, and the waits that fail a test instead of hanging it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -129,5 +129,25 @@ pub fn on_own_thread<T: Send + 'static>(
         Ok(value) => value,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("{what}"),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the call panicked"),
+    }
+}
+
+/// `frames` frames of a tone on every lane of `writer`, as a capture
+/// hands them over.
+pub fn write_frames(writer: &mut steno_audio::RecordingWriter, frames: usize) {
+    use steno_audio::FRAME_SIZE;
+    use steno_audio::writer::{LaneFrames, RecordingWriting as _};
+
+    let lanes = writer.lanes().len();
+    let tone = steno_audio::testing::AudioFixtures::tone(440.0, 0.01, 0.5);
+    let slices: Vec<&[f32]> = (0..lanes).map(|_| &tone[..FRAME_SIZE]).collect();
+    for _ in 0..frames {
+        writer
+            .write(&LaneFrames {
+                frame_count: FRAME_SIZE,
+                lanes: &slices,
+                raw_mic: None,
+            })
+            .unwrap();
     }
 }
