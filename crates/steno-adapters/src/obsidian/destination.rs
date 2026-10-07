@@ -241,14 +241,19 @@ impl ObsidianFolderDestination {
         };
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
-        // A pinned folder that is there but no longer holds this meeting's
-        // `meeting.json` (this one's was moved or deleted, and a meeting
-        // with the same date and title may have claimed the name since) is
-        // lost to it: this delivery claims a folder as a first one does and
-        // moves its receipt there, so it never writes over the other
-        // meeting's notes.
+        // A pinned folder that is there but holds no `meeting.json` of this
+        // meeting (another meeting's, missing or not a meeting's: this one's
+        // was moved or deleted, and a meeting with the same date and title
+        // may have claimed the name since) is lost to it: this delivery
+        // claims a folder as a first one does and moves its receipt there,
+        // so the cost is a duplicate folder, never an overwrite of another
+        // meeting's notes. A folder that is gone is not lost: the delivery
+        // recreates it, as Swift's does.
         let folder = match ledger.pinned_folder().map(str::to_owned) {
-            Some(lost) if self.is_lost(&lost, meeting.meeting.id)? => {
+            Some(lost)
+                if self.sink.exists(&lost)
+                    && self.meeting_of(&lost)? != Some(meeting.meeting.id) =>
+            {
                 let claimed = self.claim_folder(meeting)?;
                 ledger.move_folder(&lost, &claimed);
                 claimed
@@ -452,16 +457,6 @@ impl ObsidianFolderDestination {
         )
     }
 
-    /// Whether the pinned `folder` is there but holds no `meeting.json` of
-    /// `meeting_id`: the file is another meeting's, missing or not a
-    /// meeting's. Writing there could overwrite another meeting's notes,
-    /// so the delivery claims a folder of its own instead; the cost is a
-    /// duplicate folder, never an overwrite. A folder that is gone is not
-    /// lost: the delivery recreates it, as Swift's does.
-    fn is_lost(&self, folder: &str, meeting_id: Uuid) -> Result<bool, ObsidianError> {
-        Ok(self.sink.exists(folder) && self.meeting_of(folder)? != Some(meeting_id))
-    }
-
     /// The meeting whose `meeting.json` is in `folder`: `None` when the
     /// file is missing or names no meeting. Any other read error is
     /// [`ObsidianError::ReadFailed`], so a file another program holds open
@@ -471,14 +466,8 @@ impl ObsidianFolderDestination {
         let Some(data) = self.reading(&path, || self.sink.read(&path))? else {
             return Ok(None);
         };
-        Ok(serde_json::from_slice::<serde_json::Value>(&data)
-            .ok()
-            .and_then(|probe| {
-                probe
-                    .pointer("/meeting/id")?
-                    .as_str()
-                    .and_then(|id| Uuid::parse_str(id).ok())
-            }))
+        let probe: Option<serde_json::Value> = serde_json::from_slice(&data).ok();
+        Ok(probe.and_then(|probe| probe.pointer("/meeting/id")?.as_str()?.parse().ok()))
     }
 
     /// An `audio` or `audio.<ext>` file in the meeting folder, listed in the
