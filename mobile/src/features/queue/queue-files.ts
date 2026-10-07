@@ -48,16 +48,13 @@ export const expoQueueFiles: QueueFileAPI = {
 		if (!directory.exists) return [];
 		// The load time stands in for a creation time the file system does
 		// not report, so the row still gets a valid `startedAt`.
-		return directory.list().flatMap((entry) =>
-			entry instanceof File
-				? [
-						{
-							name: entry.name,
-							createdAt: entry.creationTime ?? entry.lastModified ?? Date.now(),
-							size: entry.size ?? 0,
-						},
-					]
-				: [],
-		);
+		return directory
+			.list()
+			.filter((entry) => entry instanceof File)
+			.map((file) => ({
+				name: file.name,
+				createdAt: file.creationTime ?? file.lastModified ?? Date.now(),
+				size: file.size ?? 0,
+			}));
 	},
 };
