@@ -2,7 +2,7 @@
 //! what hangs off it.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore.swift`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -13,8 +13,8 @@ use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
 use super::{Result, Store, StoreError, assets, people, query_all, tasks, transcript, upsert_sql};
 use crate::model::{
     AudioAsset, Decision, LanguageTag, Meeting, MeetingState, MeetingStateKind, MeetingTask,
-    Participant, Speaker, SpeakerNameSuggestion, SummaryDocument, TitleOrigin, TranscriptSegment,
-    derived_uuid,
+    Participant, Speaker, SpeakerAssignment, SpeakerNameSuggestion, SummaryDocument, TitleOrigin,
+    TranscriptSegment, derived_uuid,
 };
 use crate::paths::file_url_path;
 
@@ -307,8 +307,16 @@ impl Store {
     }
 
     /// One transaction: the meeting's processing columns plus every speaker
-    /// and segment of the meeting, replaced. The merge and cleanup stages
-    /// call this.
+    /// and segment of the meeting, replaced. The merge stage calls this.
+    ///
+    /// A speaker the user confirmed keeps its confirmation when its id
+    /// comes back (speaker ids derive from the meeting id and the cluster
+    /// label, so a re-run produces the same ids), and so does the model's
+    /// name suggestion for it; every person who had a confirmed speaker
+    /// here has their voice recomputed from the speakers now stored. A
+    /// first write recomputes nothing, as in Swift. Rust only: Swift's
+    /// `replaceTranscript` replaces the assignments and drops the suggestions
+    /// (`.plans/2026-09-29-speaker-calibration.md`, decision 5).
     pub fn replace_transcript(
         &self,
         meeting: &Meeting,
@@ -317,6 +325,18 @@ impl Store {
     ) -> Result<()> {
         self.write(|transaction| {
             write_processing_results(transaction, meeting)?;
+            let confirmed: BTreeMap<Uuid, SpeakerAssignment> =
+                people::speakers_of_meeting(transaction, meeting.id)?
+                    .into_iter()
+                    .filter(|speaker| speaker.assignment.is_confirmed())
+                    .map(|speaker| (speaker.id, speaker.assignment))
+                    .collect();
+            let voices: BTreeSet<Uuid> = confirmed
+                .values()
+                .filter_map(SpeakerAssignment::person_id)
+                .collect();
+            // Deleting the speakers cascades to their suggestions.
+            let suggestions = people::name_suggestions_of_meeting(transaction, meeting.id)?;
             transaction.execute(
                 "DELETE FROM transcriptSegment WHERE meetingID = ?1",
                 [DbUuid(meeting.id)],
@@ -328,22 +348,59 @@ impl Store {
             for speaker in speakers {
                 let mut speaker = speaker.clone();
                 speaker.meeting_id = meeting.id;
+                if let Some(assignment) = confirmed.get(&speaker.id) {
+                    speaker.assignment = assignment.clone();
+                }
                 people::insert_speaker(transaction, &speaker)?;
             }
+            people::replace_name_suggestions(transaction, meeting.id, &suggestions)?;
             for segment in segments {
                 let mut segment = segment.clone();
                 segment.meeting_id = meeting.id;
                 transcript::insert_segment(transaction, &segment)?;
             }
+            for person_id in voices {
+                people::refresh_voice(transaction, person_id)?;
+            }
             Ok(())
         })
+    }
+
+    /// One transaction: the meeting's processing columns plus the `text` of
+    /// each of `segments` that is still stored, by id. Speakers and the
+    /// segments' other columns stay as they are, so a speaker the user
+    /// named while the cleanup pass ran keeps its name. The cleanup stage
+    /// calls this. Rust only: Swift's cleanup replaces the whole transcript.
+    pub fn update_segment_texts(
+        &self,
+        meeting: &Meeting,
+        segments: &[TranscriptSegment],
+    ) -> Result<()> {
+        self.write(|transaction| {
+            write_processing_results(transaction, meeting)?;
+            for segment in segments {
+                transcript::update_text(transaction, meeting.id, segment)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// One transaction: the columns [`Meeting::apply_processing_results`]
+    /// copies, over the row as it is now, and nothing else. The summarize
+    /// stage calls this when no summarizer is set up, so the summary, tasks,
+    /// decisions and name suggestions an earlier run wrote stay. Rust only:
+    /// Swift's summarize stage without an LLM clears the summary.
+    pub fn save_processing_results(&self, meeting: &Meeting) -> Result<()> {
+        self.write(|transaction| write_processing_results(transaction, meeting))
     }
 
     /// One transaction: the meeting's processing columns plus its tasks,
     /// decisions and speaker name suggestions, replaced. Decision ids derive
     /// from the meeting id so re-runs are stable. Of `speaker_names`, only
     /// suggestions that carry a name and point at one of the meeting's
-    /// speakers are kept, the strongest per speaker.
+    /// speakers are kept, the strongest per speaker. The stored template
+    /// stays: the user picks it, and the summary's `template_id` records
+    /// which template made it (see [`Meeting::apply_processing_results`]).
     pub fn replace_summary(
         &self,
         meeting: &Meeting,

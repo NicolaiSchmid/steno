@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -456,16 +456,58 @@ impl Diarization {
         cluster_speakers: Vec::new(),
         lane: None,
     };
+
+    /// What `diarize` falls back to for a meeting with no stored speakers:
+    /// the transcript is kept, and `lane`, the lane that was to be diarized,
+    /// becomes one unknown speaker the user can still name. A mic lane is
+    /// diarized only when it is the room (a call whose tap carried no
+    /// conversation), so it becomes the room speaker too and the other
+    /// party's words never go to "me". The speaker has no embedding, so
+    /// confirming it teaches no voice, and an id of its own, so a later run
+    /// that diarizes never inherits its confirmation. Rust only: Swift
+    /// fails the meeting.
+    fn one_room_speaker(meeting_id: Uuid, lane: AudioLane) -> Diarization {
+        Diarization {
+            speakers: vec![Self::room_speaker(meeting_id)],
+            cluster_speakers: vec![Self::whole_recording(Self::room_speaker_id(meeting_id))],
+            lane: Some(lane),
+        }
+    }
+
+    /// The id of [`one_room_speaker`](Self::one_room_speaker)'s speaker.
+    fn room_speaker_id(meeting_id: Uuid) -> Uuid {
+        derived_uuid(meeting_id, "speaker-room")
+    }
+
+    fn room_speaker(meeting_id: Uuid) -> Speaker {
+        Speaker {
+            id: Self::room_speaker_id(meeting_id),
+            meeting_id,
+            // The first label a diarizer hands out.
+            cluster_label: "Speaker 1".to_owned(),
+            assignment: SpeakerAssignment::Unknown,
+            embedding: None,
+            sample_clip_range: None,
+            sample_clip_url: None,
+            cluster_confidence: 0.0,
+        }
+    }
+
+    /// `speaker_id` over the whole recording.
+    fn whole_recording(speaker_id: Uuid) -> ClusterSpeaker {
+        ClusterSpeaker {
+            speaker_id,
+            ranges: vec![TimeRange {
+                lower: 0.0,
+                upper: f64::INFINITY,
+            }],
+        }
+    }
 }
 
 struct Merged {
     segments: Vec<TranscriptSegment>,
     speakers: Vec<Speaker>,
-}
-
-struct Cleaned {
-    segments: Vec<TranscriptSegment>,
-    usage: Option<LlmUsage>,
 }
 
 /// The sample clip is at most ten seconds.
@@ -580,19 +622,20 @@ fn attributing<T, E: fmt::Display + 'static>(
 /// The reason a claimed operation that panicked fails with.
 pub const OPERATION_PANICKED: &str = "the operation stopped unexpectedly";
 
-/// `work`, with a panic inside it turned into a failure for `stage`, so a
-/// claimed operation always ends in a result and a failure is posted. The
-/// panic message itself goes to stderr through the panic hook, as any
-/// panic's does.
-async fn unless_it_panics(
-    stage: PipelineStage,
-    work: impl Future<Output = Result<()>>,
-) -> Result<()> {
+/// `work`, with a panic inside it turned into a failure for the stage
+/// `stage()` returns. `stage` runs only after the panic, so it can name the
+/// stage the work had reached. An operation therefore always ends in a
+/// result, and a failure is posted or persisted. The panic message itself
+/// goes to stderr through the panic hook, as any panic's does.
+async fn unless_it_panics<T>(
+    stage: impl FnOnce() -> PipelineStage,
+    work: impl Future<Output = Result<T>>,
+) -> Result<T> {
     use futures_util::FutureExt as _;
     std::panic::AssertUnwindSafe(work)
         .catch_unwind()
         .await
-        .unwrap_or_else(|_| Err(PipelineFailure::new(stage, OPERATION_PANICKED)))
+        .unwrap_or_else(|_| Err(PipelineFailure::new(stage(), OPERATION_PANICKED)))
 }
 
 /// The row an operation needs, or a failure for `stage` that says what
@@ -816,6 +859,20 @@ impl ProcessingPipeline {
         Ok(())
     }
 
+    /// [`warm_up`](Self::warm_up) for `meeting_id`'s job: a diarizer that
+    /// does not load goes through [`carry_on_after`](Self::carry_on_after)
+    /// and does not fail the job: `diarize` then falls back to
+    /// [`diarization_without_diarizer`](Self::diarization_without_diarizer).
+    /// Rust only: Swift fails the meeting.
+    async fn warm_up_for_job(&self, meeting_id: Uuid) -> Result<()> {
+        match self.warm_up().await {
+            Err(failure) if failure.stage == PipelineStage::Diarize => {
+                self.carry_on_after(&failure, meeting_id)
+            }
+            result => result,
+        }
+    }
+
     /// [`warm_up`](Self::warm_up) for the diarizer alone, for a speech
     /// engine that frees its models after each job (the speech sidecar):
     /// loading that engine ahead of a job would keep the child's working
@@ -830,9 +887,14 @@ impl ProcessingPipeline {
     }
 
     /// Runs every stage: `queued → processing → ready`, or `failed(reason)`
-    /// with whatever was persisted so far. Once `persist` has marked the
-    /// meeting `ready` nothing downgrades it: a `retention` error is
-    /// returned to the caller and the meeting stays ready and delivered.
+    /// with whatever was persisted so far; a panic fails the meeting too. A
+    /// failing `diarize` or `match_speakers` does not fail it: the
+    /// transcript is kept with the speakers stored for the meeting, or,
+    /// when none are stored, one unknown speaker for the diarized lane.
+    /// Once `persist` has marked the meeting `ready` nothing downgrades it,
+    /// not an error or a panic later in the run: the meeting is delivered
+    /// and its retention applied, and the panic's or the `retention`
+    /// error's failure is returned to the caller.
     /// Once the pipeline [quits](Self::quit), a failure is returned and
     /// not persisted, and a call made after it fails at once: the meeting
     /// stays `queued` or `processing`, which the next launch's
@@ -856,10 +918,33 @@ impl ProcessingPipeline {
         )?;
         let meeting_id = meeting.id;
         self.exclusively(meeting_id, PipelineStage::Decode, async {
-            let persisted = match self.process_until_persist(&asset, meeting).await {
+            // A panic fails the meeting like any stage failure, so it
+            // never stays `processing` (undeletable, and run again at every
+            // launch). Boxed: the stages' future is too large to move
+            // into the helper by value.
+            let until_persist = unless_it_panics(
+                || self.stage_in_progress(meeting_id),
+                Box::pin(self.process_until_persist(&asset, meeting)),
+            )
+            .await;
+            let persisted = match until_persist {
                 Ok(asset) => asset,
                 Err(failure) if self.quitting() => return Err(failure),
                 Err(failure) => {
+                    // A failure after `persist` marked the meeting ready
+                    // leaves it ready, and a ready meeting is delivered:
+                    // nothing resumes it to deliver it later.
+                    let ready = self
+                        .store()
+                        .meeting(meeting_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|stored| stored.state == MeetingState::Ready);
+                    if ready {
+                        self.deliver(meeting_id).await;
+                        let _ = self.stamp_deferred_retention(meeting_id).await;
+                        return Err(failure);
+                    }
                     let _ = self.store().set_state(
                         meeting_id,
                         MeetingState::Failed {
@@ -883,7 +968,7 @@ impl ProcessingPipeline {
     ) -> Result<AudioAsset> {
         let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
-            self.warm_up().await?;
+            self.warm_up_for_job(meeting.id).await?;
             attributing(
                 PipelineStage::Decode,
                 self.store()
@@ -914,24 +999,136 @@ impl ProcessingPipeline {
         let lane =
             diarized_lane_after_transcription(current.source, &asset.lanes, &transcription.lanes);
         let handed = last.filter(|decoded| Some(decoded.lane) == lane);
-        let mut diarized = self.diarize(asset, &current, lane, handed).await?;
+        let mut diarized = match self.diarize(asset, &current, lane, handed).await {
+            Ok(diarized) => diarized,
+            Err(failure) => {
+                self.carry_on_after(&failure, current.id)?;
+                self.diarization_without_diarizer(current.id, lane)?
+            }
+        };
         current.language = transcription.language;
-        diarized.speakers = self
-            .match_speakers(diarized.speakers, current.id, &settings)
-            .await?;
+        match self
+            .match_speakers(&diarized.speakers, current.id, &settings)
+            .await
+        {
+            Ok(matched) => diarized.speakers = matched,
+            // The speakers stay as diarize or the stored fallback made
+            // them.
+            Err(failure) => self.carry_on_after(&failure, current.id)?,
+        }
         let merged = self
             .merge(&current, &transcription.lanes, &diarized)
             .await?;
-        let cleaned = self
-            .cleanup(&current, merged.segments, &merged.speakers)
-            .await?;
         // This run's usage starts from the cleanup pass (None when it was
         // skipped) and the summarize stage adds its own.
-        current.llm_usage = cleaned.usage;
-        let current = self
-            .summarize(current, &cleaned.segments, &merged.speakers)
+        current.llm_usage = self
+            .cleanup(&current, merged.segments, &merged.speakers)
             .await?;
+        // The meeting was read when the run started. What the user changed
+        // since wins: the template to summarize with, a title they typed
+        // or a calendar event they attached (either keeps the model's title
+        // out), and the speakers they named or merged during cleanup, with
+        // the segments a merge repointed (their text is the cleaned text).
+        let stored = required(
+            PipelineStage::Summarize,
+            self.store().meeting(current.id),
+            || format!("meeting {} not found", current.id),
+        )?;
+        current.template_id = stored.template_id;
+        current.title = stored.title;
+        current.title_origin = stored.title_origin;
+        current.calendar_event_id = stored.calendar_event_id;
+        let speakers = attributing(PipelineStage::Summarize, self.store().speakers(current.id))?;
+        let segments = attributing(PipelineStage::Summarize, self.store().segments(current.id))?;
+        let current = self.summarize(current, &segments, &speakers).await?;
         self.persist(&current, asset).await
+    }
+
+    /// A stage whose failure costs only the speaker labels (`diarize`,
+    /// `match_speakers`, the diarizer's warm-up) is logged with `meeting_id`
+    /// and its stage only, and the run goes on with the transcript. Once
+    /// the pipeline quits the failure is returned instead: the exit may
+    /// have caused it, and the meeting stays `processing` for the next
+    /// launch rather than being finished without its speakers. Rust only:
+    /// Swift fails the meeting.
+    fn carry_on_after(&self, failure: &PipelineFailure, meeting_id: Uuid) -> Result<()> {
+        if self.quitting() {
+            return Err(failure.clone());
+        }
+        tracing::warn!(
+            target: BACKGROUND_RUN_LOG,
+            %meeting_id,
+            stage = failure.stage.as_str(),
+            "stage failed; the run goes on and keeps the transcript"
+        );
+        tracing::debug!(target: BACKGROUND_RUN_LOG, %meeting_id, %failure, "stage failure");
+        Ok(())
+    }
+
+    /// What the `diarize` stage falls back to when the diarizer fails or
+    /// did not load. A meeting with stored speakers (a re-run) keeps them
+    /// as stored, assignments, embeddings and clips included, so no
+    /// confirmation or voice is lost. Each covers the spans of the stored
+    /// segments it owns on `lane`, so the new transcript's segments on
+    /// `lane` map onto them; a speaker that owns none on `lane` (the lane
+    /// diarized last time was the other one) keeps its row and gets no
+    /// segment. The earlier fallback speaker, when it is the only one on
+    /// `lane`, covers the whole recording again. When no stored speaker
+    /// owns a segment on `lane`, [`Diarization::one_room_speaker`] covers
+    /// it next to the stored rows; a meeting without any falls back to it
+    /// alone. Rust only: Swift fails the meeting.
+    fn diarization_without_diarizer(
+        &self,
+        meeting_id: Uuid,
+        lane: Option<AudioLane>,
+    ) -> Result<Diarization> {
+        let Some(lane) = lane else {
+            return Ok(Diarization::NONE);
+        };
+        let me = LaneMerger::me_speaker_id(meeting_id);
+        let mut speakers: Vec<Speaker> =
+            attributing(PipelineStage::Diarize, self.store().speakers(meeting_id))?
+                .into_iter()
+                .filter(|speaker| speaker.id != me)
+                .collect();
+        if speakers.is_empty() {
+            return Ok(Diarization::one_room_speaker(meeting_id, lane));
+        }
+        let segments = attributing(PipelineStage::Diarize, self.store().segments(meeting_id))?;
+        let owners: Vec<ClusterSpeaker> = speakers
+            .iter()
+            .map(|speaker| ClusterSpeaker {
+                speaker_id: speaker.id,
+                ranges: segments
+                    .iter()
+                    .filter(|segment| {
+                        segment.lane == lane && segment.speaker_id == Some(speaker.id)
+                    })
+                    .map(|segment| TimeRange {
+                        lower: segment.start,
+                        upper: segment.end,
+                    })
+                    .collect(),
+            })
+            .filter(|owner| !owner.ranges.is_empty())
+            .collect();
+        let room = Diarization::room_speaker_id(meeting_id);
+        let cluster_speakers = match owners.as_slice() {
+            [only] if only.speaker_id == room => vec![Diarization::whole_recording(room)],
+            // A stored room speaker that owns nothing on `lane` was the
+            // room of the other lane: its confirmation does not carry over,
+            // and its id is taken, so the lane's segments get no speaker.
+            [] if !speakers.iter().any(|speaker| speaker.id == room) => {
+                speakers.push(Diarization::room_speaker(meeting_id));
+                vec![Diarization::whole_recording(room)]
+            }
+            _ => owners,
+        };
+        Ok(Diarization {
+            speakers,
+            cluster_speakers,
+            lane: Some(lane),
+        })
     }
 
     /// Ends `claim` and releases the speech engine when no other job, on
@@ -990,7 +1187,7 @@ impl ProcessingPipeline {
         let template_id = template_id.to_owned();
         Ok(Box::pin(async move {
             let result = unless_it_panics(
-                PipelineStage::Summarize,
+                || PipelineStage::Summarize,
                 pipeline.resummarize(meeting, &template_id),
             )
             .await;
@@ -1043,7 +1240,7 @@ impl ProcessingPipeline {
         let pipeline = self.clone();
         Ok(Box::pin(async move {
             let result =
-                unless_it_panics(PipelineStage::Deliver, pipeline.deliver_again(&meeting)).await;
+                unless_it_panics(|| PipelineStage::Deliver, pipeline.deliver_again(&meeting)).await;
             drop(admitted);
             pipeline.reporting(meeting_id, MeetingOperation::Reexport, result)
         }))
@@ -1161,6 +1358,16 @@ impl ProcessingPipeline {
             pipeline: self.clone(),
             meeting_id,
         })
+    }
+
+    /// The stage `meeting_id`'s run last posted, the stage a panic is
+    /// attributed to; `decode` before the first post.
+    fn stage_in_progress(&self, meeting_id: Uuid) -> PipelineStage {
+        self.state()
+            .runs
+            .get(&meeting_id)
+            .and_then(ProcessingRun::last_stage)
+            .unwrap_or(PipelineStage::Decode)
     }
 
     /// Replaces the run's guessed token count with the transcript's.
@@ -1341,6 +1548,7 @@ impl ProcessingPipeline {
             let layout = RecordingLayout::from_asset(asset);
             let mut speakers = Vec::new();
             let mut cluster_speakers = Vec::new();
+            let mut clips = Vec::new();
             for cluster in result.clusters {
                 let id = derived_uuid(meeting_id, &format!("speaker-{}", cluster.label));
                 let mut clip_url = None;
@@ -1351,10 +1559,9 @@ impl ProcessingPipeline {
                     };
                     let clip = buffer.slice(capped);
                     if !clip.is_empty() {
-                        attributing(PipelineStage::Diarize, layout.create_directories(true))?;
                         let path = layout.sample_clip(id);
-                        attributing(PipelineStage::Diarize, write_wav_16k(&path, &clip))?;
                         clip_url = Some(file_url(&path, false));
+                        clips.push((path, clip));
                     }
                 }
                 speakers.push(Speaker {
@@ -1372,6 +1579,12 @@ impl ProcessingPipeline {
                     ranges: cluster.ranges,
                 });
             }
+            if !clips.is_empty()
+                && let Some(layout) = &layout
+            {
+                attributing(PipelineStage::Diarize, layout.create_directories(true))?;
+                attributing(PipelineStage::Diarize, write_sample_clips(&clips))?;
+            }
             Ok(Diarization {
                 speakers,
                 cluster_speakers,
@@ -1386,7 +1599,7 @@ impl ProcessingPipeline {
     /// `unknown`. Nothing is confirmed here.
     async fn match_speakers(
         &self,
-        speakers: Vec<Speaker>,
+        speakers: &[Speaker],
         meeting_id: Uuid,
         settings: &Settings,
     ) -> Result<Vec<Speaker>> {
@@ -1394,7 +1607,8 @@ impl ProcessingPipeline {
         let threshold = settings.speaker_match_threshold;
         self.run(PipelineStage::MatchSpeakers, 0, meeting_id, async {
             let mut matched = Vec::with_capacity(speakers.len());
-            for mut speaker in speakers {
+            for speaker in speakers {
+                let mut speaker = speaker.clone();
                 speaker.assignment = SpeakerAssignment::Unknown;
                 if let Some(embedding) = &speaker.embedding
                     && let Some(found) = memory
@@ -1458,26 +1672,25 @@ impl ProcessingPipeline {
         .await
     }
 
-    /// Runs the `TranscriptCleaner` and persists the cleaned `text`;
-    /// `raw_text`, ids, order and count are the merge stage's and must come
-    /// back intact. Without a cleaner the stage posts its progress and
-    /// hands the merged segments on untouched with no usage.
+    /// Runs the `TranscriptCleaner` and persists the cleaned `text` by
+    /// segment id; `raw_text`, ids, order and count are the merge stage's
+    /// and must come back intact. The speakers are not written again, so a
+    /// speaker the user named while the pass ran stays named. Returns the
+    /// pass's usage. Without a cleaner the stage posts its progress and
+    /// leaves the merged segments untouched with no usage.
     async fn cleanup(
         &self,
         meeting: &Meeting,
         segments: Vec<TranscriptSegment>,
         speakers: &[Speaker],
-    ) -> Result<Cleaned> {
+    ) -> Result<Option<LlmUsage>> {
         self.revise(ProcessingEstimator::token_count(&segments), meeting.id);
         let store = self.store();
         let cleaner = self.inner.dependencies.cleaner.clone();
         let now = self.now();
         self.run(PipelineStage::Cleanup, 0, meeting.id, async {
             let Some(cleaner) = cleaner else {
-                return Ok::<_, PipelineFailure>(Cleaned {
-                    segments,
-                    usage: None,
-                });
+                return Ok::<_, PipelineFailure>(None);
             };
             let participants = attributing(PipelineStage::Cleanup, store.participants(meeting.id))?;
             let people = attributing(PipelineStage::Cleanup, store.persons())?;
@@ -1519,12 +1732,9 @@ impl ProcessingPipeline {
             updated.updated_at = now;
             attributing(
                 PipelineStage::Cleanup,
-                store.replace_transcript(&updated, &corrected, speakers),
+                store.update_segment_texts(&updated, &corrected),
             )?;
-            Ok(Cleaned {
-                segments: corrected,
-                usage: Some(output.usage),
-            })
+            Ok(Some(output.usage))
         })
         .await
     }
@@ -1533,8 +1743,10 @@ impl ProcessingPipeline {
     /// summary, tasks, decisions and speaker name suggestions with the
     /// meeting's title, language and summed usage in one transaction. A
     /// calendar title and a title the user typed stay; a default title is
-    /// replaced by the model's. Without a summarizer the meeting is
-    /// persisted with no summary and no tasks, decisions or suggestions.
+    /// replaced by the model's. Without a summarizer only the meeting's
+    /// processing columns are persisted: the summary, tasks, decisions and
+    /// suggestions an earlier run wrote stay. Rust only: Swift clears them.
+    /// The template is not stored (see [`Meeting::apply_processing_results`]).
     async fn summarize(
         &self,
         meeting: Meeting,
@@ -1548,11 +1760,10 @@ impl ProcessingPipeline {
         self.run(PipelineStage::Summarize, 0, meeting_id, async {
             let mut updated = meeting.clone();
             let Some(summarizer) = summarizer else {
-                updated.summary = None;
                 updated.updated_at = now;
                 attributing(
                     PipelineStage::Summarize,
-                    store.replace_summary(&updated, &[], &[], &[]),
+                    store.save_processing_results(&updated),
                 )?;
                 return Ok::<_, PipelineFailure>(updated);
             };
@@ -1643,16 +1854,18 @@ impl ProcessingPipeline {
                 updated.mixdown_url = Some(mixdown);
             }
             attributing(PipelineStage::Persist, store.save_asset(&updated))?;
-            attributing(
-                PipelineStage::Persist,
-                store.set_state(meeting.id, MeetingState::Ready, now),
-            )?;
+            // Read before the ready write, so a failed read never fails a
+            // meeting already marked ready.
             let unconfirmed: Vec<Uuid> =
                 attributing(PipelineStage::Persist, store.speakers(meeting.id))?
                     .into_iter()
                     .filter(|speaker| !speaker.assignment.is_confirmed())
                     .map(|speaker| speaker.id)
                     .collect();
+            attributing(
+                PipelineStage::Persist,
+                store.set_state(meeting.id, MeetingState::Ready, now),
+            )?;
             if !unconfirmed.is_empty() {
                 events.post(MeetingEvent::SpeakersNeedReview {
                     meeting_id: meeting.id,
@@ -1787,6 +2000,26 @@ pub fn ensure_me_participant(
     };
     store.save_participant(&me)?;
     Ok(me)
+}
+
+/// Writes every speaker's sample clip, or on a failure none: each is
+/// written beside its path first and moved into place once all are, so a
+/// failed write never leaves a kept speaker's clip holding another voice.
+/// Rust only: Swift writes each clip in place.
+fn write_sample_clips(clips: &[(PathBuf, AudioBuffer16k)]) -> std::io::Result<()> {
+    let staged = |path: &Path| path.with_extension("wav.partial");
+    if let Err(error) = clips
+        .iter()
+        .try_for_each(|(path, clip)| write_wav_16k(&staged(path), clip))
+    {
+        for (path, _) in clips {
+            let _ = std::fs::remove_file(staged(path));
+        }
+        return Err(error);
+    }
+    clips
+        .iter()
+        .try_for_each(|(path, _)| std::fs::rename(staged(path), path))
 }
 
 /// Clamps to `-1...1`, scales to Int16 and writes a 16 kHz mono WAV, the

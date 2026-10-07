@@ -249,7 +249,7 @@ const VOICE_WINDOW: usize = 50;
 /// normalised mean of the newest `VOICE_WINDOW` embeddings by
 /// `meeting.startedAt`, `sampleCount` their number; none and 0 without
 /// any. A missing person is ignored. Swift: `MeetingStore.refreshVoice`.
-fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<()> {
+pub(super) fn refresh_voice(connection: &Connection, person_id: Uuid) -> Result<()> {
     let Some(mut person) = fetch_person(connection, person_id)? else {
         return Ok(());
     };
@@ -334,6 +334,27 @@ pub(super) fn replace_name_suggestions(
         )?;
     }
     Ok(())
+}
+
+/// The meeting's suggestions, at most one per speaker, in speaker id order.
+pub(super) fn name_suggestions_of_meeting(
+    connection: &Connection,
+    meeting_id: Uuid,
+) -> Result<Vec<SpeakerNameSuggestion>> {
+    query_all(
+        connection,
+        "SELECT speakerID, name, confidence, evidence FROM speakerNameSuggestion \
+         WHERE meetingID = ?1 ORDER BY speakerID",
+        [DbUuid(meeting_id)],
+        |row| {
+            Ok(SpeakerNameSuggestion {
+                speaker_id: row.col::<DbUuid>("speakerID")?,
+                name: Some(row.get("name")?),
+                confidence: row.get("confidence")?,
+                evidence: row.get("evidence")?,
+            })
+        },
+    )
 }
 
 /// The meeting's participants by display name, ties by id: the order
@@ -584,22 +605,7 @@ impl Store {
     /// The model's guess who each speaker is, at most one per speaker, in
     /// speaker id order.
     pub fn name_suggestions(&self, meeting_id: Uuid) -> Result<Vec<SpeakerNameSuggestion>> {
-        self.read(|connection| {
-            query_all(
-                connection,
-                "SELECT speakerID, name, confidence, evidence FROM speakerNameSuggestion \
-                 WHERE meetingID = ?1 ORDER BY speakerID",
-                [DbUuid(meeting_id)],
-                |row| {
-                    Ok(SpeakerNameSuggestion {
-                        speaker_id: row.col::<DbUuid>("speakerID")?,
-                        name: Some(row.get("name")?),
-                        confidence: row.get("confidence")?,
-                        evidence: row.get("evidence")?,
-                    })
-                },
-            )
-        })
+        self.read(|connection| name_suggestions_of_meeting(connection, meeting_id))
     }
 }
 

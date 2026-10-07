@@ -40,6 +40,20 @@ pub(super) fn insert_segment(connection: &Connection, segment: &TranscriptSegmen
     )
 }
 
+/// Sets the stored `text` of `segment` (matched by id within `meeting_id`);
+/// a segment that is no longer stored is skipped.
+pub(super) fn update_text(
+    connection: &Connection,
+    meeting_id: Uuid,
+    segment: &TranscriptSegment,
+) -> Result<()> {
+    execute_cached(
+        connection,
+        "UPDATE transcriptSegment SET text = ?1 WHERE id = ?2 AND meetingID = ?3",
+        params![segment.text, DbUuid(segment.id), DbUuid(meeting_id)],
+    )
+}
+
 /// The meeting's transcript by start, ties by id.
 pub(super) fn segments_of_meeting(
     connection: &Connection,

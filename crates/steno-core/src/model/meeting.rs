@@ -263,15 +263,19 @@ impl Meeting {
     /// The id of the bundled default summary template.
     pub const DEFAULT_TEMPLATE_ID: &'static str = "default";
 
-    /// Copies the columns the pipeline owns from `results`: title with its
-    /// origin, language, state, template, summary, usage and `updatedAt`.
-    /// Everything the user or the app owns stays as stored.
+    /// Copies the columns the pipeline owns from `results`: language,
+    /// state, summary, usage and `updatedAt`, plus the title and its origin
+    /// unless the stored origin is `user` (a rename during a run stays).
+    /// The template is the user's alone: the summary's `template_id`
+    /// records which one made it. Rust only: Swift's
+    /// `writeProcessingResults` copies the template, title and origin.
     pub fn apply_processing_results(&mut self, results: &Meeting) {
-        self.title.clone_from(&results.title);
-        self.title_origin = results.title_origin;
+        if self.title_origin != TitleOrigin::User {
+            self.title.clone_from(&results.title);
+            self.title_origin = results.title_origin;
+        }
         self.language.clone_from(&results.language);
         self.state.clone_from(&results.state);
-        self.template_id.clone_from(&results.template_id);
         self.summary.clone_from(&results.summary);
         self.llm_usage = results.llm_usage;
         self.updated_at = results.updated_at;
