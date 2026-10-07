@@ -43,12 +43,11 @@ extension HandoverEngine {
       else {
         return .problem(.conflict, "metadata differs from the first announcement")
       }
-      if complete {
-        let count = MetadataValidation.chunkCount(
-          byteCount: metadata.byteCount, chunkSize: metadata.chunkSize)
-        return .json(.ok, Wire.RecordingStatus(state: .complete, receivedChunks: Array(0..<count)))
-      }
       var receipt = existing
+      if complete {
+        receipt.chunkSize = metadata.chunkSize
+        return .json(.ok, Self.status(of: receipt))
+      }
       var receivedChunks: [Int]?
       if !inbox.hasVerified(recordingID, format: metadata.format),
         !inbox.hasPartial(recordingID) || inbox.loadMetadata(recordingID) == nil
