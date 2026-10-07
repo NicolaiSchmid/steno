@@ -2142,7 +2142,7 @@ PR off `main`.
 | No traffic light inset under a native title bar: the sidebars' spacer and onboarding's top follow the platform (`apps/macos/web/`) | `fix/web-platform-title-inset` | #217 | merged |
 | After the intake, `admit` discards every file of the recording unless another device holds its receipt, and so do a refused `complete` and a failed first save (Swift core, the counterpart of #219) | `fix/swift-handover-admit` | #212 | open |
 | The phone rebuilds its queue index from the recording files on disk and the recorder's directory, gives every recording its own file, saves nothing after a failed load, and fails a row after repeated announce 409s (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | open |
-| A re-announce of a `complete` recording with another size, hash or chunk size is answered 409, so the phone keeps its file (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #PR | open |
+| A re-announce of a `complete` recording with another size, hash or chunk size is answered 409, so the phone keeps its file (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
