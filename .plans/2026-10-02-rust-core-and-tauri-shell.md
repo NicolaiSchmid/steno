@@ -794,11 +794,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   child to the next job's release or to the app's exit, as the sidecar engine is kept
   for the run (below). Rust only: Swift has no release.
 - A pipeline reload (a Settings save of the engine or of the summaries) keeps the
-  speech engine while the stored engine id runs where the current one does
-  (`steno_services::speech::SpeechEngines`): the setup that shapes an engine (models
-  directory, speech settings, sidecar binary and options) is read once at launch, so
-  the runtime `SpeechSetup::runtime` gives the engine id alone tells two engines apart.
-  The claims and the warm-up's lock belong to the engine
+  speech engine while the stored engine id runs where the current one does, and keeps
+  the diarizer (`steno_services::speech::SpeechEngines`): the setup that shapes an
+  engine (models directory, speech settings, sidecar binary and options) is read once
+  at launch, so two engine ids share an engine exactly when `SpeechSetup::runtime` puts
+  them in the same place. The claims and the warm-up's lock belong to the engine
   (`steno_pipeline::SharedSpeechEngine`), not to one pipeline, so a job on the new
   pipeline and one on the retired pipeline never release the engine under each other
   (`a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too`). The sidecar engine
@@ -807,10 +807,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   while a retired job transcribes
   (`a_reload_while_a_job_transcribes_keeps_one_sidecar_child`,
   `a_reload_keeps_the_speech_engine_while_the_engine_id_runs_where_it_did`). So a save
-  during a recording keeps the `CoreML` model the warm-up loaded. The `CoreML` engine is
-  kept until a reload asks for the sidecar and freed once the retired pipelines on it
-  are idle; a reload back before then builds a second one beside it. Swift rebuilt the
-  engine on every `reloadPipeline`.
+  during a recording keeps the `CoreML` model and the diarizer's models the warm-up
+  loaded. The `CoreML` engine is kept only while a pipeline runs on it
+  (`steno_pipeline::WeakSpeechEngine`): a reload back to it while a retired job still
+  transcribes gets the same engine, and its model is freed once no pipeline holds it.
+  Swift rebuilt the engine and the diarizer on every `reloadPipeline`.
 - A recording's warm-up (Swift's `warmUpPipelineIfModelsInstalled`, gated on the
   same installed check) loads the speech engine only where it runs in the app's
   process, `CoreML` on the Mac, as Swift did; with Parakeet in the speech sidecar it
@@ -1971,12 +1972,13 @@ crash on DirectML.
 An abort inside the driver still ends the sidecar. A child that crashes, hangs or
 overruns the memory ceiling during a load or a request with DirectML in use
 switches DirectML off for the rest of the app's run: the switch is process-wide,
-so the sidecar engine `steno-services` keeps across pipeline reloads, and any other in
-the process, asks for the CPU too. A child that dies between requests is replaced on
-DirectML, as nothing ran on it since its last answer; one that overruns the ceiling between requests still
-switches DirectML off, as what it holds then is what its last request left, on the
-GPU too. Inside the probe such an end costs no job: no audio was sent yet, so the
-same call loads again in a new child on the CPU. Mid-run it costs that job. The
+so the sidecar engine `steno-services` keeps across pipeline reloads, and any
+other in the process, asks for the CPU too. A child that dies between requests is
+replaced on DirectML, as nothing ran on it since its last answer; one that
+overruns the ceiling between requests still switches DirectML off, as what it
+holds then is what its last request left, on the GPU too. Inside the probe such
+an end costs no job: no audio was sent yet, so the same call loads again in a new
+child on the CPU. Mid-run it costs that job. The
 provider is logged at info level, with no paths: by the backend when it runs
 in-process, and by the parent from the child's answers, which carry the provider
 in force, so a fallback after the load shows in the parent's log and in

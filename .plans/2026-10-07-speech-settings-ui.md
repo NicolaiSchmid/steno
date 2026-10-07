@@ -27,11 +27,15 @@ All three go into the existing **Transcription** section
 "On this {computer}". Each row appears only when the host sends its field, so the Swift
 host, which has none of them, shows nothing new.
 
-Copy follows the Settings rule: no library, runtime or service names, no "mirror", no
-"process"; technical facts go behind a Details disclosure (the `Disclosure` component the
-section already uses for download failures).
+Labels and descriptions follow the Settings rule: no library, runtime or service names, no
+"mirror", no "process". Technical facts, such as the graphics card's DirectX version or the
+Neural Engine, go behind a Details disclosure (the `Disclosure` component the section
+already uses for download failures), which may name them.
 
-### Card "If transcription has trouble"
+### The card for the platform's switch
+
+Each platform shows at most one of the two switches, so the card takes its title from the
+switch it holds: "If transcription has trouble" on the Mac, "Speed" on Windows.
 
 **Mac only: compatibility mode** (`onnxSidecarOnMac`), a switch, off by default.
 
@@ -52,8 +56,10 @@ switch, off by default until G4 decides the default.
 - Description: "Transcribes faster on most PCs with a recent graphics card. If the card has
   a problem, Steno goes back to the processor on its own."
 - State after a fallback in this run: a callout under the row, "The graphics card stopped
-  during a transcription. Steno uses the processor until it restarts." (the process-wide
-  switch `directml_switched_off` in `crates/steno-speech/src/sidecar/client.rs`).
+  during a transcription. That meeting needs to be transcribed again. Steno uses the
+  processor until it restarts." (the process-wide switch `directml_switched_off` in
+  `crates/steno-speech/src/sidecar/client.rs`; a driver that aborts mid-run takes that job
+  with it, `SpeechSettings::directml_on_windows`).
 - Details: "Only the first step of speech recognition runs on the graphics card; the rest
   stays on the processor. Needs a graphics card that supports DirectX 12."
 
@@ -61,16 +67,19 @@ switch, off by default until G4 decides the default.
 
 **Download source** (`modelsMirror`), all platforms.
 
-- Label: **Download speech models from**
-- Control: a select, "Steno (recommended)" or "Another server…"; the second shows a text
-  field labelled **Server address** with the placeholder `https://`.
+- Label: **Download models from**
+- Control: a select, "Usual source (recommended)" or "Another server…"; the second shows
+  a text field labelled **Server address** with the placeholder `https://`.
 - Description: "Only change this if your organisation keeps its own copy of the models."
 - Validation line: "Enter an address that starts with https://." Today
   `ModelStore::with_mirror` takes any string unchecked; open question 3.
 - Details: "Steno checks every file it downloads against the copy it expects, so another
-  server cannot change what is installed. The speaker recognition models always come from
-  Steno." (Checksums and sizes come from the manifest; the speaker models keep their own
-  source, the "One model store" item under "Speech" in the parity list.)
+  server cannot change what is installed." (Checksums and sizes come from the manifest.)
+- Today the source covers the speech models only: the speaker recognition models keep
+  their own hosts (`SpeechSettings::models_mirror`). Once the diarizer's models move onto
+  the shared model store (the "One model store" item under "Speech" in
+  `.plans/2026-10-02-rust-core-and-tauri-shell.md`, which another change does), the
+  source covers them as well, and the label and Details above already fit.
 
 ### When a change applies
 
@@ -87,25 +96,26 @@ In `TranscriptionSettingsSnapshot` (`crates/steno-bridge/src/settings.rs`,
 `Sources/StenoBridge/SettingsSnapshots.swift`), each optional and omitted when the
 platform has no such setting:
 
-- `compatibilityMode: Bool?` (Mac only)
-- `graphicsCard: Bool?` (Windows only, once G4 passes) and `graphicsCardFellBack: Bool?`
+- `compatibilityModeEnabled: Bool?` (Mac only)
+- `graphicsCardEnabled: Bool?` (Windows only, once G4 passes) and
+  `graphicsCardSwitchedOff: Bool?`
 - `downloadSource: String?` (empty for the default) and `downloadSourceError: String?`
-- `restartNeeded: Bool`
+- `needsRestart: Bool?`
 
 Methods (`BridgeMethod` in `crates/steno-bridge/src/envelope.rs`), with the existing
 param types:
 
-- `settings.transcription.setCompatibilityMode` (`SetBoolParams`)
-- `settings.transcription.setGraphicsCard` (`SetBoolParams`)
+- `settings.transcription.setCompatibilityModeEnabled` (`SetBoolParams`)
+- `settings.transcription.setGraphicsCardEnabled` (`SetBoolParams`)
 - `settings.transcription.setDownloadSource` (`SetStringParams`, empty for the default)
 - `app.restart` (no params, Rust host only; the shell runs `App::shutdown` and relaunches
   as an update's relaunch does, `tauri::RESTART_EXIT_CODE` in
   `apps/desktop/src-tauri/src/main.rs`)
 
-The host writes `speech.json` atomically (`steno_pipeline::files`); the fixtures under
+The host writes `speech.json` atomically (`steno_pipeline::files::replace_file`); the fixtures under
 `apps/macos/web/fixtures/bridge/` get one recorded snapshot per platform.
 
-## Open questions for Nicolai
+## Open questions
 
 1. Should the download source appear at all, or stay a configuration file and an
    environment variable for the few who need it?
