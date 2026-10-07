@@ -32,7 +32,7 @@
 //!   then exports the handover identity (the certificate by label,
 //!   `SecIdentityCreateWithCertificate`, `SecItemExport` as PKCS#12 through
 //!   `steno-macos`, one prompt), decodes it ([`decode_pkcs12`]) and stores
-//!   it as the PEM entry `handover-identity` with its fingerprint
+//!   it as the PEM entry `handover-identity`
 //!   ([`store_imported_identity`]), replacing a desktop-id identity (D5):
 //!   the Swift one is the identity the paired phones pin. A denied key read
 //!   leaves the key empty, and Settings asks for it. A denied or failed
@@ -61,9 +61,7 @@ use steno_host::onboarding::OnboardingViewModel;
 use steno_host::services::{Preferences as _, SwiftImport, SwiftImportStage, SwiftImportStatus};
 use tokio::sync::watch;
 
-pub use identity::{
-    IDENTITY_FINGERPRINT_KEY, ImportedIdentityError, decode_pkcs12, store_imported_identity,
-};
+pub use identity::{ImportedIdentityError, decode_pkcs12, store_imported_identity};
 #[cfg(target_os = "macos")]
 pub use sources::{DefaultsCommand, LoginKeychain};
 pub use sources::{KeychainRefusal, SwiftDefaults, SwiftKeychain};
@@ -297,9 +295,7 @@ fn copy_defaults(
         if let Some(value) = value
             && !preferences.contains(ours)
         {
-            preferences
-                .set_bool(ours, value)
-                .map_err(|error| format!("{ours} could not be saved: {error}"))?;
+            preferences.set_flag(ours, value);
         }
     }
     Ok(())
@@ -535,13 +531,12 @@ impl ImportStep {
                     FAILED_EXPORT
                 }
             })?;
-        let stored =
-            decode_pkcs12(&pkcs12, &passphrase, &certificate).and_then(|(identity, bundle)| {
-                block_on(
-                    &self.runtime,
-                    store_imported_identity(&*self.secrets, &self.preferences, &identity, &bundle),
-                )
-            });
+        let stored = decode_pkcs12(&pkcs12, &passphrase, &certificate).and_then(|(_, bundle)| {
+            block_on(
+                &self.runtime,
+                store_imported_identity(&*self.secrets, &bundle),
+            )
+        });
         stored.map_err(|error| {
             tracing::warn!(%error, "the Swift handover identity was not stored");
             FAILED_EXPORT

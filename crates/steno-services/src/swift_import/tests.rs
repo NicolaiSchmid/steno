@@ -180,6 +180,7 @@ fn the_launch_half_copies_the_onboarding_flag_and_the_update_flags_and_nothing_e
         assert!(!again.contains(left), "{left} was copied");
     }
     assert_eq!(keychain.calls(), ["certificate", "has key"], "nothing read");
+    assert_flags_only(dir.path());
 }
 
 #[test]
@@ -334,8 +335,17 @@ impl SecretStore for CountingSecrets {
     }
 }
 
+/// `preferences.json` stays a map of booleans, which every earlier build
+/// reads: a value of another type would make such a build drop every flag
+/// after a rollback.
+fn assert_flags_only(support_directory: &Path) {
+    let bytes = std::fs::read(support_directory.join("preferences.json")).unwrap();
+    serde_json::from_slice::<std::collections::BTreeMap<String, bool>>(&bytes)
+        .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&bytes)));
+}
+
 struct Step {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     preferences: Arc<FilePreferences>,
     keychain: Arc<FakeKeychain>,
     raw: Arc<CountingSecrets>,
@@ -367,11 +377,6 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
                 .unwrap();
         }
     });
-    if let Some(identity) = existing_identity {
-        preferences
-            .set_string(IDENTITY_FINGERPRINT_KEY, &hex(&identity.fingerprint()))
-            .unwrap();
-    }
     let defaults = FakeDefaults::new(fixture("swift-domain.plist"));
     let pending = pending(launch(
         &at_home(),
@@ -389,7 +394,7 @@ fn step(keychain: FakeKeychain, existing_identity: Option<&HandoverIdentity>) ->
         }),
     );
     Step {
-        _dir: dir,
+        dir,
         preferences,
         keychain,
         raw,
@@ -445,12 +450,8 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
     let stored = read(&*step.raw, &HandoverIdentity::secret_key()).unwrap();
     let imported = HandoverIdentity::from_pem(&stored).unwrap();
     assert_eq!(hex(&imported.fingerprint()), FIXTURE_FINGERPRINT);
-    assert_eq!(
-        step.preferences.string(IDENTITY_FINGERPRINT_KEY).as_deref(),
-        Some(FIXTURE_FINGERPRINT),
-        "the recorded fingerprint follows the Swift identity"
-    );
     assert!(step.preferences.flag(IMPORT_RAN_KEY));
+    assert_flags_only(step.dir.path());
     assert!(step.preferences.flag(KEY_READ_KEY));
     assert_eq!(step.graph.gate.handover(), HandoverGate::Ready);
     // The key the step read, answered without asking the keychain again.
@@ -483,10 +484,6 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
             read(&*step.raw, &HandoverIdentity::secret_key()),
             before,
             "the stored identity, or its absence, is untouched"
-        );
-        assert_eq!(
-            step.preferences.string(IDENTITY_FINGERPRINT_KEY),
-            existing.map(|identity| hex(&identity.fingerprint()))
         );
         assert!(!step.preferences.flag(IMPORT_RAN_KEY));
         assert_eq!(
@@ -703,4 +700,75 @@ async fn a_graph_over_a_pending_import_reads_no_key_and_binds_no_listener_until_
         Some("sk-swift")
     );
     app.shutdown();
+}
+
+/// A paired phone proves that an identity existed: with `preferences.json`
+/// gone, the Swift certificate gone before the step and the stored
+/// identity missing or unreadable, the gate opens but no listener is built
+/// and no identity is minted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paired_phone_without_a_readable_identity_gets_no_minted_one() {
+    for unreadable in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+        std::fs::create_dir_all(&paths.support_directory).unwrap();
+        let secrets_path = paths.support_directory.join("secrets.json");
+        if unreadable {
+            std::fs::write(&secrets_path, b"not json").unwrap();
+        }
+        let keychain = Arc::new(FakeKeychain::swift_app());
+        let pending = pending(launch(
+            &at_home(),
+            Arc::new(FilePreferences::in_support_directory(
+                &paths.support_directory,
+            )),
+            &FakeDefaults::new(fixture("swift-domain.plist")),
+            keychain.clone(),
+        ));
+        let app = crate::build_with_import(test_options(paths), Some(pending)).unwrap();
+        app.store
+            .save_paired_device(
+                &steno_core::PairedDevice {
+                    id: uuid::Uuid::new_v4(),
+                    name: "Phone".to_owned(),
+                    paired_at: chrono::Utc::now(),
+                    last_seen_at: None,
+                },
+                &[1; 32],
+            )
+            .unwrap();
+        std::fs::remove_file(dir.path().join("support/preferences.json")).unwrap();
+        *keychain.certificate.lock().unwrap() = None;
+        let step = app.services.swift_import.clone().unwrap();
+        let status = tokio::task::spawn_blocking(move || step.run())
+            .await
+            .unwrap();
+        assert_eq!(
+            status.stage,
+            SwiftImportStage::Done,
+            "nothing left to import"
+        );
+        let gated = app.gated_handover.clone().unwrap();
+        gated.clone().follow(|| panic!("no listener opens")).await;
+        assert!(gated.service().is_none(), "unreadable: {unreadable}");
+        let secrets = std::fs::read(&secrets_path).unwrap_or_default();
+        assert!(
+            !String::from_utf8_lossy(&secrets).contains(HandoverIdentity::SECRET_KEY),
+            "no identity minted (unreadable: {unreadable})"
+        );
+        app.shutdown();
+    }
+}
+
+fn test_options(paths: steno_core::StenoPaths) -> crate::AppOptions {
+    crate::AppOptions {
+        paths,
+        database_path: None,
+        keyring: false,
+        opener: Arc::new(steno_host::fakes::FakeOpener::default()),
+        login_item: None,
+        runtime: tokio::runtime::Handle::current(),
+        version: "0.0.0".to_owned(),
+        make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+    }
 }

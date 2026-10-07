@@ -459,6 +459,39 @@ fn gated_secrets(
     }
 }
 
+/// Refuses to build the listener, which mints an identity when none is
+/// stored, while the store has a paired phone (or cannot say) and the
+/// stored identity is missing or cannot be read: a paired phone proves
+/// that an identity existed, and a new one would make every phone pair
+/// again. The import's gate opens the listener only after the Swift
+/// identity was stored, so this holds only when the identity was lost
+/// since, or the Swift certificate disappeared before the step.
+fn refuse_to_mint_over_paired_phones(
+    store: &Store,
+    secrets: &Arc<dyn SecretStore>,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(), String> {
+    let stored = block_on(
+        runtime,
+        secrets.secret(&steno_handover::HandoverIdentity::secret_key()),
+    );
+    if matches!(stored, Ok(Some(_))) {
+        return Ok(());
+    }
+    let paired = store
+        .paired_devices()
+        .map_or(true, |devices| !devices.is_empty());
+    match stored {
+        Err(error) => Err(format!(
+            "the handover identity could not be read, so none is minted: {error}"
+        )),
+        Ok(_) if paired => Err(
+            "phones are paired but no handover identity is stored, so none is minted".to_owned(),
+        ),
+        Ok(_) => Ok(()),
+    }
+}
+
 /// The handover while an import is pending: its listener, over the
 /// identity the import stores, comes once the import's gate opens.
 fn gated_handover(
@@ -480,7 +513,10 @@ fn gated_handover(
     Arc::new(GatedHandover::new(
         store.clone(),
         import.gate.subscribe(),
-        Box::new(move || handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)),
+        Box::new(move || {
+            refuse_to_mint_over_paired_phones(&store, &secrets, &runtime)?;
+            handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
+        }),
     ))
 }
 

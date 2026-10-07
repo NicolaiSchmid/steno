@@ -6,15 +6,6 @@ use base64::Engine as _;
 use p12_keystore::{KeyStore, KeyStoreEntry, Pkcs12ImportPolicy};
 use steno_core::SecretStore;
 use steno_handover::HandoverIdentity;
-use steno_handover::identity::hex;
-
-use crate::platform::FilePreferences;
-
-/// The `preferences.json` key the stored identity's fingerprint goes
-/// under (hex SHA-256 of the certificate's DER): not a secret, and outside
-/// the settings table, which the Swift app's `SettingsStore.save` would
-/// clear of keys it does not know.
-pub const IDENTITY_FINGERPRINT_KEY: &str = "steno.handoverIdentityFingerprint";
 
 /// What went wrong between the export and the store.
 #[derive(Debug, thiserror::Error)]
@@ -69,22 +60,17 @@ pub fn decode_pkcs12(
 
 /// Stores an imported identity: the PEM bundle under
 /// [`HandoverIdentity::SECRET_KEY`], replacing whatever identity was there
-/// (a desktop-id build's, D5), then its fingerprint under
-/// [`IDENTITY_FINGERPRINT_KEY`]. The one place the import writes the
-/// identity, so the handover's guard over the stored fingerprint can take
-/// it over.
+/// (a desktop-id build's, D5). The one place the import writes the
+/// identity. Once the handover's fingerprint record lands (#221), this
+/// becomes `HandoverIdentity::store(secrets, &record)`, which records the
+/// new fingerprint with it, so the guard accepts the Swift identity.
 pub async fn store_imported_identity(
     secrets: &dyn SecretStore,
-    preferences: &FilePreferences,
-    identity: &HandoverIdentity,
     bundle: &str,
 ) -> Result<(), ImportedIdentityError> {
     secrets
         .set_secret(&HandoverIdentity::secret_key(), Some(bundle))
         .await
-        .map_err(|error| ImportedIdentityError::Store(error.to_string()))?;
-    preferences
-        .set_string(IDENTITY_FINGERPRINT_KEY, &hex(&identity.fingerprint()))
         .map_err(|error| ImportedIdentityError::Store(error.to_string()))
 }
 
