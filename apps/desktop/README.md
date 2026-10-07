@@ -82,9 +82,8 @@ exits reach the shutdown these ways:
   `gnome-session-quit --logout --no-prompt`, so the user can go back to
   the meeting; logging out anyway saves as above (read from
   gnome-session's and the GTK portal's source; not yet seen on a real
-  GNOME session). Plasma 6.6 notes it for
-  its session monitor; the GTK portal off GNOME (Xfce, wlroots) refuses
-  it.
+  GNOME session). Plasma 6.6 notes it for its session monitor; the GTK
+  portal off GNOME (Xfce, wlroots) refuses it.
 - A system shutdown or reboot on Linux saves while logind waits: the app
   holds logind's `shutdown` delay lock and releases it after the save.
   logind waits for the lock at most five seconds by default
@@ -104,6 +103,20 @@ exits reach the shutdown these ways:
   the speech sidecar, a console process, before `RunEvent::Exit` quits
   the pipeline, so its job could leave the meeting failed; unverified
   (WP10).
+
+What starts the save on each Linux desktop, from the desktops' source
+(GTK 3.24.52, xfce4-session 4.20.4, Plasma 6.6.5, gnome-session 50.1);
+only a kill cuts it off on any of them:
+
+| Desktop | What starts the save |
+|---|---|
+| GNOME (X11, Wayland) | `EndSession`, about ten seconds to answer; then the display closing holds the exit until the save has ended |
+| Xfce on X11 | `QueryEndSession`, a minute to answer |
+| Xfce on Wayland | `QueryEndSession`; xfce4-session quits at once, and the display closing holds the exit until the save has ended |
+| KDE Plasma 6.6 (Wayland, X11) | the display closing |
+| A desktop whose portal reports the end | the portal's ending state, then the display closing |
+| wlroots and others | the display closing |
+| A shutdown or reboot (all) | logind's delay lock (five seconds), then SIGTERM and the display closing, which both wait for the save |
 
 The session clients, the portal's monitor and inhibitor and the logind
 lock are tested against fakes on a private bus. The lost display ran
@@ -836,14 +849,17 @@ there beside the Swift ones (the plan's risk list). Linux and Windows
 keep their native title bar; macOS gets the overlay title bar the Swift
 windows have, and only there does the page leave the traffic lights
 their inset (`titleBarInset` in `apps/macos/web/src/lib/platform.tsx`).
-On Linux, WebKitGTK leaks one shared-memory file descriptor per destroyed
-webview ([#160](https://github.com/NicolaiSchmid/steno/issues/160)), so
-no window is destroyed there while the app runs: main and the panels
-hide, and a closed Settings or onboarding window is kept, drops its page
-(`about:blank`) and loads its route afresh, on the section asked for,
-when opened again (`windows.rs`). Over 70 Settings open and close
-cycles under Xvfb the shell's file descriptors stay at 69 to 72, where
-destroying the window took them from 61 to 128. On Linux a panel keeps a 5 px resize border that Tauri gives
-every undecorated resizable window. The pinned size holds, but the
+On Linux, WebKitGTK leaks one shared-memory file
+descriptor per destroyed webview
+([#160](https://github.com/NicolaiSchmid/steno/issues/160)). The app
+works around it rather than fixing it: no window is destroyed there
+while the app runs. Main and the panels hide, and a closed Settings or
+onboarding window is kept, drops its page (`about:blank`) and loads its
+route afresh, on the section asked for, when opened again
+(`windows.rs`). Over 70 Settings open and close cycles under Xvfb the
+shell's file descriptors stay at 69 to 72, where destroying the window
+took them from 61 to 128. The leak itself remains in WebKitGTK and is
+not yet reported there. On Linux a panel keeps a 5 px resize border that
+Tauri gives every undecorated resizable window. The pinned size holds, but the
 border shows a resize cursor and swallows a press, so a drag that starts
 on the outer 5 px does not move the panel; no control sits there.
