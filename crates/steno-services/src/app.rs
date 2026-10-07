@@ -31,7 +31,7 @@ use crate::pipeline::{
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
 use crate::recovery::{Interrupted, LiveRecordingCheck, reconcile_interrupted};
-use crate::secrets::secret_store;
+use crate::secrets::{SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 
 /// What stops the graph from being built: another process holds the
@@ -133,6 +133,10 @@ pub struct App {
     pub live_recording_check: LiveRecordingCheck,
     /// The launch's background half, for [`App::launch_finished`].
     pub(crate) launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Resolves once the keyring opened after asking for its password, for
+    /// [`App::launch`] to read the API key again
+    /// ([`crate::secrets::secret_store_with_unlock`]).
+    pub(crate) secrets_unlocked: std::sync::Mutex<Option<SecretsUnlocked>>,
     /// Held while the graph lives, so no second app or CLI command takes
     /// the same database; `None` on a filesystem without locks
     /// ([`DatabaseLockError::Unsupported`], a startup warning). Declared
@@ -275,21 +279,26 @@ pub fn handover_intake(
 /// The handover listener over a loaded or minted identity, with the mac id
 /// the Phones settings show; `None`, with the reason, when the launch
 /// checkpoint failed ([`HandoverService::checkpoint_store`], which says why
-/// it comes first) or the identity could not be read or stored. A failed
-/// checkpoint keeps the handover off until the next launch, and the rest of
-/// the app runs. Swift: `AppEnvironment.makeHandover`.
+/// it comes first), the identity could not be read or stored, or it is not
+/// the one the paired phones pinned (`HandoverIdentity::load_or_create`). A
+/// failed checkpoint keeps the handover off until the next launch, and the
+/// rest of the app runs. Swift: `AppEnvironment.makeHandover`.
 fn handover_listener(
     store: &Arc<Store>,
     pipeline: &Arc<CurrentPipeline>,
     secrets: &Arc<dyn SecretStore>,
+    paths: &StenoPaths,
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(Arc<HandoverService>, uuid::Uuid), String> {
     HandoverService::checkpoint_store(store).map_err(|error| error.to_string())?;
+    let record = crate::handover::FingerprintFile::in_support_directory(&paths.support_directory);
     let identity = block_on(
         runtime,
         steno_handover::HandoverIdentity::load_or_create(
             secrets.as_ref(),
+            &record,
+            store,
             &format!(
                 "Steno on {}",
                 steno_handover::HandoverConfiguration::default_service_name()
@@ -347,7 +356,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         .unwrap_or_else(|| paths.database_path());
     let database_lock = lock_or_run_without(&database_path, options.lock_patience, &mut warnings)?;
     let store = open_store(&database_path)?;
-    let secrets = secret_store(options.keyring, &paths);
+    let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -383,7 +392,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
 
-    let handover = match handover_listener(&store, &pipeline, &secrets, zone, &runtime) {
+    let handover = match handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime) {
         Ok(pair) => Some(pair),
         Err(error) => {
             warnings.push(format!("Phone handover is unavailable: {error}"));
@@ -444,6 +453,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         startup_warnings: warnings,
         live_recording_check: LiveRecordingCheck::default(),
         launch_work: std::sync::Mutex::default(),
+        secrets_unlocked: std::sync::Mutex::new(secrets_unlocked),
         database_lock,
     })
 }
@@ -710,6 +720,11 @@ impl App {
     /// 5. Meanwhile the login item is registered the first time, and the
     ///    handover listener starts when a phone is already paired.
     ///
+    /// When the keyring opens later, after asking for its password, the
+    /// pipeline is built again and the host reads the API key again; the
+    /// handover stays off until the next start, as its identity could not
+    /// be read.
+    ///
     /// Swift: `AppController.launch`, which failed every interrupted
     /// recording instead of recovering it.
     pub fn launch(&self, host: &Arc<Host>) {
@@ -800,6 +815,24 @@ impl App {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
         host.register_login_item_on_first_launch();
+        let unlocked = self
+            .secrets_unlocked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(unlocked) = unlocked {
+            let (pipeline, host) = (self.pipeline.clone(), host.clone());
+            tokio::spawn(async move {
+                unlocked.await;
+                let reread = tokio::task::spawn_blocking(move || {
+                    if let Err(error) = pipeline.reload() {
+                        tracing::warn!(%error, "the pipeline was not rebuilt after the unlock");
+                    }
+                    host.secrets_changed();
+                });
+                let _ = reread.await;
+            });
+        }
         if let Some(handover) = &self.handover {
             let handover = handover.clone();
             tokio::spawn(async move {

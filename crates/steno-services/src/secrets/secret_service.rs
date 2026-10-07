@@ -2,72 +2,113 @@
 //! keyring GNOME Keyring, `KWallet` and `KeePassXC` serve on Linux. A small
 //! client over `zbus`, which the desktop shell already links, so the store
 //! adds no crate, no C library and no second async runtime.
+//! No Swift counterpart (the Swift app is macOS-only); the label follows
+//! `KeychainSecretStore.swift`.
 //!
 //! The secret crosses the bus in the `plain` algorithm. The session bus is
-//! a socket only the user's own processes reach, and any of them may ask
-//! the service for an unlocked secret anyway, so the `dh-ietf1024`
+//! a socket only the user's own processes reach, and reading another
+//! client's messages on it (`dbus-monitor`, `BecomeMonitor`) takes that same
+//! user, who can read Steno's memory and files anyway, so the `dh-ietf1024`
 //! exchange would add a cipher and a key exchange without keeping the
-//! secret from anyone who could read it on the bus. The bus is local; no
+//! secret from anyone who could not already read it. The bus is local; no
 //! secret leaves the computer.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use steno_core::{SecretKey, SecretStore, async_trait, protocols::BoundaryResult};
-use tokio::sync::OnceCell;
+use steno_core::{SecretKey, SecretPlace, SecretStore, async_trait, protocols::BoundaryResult};
+use tokio::sync::watch;
 use zbus::Connection;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Type, Value};
 
-use super::{FileSecretStore, KEYRING_SERVICE};
+use super::{Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, SecretsUnlocked};
 
 /// The Secret Service when a provider answers on the session bus, else the
 /// [`FileSecretStore`] it wraps; `STENO_<KEY>` wins over both.
 ///
-/// The choice is made once, on the first read or write, and logged: the
-/// store connects, opens a session, finds the default collection and
-/// unlocks it (the provider may ask the user). No bus, no provider, no
-/// default collection, or an unlock the user declines leaves every secret
-/// of this process in the file, never some here and some there.
+/// The choice is made once, on a thread of the store's own that starts
+/// when the store is made, and logged: the store connects, opens a
+/// session, finds the default collection and unlocks it and Steno's items
+/// in it (the provider may ask the user). No bus, no provider, no default
+/// collection, or an unlock the user declines or leaves unanswered leaves
+/// every secret of this process with the file, never some here and some
+/// there. A call made while the choice runs waits for it, except while the
+/// provider's prompt is on screen: then it fails at once with
+/// [`KeyringUnavailable::Unlocking`], so no caller (the app's start on the
+/// main thread, the host under its lock, a window's close) waits on the
+/// user. [`SecretServiceStore::unlocked_after_prompt`] says when to read
+/// again.
 ///
-/// On choosing the service, the store first moves what the file holds
-/// into it: each entry is written to the default collection and read back,
-/// and only once every entry reads back does the file lose them (and is
-/// deleted when nothing is left), so a crash or a failure on the way
-/// leaves every secret readable from the file at least. A failure there
-/// keeps the file for this process. A key that both hold takes the file's
-/// value: only this app writes either store, one instance at a time, and a
-/// file entry exists only from before the move, from a run that fell back
-/// to the file (and is then the newer value), or from a move cut short (and
-/// is then the same value).
+/// After the choice only a write asks the user, as a write is something
+/// the user did: a read of a collection or an item that is locked again
+/// fails with [`KeyringUnavailable::Locked`] and dismisses the provider's
+/// prompt unseen.
+///
+/// On choosing the service the first time, the store copies what the file
+/// holds into it, reads each value back, and then marks the file as moved
+/// ([`FileSecretStore`] says what the marker does), keeping the entries: a
+/// provider may hold a new item only in memory for a while (`KWallet` and
+/// `KeePassXC` save on their own schedule), so the entries go only on a
+/// later launch whose own connection reads every value back. A value the
+/// provider lost by then is written again. A failure before the marker is
+/// written keeps the file for this process.
+///
+/// A key both hold at the first move: the API key takes the file's value,
+/// as only this app writes either store and a file entry is then from
+/// before the move or from a run that could not open the keyring (and is
+/// the newer value; a removal there leaves an empty value, which removes
+/// the item). The handover identity keeps the service's: an identity is
+/// never replaced, as the phones pinned one of them, and the file's stays
+/// in the file for the user to recover. After the marker the service wins
+/// for every key.
 ///
 /// Items are filed under the attributes `service` ([`KEYRING_SERVICE`])
 /// and `username` (the key's raw value), the names the `keyring` crate
-/// uses, labelled `Steno <key>` for the keyring's window.
+/// uses, labelled `Steno <key>` for the keyring's window. Where several
+/// items match a key (another tool wrote one), the store reads the one
+/// with the lowest object path and a write removes the others. A value
+/// with a line break (the handover identity's PEM) is stored on one line,
+/// base64 behind `steno-base64:`.
 pub struct SecretServiceStore {
+    shared: Arc<Shared>,
+}
+
+struct Shared {
     file: FileSecretStore,
-    bus: Bus,
-    backend: OnceCell<Backend>,
+    /// How long a prompt may stay unanswered.
+    prompt_timeout: Duration,
+    backend: OnceLock<Backend>,
+    phase: watch::Sender<Phase>,
+    /// Whether the choice showed a prompt.
+    asked: AtomicBool,
+}
+
+/// Where the choice is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Connecting and moving, without the user.
+    Choosing,
+    /// The provider's prompt is on screen; back to `Choosing` once it is
+    /// answered.
+    Asking,
+    /// The backend is set: the service or the file, and whether the
+    /// choice asked the user on the way.
+    Chosen { service: bool, asked: bool },
 }
 
 impl std::fmt::Debug for SecretServiceStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SecretServiceStore")
-            .field("file", &self.file)
-            .field("bus", &self.bus)
-            .field(
-                "backend",
-                &self.backend.get().map(|backend| match backend {
-                    Backend::Service(_) => "Secret Service",
-                    Backend::File => "file",
-                }),
-            )
+            .field("file", &self.shared.file)
+            .field("phase", &*self.shared.phase.borrow())
             .finish()
     }
 }
 
 /// Which bus the store looks for a provider on.
-#[derive(Debug)]
 enum Bus {
     Session,
     /// A private bus, for the tests.
@@ -76,62 +117,185 @@ enum Bus {
 }
 
 enum Backend {
-    Service(Service),
+    Service(Keyring),
     File,
 }
 
 /// How long a D-Bus call may take, libdbus's default.
 const CALL_TIMEOUT: Duration = Duration::from_secs(25);
-/// How long the store waits for the user to answer the provider's unlock
-/// prompt.
+/// How long the store waits for the user to answer the provider's prompt.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl SecretServiceStore {
-    /// The Secret Service on the session bus, falling back to `file`.
+    /// The Secret Service on the session bus, falling back to `file`; the
+    /// choice starts now, on the store's own thread.
     #[must_use]
     pub fn new(file: FileSecretStore) -> Self {
-        SecretServiceStore {
-            file,
-            bus: Bus::Session,
-            backend: OnceCell::new(),
-        }
+        Self::start(file, Bus::Session, PROMPT_TIMEOUT)
     }
 
     /// The Secret Service on the bus at `address`, falling back to `file`.
     #[cfg(test)]
-    pub(super) fn on_bus(file: FileSecretStore, address: &str) -> Self {
-        SecretServiceStore {
+    pub(super) fn on_bus(file: FileSecretStore, address: &str, prompt_timeout: Duration) -> Self {
+        Self::start(file, Bus::Address(address.to_owned()), prompt_timeout)
+    }
+
+    fn start(file: FileSecretStore, bus: Bus, prompt_timeout: Duration) -> Self {
+        let shared = Arc::new(Shared {
             file,
-            bus: Bus::Address(address.to_owned()),
-            backend: OnceCell::new(),
+            prompt_timeout,
+            backend: OnceLock::new(),
+            phase: watch::Sender::new(Phase::Choosing),
+            asked: AtomicBool::new(false),
+        });
+        let chooser = shared.clone();
+        let spawned = std::thread::Builder::new()
+            .name("steno-secrets".to_owned())
+            .spawn(move || {
+                let backend = match tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                {
+                    Ok(runtime) => runtime.block_on(chooser.choose(&bus)),
+                    Err(error) => {
+                        tracing::warn!("secrets: no runtime for the Secret Service ({error})");
+                        Backend::File
+                    }
+                };
+                chooser.settle(backend);
+            });
+        if let Err(error) = spawned {
+            tracing::warn!("secrets: no thread for the Secret Service ({error})");
+            shared.settle(Backend::File);
+        }
+        SecretServiceStore { shared }
+    }
+
+    /// Resolves once the store chose the service after asking the user,
+    /// the moment reads that failed with [`KeyringUnavailable::Unlocking`]
+    /// can be made again; never when it chose without asking or chose the
+    /// file.
+    pub fn unlocked_after_prompt(&self) -> SecretsUnlocked {
+        let mut phase = self.shared.phase.subscribe();
+        Box::pin(async move {
+            loop {
+                if let Phase::Chosen { service, asked } = *phase.borrow_and_update() {
+                    if service && asked {
+                        return;
+                    }
+                    break;
+                }
+                if phase.changed().await.is_err() {
+                    break;
+                }
+            }
+            std::future::pending::<()>().await;
+        })
+    }
+
+    /// The chosen backend, waiting for the choice unless it waits on the
+    /// user.
+    async fn backend(&self) -> Result<&Backend, KeyringUnavailable> {
+        let mut phase = self.shared.phase.subscribe();
+        loop {
+            if let Some(backend) = self.shared.backend.get() {
+                return Ok(backend);
+            }
+            if *phase.borrow_and_update() == Phase::Asking {
+                return Err(KeyringUnavailable::Unlocking);
+            }
+            if phase.changed().await.is_err() {
+                return Err(KeyringUnavailable::Unlocking);
+            }
         }
     }
 
-    async fn backend(&self) -> &Backend {
-        self.backend.get_or_init(|| self.choose()).await
+    /// Asks with the store's timeout and nothing to note.
+    fn ask(&self) -> Ask<'static> {
+        fn nothing(_: bool) {}
+        Ask::User {
+            timeout: self.shared.prompt_timeout,
+            asking: &nothing,
+        }
     }
 
-    async fn choose(&self) -> Backend {
-        let service = match Service::open(&self.bus).await {
-            Ok(service) => service,
+    /// Waits until the choice is made, whoever it asks on the way.
+    #[cfg(test)]
+    async fn chosen(&self) {
+        let mut phase = self.shared.phase.subscribe();
+        while !matches!(*phase.borrow_and_update(), Phase::Chosen { .. }) {
+            phase.changed().await.unwrap();
+        }
+    }
+}
+
+impl Shared {
+    fn settle(&self, backend: Backend) {
+        let service = matches!(backend, Backend::Service(_));
+        let _ = self.backend.set(backend);
+        self.phase.send_replace(Phase::Chosen {
+            service,
+            asked: self.asked.load(Ordering::Relaxed),
+        });
+    }
+
+    async fn choose(&self, bus: &Bus) -> Backend {
+        let asking = |on: bool| {
+            if on {
+                self.asked.store(true, Ordering::Relaxed);
+            }
+            self.phase
+                .send_replace(if on { Phase::Asking } else { Phase::Choosing });
+        };
+        let ask = Ask::User {
+            timeout: self.prompt_timeout,
+            asking: &asking,
+        };
+        let keyring = match Keyring::open(bus, ask).await {
+            Ok(keyring) => keyring,
             Err(error) => {
                 tracing::info!(
-                    file = %self.file.path.display(),
-                    "secrets: no Secret Service ({error}), keeping secrets in the file"
+                    file = %self.file.path().display(),
+                    "secrets: no Secret Service ({error}), keeping secrets with the file"
                 );
                 return Backend::File;
             }
         };
-        match service.take_over(&self.file).await {
+        let contents = match self.file.read() {
+            Ok(contents) => contents,
+            Err(error) => {
+                tracing::warn!(
+                    file = %self.file.path().display(),
+                    "secrets: the secrets file could not be read ({error}), keeping secrets \
+                     with the file"
+                );
+                return Backend::File;
+            }
+        };
+        if contents.moved {
+            match keyring.tidy(&self.file, &contents, ask).await {
+                Ok(removed) => {
+                    tracing::info!(removed, "secrets: keeping secrets in the Secret Service");
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        "secrets: keeping secrets in the Secret Service; the file's copies \
+                         stay for the next start ({error})"
+                    );
+                }
+            }
+            return Backend::Service(keyring);
+        }
+        match keyring.take_over(&self.file, &contents, ask).await {
             Ok(moved) => {
-                tracing::info!(moved, "secrets: keeping secrets in the Secret Service");
-                Backend::Service(service)
+                tracing::info!(moved, "secrets: moved the file into the Secret Service");
+                Backend::Service(keyring)
             }
             Err(error) => {
                 tracing::warn!(
-                    file = %self.file.path.display(),
+                    file = %self.file.path().display(),
                     "secrets: moving the file into the Secret Service failed ({error}), \
-                     keeping secrets in the file"
+                     keeping secrets with the file"
                 );
                 Backend::File
             }
@@ -141,22 +305,37 @@ impl SecretServiceStore {
 
 #[async_trait]
 impl SecretStore for SecretServiceStore {
+    /// Never asks the user.
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
-        if let Some(value) = self.file.environment_value(key) {
+        if let Some(value) = self.shared.file.environment_value(key) {
             return Ok(Some(value.to_owned()));
         }
-        match self.backend().await {
-            Backend::Service(service) => Ok(service.secret(key).await?),
-            Backend::File => self.file.secret(key).await,
+        match self.backend().await? {
+            Backend::Service(keyring) => Ok(keyring.secret(key, Ask::Never).await?),
+            Backend::File => self.shared.file.secret(key).await,
         }
     }
 
     /// `None` and an empty value remove the item, as the keyring store
-    /// does; the file keeps an empty value, as in Swift.
+    /// does; the file keeps an empty value, so the next move removes the
+    /// item too. May ask the user to unlock.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
-        match self.backend().await {
-            Backend::Service(service) => Ok(service.set_secret(key, value).await?),
-            Backend::File => self.file.set_secret(key, value).await,
+        match self.backend().await? {
+            Backend::Service(keyring) => Ok(keyring.set_secret(key, value, self.ask()).await?),
+            Backend::File => {
+                self.shared
+                    .file
+                    .set_secret(key, Some(value.unwrap_or_default()))
+                    .await
+            }
+        }
+    }
+
+    /// `None` until the choice is made.
+    fn place(&self) -> Option<SecretPlace> {
+        match self.shared.backend.get()? {
+            Backend::Service(_) => Some(SecretPlace::Keyring),
+            Backend::File => Some(SecretPlace::File),
         }
     }
 }
@@ -168,27 +347,79 @@ pub(super) enum ServiceError {
     Bus(#[from] zbus::Error),
     #[error("the secrets file: {0}")]
     File(#[from] std::io::Error),
-    #[error("the Secret Service has no default collection")]
+    #[error(
+        "the Secret Service has no default keyring; create one in the keyring's manager \
+         (Passwords and Keys, KWalletManager, KeePassXC's Secret Service settings)"
+    )]
     NoDefaultCollection,
-    #[error("the keyring stayed locked: the unlock prompt was dismissed")]
+    #[error("the keyring stayed locked: its prompt was dismissed")]
     Dismissed,
-    #[error("the keyring stayed locked: nobody answered the unlock prompt")]
+    #[error("the keyring stayed locked: nobody answered its prompt")]
     PromptTimedOut,
-    #[error("the Secret Service closed the unlock prompt without an answer")]
+    #[error("the Secret Service closed its prompt without an answer")]
     PromptClosed,
     #[error("the Secret Service holds `{0}` as bytes that are not UTF-8")]
     NotText(String),
     #[error("`{0}` did not read back from the Secret Service as written")]
     ReadBack(String),
+    #[error(transparent)]
+    Unavailable(#[from] KeyringUnavailable),
+}
+
+/// Whether a call may show the provider's prompt.
+#[derive(Clone, Copy)]
+enum Ask<'a> {
+    /// Dismiss it unseen and fail with [`KeyringUnavailable::Locked`].
+    Never,
+    /// Show it and wait up to `timeout`; `asking` hears `true` as it
+    /// shows and `false` once it is answered.
+    User {
+        timeout: Duration,
+        asking: &'a (dyn Fn(bool) + Sync),
+    },
 }
 
 /// A connection with an open session and the default collection.
-struct Service {
+struct Keyring {
     connection: Connection,
     /// The service object, which opens sessions and unlocks.
-    secrets: ServiceProxy<'static>,
+    service: ServiceProxy<'static>,
     session: OwnedObjectPath,
     collection: CollectionProxy<'static>,
+}
+
+/// What a value with a line break is stored behind, base64 after it.
+/// GNOME Keyring's unencrypted keyring file (Omarchy's default, which
+/// unlocks without a password) keeps each secret on one `secret=` line, and
+/// a line break in a value makes the daemon reject the whole file at its
+/// next start, every app's secrets with it.
+const ONE_LINE_PREFIX: &str = "steno-base64:";
+
+/// `value` as it is stored: itself, or base64 behind [`ONE_LINE_PREFIX`]
+/// when it holds a line break.
+fn one_line(value: &str) -> String {
+    use base64::Engine as _;
+    if value.contains(['\n', '\r']) {
+        format!(
+            "{ONE_LINE_PREFIX}{}",
+            base64::engine::general_purpose::STANDARD.encode(value)
+        )
+    } else {
+        value.to_owned()
+    }
+}
+
+/// The value [`one_line`] stored as `stored`.
+fn from_one_line(key: &SecretKey, stored: String) -> Result<String, ServiceError> {
+    use base64::Engine as _;
+    let Some(encoded) = stored.strip_prefix(ONE_LINE_PREFIX) else {
+        return Ok(stored);
+    };
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| ServiceError::NotText(key.0.clone()))
 }
 
 /// The path the Secret Service answers with for "no object".
@@ -196,68 +427,154 @@ const NO_OBJECT: &str = "/";
 const LABEL: &str = "org.freedesktop.Secret.Item.Label";
 const ATTRIBUTES: &str = "org.freedesktop.Secret.Item.Attributes";
 
-impl Service {
-    async fn open(bus: &Bus) -> Result<Self, ServiceError> {
+impl Keyring {
+    /// Connects, opens a session and unlocks the default collection and
+    /// every Steno item in it (`KeePassXC` locks items one by one).
+    async fn open(bus: &Bus, ask: Ask<'_>) -> Result<Self, ServiceError> {
         let builder = match bus {
             Bus::Session => zbus::connection::Builder::session()?,
             Bus::Address(address) => zbus::connection::Builder::address(address.as_str())?,
         };
         let connection = builder.method_timeout(CALL_TIMEOUT).build().await?;
-        let secrets = ServiceProxy::new(&connection).await?;
-        let (_, session) = secrets.open_session("plain", &Value::from("")).await?;
-        let collection = secrets.read_alias("default").await?;
+        let service = ServiceProxy::new(&connection).await?;
+        let (_, session) = service.open_session("plain", &Value::from("")).await?;
+        let collection = service.read_alias("default").await?;
         if collection.as_str() == NO_OBJECT {
             return Err(ServiceError::NoDefaultCollection);
         }
-        let service = Service {
+        let keyring = Keyring {
             collection: CollectionProxy::new(&connection, collection).await?,
             connection,
-            secrets,
+            service,
             session,
         };
-        service.unlock().await?;
-        Ok(service)
+        keyring.unlock_collection(ask).await?;
+        let items = keyring
+            .collection
+            .search_items(HashMap::from([("service", KEYRING_SERVICE)]))
+            .await?;
+        if !items.is_empty() {
+            let items: Vec<ObjectPath<'_>> = items.iter().map(ObjectPath::from).collect();
+            keyring.unlock(&items, ask).await?;
+        }
+        Ok(keyring)
     }
 
-    /// Moves every entry of `file` into the service; how many it moved.
-    async fn take_over(&self, file: &FileSecretStore) -> Result<usize, ServiceError> {
-        let entries = file.read()?;
-        for (key, value) in &entries {
+    /// The first move: copies every entry of `contents` into the service,
+    /// reads each back, then marks the file; how many it copied. The
+    /// entries stay in the file until a later launch ([`Keyring::tidy`]).
+    async fn take_over(
+        &self,
+        file: &FileSecretStore,
+        contents: &Contents,
+        ask: Ask<'_>,
+    ) -> Result<usize, ServiceError> {
+        let identity = SecretKey::from(steno_handover::HandoverIdentity::SECRET_KEY);
+        let mut copied = 0;
+        for (key, value) in &contents.entries {
             let key = SecretKey(key.clone());
-            self.set_secret(&key, Some(value)).await?;
-            if self.secret(&key).await?.unwrap_or_default() != *value {
-                return Err(ServiceError::ReadBack(key.0));
+            if key == identity
+                && let Some(kept) = self.secret(&key, ask).await?
+            {
+                if kept != *value {
+                    tracing::warn!(
+                        file = %file.path().display(),
+                        "secrets: the Secret Service already holds another handover identity; \
+                         it stays, and the file keeps its own"
+                    );
+                }
+                continue;
+            }
+            self.write_and_check(&key, value, ask).await?;
+            copied += 1;
+        }
+        file.change(|contents| {
+            contents.moved = true;
+            Ok(())
+        })?;
+        Ok(copied)
+    }
+
+    /// A later launch: removes each file entry this connection reads back
+    /// from the service, writes again the ones the provider lost, and drops
+    /// an API key the service has since replaced; how many it removed. A
+    /// handover identity that differs stays in both.
+    async fn tidy(
+        &self,
+        file: &FileSecretStore,
+        contents: &Contents,
+        ask: Ask<'_>,
+    ) -> Result<usize, ServiceError> {
+        let identity = SecretKey::from(steno_handover::HandoverIdentity::SECRET_KEY);
+        let mut done = Vec::new();
+        for (key, value) in &contents.entries {
+            let key = SecretKey(key.clone());
+            match self.secret(&key, ask).await? {
+                Some(held) if held == *value => done.push(key),
+                None if value.is_empty() => done.push(key),
+                None => {
+                    tracing::info!(%key, "secrets: the Secret Service lost an item; writing it again");
+                    self.write_and_check(&key, value, ask).await?;
+                }
+                Some(_) if key == identity => tracing::warn!(
+                    file = %file.path().display(),
+                    "secrets: the file and the Secret Service hold different handover \
+                     identities; both stay"
+                ),
+                Some(_) => done.push(key),
             }
         }
-        if !entries.is_empty() {
-            file.remove_moved(&entries)?;
+        if done.is_empty() {
+            return Ok(0);
         }
-        Ok(entries.len())
+        file.change(|now| {
+            for key in &done {
+                if now.entries.get(key.as_str()) == contents.entries.get(key.as_str()) {
+                    now.entries.remove(key.as_str());
+                }
+            }
+            Ok(())
+        })?;
+        Ok(done.len())
     }
 
-    async fn secret(&self, key: &SecretKey) -> Result<Option<String>, ServiceError> {
-        let Some(item) = self.items(key).await?.into_iter().next() else {
+    /// Writes `value` and reads it back.
+    async fn write_and_check(
+        &self,
+        key: &SecretKey,
+        value: &str,
+        ask: Ask<'_>,
+    ) -> Result<(), ServiceError> {
+        self.set_secret(key, Some(value), ask).await?;
+        if self.secret(key, ask).await?.unwrap_or_default() != value {
+            return Err(ServiceError::ReadBack(key.0.clone()));
+        }
+        Ok(())
+    }
+
+    async fn secret(&self, key: &SecretKey, ask: Ask<'_>) -> Result<Option<String>, ServiceError> {
+        let Some(item) = self.items(key, ask).await?.into_iter().next() else {
             return Ok(None);
         };
+        self.unlock(&[ObjectPath::from(&item)], ask).await?;
         let secret = ItemProxy::new(&self.connection, item)
             .await?
             .get_secret(&self.session)
             .await?;
-        String::from_utf8(secret.value)
-            .map(Some)
-            .map_err(|_| ServiceError::NotText(key.0.clone()))
+        let stored =
+            String::from_utf8(secret.value).map_err(|_| ServiceError::NotText(key.0.clone()))?;
+        from_one_line(key, stored).map(Some)
     }
 
-    async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> Result<(), ServiceError> {
+    async fn set_secret(
+        &self,
+        key: &SecretKey,
+        value: Option<&str>,
+        ask: Ask<'_>,
+    ) -> Result<(), ServiceError> {
+        let items = self.items(key, ask).await?;
         let Some(value) = value.filter(|value| !value.is_empty()) else {
-            for item in self.items(key).await? {
-                let prompt = ItemProxy::new(&self.connection, item)
-                    .await?
-                    .delete()
-                    .await?;
-                self.complete(prompt).await?;
-            }
-            return Ok(());
+            return self.delete(items, ask).await;
         };
         let label = format!("Steno {key}");
         let properties = HashMap::from([
@@ -267,47 +584,80 @@ impl Service {
         let secret = Secret {
             session: self.session.clone(),
             parameters: Vec::new(),
-            value: value.as_bytes().to_vec(),
+            value: one_line(value).into_bytes(),
             content_type: "text/plain".to_owned(),
         };
-        self.unlock().await?;
-        let (_, prompt) = self
+        let (created, prompt) = self
             .collection
             .create_item(properties, &secret, true)
             .await?;
-        self.complete(prompt).await
+        self.complete(prompt, ask).await?;
+        let extras = items.into_iter().filter(|item| *item != created).collect();
+        self.delete(extras, ask).await
     }
 
-    /// The default collection's items filed under `key`, once it is
-    /// unlocked.
-    async fn items(&self, key: &SecretKey) -> Result<Vec<OwnedObjectPath>, ServiceError> {
-        self.unlock().await?;
-        Ok(self.collection.search_items(attributes(key)).await?)
+    async fn delete(&self, items: Vec<OwnedObjectPath>, ask: Ask<'_>) -> Result<(), ServiceError> {
+        for item in items {
+            let prompt = ItemProxy::new(&self.connection, item)
+                .await?
+                .delete()
+                .await?;
+            self.complete(prompt, ask).await?;
+        }
+        Ok(())
     }
 
-    /// Unlocks the default collection, which asks the user when it is
-    /// locked; a no-op when it is not.
-    async fn unlock(&self) -> Result<(), ServiceError> {
-        let (_, prompt) = self
-            .secrets
-            .unlock(std::slice::from_ref(self.collection.inner().path()))
-            .await?;
-        self.complete(prompt).await
+    /// The default collection's items filed under `key`, lowest path
+    /// first, once it is unlocked.
+    async fn items(
+        &self,
+        key: &SecretKey,
+        ask: Ask<'_>,
+    ) -> Result<Vec<OwnedObjectPath>, ServiceError> {
+        self.unlock_collection(ask).await?;
+        let mut items = self.collection.search_items(attributes(key)).await?;
+        items.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        Ok(items)
     }
 
-    /// Shows `prompt` (unless it is none) and waits for the user's answer.
-    async fn complete(&self, prompt: OwnedObjectPath) -> Result<(), ServiceError> {
+    async fn unlock_collection(&self, ask: Ask<'_>) -> Result<(), ServiceError> {
+        self.unlock(std::slice::from_ref(self.collection.inner().path()), ask)
+            .await
+    }
+
+    /// Unlocks `objects`, which asks the user when one is locked; a no-op
+    /// when none is.
+    async fn unlock(&self, objects: &[ObjectPath<'_>], ask: Ask<'_>) -> Result<(), ServiceError> {
+        let (_, prompt) = self.service.unlock(objects).await?;
+        self.complete(prompt, ask).await
+    }
+
+    /// Shows `prompt` (unless it is none) and waits for the user's answer,
+    /// or dismisses it unseen when the call may not ask.
+    async fn complete(&self, prompt: OwnedObjectPath, ask: Ask<'_>) -> Result<(), ServiceError> {
         if prompt.as_str() == NO_OBJECT {
             return Ok(());
         }
         let prompt = PromptProxy::new(&self.connection, prompt).await?;
+        let Ask::User { timeout, asking } = ask else {
+            let _ = prompt.dismiss().await;
+            return Err(KeyringUnavailable::Locked.into());
+        };
         let mut completed = prompt.receive_completed().await?;
-        prompt.prompt("").await?;
-        let signal = tokio::time::timeout(PROMPT_TIMEOUT, completed.next())
-            .await
-            .map_err(|_| ServiceError::PromptTimedOut)?
-            .ok_or(ServiceError::PromptClosed)?;
-        if signal.args()?.dismissed {
+        asking(true);
+        let answer = match prompt.prompt("").await {
+            Ok(()) => tokio::time::timeout(timeout, completed.next()).await,
+            Err(error) => {
+                asking(false);
+                return Err(error.into());
+            }
+        };
+        asking(false);
+        let Ok(signal) = answer else {
+            let _ = prompt.dismiss().await;
+            return Err(ServiceError::PromptTimedOut);
+        };
+        if signal.ok_or(ServiceError::PromptClosed)?.args()?.dismissed {
             return Err(ServiceError::Dismissed);
         }
         Ok(())
@@ -384,279 +734,12 @@ trait Item {
 trait Prompt {
     fn prompt(&self, window_id: &str) -> zbus::Result<()>;
 
+    fn dismiss(&self) -> zbus::Result<()>;
+
     #[zbus(signal)]
     fn completed(&self, dismissed: bool, result: Value<'_>) -> zbus::Result<()>;
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::BTreeMap;
-    use std::path::Path;
-
-    use super::super::fake_service::{Daemon, Shared, State, serve};
-    use super::*;
-
-    fn file_at(path: &Path, environment: &[(&str, &str)]) -> FileSecretStore {
-        FileSecretStore::new(
-            path,
-            environment
-                .iter()
-                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-                .collect(),
-        )
-    }
-
-    fn entries(path: &Path) -> BTreeMap<String, String> {
-        file_at(path, &[]).read().unwrap()
-    }
-
-    fn write_file(path: &Path, entries: &[(&str, &str)]) {
-        let map: BTreeMap<_, _> = entries.iter().copied().collect();
-        std::fs::write(path, serde_json::to_vec(&map).unwrap()).unwrap();
-    }
-
-    /// A store over a fresh fake: the daemon, the fake's connection (kept
-    /// for its lifetime), the fake's state and the secrets file's folder.
-    struct Setup {
-        daemon: Daemon,
-        _fake: Option<Connection>,
-        state: Shared,
-        folder: tempfile::TempDir,
-    }
-
-    impl Setup {
-        /// None when `dbus-daemon` is missing (the test skips).
-        async fn new(provider: bool, state: State) -> Option<Self> {
-            let daemon = Daemon::start()?;
-            let state = Shared::new(std::sync::Mutex::new(state));
-            let fake = if provider {
-                Some(serve(&daemon, state.clone()).await)
-            } else {
-                None
-            };
-            Some(Setup {
-                daemon,
-                _fake: fake,
-                state,
-                folder: tempfile::tempdir().unwrap(),
-            })
-        }
-
-        fn path(&self) -> std::path::PathBuf {
-            self.folder.path().join("secrets.json")
-        }
-
-        fn store(&self, environment: &[(&str, &str)]) -> SecretServiceStore {
-            SecretServiceStore::on_bus(file_at(&self.path(), environment), &self.daemon.address)
-        }
-
-        fn values(&self, key: &str) -> Vec<String> {
-            self.state.lock().unwrap().values(key)
-        }
-    }
-
-    #[tokio::test]
-    async fn secrets_are_read_written_and_removed_through_the_service() {
-        let Some(setup) = Setup::new(true, State::default()).await else {
-            return;
-        };
-        let store = setup.store(&[]);
-        let key = SecretKey::llm_api_key();
-        assert_eq!(store.secret(&key).await.unwrap(), None);
-        assert!(matches!(store.backend.get(), Some(Backend::Service(_))));
-        store.set_secret(&key, Some("sk-1")).await.unwrap();
-        store.set_secret(&key, Some("sk-2")).await.unwrap();
-        assert_eq!(store.secret(&key).await.unwrap().as_deref(), Some("sk-2"));
-        {
-            let state = setup.state.lock().unwrap();
-            let items: Vec<_> = state.items.values().collect();
-            assert_eq!(items.len(), 1, "a second write replaces the item");
-            assert_eq!(items[0].label, "Steno llm-api-key");
-            assert_eq!(
-                items[0].attributes,
-                BTreeMap::from([
-                    ("service".to_owned(), KEYRING_SERVICE.to_owned()),
-                    ("username".to_owned(), "llm-api-key".to_owned()),
-                ])
-            );
-        }
-        let identity = SecretKey::from("handover-identity");
-        store.set_secret(&identity, Some("pem")).await.unwrap();
-        store.set_secret(&key, None).await.unwrap();
-        assert_eq!(store.secret(&key).await.unwrap(), None);
-        assert_eq!(setup.values("handover-identity"), ["pem"]);
-        store.set_secret(&identity, Some("")).await.unwrap();
-        assert!(setup.state.lock().unwrap().items.is_empty());
-        assert!(!setup.path().exists(), "the file is never written");
-    }
-
-    #[tokio::test]
-    async fn without_a_provider_every_secret_stays_in_the_file() {
-        let Some(setup) = Setup::new(false, State::default()).await else {
-            return;
-        };
-        write_file(&setup.path(), &[("llm-api-key", "sk-file")]);
-        let store = setup.store(&[]);
-        let key = SecretKey::llm_api_key();
-        assert_eq!(
-            store.secret(&key).await.unwrap().as_deref(),
-            Some("sk-file")
-        );
-        assert!(matches!(store.backend.get(), Some(Backend::File)));
-        store.set_secret(&key, Some("sk-2")).await.unwrap();
-        assert_eq!(
-            entries(&setup.path()),
-            BTreeMap::from([("llm-api-key".to_owned(), "sk-2".to_owned())])
-        );
-    }
-
-    #[tokio::test]
-    async fn the_files_entries_move_into_the_service_and_the_file_goes() {
-        let Some(setup) = Setup::new(true, State::default()).await else {
-            return;
-        };
-        write_file(
-            &setup.path(),
-            &[("llm-api-key", "sk-file"), ("handover-identity", "pem")],
-        );
-        let store = setup.store(&[]);
-        assert_eq!(
-            store
-                .secret(&SecretKey::from("handover-identity"))
-                .await
-                .unwrap()
-                .as_deref(),
-            Some("pem")
-        );
-        assert_eq!(setup.values("llm-api-key"), ["sk-file"]);
-        assert_eq!(setup.values("handover-identity"), ["pem"]);
-        assert!(!setup.path().exists(), "the emptied file is deleted");
-    }
-
-    #[tokio::test]
-    async fn a_key_both_hold_takes_the_files_newer_value() {
-        let Some(setup) = Setup::new(true, State::default()).await else {
-            return;
-        };
-        let key = SecretKey::llm_api_key();
-        setup
-            .store(&[])
-            .set_secret(&key, Some("sk-old"))
-            .await
-            .unwrap();
-        write_file(&setup.path(), &[("llm-api-key", "sk-new")]);
-        let store = setup.store(&[]);
-        assert_eq!(store.secret(&key).await.unwrap().as_deref(), Some("sk-new"));
-        assert_eq!(setup.values("llm-api-key"), ["sk-new"]);
-        assert!(!setup.path().exists());
-    }
-
-    #[tokio::test]
-    async fn without_a_default_collection_every_secret_stays_in_the_file() {
-        let state = State {
-            no_default: true,
-            ..State::default()
-        };
-        let Some(setup) = Setup::new(true, state).await else {
-            return;
-        };
-        let store = setup.store(&[]);
-        let key = SecretKey::llm_api_key();
-        store.set_secret(&key, Some("sk-1")).await.unwrap();
-        assert!(matches!(store.backend.get(), Some(Backend::File)));
-        assert_eq!(
-            entries(&setup.path()),
-            BTreeMap::from([("llm-api-key".to_owned(), "sk-1".to_owned())])
-        );
-        assert!(setup.state.lock().unwrap().items.is_empty());
-    }
-
-    #[tokio::test]
-    async fn a_refused_move_keeps_the_file_for_every_secret() {
-        let state = State {
-            refuse_writes: true,
-            ..State::default()
-        };
-        let Some(setup) = Setup::new(true, state).await else {
-            return;
-        };
-        write_file(&setup.path(), &[("llm-api-key", "sk-file")]);
-        let store = setup.store(&[]);
-        let key = SecretKey::llm_api_key();
-        assert_eq!(
-            store.secret(&key).await.unwrap().as_deref(),
-            Some("sk-file")
-        );
-        assert!(matches!(store.backend.get(), Some(Backend::File)));
-        store
-            .set_secret(&SecretKey::from("other"), Some("x"))
-            .await
-            .unwrap();
-        assert_eq!(
-            entries(&setup.path()),
-            BTreeMap::from([
-                ("llm-api-key".to_owned(), "sk-file".to_owned()),
-                ("other".to_owned(), "x".to_owned()),
-            ])
-        );
-    }
-
-    #[tokio::test]
-    async fn a_locked_keyring_is_unlocked_through_its_prompt() {
-        let state = State {
-            locked: true,
-            ..State::default()
-        };
-        let Some(setup) = Setup::new(true, state).await else {
-            return;
-        };
-        let store = setup.store(&[]);
-        let key = SecretKey::llm_api_key();
-        store.set_secret(&key, Some("sk-1")).await.unwrap();
-        assert!(matches!(store.backend.get(), Some(Backend::Service(_))));
-        assert_eq!(setup.state.lock().unwrap().prompts, 1);
-
-        // Locked again while the app runs: the next read asks again.
-        setup.state.lock().unwrap().locked = true;
-        assert_eq!(store.secret(&key).await.unwrap().as_deref(), Some("sk-1"));
-        assert_eq!(setup.state.lock().unwrap().prompts, 2);
-    }
-
-    #[tokio::test]
-    async fn a_dismissed_unlock_keeps_every_secret_in_the_file() {
-        let state = State {
-            locked: true,
-            dismiss: true,
-            ..State::default()
-        };
-        let Some(setup) = Setup::new(true, state).await else {
-            return;
-        };
-        write_file(&setup.path(), &[("llm-api-key", "sk-file")]);
-        let store = setup.store(&[]);
-        let key = SecretKey::llm_api_key();
-        assert_eq!(
-            store.secret(&key).await.unwrap().as_deref(),
-            Some("sk-file")
-        );
-        assert!(matches!(store.backend.get(), Some(Backend::File)));
-        assert_eq!(setup.state.lock().unwrap().prompts, 1, "asked once");
-        assert!(setup.state.lock().unwrap().items.is_empty());
-    }
-
-    #[tokio::test]
-    async fn the_environment_wins_over_the_service() {
-        let Some(setup) = Setup::new(true, State::default()).await else {
-            return;
-        };
-        let key = SecretKey::llm_api_key();
-        setup
-            .store(&[])
-            .set_secret(&key, Some("sk-service"))
-            .await
-            .unwrap();
-        let store = setup.store(&[("STENO_LLM_API_KEY", "sk-env")]);
-        assert_eq!(store.secret(&key).await.unwrap().as_deref(), Some("sk-env"));
-        assert_eq!(setup.values("llm-api-key"), ["sk-service"]);
-    }
-}
+#[path = "secret_service_tests.rs"]
+mod tests;

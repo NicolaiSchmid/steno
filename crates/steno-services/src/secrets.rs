@@ -1,8 +1,8 @@
 //! `SecretStore` implementations: the platform keyring (the Keychain, the
 //! Windows credential store) through the `keyring` crate, the Secret
-//! Service on Linux ([`SecretServiceStore`]), and the 0600 JSON file the
-//! Swift CLI used where no keyring is reachable (`STENO_<KEY>` wins over
-//! the file and over the Secret Service).
+//! Service on Linux (`secret_service::SecretServiceStore`), and the 0600
+//! JSON file the Swift CLI used where no keyring is reachable
+//! (`STENO_<KEY>` wins over the file and over the Secret Service).
 //! Swift: `apps/macos/Steno/Services/KeychainSecretStore.swift`,
 //! `Sources/StenoCore/Testing/FileSecretStore.swift`.
 
@@ -11,7 +11,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use steno_core::{SecretKey, SecretStore, StenoPaths, async_trait, protocols::BoundaryResult};
+use steno_core::{
+    SecretKey, SecretPlace, SecretStore, StenoPaths, async_trait, protocols::BoundaryResult,
+};
 
 use crate::files::{Access, replace_file, restrict_new_file};
 
@@ -29,28 +31,69 @@ pub use secret_service::SecretServiceStore;
 /// `SecretKey`'s raw value, as in Swift. Swift also labels the item
 /// `Steno <key>`; the `keyring` crate cannot set a label (the Keychain
 /// then shows the service), and lookups match on service and account only.
-/// The Secret Service item carries the label (see [`SecretServiceStore`]).
+/// The Secret Service item carries the label (`SecretServiceStore` on
+/// Linux).
 pub const KEYRING_SERVICE: &str = "uno.schmid.steno.mac";
 
 /// The platform keyring when `keyring` is set: the Keychain on macOS, the
 /// credential store on Windows, the Secret Service on Linux when a
 /// provider answers on the session bus (else the secrets file, decided on
-/// first use; see [`SecretServiceStore`]). Without `keyring` (the CLI),
-/// the secrets file under the support directory.
+/// a thread of the store's own as soon as it is made; see
+/// `SecretServiceStore`). Without `keyring` (the CLI), the secrets file
+/// under the support directory.
 #[must_use]
 pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
+    secret_store_with_unlock(keyring, paths).0
+}
+
+/// [`secret_store`], and on Linux what resolves once the Secret Service
+/// opened after asking the user for the keyring's password: reads made
+/// while it asked failed with [`KeyringUnavailable::Unlocking`], and the
+/// app reads its secrets again then. `None` where no store asks.
+#[must_use]
+pub fn secret_store_with_unlock(
+    keyring: bool,
+    paths: &StenoPaths,
+) -> (Arc<dyn SecretStore>, Option<SecretsUnlocked>) {
     let file = || FileSecretStore::in_support_directory(&paths.support_directory);
     if !keyring {
-        return Arc::new(file());
+        return (Arc::new(file()), None);
     }
     #[cfg(target_os = "linux")]
     {
-        Arc::new(SecretServiceStore::new(file()))
+        let store = SecretServiceStore::new(file());
+        let unlocked = store.unlocked_after_prompt();
+        (Arc::new(store), Some(unlocked))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        Arc::new(KeyringSecretStore)
+        (Arc::new(KeyringSecretStore), None)
     }
+}
+
+/// Resolves once the keyring opened after the store asked the user for
+/// its password; never when it opened without asking or not at all.
+pub type SecretsUnlocked = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// A secret Steno cannot reach because the keyring that holds it is
+/// locked, still asking for its password, or was not open when the app
+/// started. Never a reason to treat the secret as absent: a caller that
+/// would mint or delete on `None` stops instead.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KeyringUnavailable {
+    /// The keyring is asking for its password.
+    #[error("the keyring is asking for its password; answer it and Steno reads it then")]
+    Unlocking,
+    /// The keyring was locked again while the app ran.
+    #[error("the keyring is locked; unlock it and try again")]
+    Locked,
+    /// The secrets moved into the keyring, which could not be opened at
+    /// start: locked, its prompt dismissed, or no provider running.
+    #[error(
+        "`{0}` is kept in the keyring, which Steno could not open when it started; \
+         unlock the keyring and start Steno again (the command line reads `STENO_<KEY>`)"
+    )]
+    NotOpened(String),
 }
 
 /// The platform keyring.
@@ -85,6 +128,10 @@ impl SecretStore for KeyringSecretStore {
         }
         Ok(())
     }
+
+    fn place(&self) -> Option<SecretPlace> {
+        Some(SecretPlace::Keyring)
+    }
 }
 
 /// A JSON object of secrets in one file, owner-only (0600) where the
@@ -99,11 +146,58 @@ impl SecretStore for KeyringSecretStore {
 /// processes writing different keys both keep theirs, and it replaces the
 /// file by renaming a complete, synced temporary file over it, so a crash
 /// or a full disk leaves the old file or the new one, never a torn one.
-/// An empty file reads as no secrets, as in Swift.
-#[derive(Debug)]
+/// An empty file reads as no secrets, as in Swift, and an empty value as
+/// no value.
+///
+/// Once the Linux app moved the entries into the Secret Service, the file
+/// carries `"movedToSecretService": true` for good. From then on it is no
+/// longer a store: a key it does not hold is an error
+/// ([`KeyringUnavailable::NotOpened`]), not `None`, and a write fails, so
+/// a run that cannot open the keyring never mints a fresh handover
+/// identity or drops the API key. The entries the move left behind are
+/// still read until a later launch deletes them. A build from before the
+/// marker cannot parse the file (the marker is not text), so it fails
+/// every secret read and write instead of minting.
 pub struct FileSecretStore {
     path: PathBuf,
     environment: BTreeMap<String, String>,
+}
+
+/// The overriding variables' names only, never a value or another
+/// variable.
+impl std::fmt::Debug for FileSecretStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileSecretStore")
+            .field("path", &self.path)
+            .field(
+                "overrides",
+                &self
+                    .environment
+                    .keys()
+                    .filter(|name| name.starts_with("STENO_"))
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+/// The file's JSON object: the entries, and the marker the move into the
+/// Secret Service leaves.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Contents {
+    #[serde(
+        rename = "movedToSecretService",
+        default,
+        skip_serializing_if = "is_false"
+    )]
+    pub moved: bool,
+    #[serde(flatten)]
+    pub entries: BTreeMap<String, String>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's `skip_serializing_if` passes a reference
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl FileSecretStore {
@@ -139,16 +233,18 @@ impl FileSecretStore {
             .filter(|value| !value.is_empty())
     }
 
-    /// Removes the entries of `moved` whose value the file still holds,
-    /// under the lock, and deletes the file once it holds nothing. An entry
-    /// another process changed since it was read stays. The lock file
-    /// stays too: deleting it while another process waits on it would let
-    /// the next writer lock a new file beside the old one.
+    /// Applies `change` to the contents under the lock and writes them
+    /// back, deleting the file when nothing is left in it. The lock file
+    /// stays: deleting it while another process waits on it would let the
+    /// next writer lock a new file beside the old one.
     #[cfg(target_os = "linux")]
-    fn remove_moved(&self, moved: &BTreeMap<String, String>) -> std::io::Result<()> {
-        self.locked(|map| {
-            map.retain(|key, value| moved.get(key) != Some(value));
-            if map.is_empty() {
+    pub(crate) fn change(
+        &self,
+        change: impl FnOnce(&mut Contents) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        self.locked(|contents| {
+            change(contents)?;
+            if *contents == Contents::default() {
                 if let Err(error) = std::fs::remove_file(&self.path)
                     && error.kind() != std::io::ErrorKind::NotFound
                 {
@@ -161,15 +257,21 @@ impl FileSecretStore {
                 }
                 return Ok(());
             }
-            self.write(map)
+            self.write(contents)
         })
     }
 
-    fn read(&self) -> std::io::Result<BTreeMap<String, String>> {
+    /// Where the file lives.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn read(&self) -> std::io::Result<Contents> {
         match std::fs::read(&self.path) {
-            Ok(bytes) if bytes.is_empty() => Ok(BTreeMap::new()),
+            Ok(bytes) if bytes.is_empty() => Ok(Contents::default()),
             Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Contents::default()),
             Err(error) => Err(error),
         }
     }
@@ -181,26 +283,17 @@ impl FileSecretStore {
         self.path.with_file_name(name)
     }
 
-    /// Applies `change` to the stored map under the lock and writes the
-    /// result atomically.
-    fn update(&self, change: impl FnOnce(&mut BTreeMap<String, String>)) -> std::io::Result<()> {
-        self.locked(|map| {
-            change(map);
-            self.write(map)
-        })
-    }
-
-    /// Replaces the file with `map`, owner-only.
-    fn write(&self, map: &BTreeMap<String, String>) -> std::io::Result<()> {
-        let data = serde_json::to_vec_pretty(map).map_err(std::io::Error::other)?;
+    /// Replaces the file with `contents`, owner-only.
+    fn write(&self, contents: &Contents) -> std::io::Result<()> {
+        let data = serde_json::to_vec_pretty(contents).map_err(std::io::Error::other)?;
         replace_file(&self.path, &data, Access::OwnerOnly)
     }
 
-    /// Runs `write` on the stored map under the advisory lock on
+    /// Runs `write` on the stored contents under the advisory lock on
     /// `<file>.lock`.
     fn locked(
         &self,
-        write: impl FnOnce(&mut BTreeMap<String, String>) -> std::io::Result<()>,
+        write: impl FnOnce(&mut Contents) -> std::io::Result<()>,
     ) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -232,19 +325,39 @@ impl SecretStore for FileSecretStore {
         if let Some(value) = self.environment_value(key) {
             return Ok(Some(value.to_owned()));
         }
-        Ok(self.read()?.get(key.as_str()).cloned())
+        let contents = self.read()?;
+        match contents.entries.get(key.as_str()) {
+            Some(value) => Ok(Some(value.clone()).filter(|value| !value.is_empty())),
+            None if contents.moved => Err(Box::new(KeyringUnavailable::NotOpened(key.0.clone()))),
+            None => Ok(None),
+        }
     }
 
+    /// Fails once the entries moved into the Secret Service.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
-        self.update(|map| match value {
-            Some(value) => {
-                map.insert(key.as_str().to_owned(), value.to_owned());
+        self.locked(|contents| {
+            if contents.moved {
+                return Err(std::io::Error::other(KeyringUnavailable::NotOpened(
+                    key.0.clone(),
+                )));
             }
-            None => {
-                map.remove(key.as_str());
+            match value {
+                Some(value) => {
+                    contents
+                        .entries
+                        .insert(key.as_str().to_owned(), value.to_owned());
+                }
+                None => {
+                    contents.entries.remove(key.as_str());
+                }
             }
+            self.write(contents)
         })?;
         Ok(())
+    }
+
+    fn place(&self) -> Option<SecretPlace> {
+        Some(SecretPlace::File)
     }
 }
 
@@ -286,6 +399,68 @@ mod tests {
             env.secret(&identity).await.unwrap().as_deref(),
             Some("pem-env")
         );
+    }
+
+    #[tokio::test]
+    async fn after_the_move_a_missing_key_and_every_write_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.json");
+        std::fs::write(
+            &path,
+            br#"{"movedToSecretService": true, "handover-identity": "pem"}"#,
+        )
+        .unwrap();
+        let store = FileSecretStore::new(&path, BTreeMap::new());
+        let (identity, key) = (
+            SecretKey::from("handover-identity"),
+            SecretKey::llm_api_key(),
+        );
+        assert_eq!(
+            store.secret(&identity).await.unwrap().as_deref(),
+            Some("pem"),
+            "an entry the move left behind still reads"
+        );
+        assert_eq!(
+            store.secret(&key).await.unwrap_err().to_string(),
+            KeyringUnavailable::NotOpened(key.0.clone()).to_string()
+        );
+        assert!(store.set_secret(&key, Some("sk-1")).await.is_err());
+        assert!(store.set_secret(&identity, None).await.is_err());
+        let env = FileSecretStore::new(
+            &path,
+            BTreeMap::from([("STENO_LLM_API_KEY".to_owned(), "sk-env".to_owned())]),
+        );
+        assert_eq!(env.secret(&key).await.unwrap().as_deref(), Some("sk-env"));
+        assert!(
+            serde_json::from_slice::<BTreeMap<String, String>>(&std::fs::read(&path).unwrap())
+                .is_err(),
+            "a build from before the marker cannot read the file at all"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_value_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::new(dir.path().join("secrets.json"), BTreeMap::new());
+        let key = SecretKey::llm_api_key();
+        store.set_secret(&key, Some("")).await.unwrap();
+        assert_eq!(store.secret(&key).await.unwrap(), None);
+    }
+
+    #[test]
+    fn the_debug_output_names_the_overrides_and_no_value() {
+        let store = FileSecretStore::new(
+            "secrets.json",
+            BTreeMap::from([
+                ("STENO_LLM_API_KEY".to_owned(), "sk-secret".to_owned()),
+                ("OTHER_TOKEN".to_owned(), "t0ken".to_owned()),
+            ]),
+        );
+        let text = format!("{store:?}");
+        assert!(text.contains("STENO_LLM_API_KEY"), "{text}");
+        for hidden in ["sk-secret", "OTHER_TOKEN", "t0ken"] {
+            assert!(!text.contains(hidden), "{text}");
+        }
     }
 
     #[tokio::test]

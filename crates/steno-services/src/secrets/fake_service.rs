@@ -2,8 +2,9 @@
 //! [`SecretServiceStore`](super::SecretServiceStore) tests: the parts of
 //! `org.freedesktop.Secret.Service`, `Collection`, `Item` and `Prompt`
 //! the store calls, with the `plain` session algorithm, one default
-//! collection that may start locked, and an unlock prompt the "user"
-//! accepts or dismisses.
+//! collection that may start locked, items locked one by one as
+//! `KeePassXC` locks them, and prompts the "user" accepts, dismisses or
+//! leaves open until the test answers.
 
 // The interface macro hands every argument over by value and keeps the
 // D-Bus method's arguments and `&self` whether the fake reads them or not;
@@ -113,14 +114,28 @@ pub struct State {
     pub next: u32,
     /// Whether the default collection is locked.
     pub locked: bool,
-    /// Whether the "user" dismisses the unlock prompt.
+    /// Whether every item is locked until an unlock names it.
+    pub items_locked: bool,
+    /// Whether the "user" dismisses the prompts.
     pub dismiss: bool,
+    /// Whether a prompt stays open until [`answer_held`] answers it.
+    pub hold: bool,
+    /// The prompts left open, with the objects each unlocks.
+    pub held: Vec<(OwnedObjectPath, Vec<OwnedObjectPath>)>,
+    /// Whether `CreateItem` and `Delete` ask the user to confirm.
+    pub confirm_writes: bool,
     /// Whether `CreateItem` fails, as a provider that refuses writes.
     pub refuse_writes: bool,
+    /// Whether `CreateItem` keeps other bytes than it was sent.
+    pub garble_writes: bool,
     /// Whether the `default` alias names no collection.
     pub no_default: bool,
     /// How many prompts were shown.
     pub prompts: usize,
+    /// How many prompts were made, shown or not.
+    pub prompts_made: usize,
+    /// How many prompts the store dismissed.
+    pub dismissals: usize,
 }
 
 impl State {
@@ -140,6 +155,73 @@ impl State {
 }
 
 pub type Shared = Arc<Mutex<State>>;
+
+impl State {
+    /// Unlocks what `objects` names: the collection, or the items.
+    fn unlock(&mut self, objects: &[OwnedObjectPath]) {
+        for object in objects {
+            if object.as_str() == COLLECTION_PATH {
+                self.locked = false;
+            } else {
+                self.items_locked = false;
+            }
+        }
+    }
+
+    /// Whether unlocking `objects` needs the user.
+    fn needs_prompt(&self, objects: &[OwnedObjectPath]) -> bool {
+        objects.iter().any(|object| {
+            if object.as_str() == COLLECTION_PATH {
+                self.locked
+            } else {
+                self.items_locked
+            }
+        })
+    }
+}
+
+/// Answers the oldest prompt left open, as the user would.
+pub async fn answer_held(fake: &Connection, state: &Shared, accept: bool) {
+    let (prompt, objects) = {
+        let mut state = state.lock().unwrap();
+        let (prompt, objects) = state.held.remove(0);
+        if accept {
+            state.unlock(&objects);
+        }
+        (prompt, objects)
+    };
+    let emitter = SignalEmitter::new(fake, prompt).unwrap();
+    let unlocked = if accept { objects } else { Vec::new() };
+    FakePrompt::completed(&emitter, !accept, Value::from(unlocked))
+        .await
+        .unwrap();
+}
+
+/// A prompt on the fake's object server; what it unlocks, if anything.
+async fn prompt_at(
+    server: &ObjectServer,
+    state: &Shared,
+    objects: Vec<OwnedObjectPath>,
+) -> fdo::Result<OwnedObjectPath> {
+    let prompt = {
+        let mut state = state.lock().unwrap();
+        state.prompts_made += 1;
+        path(format!(
+            "/org/freedesktop/secrets/prompt/{}",
+            state.prompts_made
+        ))
+    };
+    server
+        .at(
+            &prompt,
+            FakePrompt {
+                state: state.clone(),
+                objects,
+            },
+        )
+        .await?;
+    Ok(prompt)
+}
 
 const SERVICE_PATH: &str = "/org/freedesktop/secrets";
 const COLLECTION_PATH: &str = "/org/freedesktop/secrets/collection/test";
@@ -206,23 +288,10 @@ impl FakeService {
         objects: Vec<OwnedObjectPath>,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
-        let prompt = {
-            let mut state = self.state.lock().unwrap();
-            if !state.locked {
-                return Ok((objects, no_object()));
-            }
-            state.prompts += 1;
-            path(format!("/org/freedesktop/secrets/prompt/{}", state.prompts))
-        };
-        server
-            .at(
-                &prompt,
-                FakePrompt {
-                    state: self.state.clone(),
-                    objects,
-                },
-            )
-            .await?;
+        if !self.state.lock().unwrap().needs_prompt(&objects) {
+            return Ok((objects, no_object()));
+        }
+        let prompt = prompt_at(server, &self.state, objects).await?;
         Ok((Vec::new(), prompt))
     }
 }
@@ -271,18 +340,21 @@ impl FakeCollection {
             .into_iter()
             .collect();
         assert_eq!(secret.session.as_str(), SESSION_PATH);
-        let item = StoredItem {
+        let mut item = StoredItem {
             label,
             attributes,
             value: secret.value,
         };
-        let (id, new) = {
+        let (id, new, confirm) = {
             let mut state = self.state.lock().unwrap();
             if state.locked {
                 return Err(fdo::Error::AccessDenied("locked".to_owned()));
             }
             if state.refuse_writes {
                 return Err(fdo::Error::Failed("writes refused".to_owned()));
+            }
+            if state.garble_writes {
+                item.value.push(b'!');
             }
             let existing = state
                 .items
@@ -294,7 +366,7 @@ impl FakeCollection {
                 state.next
             });
             state.items.insert(id, item);
-            (id, existing.is_none())
+            (id, existing.is_none(), state.confirm_writes)
         };
         if new {
             server
@@ -307,7 +379,12 @@ impl FakeCollection {
                 )
                 .await?;
         }
-        Ok((item_path(id), no_object()))
+        let prompt = if confirm {
+            prompt_at(server, &self.state, Vec::new()).await?
+        } else {
+            no_object()
+        };
+        Ok((item_path(id), prompt))
     }
 }
 
@@ -324,7 +401,7 @@ struct FakeItem {
 impl FakeItem {
     fn get_secret(&self, session: ObjectPath<'_>) -> fdo::Result<Secret> {
         let state = self.state.lock().unwrap();
-        if state.locked {
+        if state.locked || state.items_locked {
             return Err(fdo::Error::AccessDenied("locked".to_owned()));
         }
         let item = state
@@ -341,9 +418,19 @@ impl FakeItem {
 
     /// Forgets the item; the object stays on the bus, answering
     /// `GetSecret` with an error, as `SearchItems` no longer lists it.
-    fn delete(&self) -> OwnedObjectPath {
-        self.state.lock().unwrap().items.remove(&self.id);
-        no_object()
+    async fn delete(
+        &self,
+        #[zbus(object_server)] server: &ObjectServer,
+    ) -> fdo::Result<OwnedObjectPath> {
+        let confirm = {
+            let mut state = self.state.lock().unwrap();
+            state.items.remove(&self.id);
+            state.confirm_writes
+        };
+        if confirm {
+            return prompt_at(server, &self.state, Vec::new()).await;
+        }
+        Ok(no_object())
     }
 }
 
@@ -361,8 +448,14 @@ impl FakePrompt {
     ) -> fdo::Result<()> {
         let dismissed = {
             let mut state = self.state.lock().unwrap();
+            state.prompts += 1;
+            if state.hold {
+                let held = (emitter.path().to_owned().into(), self.objects.clone());
+                state.held.push(held);
+                return Ok(());
+            }
             if !state.dismiss {
-                state.locked = false;
+                state.unlock(&self.objects);
             }
             state.dismiss
         };
@@ -373,6 +466,10 @@ impl FakePrompt {
         };
         Self::completed(&emitter, dismissed, Value::from(unlocked)).await?;
         Ok(())
+    }
+
+    fn dismiss(&self) {
+        self.state.lock().unwrap().dismissals += 1;
     }
 
     #[zbus(signal)]
