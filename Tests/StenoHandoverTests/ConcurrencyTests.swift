@@ -95,11 +95,8 @@ import Testing
       await held.held()
       let second = Task { await phone.upload(id, chunk: 0, chunks[0]) }
       // Chunk 0's save waits in the engine behind the held one, so no seam
-      // signals its landing in memory. A starved runner can take seconds to
-      // get there; the test's time limit bounds the wait.
-      try await until(within: .seconds(60)) {
-        await engine.activeReceipts[id]?.receivedChunks == [0, 1]
-      }
+      // signals its landing in memory.
+      try await until { await engine.activeReceipts[id]?.receivedChunks == [0, 1] }
       // Give chunk 0's save the time an in-memory write takes to overtake.
       try await Task.sleep(for: .milliseconds(200))
       #expect(held.reachedStore.isEmpty, "no receipt save overtakes the held one")
