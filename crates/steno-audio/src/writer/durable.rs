@@ -3,11 +3,13 @@
 //! plain `fsync` when the filesystem refuses it. `File::sync_data` and
 //! `File::sync_all` are `F_FULLFSYNC` there, which a network share can
 //! refuse (a WebDAV mount answers ENOTTY, an uncategorized error kind)
-//! while `fsync` succeeds; SQLite falls back the same way. Only a failure
-//! of both is an error, and it is `fsync`'s. Elsewhere there is nothing to
-//! fall back to: `fdatasync`, `fsync` and `FlushFileBuffers` are the plain
-//! syncs, and a second try after a failed one proves nothing. Swift:
-//! `finish` in `Sources/StenoAudio/Writer/CAFFile.swift`, whose
+//! while `fsync` succeeds; SQLite falls back the same way, on any error.
+//! The fallback retries an interrupted `fsync`. Only a failure of both is
+//! an error, and it is `fsync`'s. Elsewhere there is nothing to fall back
+//! to: `fdatasync`, `fsync` and `FlushFileBuffers` are the plain syncs, and
+//! a second try after a failed one proves nothing. Swift: `finish` in
+//! `Sources/StenoAudio/Writer/CAFFile.swift` and
+//! `Sources/StenoAudio/Writer/WAVStreamWriter.swift`, whose
 //! `FileHandle.synchronize` is a plain `fsync` alone.
 
 use std::fs::File;
@@ -18,7 +20,8 @@ type SyncFn = fn(&File) -> io::Result<()>;
 
 /// What [`sync`] tries when the full sync fails.
 #[cfg(target_os = "macos")]
-const FALLBACK: Option<SyncFn> = Some(|file| Ok(rustix::fs::fsync(file)?));
+const FALLBACK: Option<SyncFn> =
+    Some(|file| Ok(rustix::io::retry_on_intr(|| rustix::fs::fsync(file))?));
 #[cfg(not(target_os = "macos"))]
 const FALLBACK: Option<SyncFn> = None;
 
@@ -42,8 +45,7 @@ mod tests {
         Err(io::Error::from_raw_os_error(25))
     }
 
-    /// A sync that succeeds, where the real full sync would fail with the
-    /// temporary directory on a WebDAV mount.
+    /// A sync that succeeds.
     const SYNCED: SyncFn = |_| Ok(());
 
     fn failed(_: &File) -> io::Result<()> {
