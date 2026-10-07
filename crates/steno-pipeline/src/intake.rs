@@ -143,9 +143,10 @@ impl HandoverIntake for RecordingIntake {
         // A retry of an admitted recording is answered from the store with
         // no write of its own: its admission is on the disk, committed
         // durably by this process or by an earlier one, whose commits the
-        // launch checkpoint synced before the listener started
-        // (`Store::checkpoint_durably`), even one that recovery read back
-        // after a failed WAL sync.
+        // launch checkpoint copied into the synced database file before the
+        // listener started, restarting the WAL so that no older frame is
+        // replayed over them (`Store::checkpoint_durably`), even one that
+        // recovery read back after a failed WAL sync.
         if let Some(meeting_id) = existing
             .as_ref()
             .and_then(|receipt| receipt.state.meeting_id())

@@ -33,12 +33,16 @@ public actor HandoverService {
   private nonisolated let listenerStates = Broadcast<ListenerState>(initial: .stopped)
   private nonisolated let receiptUpdates = Broadcast<[HandoverReceipt]>(initial: [])
 
-  /// The checkpoint the app and `steno dev handover serve` run before they
-  /// read the identity and build the service:
-  /// `MeetingStore.checkpointDurably()`. The intake answers a phone's retry
-  /// `complete` from a stored receipt, so a listener only runs over a store
-  /// whose commits are on the disk; on an error (`StoreNotSynced`) the
-  /// caller builds none. Rust: `HandoverService::checkpoint_store`.
+  /// The launch checkpoint, which the app and `steno dev handover serve` run
+  /// before they read the identity and build the service:
+  /// `MeetingStore.checkpointDurably()`, which copies every commit into the
+  /// synced database file and restarts the WAL. The intake answers a
+  /// phone's retry `complete` from a stored receipt with no write of its
+  /// own, and after a crash recovery can read back an admission whose WAL
+  /// sync failed. The checkpoint puts that admission on the disk, and the
+  /// restart keeps a power loss from replaying older WAL frames over it,
+  /// before any phone is answered. On an error (`StoreNotSynced`) the
+  /// caller builds no listener. Rust: `HandoverService::checkpoint_store`.
   public static func checkpointStore(_ store: MeetingStore) async throws {
     do {
       try await store.checkpointDurably()

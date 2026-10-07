@@ -55,12 +55,17 @@ impl std::fmt::Debug for HandoverService {
 }
 
 impl HandoverService {
-    /// The checkpoint the app and `steno dev handover serve` run before
-    /// they read the identity and build the service:
-    /// [`Store::checkpoint_durably`]. The intake answers a phone's retry
-    /// `complete` from a stored receipt, so a listener only runs over a
-    /// store whose commits are on the disk; on an error the caller builds
-    /// none. Swift: `HandoverService.checkpointStore(_:)`.
+    /// The launch checkpoint, which the app and `steno dev handover serve`
+    /// run before they read the identity and build the service:
+    /// [`Store::checkpoint_durably`], which copies every commit into the
+    /// synced database file and restarts the WAL. The intake answers a
+    /// phone's retry `complete` from a stored receipt with no write of its
+    /// own, and after a crash recovery can read back an admission whose
+    /// WAL sync failed (Linux keeps a page whose fsync failed in its cache,
+    /// marked clean). The checkpoint puts that admission on the disk, and
+    /// the restart keeps a power loss from replaying older WAL frames over
+    /// it, before any phone is answered. On an error the caller builds no
+    /// listener. Swift: `HandoverService.checkpointStore(_:)`.
     pub fn checkpoint_store(store: &Store) -> Result<(), StoreNotSynced> {
         store.checkpoint_durably().map_err(StoreNotSynced)
     }

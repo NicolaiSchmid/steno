@@ -260,13 +260,11 @@ pub fn handover_intake(
 }
 
 /// The handover listener over a loaded or minted identity, with the mac id
-/// the Phones settings show; `None`, with the reason, when the store could
-/// not sync its WAL to the disk ([`HandoverService::checkpoint_store`]) or the
-/// identity could not be read or stored. The checkpoint comes first: the
-/// intake answers a phone's retry `complete` from a stored receipt, so the
-/// listener only runs over a store whose commits are on the disk. A failed
-/// one keeps the handover off until the next launch, and the rest of the
-/// app runs. Swift: `AppEnvironment.makeHandover`.
+/// the Phones settings show; `None`, with the reason, when the launch
+/// checkpoint failed ([`HandoverService::checkpoint_store`], which says why
+/// it comes first) or the identity could not be read or stored. A failed
+/// checkpoint keeps the handover off until the next launch, and the rest of
+/// the app runs. Swift: `AppEnvironment.makeHandover`.
 fn handover_listener(
     store: &Arc<Store>,
     pipeline: &Arc<CurrentPipeline>,
@@ -1513,7 +1511,8 @@ mod tests {
     /// the disk: a checkpoint that fails (here one another connection
     /// blocks, with no busy timeout so the test does not wait) keeps the
     /// handover off, before an identity is minted; once the checkpoint
-    /// succeeds the listener is built.
+    /// succeeds the listener is built. Swift:
+    /// `testAStoreThatCannotSyncKeepsTheHandoverOff`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_store_that_cannot_sync_keeps_the_handover_off() {
         let (dir, store) = temp_store();

@@ -96,9 +96,10 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     // A retry of an admitted recording is answered from the store with no
     // write of its own: its admission is on the disk, committed durably by
     // this process or by an earlier one, whose commits the launch
-    // checkpoint synced before the listener started
-    // (`MeetingStore.checkpointDurably()`), even one that recovery read
-    // back after a failed WAL sync.
+    // checkpoint copied into the synced database file before the listener
+    // started, restarting the WAL so that no older frame is replayed over
+    // them (`MeetingStore.checkpointDurably()`), even one that recovery
+    // read back after a failed WAL sync.
     if let meetingID = existing?.state.meetingID, try await store.meeting(id: meetingID) != nil {
       return meetingID
     }

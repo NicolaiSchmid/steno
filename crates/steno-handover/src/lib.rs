@@ -12,9 +12,9 @@
 //!
 //! - [`HandoverService`]: the entry point, what the host and the CLI hold.
 //!   Pairing, the device list, revocation, the listener and the receipt
-//!   stream. Nothing else constructs the listener. Both run
-//!   [`HandoverService::checkpoint_store`] first ([`StoreNotSynced`] when
-//!   it fails).
+//!   stream. Nothing else constructs the listener. The host and the CLI
+//!   run [`HandoverService::checkpoint_store`] before they build it
+//!   ([`StoreNotSynced`] when it fails).
 //! - [`HandoverConfiguration`]: how the listener binds, where partial
 //!   uploads live, the pairing window and the read timeout; [`Clock`] is
 //!   the one time source.

@@ -281,14 +281,12 @@ final class AppEnvironment {
     return environment
   }
 
-  /// The handover listener over `identity()`, once the store's WAL is on
-  /// the disk (`HandoverService.checkpointStore(_:)`). The checkpoint comes
-  /// first: the intake answers a phone's retry `complete` from a stored
-  /// receipt, so the listener only runs over a store whose commits are on
-  /// the disk. A failed one throws `StoreNotSynced` before the identity is
-  /// read, and `live` keeps the handover off until the next launch with a
-  /// startup warning; the rest of the app runs. Rust: `handover_listener`
-  /// in `crates/steno-services/src/app.rs`.
+  /// The handover listener over `identity()`, after the launch checkpoint
+  /// (`HandoverService.checkpointStore(_:)`, which says why it comes
+  /// first). A failed checkpoint throws `StoreNotSynced` before the
+  /// identity is read, and `live` keeps the handover off until the next
+  /// launch with a startup warning; the rest of the app runs.
+  /// Rust: `handover_listener` in `crates/steno-services/src/app.rs`.
   static func makeHandover(
     store: MeetingStore, intake: any HandoverIntake, configuration: HandoverConfiguration,
     identity: () throws -> HandoverIdentity

@@ -39,7 +39,8 @@ struct DevHandover: AsyncParsableCommand {
         .appendingPathComponent("steno-handover-\(UUID().uuidString)", isDirectory: true)
 
       let store = try MeetingStore.inMemory()
-      // The app's launch checkpoint, so no listener skips it.
+      // The app's launch checkpoint, so no listener starts without it; over
+      // this in-memory store it does nothing.
       try await HandoverService.checkpointStore(store)
       let intake = FakeHandoverIntake()
       let identity = try Self.identity(name: name)
