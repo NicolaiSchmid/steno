@@ -593,7 +593,7 @@ async fn a_re_announce_with_other_bytes_is_409_and_other_chunks_only_while_recei
     let changed = [
         ("sha256", other_hash),
         ("byteCount", longer),
-        ("chunkSize", smaller_chunks),
+        ("chunkSize", smaller_chunks.clone()),
     ];
 
     assert_eq!(phone.announce(&metadata).await.status, 201);
@@ -602,7 +602,7 @@ async fn a_re_announce_with_other_bytes_is_409_and_other_chunks_only_while_recei
     assert_eq!(phone.complete(metadata.recording_id).await.status, 200);
 
     assert_metadata_differs(&phone, &changed[..2], "complete").await;
-    let resplit = phone.announce(&changed[2].1).await;
+    let resplit = phone.announce(&smaller_chunks).await;
     assert_eq!(resplit.status, 200, "complete: chunkSize");
     assert_eq!(
         resplit.json::<wire::RecordingStatus>(),
@@ -612,6 +612,12 @@ async fn a_re_announce_with_other_bytes_is_409_and_other_chunks_only_while_recei
     assert!(
         !test.inbox().has_partial(metadata.recording_id),
         "no partial is reopened"
+    );
+    let kept = phone.status(metadata.recording_id).await;
+    assert_eq!(
+        kept.json::<wire::RecordingStatus>(),
+        status(HandoverStateKind::Complete, vec![0, 1, 2]),
+        "the receipt keeps its own split"
     );
     let again = phone.announce(&metadata).await;
     assert_eq!(again.status, 200, "the same file is still complete");

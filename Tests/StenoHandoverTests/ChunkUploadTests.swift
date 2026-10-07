@@ -321,6 +321,11 @@ import Testing
         "every chunk of the phone's split")
       #expect(
         !test.service.engine.inbox.hasPartial(metadata.recordingID), "no partial is reopened")
+      let kept = try await phone.status(metadata.recordingID)
+      #expect(
+        (try? kept.json(Wire.RecordingStatus.self))
+          == Wire.RecordingStatus(state: .complete, receivedChunks: [0, 1, 2]),
+        "the receipt keeps its own split")
       let again = try await phone.announce(metadata)
       #expect(again.status == 200, "the same file is still complete")
       #expect(
