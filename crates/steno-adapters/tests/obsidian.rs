@@ -1222,7 +1222,7 @@ fn two_meetings_delivered_at_once_both_keep_their_line_on_a_shared_person_page()
     let (release, released) = mpsc::channel::<()>();
     let released = Mutex::new(released);
     let first = destination.clone().with_step_hook(move |step| {
-        if step == DeliveryStep::PersonPageRead(ANNA_PAGE) {
+        if step == DeliveryStep::WritingPersonPage(ANNA_PAGE) {
             let _ = paused.send(());
             let _ = released.lock().unwrap().recv();
         }

@@ -6,4 +6,6 @@ mod destination;
 /// The block is pure text and lives with the renderers; the destination is
 /// what writes it into the vault.
 pub use crate::rendering::ManagedBlock;
-pub use destination::{DeliveryStep, ObsidianError, ObsidianFolderDestination};
+#[cfg(feature = "testing")]
+pub use destination::DeliveryStep;
+pub use destination::{ObsidianError, ObsidianFolderDestination};

@@ -42,8 +42,10 @@ pub enum ObsidianError {
 /// A point inside [`ObsidianFolderDestination::deliver_meeting`] that a
 /// test can stop a delivery at, so a race with a second delivery (or with
 /// another process, played by the test) runs in a chosen order instead of
-/// by luck. Production code never installs a hook.
+/// by luck. Exported with the `testing` feature only; production code never
+/// installs a hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "testing"), allow(dead_code))]
 pub enum DeliveryStep<'a> {
     /// Another delivery in this process holds the vault; this one waits for
     /// it before touching anything.
@@ -53,14 +55,16 @@ pub enum DeliveryStep<'a> {
     ClaimingFolder(&'a str),
     /// The person page at this path has been read (or found missing) and
     /// is about to be written with this meeting's line merged in.
-    PersonPageRead(&'a str),
+    WritingPersonPage(&'a str),
 }
 
 /// The hook a test installs with
 /// [`ObsidianFolderDestination::with_step_hook`] (feature `testing`).
+#[cfg(feature = "testing")]
 #[derive(Clone)]
 struct StepHook(Arc<dyn Fn(DeliveryStep<'_>) + Send + Sync>);
 
+#[cfg(feature = "testing")]
 impl std::fmt::Debug for StepHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("StepHook")
@@ -108,6 +112,7 @@ pub struct ObsidianFolderDestination {
     platform: Platform,
     sink: LocalFolderSink,
     /// The tests' [`DeliveryStep`] hook; `None` outside them.
+    #[cfg(feature = "testing")]
     steps: Option<StepHook>,
 }
 
@@ -150,6 +155,7 @@ impl ObsidianFolderDestination {
             time_zone,
             platform: Platform::CURRENT,
             sink,
+            #[cfg(feature = "testing")]
             steps: None,
         }
     }
@@ -174,11 +180,17 @@ impl ObsidianFolderDestination {
         self
     }
 
+    #[cfg(feature = "testing")]
     fn reached(&self, step: DeliveryStep<'_>) {
         if let Some(StepHook(hook)) = &self.steps {
             hook(step);
         }
     }
+
+    /// No hook outside the tests: every step passes straight through.
+    #[cfg(not(feature = "testing"))]
+    #[allow(clippy::unused_self)]
+    fn reached(&self, _step: DeliveryStep<'_>) {}
 
     #[must_use]
     pub fn settings(&self) -> &ObsidianSettings {
@@ -217,7 +229,8 @@ impl ObsidianFolderDestination {
         previous: Option<&DeliveryReceipt>,
     ) -> Result<DeliveryReceipt, ObsidianError> {
         let lock = vault_lock(&self.settings.vault_path);
-        // A delivery that panicked leaves nothing behind the lock to
+        // `try_lock` first only so a test hook sees that this delivery
+        // waits. A delivery that panicked leaves nothing behind the lock to
         // repair, so a poisoned lock is taken as it is.
         let _vault = match lock.try_lock() {
             Ok(guard) => guard,
@@ -312,7 +325,7 @@ impl ObsidianFolderDestination {
             rendered.insert(path.clone());
             let mut data = page.page.into_bytes();
             let existing = self.reading(&path, || self.sink.read(&path))?;
-            self.reached(DeliveryStep::PersonPageRead(&path));
+            self.reached(DeliveryStep::WritingPersonPage(&path));
             if let Some(existing) = existing {
                 // A page that is not UTF-8 text cannot be merged without
                 // changing bytes outside the block, so it is left as it
