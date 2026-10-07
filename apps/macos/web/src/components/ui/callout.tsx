@@ -4,7 +4,8 @@ import { cn } from "@/lib/cn";
 
 /**
  * A notice that needs the user ("Summaries are off."): a tinted surface
- * with the icon inline, one sentence of title and text, and the actions at
+ * with the icon inline, a sentence of title and text (or a few sentences of
+ * title alone, as the recorder's joined warnings are), and the actions at
  * the trailing edge. When the text would fall under 360 px the actions wrap
  * onto their own line. The `sm` size is the sidebar's: smaller type, the
  * actions always on their own line under the text. The variant colours the
