@@ -38,4 +38,18 @@ export const expoQueueFiles: QueueFileAPI = {
 		const file = new File(path);
 		if (file.exists) file.delete();
 	},
+	async list(path) {
+		// The load time stands in for a creation time the file system does
+		// not report, so the row still gets a valid `startedAt`.
+		return new Directory(path).list().flatMap((entry) =>
+			entry instanceof File
+				? [
+						{
+							name: entry.name,
+							createdAt: entry.creationTime ?? entry.lastModified ?? Date.now(),
+						},
+					]
+				: [],
+		);
+	},
 };

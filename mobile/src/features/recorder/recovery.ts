@@ -11,7 +11,9 @@ import { errorMessage } from "@/lib/error-message";
  * While recording, expo-audio writes to its own directory, so the row carries
  * that `sourceUri`: recovery moves the file into the queue directory, hashes
  * it and queues it (the duration is estimated from the bit rate). A row whose
- * file is nowhere is marked failed so the user sees why nothing arrived.
+ * file is nowhere is marked failed so the user sees why nothing arrived. The
+ * queue storage adds rows in the same state for recording files the index
+ * did not list (`adoptRecordingFiles`), so they are hashed and queued here too.
  *
  * Two phases so the async file work never races a recording that starts in
  * the meantime: `planRecovery` inspects a snapshot, `applyRecovery` patches

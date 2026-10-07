@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	CHUNK_SIZE,
+	recordingFileName,
+} from "@/features/recorder/recording-options";
+import { applyRecovery, planRecovery } from "@/features/recorder/recovery";
+import { planNext } from "@/features/sync/upload-coordinator";
+import {
 	addRecording,
 	EMPTY_INDEX,
 	type QueueIndex,
@@ -13,8 +19,15 @@ import {
 	serializeQueueIndex,
 } from "./queue-storage";
 
-/** In-memory file API; `failRename` makes the next rename throw once. */
-function memoryFiles(initial: Record<string, string> = {}) {
+/**
+ * In-memory file API; `failRename` makes the next rename throw once. `list`
+ * returns every file under the directory, its creation time from `created`
+ * by file name (0 when absent).
+ */
+function memoryFiles(
+	initial: Record<string, string> = {},
+	created: Record<string, number> = {},
+) {
 	const store = new Map(Object.entries(initial));
 	const calls: string[] = [];
 	let failRename = false;
@@ -41,6 +54,15 @@ function memoryFiles(initial: Record<string, string> = {}) {
 		async remove(path) {
 			calls.push(`remove ${path}`);
 			store.delete(path);
+		},
+		async list(directory) {
+			calls.push(`list ${directory}`);
+			const prefix = `${directory.replace(/\/+$/, "")}/`;
+			return [...store.keys()]
+				.filter((path) => path.startsWith(prefix))
+				.map((path) => path.slice(prefix.length))
+				.filter((name) => !name.includes("/"))
+				.map((name) => ({ name, createdAt: created[name] ?? 0 }));
 		},
 	};
 	return {
@@ -98,6 +120,7 @@ describe("createQueueStorage", () => {
 		expect(files.calls).toEqual([
 			"read file:///docs/queue/index.json",
 			"read file:///docs/queue/index.json.tmp",
+			"list file:///docs/queue/",
 		]);
 	});
 
@@ -140,7 +163,7 @@ describe("createQueueStorage", () => {
 		expect(await storage.load()).toEqual(one);
 	});
 
-	it("sets a corrupt index aside and starts empty", async () => {
+	it("sets a corrupt index aside", async () => {
 		const logs: string[] = [];
 		const files = memoryFiles({ "file:///docs/queue/index.json": "{oops" });
 		const storage = createQueueStorage(files.api, "file:///docs/queue", (m) =>
@@ -161,7 +184,10 @@ describe("createQueueStorage", () => {
 		});
 		const storage = createQueueStorage(files.api, "file:///docs/queue");
 		expect(await storage.load()).toEqual(one);
-		expect(files.calls).toEqual(["read file:///docs/queue/index.json"]);
+		expect(files.calls).toEqual([
+			"read file:///docs/queue/index.json",
+			"list file:///docs/queue",
+		]);
 	});
 
 	it("takes a complete temp file over a torn index and sets the torn one aside", async () => {
@@ -202,7 +228,7 @@ describe("createQueueStorage", () => {
 		);
 	});
 
-	it("starts empty when only a corrupt temp file is left and nothing can be quarantined", async () => {
+	it("rebuilds from the files when only a corrupt temp file is left and nothing can be quarantined", async () => {
 		const logs: string[] = [];
 		const files = memoryFiles({ "file:///docs/queue/index.json.tmp": "nope" });
 		const storage = createQueueStorage(files.api, "file:///docs/queue", (m) =>
@@ -243,6 +269,193 @@ describe("createQueueStorage", () => {
 		};
 		await expect(storage.save(EMPTY_INDEX)).rejects.toThrow("ENOSPC");
 		expect(await storage.load()).toEqual(one);
+	});
+});
+
+const Q = "file:///docs/queue";
+const A = "11111111-1111-4111-8111-111111111111";
+const B = "22222222-2222-4222-8222-222222222222";
+const A_STARTED = "2026-10-01T09:00:00.000Z";
+const B_STARTED = "2026-10-01T10:00:00.000Z";
+/** Creation times by file name, as the file system reports them. */
+const CREATED = {
+	[recordingFileName(A)]: Date.parse(A_STARTED),
+	[recordingFileName(B)]: Date.parse(B_STARTED),
+};
+
+/** The row the storage adds for a recording file no row names. */
+function adopted(recordingID: string, startedAt: string) {
+	return {
+		recordingID,
+		fileName: recordingFileName(recordingID),
+		sourceUri: null,
+		startedAt,
+		durationSeconds: 0,
+		byteCount: 0,
+		sha256: null,
+		chunkSize: CHUNK_SIZE,
+		uploadedChunks: [],
+		state: "recording",
+		attempts: 0,
+		nextAttemptAt: null,
+		lastError: null,
+		meetingID: null,
+	};
+}
+
+describe("recording files the index does not list", () => {
+	it("rebuild a corrupt index, and the rebuilt rows are hashed, queued and uploaded oldest first", async () => {
+		const logs: string[] = [];
+		// B is listed first; the rows come out oldest first.
+		const files = memoryFiles(
+			{
+				[`${Q}/index.json`]: "{oops",
+				[`${Q}/${recordingFileName(B)}`]: "audio",
+				[`${Q}/${recordingFileName(A)}`]: "audio",
+			},
+			CREATED,
+		);
+		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m));
+		const loaded = await storage.load();
+		expect(loaded).toEqual({
+			version: 1,
+			recordings: [adopted(A, A_STARTED), adopted(B, B_STARTED)],
+		});
+		// The corrupt index is kept aside, never deleted, and no file is removed.
+		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("{oops");
+		expect(files.calls.filter((c) => c.startsWith("remove"))).toEqual([
+			`remove ${Q}/index.corrupt.json`,
+		]);
+		expect(logs).toEqual([
+			"queue index unreadable, rebuilding it from the recording files: QueueError: index is not JSON",
+			"queue index had no row for 2 recording file(s), adopted them",
+		]);
+
+		// Launch recovery hashes and queues them; the planner announces the older.
+		const patches = await planRecovery(loaded, {
+			size: () => 80_000,
+			adopt: async () => {
+				throw new Error("nothing to move");
+			},
+			sha256: async (fileName) => `sha(${fileName})`,
+		});
+		const recovered = applyRecovery(loaded, patches);
+		expect(recovered.recordings).toMatchObject([
+			{
+				recordingID: A,
+				state: "queued",
+				byteCount: 80_000,
+				sha256: `sha(${recordingFileName(A)})`,
+				durationSeconds: 10,
+			},
+			{ recordingID: B, state: "queued", byteCount: 80_000 },
+		]);
+		expect(
+			planNext(recovered, true, new Set(), new Date("2026-10-02T00:00:00Z")),
+		).toEqual({ kind: "announce", recordingID: A });
+
+		// Saved, the rebuilt index loads back as it is.
+		await storage.save(recovered);
+		expect(await storage.load()).toEqual(recovered);
+	});
+
+	it("rebuild the index when the index and the temp file are both corrupt", async () => {
+		const logs: string[] = [];
+		const files = memoryFiles(
+			{
+				[`${Q}/index.json`]: "{oops",
+				[`${Q}/index.json.tmp`]: "nope",
+				[`${Q}/${recordingFileName(A)}`]: "audio",
+			},
+			CREATED,
+		);
+		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m));
+		expect(await storage.load()).toEqual({
+			version: 1,
+			recordings: [adopted(A, A_STARTED)],
+		});
+		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("{oops");
+		expect(files.store.has(`${Q}/${recordingFileName(A)}`)).toBe(true);
+		expect(logs[0]).toMatch(/rebuilding it from the recording files/);
+	});
+
+	it("leave an empty queue when no recording file is on disk", async () => {
+		const logs: string[] = [];
+		const files = memoryFiles({
+			[`${Q}/index.json`]: "{oops",
+			[`${Q}/index.corrupt.json`]: "older",
+			[`${Q}/notes.m4a`]: "not a recording",
+		});
+		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m));
+		expect(await storage.load()).toEqual(EMPTY_INDEX);
+		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("{oops");
+		expect(files.store.get(`${Q}/notes.m4a`)).toBe("not a recording");
+		expect(logs).toEqual([
+			"queue index unreadable, rebuilding it from the recording files: QueueError: index is not JSON",
+		]);
+	});
+
+	it("join the rows of a temp file that missed a newer recording", async () => {
+		const files = memoryFiles(
+			{
+				[`${Q}/index.json`]: '{"version":1,"recordings":[{"rec',
+				[`${Q}/index.json.tmp`]: serializeQueueIndex(one),
+				[`${Q}/a.m4a`]: "audio",
+				[`${Q}/${recordingFileName(B)}`]: "audio",
+			},
+			CREATED,
+		);
+		const storage = createQueueStorage(files.api, Q);
+		expect(await storage.load()).toEqual({
+			version: 1,
+			recordings: [...one.recordings, adopted(B, B_STARTED)],
+		});
+	});
+
+	it("join a readable index too, and a file a row names keeps that row", async () => {
+		// A was delivered but its delete never ran; B's row was never saved.
+		const delivered = setState(
+			addRecording(EMPTY_INDEX, {
+				recordingID: A,
+				fileName: recordingFileName(A),
+				startedAt: A_STARTED,
+				durationSeconds: 10,
+				byteCount: 80_000,
+				sha256: "HASH",
+				chunkSize: CHUNK_SIZE,
+			}),
+			A,
+			"delivered",
+			{ meetingID: "m-1" },
+		);
+		const files = memoryFiles(
+			{
+				[`${Q}/index.json`]: serializeQueueIndex(delivered),
+				[`${Q}/${recordingFileName(A)}`]: "audio",
+				[`${Q}/${recordingFileName(B)}`]: "audio",
+			},
+			CREATED,
+		);
+		const storage = createQueueStorage(files.api, Q);
+		expect(await storage.load()).toEqual({
+			version: 1,
+			recordings: [...delivered.recordings, adopted(B, B_STARTED)],
+		});
+	});
+
+	it("leave the index as read when the directory cannot be listed", async () => {
+		const logs: string[] = [];
+		const files = memoryFiles({
+			[`${Q}/index.json`]: serializeQueueIndex(one),
+		});
+		files.api.list = async () => {
+			throw new Error("EACCES");
+		};
+		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m));
+		expect(await storage.load()).toEqual(one);
+		expect(logs).toEqual([
+			"queue directory unreadable, no recording files adopted: Error: EACCES",
+		]);
 	});
 });
 

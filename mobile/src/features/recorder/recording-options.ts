@@ -48,3 +48,17 @@ export const CHUNK_SIZE = 16 * 1024 * 1024;
 export function recordingFileName(recordingID: string): string {
 	return `${recordingID}${RECORDING_EXTENSION}`;
 }
+
+const RECORDING_FILE_NAME = new RegExp(
+	`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})${RECORDING_EXTENSION.replace(".", "\\.")}$`,
+	"i",
+);
+
+/**
+ * The recording id a `recordingFileName` was made from, or null for any other
+ * name (the index files, a file of another app version). The id is the UUID
+ * the recorder drew, which the Mac also requires in the upload path.
+ */
+export function recordingIDFromFileName(fileName: string): string | null {
+	return RECORDING_FILE_NAME.exec(fileName)?.[1] ?? null;
+}

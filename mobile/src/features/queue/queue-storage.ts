@@ -1,4 +1,9 @@
 import {
+	CHUNK_SIZE,
+	recordingIDFromFileName,
+} from "@/features/recorder/recording-options";
+import {
+	addRecording,
 	EMPTY_INDEX,
 	type QueuedRecording,
 	QueueError,
@@ -11,7 +16,9 @@ import {
  * Persistence for the queue index through an injected file API, so vitest
  * can make `rename` throw (plan P4). Writes go to `index.json.tmp` first and
  * are renamed over `index.json`; a rename failure leaves the previous index
- * untouched and removes the temp file.
+ * untouched and removes the temp file. Every load also lists the directory
+ * and adds a row for each recording file no row names, so an index that was
+ * lost, torn or written stale never strands a recording on disk.
  */
 export type QueueFileAPI = {
 	/** Null when the file does not exist. */
@@ -22,6 +29,14 @@ export type QueueFileAPI = {
 	rename(from: string, to: string): Promise<void>;
 	/** No-op when missing. */
 	remove(path: string): Promise<void>;
+	/** The files directly in `directory`. */
+	list(directory: string): Promise<QueueDirectoryEntry[]>;
+};
+
+export type QueueDirectoryEntry = {
+	name: string;
+	/** Milliseconds since the epoch. */
+	createdAt: number;
 };
 
 export type QueueStorage = {
@@ -120,6 +135,50 @@ function tryParse(
 	}
 }
 
+/**
+ * `index` plus a row for every recording file in `entries` that no row names
+ * by id or file name, oldest first. A row the index has keeps its state, so a
+ * file left behind by a `delivered` row is not uploaded again. A new row is
+ * `recording` with no size and no hash, the state crash recovery
+ * (`planRecovery` in `src/features/recorder/recovery.ts`) picks up at launch:
+ * it hashes the file and queues it, or marks the row failed when the file is
+ * empty. `startedAt` is the file's creation time, which is when expo-audio
+ * opened it for the recording; the move into the queue directory keeps it.
+ */
+export function adoptRecordingFiles(
+	index: QueueIndex,
+	entries: readonly QueueDirectoryEntry[],
+): QueueIndex {
+	const known = new Set(
+		index.recordings.flatMap((r) => [r.recordingID, r.fileName]),
+	);
+	return entries
+		.flatMap((entry) => {
+			const recordingID = recordingIDFromFileName(entry.name);
+			return recordingID && !known.has(recordingID) && !known.has(entry.name)
+				? [{ recordingID, entry }]
+				: [];
+		})
+		.sort((a, b) => a.entry.createdAt - b.entry.createdAt)
+		.reduce(
+			(acc, { recordingID, entry }) =>
+				addRecording(
+					acc,
+					{
+						recordingID,
+						fileName: entry.name,
+						startedAt: new Date(entry.createdAt).toISOString(),
+						durationSeconds: 0,
+						byteCount: 0,
+						sha256: null,
+						chunkSize: CHUNK_SIZE,
+					},
+					"recording",
+				),
+			index,
+		);
+}
+
 function join(directory: string, name: string): string {
 	return `${directory.replace(/\/+$/, "")}/${name}`;
 }
@@ -133,25 +192,51 @@ export function createQueueStorage(
 	const tempPath = join(directory, "index.json.tmp");
 	const corruptPath = join(directory, "index.corrupt.json");
 
+	const readIndex = async (): Promise<QueueIndex> => {
+		const text = await files.readText(indexPath);
+		const parsed = text === null ? null : tryParse(text);
+		if (parsed?.ok) return parsed.value;
+		// Missing or torn index: a complete temp file is the newest state
+		// (a crash between the temp write and the rename leaves exactly
+		// that), so it wins over quarantining. Without one the rows come
+		// from the recording files alone.
+		const temp = await files.readText(tempPath);
+		const fromTemp = temp === null ? null : tryParse(temp);
+		if (parsed && !parsed.ok) {
+			const outcome = fromTemp?.ok
+				? "using the temp file"
+				: "rebuilding it from the recording files";
+			log(`queue index unreadable, ${outcome}: ${parsed.reason}`);
+			await files.remove(corruptPath);
+			await files.rename(indexPath, corruptPath).catch(() => {});
+		} else if (fromTemp && !fromTemp.ok) {
+			log(
+				`queue temp index unreadable, rebuilding the index from the recording files: ${fromTemp.reason}`,
+			);
+		}
+		return fromTemp?.ok ? fromTemp.value : EMPTY_INDEX;
+	};
+
 	return {
 		async load() {
-			const text = await files.readText(indexPath);
-			const parsed = text === null ? null : tryParse(text);
-			if (parsed?.ok) return parsed.value;
-			// Missing or torn index: a complete temp file is the newest state
-			// (a crash between the temp write and the rename leaves exactly
-			// that), so it wins over quarantining.
-			const temp = await files.readText(tempPath);
-			const fromTemp = temp === null ? null : tryParse(temp);
-			if (parsed && !parsed.ok) {
-				const outcome = fromTemp?.ok ? "using the temp file" : "starting empty";
-				log(`queue index unreadable, ${outcome}: ${parsed.reason}`);
-				await files.remove(corruptPath);
-				await files.rename(indexPath, corruptPath).catch(() => {});
-			} else if (fromTemp && !fromTemp.ok) {
-				log(`queue temp index unreadable, starting empty: ${fromTemp.reason}`);
+			const loaded = await readIndex();
+			let entries: QueueDirectoryEntry[];
+			try {
+				entries = await files.list(directory);
+			} catch (error) {
+				log(
+					`queue directory unreadable, no recording files adopted: ${String(error)}`,
+				);
+				return loaded;
 			}
-			return fromTemp?.ok ? fromTemp.value : EMPTY_INDEX;
+			const adopted = adoptRecordingFiles(loaded, entries);
+			const count = adopted.recordings.length - loaded.recordings.length;
+			if (count > 0) {
+				log(
+					`queue index had no row for ${count} recording file(s), adopted them`,
+				);
+			}
+			return adopted;
 		},
 
 		async save(index) {
