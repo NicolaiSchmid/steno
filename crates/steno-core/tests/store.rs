@@ -751,8 +751,9 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
 
     let inside = store
         .write_durably(|transaction| {
-            // A no-op change, so the commit writes a frame to the WAL.
-            transaction.execute("UPDATE setting SET value = value", [])?;
+            // A change of a page, so the commit writes a frame to the WAL;
+            // an update to the same value would write none.
+            transaction.execute_batch("CREATE TABLE probe(x)")?;
             sync_levels(transaction)
         })
         .unwrap();
@@ -787,7 +788,8 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
 
 /// A durable checkpoint leaves every commit in the database file itself:
 /// a copy of that file without its WAL holds the last commit. It runs
-/// under `FULL` and sets `NORMAL` back, like a durable write.
+/// under `FULL` and sets `NORMAL` back, like a durable write. Swift:
+/// `aDurableCheckpointCopiesEveryCommitIntoTheDatabaseFile`.
 #[test]
 fn a_durable_checkpoint_copies_every_commit_into_the_database_file() {
     let dir = tempfile::tempdir().unwrap();
@@ -815,6 +817,7 @@ fn a_durable_checkpoint_copies_every_commit_into_the_database_file() {
 /// A checkpoint another connection blocks past the busy timeout (here
 /// none, so the test does not wait) fails as busy, as GRDB's does, and
 /// sets `NORMAL` back; once the other connection lets go it succeeds.
+/// Swift: `aCheckpointAnotherConnectionBlocksThrowsBusy`.
 #[test]
 fn a_checkpoint_another_connection_blocks_fails_as_busy() {
     let dir = tempfile::tempdir().unwrap();
@@ -831,5 +834,86 @@ fn a_checkpoint_another_connection_blocks_fails_as_busy() {
     assert_eq!(store.read(sync_levels).unwrap(), (1, false));
 
     writer.execute_batch("ROLLBACK").unwrap();
+    store.checkpoint_durably().unwrap();
+}
+
+/// The salt in the WAL file's header (bytes 16 to 24), which every valid
+/// frame repeats: recovery replays only frames under the header's salt.
+fn wal_salt(database: &std::path::Path) -> Vec<u8> {
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::read(wal).unwrap()[16..24].to_vec()
+}
+
+/// A durable checkpoint starts the WAL over: the file's header has a new
+/// salt, so recovery after a power loss replays none of the frames written
+/// before it. The write that restarts it leaves the schema and the applied
+/// migrations as they were. Swift: `aDurableCheckpointRestartsTheWAL`.
+#[test]
+fn a_durable_checkpoint_restarts_the_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .write(|transaction| {
+            transaction.execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (42);")?;
+            Ok(())
+        })
+        .unwrap();
+    let salt = wal_salt(&path);
+    let schema = store.schema_dump().unwrap();
+
+    store.checkpoint_durably().unwrap();
+
+    assert_ne!(wal_salt(&path), salt, "the WAL restarted");
+    assert_eq!(store.schema_dump().unwrap(), schema);
+    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
+}
+
+/// A reader still in the WAL blocks the checkpoint, on an older snapshot
+/// and on the newest one alike: the WAL cannot restart under it. The
+/// checkpoint fails as busy (no busy timeout here, so the test does not
+/// wait) and succeeds once the reader has ended. Swift:
+/// `aReaderInTheWALBlocksTheCheckpoint`.
+#[test]
+fn a_reader_in_the_wal_blocks_the_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+        .unwrap();
+    let insert = |value: i64| {
+        store
+            .write(|transaction| {
+                transaction.execute("INSERT INTO probe VALUES (?1)", [value])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    store
+        .write(|transaction| Ok(transaction.execute_batch("CREATE TABLE probe(x)")?))
+        .unwrap();
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    let begin_reading = || {
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT count(*) FROM setting", [], |row| row.get(0))
+            .unwrap();
+    };
+    insert(1);
+
+    begin_reading();
+    insert(2);
+    let error = store.checkpoint_durably().unwrap_err();
+    assert!(error.is_busy(), "older snapshot: {error}");
+    reader.execute_batch("COMMIT").unwrap();
+
+    insert(3);
+    begin_reading();
+    let error = store.checkpoint_durably().unwrap_err();
+    assert!(error.is_busy(), "newest snapshot: {error}");
+    reader.execute_batch("COMMIT").unwrap();
+
     store.checkpoint_durably().unwrap();
 }

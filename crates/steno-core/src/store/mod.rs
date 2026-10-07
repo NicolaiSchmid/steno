@@ -292,24 +292,33 @@ impl Store {
         self.commit_on(&mut full.connection, body)
     }
 
-    /// Copies every commit in the WAL into the database file and syncs
-    /// both (`PRAGMA wal_checkpoint(FULL)` under `synchronous = FULL` with
-    /// `fullfsync` on), so everything this connection reads is on the disk
-    /// when it returns. The app runs it at launch, before the handover
-    /// listener starts: after a crash, recovery can read back a commit
-    /// whose WAL sync failed (Linux keeps a page whose fsync failed in its
-    /// cache, marked clean), and the intake would answer a phone's retry
-    /// `complete` from that commit. A failed sync is an error, and so is a
-    /// checkpoint another connection still blocks when the busy timeout
-    /// runs out: SQLite's `SQLITE_BUSY`, which GRDB throws too and
-    /// [`StoreError::is_busy`] recognises, since the commits it could not
-    /// copy are not known to be on the disk. Swift:
-    /// `MeetingStore.checkpointDurably`.
+    /// Copies every commit in the WAL into the database file, syncs it, and
+    /// starts the WAL over, so a power loss afterwards brings back what the
+    /// store reads now. `HandoverService::checkpoint_store` runs it at
+    /// launch, before the handover listener starts, and says why.
+    /// `PRAGMA wal_checkpoint(RESTART)` under `synchronous = FULL` with
+    /// `fullfsync` on copies the frames, syncs the database file and waits
+    /// until no reader is left in the WAL. That leaves the WAL file as it
+    /// was: after a failed WAL sync it can still hold older frames under
+    /// their old salt, which recovery after a power loss would replay over
+    /// the checkpointed pages. So one durable write that changes a page
+    /// follows, under the same hold of the lock: a private table created
+    /// and dropped, which leaves the schema and the applied migrations as
+    /// they were. Its commit restarts the WAL with a new salt and syncs the
+    /// header and its frames, and recovery skips every frame under the old
+    /// salt. A failed sync is an error, and so is a checkpoint that another
+    /// connection (a writer, or a reader still in the WAL) blocks when the
+    /// busy timeout runs out: SQLite's `SQLITE_BUSY`, which GRDB throws too
+    /// and [`StoreError::is_busy`] recognises, since the commits it could
+    /// not copy are not known to be on the disk. An in-memory store has no
+    /// WAL and returns at once. Swift: `MeetingStore.checkpointDurably`.
     pub fn checkpoint_durably(&self) -> Result<()> {
-        let full = FullSync::hold(self.lock())?;
-        let blocked: bool =
+        let mut full = FullSync::hold(self.lock())?;
+        let (blocked, wal_frames): (bool, i64) =
             full.connection
-                .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| row.get(0))?;
+                .query_row("PRAGMA wal_checkpoint(RESTART)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
         if blocked {
             return Err(rusqlite::Error::SqliteFailure(
                 rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
@@ -317,7 +326,16 @@ impl Store {
             )
             .into());
         }
-        Ok(())
+        if wal_frames < 0 {
+            return Ok(());
+        }
+        // A commit that changes no page (an update to the same value)
+        // writes no frame and leaves the WAL as it is.
+        self.commit_on(&mut full.connection, |transaction| {
+            transaction
+                .execute_batch("CREATE TABLE stenoWalRestart(x); DROP TABLE stenoWalRestart;")?;
+            Ok(())
+        })
     }
 
     /// The `IMMEDIATE` transaction of [`Store::write`] on `connection`,
