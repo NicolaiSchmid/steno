@@ -158,6 +158,44 @@ fn interrupted_recordings_fail_at_launch() {
     );
 }
 
+/// Only the rows named, and only while they still record: a recording
+/// left alone, or one started since, keeps recording.
+#[test]
+fn only_the_named_recordings_fail() {
+    let store = Store::in_memory().unwrap();
+    let now = date("2026-09-30T09:00:00.000Z");
+    let recording = |id: &str| {
+        let mut meeting = common::meeting();
+        meeting.id = uuid(id);
+        meeting.state = MeetingState::Recording;
+        store.save_meeting(&meeting).unwrap();
+        meeting.id
+    };
+    let failed = recording("00000000-0000-4000-8000-0000000000a1");
+    let left_alone = recording("00000000-0000-4000-8000-0000000000a2");
+    let mut queued = common::meeting();
+    queued.id = uuid("00000000-0000-4000-8000-0000000000a3");
+    queued.state = MeetingState::Queued;
+    store.save_meeting(&queued).unwrap();
+    let missing = uuid("00000000-0000-4000-8000-0000000000a4");
+
+    assert_eq!(
+        store
+            .fail_recordings(&[failed, queued.id, missing], "interrupted", now)
+            .unwrap(),
+        vec![failed]
+    );
+    let state = |id| store.meeting(id).unwrap().unwrap().state;
+    assert_eq!(
+        state(failed),
+        MeetingState::Failed {
+            reason: "interrupted".to_owned()
+        }
+    );
+    assert_eq!(state(left_alone), MeetingState::Recording);
+    assert_eq!(state(queued.id), MeetingState::Queued);
+}
+
 /// The reason is Swift's default, read from the Swift source so the two
 /// cannot drift apart.
 #[test]

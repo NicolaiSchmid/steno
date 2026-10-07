@@ -240,7 +240,9 @@ impl Store {
     /// Launch reconciliation: every meeting still `recording` belongs to a
     /// process that died mid-meeting. One transaction marks them
     /// `failed(reason)` with `updatedAt = now` and returns their ids,
-    /// oldest first. The app passes [`Self::INTERRUPTED_RECORDING_REASON`].
+    /// oldest first. The app recovers what it can first and fails the rest
+    /// through [`Self::fail_recordings`], with
+    /// [`Self::INTERRUPTED_RECORDING_REASON`].
     pub fn fail_interrupted_recordings(
         &self,
         reason: &str,
@@ -261,6 +263,39 @@ impl Store {
                 save(transaction, meeting)?;
             }
             Ok(meetings.into_iter().map(|meeting| meeting.id).collect())
+        })
+    }
+
+    /// [`Self::fail_interrupted_recordings`] for the meetings in `ids`
+    /// alone, each only while it is still `recording`; returns the ones it
+    /// marked, in `ids` order. The launch passes the rows its recovery
+    /// could not salvage, so a row it left alone (a recording another
+    /// process is still writing) and a recording started since it listed
+    /// them stay `recording`. Swift: `MeetingStore.failInterruptedRecordings`,
+    /// which failed every such row.
+    pub fn fail_recordings(
+        &self,
+        ids: &[Uuid],
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>> {
+        self.write(|transaction| {
+            let mut failed = Vec::new();
+            for &id in ids {
+                let Some(mut meeting) = fetch(transaction, id)? else {
+                    continue;
+                };
+                if meeting.state != MeetingState::Recording {
+                    continue;
+                }
+                meeting.state = MeetingState::Failed {
+                    reason: reason.to_owned(),
+                };
+                meeting.updated_at = now;
+                save(transaction, &meeting)?;
+                failed.push(id);
+            }
+            Ok(failed)
         })
     }
 
