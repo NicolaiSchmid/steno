@@ -1554,56 +1554,23 @@ mod tests {
         assert_eq!(reports.load(Ordering::SeqCst), 1);
     }
 
-    #[test]
-    fn end_closes_the_gate_before_it_waits_for_the_thread() {
-        let gate = Arc::new(Gate::new());
-        let (quit, _quit_receiver) = pw::channel::channel();
+    /// `end(.., limit)` on its own thread, for a capture thread that runs
+    /// `body` and then ends; the receiver gets how long `end` took.
+    fn end_on_a_thread(
+        gate: &Arc<Gate>,
+        limit: Duration,
+        body: impl FnOnce() + Send + 'static,
+    ) -> (Receiver<Duration>, JoinHandle<()>) {
         let (ending, ended) = sync_channel::<()>(0);
-        // A thread that ends only once the gate closed.
-        let thread = std::thread::spawn({
-            let gate = Arc::clone(&gate);
-            move || {
-                let _ending = ending;
-                while gate.open.load(Ordering::SeqCst) {
-                    std::thread::yield_now();
-                }
-            }
-        });
-        let started = Instant::now();
-        LiveCaptureBackend::end(
-            Active {
-                quit,
-                gate: Arc::clone(&gate),
-                ended,
-                thread,
-                thread_id: Arc::new(AtomicU32::new(0)),
-            },
-            STOP_TIMEOUT,
-        );
-        assert!(!gate.open.load(Ordering::SeqCst));
-        assert!(
-            started.elapsed() < STOP_TIMEOUT,
-            "the thread ended and was joined"
-        );
-    }
-
-    #[test]
-    fn end_leaves_a_report_stuck_in_its_handler_and_its_thread_behind() {
-        const LIMIT: Duration = Duration::from_millis(300);
-        let gate = Arc::new(Gate::new());
-        let (quit, _quit_receiver) = pw::channel::channel();
-        let (ending, ended) = sync_channel::<()>(0);
-        // The PipeWire thread, stuck in a report's handler until released.
-        let (release, passer) = hold_inside(&gate, Pass::Report);
-        let (done, thread_done) = sync_channel(1);
         let thread = std::thread::spawn(move || {
             let _ending = ending;
-            done.send(passer.join().unwrap()).unwrap();
+            body();
         });
-        let (returned, end_returned) = sync_channel(1);
+        let (returned, took) = sync_channel(1);
         let stopper = std::thread::spawn({
-            let gate = Arc::clone(&gate);
+            let gate = Arc::clone(gate);
             move || {
+                let (quit, _quit_receiver) = pw::channel::channel();
                 let active = Active {
                     quit,
                     gate,
@@ -1612,11 +1579,42 @@ mod tests {
                     thread_id: Arc::new(AtomicU32::new(0)),
                 };
                 let started = Instant::now();
-                LiveCaptureBackend::end(active, LIMIT);
+                LiveCaptureBackend::end(active, limit);
                 returned.send(started.elapsed()).unwrap();
             }
         });
-        let took = end_returned
+        (took, stopper)
+    }
+
+    #[test]
+    fn end_closes_the_gate_before_it_waits_for_the_thread() {
+        let gate = Arc::new(Gate::new());
+        // A thread that ends only once the gate closed.
+        let (took, stopper) = end_on_a_thread(&gate, STOP_TIMEOUT, {
+            let gate = Arc::clone(&gate);
+            move || {
+                while gate.open.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+            }
+        });
+        let took = took.recv().expect("end() returns");
+        stopper.join().unwrap();
+        assert!(!gate.open.load(Ordering::SeqCst));
+        assert!(took < STOP_TIMEOUT, "the thread ended and was joined");
+    }
+
+    #[test]
+    fn end_leaves_a_report_stuck_in_its_handler_and_its_thread_behind() {
+        const LIMIT: Duration = Duration::from_millis(300);
+        let gate = Arc::new(Gate::new());
+        // The PipeWire thread, stuck in a report's handler until released.
+        let (release, passer) = hold_inside(&gate, Pass::Report);
+        let (done, thread_done) = sync_channel(1);
+        let (took, stopper) = end_on_a_thread(&gate, LIMIT, move || {
+            done.send(passer.join().unwrap()).unwrap();
+        });
+        let took = took
             .recv_timeout(Duration::from_secs(10))
             .expect("end() returns at its limit with the report still inside");
         assert!(
@@ -1638,36 +1636,17 @@ mod tests {
     fn end_gives_a_report_and_the_thread_one_deadline() {
         const LIMIT: Duration = Duration::from_secs(1);
         let gate = Arc::new(Gate::new());
-        let (quit, _quit_receiver) = pw::channel::channel();
-        let (ending, ended) = sync_channel::<()>(0);
         // A report that leaves halfway through the limit, and a thread that
         // does not end before the test lets go.
         let (release, passer) = hold_inside(&gate, Pass::Report);
         let (unstick, stuck) = sync_channel::<()>(0);
-        let thread = std::thread::spawn(move || {
-            let _ending = ending;
+        let (took, stopper) = end_on_a_thread(&gate, LIMIT, move || {
             let _ = stuck.recv();
-        });
-        let (returned, end_returned) = sync_channel(1);
-        let stopper = std::thread::spawn({
-            let gate = Arc::clone(&gate);
-            move || {
-                let active = Active {
-                    quit,
-                    gate,
-                    ended,
-                    thread,
-                    thread_id: Arc::new(AtomicU32::new(0)),
-                };
-                let started = Instant::now();
-                LiveCaptureBackend::end(active, LIMIT);
-                returned.send(started.elapsed()).unwrap();
-            }
         });
         std::thread::sleep(LIMIT / 2);
         release.send(()).unwrap();
         assert!(passer.join().unwrap());
-        let took = end_returned
+        let took = took
             .recv_timeout(Duration::from_secs(10))
             .expect("end() returns at its limit with the thread still running");
         // The join given a limit of its own would take until 1.5 s.
