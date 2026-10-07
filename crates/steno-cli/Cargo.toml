@@ -39,8 +39,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "
 uuid.workspace = true
 
 [dev-dependencies]
-# Reads the recorded migrations without the store, which would migrate.
-rusqlite.workspace = true
 steno-llm = { path = "../steno-llm", features = ["testing"] }
 tempfile.workspace = true
 

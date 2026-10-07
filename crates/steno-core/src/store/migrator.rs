@@ -213,6 +213,54 @@ mod tests {
         ));
     }
 
+    /// Opening without migrating reads a database at this build's version,
+    /// refuses one an older build left (naming the version it lacks) and
+    /// one a newer build migrated, and changes neither; a missing file is
+    /// not created.
+    #[test]
+    fn opening_without_migrating_applies_nothing() {
+        use crate::Store;
+        use crate::testing::{database_one_version_behind, recorded_migrations};
+
+        let directory = tempfile::tempdir().unwrap();
+        let current = directory.path().join("current.sqlite");
+        drop(Store::open(&current).unwrap());
+        let store = Store::open_without_migrating(&current).unwrap();
+        assert_eq!(
+            store.applied_migrations().unwrap(),
+            ["v1", "v2", "v3", "v4"]
+        );
+
+        let behind = directory.path().join("behind.sqlite");
+        database_one_version_behind(&behind);
+        let error = Store::open_without_migrating(&behind).expect_err("an older schema is refused");
+        assert!(
+            matches!(error, StoreError::PendingMigration(ref id) if id == "v4"),
+            "{error}"
+        );
+        assert_eq!(
+            recorded_migrations(&behind),
+            ["v1", "v2", "v3"],
+            "nothing was migrated"
+        );
+
+        Connection::open(&current)
+            .unwrap()
+            .execute(
+                "INSERT INTO grdb_migrations (identifier) VALUES ('v99')",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            Store::open_without_migrating(&current),
+            Err(StoreError::UnknownMigration(ref id)) if id == "v99"
+        ));
+
+        let missing = directory.path().join("missing.sqlite");
+        assert!(Store::open_without_migrating(&missing).is_err());
+        assert!(!missing.exists(), "a missing database is not created");
+    }
+
     #[test]
     fn a_migration_breaking_a_foreign_key_rolls_back() {
         let mut connection = Connection::open_in_memory().unwrap();

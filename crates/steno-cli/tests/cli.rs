@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use steno_core::testing::{database_one_version_behind, recorded_migrations};
+
 struct Run {
     status: i32,
     stdout: String,
@@ -408,18 +410,6 @@ fn export_beside(db: &Path, home: &Path) -> Run {
     )
 }
 
-/// The migrations `db` records, read without the store (which migrates).
-fn applied_migrations(db: &Path) -> Vec<String> {
-    rusqlite::Connection::open(db)
-        .unwrap()
-        .prepare("SELECT identifier FROM grdb_migrations ORDER BY rowid")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap()
-}
-
 /// A command that only reads, beside the app, opens the database without
 /// migrating it: it runs on a database at this build's version and changes
 /// nothing, and refuses one an older app still runs on rather than migrate
@@ -434,7 +424,7 @@ fn a_reading_command_beside_the_app_never_migrates() {
         home,
     );
     assert_eq!(migrate.status, 0, "{}", migrate.stderr);
-    let before = applied_migrations(&current);
+    let before = recorded_migrations(&current);
     let _app = steno_core::DatabaseLock::acquire(&current).unwrap();
     let read = export_beside(&current, home);
     assert!(
@@ -442,34 +432,11 @@ fn a_reading_command_beside_the_app_never_migrates() {
         "it opened the database and looked the meeting up: {}",
         read.stderr
     );
-    assert_eq!(applied_migrations(&current), before);
+    assert_eq!(recorded_migrations(&current), before);
 
-    // What an older app left: every migration but the newest.
     let older = home.join("older.sqlite");
-    {
-        let mut connection = rusqlite::Connection::open(&older).unwrap();
-        let _: String = connection
-            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-            .unwrap();
-        let transaction = connection.transaction().unwrap();
-        transaction
-            .execute_batch("CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
-            .unwrap();
-        let (_, migrations) = steno_core::store::migrator::MIGRATIONS
-            .split_last()
-            .unwrap();
-        for migration in migrations {
-            transaction.execute_batch(migration.sql).unwrap();
-            transaction
-                .execute(
-                    "INSERT INTO grdb_migrations (identifier) VALUES (?1)",
-                    [migration.identifier],
-                )
-                .unwrap();
-        }
-        transaction.commit().unwrap();
-    }
-    let before = applied_migrations(&older);
+    database_one_version_behind(&older);
+    let before = recorded_migrations(&older);
     let _older_app = steno_core::DatabaseLock::acquire(&older).unwrap();
     let refused = export_beside(&older, home);
     assert_eq!(refused.status, 2, "{}", refused.stderr);
@@ -481,7 +448,7 @@ fn a_reading_command_beside_the_app_never_migrates() {
         "{}",
         refused.stderr
     );
-    assert_eq!(applied_migrations(&older), before, "nothing was migrated");
+    assert_eq!(recorded_migrations(&older), before, "nothing was migrated");
 }
 
 #[test]
