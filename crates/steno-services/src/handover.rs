@@ -308,12 +308,11 @@ impl GatedHandover {
         }
         let this = self.clone();
         let built = tokio::task::spawn_blocking(move || (this.make)()).await;
-        let listener = match built {
-            Ok(Ok(listener)) => listener,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "phone handover is unavailable");
-                return;
-            }
+        let listener = match built
+            .map_err(|error| error.to_string())
+            .and_then(|made| made)
+        {
+            Ok(listener) => listener,
             Err(error) => {
                 tracing::warn!(%error, "phone handover is unavailable");
                 return;

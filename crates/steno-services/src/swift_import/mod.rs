@@ -570,21 +570,17 @@ impl SwiftImport for ImportStep {
         } else {
             self.open_key();
         }
-        let outcome = self.export();
+        let failure = self.export().err();
         {
             let mut state = self.state();
-            match outcome {
-                Ok(()) => {
-                    state.stage = SwiftImportStage::Done;
-                    state.failure = None;
-                }
-                Err(failure) => {
-                    state.stage = SwiftImportStage::Waiting;
-                    state.failure = Some(failure);
-                }
-            }
+            state.stage = if failure.is_none() {
+                SwiftImportStage::Done
+            } else {
+                SwiftImportStage::Waiting
+            };
+            state.failure = failure;
         }
-        if outcome.is_ok() {
+        if failure.is_none() {
             self.preferences.set_flag(IMPORT_RAN_KEY, true);
             self.gate.set_handover(HandoverGate::Ready);
         } else {
@@ -599,8 +595,7 @@ impl SwiftImport for ImportStep {
         if self.state().stage == SwiftImportStage::Done {
             return self.status();
         }
-        let read_key = self.state().read_key;
-        if read_key {
+        if self.state().read_key {
             self.key_read(None);
         } else {
             self.open_key();
