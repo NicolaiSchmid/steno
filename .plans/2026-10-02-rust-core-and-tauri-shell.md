@@ -1400,17 +1400,18 @@ touch lines; each fix is ported to Swift before cutover.
   leaves memory. The phone marks that recording `delivered` and deletes its copy also
   when an unpair moved the row to `unpaired`, or a new pairing queued it again, while
   the `complete` was out (`TRANSITIONS` in `mobile/src/features/queue/queue-index.ts`
-  allows `unpaired` and `queued` to `delivered`), so no pairing uploads it again as a
-  second meeting. Until that `complete` answers, the planner (`planNext` in
+  allows `unpaired` and `queued` to `delivered`), so after a `complete` whose 200
+  reaches the phone no pairing uploads it again as a second meeting. Until that
+  `complete` answers, the planner (`planNext` in
   `mobile/src/features/sync/upload-coordinator.ts`) announces nothing for the row, so
-  its 200 cannot delete the file under a new pairing's upload. A refused `complete`
-  leaves the row `unpaired` with its file, or `queued` with a backoff after a new
-  pairing, and the new pairing uploads it. Both apps bind the hash to the file the
-  intake gets: the partial's identity is taken before the `verifying` write and
-  checked before the promote, and a
-  partial gone or created again meanwhile (a stale `complete`'s refusal, then the
-  phone's retried announce) answers 409 with no chunk listed, so the phone sends every
-  chunk again instead of the intake admitting an empty file. Swift compares APFS file
+  its 200 cannot delete the file under a new pairing's upload. A 401 to that
+  `complete` leaves the row `unpaired` with its file, for the next pairing to upload,
+  or `queued` with a backoff after a new pairing, which uploads it. Both apps bind the
+  hash to the file the intake gets: the partial's identity is taken before the
+  `verifying` write and checked before the promote, and a partial gone or created
+  again meanwhile (a stale `complete`'s refusal, then the phone's retried announce)
+  answers 409 with no chunk listed, so the phone sends every chunk again instead of
+  the intake admitting an empty file. Swift compares APFS file
   numbers, which are never reused. Rust holds the partial open until the promote, so
   its number cannot go to another file. Both apps share two gaps. The files of a
   revoked device's receipt that is only in the store, and not being completed, wait
@@ -1767,6 +1768,13 @@ request that fixes an item deletes it.
   need an intake that moves it first. Where: `admit` in
   `crates/steno-handover/src/engine/recording.rs` and in
   `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #208, #209.
+- **Unowned.** A `complete` the computer admitted whose answer never reaches the phone
+  (the 10 s timeout, a dropped connection, the app killed or suspended) leaves the row
+  pending with its file. When an unpair follows, the revoke deletes the receipt, so the
+  next pairing uploads the recording again and the computer admits it as a second
+  meeting. Both apps. Where: `revoke` in `crates/steno-handover/src/engine/mod.rs` and
+  `Sources/StenoHandover/Routing/HandoverEngine.swift`, the `complete` case in
+  `mobile/src/features/sync/upload-executor.ts`. Found: #211.
 - **Unowned.** The phone intake's receipt and meeting commits run under
   `synchronous = NORMAL` (`Store::open` in `crates/steno-core/src/store/mod.rs`), so a
   power loss after the computer answers `complete`, when the phone deletes its copy,
