@@ -356,7 +356,7 @@ import Testing
   }
 
   @Test(.timeLimit(.minutes(1)))
-  func anAdmissionOfARevokedPhoneLeavesAnotherPhonesFilesAlone() async throws {
+  func anAdmissionOfARevokedPhoneLeavesAnotherPhonesUploadAlone() async throws {
     // The phone is revoked while the intake holds its `complete`, and
     // another phone pairs, announces the same recording id and sends chunk
     // 0. When the intake answers, the revoked phone's admission finds the
@@ -480,7 +480,7 @@ import Testing
   }
 
   @Test(.timeLimit(.minutes(1)))
-  func aFailedFirstSaveOfARevokedPhoneLeavesAnotherPhonesFilesAlone() async throws {
+  func aFailedFirstSaveOfARevokedPhoneLeavesAnotherPhonesUploadAlone() async throws {
     // The phone's first announce opens the partial and sidecar, and its
     // receipt save is held on its way to the store. The phone is revoked
     // (its files go; the store delete waits behind the held save), and
@@ -509,6 +509,43 @@ import Testing
       held.release()
       #expect(try await announcing.value.code == 500, "the phone's receipt save failed")
       try await revoking.value
+      #expect(try await otherAnnouncing.value.code == 201)
+
+      #expect(engine.inbox.hasPartial(id), "the other phone's partial stays")
+      #expect(engine.inbox.loadMetadata(id) == metadata, "and so does its sidecar")
+      #expect(await other.upload(id, chunk: 0, chunks[0]).code == 204)
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aFirstAnnounceTheStoreRefusesAfterARevokeLeavesAnotherPhonesUploadAlone() async throws {
+    // The phone is revoked, and its first announce, which passed the gate
+    // before, runs only now: it opens the partial and sidecar, and its
+    // receipt save is held on its way to the store. Another phone, paired
+    // before, announces the same recording id. The held save then reaches
+    // the store, whose foreign key refuses it because the phone's device
+    // row is gone, and the cleanup after it leaves the other phone's
+    // partial and sidecar alone. Had they gone, its chunk 0 would be
+    // answered 404 "announce again".
+    let chunkSize = 64 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let held = HeldSave(store: test.store) { $0.receivedChunks.isEmpty }
+      defer { held.release() }
+      let engine = Self.engine(test, saveReceipt: held.save)
+      let phone = try await EngineClient.paired(test, engine: engine)
+      let other = try await EngineClient.paired(test, engine: engine, deviceName: "Other iPhone")
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 76)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: chunkSize)
+      let id = metadata.recordingID
+
+      try await engine.revoke(phone.device.id)
+      let announcing = Task { try await phone.announce(metadata) }
+      await held.held()
+      let otherAnnouncing = Task { try await other.announce(metadata) }
+      try await until { await engine.activeReceipts[id]?.deviceID == other.device.id }
+      held.release()
+      #expect(try await announcing.value.code == 500, "the store refused the phone's receipt")
       #expect(try await otherAnnouncing.value.code == 201)
 
       #expect(engine.inbox.hasPartial(id), "the other phone's partial stays")
