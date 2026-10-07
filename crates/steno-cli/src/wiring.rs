@@ -80,12 +80,12 @@ fn hold_lock(database: &Path) -> Result<(), Failure> {
     if held.iter().any(|lock| lock.path() == path) {
         return Ok(());
     }
-    match steno_services::lock_database(database) {
+    match steno_services::lock_database(database, std::time::Duration::ZERO) {
         Ok(lock) => {
             held.push(lock);
             Ok(())
         }
-        Err(steno_services::BuildError::Locked(DatabaseLockError::Held(_))) => {
+        Err(steno_services::BuildError::Lock(DatabaseLockError::Held(_))) => {
             Err(Failure::runtime(format!(
                 "Steno is running on {}; quit it first, then run this command again.",
                 database.display()

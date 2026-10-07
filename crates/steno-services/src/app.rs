@@ -38,7 +38,7 @@ use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error(transparent)]
-    Locked(#[from] DatabaseLockError),
+    Lock(#[from] DatabaseLockError),
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error("Could not create the database folder: {0}")]
@@ -66,7 +66,15 @@ pub struct AppOptions {
     pub version: String,
     /// Builds a capture session; `CaptureSession::new` in the product.
     pub make_capture_session: MakeCaptureSession,
+    /// How long [`build`] waits for the database's lock while another
+    /// process holds it ([`DatabaseLock::acquire_within`]):
+    /// [`LOCK_PATIENCE`] in the product, whose update relaunch starts the
+    /// new process before the old one has exited; zero in the tests.
+    pub lock_patience: std::time::Duration,
 }
+
+/// The product's [`AppOptions::lock_patience`].
+pub const LOCK_PATIENCE: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl AppOptions {
     /// The product under the default support directory on the given
@@ -87,6 +95,7 @@ impl AppOptions {
             make_capture_session: Arc::new(|configuration| {
                 CaptureSession::new(configuration).map_err(|error| error.to_string())
             }),
+            lock_patience: LOCK_PATIENCE,
         })
     }
 }
@@ -94,9 +103,6 @@ impl AppOptions {
 /// The running graph.
 pub struct App {
     pub paths: StenoPaths,
-    /// Held while the graph lives, so no second app or writing CLI command
-    /// runs on the same database.
-    pub database_lock: DatabaseLock,
     pub store: Arc<Store>,
     pub secrets: Arc<dyn SecretStore>,
     pub events: MeetingEventBus,
@@ -114,6 +120,11 @@ pub struct App {
     /// What went wrong while building, for the shell's log; an unreadable
     /// API key is logged where it is read.
     pub startup_warnings: Vec<String>,
+    /// Held while the graph lives, so no second app or CLI command takes
+    /// the same database; `None` on a filesystem without locks
+    /// ([`DatabaseLockError::Unsupported`], a startup warning). Declared
+    /// last so it outlives what it guards: fields drop in order.
+    pub database_lock: Option<DatabaseLock>,
 }
 
 /// The viewer's zone, fixed at start.
@@ -129,10 +140,14 @@ pub fn open_store(path: &std::path::Path) -> Result<Arc<Store>, BuildError> {
 }
 
 /// Takes the lock of the database at `path` ([`DatabaseLock`]), creating
-/// its folder.
-pub fn lock_database(path: &std::path::Path) -> Result<DatabaseLock, BuildError> {
+/// its folder, and waits up to `patience` while another process holds it.
+/// Rust only: the Swift app and CLI took no lock.
+pub fn lock_database(
+    path: &std::path::Path,
+    patience: std::time::Duration,
+) -> Result<DatabaseLock, BuildError> {
     create_database_folder(path)?;
-    Ok(DatabaseLock::acquire(path)?)
+    Ok(DatabaseLock::acquire_within(path, patience)?)
 }
 
 fn create_database_folder(path: &std::path::Path) -> Result<(), BuildError> {
@@ -269,26 +284,37 @@ fn handover_listener(
     Ok((service, mac_id))
 }
 
-/// Builds the graph. First the database's lock ([`DatabaseLock`]): with
-/// another process on the database the build fails with
-/// [`BuildError::Locked`] before the database is opened. Real: store,
-/// settings, secret store, speech engine (`CoreML` in this process on the
-/// Mac, the ONNX speech sidecar elsewhere and as the Mac's fallback;
-/// [`SpeechSetup::runtime`]), ONNX diarizer, cosine speaker memory over the
-/// store, LLM passes, delivery coordinator, handover listener, capture
-/// session, recorder, the speech models, folder usage, preferences, and the
-/// login item when the shell passes its own ([`AppOptions::login_item`]).
-/// Fakes where no platform side exists yet (the plan's "Pipeline and
-/// services (WP6b)" list says why for each): permissions (all granted),
-/// updater, clip player, QR encoder; the audio device list is empty off the
-/// Mac until the `PipeWire` and WASAPI backends enumerate devices.
+/// Builds the graph. First the database's lock ([`DatabaseLock`]): while
+/// another process holds it past [`AppOptions::lock_patience`] the build
+/// fails with [`BuildError::Lock`] before the database is opened; on a
+/// filesystem without locks it runs without one and says so in
+/// [`App::startup_warnings`]. Real: store, settings, secret store, speech
+/// engine (`CoreML` in this process on the Mac, the ONNX speech sidecar
+/// elsewhere and as the Mac's fallback; [`SpeechSetup::runtime`]), ONNX
+/// diarizer, cosine speaker memory over the store, LLM passes, delivery
+/// coordinator, handover listener, capture session, recorder, the speech
+/// models, folder usage, preferences, and the login item when the shell
+/// passes its own ([`AppOptions::login_item`]). Fakes where no platform
+/// side exists yet (the plan's "Pipeline and services (WP6b)" list says why
+/// for each): permissions (all granted), updater, clip player, QR encoder;
+/// the audio device list is empty off the Mac until the `PipeWire` and
+/// WASAPI backends enumerate devices.
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
     let database_path = options
         .database_path
         .unwrap_or_else(|| paths.database_path());
-    let database_lock = lock_database(&database_path)?;
+    let database_lock = match lock_database(&database_path, options.lock_patience) {
+        Ok(lock) => Some(lock),
+        Err(BuildError::Lock(error @ DatabaseLockError::Unsupported { .. })) => {
+            warnings.push(format!(
+                "Running without the database lock, so a second Steno on this database is not kept out: {error}"
+            ));
+            None
+        }
+        Err(error) => return Err(error),
+    };
     let store = open_store(&database_path)?;
     let secrets = secret_store(options.keyring, &paths);
     let codex = codex_store();
@@ -366,7 +392,6 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 
     Ok(App {
         paths,
-        database_lock,
         store,
         secrets,
         events,
@@ -380,6 +405,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         runtime,
         version: options.version,
         startup_warnings: warnings,
+        database_lock,
     })
 }
 
@@ -847,6 +873,7 @@ mod tests {
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+            lock_patience: std::time::Duration::ZERO,
         })
         .unwrap();
         let prepare = async || {
@@ -924,6 +951,7 @@ mod tests {
                 runtime: tokio::runtime::Handle::current(),
                 version: "0.0.0".to_owned(),
                 make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+                lock_patience: std::time::Duration::ZERO,
             };
             (dir, options)
         };
@@ -969,7 +997,6 @@ mod tests {
         services.recorder = recorder.clone();
         App {
             paths: StenoPaths::new(dir.path().join("support")),
-            database_lock: DatabaseLock::acquire(&dir.path().join("steno.sqlite")).unwrap(),
             store: store.clone(),
             secrets: Arc::new(steno_core::testing::InMemorySecretStore::new()),
             events: MeetingEventBus::new(),
@@ -983,6 +1010,7 @@ mod tests {
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             startup_warnings: Vec::new(),
+            database_lock: None,
         }
     }
 
@@ -1360,6 +1388,7 @@ mod tests {
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
+            lock_patience: std::time::Duration::ZERO,
         }
     }
 
@@ -1377,7 +1406,7 @@ mod tests {
 
         let refused = build(options_under(&support)).err().unwrap();
         assert!(
-            matches!(&refused, BuildError::Locked(DatabaseLockError::Held(path)) if path == &support.join("steno.lock")),
+            matches!(&refused, BuildError::Lock(DatabaseLockError::Held(path)) if path == &support.join("steno.lock")),
             "{refused:?}"
         );
         assert_eq!(
@@ -1388,6 +1417,60 @@ mod tests {
 
         drop(first);
         build(options_under(&support)).unwrap();
+    }
+
+    /// The lock comes before the database: a second app over a file that
+    /// is no database fails with `Held`, not with the store's error, so it
+    /// never opened (or migrated) what the first one holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_lock_is_taken_before_the_database_is_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        let garbage = support.join("garbage.sqlite");
+        std::fs::write(&garbage, b"not a database, not even close").unwrap();
+        let _first = DatabaseLock::acquire(&garbage).unwrap();
+        let mut options = options_under(&support);
+        options.database_path = Some(garbage.clone());
+        let refused = build(options).err().unwrap();
+        assert!(
+            matches!(&refused, BuildError::Lock(DatabaseLockError::Held(_))),
+            "{refused:?}"
+        );
+    }
+
+    /// An update's relaunch starts the new app before the old one has
+    /// exited: the new one waits out the old one's lock within its
+    /// patience, and is refused once the patience has passed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relaunched_app_waits_for_the_old_one_within_its_patience() {
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        std::fs::create_dir_all(&support).unwrap();
+        let database = support.join("steno.sqlite");
+
+        let old = DatabaseLock::acquire(&database).unwrap();
+        let exit = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(old);
+        });
+        let mut options = options_under(&support);
+        options.lock_patience = LOCK_PATIENCE;
+        let relaunched = build(options).unwrap();
+        exit.join().unwrap();
+        assert!(relaunched.database_lock.is_some());
+        drop(relaunched);
+
+        let _never_exits = DatabaseLock::acquire(&database).unwrap();
+        let mut options = options_under(&support);
+        options.lock_patience = std::time::Duration::from_millis(300);
+        let started = std::time::Instant::now();
+        let refused = build(options).err().unwrap();
+        assert!(
+            matches!(&refused, BuildError::Lock(DatabaseLockError::Held(_))),
+            "{refused:?}"
+        );
+        assert!(started.elapsed() >= std::time::Duration::from_millis(300));
     }
 
     #[test]

@@ -530,11 +530,11 @@ pub enum ShellHostError {
 #[cfg(not(feature = "fixture-host"))]
 impl ShellHostError {
     /// Whether another process holds the database (`steno_core::DatabaseLock`):
-    /// another Steno app, or a `steno` command that writes.
+    /// another Steno app, or a `steno` command.
     pub fn is_database_held(&self) -> bool {
         matches!(
             self,
-            Self::Build(steno_services::BuildError::Locked(
+            Self::Build(steno_services::BuildError::Lock(
                 steno_core::DatabaseLockError::Held(_)
             ))
         )
@@ -739,11 +739,11 @@ mod refusal_tests {
     /// start; any other build failure stays an error.
     #[test]
     fn only_a_held_database_refuses_the_start() {
-        let held = ShellHostError::Build(steno_services::BuildError::Locked(
+        let held = ShellHostError::Build(steno_services::BuildError::Lock(
             steno_core::DatabaseLockError::Held("/support/steno.lock".into()),
         ));
         assert!(held.is_database_held());
-        let unreadable = ShellHostError::Build(steno_services::BuildError::Locked(
+        let unreadable = ShellHostError::Build(steno_services::BuildError::Lock(
             steno_core::DatabaseLockError::Io {
                 path: "/support/steno.lock".into(),
                 source: std::io::Error::other("read-only"),
