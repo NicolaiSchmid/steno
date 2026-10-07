@@ -9,8 +9,8 @@ use std::thread::JoinHandle;
 
 use chrono::{FixedOffset, Utc};
 use steno_audio::{
-    CaptureConfiguration, CaptureSession, CaptureStatistics, FRAMES_PER_SECOND,
-    LaneLevels as AudioLevels,
+    CaptureConfiguration, CaptureNotice, CaptureSession, CaptureStatistics, CaptureStream,
+    FRAMES_PER_SECOND, LaneLevels as AudioLevels,
 };
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
@@ -36,6 +36,13 @@ struct Active {
     levels: Arc<Mutex<Option<LaneLevels>>>,
     /// The forwarding thread, joined once the session is dropped.
     level_thread: JoinHandle<()>,
+    /// The warning while the default input stands in for the chosen
+    /// microphone ([`input_warning`]), kept apart from the status's own so
+    /// a rebuild can set and clear it; written by `notice_thread`.
+    input_warning: Arc<Mutex<Option<String>>>,
+    /// Re-reads the microphone after each rebuild, joined once the session
+    /// is dropped.
+    notice_thread: JoinHandle<()>,
 }
 
 struct Inner {
@@ -49,6 +56,17 @@ struct Inner {
 /// dBFS to the `0...1` RMS the bridge carries.
 fn linear(db: f32) -> f64 {
     10f64.powf(f64::from(db) / 20.0).clamp(0.0, 1.0)
+}
+
+/// The warning while `stream` records the default input in place of the
+/// chosen microphone, naming the one it records. Rust only: Swift fails the
+/// start when the chosen microphone is missing.
+fn input_warning(stream: Option<&CaptureStream>) -> Option<String> {
+    let input = stream?.input.as_ref().filter(|input| input.is_fallback)?;
+    Some(format!(
+        "Recording from {} because the chosen microphone is not connected.",
+        input.name
+    ))
 }
 
 fn levels(levels: &AudioLevels) -> LaneLevels {
@@ -214,6 +232,7 @@ impl CaptureRecorder {
             )
             .map_err(|e| e.to_string())?;
         let levels_receiver = session.levels();
+        let notices = session.notices();
         if let Err(error) = session.start(meeting.id) {
             let _ = intake.fail(meeting.id, &format!("Recording could not start: {error}"));
             return Err(error.to_string());
@@ -238,6 +257,31 @@ impl CaptureRecorder {
                 }
             })
         };
+        // A rebuild may record another microphone; the thread holds the
+        // session weakly, so dropping it ends the notices and the thread.
+        let input_warning = Arc::new(Mutex::new(input_warning(session.stream().as_ref())));
+        let notice_thread = {
+            let (warning, session, hook) =
+                (input_warning.clone(), Arc::downgrade(&session), self.hook());
+            std::thread::spawn(move || {
+                while let Ok(notice) = notices.recv() {
+                    if !matches!(notice, CaptureNotice::DeviceResumed { .. }) {
+                        continue;
+                    }
+                    let Some(session) = session.upgrade() else {
+                        return;
+                    };
+                    *warning
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        self::input_warning(session.stream().as_ref());
+                    drop(session);
+                    if let Some(hook) = &hook {
+                        hook();
+                    }
+                }
+            })
+        };
         {
             let mut inner = self.inner();
             inner.status.state = RecordingState::Recording;
@@ -254,6 +298,8 @@ impl CaptureRecorder {
                 mode,
                 levels: shared,
                 level_thread,
+                input_warning,
+                notice_thread,
             });
         }
         Ok(())
@@ -320,6 +366,7 @@ impl CaptureRecorder {
         };
         drop(active.session);
         let _ = active.level_thread.join();
+        let _ = active.notice_thread.join();
         let mut inner = self.inner();
         inner.status.state = RecordingState::Idle;
         inner.status.started_at = None;
@@ -348,6 +395,14 @@ impl Recorder for CaptureRecorder {
                 .levels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if status.warning.is_none() {
+                status.warning.clone_from(
+                    &active
+                        .input_warning
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                );
+            }
         }
         status
     }
@@ -403,6 +458,13 @@ impl Recorder for CaptureRecorder {
         let mut inner = self.inner();
         inner.status.warning = None;
         inner.status.error = None;
+        // Until the next rebuild says otherwise.
+        if let Some(active) = &inner.active {
+            *active
+                .input_warning
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
         drop(inner);
         self.notify();
     }
@@ -554,6 +616,16 @@ mod tests {
         engine_id: &str,
         runtime_of: impl Fn(&str) -> SpeechRuntime + Send + Sync + 'static,
     ) -> Harness {
+        harness_capturing(models, engine_id, runtime_of, synthetic_capture())
+    }
+
+    /// [`harness_over`] recording through `capture`.
+    fn harness_capturing(
+        models: Arc<dyn SpeechModels>,
+        engine_id: &str,
+        runtime_of: impl Fn(&str) -> SpeechRuntime + Send + Sync + 'static,
+        capture: MakeCaptureSession,
+    ) -> Harness {
         let (dir, store) = temp_store();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
@@ -591,7 +663,7 @@ mod tests {
         let recorder = Arc::new(CaptureRecorder::new(
             store.clone(),
             pipeline,
-            synthetic_capture(),
+            capture,
             Arc::new(FakePermissions::all_granted()),
             models,
             chrono::FixedOffset::east_opt(0).unwrap(),
@@ -756,6 +828,65 @@ mod tests {
         assert!(in_process.save_engine("parakeet-ultra").is_err());
         assert!(warmed_the_engine(&in_process).await);
         stop(&in_process.recorder).await;
+    }
+
+    /// A rebuild that records the default input in place of the chosen
+    /// microphone shows a warning naming the one recorded, until it is
+    /// dismissed or the recording stops.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_recording_on_a_stand_in_microphone_names_it_in_a_warning() {
+        let input = |name: &str, is_fallback| steno_audio::CaptureInput {
+            uid: name.to_lowercase(),
+            name: name.to_owned(),
+            is_fallback,
+        };
+        let (chosen, stand_in) = (
+            input("USB Microphone", false),
+            input("Built-in Audio", true),
+        );
+        let capture: MakeCaptureSession = Arc::new(move |configuration: CaptureConfiguration| {
+            let stream = |input: &steno_audio::CaptureInput| CaptureStream {
+                input: Some(input.clone()),
+                ..CaptureStream::SYNTHETIC
+            };
+            let options = steno_audio::testing::synthetic::SyntheticOptions::tones(
+                &configuration.lanes(),
+                &[(steno_core::AudioLane::Mixed, 440.0)],
+                600.0,
+            )
+            .real_time(true)
+            .change_device_after(0.3)
+            .stream(stream(&chosen))
+            .stream_after_restart(stream(&stand_in));
+            CaptureSession::with_backend(
+                configuration,
+                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+                None,
+                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                Arc::new(steno_audio::SystemClock::new()),
+            )
+            .map_err(|error| error.to_string())
+        });
+        let harness = harness_capturing(
+            models_with(&[]),
+            "parakeet-v3",
+            platform_rule(SpeechSettings::default()),
+            capture,
+        );
+        let warning = || harness.recorder.status().warning;
+        start(&harness.recorder).await;
+        assert_eq!(warning(), None, "the chosen microphone records");
+        eventually("the rebuild's stand-in is named", || {
+            warning().as_deref()
+                == Some(
+                    "Recording from Built-in Audio because the chosen microphone is not connected.",
+                )
+        })
+        .await;
+        harness.recorder.clear_messages();
+        assert_eq!(warning(), None, "dismissed");
+        stop(&harness.recorder).await;
+        assert_eq!(warning(), None, "nothing left after the stop");
     }
 
     /// Quitting stops the recording with `quit` and saves it: the meeting
