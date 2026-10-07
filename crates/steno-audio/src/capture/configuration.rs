@@ -283,8 +283,9 @@ pub enum CaptureNotice {
 pub struct CaptureStatistics {
     /// Seconds of audio written to the master.
     pub duration: f64,
-    /// Frames lost per lane to ring overruns or a stalled writer; should be
-    /// empty.
+    /// Frames lost per lane: ring overruns, a stalled writer's full relay,
+    /// whole frames a stop left undrained in the rings and, on Windows,
+    /// clock-drift slips; should be empty.
     pub dropped_frames: BTreeMap<AudioLane, usize>,
     /// True when the tap never exceeded [`LaneLevel::SILENT_PEAK_LINEAR`].
     pub system_lane_silent: bool,

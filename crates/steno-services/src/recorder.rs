@@ -1012,7 +1012,7 @@ mod tests {
     }
 
     /// Every warning that applies is kept: a device loss no longer hides a
-    /// silent system lane or a gap.
+    /// silent system lane or missing audio.
     #[test]
     fn every_warning_that_applies_is_joined() {
         let mut all = statistics();

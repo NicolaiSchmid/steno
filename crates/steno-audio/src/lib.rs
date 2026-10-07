@@ -17,7 +17,8 @@
 //!   bodies, the processing thread and the relay; everything on the
 //!   real-time path.
 //! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars),
-//!   its thread and the 3:1 resampler.
+//!   its thread, which syncs the master every 5 s, the one sync every file
+//!   goes through, and the 3:1 resampler.
 //! - [`clock`]: the injectable [`Clock`] the rebuild and the detector
 //!   sleep on.
 //! - [`testing`]: the synthetic backend, the manual clock, fixtures,
@@ -44,7 +45,8 @@
 //!   │
 //!   ▼
 //! writer thread                `WriterThread`: `RecordingWriter`,
-//!   │  `Resampler48kTo16k`, files; republishes `LevelSlot` on change
+//!   │  `Resampler48kTo16k`, files, a sync of the master every 5 s;
+//!   │  republishes `LevelSlot` on change
 //!   ▼
 //! `CaptureSession`             state machine, `states`, `levels` and
 //!                              `notices` channels, the asset on `stop()`
@@ -123,7 +125,7 @@ pub const SAMPLE_RATE: f64 = 48_000.0;
 /// meter and the writer all work in this unit.
 pub const FRAME_SIZE: usize = 480;
 /// Processing frames a second: 48 000 samples in frames of [`FRAME_SIZE`].
-pub const FRAMES_PER_SECOND: usize = 100;
+pub const FRAMES_PER_SECOND: usize = SAMPLE_RATE as usize / FRAME_SIZE;
 /// The echo canceller's tail: 200 ms at 48 kHz.
 pub const ECHO_TAIL_LENGTH: usize = 9_600;
 
