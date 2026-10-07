@@ -35,7 +35,9 @@ impl Failure {
 pub type Outcome = Result<(), Failure>;
 
 /// `--db PATH`, shared by every command that opens the database. Defaults
-/// to the database under the support directory, which follows `HOME`.
+/// to the database under the support directory, which follows `HOME`. A
+/// path with the extension `lock` is refused: it would be its own lock
+/// file (`DatabaseLock::path_for`). Rust only.
 #[derive(Debug, Clone, Args)]
 pub struct DatabaseOptions {
     /// Path of the SQLite database.
@@ -46,6 +48,16 @@ pub struct DatabaseOptions {
 impl DatabaseOptions {
     pub fn path(&self) -> Result<PathBuf, Failure> {
         match &self.database_path {
+            Some(path)
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "lock") =>
+            {
+                Err(Failure::usage(format!(
+                    "{} would be its own lock file; give the database another extension.",
+                    path.display()
+                )))
+            }
             Some(path) => Ok(path.clone()),
             None => Ok(paths()?.database_path()),
         }
@@ -336,6 +348,19 @@ mod tests {
             DatabaseLock::acquire(&dir.path().join("steno.sqlite")),
             Err(DatabaseLockError::Held(_))
         ));
+    }
+
+    /// A database named like its own lock file is refused before anything
+    /// opens it.
+    #[test]
+    fn a_database_with_the_extension_lock_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = DatabaseOptions {
+            database_path: Some(dir.path().join("steno.lock")),
+        };
+        assert!(matches!(options.path(), Err(Failure::Usage(_))));
+        assert!(matches!(options.open(), Err(Failure::Usage(_))));
+        assert!(!dir.path().join("steno.lock").exists());
     }
 
     /// A command that only reads lets go of a lock it found free once the
