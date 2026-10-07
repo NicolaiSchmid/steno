@@ -60,11 +60,11 @@ pub trait RecordingWriting: Send {
     fn files(&self) -> RecordingFiles;
     /// One frame for every lane.
     fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError>;
-    /// Makes what the master holds so far durable (`File::sync_data`, see
+    /// Makes what the files hold so far durable (`File::sync_data`, see
     /// [`CafStreamWriter::sync`]), so a power loss keeps it; the writer
     /// thread calls it every
     /// [`SYNC_INTERVAL_FRAMES`](super::writer_thread::SYNC_INTERVAL_FRAMES)
-    /// frames. A failure is logged once and handed back at the close, and
+    /// frames. A failure is logged once and handed back at the stop, and
     /// the recording goes on; only a failed write ends it, and a sync
     /// failure is reported only when nothing else ended the recording. Rust
     /// only: Swift synced at the close alone.
@@ -203,11 +203,22 @@ impl RecordingWriting for RecordingWriter {
         Ok(())
     }
 
-    /// Syncs the master alone: it is what a recovered recording is rebuilt
-    /// from, and the 16 kHz sidecars and the raw microphone are derived from
-    /// the same audio (the close syncs every file).
+    /// Syncs every file, the master first, so after a power loss a
+    /// recovered recording's sidecars, which its transcript is decoded
+    /// from, are as long as its master. A sidecar costs little beside the
+    /// master: 16 kHz Int16 is about a sixth of a lane's bytes in it. A
+    /// failure on one file still syncs the others, and the first is
+    /// returned. That the real sync reaches the disk is the manual
+    /// power-loss check's; the tests count the calls.
     fn sync(&mut self) -> std::io::Result<()> {
-        self.master.sync()
+        let mut result = self.master.sync();
+        for sidecar in &mut self.sidecars {
+            result = result.and(sidecar.sync());
+        }
+        if let Some(raw_mic) = self.raw_mic.as_mut() {
+            result = result.and(raw_mic.sync());
+        }
+        result
     }
 
     /// Closes every file, the master first. A failure on one file still

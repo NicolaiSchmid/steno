@@ -16,9 +16,9 @@
 //! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
 //!   bodies, the processing thread and the relay; everything on the
 //!   real-time path.
-//! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars),
-//!   its thread, which syncs the master every 5 s, the one sync every file
-//!   goes through, and the 3:1 resampler.
+//! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars);
+//!   its thread, which syncs every file every 5 s; `durable`, the one sync
+//!   every file goes through; and the 3:1 resampler.
 //! - [`clock`]: the injectable [`Clock`] the rebuild and the detector
 //!   sleep on.
 //! - [`testing`]: the synthetic backend, the manual clock, fixtures,
@@ -45,7 +45,7 @@
 //!   │
 //!   ▼
 //! writer thread                `WriterThread`: `RecordingWriter`,
-//!   │  `Resampler48kTo16k`, files, a sync of the master every 5 s;
+//!   │  `Resampler48kTo16k`, files, a sync of every file every 5 s;
 //!   │  republishes `LevelSlot` on change
 //!   ▼
 //! `CaptureSession`             state machine, `states`, `levels` and

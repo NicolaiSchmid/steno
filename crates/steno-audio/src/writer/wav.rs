@@ -93,6 +93,16 @@ impl WavStreamWriter {
         Ok(())
     }
 
+    /// Makes every sample written so far durable with `File::sync_data`,
+    /// as [`CafStreamWriter::sync`](super::CafStreamWriter::sync) does for
+    /// the master. Nothing after `finish`. Rust only: Swift synced at the
+    /// close alone.
+    pub fn sync(&mut self) -> std::io::Result<()> {
+        self.file
+            .as_ref()
+            .map_or(Ok(()), |file| durable::sync(file, File::sync_data))
+    }
+
     /// Patches the sizes, syncs and closes; once.
     pub fn finish(&mut self) -> Result<(), CaptureError> {
         let Some(mut file) = self.file.take() else {

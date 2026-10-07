@@ -5,9 +5,9 @@
 //! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`.
 //!
 //! Every [`SYNC_INTERVAL_FRAMES`] frames the thread
-//! [`sync`](RecordingWriting::sync)s the master (`File::sync_data`,
-//! `F_FULLFSYNC` on the Mac, a plain `fsync` where a filesystem refuses
-//! that), so a power loss or a kernel crash loses about the last 5 s of a
+//! [`sync`](RecordingWriting::sync)s the files, the master and the
+//! sidecars (`File::sync_data`, `F_FULLFSYNC` on the Mac, a plain `fsync`
+//! where a filesystem refuses that), so a power loss or a kernel crash loses about the last 5 s of a
 //! recording, more while the writer is behind, not everything still in the
 //! page cache. A sync that fails even so is logged once, kept apart for
 //! [`WriterThread::take_sync_error`] (what was written may not be on disk)
@@ -43,7 +43,7 @@ pub type ErrorHandler = Box<dyn Fn(CaptureError) + Send>;
 /// A recording has at most one channel per [`AudioLane`].
 const MAX_LANES: usize = AudioLane::ALL.len();
 
-/// Frames written between two syncs of the master: 5 s of 10 ms frames,
+/// Frames written between two syncs of the files: 5 s of 10 ms frames,
 /// counted in audio rather than wall time, so gap silence counts and a
 /// test needs no clock. A slow sync is covered by the relay's 20 s
 /// ([`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]).
@@ -102,7 +102,7 @@ impl Worker {
         }
     }
 
-    /// Syncs the master after every [`SYNC_INTERVAL_FRAMES`] frames
+    /// Syncs the files after every [`SYNC_INTERVAL_FRAMES`] frames
     /// written. The first failure is kept and logged by its kind and OS
     /// code alone (the log's privacy rule: no path); later ones are not,
     /// and the next interval tries again.
@@ -120,6 +120,8 @@ impl Worker {
                 os_error = ?error.raw_os_error(),
                 "the recording could not be synced to disk; the writes go on"
             );
+            // The master's path names the recording; the file that
+            // failed may be a sidecar.
             self.sync_error = Some(io_error(&self.writer.files().master, &error));
         }
     }
@@ -383,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn the_master_is_synced_after_every_interval_of_frames_and_not_before() {
+    fn the_files_are_synced_after_every_interval_of_frames_and_not_before() {
         let run = run(false);
         assert!(run.reported.is_empty(), "{:?}", run.reported);
         assert_eq!(run.seen.syncs, [500, 1000, 1500]);
