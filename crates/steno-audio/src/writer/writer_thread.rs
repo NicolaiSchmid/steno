@@ -279,20 +279,32 @@ mod tests {
         fn sync(&mut self) -> std::io::Result<()> {
             self.calls.lock().unwrap().push(Call::Sync);
             if self.fail_syncs {
-                return Err(std::io::ErrorKind::Unsupported.into());
+                Err(std::io::ErrorKind::Unsupported.into())
+            } else {
+                Ok(())
             }
-            Ok(())
         }
         fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
             Ok(self.files())
         }
     }
 
-    /// Pushes `frames` one-lane frames through a writer thread over the
+    /// Three sync intervals and part of a fourth.
+    const FRAMES: usize = 3 * SYNC_INTERVAL_FRAMES + 10;
+
+    /// Each sync follows its interval's last write: after writes 500, 1000
+    /// and 1500, with the syncs before them counted in.
+    const SYNCS: [usize; 3] = [
+        SYNC_INTERVAL_FRAMES,
+        2 * SYNC_INTERVAL_FRAMES + 1,
+        3 * SYNC_INTERVAL_FRAMES + 2,
+    ];
+
+    /// Pushes [`FRAMES`] one-lane frames through a writer thread over the
     /// fake and returns its calls and the errors it reported. The relay
     /// holds them all, so none is dropped.
-    fn run(frames: usize, fail_syncs: bool) -> (Vec<Call>, Vec<CaptureError>) {
-        let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, frames));
+    fn run(fail_syncs: bool) -> (Vec<Call>, Vec<CaptureError>) {
+        let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, FRAMES));
         let calls = Arc::new(Mutex::new(Vec::new()));
         let errors = Arc::new(Mutex::new(Vec::new()));
         let mut thread = WriterThread::new(
@@ -311,7 +323,7 @@ mod tests {
             }),
         );
         let zeros = vec![0.0f32; FRAME_SIZE];
-        for _ in 0..frames {
+        for _ in 0..FRAMES {
             assert!(relay.begin_frame());
             relay.write(0, &zeros);
             relay.end_frame();
@@ -333,19 +345,11 @@ mod tests {
             .collect()
     }
 
-    /// Each sync follows the interval's last write: after writes 500, 1000
-    /// and 1500, with the syncs before them counted in.
-    const SYNCS_AFTER_1510_FRAMES: [usize; 3] = [
-        SYNC_INTERVAL_FRAMES,
-        2 * SYNC_INTERVAL_FRAMES + 1,
-        3 * SYNC_INTERVAL_FRAMES + 2,
-    ];
-
     #[test]
     fn the_master_is_synced_after_every_interval_of_frames_and_not_before() {
-        let (calls, errors) = run(SYNC_INTERVAL_FRAMES * 3 + 10, false);
+        let (calls, errors) = run(false);
         assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(sync_indices(&calls), SYNCS_AFTER_1510_FRAMES);
+        assert_eq!(sync_indices(&calls), SYNCS);
     }
 
     /// A filesystem that refuses every sync (a network share can) neither
@@ -353,12 +357,12 @@ mod tests {
     /// reported as an error, and every interval tries the sync again.
     #[test]
     fn a_failed_sync_keeps_the_writes_going_and_is_tried_again() {
-        let (calls, errors) = run(SYNC_INTERVAL_FRAMES * 3 + 10, true);
+        let (calls, errors) = run(true);
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(
             calls.iter().filter(|call| **call == Call::Write).count(),
-            SYNC_INTERVAL_FRAMES * 3 + 10
+            FRAMES
         );
-        assert_eq!(sync_indices(&calls), SYNCS_AFTER_1510_FRAMES);
+        assert_eq!(sync_indices(&calls), SYNCS);
     }
 }
