@@ -1779,6 +1779,22 @@ touch lines; each fix is ported to Swift before cutover.
 - Linux shows the tray only where a status notifier host runs (KDE, most desktop
   panels, GNOME with the AppIndicator extension); elsewhere closing the main window
   quits, where the Swift `NSStatusItem` is always in the menu bar.
+- One process per database (Rust only; the stable plan's P8). The app takes an
+  exclusive advisory lock on `steno.lock` beside the database before it opens it and
+  holds it until it exits (`steno_core::DatabaseLock`, `flock` or `LockFileEx`, which
+  the OS drops when the process ends however it ends). A second app on the same
+  database says "Steno is already running" and ends before it opens a window
+  (`refuse_to_start` in the shell's `main.rs`): the old identifier's beside the new
+  one, a Linux session without a bus (no single-instance guard there), or a
+  single-instance connect that failed. The CLI's commands that write (`process`,
+  `deliver`, `dev db`) refuse while the app holds the lock; the ones that only read
+  (`export`, the settings `dev models` and `dev llm` read) run beside it. Without it
+  each instance failed the other's live recording at launch, processed the same
+  meetings and ran its own retention sweep. The Swift app takes no lock and ships no
+  further release, so a Swift app beside the Rust app on one Mac is still not kept
+  out, and either one's launch can fail the other's live recording;
+  `fix/recording-recovery` makes the Rust launch leave a `recording` row alone while
+  its master still grows.
 - Updates: Sparkle checks daily on its own (`SUEnableAutomaticChecks`,
   `SUScheduledCheckInterval` 86400 in `apps/macos/project.yml`); the shell checks only
   when asked (the tray's Check for Updates, `updates.check` from Settings).
