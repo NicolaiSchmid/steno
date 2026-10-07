@@ -24,13 +24,15 @@ use steno_core::{
     async_trait, paths::file_url_path, protocols::BoundaryResult,
 };
 use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
-use steno_host::services::SpeechModels;
+use steno_host::services::{ModelNotice, SpeechModels};
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{SharedSpeechEngine, WeakSpeechEngine};
 use steno_speech::{
     LanguageTagger, ModelStore, OnnxSpeechEngine, SidecarConfig, SidecarSpeechEngine,
     SpeechRuntime, SpeechSettings,
 };
+
+use crate::model_gate::{GatedDiarizer, GatedSpeechEngine};
 
 /// Threads for one ONNX operator; the plan measured at four.
 pub const ONNX_THREADS: usize = 4;
@@ -334,11 +336,31 @@ struct KeptEngines {
 }
 
 impl SpeechEngines {
-    /// The engines [`speech_engine`] builds over `setup`.
+    /// The engines [`speech_engine`] builds over `setup`, and the diarizer,
+    /// each behind a gate that refuses a call while its models are not
+    /// installed, with the speech sidecar's own install turned off: no
+    /// pipeline run downloads a model ([`crate::model_gate`]).
     #[must_use]
     pub fn new(setup: SpeechSetup) -> Self {
-        let over = setup.clone();
-        Self::with_builder(setup, Box::new(move |runtime| engine_on(runtime, &over)))
+        let models = Arc::new(ModelStoreSpeechModels::new(&setup));
+        let mut over = setup.clone();
+        over.sidecar.install_models = false;
+        let engine_models = models.clone();
+        let mut engines = Self::with_builder(
+            setup,
+            Box::new(move |runtime| {
+                let models = engine_models.clone();
+                Arc::new(GatedSpeechEngine::new(
+                    engine_on(runtime, &over),
+                    Arc::new(move || models.installed_on(runtime)),
+                ))
+            }),
+        );
+        engines.diarizer = Arc::new(GatedDiarizer::new(
+            engines.diarizer,
+            Arc::new(move || models.is_installed(ModelAsset::OfflineDiarizer)),
+        ));
+        engines
     }
 
     /// Engines from `build` instead, for the tests.
@@ -540,6 +562,10 @@ pub struct ModelStoreSpeechModels {
     pub speech: ModelStore,
     /// The `CoreML` Parakeet's directory.
     pub coreml: PathBuf,
+    /// The `CoreML` store, the models directory's `fluidaudio/`, with the
+    /// speech settings' mirror: Settings installs the `CoreML` Parakeet
+    /// through it.
+    pub coreml_store: ModelStore,
     /// The speech settings, which decide where [`speech_engine`] runs
     /// each engine id.
     speech_settings: SpeechSettings,
@@ -553,7 +579,20 @@ impl ModelStoreSpeechModels {
         ModelStoreSpeechModels {
             speech: setup.model_store(),
             coreml: coreml_model_directory(&setup.models_directory),
+            coreml_store: setup.speech_settings.coreml_store(&setup.models_directory),
             speech_settings: setup.speech_settings.clone(),
+        }
+    }
+
+    /// Whether every model the engine on `runtime` loads is on disk: the
+    /// `CoreML` Parakeet's files, or every model the speech sidecar loads
+    /// (the VAD and the fp32 Parakeet).
+    pub(crate) fn installed_on(&self, runtime: SpeechRuntime) -> bool {
+        match runtime {
+            SpeechRuntime::CoreMlInProcess => coreml_parakeet_installed(&self.coreml),
+            SpeechRuntime::OnnxSidecar => steno_speech::ModelAsset::all()
+                .iter()
+                .all(|asset| self.speech.is_installed(asset)),
         }
     }
 
@@ -588,43 +627,6 @@ impl ModelStoreSpeechModels {
         }
         i64::try_from(walk(path)).unwrap_or(i64::MAX)
     }
-
-    /// Installs `assets` into the ONNX store one after another, reporting
-    /// the fraction of all their bytes and the file under way, then
-    /// `(1.0, "Installed")`.
-    fn install(
-        &self,
-        assets: &[steno_speech::ModelAsset],
-        progress: &mut dyn FnMut(f64, &str),
-    ) -> BoundaryResult<()> {
-        let total = assets
-            .iter()
-            .map(steno_speech::ModelAsset::total_size)
-            .sum::<u64>()
-            .max(1);
-        let mut throttle = ProgressThrottle::default();
-        let mut received_before: u64 = 0;
-        for asset in assets {
-            self.speech.ensure(asset, &mut |report| {
-                let earlier_files: u64 = asset
-                    .files
-                    .iter()
-                    .take_while(|f| f.name != report.file)
-                    .map(|f| f.size)
-                    .sum();
-                #[allow(clippy::cast_precision_loss)]
-                let fraction = ((received_before + earlier_files + report.received) as f64
-                    / total as f64)
-                    .min(1.0);
-                if throttle.forwards(fraction, report.file) {
-                    progress(fraction, report.file);
-                }
-            })?;
-            received_before += asset.total_size();
-        }
-        progress(1.0, "Installed");
-        Ok(())
-    }
 }
 
 impl SpeechModels for ModelStoreSpeechModels {
@@ -632,13 +634,7 @@ impl SpeechModels for ModelStoreSpeechModels {
     /// ([`SpeechSetup::runtime`]): the `CoreML` Parakeet's files, or every
     /// model the speech sidecar loads (the VAD and the fp32 Parakeet).
     fn engine_installed(&self, engine_id: &str) -> bool {
-        if self.runs_on_coreml(engine_id) {
-            coreml_parakeet_installed(&self.coreml)
-        } else {
-            steno_speech::ModelAsset::all()
-                .iter()
-                .all(|asset| self.speech.is_installed(asset))
-        }
+        self.installed_on(engine_runtime(engine_id, &self.speech_settings))
     }
 
     fn is_installed(&self, asset: ModelAsset) -> bool {
@@ -669,15 +665,18 @@ impl SpeechModels for ModelStoreSpeechModels {
         match asset {
             ModelAsset::OfflineDiarizer => {
                 steno_diarize::models::remove_old_parts(&self.speech);
-                self.install(&[steno_diarize::models::asset()], progress)
+                install_with_progress(&self.speech, &[steno_diarize::models::asset()], progress)
             }
-            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Err(
-                "This build cannot download the CoreML Parakeet v3 model; install it from the Steno Mac app."
-                    .into(),
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => install_with_progress(
+                &self.coreml_store,
+                &[steno_speech::ModelAsset::parakeet_v3_coreml()],
+                progress,
             ),
             // Silero VAD (640 KB) too, so the ONNX engine is ready offline
             // once the row says Installed.
-            ModelAsset::ParakeetV3 => self.install(&steno_speech::ModelAsset::all(), progress),
+            ModelAsset::ParakeetV3 => {
+                install_with_progress(&self.speech, &steno_speech::ModelAsset::all(), progress)
+            }
             other => Err(format!("{} has no Rust engine yet", other.as_str()).into()),
         }
     }
@@ -708,6 +707,7 @@ impl SpeechModels for ModelStoreSpeechModels {
     fn display_name(&self, asset: ModelAsset) -> &'static str {
         match asset {
             ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "Parakeet TDT 0.6B v3 (fp32)",
+            ModelAsset::OfflineDiarizer => ONNX_DIARIZER_NAME,
             other => other.display_name(),
         }
     }
@@ -717,21 +717,107 @@ impl SpeechModels for ModelStoreSpeechModels {
     fn source_repo(&self, asset: ModelAsset) -> &'static str {
         match asset {
             ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "nvidia/parakeet-tdt-0.6b-v3",
+            ModelAsset::OfflineDiarizer => ONNX_DIARIZER_NOTICES[0].2,
             other => other.source_repo(),
+        }
+    }
+
+    /// The diarizer's two ONNX models each have a line with their own
+    /// licence and attribution ([`ONNX_DIARIZER_NOTICES`]); every other
+    /// asset has the default one.
+    fn notices(&self, asset: ModelAsset) -> Vec<ModelNotice> {
+        match asset {
+            ModelAsset::OfflineDiarizer => ONNX_DIARIZER_NOTICES
+                .iter()
+                .map(|(name, licence, source)| ModelNotice {
+                    name: (*name).to_owned(),
+                    licence: (*licence).to_owned(),
+                    source: (*source).to_owned(),
+                })
+                .collect(),
+            other => vec![ModelNotice {
+                name: self.display_name(other).to_owned(),
+                licence: other.licence().to_owned(),
+                source: self.source_repo(other).to_owned(),
+            }],
         }
     }
 
     /// Where the speech sidecar runs Parakeet v3, the fp32 export's size
     /// from its manifest, not the `CoreML` build's.
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
-        match asset {
-            ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => {
-                let bytes = steno_speech::ModelAsset::parakeet_v3_fp32().total_size();
-                i64::try_from(bytes).unwrap_or(i64::MAX)
+        let bytes = match asset {
+            ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
+                steno_speech::ModelAsset::parakeet_v3_coreml().total_size()
             }
-            other => other.approximate_bytes(),
-        }
+            ModelAsset::ParakeetV3 => steno_speech::ModelAsset::parakeet_v3_fp32().total_size(),
+            ModelAsset::OfflineDiarizer => ONNX_DIARIZER_BYTES,
+            other => return other.approximate_bytes(),
+        };
+        i64::try_from(bytes).unwrap_or(i64::MAX)
     }
+}
+
+/// What Settings calls the diarizer every platform runs: the two ONNX
+/// models, not the Swift app's `CoreML` one.
+const ONNX_DIARIZER_NAME: &str =
+    "Speaker diarization (pyannote segmentation 3.0, WeSpeaker ResNet34-LM)";
+
+/// The diarizer's two acknowledgement lines, `(name with attribution,
+/// licence, source)`: the models `steno_diarize::models` fetches, as
+/// sherpa-onnx exported them from their originals.
+const ONNX_DIARIZER_NOTICES: [(&str, &str, &str); 2] = [
+    (
+        "pyannote segmentation 3.0 by pyannote.audio (CNRS), as exported by sherpa-onnx",
+        "MIT",
+        "pyannote/segmentation-3.0",
+    ),
+    (
+        "WeSpeaker ResNet34-LM by WeSpeaker, trained on VoxCeleb, as exported by sherpa-onnx",
+        "CC BY 4.0 (VoxCeleb)",
+        "Wespeaker/wespeaker-voxceleb-resnet34-LM",
+    ),
+];
+
+/// The two ONNX diarizer files' bytes: the segmentation model's 5 992 913
+/// and the embedding model's 26 530 550.
+const ONNX_DIARIZER_BYTES: u64 = 5_992_913 + 26_530_550;
+
+/// Installs `assets` into `store` one after another, reporting the
+/// fraction of all their bytes and the file under way (at most once per
+/// whole percent or file), then `(1.0, "Installed")`.
+fn install_with_progress(
+    store: &ModelStore,
+    assets: &[steno_speech::ModelAsset],
+    progress: &mut dyn FnMut(f64, &str),
+) -> BoundaryResult<()> {
+    let total = assets
+        .iter()
+        .map(steno_speech::ModelAsset::total_size)
+        .sum::<u64>()
+        .max(1);
+    let mut throttle = ProgressThrottle::default();
+    let mut received_before: u64 = 0;
+    for asset in assets {
+        store.ensure(asset, &mut |report| {
+            let earlier_files: u64 = asset
+                .files
+                .iter()
+                .take_while(|f| f.name != report.file)
+                .map(|f| f.size)
+                .sum();
+            #[allow(clippy::cast_precision_loss)]
+            let fraction = ((received_before + earlier_files + report.received) as f64
+                / total as f64)
+                .min(1.0);
+            if throttle.forwards(fraction, report.file) {
+                progress(fraction, report.file);
+            }
+        })?;
+        received_before += asset.total_size();
+    }
+    progress(1.0, "Installed");
+    Ok(())
 }
 
 /// Lets a download report through only when its whole percent or its file
@@ -1193,6 +1279,58 @@ mod tests {
         );
     }
 
+    /// Settings downloads the `CoreML` Parakeet into the models
+    /// directory's `fluidaudio/parakeet-tdt-0.6b-v3/`, through the mirror
+    /// when one is set (`<mirror>/parakeet-tdt-0.6b-v3/<file>`), with the
+    /// progress of the file under way; here the mirror serves junk of the
+    /// first file's size, which fails its checksum and installs nothing.
+    /// On the Mac that is the Parakeet v3 row's download.
+    #[test]
+    fn the_coreml_parakeet_downloads_into_the_fluidaudio_folder_with_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let asset = steno_speech::ModelAsset::parakeet_v3_coreml();
+        let first = &asset.files[0];
+        let models = ModelStoreSpeechModels::new(&testing::setup(
+            dir.path(),
+            SpeechSettings {
+                models_mirror: Some(junk_mirror(usize::try_from(first.size).unwrap())),
+                ..SpeechSettings::default()
+            },
+        ));
+        assert_eq!(models.coreml_store.directory(&asset), models.coreml);
+        assert_eq!(
+            models.coreml,
+            dir.path().join("fluidaudio").join("parakeet-tdt-0.6b-v3")
+        );
+        let mut reports = Vec::new();
+        let mut record = |fraction: f64, file: &str| reports.push((fraction, file.to_owned()));
+        let error = if cfg!(target_os = "macos") {
+            models.download(ModelAsset::ParakeetV3, &mut record)
+        } else {
+            install_with_progress(&models.coreml_store, &[asset.clone()], &mut record)
+        }
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("sha256") && error.contains("coremldata.bin"),
+            "{error}"
+        );
+        assert!(
+            !reports.is_empty()
+                && reports
+                    .iter()
+                    .all(|(fraction, file)| *file == first.name && *fraction < 1.0),
+            "{reports:?}"
+        );
+        assert!(!coreml_parakeet_installed(&models.coreml));
+        assert!(
+            testing::files_under(&models.coreml)
+                .iter()
+                .all(|path| path.extension().is_some_and(|ext| ext == "lock")),
+            "only the lock of the file that failed"
+        );
+    }
+
     #[test]
     fn download_progress_goes_through_once_per_percent_or_file() {
         let mut throttle = ProgressThrottle::default();
@@ -1469,16 +1607,17 @@ mod tests {
     }
 
     /// Settings shows the size of the model the platform runs: the
-    /// `CoreML` build's on the Mac by default, the fp32 export's (about
-    /// 2.6 GB) elsewhere. The diarizer keeps the Swift app's measure for
-    /// now (the open item on the diarizer's rows in the plan).
+    /// `CoreML` build's manifest on the Mac by default (about 483 MB), the
+    /// fp32 export's (about 2.6 GB) elsewhere, and the two ONNX diarizer
+    /// files' (about 33 MB) everywhere.
     #[test]
     fn the_expected_size_is_that_of_the_model_the_platform_runs() {
         let models = testing::models_in(Path::new("/tmp/steno-models"));
         let expected = if cfg!(target_os = "macos") {
+            let bytes = steno_speech::ModelAsset::parakeet_v3_coreml().total_size();
             format!(
                 "Not downloaded · {}",
-                steno_host::labels::file_size(ModelAsset::ParakeetV3.approximate_bytes())
+                steno_host::labels::file_size(i64::try_from(bytes).unwrap())
             )
         } else {
             fp32_size_text()
@@ -1486,7 +1625,7 @@ mod tests {
         assert_eq!(parakeet_size_text(&models), expected);
         assert_eq!(
             models.expected_bytes(ModelAsset::OfflineDiarizer),
-            ModelAsset::OfflineDiarizer.approximate_bytes()
+            32_523_463
         );
     }
 
@@ -1495,12 +1634,51 @@ mod tests {
     fn parakeet_acknowledgement() -> (String, String) {
         let models = testing::models_in(Path::new("/tmp/steno-models"));
         let rows = steno_host::settings::snapshots::acknowledgements(&models);
-        assert_eq!(
-            rows[4].name,
-            ModelAsset::OfflineDiarizer.display_name(),
-            "the other assets keep their names"
-        );
         (rows[0].name.clone(), rows[0].source.clone())
+    }
+
+    /// Settings > General acknowledges the two models the Rust app offers:
+    /// Parakeet v3, then the diarizer's two ONNX models, each with its
+    /// licence and who made it (WeSpeaker's CC BY 4.0 asks for the
+    /// attribution); no row for Whisper, Ultra or the German Parakeet, and
+    /// the Transcription row names the ONNX models.
+    #[test]
+    fn the_diarizer_is_acknowledged_as_its_two_onnx_models() {
+        let models = testing::models_in(Path::new("/tmp/steno-models"));
+        let rows = steno_host::settings::snapshots::acknowledgements(&models);
+        let speech: Vec<_> = rows
+            .iter()
+            .filter(|row| row.group == steno_bridge::GeneralAcknowledgementGroup::SpeechModels)
+            .map(|row| (row.name.as_str(), row.licence.as_str(), row.source.as_str()))
+            .collect();
+        assert_eq!(speech.len(), 3, "{speech:?}");
+        assert_eq!(
+            &speech[1..],
+            [
+                (
+                    "pyannote segmentation 3.0 by pyannote.audio (CNRS), as exported by sherpa-onnx",
+                    "MIT",
+                    "pyannote/segmentation-3.0",
+                ),
+                (
+                    "WeSpeaker ResNet34-LM by WeSpeaker, trained on VoxCeleb, as exported by sherpa-onnx",
+                    "CC BY 4.0 (VoxCeleb)",
+                    "Wespeaker/wespeaker-voxceleb-resnet34-LM",
+                ),
+            ]
+        );
+        assert_eq!(
+            models.display_name(ModelAsset::OfflineDiarizer),
+            "Speaker diarization (pyannote segmentation 3.0, WeSpeaker ResNet34-LM)"
+        );
+        assert!(
+            speech
+                .iter()
+                .all(|(name, _, source)| !name.contains("Whisper")
+                    && !name.contains("Ultra")
+                    && !source.contains("speaker-diarization-coreml")),
+            "{speech:?}"
+        );
     }
 
     #[cfg(target_os = "macos")]

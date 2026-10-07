@@ -14,6 +14,7 @@
 //! | [`audio_folders`] | Where recordings were written, beside the database: each recording's and phone upload's folder, for crash recovery and the adoption of a master with no meeting, and the known folders |
 //! | [`recovery`] | Recovery of an interrupted recording from its master on disk, at launch and after a failed stop, the launch's adoption of a master no meeting names, and [`LiveRecordingCheck`](recovery::LiveRecordingCheck), when a master counts as still written |
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
+//! | [`model_gate`] | The gates that keep a pipeline run from downloading a model: a refusal leaves the meeting queued until Settings installs it |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
 //! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, and the host's `Handover` over the listener |
@@ -92,6 +93,7 @@ pub mod handover;
 mod kill_tests;
 pub mod llm;
 pub mod logs;
+pub mod model_gate;
 pub mod pipeline;
 pub mod platform;
 pub mod qr;

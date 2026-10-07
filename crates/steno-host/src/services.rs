@@ -404,6 +404,19 @@ pub trait SpeechModels: Send + Sync {
         asset.source_repo()
     }
 
+    /// The acknowledgement lines of `asset`, one per model behind it with
+    /// its attribution; the default is one line of
+    /// [`Self::display_name`], [`ModelAsset::licence`] and
+    /// [`Self::source_repo`]. The services give the ONNX diarizer one line
+    /// for each of its two models, whose licences differ. Rust only.
+    fn notices(&self, asset: ModelAsset) -> Vec<ModelNotice> {
+        vec![ModelNotice {
+            name: self.display_name(asset).to_owned(),
+            licence: asset.licence().to_owned(),
+            source: self.source_repo(asset).to_owned(),
+        }]
+    }
+
     /// About how many bytes `asset`'s model takes once installed, shown
     /// before a download and when the installed size cannot be read; the
     /// default is the Swift app's measure, [`ModelAsset::approximate_bytes`].
@@ -412,6 +425,15 @@ pub trait SpeechModels: Send + Sync {
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         asset.approximate_bytes()
     }
+}
+
+/// One line of the Acknowledgements dialog for a model: what it is and who
+/// made it, its licence, and where it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelNotice {
+    pub name: String,
+    pub licence: String,
+    pub source: String,
 }
 
 /// One entry of the Codex backend's model list. Swift: `CodexModel` in

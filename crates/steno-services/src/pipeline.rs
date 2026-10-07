@@ -125,6 +125,22 @@ impl CurrentPipeline {
         (current.pipeline.clone(), current.engine.clone())
     }
 
+    /// [`ProcessingPipeline::resume_unfinished`] on the current pipeline,
+    /// from any thread: the meetings left `queued` or `processing` start
+    /// on the runtime. Called once a model install finished, so the
+    /// meetings a run refused for missing models are processed; a failure
+    /// is logged.
+    pub fn resume_unfinished(&self) {
+        let _entered = self.runtime.enter();
+        match self.current().resume_unfinished() {
+            Ok(resumed) if !resumed.is_empty() => {
+                tracing::info!(count = resumed.len(), "resumed meetings waiting for models");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
+        }
+    }
+
     /// Quits every pipeline this one built or builds from now on, the
     /// current one, the retired ones still finishing and a reload's
     /// replacement: see [`ProcessingPipeline::quit`].

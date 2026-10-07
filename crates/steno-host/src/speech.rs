@@ -18,6 +18,12 @@ string_enum! {
 }
 
 impl ModelAsset {
+    /// The assets the Rust app offers: Parakeet v3 and the diarizer. The
+    /// Swift app's Ultra, German and Whisper models have no Rust engine
+    /// (`steno_core::store::RETIRED_SPEECH_ENGINE_IDS`), so Settings shows
+    /// no row for them. Rust only.
+    pub const OFFERED: [ModelAsset; 2] = [ModelAsset::ParakeetV3, ModelAsset::OfflineDiarizer];
+
     /// The Hugging Face repository the files come from.
     #[must_use]
     pub fn source_repo(self) -> &'static str {
@@ -78,11 +84,11 @@ string_enum! {
 }
 
 impl SpeechEngineId {
-    /// The engines the settings pane offers.
-    pub const USER_SELECTABLE: [SpeechEngineId; 2] = [
-        SpeechEngineId::ParakeetV3,
-        SpeechEngineId::WhisperKitLargeV3Turbo,
-    ];
+    /// The engines the settings pane offers: Parakeet v3 alone, so the
+    /// picker shows no row. The Swift app also offered Whisper; a stored
+    /// Whisper, Ultra or German id becomes Parakeet v3 at launch
+    /// (`Store::retire_speech_engine`). Rust only.
+    pub const USER_SELECTABLE: [SpeechEngineId; 1] = [SpeechEngineId::ParakeetV3];
 
     /// The model the engine loads; the diarizer is separate.
     #[must_use]

@@ -26,6 +26,7 @@ use steno_pipeline::{
 use crate::block_on;
 use crate::handover::{ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
+use crate::model_gate::ResumeAfterInstall;
 use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
 };
@@ -527,7 +528,13 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
 
     let permissions = Arc::new(FakePermissions::all_granted());
-    let speech_models = Arc::new(ModelStoreSpeechModels::new(speech));
+    // Settings and onboarding install the models; the pipeline never does
+    // (`model_gate`), so an install resumes the meetings waiting for it.
+    let resume = pipeline.clone();
+    let speech_models = Arc::new(ResumeAfterInstall::new(
+        ModelStoreSpeechModels::new(speech),
+        Box::new(move || resume.resume_unfinished()),
+    ));
     let recorder = CaptureRecorder::new(
         store.clone(),
         pipeline.clone(),
@@ -1531,11 +1538,11 @@ mod tests {
 
     /// The models directory is decided once, when the app is built: a
     /// reload after the settings name another directory keeps the first,
-    /// so the pipeline and the model service agree. Both directories are
-    /// plain files, so the engine's `prepare` fails naming the one it uses
-    /// without touching the network (`CoreML` misses its bundles under it
-    /// on the Mac; elsewhere the sidecar's store cannot create its folder
-    /// in it).
+    /// so the pipeline and the model service agree. The first is empty,
+    /// the second holds every model (placeholder files of their sizes):
+    /// the engine's `prepare` is refused for missing models before the
+    /// reload and still after it, where an engine over the second would
+    /// get past the gate. No network.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_keeps_the_models_directory_the_app_was_built_with() {
         let dir = tempfile::tempdir().unwrap();
@@ -1544,9 +1551,13 @@ mod tests {
             dir.path().join("built-models"),
             dir.path().join("reloaded-models"),
         );
-        for file in [&first, &reloaded] {
-            std::fs::write(file, b"not a directory").unwrap();
+        std::fs::create_dir_all(&first).unwrap();
+        let full = crate::speech::testing::models_in(&reloaded);
+        crate::speech::testing::install_coreml_parakeet(&full.coreml);
+        for asset in steno_speech::ModelAsset::all() {
+            crate::speech::testing::install_speech_asset(&full, &asset);
         }
+        crate::speech::testing::install_onnx_diarizer(&full);
         let store = open_store(&paths.database_path()).unwrap();
         let mut settings = store.settings().unwrap();
         settings.models_directory = Some(file_url(&first, true));
@@ -1554,21 +1565,21 @@ mod tests {
         drop(store);
 
         let app = build(options_under(&dir.path().join("support"))).unwrap();
-        let prepare = async || {
+        let refused = async || {
             let engine = app.pipeline.current().dependencies().speech_engine.clone();
-            engine.prepare().await.unwrap_err().to_string()
+            let error = engine.prepare().await.unwrap_err();
+            error
+                .downcast_ref::<steno_pipeline::PipelineFailure>()
+                .is_some_and(steno_pipeline::PipelineFailure::is_models_missing)
         };
-        let named = first.display().to_string();
-        let error = prepare().await;
-        assert!(error.contains(&named), "{named} in {error}");
+        assert!(refused().await, "the empty directory");
 
         settings.models_directory = Some(file_url(&reloaded, true));
         app.store.save_settings(&settings).unwrap();
         app.pipeline.reload().unwrap();
-        let error = prepare().await;
         assert!(
-            error.contains(&named) && !error.contains("reloaded-models"),
-            "{named} in {error}"
+            refused().await,
+            "still the empty directory after the reload"
         );
     }
 
