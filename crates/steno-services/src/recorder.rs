@@ -385,14 +385,15 @@ impl CaptureRecorder {
             CaptureMode::Call => steno_audio::CaptureMode::Call,
             CaptureMode::InPerson => steno_audio::CaptureMode::InPerson,
         };
-        let disk = self.disk();
-        let free = disk.free_for(&audio_folder);
         let mut configuration = CaptureConfiguration::new(audio_mode, &audio_folder);
         configuration
             .input_device_uid
             .clone_from(&settings.input_device_uid);
+        let disk = self.disk();
         let rate = bytes_per_second(&configuration);
-        let room = free.map_or(Room::Enough, |free| Room::of(free, rate));
+        let room = disk
+            .free_for(&audio_folder)
+            .map_or(Room::Enough, |free| Room::of(free, rate));
         if room == Room::Full {
             return Err(
                 "the disk is almost full. Free some space, then start the recording again"
@@ -870,7 +871,6 @@ mod tests {
     use crate::testing::{
         PATIENCE, eventually, fake_dependencies, on_own_thread, synthetic_capture, temp_store,
     };
-    use steno_audio::CaptureError;
     use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
     use steno_core::AudioLane;
     use steno_core::paths::file_url;
@@ -995,7 +995,10 @@ mod tests {
             chrono::FixedOffset::east_opt(0).unwrap(),
             tokio::runtime::Handle::current(),
         );
-        recorder.watch_disk_with(disk_with(free.clone()));
+        recorder.watch_disk_with({
+            let free = free.clone();
+            disk_with(move |_| Ok(free.load(Ordering::SeqCst)))
+        });
         Harness {
             _dir: dir,
             store: store.clone(),
@@ -1008,72 +1011,96 @@ mod tests {
         }
     }
 
-    /// A disk watch over `free`, read every 20 ms.
-    fn disk_with(free: Arc<AtomicU64>) -> DiskWatch {
+    /// A disk watch over `free_space`, read every 20 ms.
+    fn disk_with(
+        free_space: impl Fn(&Path) -> std::io::Result<u64> + Send + Sync + 'static,
+    ) -> DiskWatch {
         DiskWatch {
-            free_space: Arc::new(move |_| Ok(free.load(Ordering::SeqCst))),
-            interval: std::time::Duration::from_millis(20),
+            free_space: Arc::new(free_space),
+            interval: Duration::from_millis(20),
         }
+    }
+
+    /// The real writer with `before` run ahead of every write; an error
+    /// from it fails that write.
+    struct BeforeWrite<F> {
+        inner: RecordingWriter,
+        before: F,
+    }
+
+    impl<F: FnMut() -> Result<(), CaptureError> + Send> RecordingWriting for BeforeWrite<F> {
+        fn files(&self) -> RecordingFiles {
+            self.inner.files()
+        }
+        fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
+            (self.before)()?;
+            self.inner.write(frames)
+        }
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.inner.sync()
+        }
+        fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
+            self.inner.finish()
+        }
+    }
+
+    /// A capture session over `backend` and a relay of `headroom` frames
+    /// whose writers are [`BeforeWrite`]s, each with a `before` from
+    /// `make_before`.
+    fn session_with_writes<F>(
+        configuration: CaptureConfiguration,
+        backend: Arc<dyn steno_audio::CaptureBackend>,
+        headroom: usize,
+        make_before: impl Fn() -> F + Send + Sync + 'static,
+    ) -> Result<CaptureSession, String>
+    where
+        F: FnMut() -> Result<(), CaptureError> + Send + 'static,
+    {
+        CaptureSession::with_writer_factory(
+            configuration,
+            backend,
+            None,
+            headroom,
+            Arc::new(steno_audio::SystemClock::new()),
+            Arc::new(move |layout, lanes, keep_raw| {
+                Ok(Box::new(BeforeWrite {
+                    inner: RecordingWriter::new(layout, lanes, keep_raw)?,
+                    before: make_before(),
+                }) as Box<dyn RecordingWriting>)
+            }),
+        )
+        .map_err(|error| error.to_string())
     }
 
     /// Capture sessions over the synthetic tone whose writer fails every
     /// write after the first `writes`, as a disk that fills does, and whose
     /// restarts after a device change all fail when `device_lost` is set.
     fn failing_capture(writes: Option<usize>, device_lost: bool) -> MakeCaptureSession {
-        use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
-
-        struct FillsUp {
-            inner: RecordingWriter,
-            left: Option<usize>,
-        }
-        impl RecordingWriting for FillsUp {
-            fn files(&self) -> RecordingFiles {
-                self.inner.files()
-            }
-            fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
-                if let Some(left) = self.left.as_mut() {
-                    if *left == 0 {
-                        return Err(CaptureError::WriterFailed("No space left on device".into()));
-                    }
-                    *left -= 1;
-                }
-                self.inner.write(frames)
-            }
-            fn sync(&mut self) -> std::io::Result<()> {
-                self.inner.sync()
-            }
-            fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
-                self.inner.finish()
-            }
-        }
-
         Arc::new(move |configuration: CaptureConfiguration| {
-            let lanes = configuration.lanes();
-            let mut options = steno_audio::testing::synthetic::SyntheticOptions::tones(
-                &lanes,
-                &[(steno_core::AudioLane::Mic, 440.0)],
-                600.0,
-            );
-            options.real_time = true;
+            let mut options = crate::testing::synthetic_tone(&configuration);
             if device_lost {
                 options = options
                     .change_device_after(0.2)
                     .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS);
             }
-            CaptureSession::with_writer_factory(
+            session_with_writes(
                 configuration,
                 Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
-                None,
                 CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-                Arc::new(steno_audio::SystemClock::new()),
-                Arc::new(move |layout, lanes, keep_raw| {
-                    Ok(Box::new(FillsUp {
-                        inner: RecordingWriter::new(layout, lanes, keep_raw)?,
-                        left: writes,
-                    }) as Box<dyn RecordingWriting>)
-                }),
+                move || {
+                    let mut left = writes;
+                    move || match left.as_mut() {
+                        Some(0) => {
+                            Err(CaptureError::WriterFailed("No space left on device".into()))
+                        }
+                        Some(left) => {
+                            *left -= 1;
+                            Ok(())
+                        }
+                        None => Ok(()),
+                    }
+                },
             )
-            .map_err(|error| error.to_string())
         })
     }
 
@@ -1702,31 +1729,6 @@ mod tests {
         assert!(line.contains("Mic: 250, System: 0"), "{line}");
     }
 
-    /// The real writer whose first write waits for `go`, so a backend that
-    /// delivers meanwhile overflows a one-frame relay.
-    struct Stalled {
-        inner: RecordingWriter,
-        go: Option<std::sync::mpsc::Receiver<()>>,
-    }
-
-    impl RecordingWriting for Stalled {
-        fn files(&self) -> RecordingFiles {
-            self.inner.files()
-        }
-        fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError> {
-            if let Some(go) = self.go.take() {
-                let _ = go.recv_timeout(PATIENCE);
-            }
-            self.inner.write(frames)
-        }
-        fn sync(&mut self) -> std::io::Result<()> {
-            self.inner.sync()
-        }
-        fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
-            self.inner.finish()
-        }
-    }
-
     /// A stop whose recording lost frames logs them with the meeting: a
     /// backend delivers two seconds at once while the writer is stalled
     /// behind a one-frame relay.
@@ -1744,43 +1746,32 @@ mod tests {
             &[(AudioLane::Mixed, 440.0)],
             2.0,
         )));
-        let make: MakeCaptureSession = {
+        // The first write waits for `go`, so the backend overflows a
+        // one-frame relay meanwhile.
+        harness.capture_with({
             let backend = backend.clone();
             Arc::new(move |configuration| {
                 let stalled = stalled.clone();
-                CaptureSession::with_writer_factory(
-                    configuration,
-                    backend.clone(),
-                    None,
-                    1,
-                    Arc::new(steno_audio::SystemClock::new()),
-                    Arc::new(move |layout, lanes, keep_raw| {
-                        Ok(Box::new(Stalled {
-                            inner: RecordingWriter::new(layout, lanes, keep_raw)?,
-                            go: stalled.lock().unwrap().take(),
-                        }) as Box<dyn RecordingWriting>)
-                    }),
-                )
-                .map_err(|error| error.to_string())
+                session_with_writes(configuration, backend.clone(), 1, move || {
+                    let mut go = stalled.lock().unwrap().take();
+                    move || {
+                        if let Some(go) = go.take() {
+                            let _ = go.recv_timeout(PATIENCE);
+                        }
+                        Ok(())
+                    }
+                })
             })
-        };
-        let recorder = CaptureRecorder::new(
-            harness.store.clone(),
-            harness.recorder.pipeline.clone(),
-            make,
-            Arc::new(FakePermissions::all_granted()),
-            harness.recorder.speech_models.clone(),
-            FixedOffset::east_opt(0).unwrap(),
-            tokio::runtime::Handle::current(),
-        );
-        start(&recorder).await;
+        });
+        let recorder = &harness.recorder;
+        start(recorder).await;
         let meeting_id = recorder.status().meeting_id.unwrap();
         let finished = backend.clone();
         tokio::task::spawn_blocking(move || finished.wait_until_finished())
             .await
             .unwrap();
         go.send(()).unwrap();
-        stop(&recorder).await;
+        stop(recorder).await;
         let text = log.text();
         assert!(
             text.lines()
@@ -1926,15 +1917,12 @@ mod tests {
     async fn an_unreadable_free_space_lets_the_recording_run() {
         let harness = harness(&[]);
         let reads = Arc::new(AtomicUsize::new(0));
-        harness.recorder.watch_disk_with(DiskWatch {
-            free_space: {
-                let reads = reads.clone();
-                Arc::new(move |_| {
-                    reads.fetch_add(1, Ordering::SeqCst);
-                    Err(std::io::Error::other("statvfs failed"))
-                })
-            },
-            interval: std::time::Duration::from_millis(20),
+        harness.recorder.watch_disk_with({
+            let reads = reads.clone();
+            disk_with(move |_| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                Err(std::io::Error::other("statvfs failed"))
+            })
         });
         start(&harness.recorder).await;
         eventually("the space was read while recording", || {
