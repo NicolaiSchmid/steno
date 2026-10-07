@@ -197,8 +197,7 @@ impl WavFile {
 
     /// Parses `data` as RIFF/WAVE.
     pub fn read_bytes(mut data: &[u8]) -> Result<Self, WavReadError> {
-        // A slice cannot fail to read, so no path is needed for the error.
-        let layout = WavLayout::read(&mut data, Path::new(""))?;
+        let layout = WavLayout::read(&mut data)?;
         let bytes_per_sample = layout.bytes_per_sample();
         let bytes_per_frame = layout.bytes_per_frame();
         let mut channels = vec![vec![0.0f32; layout.frames]; layout.channels];
@@ -220,9 +219,9 @@ impl WavFile {
     /// Reads a block at a time into a buffer of the lane's length, so
     /// nothing but the lane is held.
     pub fn read_16k_mono(path: &Path) -> Result<Vec<f32>, WavReadError> {
-        let io = |e: std::io::Error| WavReadError::Io(format!("{}: {e}", path.display()));
+        let io = |e: std::io::Error| WavReadError::Io(e.to_string());
         let mut file = WindowedFile::open(path).map_err(io)?;
-        let layout = WavLayout::read(&mut file, path)?;
+        let layout = WavLayout::read(&mut file)?;
         if layout.sample_rate != 16_000 || layout.channels != 1 {
             return Err(WavReadError::UnsupportedFormat(format!(
                 "{} Hz, {} channel(s); need 16000 Hz mono",
@@ -248,6 +247,14 @@ impl WavFile {
         Ok(samples)
     }
 
+    /// Seconds, from the headers alone, so a long file is not read: the
+    /// data chunk's whole frames over the sample rate.
+    pub fn read_duration(path: &Path) -> Result<f64, WavReadError> {
+        let mut file = WindowedFile::open(path).map_err(|e| WavReadError::Io(e.to_string()))?;
+        let layout = WavLayout::read(&mut file)?;
+        Ok(layout.frames as f64 / f64::from(layout.sample_rate.max(1)))
+    }
+
     /// Frames per read in `read_16k_mono`.
     const BLOCK_FRAMES: usize = 32_768;
 }
@@ -268,13 +275,13 @@ struct WavLayout {
 }
 
 impl WavLayout {
-    /// Walks the chunks of `source`; `path` names the file in a read error.
-    fn read(source: &mut impl ReadAt, path: &Path) -> Result<Self, WavReadError> {
+    /// Walks the chunks of `source`.
+    fn read(source: &mut impl ReadAt) -> Result<Self, WavReadError> {
         let len = source.len();
         let mut read = |offset: usize, buffer: &mut [u8]| {
             source
                 .read_at(offset, buffer)
-                .map_err(|e| WavReadError::Io(format!("{}: {e}", path.display())))
+                .map_err(|e| WavReadError::Io(e.to_string()))
         };
         let mut tags = [0u8; 12];
         if len >= 12 {

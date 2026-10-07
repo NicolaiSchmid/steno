@@ -85,6 +85,11 @@ fn two_lanes_round_trip_sample_accurately_with_sidecars() {
     let system_sidecar = WavFile::read_16k_mono(&files.sidecars_16k[&AudioLane::System]).unwrap();
     assert_eq!(mic_sidecar.len(), 32_000);
     assert_eq!(system_sidecar.len(), 32_000);
+    assert_eq!(
+        WavFile::read_duration(&files.sidecars_16k[&AudioLane::Mic]).unwrap(),
+        2.0,
+        "the length from the header alone"
+    );
     assert!(level_against_sine(&mic_sidecar[2_000..], 0.5).abs() < 0.1);
     assert!(level_against_sine(&system_sidecar[2_000..], 0.25).abs() < 0.1);
     let info = WavFile::read(&files.sidecars_16k[&AudioLane::Mic]).unwrap();

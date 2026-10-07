@@ -233,8 +233,7 @@ impl CafFile {
 
     /// Parses `data` as a CAF.
     pub fn read_bytes(mut data: &[u8]) -> Result<Self, CafReadError> {
-        // A slice cannot fail to read, so no path is needed for the error.
-        let layout = CafLayout::read(&mut data, Path::new(""))?;
+        let layout = CafLayout::read(&mut data)?;
         let channel_count = layout.channels;
         let bytes_per_sample = CafStreamWriter::BYTES_PER_SAMPLE;
         let mut channels = vec![vec![0.0f32; layout.frames]; channel_count];
@@ -264,13 +263,13 @@ struct CafLayout {
 }
 
 impl CafLayout {
-    /// Walks the chunks of `source`; `path` names the file in a read error.
-    fn read(source: &mut impl ReadAt, path: &Path) -> Result<Self, CafReadError> {
+    /// Walks the chunks of `source`.
+    fn read(source: &mut impl ReadAt) -> Result<Self, CafReadError> {
         let len = source.len();
         let mut read = |offset: usize, buffer: &mut [u8]| {
             source
                 .read_at(offset, buffer)
-                .map_err(|e| CafReadError::Io(format!("{}: {e}", path.display())))
+                .map_err(|e| CafReadError::Io(e.to_string()))
         };
         let mut magic = [0u8; 4];
         if len >= 8 {
@@ -358,7 +357,6 @@ impl CafLayout {
 /// through it.
 pub(crate) struct CafReader {
     file: WindowedFile,
-    path: PathBuf,
     layout: CafLayout,
     /// Frames read so far.
     position: usize,
@@ -368,12 +366,10 @@ pub(crate) struct CafReader {
 impl CafReader {
     /// Reads the chunk headers; the samples wait for `read_frames`.
     pub(crate) fn open(path: &Path) -> Result<Self, CafReadError> {
-        let mut file = WindowedFile::open(path)
-            .map_err(|e| CafReadError::Io(format!("{}: {e}", path.display())))?;
-        let layout = CafLayout::read(&mut file, path)?;
+        let mut file = WindowedFile::open(path).map_err(|e| CafReadError::Io(e.to_string()))?;
+        let layout = CafLayout::read(&mut file)?;
         Ok(Self {
             file,
-            path: path.to_path_buf(),
             layout,
             position: 0,
             bytes: Vec::new(),
@@ -408,7 +404,7 @@ impl CafReader {
         self.bytes.resize(frames * bytes_per_frame, 0);
         self.file
             .read_at(offset, &mut self.bytes)
-            .map_err(|e| CafReadError::Io(format!("{}: {e}", self.path.display())))?;
+            .map_err(|e| CafReadError::Io(e.to_string()))?;
         samples.clear();
         samples.extend(
             self.bytes

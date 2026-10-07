@@ -5,9 +5,9 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Bytes read by offset; see the module doc.
+/// Bytes read by offset; see the module doc. A file's errors name it.
 pub(crate) trait ReadAt {
     /// The bytes there are.
     fn len(&self) -> usize;
@@ -33,6 +33,8 @@ impl ReadAt for &[u8] {
 /// a window or more goes to the file directly.
 pub(crate) struct WindowedFile {
     file: File,
+    /// Named in every error.
+    path: PathBuf,
     len: usize,
     window: Vec<u8>,
     /// The file offset of `window[0]`.
@@ -44,11 +46,13 @@ impl WindowedFile {
     const WINDOW: usize = 64 * 1024;
 
     pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
-        let file = File::open(path)?;
+        let named = |error| named(path, &error);
+        let file = File::open(path).map_err(named)?;
         // A file longer than the address space cannot be a recording.
-        let len = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
+        let len = usize::try_from(file.metadata().map_err(named)?.len()).unwrap_or(usize::MAX);
         Ok(Self {
             file,
+            path: path.to_path_buf(),
             len,
             window: Vec::new(),
             window_start: 0,
@@ -56,12 +60,8 @@ impl WindowedFile {
     }
 }
 
-impl ReadAt for WindowedFile {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn read_at(&mut self, offset: usize, buffer: &mut [u8]) -> std::io::Result<()> {
+impl WindowedFile {
+    fn read_window(&mut self, offset: usize, buffer: &mut [u8]) -> std::io::Result<()> {
         let end = offset + buffer.len();
         if offset >= self.window_start && end <= self.window_start + self.window.len() {
             let from = offset - self.window_start;
@@ -82,4 +82,20 @@ impl ReadAt for WindowedFile {
         buffer.copy_from_slice(&self.window[..buffer.len()]);
         Ok(())
     }
+}
+
+impl ReadAt for WindowedFile {
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    fn read_at(&mut self, offset: usize, buffer: &mut [u8]) -> std::io::Result<()> {
+        self.read_window(offset, buffer)
+            .map_err(|error| named(&self.path, &error))
+    }
+}
+
+/// `error` with `path` in front of its message.
+fn named(path: &Path, error: &std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
