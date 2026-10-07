@@ -1269,7 +1269,8 @@ item to settle before the Linux release:
   playback in the Rust crates, no `<audio>` in the web UI), so nothing of
   its own is in the lane. Leaving its output out was weighed and not done
   until Steno plays audio while it records (#214); the measurements, on
-  the private daemon with PipeWire 1.6.5 and WirePlumber 0.5.14:
+  the private daemon `scripts/pipewire-headless.sh` starts (PipeWire
+  1.6.5, WirePlumber 0.5.14):
   - A playback node names its process only through its client: the node
     carries `client.id`, and that client `application.process.id` (equal
     to `pipewire.sec.pid` for a native client). A property Steno would set
@@ -1375,7 +1376,7 @@ item to settle before the Linux release:
   head of the `1.4` branch and 1.6.5 to 1.6.8, and has the same code at
   the same lines in 1.0.5, so a distribution on 1.0 to 1.4 keeps the
   miss unless it carries the fix. Both variants of the reproduction
-  still hold with the nix shell's PipeWire 1.6.5 and WirePlumber 0.5.14;
+  still hold with PipeWire 1.6.5 and WirePlumber 0.5.14;
   neither was run against 1.6.9. Nothing is left to report for 1.6. A
   backport to 1.4 could still be asked; the text below is ready and not
   filed (Nicolai files it if the Linux release targets a distribution on
@@ -1392,16 +1393,17 @@ item to settle before the Linux release:
   > (line 106) removes the pong listener without calling
   > `remove_pending` (line 122). So a client that unbinds before the
   > owner answers its ping stops property events for every bound client
-  > until the owner restarts. Reproduced with PipeWire 1.6.5 and
-  > WirePlumber 0.5.14, whose `metadata.c` is identical to 1.4.11's:
+  > until the owner restarts. Reproduced with PipeWire 1.6.5, whose
+  > `metadata.c` is identical to 1.4.11's, and WirePlumber 0.5.14:
   >
   > ```sh
-  > wp=$(pidof wireplumber)
+  > wp=$(pgrep -u "$(id -u)" -x wireplumber)
   > pw-metadata -m -n default &
   > kill -STOP "$wp"
   > timeout 1 pw-metadata -n default
   > kill -CONT "$wp"
   > pw-metadata -n default 0 test.after 1
+  > pw-metadata -n default
   > ```
   >
   > Expected: the monitor prints `test.after`. Actual: it never does,
@@ -1410,31 +1412,31 @@ item to settle before the Linux release:
 - **`stop()` is bounded.** It closes the capture's gate to the sink and
   joins the PipeWire thread, all within 2 s once it has the backend (a
   `start` in progress holds it); a device-change report still inside the
-  gate then is logged and left to finish, with the thread it runs on,
-  and a thread that has not ended otherwise is logged with the system
-  call it waits in and left behind (the devices may stay open until
-  Steno quits). Only a cycle's delivery inside the gate is waited for
-  without a bound: it takes microseconds, and one still writing the
-  rings once `stop()` returned would write them beside the next
-  backend's thread. A report runs the session's handler, which may wait
-  for the session mutex; one left behind reaches the session late. The
-  session ignores it unless recording, and otherwise rebuilds once more:
-  the report starts a rebuild, or becomes the pending change of the one
-  in progress (of the next recording, if the stop ended one and another
-  started meanwhile). A late report that takes the sink's latch after
-  the rebuild re-armed it holds back the rebuilt backend's first report,
-  but starts a rebuild itself. So once `stop()` returned no frame
+  gate then is logged and left to finish, with the thread it runs on, and
+  a thread that has not ended otherwise is logged with the system call it
+  waits in and left behind (the devices may stay open until Steno quits).
+  Only a cycle's delivery inside the gate is waited for without a bound:
+  it takes microseconds, and one still writing the rings once `stop()`
+  returned would write them beside the next backend's thread. A report
+  runs the session's handler, which may wait for the session mutex; one
+  left behind reaches the session late. The session ignores it unless it
+  is still recording the recording that backend served, and otherwise
+  rebuilds once more: the report starts a rebuild, or becomes the pending
+  change of the one in progress. A late report that takes the sink's latch
+  after the rebuild re-armed it holds back the rebuilt backend's first
+  report, but starts a rebuild itself. So once `stop()` returned no frame
   reaches the sink, and no report but one the gate let in before it
-  closed. A hang was seen once in testing, most likely in a log write:
-  logs were written synchronously then, a capture thread left behind in
-  a later run was blocked in `write(2)` to stderr, waiting on the disk's
-  journal at idle I/O priority, and `stop()`'s own log of the hang
-  waited for the same stderr lock. Since #202 the binaries queue log
-  lines for one writer thread and drop a line rather than wait
-  (`steno_services::logs`), so a stalled stderr holds neither the
-  capture thread nor `stop()`. Only log lines are queued: the shell's
-  `stderr_line!` and the CLI's progress lines still write to stderr
-  directly.
+  closed.
+
+  A hang was seen once in testing, most likely in a log write: logs were
+  written synchronously then, a capture thread left behind in a later run
+  was blocked in `write(2)` to stderr, waiting on the disk's journal at
+  idle I/O priority, and `stop()`'s own log of the hang waited for the
+  same stderr lock. Since #202 the binaries queue log lines for one writer
+  thread and drop a line rather than wait (`steno_services::logs`), so a
+  stalled stderr holds neither the capture thread nor `stop()`. Only log
+  lines are queued: the shell's `stderr_line!` and the CLI's progress
+  lines still write to stderr directly.
 - **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
   names no Linux node, so a synced or copied settings file shows the input
   device as unavailable and the user picks again. A virtual source (a null
