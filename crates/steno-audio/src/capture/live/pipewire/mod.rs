@@ -16,17 +16,17 @@
 //! and tears down without watching, so no device-change report begins
 //! before `start` took the answer. `stop()` closes the capture's `Gate` to
 //! the sink, sends a quit through a `pipewire::channel` and joins the
-//! thread, all within `STOP_TIMEOUT` (2 s) of its call: a device-change
-//! report still in the sink's handler then (with the thread it runs on),
-//! or a thread that has not ended (with where it waits), is logged and
-//! left behind, and `stop()` returns. Only a cycle's delivery already inside the gate is
-//! waited for without a bound (microseconds; see `Gate`). So once `stop()`
-//! returned no frame reaches the sink, and no report but one the gate let
-//! in before it closed, which reaches the session late. Logs go through
-//! the subscriber the binary installed, synchronously unless it buffers
-//! them: a log write that blocks (stderr on a stalled disk) can hold the
-//! thread past `STOP_TIMEOUT`, and then holds `stop()` too, in its own log
-//! of the hang.
+//! thread, all within `STOP_TIMEOUT` (2 s) once it has the backend: a
+//! device-change report still in the sink's handler then (with the thread
+//! it runs on), or a thread that has not ended (with where it waits), is
+//! logged and left behind, and `stop()` returns. Only a cycle's delivery
+//! already inside the gate is waited for without a bound (microseconds;
+//! see `Gate`). So once `stop()` returned no frame reaches the sink, and
+//! no report but one the gate let in before it closed, which reaches the
+//! session late. Logs go through the subscriber the binary installed,
+//! synchronously unless it buffers them: a log write that blocks (stderr
+//! on a stalled disk) can hold the thread past `STOP_TIMEOUT`, and then
+//! holds `stop()` too, in its own log of the hang.
 //!
 //! The stream runs with `RT_PROCESS`, so its `process` callback runs on
 //! PipeWire's data-loop thread, which is the real-time path here:
@@ -127,9 +127,9 @@ const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// judgement start a new stream.
 const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 
-/// How long `stop()` waits, from its call, for a report to leave the gate
-/// and the PipeWire thread to tear down, a few milliseconds normally; past
-/// it the report or the thread is left behind.
+/// How long `stop()` waits, once it has the backend, for a report to leave
+/// the gate and the PipeWire thread to tear down, a few milliseconds
+/// normally; past it the report or the thread is left behind.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The capture stream's `node.name`.
@@ -152,9 +152,9 @@ const STREAM_NODE_NAME: &str = "steno-capture";
 ///   and waited for on a condition variable, until the deadline `close` is
 ///   given. It runs the sink's handler, which may block (the session's
 ///   takes the session mutex), and a late one costs at most a spurious
-///   rebuild (possibly of the next recording): the session ignores a
-///   report unless recording, and keeps one that comes during a rebuild
-///   for the next.
+///   rebuild of the same recording: the session ignores a report unless
+///   it is still recording the recording the report's capture served, and
+///   keeps one that comes during a rebuild for the next.
 ///
 /// Once `close` returned, no cycle reaches the sink, and a report only if
 /// the gate let it in before it closed and `close` gave up waiting for it.
@@ -206,9 +206,8 @@ impl Gate {
             tests::before_a_report_counts_itself();
             *inside += 1;
         }
+        let _leaves = ReportLeaves(self);
         work();
-        *self.reporting() -= 1;
-        self.report_left.notify_all();
         true
     }
 
@@ -239,6 +238,17 @@ impl Gate {
             .wait_timeout_while(self.reporting(), wait, |inside| *inside != 0)
             .unwrap_or_else(PoisonError::into_inner);
         *inside == 0
+    }
+}
+
+/// Counts a report out of its [`Gate`] when dropped, so a handler that
+/// panics leaves too and holds no `close` to its deadline.
+struct ReportLeaves<'a>(&'a Gate);
+
+impl Drop for ReportLeaves<'_> {
+    fn drop(&mut self) {
+        *self.0.reporting() -= 1;
+        self.0.report_left.notify_all();
     }
 }
 
@@ -286,10 +296,11 @@ fn process(stream: &pw::stream::Stream, rt: &mut RealTime) {
     rt.cycle_frames.store(view.frames, Ordering::Release);
 }
 
-/// `work` through a new open [`Gate`], as [`process`] puts a cycle through
-/// its capture's; whether it ran. For the allocation count in
-/// `tests/realtime.rs`, which cannot reach the gate.
+/// For tests: `work` through a new open [`Gate`], as [`process`] puts a
+/// cycle through its capture's; whether it ran. For the allocation count
+/// in `tests/realtime.rs`, which cannot reach the gate.
 #[doc(hidden)]
+#[must_use]
 pub fn through_an_open_gate(work: impl FnOnce()) -> bool {
     Gate::new().deliver(work)
 }
@@ -1182,10 +1193,11 @@ impl LiveCaptureBackend {
             // The report runs on the thread, which cannot have ended.
             tracing::error!(
                 "a PipeWire device-change report is still in its handler {} s after \
-                 the capture's gate closed; it is left behind to finish, the session \
-                 may act on it late, and the capture thread, cut off from the \
+                 the capture's gate closed ({}); it is left behind to finish, the \
+                 session may act on it late, and the capture thread, cut off from the \
                  recording, ends once the report returns",
-                limit.as_secs_f32()
+                limit.as_secs_f32(),
+                where_it_waits(active.thread_id.load(Ordering::Relaxed))
             );
             return;
         }
@@ -1444,6 +1456,38 @@ mod tests {
         assert_eq!(passed, 2);
         assert_eq!(gate.delivering.load(Ordering::SeqCst), 0);
         assert_eq!(*gate.reporting(), 0);
+    }
+
+    #[test]
+    fn a_report_whose_handler_panics_leaves_the_gate() {
+        let gate = Gate::new();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gate.report(|| panic!("the handler panics"))
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(*gate.reporting(), 0, "the report counted itself out");
+        assert!(
+            gate.close(Instant::now()),
+            "close() finds nobody inside, rather than a report that died"
+        );
+    }
+
+    #[test]
+    fn a_delivery_never_takes_the_reports_lock() {
+        let gate = Arc::new(Gate::new());
+        let (ran, done) = sync_channel(1);
+        let held = gate.reporting();
+        let thread = std::thread::spawn({
+            let gate = Arc::clone(&gate);
+            move || ran.send(gate.deliver(|| ())).unwrap()
+        });
+        assert_eq!(
+            done.recv_timeout(Duration::from_secs(1)),
+            Ok(true),
+            "a delivery waited for the lock a report holds"
+        );
+        drop(held);
+        thread.join().unwrap();
     }
 
     #[test]

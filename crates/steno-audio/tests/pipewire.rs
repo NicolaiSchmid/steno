@@ -53,7 +53,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -406,11 +406,17 @@ fn assert_tone(samples: &[f32], wanted: f64, other: f64, lane: &str) {
     );
 }
 
+/// Empties the rings; the frames the first lane held.
+fn drain(sink: &LaneFrameSink) -> usize {
+    let held: Vec<usize> = (0..sink.lanes().len())
+        .map(|lane| sink.ring(lane).drain_all().len())
+        .collect();
+    held.first().copied().unwrap_or(0)
+}
+
 /// Empties the rings, then waits until every lane holds `frames`.
 fn collect(sink: &LaneFrameSink, frames: usize) -> Vec<Vec<f32>> {
-    for lane in 0..sink.lanes().len() {
-        drop(sink.ring(lane).drain_all());
-    }
+    drain(sink);
     let filled = eventually(Duration::from_secs(5), || {
         sink.available_to_read() >= frames
     });
@@ -524,6 +530,11 @@ fn an_unknown_microphone_fails_and_the_backend_starts_again() {
     assert_eq!(
         start(&backend, &lanes, Some("no-such-device"), &sink),
         Err(CaptureError::InputDeviceUnavailable)
+    );
+    assert!(
+        thread_named("steno-pipewire").is_none(),
+        "the failed start joined its thread: {:?}",
+        threads()
     );
     for round in 0..2 {
         start(&backend, &lanes, None, &sink)
@@ -932,26 +943,66 @@ fn a_connection_closed_from_outside_in_person_is_reported_as_the_input_gone() {
     );
 }
 
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_report_stuck_in_its_handler_does_not_hold_stop() {
-    let lanes = CALL;
+/// The `steno-capture` nodes in the graph.
+fn capture_nodes() -> usize {
+    dump()
+        .iter()
+        .filter(|object| {
+            object
+                .pointer("/info/props/node.name")
+                .and_then(serde_json::Value::as_str)
+                == Some(CAPTURE_NODE)
+        })
+        .count()
+}
+
+/// The threads of this process with `part` in their name.
+fn threads_named(part: &str) -> usize {
+    threads()
+        .iter()
+        .filter(|(_, name)| name.contains(part))
+        .count()
+}
+
+/// A sink whose handler sends each report on the returned receiver, and
+/// is stuck in the first, as a handler waiting for a lock, until the
+/// returned sender sends.
+fn sink_stuck_in_its_first_report(
+    lanes: &[AudioLane],
+) -> (Arc<LaneFrameSink>, Receiver<DeviceChangeReason>, Sender<()>) {
     let (entered, handler_entered) = channel();
     let (release, released) = channel::<()>();
     let released = Mutex::new(released);
-    let sink = Arc::new(LaneFrameSink::with_handler(
-        &lanes,
+    let stuck_once = AtomicBool::new(true);
+    let sink = LaneFrameSink::with_handler(
+        lanes,
         SAMPLE_RATE,
         2.0,
         Box::new(move |reason| {
             let _ = entered.send(reason);
-            // Stuck, as a handler waiting for a lock, until the test lets go.
-            let _ = released
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .recv();
+            if stuck_once.swap(false, Ordering::SeqCst) {
+                let _ = released
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .recv();
+            }
         }),
-    ));
+    );
+    (Arc::new(sink), handler_entered, release)
+}
+
+/// A report stuck in the handler holds `stop()` only to its bound, and the
+/// session's rebuild then starts the same backend on the same sink while
+/// the old capture's thread and node are still there: the rebuilt capture
+/// records both lanes beside it and through its teardown, and that
+/// teardown reads as no change.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_report_stuck_in_its_handler_holds_neither_stop_nor_the_rebuild() {
+    let _sink_tone = Tone::into_sink(SINK, SINK_TONE);
+    let _mic_tone = Tone::into_source(MIC, MIC_TONE);
+    let lanes = CALL;
+    let (sink, handler_entered, release) = sink_stuck_in_its_first_report(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, None, &sink).expect("start");
     destroy_capture_links_from(&[SINK]);
@@ -987,27 +1038,67 @@ fn a_report_stuck_in_its_handler_does_not_hold_stop() {
         "samples dropped after stop() returned: {:?}",
         sink.dropped_samples()
     );
+
+    // The session's rebuild: the latch re-armed, then the same backend
+    // started on the same sink beside the old capture.
+    sink.rearm_device_change();
+    start(&backend, &lanes, None, &sink).expect("a start beside the stuck capture");
+    assert_eq!(threads_named("steno-pipewire"), 2, "{:?}", threads());
+    assert_eq!(
+        capture_nodes(),
+        2,
+        "the old capture's node stays while stuck"
+    );
+    let audio = collect(&sink, 12_000);
+    assert_tone(
+        &audio[0],
+        MIC_TONE,
+        SINK_TONE,
+        "mic beside the stuck capture",
+    );
+    assert_tone(
+        &audio[1],
+        SINK_TONE,
+        MIC_TONE,
+        "system beside the stuck capture",
+    );
+
     release.send(()).expect("the handler is still waiting");
-    let threads_gone =
-        || thread_named("data-loop").is_none() && thread_named("steno-pipewire").is_none();
+    // Through the old capture's teardown the rebuilt one keeps delivering.
+    let mut delivered = 0;
+    let listened = Instant::now();
+    while listened.elapsed() < QUIET {
+        std::thread::sleep(Duration::from_millis(50));
+        delivered += drain(&sink);
+    }
     assert!(
-        eventually(SETTLE, threads_gone),
-        "the capture's threads outlive the late report: {:?}",
+        delivered > 48_000,
+        "only {delivered} frames in {QUIET:?} across the old capture's teardown"
+    );
+    assert!(
+        sink.dropped_samples().is_empty(),
+        "samples dropped across the old capture's teardown: {:?}",
+        sink.dropped_samples()
+    );
+    assert!(
+        handler_entered.try_recv().is_err(),
+        "the old capture's teardown was reported as a change"
+    );
+    assert!(
+        eventually(SETTLE, || threads_named("steno-pipewire") == 1
+            && capture_nodes() == 1),
+        "the old capture outlives its late report: {:?}",
         threads()
     );
-    assert!(
-        eventually(SETTLE, || node_id(CAPTURE_NODE).is_none()),
-        "{CAPTURE_NODE} is still in the graph after the late report"
+    let audio = collect(&sink, 12_000);
+    assert_tone(&audio[0], MIC_TONE, SINK_TONE, "mic after the old teardown");
+    assert_tone(
+        &audio[1],
+        SINK_TONE,
+        MIC_TONE,
+        "system after the old teardown",
     );
-    assert!(
-        eventually(SETTLE, || Arc::strong_count(&sink) == 1),
-        "the capture thread let go of the sink"
-    );
-    assert_eq!(
-        sink.available_to_read(),
-        after_stop,
-        "no frame arrives after stop() returns"
-    );
+    stop_and_check_teardown(&backend, &sink);
 }
 
 /// A lingering virtual microphone, created by `pw-cli`; destroyed when
