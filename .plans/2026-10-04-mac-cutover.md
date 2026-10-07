@@ -11,7 +11,7 @@ changes this plan in these places:
 - step 2's beta staging and signing, and all of step 3 (distribution), become
   its "Release mechanics" and "The Sparkle handoff"; step 2's frozen `appcast`
   branch stands, with one handoff item (its D8);
-- step 4 reads the Swift app's preference domain explicitly, copies two keys and
+- step 4 reads the Swift app's preference domain explicitly, copies one key and
   Sparkle's two update flags, and drops the panel anchor (its S6);
 - step 5's open choice is its D4, which keeps `SMAppService`; the new app
   registers itself, and the Swift entry is handled as its S6 says;

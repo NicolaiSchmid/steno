@@ -21,7 +21,7 @@ places:
 - step 2's beta staging and signing, and all of step 3 (distribution), become
   "Release mechanics" and "The Sparkle handoff"; step 2's frozen `appcast`
   branch stands, with one handoff item (D8);
-- step 4 reads the Swift app's preference domain explicitly, copies two keys
+- step 4 reads the Swift app's preference domain explicitly, copies one key
   and Sparkle's two update flags, and drops the panel anchor (S6);
 - step 5's open choice is D4, which keeps `SMAppService`; the new app registers
   itself, and the Swift app's entry is handled as S6 says;
@@ -208,7 +208,7 @@ Forge and atlas.
 |---|---|---|---|
 | D1 | `v*` tags | as recommended | Confirmed |
 | D2 | 0.11.0 | as recommended | Confirmed |
-| D3 | the blocking list gates data loss, core flows and silent failures | "we should never loose any data" | Changed: every data-loss path blocks (P1 to P30) |
+| D3 | the blocking list gates data loss, core flows and silent failures | "we should never loose any data" | Changed: every data-loss path blocks (P1 to P37) |
 | D4 | `SMAppService`, the Swift registration carrying over | as recommended | Confirmed; with D5 the app registers itself (S6) |
 | D5 | `uno.schmid.steno.mac` on the Mac, `uno.schmid.steno.desktop` elsewhere | "it should be com.nicolaischmid.steno" | Changed; directories and iOS availability **To confirm** |
 | D6 | Linux and Windows listed once gated | "also omarchy and nixos users" | Changed: GNOME, Omarchy and NixOS, X1 to X8 |
@@ -238,8 +238,7 @@ why and the alternative.
   Swift-only path closes with the handoff (D9), since Swift ships no further
   release and runs again only as a rollback. Everything that loses no data
   follows (What follows). The blocking list holds the paths found in the plans
-  and by the data-loss audit of the Rust app's code; the audit's owner list
-  fills the "owner: TBD" cells. Alternative: the earlier gate, which also
+  and by the data-loss audit of the Rust app's code. Alternative: the earlier gate, which also
   blocked core flows and silent failures but not every unlikely loss.
 - **D4 The login item stays `SMAppService.mainApp` on macOS.** Confirmed. It is
   the Mac's own login item, the one the Swift app uses, and it keeps the General
@@ -349,7 +348,7 @@ why and the alternative.
 
 A row closes when its PR merges and its item leaves "Open after the port". Rows
 with a PR number have one; the Rust plan's Progress table says whether it is
-open or merged. "Owner: TBD" cells take the data-loss audit's owner list.
+open or merged. The owner is the coordinator that opens the package's PRs.
 
 **The handoff, on the Mac:**
 
@@ -373,50 +372,57 @@ open or merged. "Owner: TBD" cells take the data-loss audit's owner list.
 
 | ID | What can be lost, and the fix | Owner |
 |---|---|---|
-| P1 | A recording: the intake's receipt and meeting commits run under `synchronous = NORMAL`, so a power loss after `complete` can roll back the meeting while the phone has deleted its copy (#213) | #213 |
-| P2 | A recording, or a second meeting: a `complete` answer that never reaches the phone. A `handoverAdmission` table answers the retry "delivered", also for a recording whose meeting was deleted; the Rust migrator ignores later migrations and shows a dialog instead of panicking; the backfill runs on every open (`fix/handover-lost-complete-answer`, D11) | handover pipeline |
-| P3 | A recording ended by a kill, a crash or a power loss: salvage the CAF at launch into a meeting that processes, instead of marking it failed | owner: TBD (data-loss audit and audio coordinator) |
-| P4 | A recording's stop: a `stop()` that waited behind a writer failure's or a device loss's finalise returns that recording, as Swift's actor did | owner: TBD |
-| P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s (in the `.deb`, the AUR and Nix packages, and written by the app for the AppImage), and the save logs its duration; on Windows, `ShutdownBlockReasonCreate` while recording | Linux coordinator (with #220) |
-| P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux | Linux coordinator |
-| P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | owner: TBD |
-| P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221 | Linux coordinator (with #221) |
-| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess`, a `meeting.processAgain` bridge method and its button; a meeting refused for missing models stays queued and resumes once they install | owner: TBD |
-| P10 | A meeting's whole result: a diarizer or speaker-match failure fails the meeting. It merges without diarization instead | owner: TBD |
-| P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | owner: TBD |
-| P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | owner: TBD |
-| P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a cap on resume attempts stops the loop | owner: TBD |
-| P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | owner: TBD |
-| P15 | Anything two processes write at once: one exclusive lock per data directory for the app's lifetime; a second process (the Swift app on the same database, the CLI, a Linux session with no D-Bus for the single-instance guard) skips the resume, the sweep and the intake | owner: TBD |
-| P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | owner: TBD |
-| P17 | A local recording's folder: a failed enqueue saves the asset row, so the folder is not orphaned | owner: TBD |
-| P18 | A recording that silently stopped: the recorder subscribes to session failures | owner: TBD |
-| P19 | The mic lane when the input device goes away: the mic falls back mid-recording (in #222) | #222 |
-| P20 | A recording that fills the disk: a free-space check before and during recording, with a warning | owner: TBD |
-| P21 | The unsynced tail of a recording: periodic `sync_data` on the master | owner: TBD |
-| P22 | A lane that stopped delivering: a stall watchdog | owner: TBD |
-| P23 | Audio the relay dropped: a warning, with the drop count on the meeting | owner: TBD |
-| P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | owner: TBD |
-| P25 | A recording stopped by an update: updates wait while a recording runs | owner: TBD |
-| P26 | A person page: a case-only rename of a person loses the page on a case-insensitive disk | owner: TBD |
-| P27 | Notes written at once to one vault: deliveries are serialised per vault | owner: TBD |
-| P28 | A note never written: a delivery left Pending is resumed at launch | owner: TBD |
-| P29 | A note on Windows: names that Windows reserves (`CON`, `NUL`, ...) are escaped | owner: TBD |
-| P30 | A note the user edited: a re-export does not overwrite it (D13) | owner: TBD |
+| P1 | A recording: the intake's receipt and meeting commits run under `synchronous = NORMAL`, so a power loss after `complete` can roll back the meeting while the phone has deleted its copy (#213) | handover (#213) |
+| P2 | A recording, or a second meeting: a `complete` answer that never reaches the phone. A `handoverAdmission` table answers the retry "delivered", also for a recording whose meeting was deleted; the Rust migrator ignores later migrations and shows a dialog instead of panicking; the backfill runs on every open (`fix/handover-lost-complete-answer`, D11) | handover |
+| P3 | A recording ended by a kill, a crash or a power loss: salvage the CAF at launch into a meeting that processes, instead of marking it failed | capture and recovery (`wp-cap-*`) |
+| P4 | A recording's stop: a `stop()` that waited behind a writer failure's or a device loss's finalise returns that recording, as Swift's actor did | capture and recovery (`wp-cap-*`) |
+| P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s (in the `.deb`, the AUR and Nix packages, and written by the app for the AppImage), and the save logs its duration; on Windows, `ShutdownBlockReasonCreate` while recording | Linux desktop (with #220) |
+| P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux | Linux desktop |
+| P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
+| P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221 | audio (with #221) |
+| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess`, a `meeting.processAgain` bridge method and its button; a meeting refused for missing models stays queued and resumes once they install | pipeline, store and export (`wp-pse-*`) |
+| P10 | A meeting's whole result: a diarizer or speaker-match failure fails the meeting. It merges without diarization instead | pipeline, store and export (`wp-pse-*`) |
+| P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | pipeline, store and export (`wp-pse-*`) |
+| P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
+| P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard) |
+| P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | pipeline, store and export (`wp-pse-*`) |
+| P15 | Anything two processes write at once: one exclusive lock per data directory for the app's lifetime; a second process (the Swift app on the same database, the CLI, a Linux session with no D-Bus for the single-instance guard) skips the resume, the sweep and the intake | capture and recovery (`wp-cap-*`) (`steno.lock`) |
+| P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
+| P17 | A local recording's folder: a failed enqueue saves the asset row, so the folder is not orphaned; the recorder's rebuild thread survives a panic | capture and recovery (`wp-cap-*`) |
+| P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
+| P19 | The mic lane when the input device goes away: the mic falls back mid-recording (in #222) | audio (#222) |
+| P20 | A recording that fills the disk: a free-space check before and during recording, with a warning | capture and recovery (`wp-cap-*`) |
+| P21 | The unsynced tail of a recording: periodic `sync_data` on the master | capture and recovery (`wp-cap-*`) |
+| P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`) | capture and recovery (`wp-cap-*`) |
+| P23 | Audio the relay dropped: a warning, with the drop count on the meeting | capture and recovery (`wp-cap-*`) |
+| P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio |
+| P25 | A recording or a processing run stopped by an update: updates wait while either runs | Linux desktop |
+| P26 | A person page: a case-only rename of a person loses the page on a case-insensitive disk | pipeline, store and export (`wp-pse-*`) |
+| P27 | Notes written at once to one vault: deliveries are serialised per vault | pipeline, store and export (`wp-pse-*`) |
+| P28 | A note never written: a delivery left Pending is resumed at launch | pipeline, store and export (`wp-pse-*`) |
+| P29 | A note on Windows: names that Windows reserves (`CON`, `NUL`, ...) are escaped | pipeline, store and export (`wp-pse-*`) |
+| P30 | A note the user edited: a re-export does not overwrite it (D13) | pipeline, store and export (`wp-pse-*`) (after D13) |
+| P31 | Settings the other app wrote: a settings save upserts and keeps keys it does not know | pipeline, store and export (`wp-pse-*`) |
+| P32 | Preferences, the panel anchor and the Codex sign-in: each is written atomically, and the Codex `auth.json` is synced | pipeline, store and export (`wp-pse-*`) |
+| P33 | Another phone's upload: the first announce's discard, and a re-announce whose hash differs, leave other devices' files alone; an old device's 409 hands over cleanly (with P2) | handover |
+| P34 | Recordings on the phone: the mobile queue index rebuilds after a failed load, and recorder files left by the audio module are found again (#223) | handover (#223) |
+| P35 | Pairings: the pairing writes are durable and the intake runs in one transaction (#213); the identity-fingerprint guard gets a macOS test and its Swift mirror | handover |
+| P36 | Secrets and files on Windows: credentials persist, and renames are durable | handover |
+| P37 | A recording through a cancelled logout: the save that a logout started is undone cleanly when the logout is cancelled (#220) | Linux desktop (#220) |
 
 **The final audio path (D9), on every platform:**
 
 | ID | Package | Owner |
 |---|---|---|
-| A1 | A streamed decoder and mixdown: CAF and WAV decoded and mixed in bounded chunks, so a two-hour two-channel master never sits in memory whole | owner: TBD |
-| A2 | The CoreML backend on the shared chunker, merge and decoder settings | owner: TBD |
-| A3 | The diarizer on `ModelStore`, and its inference in the speech sidecar, so a crash in ONNX Runtime ends the child, not the app (invariant 4) | owner: TBD |
-| A4 | PipeWire: `stop()` bounded, the own output and the default move settled (#214); `start`'s first cycle and the latencies measured on Nicolai's hardware | #214 |
+| A1 | A streamed decoder and mixdown: CAF and WAV decoded and mixed in bounded chunks, so a two-hour two-channel master never sits in memory whole | audio |
+| A2 | The CoreML backend on the shared chunker, merge and decoder settings | audio |
+| A3 | The diarizer on `ModelStore`, and its inference in the speech sidecar, so a crash in ONNX Runtime ends the child, not the app (invariant 4) | audio |
+| A4 | PipeWire: `stop()` bounded, the own output and the default move settled (#214); `start`'s first cycle and the latencies measured on Nicolai's hardware | audio (#214) |
 | A5 | One speech engine per reload | #218, merged |
 | A6 | Devices that will not run at 48 kHz, and a headset's switch mid-call | #198 |
 | A7 | The Linux input device list and the device UID fallback | #222 |
 | A8 | Meeting detection on Linux, over PipeWire's streams | #222 |
-| A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; call mode without an output client checked on the Mac | owner: TBD |
+| A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; call mode without an output client checked on the Mac | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -552,8 +558,9 @@ Every package is written in parallel except where a dependency is named:
     - **At launch,** first in the shell's `setup`, before `Host::real` builds the
       graph: while `preferences.json` holds no onboarding flag, read the Swift
       domain explicitly (`/usr/bin/defaults export uno.schmid.steno.mac -`,
-      parsed with the `plist` crate); copy `steno.onboardingCompleted` and
-      `steno.loginItemRegistered`; copy Sparkle's `SUEnableAutomaticChecks` and
+      parsed with the `plist` crate); copy `steno.onboardingCompleted` (not
+      `steno.loginItemRegistered`, so the new identifier registers itself);
+      copy Sparkle's `SUEnableAutomaticChecks` and
       `SUAutomaticallyUpdate` into S4's flags; drop the panel anchor; remove the
       Launch Agent a desktop-id build left behind. If the keychain holds a Swift
       handover certificate or a Swift API key and the import has not run, the
@@ -574,8 +581,9 @@ Every package is written in parallel except where a dependency is named:
       or mints an identity, and the step says that phones pair again. Then the
       pipeline and the listener start. Skipping the step counts as both denied.
   - **Login item** (D4). On macOS, `autostart.rs` uses `SMAppService.mainApp`.
-    At the first launch after the handoff the new app registers itself when the
-    stored `launch_at_login` setting (shared database) is on. The Swift entry is
+    At the first launch after the handoff the new app registers its own
+    identifier explicitly when the stored `launch_at_login` setting (shared
+    database) is on. The Swift entry is
     left to macOS. If R3 shows that it stays as a second "Steno" in Login Items,
     the onboarding step and the release notes tell the user to remove it in
     System Settings > General > Login Items. If it launches a Swift copy, or
@@ -657,9 +665,7 @@ Each lands before `0.11.0-rc.1`.
 
 ### P: no data lost (D3)
 
-The table above names each. Where it gives a branch, the package is that branch.
-P1, P2 and the Linux ones (P5, P6, P8) have owners; the audit's owner list fills
-the rest. Their tests:
+The table above names each package and its owner. Their tests:
 
 - **P2.** Its tests include a store written by the Swift `v0.10.0-rc.2` intake (a
   phone meeting with no `handoverAdmission` row), opened by the Rust app, which
@@ -1125,7 +1131,8 @@ except case e.
   3. Settings downloads the CoreML Parakeet and the diarizer models, with
      progress.
   4. A five-minute call is transcribed, diarized and exported.
-  5. On Forge, with `HOME=~/steno-handoff/soak-home` (the models copied into its
+  5. Only once every P package is merged (G2). On Forge, with
+     `HOME=~/steno-handoff/soak-home` (the models copied into its
      `Library/Application Support/Steno/Models/`, no API key, no destination),
      with `steno` and `steno-speech-sidecar` built from the tag into one
      directory and the default four ONNX threads, each under `/usr/bin/time -l`:
@@ -1289,9 +1296,8 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
    app's Mac availability, D9's final choices, D12, D13, and the call-mode check
    in A9 once he has run it.
 2. **Every package is written,** in parallel except for the dependencies under
-   "Work packages": S1 to S7, A1 to A9, P1 to P30, X1 to X7.
-   The data-loss audit's owner list assigns the "owner: TBD" rows; any further
-   gap it finds joins the P table before G1.
+   "Work packages": S1 to S7, A1 to A9, P1 to P37, X1 to X7. Any further gap the
+   data-loss audit finds joins the P table before G1.
 3. **Gate G1.** Every package is merged, every row of the blocking list is
    closed, and the audio path is final (D9).
 4. **Bump to `0.11.0-rc.1` and tag it.** This publishes a pre-release and moves
@@ -1301,6 +1307,9 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
    - R1 to R3 pass on candidate N. R4 publishes N+1, which changes only the
      version, and R5, R6 and the dogfood pass on N+1, in that order.
    - The Linux gate of each target to be listed passes.
+   - The R5 soak and the stability count start only once every P package is
+     merged, on a candidate built after the last of them (D9: the audio path is
+     final).
    - **The stability count** (D12): R5's soak passes, and ten real meetings on
      the Mac and five on each Linux target to be listed are recorded, processed
      and exported without a failure. The deliberate kills, logouts and reboots
