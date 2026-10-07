@@ -198,13 +198,8 @@ impl DeliveryLedger {
             && components.all(|component| matches!(component, Component::Normal(_)))
     }
 
-    /// The folder of a first delivery: `base`, with `-2`, `-3`, … appended
-    /// while the candidate exists and holds another meeting's `meeting.json`
-    /// (or none); a candidate holding `meeting_id` is a crashed attempt and
-    /// is reused. `exists` and `meeting_of` are the destination's two
-    /// lookups. A writer claims the folder instead, with
-    /// [`DeliveryLedger::claim_folder`], so another writer cannot pick the
-    /// same one between the lookup and the first write.
+    /// [`DeliveryLedger::claim_folder`] with `exists` as the claim, the
+    /// lookup Swift's `resolveFolder` does.
     #[must_use]
     pub fn resolve_folder(
         base: &str,
@@ -221,13 +216,17 @@ impl DeliveryLedger {
         folder
     }
 
-    /// [`DeliveryLedger::resolve_folder`]'s rule with each candidate
-    /// claimed: `claim` creates the folder and says whether it was new
-    /// (`Ok(true)`, the folder is this delivery's) or something was
-    /// already at the path (`Ok(false)`, which `meeting_of` then decides).
-    /// Creating is the claim, so two first deliveries with the same slug,
-    /// in one process or two, never share a folder. A failed `claim` ends
-    /// the search with its error.
+    /// The folder of a first delivery: `base`, with `-2`, `-3`, … appended
+    /// while the candidate is taken, that is, already there and holding
+    /// another meeting's `meeting.json` (or none); a candidate holding
+    /// `meeting_id` is a crashed attempt and is reused. `claim` creates the
+    /// candidate and says whether it was new (`Ok(true)`, the folder is
+    /// this delivery's) or something was already at the path (`Ok(false)`,
+    /// which `meeting_of` then decides). Creating is the claim, so two
+    /// first deliveries with the same slug, in one process or two, never
+    /// share a folder. A failed `claim` ends the search with its error.
+    /// Swift: none; `resolveFolder` looks up and the first write creates
+    /// the folder.
     pub fn claim_folder<E>(
         base: &str,
         meeting_id: Uuid,

@@ -4,12 +4,12 @@
 //! - [`rendering`]: pure renderers from [`MeetingExport`](steno_core::MeetingExport)
 //!   to bytes: folder note, transcript and tasks Markdown, `WebVTT`,
 //!   `meeting.json` and person pages. No I/O, no clock; equal inputs give
-//!   equal bytes on every machine, and on the Mac the bytes are the Swift
-//!   renderers' (`Tests/Fixtures/snapshots/obsidian`); a Windows or Linux
-//!   call's folder note differs in its info line's one word
-//!   (`Tests/Fixtures/snapshots/platforms`), and on Windows a person named
-//!   after a reserved device name (`Con`) gets a page named `Con_.md`
-//!   ([`Slug::file_name`](naming::Slug::file_name)).
+//!   equal bytes on every machine but for one rule: on Windows a person
+//!   named `Con` gets `Con_.md` and the link `[[Con_|Con]]`
+//!   ([`Slug::file_name`](naming::Slug::file_name)). On the Mac the bytes
+//!   are the Swift renderers' (`Tests/Fixtures/snapshots/obsidian`); a
+//!   Windows or Linux call's folder note differs in its info line's one
+//!   word (`Tests/Fixtures/snapshots/platforms`).
 //! - [`naming`]: the meeting folder layout and the slugs.
 //! - [`obsidian`]: the Obsidian vault folder destination and the managed
 //!   block it owns on person pages.

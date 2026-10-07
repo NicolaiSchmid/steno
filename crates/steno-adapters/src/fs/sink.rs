@@ -90,6 +90,7 @@ impl LocalFolderSink {
     /// `AlreadyExists` when anything is already at that path. The one step
     /// that claims a folder: of two writers creating the same path, in this
     /// process or another, exactly one succeeds.
+    /// Swift: none; the Swift destination's first write creates the folder.
     pub fn create_new_directory(&self, relative: &str) -> std::io::Result<()> {
         fs::create_dir(self.path(relative))
     }

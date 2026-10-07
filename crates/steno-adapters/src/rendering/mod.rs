@@ -1,12 +1,12 @@
 //! Pure renderers from the canonical model to bytes. No I/O, no clock;
-//! equal inputs give equal bytes on every machine. With
+//! equal inputs give equal bytes on every machine but for one rule: on
+//! Windows a person named `Con` gets `Con_.md` and the link `[[Con_|Con]]`
+//! ([`Slug::file_name`](crate::naming::Slug::file_name)). With
 //! [`RenderOptions::platform`] the Mac, the bytes are the Swift renderers'
 //! (`Sources/StenoAdapters/Rendering`), pinned by the goldens in
 //! `Tests/Fixtures/snapshots/obsidian`; a Windows or Linux call's folder
 //! note differs in its info line's one word
-//! (`Tests/Fixtures/snapshots/platforms`). The one machine-dependent rule
-//! is Windows' reserved device names: there a person named `Con` gets
-//! `Con_.md` and links `[[Con_|Con]]` ([`Slug::file_name`](crate::naming::Slug::file_name)).
+//! (`Tests/Fixtures/snapshots/platforms`).
 
 mod artifact;
 pub mod date_text;

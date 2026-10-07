@@ -62,6 +62,8 @@ impl Slug {
     /// `nul_.tar`. The list is Microsoft's "Naming Files, Paths, and
     /// Namespaces", plus `CONIN$` and `CONOUT$`; the page's `.md` does not
     /// change the check.
+    /// Swift: none; the Swift app runs on the Mac, where the names are
+    /// allowed.
     #[must_use]
     pub fn file_name_reserving(text: &str, device_names_reserved: bool) -> String {
         let name = Self::sanitized_file_name(text);
