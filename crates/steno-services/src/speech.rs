@@ -216,9 +216,8 @@ fn models_directory_with(
 /// The `CoreML` Parakeet directory under `models_directory`.
 #[must_use]
 pub fn coreml_model_directory(models_directory: &Path) -> PathBuf {
-    models_directory
-        .join("fluidaudio")
-        .join("parakeet-tdt-0.6b-v3")
+    ModelStore::coreml_in_models_directory(models_directory)
+        .directory(&steno_speech::ModelAsset::parakeet_v3_coreml())
 }
 
 /// What makes the `CoreML` Parakeet installed: Swift's
