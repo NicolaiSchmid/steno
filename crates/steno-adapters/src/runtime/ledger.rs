@@ -84,11 +84,11 @@ impl DeliveryLedger {
         self.previous.iter().flat_map(|receipt| &receipt.files)
     }
 
-    /// Whether an owned path may be opened for writing: on a first delivery
-    /// always, as is any path directly in the folder a redelivery claimed
-    /// ([`DeliveryLedger::move_folder`]); otherwise when the receipt lists
-    /// it as owned or nothing is there yet. A file the app never wrote is
-    /// never opened for writing.
+    /// Whether an owned path may be opened for writing: always on a first
+    /// delivery and for a path directly in the folder a redelivery claimed
+    /// ([`DeliveryLedger::move_folder`]); otherwise only when the receipt
+    /// lists it as owned or nothing is there yet. A file the app never wrote
+    /// is never opened for writing.
     #[must_use]
     pub fn may_write(&self, path: &str, exists: bool) -> bool {
         self.is_first_delivery()
@@ -102,13 +102,12 @@ impl DeliveryLedger {
                 .any(|file| file.ownership == FileOwnership::Owned && file.relative_path == path)
     }
 
-    /// Moves the receipt to come from `from`, the pinned folder that no
-    /// longer holds this meeting's `meeting.json` (another meeting's, or
-    /// none), to `to`, the folder this delivery claimed. It drops every
-    /// listed file under `from`, since this delivery no longer writes
-    /// there. [`DeliveryLedger::may_write`] then allows any path directly
-    /// under `to`, as on a first delivery: the claim gave a new folder or
-    /// one holding this meeting's `meeting.json`.
+    /// Moves the receipt from `from`, the pinned folder that is no longer
+    /// this meeting's, to `to`, the folder this delivery claimed in its
+    /// place. Every listed file under `from` leaves the receipt, since this
+    /// delivery no longer writes there, and [`DeliveryLedger::may_write`]
+    /// allows any path directly in `to`, as on a first delivery: the claim
+    /// gave a new folder or one holding this meeting's `meeting.json`.
     /// Swift: none; Swift writes into the pinned folder whatever it holds.
     pub fn move_folder(&mut self, from: &str, to: &str) {
         let prefix = format!("{}/", from.trim_end_matches('/'));
@@ -239,11 +238,11 @@ impl DeliveryLedger {
     }
 
     /// The folder of a delivery without one (a first delivery, or a
-    /// redelivery whose pinned folder no longer holds this meeting's
-    /// `meeting.json`): `base`, with `-2`, `-3`, … appended while the
-    /// candidate is taken, that is, already there and holding another
-    /// meeting's `meeting.json` (or none); a candidate holding `meeting_id`
-    /// is a crashed or failed attempt and is reused. `claim` creates the
+    /// redelivery whose pinned folder is no longer this meeting's): `base`,
+    /// with `-2`, `-3`, … appended while the candidate is taken, that is,
+    /// already there and holding another meeting's `meeting.json` (or
+    /// none); a candidate holding `meeting_id` is a crashed or failed
+    /// attempt and is reused. `claim` creates the
     /// candidate and says whether it was new (`Ok(true)`, the folder is
     /// this delivery's) or something was already at the path (`Ok(false)`,
     /// which `meeting_of` then decides). Creating is the claim, so two
