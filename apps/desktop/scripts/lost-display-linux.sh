@@ -4,8 +4,8 @@
 # (Ctrl+Shift+R, the record shortcut), lets it run, then ends the Xvfb
 # server by the PID this script recorded. GDK ends the process when its X
 # server goes; the shell's log writer (`display_lost.rs`) must save the
-# recording first. Exits 0 when the app said so ("the display closed;
-# saving") and the store holds the meeting `queued` with a duration above
+# recording first. Exits 0 when the app logged its save ("the display
+# closed; saving") and the store holds the meeting `queued` with a duration above
 # zero, 1 otherwise, 2 on a usage error or a missing tool.
 #
 #   scripts/pipewire-headless.sh \
@@ -94,13 +94,15 @@ for _ in $(seq 120); do
 done
 [[ -n "$main" ]] || fail "no main window within 60 s"
 
-# The page may still be loading, so the shortcut is sent again until a
-# recording shows in the store, each time only after waiting long enough
-# that a second press cannot stop the recording the first one started.
+# The page may still be loading, so the shortcut is sent again while the
+# store holds no meeting at all: a press after a recording started would
+# stop it.
 recording=""
 for _ in $(seq 6); do
-  xdotool windowfocus --sync "$main" 2>/dev/null || true
-  xdotool key --clearmodifiers ctrl+shift+r
+  if [[ -z "$(meetings "$store")" ]]; then
+    xdotool windowfocus --sync "$main" 2>/dev/null || true
+    xdotool key --clearmodifiers ctrl+shift+r
+  fi
   for _ in $(seq 20); do
     if grep -q '^recording ' <<<"$(meetings "$store")"; then
       recording=yes
