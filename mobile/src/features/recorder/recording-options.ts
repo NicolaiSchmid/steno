@@ -62,3 +62,24 @@ const RECORDING_FILE_NAME = new RegExp(
 export function recordingIDFromFileName(fileName: string): string | null {
 	return RECORDING_FILE_NAME.exec(fileName)?.[1] ?? null;
 }
+
+/**
+ * `Documents/ExpoAudio/`, where expo-audio writes a recording while it runs
+ * (`RECORDING_OPTIONS.directory` is `document`); the recorder moves the file
+ * into the queue directory when it stops.
+ */
+export const RECORDER_DIRECTORY = "ExpoAudio";
+
+const RECORDER_FILE_NAME = new RegExp(
+	`^recording-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})${RECORDING_EXTENSION.replace(".", "\\.")}$`,
+	"i",
+);
+
+/**
+ * The UUID in a file name expo-audio gives a recording
+ * (`recording-<UUID>.m4a`), lower-cased like the ids the recorder draws, or
+ * null for any other name.
+ */
+export function recorderFileID(fileName: string): string | null {
+	return RECORDER_FILE_NAME.exec(fileName)?.[1]?.toLowerCase() ?? null;
+}

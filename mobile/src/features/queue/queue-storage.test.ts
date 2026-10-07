@@ -18,11 +18,13 @@ import {
 	type QueueFileAPI,
 	serializeQueueIndex,
 } from "./queue-storage";
+import { createQueueStore } from "./queue-store";
 
 /**
- * In-memory file API; `failRename` makes the next rename throw once. `list`
- * returns every file under the directory, its creation time from `created`
- * by file name (0 when absent).
+ * In-memory file API; `failRename` makes the next rename throw once and
+ * `failReads` the next that many reads. `list` returns every file under the
+ * directory, its creation time from `created` by file name (0 when absent)
+ * and its size from the text's length.
  */
 function memoryFiles(
 	initial: Record<string, string> = {},
@@ -31,9 +33,14 @@ function memoryFiles(
 	const store = new Map(Object.entries(initial));
 	const calls: string[] = [];
 	let failRename = false;
+	let failReads = 0;
 	const api: QueueFileAPI = {
 		async readText(path) {
 			calls.push(`read ${path}`);
+			if (failReads > 0) {
+				failReads -= 1;
+				throw new Error("EACCES read");
+			}
 			return store.get(path) ?? null;
 		},
 		async writeText(path, text) {
@@ -62,7 +69,11 @@ function memoryFiles(
 				.filter((path) => path.startsWith(prefix))
 				.map((path) => path.slice(prefix.length))
 				.filter((name) => !name.includes("/"))
-				.map((name) => ({ name, createdAt: created[name] ?? 0 }));
+				.map((name) => ({
+					name,
+					createdAt: created[name] ?? 0,
+					size: store.get(`${prefix}${name}`)?.length ?? 0,
+				}));
 		},
 	};
 	return {
@@ -71,6 +82,9 @@ function memoryFiles(
 		calls,
 		failNextRename() {
 			failRename = true;
+		},
+		failReads(count: number) {
+			failReads = count;
 		},
 	};
 }
@@ -323,9 +337,7 @@ describe("recording files the index does not list", () => {
 		});
 		// The corrupt index is kept aside, never deleted, and no file is removed.
 		expect(files.store.get(`${Q}/index.corrupt.json`)).toBe("{oops");
-		expect(files.calls.filter((c) => c.startsWith("remove"))).toEqual([
-			`remove ${Q}/index.corrupt.json`,
-		]);
+		expect(files.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
 		expect(logs).toEqual([
 			"queue index unreadable, rebuilding it from the recording files: QueueError: index is not JSON",
 			"queue index had no row for 2 recording file(s), adopted them",
@@ -456,6 +468,237 @@ describe("recording files the index does not list", () => {
 		expect(logs).toEqual([
 			"queue directory unreadable, no recording files adopted: Error: EACCES",
 		]);
+	});
+});
+
+const REC = "file:///docs/ExpoAudio";
+// expo-audio names its files after an upper-case UUID.
+const C = "33333333-3333-4333-8333-333333333333";
+const D = "44444444-4444-4444-8444-444444444444";
+const E = "55555555-5555-4555-8555-555555555555";
+const recorderName = (id: string) => `recording-${id.toUpperCase()}.m4a`;
+const C_STARTED = "2026-10-01T11:00:00.000Z";
+
+describe("recordings left in the recorder's directory", () => {
+	it("move into the queue under the UUID of their name when no row will recover them", async () => {
+		const logs: string[] = [];
+		// B was recording when the app died: crash recovery moves its file.
+		// A failed with its file still in the recorder's directory.
+		let index = addRecording(
+			EMPTY_INDEX,
+			{
+				recordingID: B,
+				fileName: recordingFileName(B),
+				sourceUri: `file:///private/docs/ExpoAudio/${recorderName(E)}`,
+				startedAt: B_STARTED,
+				durationSeconds: 0,
+				byteCount: 0,
+				sha256: null,
+				chunkSize: CHUNK_SIZE,
+			},
+			"recording",
+		);
+		index = setState(
+			addRecording(
+				index,
+				{
+					recordingID: A,
+					fileName: recordingFileName(A),
+					sourceUri: `${REC}/${recorderName(D)}`,
+					startedAt: A_STARTED,
+					durationSeconds: 0,
+					byteCount: 0,
+					sha256: null,
+					chunkSize: CHUNK_SIZE,
+				},
+				"recording",
+			),
+			A,
+			"failed",
+			{ lastError: "could not move" },
+		);
+		const files = memoryFiles(
+			{
+				[`${Q}/index.json`]: serializeQueueIndex(index),
+				// C: the app died before its row was saved.
+				[`${REC}/${recorderName(C)}`]: "audio C",
+				[`${REC}/${recorderName(D)}`]: "audio D",
+				[`${REC}/${recorderName(E)}`]: "audio E",
+				// Created empty for a recording that never started.
+				[`${REC}/recording-66666666-6666-4666-8666-666666666666.m4a`]: "",
+				[`${REC}/notes.m4a`]: "not a recording",
+			},
+			{
+				[recorderName(C)]: Date.parse(C_STARTED),
+				[recorderName(D)]: Date.parse(A_STARTED),
+			},
+		);
+		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m), REC);
+		const loaded = await storage.load();
+		expect(loaded).toEqual({
+			version: 1,
+			recordings: [
+				...index.recordings,
+				adopted(D, A_STARTED),
+				adopted(C, C_STARTED),
+			],
+		});
+		expect(files.store.get(`${Q}/${recordingFileName(C)}`)).toBe("audio C");
+		expect(files.store.get(`${Q}/${recordingFileName(D)}`)).toBe("audio D");
+		expect([...files.store.keys()].filter((k) => k.startsWith(REC))).toEqual([
+			`${REC}/${recorderName(E)}`,
+			`${REC}/recording-66666666-6666-4666-8666-666666666666.m4a`,
+			`${REC}/notes.m4a`,
+		]);
+		expect(logs).toEqual([
+			"moved 2 recording file(s) without a row from the recorder's directory",
+			"queue index had no row for 2 recording file(s), adopted them",
+		]);
+
+		// Launch recovery hashes and queues the moved files; B's comes from
+		// the recorder's directory as before.
+		const patches = await planRecovery(loaded, {
+			size: (fileName) => files.store.get(`${Q}/${fileName}`)?.length ?? 0,
+			adopt: async (_, fileName) => {
+				await files.api.rename(`${REC}/${recorderName(E)}`, `${Q}/${fileName}`);
+			},
+			sha256: async (fileName) => `sha(${fileName})`,
+		});
+		expect(applyRecovery(loaded, patches).recordings).toMatchObject([
+			{ recordingID: B, state: "queued", byteCount: 7 },
+			{ recordingID: A, state: "failed" },
+			{
+				recordingID: D,
+				state: "queued",
+				sha256: `sha(${recordingFileName(D)})`,
+			},
+			{
+				recordingID: C,
+				state: "queued",
+				sha256: `sha(${recordingFileName(C)})`,
+			},
+		]);
+	});
+
+	it("stay where they are when the queue already has their name, or the move fails", async () => {
+		const logs: string[] = [];
+		const files = memoryFiles({
+			[`${Q}/index.json`]: serializeQueueIndex(EMPTY_INDEX),
+			[`${Q}/${recordingFileName(C)}`]: "older C",
+			[`${REC}/${recorderName(C)}`]: "audio C",
+			[`${REC}/${recorderName(D)}`]: "audio D",
+		});
+		files.failNextRename();
+		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m), REC);
+		expect(await storage.load()).toEqual({
+			version: 1,
+			recordings: [adopted(C, new Date(0).toISOString())],
+		});
+		expect(files.store.get(`${Q}/${recordingFileName(C)}`)).toBe("older C");
+		expect(files.store.get(`${REC}/${recorderName(C)}`)).toBe("audio C");
+		expect(files.store.get(`${REC}/${recorderName(D)}`)).toBe("audio D");
+		expect(logs[0]).toBe(
+			`recording ${recorderName(D)} not moved into the queue: Error: EIO rename`,
+		);
+
+		// The next load moves it.
+		expect((await storage.load()).recordings.map((r) => r.recordingID)).toEqual(
+			[C, D],
+		);
+		expect(files.store.get(`${Q}/${recordingFileName(D)}`)).toBe("audio D");
+	});
+});
+
+describe("a queue load that fails", () => {
+	it("does not fail when the corrupt index cannot be set aside", async () => {
+		const logs: string[] = [];
+		const files = memoryFiles(
+			{
+				[`${Q}/index.json`]: "{oops",
+				[`${Q}/${recordingFileName(A)}`]: "audio",
+			},
+			CREATED,
+		);
+		files.api.remove = async () => {
+			throw new Error("EPERM remove");
+		};
+		files.failNextRename();
+		const storage = createQueueStorage(files.api, Q, (m) => logs.push(m));
+		expect(await storage.load()).toEqual({
+			version: 1,
+			recordings: [adopted(A, A_STARTED)],
+		});
+		expect(logs[1]).toBe("queue index not set aside: Error: EIO rename");
+	});
+
+	it("saves nothing until a load succeeds, so the index keeps every row", async () => {
+		const two = addRecording(one, {
+			recordingID: B,
+			fileName: recordingFileName(B),
+			startedAt: B_STARTED,
+			durationSeconds: 5,
+			byteCount: 40_000,
+			sha256: "HASH-B",
+			chunkSize: CHUNK_SIZE,
+		});
+		const persisted = serializeQueueIndex(two);
+		const files = memoryFiles({ [`${Q}/index.json`]: persisted });
+		const logs: string[] = [];
+		const store = createQueueStore(createQueueStorage(files.api, Q), (m) =>
+			logs.push(m),
+		);
+		const next = {
+			recordingID: E,
+			fileName: recordingFileName(E),
+			startedAt: C_STARTED,
+			durationSeconds: 0,
+			byteCount: 0,
+			sha256: null,
+			chunkSize: CHUNK_SIZE,
+		};
+
+		// The index cannot be read at launch, nor on the update's retry.
+		files.failReads(2);
+		await store.load();
+		expect(store.snapshot()).toEqual({
+			index: EMPTY_INDEX,
+			ready: false,
+			loadError: "EACCES read",
+		});
+		await expect(
+			store.update((current) => addRecording(current, next, "recording")),
+		).rejects.toThrow(/not loaded: EACCES read/);
+		expect(files.store.get(`${Q}/index.json`)).toBe(persisted);
+		expect(files.calls.filter((c) => c.startsWith("write"))).toEqual([]);
+		expect(logs).toHaveLength(2);
+
+		// Readable again: the update sees and keeps every row.
+		await store.update((current) => addRecording(current, next, "recording"));
+		expect(store.snapshot()).toMatchObject({ ready: true, loadError: null });
+		const saved = parseQueueIndex(files.store.get(`${Q}/index.json`) ?? "");
+		expect(saved.recordings.map((r) => r.recordingID)).toEqual(["a", B, E]);
+		expect(saved.recordings.slice(0, 2)).toEqual(two.recordings);
+	});
+
+	it("is tried again by load, and a loaded store does not load again", async () => {
+		const files = memoryFiles({
+			[`${Q}/index.json`]: serializeQueueIndex(one),
+		});
+		const store = createQueueStore(createQueueStorage(files.api, Q));
+		const seen: boolean[] = [];
+		store.subscribe(() => seen.push(store.snapshot().ready));
+		files.failReads(1);
+		await store.load();
+		await store.load();
+		expect(store.snapshot()).toEqual({
+			index: one,
+			ready: true,
+			loadError: null,
+		});
+		expect(seen).toEqual([false, true]);
+		const reads = files.calls.length;
+		await store.load();
+		expect(files.calls).toHaveLength(reads);
 	});
 });
 

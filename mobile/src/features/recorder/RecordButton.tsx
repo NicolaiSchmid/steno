@@ -20,7 +20,8 @@ import { useThemeColor } from "@/lib/useThemeColor";
  * The one control: a ring with a red disc that morphs into a rounded square
  * while recording (the spatial spring), fading the ring to the emphasis tier
  * (functional tempo). `busy` shows a spinner while the session starts or the
- * file is being finalised.
+ * file is being finalised; `disabled` (the queue is not loaded yet) only
+ * ignores presses.
  */
 const SIZE = 88;
 const INNER_IDLE = 68;
@@ -29,10 +30,12 @@ const INNER_RECORDING = 32;
 export function RecordButton({
 	recording,
 	busy,
+	disabled = false,
 	onPress,
 }: {
 	recording: boolean;
 	busy: boolean;
+	disabled?: boolean;
 	onPress: () => void;
 }) {
 	const ring = useThemeColor("--color-border");
@@ -75,8 +78,8 @@ export function RecordButton({
 			}
 			accessibilityLabel={recording ? "Stop recording" : "Start recording"}
 			accessibilityRole="button"
-			accessibilityState={{ busy, disabled: busy }}
-			disabled={busy}
+			accessibilityState={{ busy, disabled: busy || disabled }}
+			disabled={busy || disabled}
 			onPress={onPress}
 		>
 			<Animated.View

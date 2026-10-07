@@ -1,5 +1,6 @@
 import { Directory, File, Paths } from "expo-file-system";
 
+import { RECORDER_DIRECTORY } from "@/features/recorder/recording-options";
 import type { QueueFileAPI } from "./queue-storage";
 
 /**
@@ -13,6 +14,10 @@ export function ensureQueueDirectory(): Directory {
 	if (!directory.exists) directory.create({ intermediates: true });
 	return directory;
 }
+
+/** `Documents/ExpoAudio/`, where expo-audio writes a recording while it runs. */
+export const recorderDirectory = () =>
+	new Directory(Paths.document, RECORDER_DIRECTORY);
 
 /** A recording in the queue directory (created on demand); read `.exists`, `.size`, `.uri`. */
 export function queuedFile(fileName: string): File {
@@ -39,14 +44,17 @@ export const expoQueueFiles: QueueFileAPI = {
 		if (file.exists) file.delete();
 	},
 	async list(path) {
+		const directory = new Directory(path);
+		if (!directory.exists) return [];
 		// The load time stands in for a creation time the file system does
 		// not report, so the row still gets a valid `startedAt`.
-		return new Directory(path).list().flatMap((entry) =>
+		return directory.list().flatMap((entry) =>
 			entry instanceof File
 				? [
 						{
 							name: entry.name,
 							createdAt: entry.creationTime ?? entry.lastModified ?? Date.now(),
+							size: entry.size ?? 0,
 						},
 					]
 				: [],

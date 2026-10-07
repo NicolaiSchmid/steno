@@ -41,7 +41,7 @@ export function RecorderScreen() {
 	const navigation =
 		useNavigation<NativeStackNavigationProp<RootStackParamList>>();
 	const { pairing } = usePairing();
-	const { index, ready, update } = useQueue();
+	const { index, ready, loadError, retryLoad, update } = useQueue();
 	const sync = useUploadCoordinator();
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | null>(null);
@@ -122,7 +122,11 @@ export function RecorderScreen() {
 		return () => clearInterval(timer);
 	}, []);
 
+	// A recording starts only once the queue is loaded, so no load runs while
+	// the recorder writes: the load moves recordings it finds without a row
+	// out of the recorder's directory.
 	const toggle = useCallback(async () => {
+		if (!ready) return;
 		setError(null);
 		setBusy(true);
 		try {
@@ -138,7 +142,7 @@ export function RecorderScreen() {
 			// found nothing to stop.
 			setBusy(false);
 		}
-	}, [recorder]);
+	}, [ready, recorder]);
 
 	const macLabel = pairing ? pairing.mac.macName : "Pair a Mac";
 	const statusLine = recorder.isRecording
@@ -167,6 +171,7 @@ export function RecorderScreen() {
 			<View className="items-center gap-4 px-6 py-6">
 				<RecordButton
 					busy={busy}
+					disabled={!ready}
 					onPress={() => void toggle()}
 					recording={recorder.isRecording}
 				/>
@@ -197,6 +202,23 @@ export function RecorderScreen() {
 					<AppText className="text-center" variant="error">
 						{error}
 					</AppText>
+				) : null}
+				{loadError ? (
+					<View className="items-center gap-2">
+						<AppText className="text-center" variant="error">
+							Steno could not read the list of recordings on this phone. Your
+							recordings stay where they are; recording and uploading wait until
+							the list can be read.
+						</AppText>
+						<PressableScale
+							accessibilityLabel="Try reading the recordings again"
+							accessibilityRole="button"
+							hitSlop={HIT_SLOP}
+							onPress={retryLoad}
+						>
+							<AppText variant="heading">Try again</AppText>
+						</PressableScale>
+					</View>
 				) : null}
 			</View>
 

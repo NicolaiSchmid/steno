@@ -1,5 +1,7 @@
 import {
 	CHUNK_SIZE,
+	recorderFileID,
+	recordingFileName,
 	recordingIDFromFileName,
 } from "@/features/recorder/recording-options";
 import {
@@ -18,7 +20,13 @@ import {
  * are renamed over `index.json`; a rename failure leaves the previous index
  * untouched and removes the temp file. Every load also lists the directory
  * and adds a row for each recording file no row names, so an index that was
- * lost, torn or written stale never strands a recording on disk.
+ * lost, torn or written stale never strands a recording on disk; before
+ * that it moves in the recordings a crash left in the recorder's directory
+ * with no row to recover them (`adoptRecorderFiles`).
+ *
+ * A load that throws (the index could not be read) persists nothing and
+ * leaves every file where it was; `queue-store.ts` then refuses to save
+ * until a load succeeds.
  */
 export type QueueFileAPI = {
 	/** Null when the file does not exist. */
@@ -29,7 +37,7 @@ export type QueueFileAPI = {
 	rename(from: string, to: string): Promise<void>;
 	/** No-op when missing. */
 	remove(path: string): Promise<void>;
-	/** The files directly in `directory`. */
+	/** The files directly in `directory`; none when it does not exist. */
 	list(directory: string): Promise<QueueDirectoryEntry[]>;
 };
 
@@ -37,6 +45,8 @@ export type QueueDirectoryEntry = {
 	name: string;
 	/** Milliseconds since the epoch. */
 	createdAt: number;
+	/** Bytes. */
+	size: number;
 };
 
 export type QueueStorage = {
@@ -179,14 +189,64 @@ export function adoptRecordingFiles(
 		);
 }
 
+/** A recording file to move from the recorder's directory into the queue. */
+export type RecorderAdoption = {
+	from: QueueDirectoryEntry;
+	/** The queue file name, `<id>.m4a` with the id from the recorder's name. */
+	to: string;
+};
+
+/**
+ * The recordings in the recorder's directory (`recorderEntries`) that no
+ * crash recovery will move: a file is left in place when it is not named
+ * like an expo-audio recording, holds no bytes (no audio; the recorder's
+ * file for the next recording is created empty), or a `recording` row names
+ * it as its `sourceUri` (`planRecovery` moves it under that row). Every
+ * other one, a crash before its row was saved or a row that failed with its
+ * file still there, becomes a new queue file named after the UUID in the
+ * recorder's name, unless a row or a queue file already has that name.
+ */
+export function adoptRecorderFiles(
+	index: QueueIndex,
+	queueEntries: readonly QueueDirectoryEntry[],
+	recorderEntries: readonly QueueDirectoryEntry[],
+): RecorderAdoption[] {
+	const recovered = new Set(
+		index.recordings.flatMap((r) =>
+			r.state === "recording" && r.sourceUri
+				? [r.sourceUri.slice(r.sourceUri.lastIndexOf("/") + 1)]
+				: [],
+		),
+	);
+	const taken = new Set([
+		...index.recordings.flatMap((r) => [r.recordingID, r.fileName]),
+		...queueEntries.map((e) => e.name),
+	]);
+	return recorderEntries.flatMap((from) => {
+		const id = recorderFileID(from.name);
+		if (!id || from.size <= 0 || recovered.has(from.name)) return [];
+		const to = recordingFileName(id);
+		if (taken.has(id) || taken.has(to)) return [];
+		taken.add(to);
+		return [{ from, to }];
+	});
+}
+
 function join(directory: string, name: string): string {
 	return `${directory.replace(/\/+$/, "")}/${name}`;
 }
 
+/**
+ * `recorderDirectory` is expo-audio's directory (`Documents/ExpoAudio/`);
+ * null leaves it alone. Loads run only while nothing records: the recorder
+ * starts only once the queue is loaded (`RecorderScreen`), and a file of a
+ * process that died has no writer left.
+ */
 export function createQueueStorage(
 	files: QueueFileAPI,
 	directory: string,
 	log: (message: string) => void = () => {},
+	recorderDirectory: string | null = null,
 ): QueueStorage {
 	const indexPath = join(directory, "index.json");
 	const tempPath = join(directory, "index.json.tmp");
@@ -207,14 +267,58 @@ export function createQueueStorage(
 				? "using the temp file"
 				: "rebuilding it from the recording files";
 			log(`queue index unreadable, ${outcome}: ${parsed.reason}`);
-			await files.remove(corruptPath);
-			await files.rename(indexPath, corruptPath).catch(() => {});
+			// Best effort, and never a reason to fail the load: the rename
+			// replaces an older corrupt copy, and when it fails the next save
+			// writes over the unreadable index.
+			await files.rename(indexPath, corruptPath).catch((error) => {
+				log(`queue index not set aside: ${String(error)}`);
+			});
 		} else if (fromTemp && !fromTemp.ok) {
 			log(
 				`queue temp index unreadable, rebuilding the index from the recording files: ${fromTemp.reason}`,
 			);
 		}
 		return fromTemp?.ok ? fromTemp.value : EMPTY_INDEX;
+	};
+
+	/** Moves `adoptRecorderFiles`' picks; the entries of the files moved. */
+	const moveRecorderFiles = async (
+		index: QueueIndex,
+		queueEntries: readonly QueueDirectoryEntry[],
+	): Promise<QueueDirectoryEntry[]> => {
+		if (recorderDirectory === null) return [];
+		let recorderEntries: QueueDirectoryEntry[];
+		try {
+			recorderEntries = await files.list(recorderDirectory);
+		} catch (error) {
+			log(`recorder directory unreadable, nothing moved: ${String(error)}`);
+			return [];
+		}
+		const moved: QueueDirectoryEntry[] = [];
+		for (const { from, to } of adoptRecorderFiles(
+			index,
+			queueEntries,
+			recorderEntries,
+		)) {
+			try {
+				await files.rename(
+					join(recorderDirectory, from.name),
+					join(directory, to),
+				);
+				moved.push({ ...from, name: to });
+			} catch (error) {
+				// Left where it is; the next load tries again.
+				log(
+					`recording ${from.name} not moved into the queue: ${String(error)}`,
+				);
+			}
+		}
+		if (moved.length > 0) {
+			log(
+				`moved ${moved.length} recording file(s) without a row from the recorder's directory`,
+			);
+		}
+		return moved;
 	};
 
 	return {
@@ -229,6 +333,7 @@ export function createQueueStorage(
 				);
 				return loaded;
 			}
+			entries = [...entries, ...(await moveRecorderFiles(loaded, entries))];
 			const adopted = adoptRecordingFiles(loaded, entries);
 			const count = adopted.recordings.length - loaded.recordings.length;
 			if (count > 0) {

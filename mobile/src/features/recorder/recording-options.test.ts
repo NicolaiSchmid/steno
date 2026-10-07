@@ -5,6 +5,7 @@ import {
 	RECORDING_AUDIO_MODE,
 	RECORDING_FORMAT,
 	RECORDING_OPTIONS,
+	recorderFileID,
 	recordingFileName,
 	recordingIDFromFileName,
 } from "./recording-options";
@@ -54,6 +55,22 @@ describe("recording preset", () => {
 			`x${id}.m4a`,
 		]) {
 			expect(recordingIDFromFileName(name)).toBeNull();
+		}
+	});
+
+	it("reads the UUID back only from expo-audio's recording file names", () => {
+		// `AudioUtils.createRecordingUrl` in expo-audio's iOS module.
+		expect(RECORDING_OPTIONS.directory).toBe("document");
+		const id = "0F8B6A2E-4C1D-4E9A-9B3F-5D7C2A1E8F40";
+		expect(recorderFileID(`recording-${id}.m4a`)).toBe(id.toLowerCase());
+		for (const name of [
+			`${id}.m4a`,
+			`recording-${id}.caf`,
+			`recording-${id}.m4a.tmp`,
+			"recording-abc.m4a",
+			`xrecording-${id}.m4a`,
+		]) {
+			expect(recorderFileID(name)).toBeNull();
 		}
 	});
 });
