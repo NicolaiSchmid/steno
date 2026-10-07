@@ -15,13 +15,17 @@ import Foundation
 /// service's retry with the same path admits again instead of finding the
 /// file gone or a second meeting created.
 ///
-/// The `.complete` receipt and the meeting commit durably
-/// (`MeetingStore.writeDurably`), because the phone deletes its copy once
-/// `complete` answers 200: the receipt here, the meeting in `enqueue`,
-/// which is `ProcessingPipeline.enqueueDurably` in `init(currentPipeline:)`
-/// and must be in any other production `enqueue`. The `.failed` receipt of a
-/// refused admission commits as usual: the phone keeps its copy then. The
-/// copy itself is not synced (`copyItem`); the Rust intake syncs it.
+/// The phone deletes its copy once `complete` answers 200, so everything
+/// the admission wrote is on the disk before the receipt says complete.
+/// The copy, its meeting folder and every folder `admit` created are
+/// synced (`F_FULLFSYNC`, `fsync` where that fails), and the `.complete`
+/// receipt and the meeting commit durably (`MeetingStore.writeDurably`):
+/// the receipt here, the meeting in `enqueue`, which is
+/// `ProcessingPipeline.enqueueDurably` in the production wiring
+/// (`init(currentPipeline:)`) and must be in any other production
+/// `enqueue`. The `.failed` receipt of a refused admission commits as
+/// usual: the phone keeps its copy then.
+/// Rust: `RecordingIntake` in `crates/steno-pipeline/src/intake.rs`.
 public struct RecordingIntake: HandoverIntake, Sendable {
   public typealias Enqueue = @Sendable (Meeting, AudioAsset) async throws -> Void
 
@@ -29,6 +33,9 @@ public struct RecordingIntake: HandoverIntake, Sendable {
   public let settings: SettingsStore
   public let enqueue: Enqueue
   public let now: @Sendable () -> Date
+  /// The syncs `admit` makes; the disk in the product, a recorder in the
+  /// tests.
+  var syncs = Syncs.disk
 
   /// `enqueue` is `ProcessingPipeline.enqueue(_:asset:)` in the app and the
   /// CLI; tests pass a counting closure.
@@ -84,12 +91,28 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     let meetingID = UUID()
     let timestamp = now()
     let layout = RecordingLayout(audioFolder: settings.audioFolder, meetingID: meetingID)
+    // The copy and its folders are on the disk before the receipt says
+    // complete. `copyItem` syncs nothing (on APFS it clones the file's
+    // metadata only), so the parent of every folder created here, the copy
+    // and its meeting folder are synced, as Rust's `create_dir_all_durably`
+    // and `copy_durably` do.
+    let created = Self.missingFolders(layout.directory)
     try layout.createDirectories()
+    for folder in created.reversed() {
+      syncs.directory(folder.deletingLastPathComponent())
+    }
     let destination = layout.master(metadata.format)
     if FileManager.default.fileExists(atPath: destination.path) {
       try FileManager.default.removeItem(at: destination)
     }
     try FileManager.default.copyItem(at: file, to: destination)
+    do {
+      try syncs.file(destination)
+    } catch {
+      try? FileManager.default.removeItem(at: destination)
+      throw error
+    }
+    syncs.directory(layout.directory)
 
     let meeting = Meeting(
       id: meetingID,
@@ -139,6 +162,20 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     return meetingID
   }
 
+  /// `folder` and the folders above it that do not exist yet, deepest
+  /// first.
+  static func missingFolders(_ folder: URL) -> [URL] {
+    var missing: [URL] = []
+    var current = folder.standardizedFileURL
+    while !FileManager.default.fileExists(atPath: current.path) {
+      missing.append(current)
+      let parent = current.deletingLastPathComponent()
+      if parent.path == current.path { break }
+      current = parent
+    }
+    return missing
+  }
+
   /// "Phone recording 2026-09-24 11:00" in the Mac's time zone.
   static func title(for startedAt: Date, timeZone: TimeZone = .current) -> String {
     let formatter = DateFormatter()
@@ -146,5 +183,37 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     formatter.timeZone = timeZone
     formatter.dateFormat = "yyyy-MM-dd HH:mm"
     return "Phone recording " + formatter.string(from: startedAt)
+  }
+}
+
+extension RecordingIntake {
+  /// The syncs a durable admission makes. A file's sync throws; a folder's
+  /// is best effort, as in Rust's `Syncs` (`crates/steno-pipeline/src/files.rs`).
+  struct Syncs: Sendable {
+    /// Flushes the file at the URL to the disk.
+    var file: @Sendable (URL) throws -> Void
+    /// Makes the entries of the folder at the URL (a new file, a new
+    /// folder) durable.
+    var directory: @Sendable (URL) -> Void
+
+    /// The product's syncs: `F_FULLFSYNC`, which also flushes the drive's
+    /// cache, and `fsync` where that fails or the platform lacks it.
+    static let disk = Syncs(
+      file: { url in try fullSync(url) },
+      directory: { url in try? fullSync(url) })
+
+    static func fullSync(_ url: URL) throws {
+      let descriptor = open(url.path, O_RDONLY)
+      guard descriptor >= 0 else { throw posixError() }
+      defer { close(descriptor) }
+      #if canImport(Darwin)
+        if fcntl(descriptor, F_FULLFSYNC) == 0 { return }
+      #endif
+      guard fsync(descriptor) == 0 else { throw posixError() }
+    }
+
+    private static func posixError() -> POSIXError {
+      POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+    }
   }
 }

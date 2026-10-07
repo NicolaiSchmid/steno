@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 import Testing
 
 @testable import StenoCore
@@ -146,6 +147,94 @@ import Testing
       try await store.handoverReceipt(recordingID: SampleData.uuid(91))?.state
         == .complete(meetingID: meetingID))
     #expect(!FileManager.default.fileExists(atPath: upload.path))
+  }
+
+  /// The syncs `admit` makes and the enqueue, in order, as
+  /// `file <path>`, `folder <path>` and `enqueue`.
+  final class SyncLog: Sendable {
+    private let events = Mutex<[String]>([])
+    var all: [String] { events.withLock { $0 } }
+    func record(_ event: String) { events.withLock { $0.append(event) } }
+
+    func syncs(failingFile: Bool = false) -> RecordingIntake.Syncs {
+      struct SyncFailed: Error {}
+      return RecordingIntake.Syncs(
+        file: { url in
+          self.record("file \(url.standardizedFileURL.path)")
+          if failingFile { throw SyncFailed() }
+        },
+        directory: { url in self.record("folder \(url.standardizedFileURL.path)") })
+    }
+  }
+
+  /// Before the receipt and the meeting are written, the parent of every
+  /// folder `admit` created is synced (outermost first), then the copy,
+  /// then its meeting folder, as Rust's `create_dir_all_durably` and
+  /// `copy_durably` do: `copyItem` alone syncs nothing.
+  @Test func theCopyAndEveryFolderItCreatedAreSyncedBeforeTheReceipt() async throws {
+    let directory = try Fixtures.temporaryDirectory().standardizedFileURL
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.inMemory()
+    let settingsStore = SettingsStore(writer: store.writer)
+    var settings = Settings()
+    let audio = directory.appendingPathComponent("audio", isDirectory: true)
+    settings.audioFolder = audio
+    try await settingsStore.save(settings)
+    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let log = SyncLog()
+    var intake = RecordingIntake(
+      store: store, settings: settingsStore,
+      enqueue: { _, _ in log.record("enqueue") })
+    intake.syncs = log.syncs()
+    let upload = directory.appendingPathComponent("upload.bin")
+    try Data([1]).write(to: upload)
+
+    let meetingID = try await intake.admit(
+      file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
+
+    let meetingFolder = audio.appendingPathComponent(meetingID.uuidString).path
+    #expect(
+      log.all == [
+        "folder \(directory.path)",
+        "folder \(audio.path)",
+        "file \(meetingFolder)/recording.m4a",
+        "folder \(meetingFolder)",
+        "enqueue",
+      ])
+  }
+
+  /// A copy whose sync fails is removed and nothing is written: the upload
+  /// stays for the retry.
+  @Test func aCopyWhoseSyncFailsIsRemovedAndNoReceiptIsWritten() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.inMemory()
+    let settingsStore = SettingsStore(writer: store.writer)
+    var settings = Settings()
+    settings.audioFolder = directory.appendingPathComponent("audio", isDirectory: true)
+    try await settingsStore.save(settings)
+    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    let log = SyncLog()
+    var intake = RecordingIntake(
+      store: store, settings: settingsStore,
+      enqueue: { _, _ in log.record("enqueue") })
+    intake.syncs = log.syncs(failingFile: true)
+    let upload = directory.appendingPathComponent("upload.bin")
+    try Data([1]).write(to: upload)
+
+    await #expect(throws: (any Error).self) {
+      _ = try await intake.admit(
+        file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
+    }
+    #expect(!log.all.contains("enqueue"))
+    #expect(try await store.handoverReceipt(recordingID: SampleData.uuid(91)) == nil)
+    let copies = try FileManager.default.contentsOfDirectory(atPath: settings.audioFolder.path)
+      .flatMap { folder in
+        try FileManager.default.contentsOfDirectory(
+          atPath: settings.audioFolder.appendingPathComponent(folder).path)
+      }
+    #expect(copies.isEmpty, "the unsynced copy is removed")
+    #expect(FileManager.default.fileExists(atPath: upload.path))
   }
 
   /// The production intake over the real pipeline commits the `.complete`

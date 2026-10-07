@@ -73,7 +73,8 @@ pub fn replace_file(path: &Path, data: &[u8], access: Access) -> std::io::Result
 /// the folder synced, so once this returns the copy survives a power loss.
 /// The phone intake copies an upload with it before it marks the receipt
 /// complete, since the phone deletes its own copy then; Swift's
-/// `RecordingIntake` used `copyItem`, which syncs nothing.
+/// `RecordingIntake` syncs its `copyItem` copy and folders instead
+/// (`RecordingIntake.Syncs`).
 pub fn copy_durably(source: &Path, destination: &Path) -> std::io::Result<()> {
     copy_durably_with(&Disk, source, destination)
 }

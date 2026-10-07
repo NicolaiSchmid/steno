@@ -74,15 +74,14 @@ pub fn default_title(
 ///
 /// The copy and the meeting folder are synced to the disk before the
 /// receipt is marked complete ([`crate::files::copy_durably`]), because
-/// the phone deletes its own copy once `complete` answers 200. This is
-/// deliberately stricter than Swift, whose `RecordingIntake` used
-/// `copyItem` and synced nothing, so a power loss after the answer lost
-/// the recording on both devices. For the same reason the `complete`
-/// receipt and the meeting commit durably ([`Store::write_durably`]),
-/// as in Swift: the receipt here, the meeting in the enqueue, which is
-/// [`ProcessingPipeline::enqueue_durably`] in [`RecordingIntake::over`]
-/// and must be in any other production `enqueue`. The `failed` receipt of
-/// a refused admission commits as usual: the phone keeps its copy then.
+/// the phone deletes its own copy once `complete` answers 200; Swift
+/// syncs its `copyItem` copy and the folders the same way. For the same
+/// reason the `complete` receipt and the meeting commit durably
+/// ([`Store::write_durably`]), as in Swift: the receipt here, the meeting
+/// in the enqueue, which is [`ProcessingPipeline::enqueue_durably`] in
+/// [`RecordingIntake::over`] and must be in any other production
+/// `enqueue`. The `failed` receipt of a refused admission commits as
+/// usual: the phone keeps its copy then.
 /// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
 pub struct RecordingIntake {
     store: Arc<Store>,

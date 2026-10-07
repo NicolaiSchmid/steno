@@ -960,10 +960,12 @@ still has to draw the window side. `[ ]` is not ported yet.
   size in Settings > Transcription), while every platform runs the ONNX pyannote 3.0
   and WeSpeaker ResNet34-LM models; the same hooks (`display_name`, `source_repo`,
   `expected_bytes`) fix them.
-- The phone intake syncs the copy and its folder to the disk before it marks the
-  receipt complete (`steno_pipeline::files::copy_durably`); Swift's `copyItem` did
-  not, so a power loss after the phone's 200 lost the recording on both devices. The
-  receipt and meeting commits are durable in both apps (the Store item below).
+- The phone intake syncs the copy, its meeting folder and the parent of every folder
+  it created to the disk before it marks the receipt complete, in both apps: Rust
+  through `steno_pipeline::files::copy_durably` and `create_dir_all_durably`, Swift
+  after its `copyItem` (`RecordingIntake.Syncs`, `F_FULLFSYNC` with `fsync` as the
+  fallback). The receipt and meeting commits are durable in both apps (the Store item
+  below).
 - Every exit runs `App::shutdown` first, once, at most ten seconds (`ExitGate`): the
   pipelines quit, a start or a stop in progress settles, a recording in progress stops
   with `quit` and is saved, the handover listener stops, and no recording starts
@@ -1144,9 +1146,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   `init(pipeline:)` go through). A refused admission's `failed` receipt and every
   other write stay `NORMAL`. Tests read the level inside the commits (Rust's
   `Store::probe_commits` behind `testing`, Swift's `CommitLog` over the writer's
-  trace); a power loss itself is not tested. Swift should still fsync the copied
-  master with its folder, as Rust's `copy_durably` does; its `copyItem` syncs
-  nothing.
+  trace); a power loss itself is not tested.
 
 ### Adapters
 
@@ -2232,10 +2232,14 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   so a mirror serves only the speech models. Where:
   `crates/steno-diarize/src/models.rs`; the "One model store" item under "Speech" in
   the parity list. Found: #183.
-- **Unowned.** Untested paths with no seam to test them: the phone intake's fsync
-  calls, and in `steno-llm` the cleanup after a failed `auth.json` write and the detail
-  that names a temporary file that could not be removed. Where:
-  `crates/steno-pipeline/src/files.rs`, `crates/steno-llm`. Found: #167, #185.
+- **Unowned.** Untested paths with no seam to test them: the system calls behind the
+  phone intake's syncs (Rust's `Disk` in `crates/steno-pipeline/src/files.rs`, Swift's
+  `RecordingIntake.Syncs.disk`; the tests record which syncs run, not that the disk
+  flushed), and in `steno-llm` the cleanup after a failed `auth.json` write and the
+  detail that names a temporary file that could not be removed. Where:
+  `crates/steno-pipeline/src/files.rs`,
+  `Sources/StenoCore/Storage/RecordingIntake.swift`, `crates/steno-llm`. Found: #167,
+  #185, #213.
 
 ## Progress
 
