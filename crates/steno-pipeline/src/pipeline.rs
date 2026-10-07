@@ -779,12 +779,12 @@ impl ProcessingPipeline {
     /// [quits](Self::quit), the meeting is saved and stays `queued` for the
     /// next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let Some(starting) = self.claim_start(meeting.id, asset.id) else {
-            return Err(PipelineFailure::new(
+        let starting = self.claim_start(meeting.id, asset.id).ok_or_else(|| {
+            PipelineFailure::new(
                 PipelineStage::Decode,
                 format!("meeting {} is already being processed", meeting.id),
-            ));
-        };
+            )
+        })?;
         self.enqueue_claimed(meeting, asset, &starting)
     }
 

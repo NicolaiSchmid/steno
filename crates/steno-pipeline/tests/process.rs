@@ -1576,11 +1576,7 @@ async fn a_job_that_fails_after_the_pipeline_quits_is_resumed_at_the_next_launch
     engine.wait_until_entered().await;
 
     let runs = runs_file(&asset);
-    assert_eq!(
-        std::fs::read_to_string(&runs).unwrap(),
-        "1",
-        "the run is counted"
-    );
+    assert_eq!(read_runs(&asset), "1", "the run is counted");
     pipeline.quit();
     engine.open.notify_one();
     pipeline.wait_until_idle().await;
@@ -2339,7 +2335,7 @@ async fn launch_recovery_gives_up_on_a_meeting_whose_runs_ended_with_the_app() {
             [meeting.id],
             "launch {count}"
         );
-        assert_eq!(std::fs::read_to_string(&runs).unwrap(), count.to_string());
+        assert_eq!(read_runs(&asset), count.to_string());
     }
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Processing);
 
@@ -2522,18 +2518,10 @@ async fn a_quit_takes_back_a_run_held_mid_transcription() {
     let (pipeline, engine) = gated_pipeline(&world, &latch);
     assert_eq!(pipeline.resume_unfinished().unwrap(), [meeting.id]);
     engine.wait_until_entered().await;
-    assert_eq!(
-        std::fs::read_to_string(&runs).unwrap(),
-        "3",
-        "the run is counted"
-    );
+    assert_eq!(read_runs(&asset), "3", "the run is counted");
 
     pipeline.quit();
-    assert_eq!(
-        std::fs::read_to_string(&runs).unwrap(),
-        "2",
-        "the exit took its run back"
-    );
+    assert_eq!(read_runs(&asset), "2", "the exit took its run back");
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Processing);
 
     let next_launch = ProcessingPipeline::new(
