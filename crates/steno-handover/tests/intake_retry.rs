@@ -19,8 +19,7 @@ use std::sync::Arc;
 
 use common::{EngineDevice, Phone, ScriptedIntake, TestService, chunks, fake_intake, seeded_bytes};
 use steno_core::{
-    AudioFormat, HandoverIntake, HandoverReceipt, HandoverState, HandoverStateKind,
-    RecordingMetadata,
+    AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
 };
 use steno_handover::engine::Engine;
 use steno_handover::{HandoverIdentity, HandoverService, wire};
@@ -327,10 +326,9 @@ async fn another_phones_first_announce_after_a_restart_and_a_revoke_admits_its_o
     // waiting file, so its `complete` hashes and admits its own bytes,
     // never the old file unhashed.
     const SIZE: i64 = 64 * 1024;
-    let refusing: Arc<dyn HandoverIntake> = ScriptedIntake::new(meeting_id(), 1);
     let first = TestService::with(common::Options {
         chunk_size: SIZE,
-        intake: Some(refusing),
+        intake: Some(ScriptedIntake::new(meeting_id(), 1)),
         start: false,
         ..common::Options::default()
     })
@@ -347,7 +345,7 @@ async fn another_phones_first_announce_after_a_restart_and_a_revoke_admits_its_o
         "the verified file waits"
     );
 
-    let intake = ScriptedIntake::new(meeting_id(), 0);
+    let intake = fake_intake(meeting_id());
     let second = Arc::new(HandoverService::new(
         first.service.configuration.clone(),
         first.store.clone(),
@@ -377,10 +375,10 @@ async fn another_phones_first_announce_after_a_restart_and_a_revoke_admits_its_o
     other.upload_all(&metadata, &bytes).await;
     let completed = other.complete(id).await;
     assert_eq!(completed.status.as_u16(), 200);
-    let files = intake.entries();
-    assert_eq!(files.len(), 1);
+    let admissions = intake.admissions.entries();
+    assert_eq!(admissions.len(), 1);
     assert_eq!(
-        std::fs::read(&files[0]).unwrap(),
+        std::fs::read(&admissions[0].file).unwrap(),
         bytes,
         "the other phone's own bytes, hashed"
     );
