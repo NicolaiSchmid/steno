@@ -334,8 +334,9 @@ fn the_default_relay_holds_twenty_seconds_with_the_writer_stalled() {
     assert_eq!(relay.dropped_frames(), [0, 0, 0]);
 }
 
-/// The real writer on a filesystem that refuses every sync, as a network
-/// share can refuse `F_FULLFSYNC`.
+/// The real writer on a filesystem where every sync fails, the plain
+/// `fsync` the Mac falls back to as well: the periodic syncs and the
+/// close's, after the real close has written everything.
 struct SyncRefused(RecordingWriter);
 
 impl RecordingWriting for SyncRefused {
@@ -349,15 +350,17 @@ impl RecordingWriting for SyncRefused {
         Err(std::io::ErrorKind::Unsupported.into())
     }
     fn finish(&mut self) -> Result<RecordingFiles, CaptureError> {
-        self.0.finish()
+        self.0.finish()?;
+        Err(CaptureError::WriterFailed("the close's sync failed".into()))
     }
 }
 
-/// A sync that always fails costs the recording nothing: 8 s delivered
-/// (past the first sync, at 5 s) are all in the master, and the session
-/// ends `Idle`, never `Failed`.
+/// A sync that always fails cuts nothing short: 8 s delivered (past the
+/// first sync, at 5 s) are all in the master, and the stop hands the
+/// recording back. It ends `Failed` with that recording, on the first
+/// sync's error, since what was written may not be on disk.
 #[test]
-fn a_refused_sync_keeps_the_whole_recording_and_ends_idle() {
+fn a_failing_sync_keeps_the_whole_recording_and_says_so() {
     let directory = tempfile::tempdir().unwrap();
     let backend = Arc::new(SyntheticCaptureBackend::new(tones(
         &[AudioLane::Mixed],
@@ -381,9 +384,17 @@ fn a_refused_sync_keeps_the_whole_recording_and_ends_idle() {
     session.start(Uuid::new_v4()).unwrap();
     backend.wait_until_finished();
     let result = session.stop().unwrap();
-    assert_eq!(session.state(), CaptureState::Idle);
-    let seen = collect_states(&states, until_idle_again());
-    assert!(!seen.iter().any(until_failed), "{:?}", kinds(&seen));
+    let seen = collect_states(&states, until_failed);
+    match seen.last() {
+        Some(CaptureState::Failed {
+            error: CaptureError::WriterFailed(detail),
+            recording,
+        }) => {
+            assert!(detail.ends_with("unsupported"), "{detail}");
+            assert_eq!(recording.as_deref(), Some(&result));
+        }
+        _ => panic!("expected Failed(WriterFailed): {:?}", kinds(&seen)),
+    }
     assert_eq!(master_of(&result).frame_count(), 800 * FRAME_SIZE);
     assert!(
         result.statistics.dropped_frames.values().all(|n| *n == 0),

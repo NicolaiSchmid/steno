@@ -6,19 +6,20 @@
 //!
 //! Every [`SYNC_INTERVAL_FRAMES`] frames the thread
 //! [`sync`](RecordingWriting::sync)s the master (`File::sync_data`,
-//! `F_FULLFSYNC` on the Mac), so a power loss or a kernel crash loses about
-//! the last 5 s of a recording, more while the writer is behind, not
-//! everything still in the page cache. A failed sync (a filesystem that
-//! refuses it, as a network share can) is logged once and tried again at
-//! the next interval; the writes go on. Rust only: Swift synced at the
-//! close alone.
+//! `F_FULLFSYNC` on the Mac, a plain `fsync` where a filesystem refuses
+//! that), so a power loss or a kernel crash loses about the last 5 s of a
+//! recording, more while the writer is behind, not everything still in the
+//! page cache. A sync that fails even so is logged once, kept for
+//! [`WriterThread::take_error`] (what was written may not be on disk) and
+//! tried again at the next interval; the writes go on. Rust only: Swift
+//! synced at the close alone.
 //!
-//! A write error is kept (for [`WriterThread::take_error`]), reported once
-//! and stops further writes; the loop keeps draining so the relay never
-//! fills. The lane slices handed to the writer sit in a stack array sized
-//! by [`AudioLane::ALL`], so a drained frame allocates nothing (not a
-//! real-time requirement here, the thread does file I/O, but one less
-//! allocation per 10 ms).
+//! A write error is kept (for [`WriterThread::take_error`], in place of a
+//! failed sync's), reported once and stops further writes; the loop keeps
+//! draining so the relay never fills. The lane slices handed to the writer
+//! sit in a stack array sized by [`AudioLane::ALL`], so a drained frame
+//! allocates nothing (not a real-time requirement here, the thread does
+//! file I/O, but one less allocation per 10 ms).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +28,7 @@ use std::time::Duration;
 
 use steno_core::AudioLane;
 
+use super::io_error;
 use super::recording_writer::{LaneFrames, RecordingWriting};
 use crate::FRAMES_PER_SECOND;
 use crate::capture::{CaptureError, LaneLevels};
@@ -58,13 +60,12 @@ struct Worker {
     on_levels: LevelsHandler,
     on_error: ErrorHandler,
     failed: Arc<AtomicBool>,
-    /// The first write error, kept for whoever closes the files.
+    /// The write error, else the first failed sync's, kept for whoever
+    /// closes the files.
     error: Option<CaptureError>,
     last_generation: usize,
     /// Frames written since the last sync.
     unsynced_frames: usize,
-    /// A failed sync was logged; later failures are not.
-    sync_failure_logged: bool,
 }
 
 impl Worker {
@@ -99,8 +100,10 @@ impl Worker {
     }
 
     /// Syncs the master after every [`SYNC_INTERVAL_FRAMES`] frames
-    /// written. A failure is logged once, by its kind alone (the log's
-    /// privacy rule: no path), and the next interval tries again.
+    /// written. The first failure is kept and logged by its kind and OS
+    /// code alone (the log's privacy rule: no path); later ones are not,
+    /// and the next interval tries again. Only a sync after a successful
+    /// write gets here, so `error` holds nothing but a failed sync's.
     fn sync_if_due(&mut self) {
         self.unsynced_frames += 1;
         if self.unsynced_frames < SYNC_INTERVAL_FRAMES {
@@ -108,13 +111,14 @@ impl Worker {
         }
         self.unsynced_frames = 0;
         if let Err(error) = self.writer.sync()
-            && !self.sync_failure_logged
+            && self.error.is_none()
         {
-            self.sync_failure_logged = true;
             tracing::warn!(
                 kind = ?error.kind(),
+                os_error = ?error.raw_os_error(),
                 "the recording could not be synced to disk; the writes go on"
             );
+            self.error = Some(io_error(&self.writer.files().master, &error));
         }
     }
 
@@ -169,7 +173,6 @@ impl WriterThread {
             error: None,
             last_generation: 0,
             unsynced_frames: 0,
-            sync_failure_logged: false,
         };
         Self {
             worker: Some(worker),
@@ -214,8 +217,9 @@ impl WriterThread {
         self.join();
     }
 
-    /// The first write error, once the thread is stopped; `None` while the
-    /// loop runs, after the writer was taken, or when every write succeeded.
+    /// The write error, else the first failed sync's, once the thread is
+    /// stopped; `None` while the loop runs, after the writer was taken, or
+    /// when every write and sync succeeded.
     pub fn take_error(&mut self) -> Option<CaptureError> {
         self.worker.as_mut().and_then(|worker| worker.error.take())
     }
@@ -258,7 +262,8 @@ mod tests {
         Sync,
     }
 
-    /// Records every call; every sync fails when `fail_syncs` is set.
+    /// Records every call; every sync fails when `fail_syncs` is set, with
+    /// what a WebDAV mount on the Mac answers both syncs (ENOTTY).
     struct Recording {
         calls: Arc<Mutex<Vec<Call>>>,
         fail_syncs: bool,
@@ -280,7 +285,7 @@ mod tests {
         fn sync(&mut self) -> std::io::Result<()> {
             self.calls.lock().unwrap().push(Call::Sync);
             if self.fail_syncs {
-                Err(std::io::ErrorKind::Unsupported.into())
+                Err(std::io::Error::from_raw_os_error(25))
             } else {
                 Ok(())
             }
@@ -290,24 +295,39 @@ mod tests {
         }
     }
 
+    /// The `warn` lines logged on the test's thread.
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     /// Three sync intervals and part of a fourth.
     const FRAMES: usize = 3 * SYNC_INTERVAL_FRAMES + 10;
 
-    /// Each sync follows its interval's last write: after writes 500, 1000
-    /// and 1500, with the syncs before them counted in.
-    const SYNCS: [usize; 3] = [
-        SYNC_INTERVAL_FRAMES,
-        2 * SYNC_INTERVAL_FRAMES + 1,
-        3 * SYNC_INTERVAL_FRAMES + 2,
-    ];
+    /// What a run did: the fake's calls, the errors reported, the error
+    /// kept for the close, and the `warn` lines.
+    struct Run {
+        calls: Vec<Call>,
+        reported: Vec<CaptureError>,
+        kept: Option<CaptureError>,
+        log: String,
+    }
 
-    /// Pushes [`FRAMES`] one-lane frames through a writer thread over the
-    /// fake and returns its calls and the errors it reported. The relay
-    /// holds them all, so none is dropped.
-    fn run(fail_syncs: bool) -> (Vec<Call>, Vec<CaptureError>) {
+    /// Pushes [`FRAMES`] one-lane frames through a writer thread's worker
+    /// over the fake, drained on the test's thread so its log is captured
+    /// there. The relay holds them all, so none is dropped.
+    fn run(fail_syncs: bool) -> Run {
         let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, FRAMES));
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let errors = Arc::new(Mutex::new(Vec::new()));
+        let reported = Arc::new(Mutex::new(Vec::new()));
         let mut thread = WriterThread::new(
             Arc::clone(&relay),
             Box::new(Recording {
@@ -319,8 +339,8 @@ mod tests {
             false,
             Box::new(|_| {}),
             Box::new({
-                let errors = Arc::clone(&errors);
-                move |error| errors.lock().unwrap().push(error)
+                let reported = Arc::clone(&reported);
+                move |error| reported.lock().unwrap().push(error)
             }),
         );
         let zeros = vec![0.0f32; FRAME_SIZE];
@@ -329,41 +349,77 @@ mod tests {
             relay.write(0, &zeros);
             relay.end_frame();
         }
-        thread.start();
-        thread.stop();
+        let log = Log::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer({
+                let log = log.clone();
+                move || log.clone()
+            })
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let mut worker = thread.worker.take().unwrap();
+        tracing::subscriber::with_default(subscriber, || worker.drain());
+        thread.worker = Some(worker);
+        let kept = thread.take_error();
         let calls = calls.lock().unwrap().clone();
-        let errors = errors.lock().unwrap().clone();
-        (calls, errors)
+        let reported = reported.lock().unwrap().clone();
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        Run {
+            calls,
+            reported,
+            kept,
+            log,
+        }
     }
 
-    /// The indices of the syncs among the fake's calls.
-    fn sync_indices(calls: &[Call]) -> Vec<usize> {
-        calls
-            .iter()
-            .enumerate()
-            .filter(|(_, call)| **call == Call::Sync)
-            .map(|(index, _)| index)
-            .collect()
+    /// The writes before each sync among the fake's calls.
+    fn writes_before_each_sync(calls: &[Call]) -> Vec<usize> {
+        let mut writes = 0;
+        let mut before = Vec::new();
+        for call in calls {
+            match call {
+                Call::Write => writes += 1,
+                Call::Sync => before.push(writes),
+            }
+        }
+        before
     }
 
     #[test]
     fn the_master_is_synced_after_every_interval_of_frames_and_not_before() {
-        let (calls, errors) = run(false);
-        assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(sync_indices(&calls), SYNCS);
+        let run = run(false);
+        assert!(run.reported.is_empty(), "{:?}", run.reported);
+        assert_eq!(writes_before_each_sync(&run.calls), [500, 1000, 1500]);
+        assert!(run.kept.is_none(), "{:?}", run.kept);
+        assert_eq!(run.log, "");
     }
 
-    /// A filesystem that refuses every sync (a network share can) neither
-    /// ends nor shortens the recording: every frame is written, nothing is
-    /// reported as an error, and every interval tries the sync again.
+    /// A filesystem where every sync fails, the fallback too, neither ends
+    /// nor shortens the recording: every frame is written, nothing is
+    /// reported while recording, and every interval tries the sync again.
+    /// The failure is logged once, by kind and OS code, and kept for the
+    /// close, since what was written may not be on disk.
     #[test]
-    fn a_failed_sync_keeps_the_writes_going_and_is_tried_again() {
-        let (calls, errors) = run(true);
-        assert!(errors.is_empty(), "{errors:?}");
+    fn a_failed_sync_keeps_the_writes_going_is_logged_once_and_kept() {
+        let run = run(true);
+        assert!(run.reported.is_empty(), "{:?}", run.reported);
         assert_eq!(
-            calls.iter().filter(|call| **call == Call::Write).count(),
+            run.calls
+                .iter()
+                .filter(|call| **call == Call::Write)
+                .count(),
             FRAMES
         );
-        assert_eq!(sync_indices(&calls), SYNCS);
+        assert_eq!(writes_before_each_sync(&run.calls), [500, 1000, 1500]);
+        assert!(
+            matches!(&run.kept, Some(CaptureError::WriterFailed(message)) if message.starts_with("master.caf: ")),
+            "{:?}",
+            run.kept
+        );
+        let lines: Vec<&str> = run.log.lines().collect();
+        assert_eq!(lines.len(), 1, "{}", run.log);
+        assert!(lines[0].contains("could not be synced"), "{}", lines[0]);
+        assert!(lines[0].contains("os_error=Some(25)"), "{}", lines[0]);
+        assert!(!lines[0].contains("master.caf"), "{}", lines[0]);
     }
 }

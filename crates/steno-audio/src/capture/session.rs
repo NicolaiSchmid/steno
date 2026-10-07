@@ -761,7 +761,8 @@ impl Core {
         writer_thread.stop();
         // A write that failed during this drain went to `writer_failed`,
         // which ignores it once the state is `Stopping`; it comes back
-        // beside the asset instead, as a failed close does.
+        // beside the asset instead, as a failed close does, and so does a
+        // sync that failed while recording.
         let write_failure = writer_thread.take_error();
         let mut writer = writer_thread.take_writer().ok_or_else(writer_lost)?;
         // Read before `clear()`, which zeroes the ring overrun counts. Whole
