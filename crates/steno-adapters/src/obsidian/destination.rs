@@ -481,17 +481,13 @@ impl ObsidianFolderDestination {
             String::from_utf8(data).ok()
         };
         let named = |value: &str| value.trim().trim_matches('"').parse::<Uuid>().ok() == Some(id);
-        let vtt = read(MeetingFolder::VTT).is_some_and(|text| {
+        let note = MeetingFolder::note_file(Note::Folder, &folder_slug(folder));
+        read(MeetingFolder::VTT).is_some_and(|text| {
             text.lines()
                 .next()
                 .and_then(|header| header.strip_prefix("WEBVTT - Steno "))
                 .is_some_and(named)
-        });
-        vtt || read(&MeetingFolder::note_file(
-            Note::Folder,
-            &folder_slug(folder),
-        ))
-        .is_some_and(|text| {
+        }) || read(&note).is_some_and(|text| {
             text.lines()
                 .skip(1)
                 .take_while(|line| *line != "---")
