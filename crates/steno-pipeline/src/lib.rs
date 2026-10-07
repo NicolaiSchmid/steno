@@ -7,7 +7,7 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue`, `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes, `quit` and its [`QuitLatch`] for the app's exit, `apply_retention`, the stages |
+//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue`, `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, `apply_retention`, the stages |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
@@ -80,7 +80,8 @@ pub use intake::{
 pub use lane_merger::LaneMerger;
 pub use pipeline::{
     BACKGROUND_RUN_LOG, MonotonicClock, Now, OPERATION_PANICKED, Operation, PipelineDependencies,
-    PipelineFailure, ProcessingPipeline, QuitLatch, SystemClock,
+    PipelineFailure, ProcessingPipeline, QuitLatch, SharedSpeechEngine, SystemClock,
+    WeakSpeechEngine,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use speaker_memory::StoreSpeakerMemory;

@@ -518,8 +518,8 @@ mod tests {
         store.save_settings(&settings).unwrap();
         let engine = Arc::new(FakeSpeechEngine::default());
         let diarizer = Arc::new(FakeDiarizer::default());
-        let mut dependencies = fake_dependencies(&store, "fake-engine");
-        dependencies.speech_engine = engine.clone();
+        let mut dependencies = fake_dependencies(&store, "fake-engine")
+            .with_speech_engine(steno_pipeline::SharedSpeechEngine::new(engine.clone()));
         dependencies.diarizer = diarizer.clone();
         let failing_reloads = Arc::new(AtomicBool::new(false));
         let make: MakeDependencies = {

@@ -23,7 +23,7 @@ use steno_core::{
 use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no_conversation};
 use steno_pipeline::{
     LaneMerger, MeetingEventBus, MonotonicClock, PipelineDependencies, ProcessingPipeline,
-    QuitLatch, RetentionSweep, StageRates,
+    QuitLatch, RetentionSweep, SharedSpeechEngine, StageRates,
 };
 use uuid::Uuid;
 
@@ -661,9 +661,11 @@ async fn without_an_llm_the_meeting_is_ready_with_no_summary() {
 
 /// The world's dependencies with `engine` as the speech engine.
 fn with_engine(world: &World, engine: Arc<dyn steno_core::SpeechEngine>) -> PipelineDependencies {
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = engine;
-    dependencies
+    world
+        .pipeline
+        .dependencies()
+        .clone()
+        .with_speech_engine(SharedSpeechEngine::new(engine))
 }
 
 /// Enqueues the two-lane call as a meeting of its own; its id.
@@ -912,6 +914,41 @@ async fn a_job_leaves_the_engine_loaded_while_another_still_transcribes() {
     assert_eq!(engine.inner.releases.count(), 1);
 }
 
+/// Two pipelines over one engine and its claims, as the services build
+/// them across a reload: a job on the new one that finishes while a job
+/// on the retired one still transcribes leaves the engine loaded; the
+/// retired one's job, the last, releases it once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_on_another_pipeline_over_the_engine_keeps_it_loaded_too() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let shared = with_engine(&world, engine.clone());
+    let retired = ProcessingPipeline::new(shared.clone());
+    let current = ProcessingPipeline::new(shared);
+    assert!(
+        retired
+            .dependencies()
+            .speech_engine
+            .ptr_eq(&current.dependencies().speech_engine)
+    );
+
+    let slow = enqueue_call(&world, &retired);
+    engine.wait_until_entered().await;
+    let fast = enqueue_call(&world, &current);
+    current.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, fast), MeetingState::Ready);
+    assert_eq!(
+        engine.inner.releases.count(),
+        0,
+        "the retired pipeline's job still needs the engine"
+    );
+
+    engine.open.notify_one();
+    retired.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, slow), MeetingState::Ready);
+    assert_eq!(engine.inner.releases.count(), 1);
+}
+
 /// A job that claims the engine while another job's release runs waits
 /// for the release and prepares again after it, never during it.
 #[tokio::test(flavor = "multi_thread")]
@@ -939,6 +976,208 @@ async fn a_job_that_starts_during_a_release_prepares_again_after_it() {
     for meeting in [first, second] {
         assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
     }
+}
+
+/// The same across a reload: a job on another pipeline over the engine
+/// that claims it while the retired pipeline's job releases it waits for
+/// the release and prepares after it, as the lock is the engine's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_on_another_pipeline_that_starts_during_a_release_prepares_after_it() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine::new(Gate::FirstRelease));
+    let shared = with_engine(&world, engine.clone());
+    let retired = ProcessingPipeline::new(shared.clone());
+    let current = ProcessingPipeline::new(shared);
+
+    let first = enqueue_call(&world, &retired);
+    engine.wait_until_entered().await;
+    let second = enqueue_call(&world, &current);
+    // Time enough for the second job's warm-up, were it not held.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(engine.log(), ["prepare", "release"]);
+
+    engine.open.notify_one();
+    retired.wait_until_idle().await;
+    current.wait_until_idle().await;
+    assert_eq!(
+        engine.log(),
+        [
+            "prepare", "release", "released", "prepare", "release", "released"
+        ]
+    );
+    for meeting in [first, second] {
+        assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    }
+}
+
+/// A recording's diarizer warm-up during a job's release waits for the
+/// release, as a job's warm-up does: the diarizer never loads while the
+/// speech engine frees its models.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_diarizer_warm_up_waits_for_a_release() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(GatedEngine::new(Gate::FirstRelease));
+    let diarizer = Arc::new(FakeDiarizer::default());
+    let mut dependencies = with_engine(&world, engine.clone());
+    dependencies.diarizer = diarizer.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+
+    let meeting = enqueue_call(&world, &pipeline);
+    engine.wait_until_entered().await;
+    assert_eq!(diarizer.preparations.count(), 1, "the job's own warm-up");
+    let warm_up = tokio::spawn({
+        let pipeline = pipeline.clone();
+        async move { pipeline.warm_up_diarizer().await }
+    });
+    // Time enough for the diarizer's warm-up, were it not held.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(diarizer.preparations.count(), 1);
+    assert_eq!(engine.log(), ["prepare", "release"]);
+
+    engine.open.notify_one();
+    warm_up.await.unwrap().unwrap();
+    assert_eq!(diarizer.preparations.count(), 2);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+}
+
+/// [`GatedEngine`] whose second `prepare` also waits, until `open` is
+/// notified: the first is the first job's warm-up.
+struct SecondPrepareHeld {
+    inner: Arc<GatedEngine>,
+    prepares: std::sync::atomic::AtomicUsize,
+    entered: tokio::sync::Notify,
+    open: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl steno_core::SpeechEngine for SecondPrepareHeld {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        self.inner.supported_languages()
+    }
+
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        if self
+            .prepares
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 1
+        {
+            self.entered.notify_one();
+            self.open.notified().await;
+        }
+        self.inner.prepare().await
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+        hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
+        self.inner.transcribe(audio, hint).await
+    }
+
+    async fn release(&self) -> steno_core::protocols::BoundaryResult<()> {
+        self.inner.release().await
+    }
+}
+
+/// A job whose lanes end while a recording's warm-up holds the lock
+/// leaves the engine loaded when a second job claims it meanwhile: the
+/// count is checked again under the lock, so only the second job's end
+/// releases it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_claimed_while_a_finisher_waits_on_a_warm_up_keeps_the_engine_loaded() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let gated = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let engine = Arc::new(SecondPrepareHeld {
+        inner: gated.clone(),
+        prepares: 0.into(),
+        entered: tokio::sync::Notify::new(),
+        open: tokio::sync::Notify::new(),
+    });
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+
+    let first = enqueue_call(&world, &pipeline);
+    gated.wait_until_entered().await;
+    let warm_up = tokio::spawn({
+        let pipeline = pipeline.clone();
+        async move { pipeline.warm_up().await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), engine.entered.notified())
+        .await
+        .expect("the warm-up holds the lock");
+    // The first job's lanes end; it waits on the lock to release.
+    gated.open.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // The second job claims the engine and waits on the lock to warm up.
+    let second = enqueue_call(&world, &pipeline);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(gated.log(), ["prepare"]);
+
+    engine.open.notify_one();
+    warm_up.await.unwrap().unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        gated.log(),
+        ["prepare", "prepare", "prepare", "release", "released"],
+        "only the last job's end releases the engine"
+    );
+    for meeting in [first, second] {
+        assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    }
+}
+
+/// A job whose lanes end while another job holds a claim does not wait on
+/// the lock at all: it finishes while a recording's warm-up still holds
+/// it, and the engine stays loaded for the other job.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_finisher_that_sees_another_claim_does_not_wait_on_a_warm_up() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let gated = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let engine = Arc::new(SecondPrepareHeld {
+        inner: gated.clone(),
+        prepares: 0.into(),
+        entered: tokio::sync::Notify::new(),
+        open: tokio::sync::Notify::new(),
+    });
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+
+    let first = enqueue_call(&world, &pipeline);
+    gated.wait_until_entered().await;
+    let warm_up = tokio::spawn({
+        let pipeline = pipeline.clone();
+        async move { pipeline.warm_up().await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), engine.entered.notified())
+        .await
+        .expect("the warm-up holds the lock");
+    // The second job claims the engine and waits on the lock to warm up.
+    let second = enqueue_call(&world, &pipeline);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // The first job's lanes end; it finishes under the held lock.
+    gated.open.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while meeting_state(&world, first) != MeetingState::Ready {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the first job finished while the warm-up held the lock");
+    assert_eq!(gated.log(), ["prepare"]);
+
+    engine.open.notify_one();
+    warm_up.await.unwrap().unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        gated.log(),
+        ["prepare", "prepare", "prepare", "release", "released"],
+        "only the last job's end releases the engine"
+    );
+    assert_eq!(meeting_state(&world, second), MeetingState::Ready);
 }
 
 /// A job that panics gives its claim back without a release, so the next
@@ -1274,9 +1513,10 @@ impl steno_core::SpeechEngine for PanickingEngine {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let mut dependencies = world.pipeline.dependencies().clone();
-    dependencies.speech_engine = Arc::new(PanickingEngine(std::collections::BTreeSet::new()));
-    let pipeline = ProcessingPipeline::new(dependencies);
+    let pipeline = ProcessingPipeline::new(with_engine(
+        &world,
+        Arc::new(PanickingEngine(std::collections::BTreeSet::new())),
+    ));
     let meeting = call_meeting(world.now);
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
     pipeline.enqueue(&meeting, &asset).unwrap();

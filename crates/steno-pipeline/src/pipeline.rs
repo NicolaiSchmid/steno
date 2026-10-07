@@ -12,16 +12,20 @@
 //! Once a job's lanes are transcribed and no other job is between its
 //! warm-up and its last lane, the speech engine is released
 //! ([`SpeechEngine::release`]): the speech sidecar's child exits and its
-//! working set goes back before the diarizer runs.
+//! working set goes back before the diarizer runs. The claims belong to the
+//! engine ([`SharedSpeechEngine`]), not to one pipeline, so pipelines that
+//! share an engine (the services keep it across a reload) never release it
+//! under each other's jobs.
 
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::future::Future;
+use std::ops::Deref;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
@@ -155,6 +159,145 @@ impl QuitLatch {
     }
 }
 
+/// A speech engine with the jobs that claim it, shared by every pipeline
+/// built over it: a job claims the engine from its warm-up to its last
+/// lane, and the engine is released only once no job on any of those
+/// pipelines holds a claim. The pipelines' warm-ups (the diarizer's
+/// too) and that release take one lock, so a warm-up never overlaps a
+/// release. Clones share the engine and its claims; [`new`](Self::new)
+/// starts with none. The services hand a clone to each pipeline a reload
+/// builds over the same engine, and keep the sidecar's for the run and a
+/// [`WeakSpeechEngine`] to the in-process one. Rust only: Swift has no
+/// release.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use steno_core::testing::FakeSpeechEngine;
+/// use steno_pipeline::SharedSpeechEngine;
+///
+/// let engine = SharedSpeechEngine::new(Arc::new(FakeSpeechEngine::default()));
+/// let shared = engine.clone();
+/// assert!(shared.ptr_eq(&engine));
+/// // A new value over the same engine starts claims of its own: share by
+/// // cloning.
+/// let separate = SharedSpeechEngine::new(engine.engine().clone());
+/// assert!(!separate.ptr_eq(&engine));
+/// // It derefs to the engine.
+/// assert_eq!(shared.id(), "fake-engine");
+/// ```
+#[derive(Clone)]
+pub struct SharedSpeechEngine(Arc<SharedEngineState>);
+
+/// What the pipelines over one [`SharedSpeechEngine`] share: the engine
+/// and its claims.
+struct SharedEngineState {
+    engine: Arc<dyn SpeechEngine>,
+    /// Jobs between their warm-up and their last lane ([`SpeechClaim`]).
+    count: Mutex<usize>,
+    /// Serialises the warm-ups (`warm_up`, `warm_up_diarizer`) and the
+    /// release after a job's lanes: one preparation at a time, so two runs
+    /// that start together load each engine once, and a warm-up never
+    /// overlaps a release.
+    preparing: AsyncMutex<()>,
+}
+
+impl SharedSpeechEngine {
+    /// `engine` with no claims on it yet, shared with no other value: a
+    /// pipeline built over it releases the engine under the jobs of any
+    /// other pipeline on the same engine. Pipelines that run on one
+    /// engine share a clone instead; the app's come from
+    /// `steno_services::speech::SpeechEngines`.
+    #[must_use]
+    pub fn new(engine: Arc<dyn SpeechEngine>) -> Self {
+        SharedSpeechEngine(Arc::new(SharedEngineState {
+            engine,
+            count: Mutex::new(0),
+            preparing: AsyncMutex::new(()),
+        }))
+    }
+
+    /// The engine itself.
+    #[must_use]
+    pub fn engine(&self) -> &Arc<dyn SpeechEngine> {
+        &self.0.engine
+    }
+
+    /// Whether `other` is a clone of this one: the same engine with the
+    /// same claims.
+    #[must_use]
+    pub fn ptr_eq(&self, other: &SharedSpeechEngine) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// A handle that finds this engine and its claims again while a
+    /// clone of it is alive, without keeping them alive itself.
+    #[must_use]
+    pub fn downgrade(&self) -> WeakSpeechEngine {
+        WeakSpeechEngine(Arc::downgrade(&self.0))
+    }
+
+    /// The number of claims, under their lock.
+    fn claim_count(&self) -> MutexGuard<'_, usize> {
+        self.0
+            .count
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Counts a job as needing the engine until the claim is dropped or
+    /// handed to [`ProcessingPipeline::finish_speech`].
+    fn claim(&self) -> SpeechClaim {
+        *self.claim_count() += 1;
+        SpeechClaim {
+            engine: self.clone(),
+        }
+    }
+
+    /// The lock the warm-ups and the release take, shared by every
+    /// pipeline over this engine.
+    async fn preparing(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.0.preparing.lock().await
+    }
+}
+
+impl Deref for SharedSpeechEngine {
+    type Target = dyn SpeechEngine;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.engine.as_ref()
+    }
+}
+
+/// A [`SharedSpeechEngine`] that does not keep the engine alive, from
+/// [`SharedSpeechEngine::downgrade`]: the services keep one for the
+/// in-process engine, so a reload back to it while a retired pipeline
+/// still runs on it gets the same engine and claims, and its model is
+/// freed once no pipeline holds it. Rust only.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use steno_core::testing::FakeSpeechEngine;
+/// use steno_pipeline::SharedSpeechEngine;
+///
+/// let engine = SharedSpeechEngine::new(Arc::new(FakeSpeechEngine::default()));
+/// let weak = engine.downgrade();
+/// assert!(weak.upgrade().is_some_and(|again| again.ptr_eq(&engine)));
+/// drop(engine);
+/// assert!(weak.upgrade().is_none());
+/// ```
+#[derive(Clone)]
+pub struct WeakSpeechEngine(Weak<SharedEngineState>);
+
+impl WeakSpeechEngine {
+    /// The engine with its claims, while a clone of it is alive.
+    #[must_use]
+    pub fn upgrade(&self) -> Option<SharedSpeechEngine> {
+        self.0.upgrade().map(SharedSpeechEngine)
+    }
+}
+
 /// Everything the pipeline needs, and the only injection axis: the app
 /// and the CLI pass real implementations, tests pass the fakes in
 /// `steno_core::testing`. `cleaner` and `summarizer` are `None` when no
@@ -165,7 +308,10 @@ impl QuitLatch {
 #[derive(Clone)]
 pub struct PipelineDependencies {
     pub decoder: Arc<dyn AudioDecoder>,
-    pub speech_engine: Arc<dyn SpeechEngine>,
+    /// The speech engine with its claims: [`new`](Self::new) gives it
+    /// claims of its own; [`with_speech_engine`](Self::with_speech_engine)
+    /// shares the caller's.
+    pub speech_engine: SharedSpeechEngine,
     pub diarizer: Arc<dyn Diarizer>,
     pub speaker_memory: Arc<dyn SpeakerMemory>,
     pub cleaner: Option<Arc<dyn TranscriptCleaner>>,
@@ -194,7 +340,7 @@ impl PipelineDependencies {
     ) -> Self {
         PipelineDependencies {
             decoder,
-            speech_engine,
+            speech_engine: SharedSpeechEngine::new(speech_engine),
             diarizer,
             speaker_memory,
             cleaner: None,
@@ -206,6 +352,14 @@ impl PipelineDependencies {
             clock: Arc::new(SystemClock::default()),
             quit_latch: QuitLatch::default(),
         }
+    }
+
+    /// Runs on `engine`, sharing its claims with every pipeline over a
+    /// clone of it, instead of the engine [`new`](Self::new) was given.
+    #[must_use]
+    pub fn with_speech_engine(mut self, engine: SharedSpeechEngine) -> Self {
+        self.speech_engine = engine;
+        self
     }
 
     #[must_use]
@@ -253,19 +407,11 @@ struct State {
     /// The background runs started by `enqueue` and `resume_unfinished`,
     /// by asset id.
     running: HashMap<Uuid, JoinHandle<()>>,
-    /// Claims on the speech engine: jobs between their warm-up and their
-    /// last lane ([`SpeechClaim`]).
-    speech_claims: usize,
 }
 
 struct Inner {
     dependencies: PipelineDependencies,
     state: Mutex<State>,
-    /// Serialises the warm-ups (`warm_up`, `warm_up_diarizer`) and the
-    /// release after a job's lanes: one preparation at a time, so two runs
-    /// that start together load each engine once, and a warm-up never
-    /// overlaps a release.
-    preparing: AsyncMutex<()>,
 }
 
 /// The pipeline. Cheap to clone: every clone shares the state.
@@ -466,7 +612,6 @@ impl ProcessingPipeline {
             inner: Arc::new(Inner {
                 dependencies,
                 state: Mutex::new(State::default()),
-                preparing: AsyncMutex::new(()),
             }),
         }
     }
@@ -478,6 +623,11 @@ impl ProcessingPipeline {
 
     fn store(&self) -> &Arc<Store> {
         &self.inner.dependencies.store
+    }
+
+    /// The speech engine and its claims.
+    fn speech_engine(&self) -> &SharedSpeechEngine {
+        &self.inner.dependencies.speech_engine
     }
 
     fn now(&self) -> DateTime<Utc> {
@@ -647,12 +797,13 @@ impl ProcessingPipeline {
     }
 
     /// Loads the speech engine and the diarizer now, so a run that starts
-    /// later finds them resident. Concurrent calls are serialised; a failed
+    /// later finds them resident. Concurrent calls are serialised, across
+    /// the pipelines that share the engine too; a failed
     /// load is retried by the next call rather than cached. Errors carry
     /// `decode` for the engine and `diarize` for the diarizer, as the
     /// Swift `warmUp` in `ProcessingPipeline.swift` attributes them.
     pub async fn warm_up(&self) -> Result<()> {
-        let _guard = self.inner.preparing.lock().await;
+        let _guard = self.speech_engine().preparing().await;
         let dependencies = &self.inner.dependencies;
         attributing(
             PipelineStage::Decode,
@@ -671,7 +822,7 @@ impl ProcessingPipeline {
     /// set resident until the job is done, outside any claim. Rust only:
     /// Swift's `warmUp` loads both.
     pub async fn warm_up_diarizer(&self) -> Result<()> {
-        let _guard = self.inner.preparing.lock().await;
+        let _guard = self.speech_engine().preparing().await;
         attributing(
             PipelineStage::Diarize,
             self.inner.dependencies.diarizer.prepare().await,
@@ -730,7 +881,7 @@ impl ProcessingPipeline {
         asset: &AudioAsset,
         meeting: Meeting,
     ) -> Result<AudioAsset> {
-        let claim = self.claim_speech();
+        let claim = self.speech_engine().claim();
         let transcribed: Result<_> = async {
             self.warm_up().await?;
             attributing(
@@ -783,17 +934,9 @@ impl ProcessingPipeline {
         self.persist(&current, asset).await
     }
 
-    /// Counts a job as needing the speech engine until the claim is
-    /// dropped or handed to [`finish_speech`](Self::finish_speech).
-    fn claim_speech(&self) -> SpeechClaim {
-        self.state().speech_claims += 1;
-        SpeechClaim {
-            pipeline: self.clone(),
-        }
-    }
-
-    /// Ends `claim` and releases the speech engine when no other job is
-    /// between its warm-up and its last lane. Another claim seen before
+    /// Ends `claim` and releases the speech engine when no other job, on
+    /// this pipeline or another over the same engine, is between its
+    /// warm-up and its last lane. Another claim seen before
     /// the lock ends the call at once, so a finisher never waits on a
     /// warm-up only to leave the engine loaded. Under `preparing`, the
     /// count is checked again: a job that claims the engine meanwhile
@@ -803,14 +946,14 @@ impl ProcessingPipeline {
     /// release is logged and never fails the job.
     async fn finish_speech(&self, claim: SpeechClaim) {
         drop(claim);
-        if self.state().speech_claims > 0 {
+        if *self.speech_engine().claim_count() > 0 {
             return;
         }
-        let _guard = self.inner.preparing.lock().await;
-        if self.state().speech_claims > 0 {
+        let _guard = self.speech_engine().preparing().await;
+        if *self.speech_engine().claim_count() > 0 {
             return;
         }
-        if let Err(error) = self.inner.dependencies.speech_engine.release().await {
+        if let Err(error) = self.speech_engine().release().await {
             tracing::warn!(target: BACKGROUND_RUN_LOG, "the speech engine was not released");
             tracing::debug!(target: BACKGROUND_RUN_LOG, %error, "speech engine release failure");
         }
@@ -1597,15 +1740,15 @@ impl Drop for Admitted {
     }
 }
 
-/// A job's claim on the speech engine, counted in `speech_claims`;
-/// dropping it ends the claim.
+/// A job's claim on the speech engine, counted in its
+/// [`SharedSpeechEngine`]; dropping it ends the claim.
 struct SpeechClaim {
-    pipeline: ProcessingPipeline,
+    engine: SharedSpeechEngine,
 }
 
 impl Drop for SpeechClaim {
     fn drop(&mut self) {
-        self.pipeline.state().speech_claims -= 1;
+        *self.engine.claim_count() -= 1;
     }
 }
 
