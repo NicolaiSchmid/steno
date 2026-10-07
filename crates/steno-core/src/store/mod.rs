@@ -271,7 +271,9 @@ impl Store {
     /// [`Store::write`] whose commit is on the disk when it returns, for
     /// the commits an answer to another device depends on: the phone
     /// intake's admission, before `complete` tells the phone to delete its
-    /// copy, a pairing, whose token the phone keeps, and a revoke.
+    /// copy; the `failed` receipt after a failed admission commit, which
+    /// writes over that commit's frames before the intake removes its copy;
+    /// a pairing, whose token the phone keeps; and a revoke.
     /// The transaction runs under `synchronous = FULL` with `fullfsync`
     /// on, so its commit syncs the WAL (with `F_FULLFSYNC` on Apple
     /// platforms, which also flushes the drive's cache) instead of leaving
@@ -286,6 +288,34 @@ impl Store {
     pub fn write_durably<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
         let mut full = FullSync::hold(self.lock())?;
         self.commit_on(&mut full.connection, body)
+    }
+
+    /// Copies every commit in the WAL into the database file and syncs
+    /// both (`PRAGMA wal_checkpoint(FULL)` under `synchronous = FULL` with
+    /// `fullfsync` on), so everything this connection reads is on the disk
+    /// when it returns. The app runs it at launch, before the handover
+    /// listener starts: after a crash, recovery can read back a commit
+    /// whose WAL sync failed (Linux keeps a page whose fsync failed in its
+    /// cache, marked clean), and the intake would answer a phone's retry
+    /// `complete` from that commit. A failed sync is an error, and so is a
+    /// checkpoint another connection still blocks when the busy timeout
+    /// runs out: SQLite's `SQLITE_BUSY`, which GRDB throws too and
+    /// [`StoreError::is_busy`] recognises, since the commits it could not
+    /// copy are not known to be on the disk. Swift:
+    /// `MeetingStore.checkpointDurably`.
+    pub fn checkpoint_durably(&self) -> Result<()> {
+        let full = FullSync::hold(self.lock())?;
+        let blocked: bool =
+            full.connection
+                .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| row.get(0))?;
+        if blocked {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("another connection blocked the checkpoint".to_owned()),
+            )
+            .into());
+        }
+        Ok(())
     }
 
     /// The `IMMEDIATE` transaction of [`Store::write`] on `connection`,

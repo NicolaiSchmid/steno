@@ -784,3 +784,52 @@ fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
         "the lock the panic poisoned is reused at NORMAL"
     );
 }
+
+/// A durable checkpoint leaves every commit in the database file itself:
+/// a copy of that file without its WAL holds the last commit. It runs
+/// under `FULL` and sets `NORMAL` back, like a durable write.
+#[test]
+fn a_durable_checkpoint_copies_every_commit_into_the_database_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .write(|transaction| {
+            transaction.execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (42);")?;
+            Ok(())
+        })
+        .unwrap();
+
+    store.checkpoint_durably().unwrap();
+    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
+
+    let copy = dir.path().join("copy.sqlite");
+    std::fs::copy(&path, &copy).unwrap();
+    let probed: i64 = rusqlite::Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT x FROM probe", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(probed, 42);
+}
+
+/// A checkpoint another connection blocks past the busy timeout (here
+/// none, so the test does not wait) fails as busy, as GRDB's does, and
+/// sets `NORMAL` back; once the other connection lets go it succeeds.
+#[test]
+fn a_checkpoint_another_connection_blocks_fails_as_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+        .unwrap();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let error = store.checkpoint_durably().unwrap_err();
+    assert!(error.is_busy(), "{error}");
+    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
+
+    writer.execute_batch("ROLLBACK").unwrap();
+    store.checkpoint_durably().unwrap();
+}
