@@ -6,9 +6,12 @@
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use chrono::{FixedOffset, Utc};
-use steno_audio::{CaptureConfiguration, CaptureSession, LaneLevels as AudioLevels};
+use steno_audio::{
+    CaptureConfiguration, CaptureSession, CaptureStatistics, LaneLevels as AudioLevels,
+};
 use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
@@ -416,10 +419,7 @@ impl Recorder for CaptureRecorder {
 /// and a call whose system audio stayed silent. Swift:
 /// `RecordingController.stop`, where a device loss replaced the silent-lane
 /// line; the joining and the dropped frames are Rust only.
-fn recording_warning(
-    mode: CaptureMode,
-    statistics: &steno_audio::CaptureStatistics,
-) -> Option<String> {
+fn recording_warning(mode: CaptureMode, statistics: &CaptureStatistics) -> Option<String> {
     let mut lines = Vec::new();
     if statistics.ended_on_device_loss {
         lines.push("An audio device disappeared; the partial recording was kept.".to_owned());
@@ -427,13 +427,11 @@ fn recording_warning(
     let dropped = statistics
         .dropped_frames
         .values()
-        .copied()
         .max()
+        .copied()
         .unwrap_or(0);
     if dropped > 0 {
-        let seconds = dropped.div_ceil(CaptureSession::gap_frames(std::time::Duration::from_secs(
-            1,
-        )));
+        let seconds = dropped.div_ceil(CaptureSession::gap_frames(Duration::from_secs(1)));
         let amount = if seconds == 1 {
             "About 1 second of the recording is".to_owned()
         } else {
@@ -476,6 +474,7 @@ mod tests {
     use crate::testing::{
         PATIENCE, eventually, fake_dependencies, on_own_thread, synthetic_capture, temp_store,
     };
+    use steno_core::AudioLane;
     use steno_core::paths::file_url;
     use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
     use steno_host::fakes::{FakePermissions, FakeSpeechModels};
@@ -960,8 +959,8 @@ mod tests {
         );
     }
 
-    fn statistics() -> steno_audio::CaptureStatistics {
-        steno_audio::CaptureStatistics {
+    fn statistics() -> CaptureStatistics {
+        CaptureStatistics {
             duration: 60.0,
             dropped_frames: std::collections::BTreeMap::new(),
             system_lane_silent: false,
@@ -981,12 +980,8 @@ mod tests {
     #[test]
     fn dropped_frames_warn_with_the_seconds_missing() {
         let mut dropped = statistics();
-        dropped
-            .dropped_frames
-            .insert(steno_core::AudioLane::Mic, 250);
-        dropped
-            .dropped_frames
-            .insert(steno_core::AudioLane::System, 40);
+        dropped.dropped_frames.insert(AudioLane::Mic, 250);
+        dropped.dropped_frames.insert(AudioLane::System, 40);
         assert_eq!(
             recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
             Some(
@@ -994,9 +989,7 @@ mod tests {
             )
         );
         dropped.dropped_frames.clear();
-        dropped
-            .dropped_frames
-            .insert(steno_core::AudioLane::Mixed, 1);
+        dropped.dropped_frames.insert(AudioLane::Mixed, 1);
         assert_eq!(
             recording_warning(CaptureMode::InPerson, &dropped).as_deref(),
             Some("About 1 second of the recording is missing because the disk could not keep up.")
@@ -1010,7 +1003,7 @@ mod tests {
         let mut all = statistics();
         all.ended_on_device_loss = true;
         all.system_lane_silent = true;
-        all.dropped_frames.insert(steno_core::AudioLane::Mic, 100);
+        all.dropped_frames.insert(AudioLane::Mic, 100);
         let warning = recording_warning(CaptureMode::Call, &all).unwrap();
         assert_eq!(
             warning,
