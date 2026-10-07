@@ -164,8 +164,10 @@ import Testing
       at: Fixtures.url("audio/conversation-two-lane-6s.wav"), to: upload)
     var metadata = SampleData.recordingMetadata()
     metadata.format = .wav16kInt16
+    // The app's wiring (`AppEnvironment.makeIntake`).
+    let pipeline = harness.pipeline
     let intake = RecordingIntake(
-      store: store, settings: harness.settingsStore, pipeline: harness.pipeline,
+      store: store, settings: harness.settingsStore, currentPipeline: { pipeline },
       now: { PipelineHarness.now })
     #expect(try await CommitLog.synchronous(of: store) == 1)
     let log = try await CommitLog.install(on: store)

@@ -405,17 +405,16 @@ final class AppEnvironment {
   }
 
   /// Core's `RecordingIntake` over whatever pipeline is current when a phone
-  /// recording completes, so a pipeline reload never strands the listener.
-  /// Its meeting commits durably (`enqueueDurably`), as
-  /// `RecordingIntake.init(pipeline:)`'s does.
+  /// recording completes, so a pipeline reload never strands the listener;
+  /// `init(currentPipeline:)` commits its meeting durably.
   func makeIntake() -> RecordingIntake {
     RecordingIntake(
       store: store, settings: settings,
-      enqueue: { [weak self] meeting, asset in
+      currentPipeline: { [weak self] in
         guard let pipeline = await MainActor.run(body: { self?.pipeline }) else {
           throw PipelineFailure(stage: .decode, reason: "the app is shutting down")
         }
-        try await pipeline.enqueueDurably(meeting, asset: asset)
+        return pipeline
       },
       now: now)
   }

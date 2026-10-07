@@ -18,8 +18,8 @@ import Foundation
 /// The `.complete` receipt and the meeting commit durably
 /// (`MeetingStore.writeDurably`), because the phone deletes its copy once
 /// `complete` answers 200: the receipt here, the meeting in `enqueue`,
-/// which is `ProcessingPipeline.enqueueDurably` in `init(pipeline:)` and
-/// must be in any other production `enqueue`. The `.failed` receipt of a
+/// which is `ProcessingPipeline.enqueueDurably` in `init(currentPipeline:)`
+/// and must be in any other production `enqueue`. The `.failed` receipt of a
 /// refused admission commits as usual: the phone keeps its copy then. The
 /// copy itself is not synced (`copyItem`); the Rust intake syncs it.
 public struct RecordingIntake: HandoverIntake, Sendable {
@@ -44,17 +44,32 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     self.now = now
   }
 
-  /// The production wiring: `enqueue` is `ProcessingPipeline.enqueueDurably`.
+  /// The production wiring: `enqueue` is `ProcessingPipeline.enqueueDurably`
+  /// on the pipeline `currentPipeline` returns when a recording is
+  /// admitted, so a pipeline reload never strands the intake
+  /// (`AppEnvironment.makeIntake`).
+  public init(
+    store: MeetingStore,
+    settings: SettingsStore,
+    currentPipeline: @escaping @Sendable () async throws -> ProcessingPipeline,
+    now: @escaping @Sendable () -> Date = Date.init
+  ) {
+    self.init(
+      store: store, settings: settings,
+      enqueue: { meeting, asset in
+        try await currentPipeline().enqueueDurably(meeting, asset: asset)
+      },
+      now: now)
+  }
+
+  /// `init(currentPipeline:)` over one pipeline that never changes.
   public init(
     store: MeetingStore,
     settings: SettingsStore,
     pipeline: ProcessingPipeline,
     now: @escaping @Sendable () -> Date = Date.init
   ) {
-    self.init(
-      store: store, settings: settings,
-      enqueue: { meeting, asset in try await pipeline.enqueueDurably(meeting, asset: asset) },
-      now: now)
+    self.init(store: store, settings: settings, currentPipeline: { pipeline }, now: now)
   }
 
   public func admit(file: URL, metadata: RecordingMetadata, device: PairedDevice) async throws

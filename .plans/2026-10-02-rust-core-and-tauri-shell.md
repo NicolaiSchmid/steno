@@ -1139,8 +1139,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   `save_handover_receipt_durably` and `saveDurably(_:)`, the meeting through
   `ProcessingPipeline::enqueue_durably` and `enqueueDurably`, which every production
   wiring of the intake uses (`RecordingIntake::over`,
-  `steno_services::app::handover_intake`, `RecordingIntake.init(pipeline:)`,
-  `AppEnvironment.makeIntake`). A refused admission's `failed` receipt and every
+  `steno_services::app::handover_intake`, and Swift's
+  `RecordingIntake.init(currentPipeline:)`, which `AppEnvironment.makeIntake` and
+  `init(pipeline:)` go through). A refused admission's `failed` receipt and every
   other write stay `NORMAL`. Tests read the level inside the commits (Rust's
   `Store::probe_commits` behind `testing`, Swift's `CommitLog` over the writer's
   trace); a power loss itself is not tested. Swift should still fsync the copied
