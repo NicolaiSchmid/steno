@@ -35,6 +35,13 @@
 //! capture missed the move. The backend's logs go to the test output, at
 //! `info` unless a non-empty `RUST_LOG` says otherwise.
 //!
+//! The input list and the meeting detection's source run here too: the
+//! list names the test microphone as the default input and follows a
+//! source coming and going, and a `pw-record` of the microphone shows up
+//! holding it with its pid and goes when it ends, with a change for both,
+//! while Steno's own capture is never listed; an unknown microphone UID
+//! records the default source.
+//!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
 //! finds in `/proc/self/task` and counts with
@@ -523,13 +530,30 @@ fn in_person_records_only_the_microphone_by_its_uid() {
 
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn an_unknown_microphone_fails_and_the_backend_starts_again() {
+fn an_unknown_microphone_records_the_default_source() {
+    let _mic_tone = Tone::into_source(MIC, MIC_TONE);
     let lanes = [AudioLane::Mixed];
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let backend = Arc::new(LiveCaptureBackend::new());
-    assert_eq!(
-        start(&backend, &lanes, Some("no-such-device"), &sink),
-        Err(CaptureError::InputDeviceUnavailable)
+    // A Core Audio UID, as a settings file synced from a Mac holds.
+    start(&backend, &lanes, Some("BuiltInMicrophoneDevice"), &sink).expect("start");
+    let audio = collect(&sink, 24_000);
+    assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
+    stop_and_check_teardown(&backend, &sink);
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_failed_start_leaves_the_backend_ready_to_start_again() {
+    let lanes = [AudioLane::Mixed];
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let backend = Arc::new(LiveCaptureBackend::new());
+    assert!(
+        matches!(
+            start(&backend, &[], None, &sink),
+            Err(CaptureError::UnexpectedStreamLayout(_))
+        ),
+        "no lanes fails once the graph is read"
     );
     assert!(
         thread_named("steno-pipewire").is_none(),
@@ -1154,11 +1178,12 @@ fn a_microphone_that_goes_away_in_person_is_reported_as_the_input_gone() {
     let reason = next_report(&reasons);
     assert_eq!(reason, DeviceChangeReason::InputDeviceGone);
     stop(&backend);
-    assert_eq!(
-        start(&backend, &lanes, Some(mic.name), &sink),
-        Err(CaptureError::InputDeviceUnavailable),
-        "the rebuild's restart finds it gone"
-    );
+    let _mic_tone = Tone::into_source(MIC, MIC_TONE);
+    start(&backend, &lanes, Some(mic.name), &sink)
+        .expect("the rebuild's restart records the default source");
+    let audio = collect(&sink, 24_000);
+    assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
+    stop(&backend);
 }
 
 #[test]
@@ -1178,4 +1203,189 @@ fn a_microphone_that_goes_away_during_a_call_is_reported_as_the_input_gone() {
         "not the output gone"
     );
     stop_and_check_teardown(&backend, &sink);
+}
+
+/// The live input list, on its own thread with a deadline.
+fn inputs() -> Vec<steno_audio::capture::live::AudioDeviceInfo> {
+    within(Duration::from_secs(10), "the input list", || {
+        steno_audio::capture::live::AudioDevices::inputs()
+    })
+    .expect("the input list")
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn the_input_list_names_the_sources_and_marks_the_default() {
+    let listed = inputs();
+    println!("{listed:#?}");
+    let mic = listed
+        .iter()
+        .find(|device| device.uid == MIC)
+        .expect("the test microphone");
+    assert_eq!(mic.name, "Steno test microphone", "its description");
+    assert!(mic.is_default_input);
+    assert_eq!(mic.input_channels, 1);
+    assert!(
+        listed
+            .iter()
+            .all(|device| device.uid != SINK && device.uid != SECOND_SINK),
+        "a sink is no input"
+    );
+    assert_eq!(listed.iter().filter(|d| d.is_default_input).count(), 1);
+    let extra = TemporaryMic::create("steno-test-mic-listed");
+    assert!(
+        inputs()
+            .iter()
+            .any(|device| device.uid == extra.name && !device.is_default_input),
+        "a new source is listed"
+    );
+    extra.destroy();
+    assert!(
+        inputs().iter().all(|device| device.uid != extra.name),
+        "a source that went is not"
+    );
+    assert!(
+        eventually(SETTLE, || thread_named("steno-pw-devs").is_none()),
+        "each list's thread ends with it: {:?}",
+        threads()
+    );
+}
+
+/// A `pw-record` of the test microphone into a temporary file, killed
+/// when dropped.
+struct Recorder {
+    child: Child,
+    _dir: tempfile::TempDir,
+}
+
+impl Recorder {
+    fn start() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child = Command::new("pw-record")
+            .args(["--target", MIC])
+            .arg(dir.path().join("recorded.wav"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("pw-record");
+        Self { child, _dir: dir }
+    }
+
+    fn pid(&self) -> i32 {
+        i32::try_from(self.child.id()).expect("a pid")
+    }
+
+    fn end(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// The source's view of `pid`, read afresh.
+fn activity_of(
+    source: &steno_audio::detection::LiveProcessAudioActivity,
+    pid: i32,
+) -> Option<steno_audio::ProcessAudioActivity> {
+    use steno_audio::ProcessAudioActivitySource as _;
+    source
+        .snapshot()
+        .expect("a snapshot")
+        .into_iter()
+        .find(|process| process.pid == pid)
+}
+
+/// Waits up to `limit` for a change message, dropping any others queued.
+fn changed_within(changes: &Receiver<()>, limit: Duration) -> bool {
+    let arrived = changes.recv_timeout(limit).is_ok();
+    while changes.try_recv().is_ok() {}
+    arrived
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_recorder_holds_the_microphone_until_it_ends_and_steno_is_not_listed() {
+    use steno_audio::ProcessAudioActivitySource as _;
+    show_logs();
+    let source = steno_audio::detection::LiveProcessAudioActivity::new();
+    let changes = source.changes();
+    assert!(
+        changed_within(&changes, Duration::from_secs(5)),
+        "one message right away"
+    );
+    let more: Vec<_> = (0..5).map(|_| source.changes()).collect();
+    source.snapshot().expect("a first view");
+    let watching = || {
+        threads()
+            .iter()
+            .filter(|(_, name)| name.contains("steno-pw-detect"))
+            .count()
+    };
+    assert_eq!(
+        watching(),
+        1,
+        "one thread for every receiver: {:?}",
+        threads()
+    );
+    drop(more);
+
+    let mut recorder = Recorder::start();
+    let pid = recorder.pid();
+    assert!(
+        eventually(Duration::from_secs(10), || activity_of(&source, pid)
+            .is_some_and(|p| p.is_running_input)),
+        "pw-record ({pid}) holds the microphone: {:?}",
+        source.snapshot()
+    );
+    let holder = activity_of(&source, pid).expect("listed");
+    println!("{holder:?}");
+    assert_eq!(holder.bundle_id.as_deref(), Some("pw-cat"), "its binary");
+    assert!(!holder.is_running_output);
+    assert!(
+        changed_within(&changes, Duration::ZERO),
+        "the recorder's arrival was a change"
+    );
+
+    // Steno's own capture of the same microphone is left out.
+    let lanes = [AudioLane::Mixed];
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let backend = Arc::new(LiveCaptureBackend::new());
+    start(&backend, &lanes, None, &sink).expect("start");
+    #[allow(clippy::cast_possible_wrap)]
+    let own = std::process::id() as i32;
+    assert!(
+        eventually(Duration::from_secs(2), || node_id(CAPTURE_NODE).is_some()),
+        "the capture runs"
+    );
+    std::thread::sleep(SETTLE);
+    assert_eq!(
+        activity_of(&source, own),
+        None,
+        "Steno's capture is not listed"
+    );
+    stop(&backend);
+
+    while changes.try_recv().is_ok() {}
+    recorder.end();
+    assert!(
+        eventually(Duration::from_secs(10), || activity_of(&source, pid)
+            .is_none()),
+        "pw-record's stream went with it"
+    );
+    assert!(
+        changed_within(&changes, Duration::ZERO),
+        "the recorder's end was a change"
+    );
+    drop(changes);
+    drop(source);
+    assert!(
+        thread_named("steno-pw-detect").is_none(),
+        "the source's thread ends with it: {:?}",
+        threads()
+    );
 }
