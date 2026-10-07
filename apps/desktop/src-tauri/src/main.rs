@@ -221,7 +221,7 @@ const REFUSED_CODE: i32 = 3;
 /// each other's recordings at launch, so this one says why and ends once
 /// the alert is closed, before it opens a window or touches the database.
 /// Its run loop has no host to shut down (`host::is_running`). Rust only:
-/// the Swift app ran a second copy beside the first.
+/// the Swift app relied on macOS opening one copy per bundle id.
 fn refuse_to_start(handle: &tauri::AppHandle, error: &dyn std::error::Error) {
     use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 

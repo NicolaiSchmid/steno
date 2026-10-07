@@ -80,7 +80,7 @@ fn hold_lock(database: &Path) -> Result<(), Failure> {
     if held.iter().any(|lock| lock.path() == path) {
         return Ok(());
     }
-    match steno_services::app::lock_database(database) {
+    match steno_services::lock_database(database) {
         Ok(lock) => {
             held.push(lock);
             Ok(())
