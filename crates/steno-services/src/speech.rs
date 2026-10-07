@@ -1307,7 +1307,11 @@ mod tests {
         let error = if cfg!(target_os = "macos") {
             models.download(ModelAsset::ParakeetV3, &mut record)
         } else {
-            install_with_progress(&models.coreml_store, &[asset.clone()], &mut record)
+            install_with_progress(
+                &models.coreml_store,
+                std::slice::from_ref(&asset),
+                &mut record,
+            )
         }
         .unwrap_err()
         .to_string();
@@ -1639,7 +1643,7 @@ mod tests {
 
     /// Settings > General acknowledges the two models the Rust app offers:
     /// Parakeet v3, then the diarizer's two ONNX models, each with its
-    /// licence and who made it (WeSpeaker's CC BY 4.0 asks for the
+    /// licence and who made it (the `WeSpeaker` model's CC BY 4.0 asks for the
     /// attribution); no row for Whisper, Ultra or the German Parakeet, and
     /// the Transcription row names the ONNX models.
     #[test]
