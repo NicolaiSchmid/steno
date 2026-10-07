@@ -1308,20 +1308,30 @@ parity item until a plan says otherwise:
   fails the start with `InputDeviceUnavailable`, and a microphone lost
   during a recording ends it in `DeviceLost` after the rebuild's four
   restarts. In Rust every live backend (Core Audio, PipeWire, WASAPI)
-  records the default input in its place, at `start` and at a rebuild's
-  restart alike (`CaptureBackend::start`), logs one warning, and names the
-  device in `CaptureStream::input`. The recorder then sets the recording
-  snapshot's `warning` to "Recording from <name> because the chosen
-  microphone is not connected." until a rebuild returns to the chosen one,
-  the user dismisses it or the recording stops. Each backend watches for
-  the chosen device (the Mac's device list, PipeWire's registry, WASAPI's
-  endpoint notifications); its return reads as `DefaultInputChanged`, and
-  the rebuild records it again. A Bluetooth headset gone for a second
-  while it changes profile is recorded on the default input meanwhile,
-  instead of silence. A lost microphone ends a recording only when no
-  input is left at all. Settings lists the stored device as "Microphone
-  not connected" until the user picks again or it comes back. Swift keeps
-  its behaviour until the cutover.
+  records the default input in its place (the fallback,
+  `CaptureInput::is_fallback`), at `start` and at a rebuild's restart
+  alike (`CaptureBackend::start`), logs one warning, and names the device
+  in `CaptureStream::input`. A chosen microphone that is connected but
+  does not open (still settling after it was plugged in, held by another
+  app, a link that never runs) fails the backend's `start`; the session
+  then starts it once more without a UID, at the start and after a
+  rebuild's last restart, and marks that input as the fallback. The
+  recorder then sets the recording snapshot's `warning` to "Recording from
+  <name> because the chosen microphone is not available." (or "from the
+  system default microphone" when the input has no name) until a rebuild
+  returns to the chosen one, the user dismisses it or the recording stops.
+  Each backend watches for the chosen device (the Mac's device list,
+  PipeWire's registry, WASAPI's endpoint notifications, and on the Mac and
+  WASAPI a re-check every 5 s while on the fallback); its return reads as
+  `DefaultInputChanged`, and the rebuild records it again. A fallback the
+  session chose watches for nothing: the next rebuild asks for the chosen
+  microphone again. A Bluetooth headset gone for a second while it changes
+  profile is recorded on the default input meanwhile, instead of a gap or
+  the end of the recording. A chosen microphone that is missing or cannot
+  be opened no longer ends a recording while the default input can be
+  opened. Settings lists the stored device as "Microphone not connected"
+  until the user picks again or it comes back. Swift keeps its behaviour
+  until the cutover.
 - **Steno's own aggregates are not inputs.** On the Mac,
   `AudioDevices::inputs` leaves out the private aggregates Steno's
   captures create (`uno.schmid.steno.aggregate.*`); Swift lists them as a
@@ -1696,9 +1706,9 @@ item to settle before the Linux release:
   copied settings file names no Linux node, so it records the default
   source, as any missing chosen microphone does on every platform (see "A
   chosen microphone that is missing records the default input" in the
-  first Audio list). Standing in, the capture's snapshot follows the
-  default as one without a UID does, and the chosen node (and a port of
-  it) announced again is a change (`Graph::followed_source`). A virtual
+  first Audio list). On the fallback, the capture's snapshot follows the
+  default as one without a UID does, and the chosen node, or one of its
+  ports, announced again counts as a change (`Graph::followed_source`). A virtual
   source (a null sink with `media.class = Audio/Source/Virtual`) records
   from its monitor output, the only output it has.
 - **The input device list** (`capture::live::pipewire::AudioDevices`) is
