@@ -1526,7 +1526,10 @@ touch lines; each fix is ported to Swift before cutover.
   ellipsis off the Mac and "Exit Steno" on Windows, and shows shortcut hints on the
   Mac only. A call's folder note says "Windows call" or "Linux call" in its info line
   off the Mac (`RenderOptions::platform`, from `Platform::CURRENT`); the frontmatter's
-  `source` stays `mac-call`. The Swift app sets no platform and keeps the Mac's words.
+  `source` stays `mac-call`. Only the Mac's pages leave the traffic lights their
+  inset (`titleBarInset`); under the native title bar of Windows and Linux the
+  sidebars open without the spacer and onboarding at a 24 px top. The Swift app sets
+  no platform and keeps the Mac's words.
   Three changes reach both apps: a vault the CLI named reads "Obsidian (<vault
   folder>)" in the footer, onboarding page 1's button says Continue, and the retention
   sentence says "Recordings are kept until you delete them" and points at Settings >
