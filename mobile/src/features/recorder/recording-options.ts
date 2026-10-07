@@ -49,10 +49,14 @@ export function recordingFileName(recordingID: string): string {
 	return `${recordingID}${RECORDING_EXTENSION}`;
 }
 
-const RECORDING_FILE_NAME = new RegExp(
-	`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})${RECORDING_EXTENSION.replace(".", "\\.")}$`,
-	"i",
-);
+/** `<prefix><UUID>.m4a`, the UUID captured; any case. */
+const fileNamePattern = (prefix: string) =>
+	new RegExp(
+		`^${prefix}([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})${RECORDING_EXTENSION.replace(".", "\\.")}$`,
+		"i",
+	);
+
+const RECORDING_FILE_NAME = fileNamePattern("");
 
 /**
  * The recording id a `recordingFileName` was made from, or null for any other
@@ -70,10 +74,7 @@ export function recordingIDFromFileName(fileName: string): string | null {
  */
 export const RECORDER_DIRECTORY = "ExpoAudio";
 
-const RECORDER_FILE_NAME = new RegExp(
-	`^recording-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})${RECORDING_EXTENSION.replace(".", "\\.")}$`,
-	"i",
-);
+const RECORDER_FILE_NAME = fileNamePattern("recording-");
 
 /**
  * The UUID in a file name expo-audio gives a recording
