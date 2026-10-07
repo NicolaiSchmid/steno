@@ -40,7 +40,6 @@ vi.mock("./queue-files", () => ({
 		async writeText() {},
 		async rename() {},
 		async move() {},
-		async remove() {},
 		async list() {
 			return [];
 		},

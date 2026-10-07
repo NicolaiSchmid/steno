@@ -420,9 +420,8 @@ describe("a load with recording files the index does not list", () => {
 			version: 1,
 			recordings: [adopted(A, A_STARTED), adopted(B, B_STARTED)],
 		});
-		// The corrupt index is kept aside, never deleted, and no file is removed.
+		// The corrupt index is kept aside, never deleted.
 		expect(setAside(files, "corrupt")).toEqual(["{oops"]);
-		expect(files.calls.filter((c) => c.startsWith("remove"))).toEqual([]);
 		expect(logs).toEqual([
 			"queue index corrupt, rebuilding it from the recording files: QueueError: index is not JSON",
 			"queue index had no row for 2 recording file(s), adopted them",
