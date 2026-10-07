@@ -1177,23 +1177,32 @@ still has to draw the window side. `[ ]` is not ported yet.
   check that the `failed` receipt commits under `FULL` while the copy is still there;
   a power loss itself is not tested, nor a failing WAL sync (that needs a
   fault-injecting SQLite VFS; the probe in #213's description ran one outside the
-  repository). The Rust
-  store also turns `checkpoint_fullfsync` on (`Store::open`), which the bundled SQLite
-  leaves off and Apple's system SQLite under GRDB has on, so a checkpoint on a Mac
-  cannot undo a durable commit.
+  repository). The Rust store also turns `checkpoint_fullfsync` on (`set_up` in
+  `crates/steno-core/src/store/mod.rs`, shared by `Store::open` and
+  `Store::open_without_migrating`), which the bundled SQLite leaves off and Apple's
+  system SQLite under GRDB has on, so a checkpoint on a Mac cannot undo a durable
+  commit.
 - At launch, before the handover listener exists, both apps checkpoint the store
-  durably (`Store::checkpoint_durably`, `MeetingStore.checkpointDurably()`:
-  `wal_checkpoint(FULL)` under `FULL` with `fullfsync`), so every commit the store
-  reads is in the synced database file. After a crash, recovery can read back an
+  durably (`Store::checkpoint_durably`, `MeetingStore.checkpointDurably()`):
+  `wal_checkpoint(RESTART)` under `FULL` with `fullfsync` copies every commit in the
+  WAL into the database file, syncs it and waits until no reader is left in the WAL,
+  and one durable write that changes a page (a private table created and dropped,
+  which leaves the schema and the applied migrations as they were) then restarts the
+  WAL with a new salt and syncs its header. After a crash, recovery can read back an
   admission whose WAL sync failed (Linux keeps a page whose fsync failed in its cache,
   marked clean), and the intake answers a retried `complete` from a stored `complete`
-  receipt without a write of its own; the checkpoint puts that admission on the disk
-  first. A checkpoint that fails, or that another connection still blocks when the
-  busy timeout runs out (`SQLITE_BUSY`), keeps the handover off until the next launch
-  with a startup warning; the rest of the app runs (`handover_listener` in
-  `crates/steno-services/src/app.rs`, `AppEnvironment.makeHandover`). Tests hold
-  another connection's write lock so the checkpoint fails, and expect no listener and
-  no identity read. The guard is one helper, `HandoverService::checkpoint_store` and
+  receipt without a write of its own; the checkpoint puts that admission in the synced
+  database file first, and the restart keeps a power loss from replaying the older
+  frames still in the WAL file over it (recovery skips every frame under the old
+  salt). A checkpoint that fails, or that another connection (a writer, or a reader
+  still in the WAL) blocks when the busy timeout runs out (`SQLITE_BUSY`), keeps the
+  handover off until the next launch, with a startup warning (the Mac app's menu bar,
+  the Rust shell's log) and Settings' unavailable callout; the rest of the app runs
+  (`handover_listener` in `crates/steno-services/src/app.rs`,
+  `AppEnvironment.makeHandover`). Tests check at the file level that the WAL's salt
+  changes and that another connection's write lock or read transaction makes the
+  checkpoint fail, and with the write lock held expect no listener and no identity
+  read. The launch checkpoint is one helper, `HandoverService::checkpoint_store` and
   `HandoverService.checkpointStore(_:)`, which fails with `StoreNotSynced`; the CLI's
   `steno dev handover serve` in both apps runs it before it mints the identity and
   exits nonzero when it fails. The CLI's store is in memory, so its checkpoint has no
