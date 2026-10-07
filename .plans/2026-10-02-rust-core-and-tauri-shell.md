@@ -2021,7 +2021,7 @@ PR off `main`.
 | The handover's admission, first announce and revoke refusals leave another device's files and receipt alone, and the admission leaves no file behind (`steno-handover`) | `fix/rust-handover-admit-announce` | #219 | merged |
 | No traffic light inset under a native title bar: the sidebars' spacer and onboarding's top follow the platform (`apps/macos/web/`) | `fix/web-platform-title-inset` | #217 | merged |
 | After the intake, `admit` discards every file of the recording unless another device holds its receipt, and so do a refused `complete` and a failed first save (Swift core, the counterpart of #219) | `fix/swift-handover-admit` | #212 | open |
-| The phone rebuilds its queue index from the recording files on disk, so a lost or stale index leaves no recording behind (`mobile/`) | `fix/mobile-queue-index-rebuild` | #PR | open |
+| The phone rebuilds its queue index from the recording files on disk, so a lost or stale index leaves no recording behind (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
