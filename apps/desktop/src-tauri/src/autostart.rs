@@ -230,7 +230,13 @@ pub fn turn_off_at_exit(app: &AppHandle) {
         return;
     }
     stop_timeout::remove_autostart();
-    if let Err(error) = set_mark(&mark, false) {
+    clear_mark(&mark);
+}
+
+/// Removes the mark at `mark`; a failure is logged.
+#[cfg(target_os = "linux")]
+fn clear_mark(mark: &std::path::Path) {
+    if let Err(error) = set_mark(mark, false) {
         tracing::debug!(%error, "clearing the mark of Launch at login");
     }
 }
@@ -292,32 +298,26 @@ pub fn sync_at_launch(app: &AppHandle) {
         marked,
         stop_timeout::runs_as_autostart_unit(),
     );
-    let clear = || {
-        if let Some(mark) = &mark
-            && let Err(error) = set_mark(mark, false)
-        {
-            tracing::debug!(%error, "clearing the mark of Launch at login");
-        }
-    };
-    match step {
-        AtLaunch::Keep => stop_timeout::sync(Some(true)),
+    let login_item = match step {
+        AtLaunch::Keep => Some(true),
         AtLaunch::TurnOff => match manager.disable() {
-            Ok(()) => {
-                clear();
-                stop_timeout::sync(Some(false));
-            }
+            Ok(()) => Some(false),
             Err(error) => {
                 tracing::warn!("Launch at login could not be turned off; it stays on");
                 tracing::debug!(%error, "turning Launch at login off at launch");
-                stop_timeout::sync(Some(true));
+                Some(true)
             }
         },
-        AtLaunch::Drop => {
-            clear();
-            stop_timeout::sync(Some(false));
-        }
-        AtLaunch::Leave => stop_timeout::sync(None),
+        AtLaunch::Drop => Some(false),
+        AtLaunch::Leave => None,
+    };
+    // No entry is left: a mark has nothing more to turn off.
+    if login_item == Some(false)
+        && let Some(mark) = &mark
+    {
+        clear_mark(mark);
     }
+    stop_timeout::sync(login_item);
 }
 
 /// Where the user manages login items; `None` where there is no such
