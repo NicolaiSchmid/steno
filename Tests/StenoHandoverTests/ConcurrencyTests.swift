@@ -520,6 +520,50 @@ import Testing
   }
 
   @Test(.timeLimit(.minutes(1)))
+  func anAdmissionOfARevokedPhoneLeavesFilesAnnouncedDuringItsSaveAlone() async throws {
+    // The phone is revoked while the intake holds its `complete`. Once the
+    // intake answers, the admission's `.complete` save is held on its way
+    // to the store, and another phone announces the same recording id. The
+    // admission then finds that phone's receipt in memory and leaves its
+    // partial and sidecar alone: the check comes after the save, the last
+    // suspension. Checked before the save, when memory held no receipt, the
+    // files would go and the other phone's chunks would be answered 404
+    // "announce again".
+    let chunkSize = 64 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let intake = HeldIntake(test.intake)
+      defer { intake.release() }
+      let held = HeldSave(store: test.store) { $0.state.kind == .complete }
+      defer { held.release() }
+      let engine = Self.engine(test, intake: intake, saveReceipt: held.save)
+      let phone = try await EngineClient.paired(test, engine: engine)
+      let other = try await EngineClient.paired(test, engine: engine, deviceName: "Other iPhone")
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 72)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let id = metadata.recordingID
+      try await phone.uploadAll(metadata, bytes)
+
+      let completion = Task { await phone.complete(id) }
+      await intake.held()
+      try await engine.revoke(phone.device.id)
+      intake.release()
+      await held.held()
+      let announcing = Task { try await other.announce(metadata) }
+      try await until { await engine.activeReceipts[id]?.deviceID == other.device.id }
+      held.release()
+      #expect(await completion.value.code == 200, "the intake admitted the revoked phone's file")
+      #expect(try await announcing.value.code == 201)
+
+      #expect(engine.inbox.hasPartial(id), "the other phone's partial stays")
+      #expect(engine.inbox.loadMetadata(id) == metadata, "and so does its sidecar")
+      try await other.uploadAll(metadata, bytes)
+      #expect(await other.complete(id).code == 200)
+      let admissions = await test.intake.admissions.entries
+      #expect(admissions.map(\.device.id) == [phone.device.id, other.device.id])
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
   func aLateChunkOfARevokedPhoneStaysOutOfAnotherPhonesReceipt() async throws {
     // Chunk 0 is held after its file write while the phone is revoked (its
     // receipt and partial go) and another phone pairs and announces the
@@ -558,11 +602,12 @@ import Testing
     }
   }
 
-  /// An engine beside `test`'s service, over its store and intake, that
-  /// saves receipts, writes chunks and hashes the partial through the given
-  /// seams.
+  /// An engine beside `test`'s service, over its store, that admits through
+  /// `intake` (by default `test`'s) behind a `MovingIntake`, and saves
+  /// receipts, writes chunks and hashes the partial through the given seams.
   private static func engine(
     _ test: TestService,
+    intake: (any HandoverIntake)? = nil,
     saveReceipt: (@Sendable (HandoverReceipt) async throws -> Void)? = nil,
     writeChunk: (@Sendable (Data, UInt64, URL) async throws -> Void)? = nil,
     hashMatches: (@Sendable (URL, Data) async throws -> Bool)? = nil
@@ -570,8 +615,9 @@ import Testing
     let now = test.now
     return HandoverEngine(
       configuration: test.service.configuration, identity: test.service.identity,
-      store: test.store, intake: test.moving(test.intake), receipts: Broadcast(initial: []),
-      now: { now }, saveReceipt: saveReceipt, writeChunk: writeChunk, hashMatches: hashMatches)
+      store: test.store, intake: test.moving(intake ?? test.intake),
+      receipts: Broadcast(initial: []), now: { now }, saveReceipt: saveReceipt,
+      writeChunk: writeChunk, hashMatches: hashMatches)
   }
 
   /// The meeting a `complete` of `recordingID` admitted.
