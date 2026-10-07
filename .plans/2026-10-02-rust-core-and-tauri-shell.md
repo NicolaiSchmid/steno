@@ -1559,17 +1559,21 @@ touch lines; each fix is ported to Swift before cutover.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
-- Re-announce: both apps compare a known recording's announced byte count, SHA-256
-  and chunk size with its receipt right after the owner check, also when the receipt
-  is `complete`, and answer a difference 409 "metadata differs from the first
-  announcement" (`Engine::reannounce`, `HandoverEngine.announce`). Format, duration
-  and `startedAt` are not compared: under the same size and SHA-256 they describe the
-  same bytes, so a difference there loses nothing. Before, a `complete`
-  receipt answered 200 `complete` to any metadata from its owner, so the phone posted
-  `complete`, took the earlier file's meeting id and deleted a recording the computer
-  does not have. The phone keeps the row and its file: it announces again after the
-  backoff, and the third 409 in a row marks the row `failed` with Retry
-  (`failAnnounce` in `mobile/src/features/sync/upload-executor.ts`).
+- Re-announce: both apps compare a known recording's announced byte count and SHA-256
+  with its receipt right after the owner check, also when the receipt is `complete`,
+  and the chunk size while the receipt is not yet `complete`; a difference is 409
+  "metadata differs from the first announcement" (`Engine::reannounce`,
+  `HandoverEngine.announce`). Before, a `complete` receipt answered 200 `complete` to
+  any metadata from its owner, so the phone posted `complete`, took the earlier
+  file's meeting id and deleted a recording the computer does not have. The phone
+  keeps the row and its file: it announces again after the backoff, and the third
+  409 in a row marks the row `failed` with Retry (`failAnnounce` in
+  `mobile/src/features/sync/upload-executor.ts`). The chunk size matters only while
+  chunks arrive: a `complete` receipt announced with the same size and SHA-256 in
+  other chunks is the file the computer holds, answered 200 `complete` with every
+  chunk of the announced split, so the phone posts `complete` and gets the meeting
+  id. Format, duration and `startedAt` are not compared: under the same size and
+  SHA-256 they describe the same bytes, so a difference there loses nothing.
 - Store reads: Swift's `HandoverEngine.sweepOrphans` and `RecordingHandler.receipt`
   read with `try?`, so a failed read, with no receipt in memory (after a restart),
   counts as no receipt: the sweep deletes a resumable upload, a route answers 404, and
@@ -2158,7 +2162,7 @@ PR off `main`.
 | No traffic light inset under a native title bar: the sidebars' spacer and onboarding's top follow the platform (`apps/macos/web/`) | `fix/web-platform-title-inset` | #217 | merged |
 | After the intake, `admit` discards every file of the recording unless another device holds its receipt, and so do a refused `complete` and a failed first save (Swift core, the counterpart of #219) | `fix/swift-handover-admit` | #212 | open |
 | The phone rebuilds its queue index from the recording files on disk and the recorder's directory, gives every recording its own file, saves nothing after a failed load, and fails a row after repeated announce 409s (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | open |
-| A re-announce of a `complete` recording with another size, hash or chunk size is answered 409, so the phone keeps its file (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | open |
+| A re-announce of a `complete` recording with another size or hash is answered 409, so the phone keeps its file, and the same bytes in other chunks are answered `complete` (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
