@@ -51,7 +51,11 @@
 //! models directory from the settings, else `STENO_MODELS_DIR`,
 //! else `<support directory>/Models` (`steno-services`);
 //! [`ModelStore::from_environment`], for the `transcribe` example and the
-//! FLEURS test, takes it from the same variable and default.
+//! FLEURS test, takes it from the same variable and default. The Mac's
+//! `CoreML` Parakeet has a store of its own at the models directory's
+//! `fluidaudio/` ([`ModelStore::coreml_in_models_directory`]), its one
+//! asset in `fluidaudio/parakeet-tdt-0.6b-v3/`, where the Swift app's
+//! `FluidAudio` puts it.
 //!
 //! Where each model is hosted: [`model_store`].
 //!
@@ -132,8 +136,8 @@ pub use error::{SidecarError, SpeechError};
 pub use features::MelExtractor;
 pub use language::{LanguageRecognizer, LanguageTagger, StopwordRecognizer, WhatlangRecognizer};
 pub use model_store::{
-    DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore, PARAKEET_V3_FP32_REVISION,
-    STENO_MODELS_REPO,
+    DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore, PARAKEET_V3_COREML_REPO,
+    PARAKEET_V3_COREML_REVISION, PARAKEET_V3_FP32_REVISION, STENO_MODELS_REPO,
 };
 pub use onnx::{EncoderProvider, OnnxBackend, OnnxOptions};
 pub use pipeline::{PipelineConfig, RecoveryConfig, Transcriber, Transcript};

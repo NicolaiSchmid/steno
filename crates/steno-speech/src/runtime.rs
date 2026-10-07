@@ -83,6 +83,15 @@ impl SpeechSettings {
     pub fn model_store(&self, models_directory: &Path) -> ModelStore {
         ModelStore::in_models_directory(models_directory).with_mirror(self.models_mirror.clone())
     }
+
+    /// The `CoreML` store of the models directory `models_directory` (its
+    /// `fluidaudio/` folder, [`ModelStore::coreml_in_models_directory`])
+    /// with these settings' mirror.
+    #[must_use]
+    pub fn coreml_store(&self, models_directory: &Path) -> ModelStore {
+        ModelStore::coreml_in_models_directory(models_directory)
+            .with_mirror(self.models_mirror.clone())
+    }
 }
 
 #[cfg(test)]
