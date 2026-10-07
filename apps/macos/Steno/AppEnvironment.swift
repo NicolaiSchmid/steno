@@ -17,7 +17,8 @@ import StenoSpeech
 @Observable
 final class AppEnvironment {
   typealias MakeCaptureSession = @Sendable (CaptureConfiguration) throws -> CaptureSession
-  typealias MakeDependencies = @Sendable (Settings, _ apiKey: String?) throws ->
+  typealias MakeDependencies =
+    @Sendable (Settings, _ apiKey: String?) throws ->
     PipelineDependencies
 
   let store: MeetingStore
@@ -268,17 +269,43 @@ final class AppEnvironment {
       clock: ContinuousClock())
     environment.startupWarnings = warnings
     do {
-      let identity = try IdentityKeychain.loadOrCreate(
-        commonName: "Steno on \(HandoverConfiguration.defaultServiceName())")
-      environment.handover = HandoverService(
-        configuration: HandoverConfiguration(),
-        store: store,
-        intake: environment.makeIntake(),
-        identity: identity)
+      environment.handover = try await makeHandover(
+        store: store, intake: environment.makeIntake(), configuration: HandoverConfiguration()
+      ) {
+        try IdentityKeychain.loadOrCreate(
+          commonName: "Steno on \(HandoverConfiguration.defaultServiceName())")
+      }
     } catch {
       environment.startupWarnings.append("Phone handover is unavailable: \(error)")
     }
     return environment
+  }
+
+  /// The handover listener over `identity()`, once the store's WAL is on
+  /// the disk (`MeetingStore.checkpointDurably()`). The checkpoint comes
+  /// first: the intake answers a phone's retry `complete` from a stored
+  /// receipt, so the listener only runs over a store whose commits are on
+  /// the disk. A failed one throws `StoreNotSynced` before the identity is
+  /// read, and `live` keeps the handover off until the next launch with a
+  /// startup warning; the rest of the app runs. Rust: `handover_listener`
+  /// in `crates/steno-services/src/app.rs`.
+  static func makeHandover(
+    store: MeetingStore, intake: any HandoverIntake, configuration: HandoverConfiguration,
+    identity: () throws -> HandoverIdentity
+  ) async throws -> HandoverService {
+    do {
+      try await store.checkpointDurably()
+    } catch {
+      throw StoreNotSynced(underlying: error)
+    }
+    return HandoverService(
+      configuration: configuration, store: store, intake: intake, identity: try identity())
+  }
+
+  /// `makeHandover`'s checkpoint failed.
+  struct StoreNotSynced: Error, CustomStringConvertible {
+    let underlying: any Error
+    var description: String { "the database could not be synced to the disk: \(underlying)" }
   }
 
   /// Beside `-steno-ui-testing`: the preview's `FakeSpeechEngine` sleeps in
