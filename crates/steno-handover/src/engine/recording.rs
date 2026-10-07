@@ -118,7 +118,8 @@ impl Engine {
 
     /// A known recording announced again: 200 with the status, 409 when
     /// another device owns it or the metadata changed, also once it is
-    /// `complete`. The partial is reopened when it or the sidecar is gone (a
+    /// `complete`; a `complete` one with other chunks of the same bytes is
+    /// 200 with every chunk of the announced split. The partial is reopened when it or the sidecar is gone (a
     /// sweep, a crash before the first chunk, a refusal), with the same
     /// receipt and an empty chunk set; a verified file waiting for a second
     /// intake attempt keeps its chunk set, so the phone's retry (announce,
@@ -142,17 +143,26 @@ impl Engine {
         // Also for a `complete` receipt: a phone told `complete` posts
         // `complete`, and the 200 to that deletes its copy. A different file
         // under an admitted id is refused instead, and stays on the phone.
+        // The chunk size matters only while chunks arrive: the same bytes
+        // split otherwise are the file the computer holds, and every chunk
+        // of the phone's split lets it post `complete`.
+        let complete = receipt.state.kind() == HandoverStateKind::Complete;
         if receipt.byte_count != metadata.byte_count
             || receipt.sha256 != metadata.sha256
-            || receipt.chunk_size != metadata.chunk_size
+            || (!complete && receipt.chunk_size != metadata.chunk_size)
         {
             return HandoverResponse::problem(
                 StatusCode::CONFLICT,
                 "metadata differs from the first announcement",
             );
         }
-        if receipt.state.kind() == HandoverStateKind::Complete {
-            return HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt));
+        if complete {
+            let count = MetadataValidation::chunk_count(metadata.byte_count, metadata.chunk_size);
+            let status = wire::RecordingStatus {
+                state: HandoverStateKind::Complete,
+                received_chunks: (0..count).collect(),
+            };
+            return HandoverResponse::json(StatusCode::OK, &status);
         }
         let received_chunks = match self.reopen_missing_files(metadata, device.id) {
             None => return Self::unauthorized(),

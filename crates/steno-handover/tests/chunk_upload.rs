@@ -569,12 +569,13 @@ async fn announce_after_complete_reports_complete_with_every_chunk() {
 }
 
 #[tokio::test]
-async fn a_re_announce_with_other_metadata_is_409_while_receiving_and_once_complete() {
+async fn a_re_announce_with_other_bytes_is_409_and_other_chunks_only_while_receiving() {
     // A different file under an admitted id is not answered `complete`: the
     // phone would post `complete`, take its 200 and delete a recording the
     // computer does not have. The phone keeps a recording answered 409 and
     // announces it again after its backoff, until the third 409 in a row
-    // marks it `failed` with Retry.
+    // marks it `failed` with Retry. The same bytes in other chunks are the
+    // file the computer holds once it is `complete`, and are delivered.
     let intake = fake_intake(meeting_id());
     let test = TestService::with_intake(CHUNK_SIZE, intake.clone()).await;
     let phone = Phone::pair(&test).await;
@@ -600,7 +601,14 @@ async fn a_re_announce_with_other_metadata_is_409_while_receiving_and_once_compl
     phone.upload_all(&metadata, &bytes).await;
     assert_eq!(phone.complete(metadata.recording_id).await.status, 200);
 
-    assert_metadata_differs(&phone, &changed, "complete").await;
+    assert_metadata_differs(&phone, &changed[..2], "complete").await;
+    let resplit = phone.announce(&changed[2].1).await;
+    assert_eq!(resplit.status, 200, "complete: chunkSize");
+    assert_eq!(
+        resplit.json::<wire::RecordingStatus>(),
+        status(HandoverStateKind::Complete, (0..5).collect()),
+        "every chunk of the phone's split"
+    );
     assert!(
         !test.inbox().has_partial(metadata.recording_id),
         "no partial is reopened"
@@ -610,6 +618,12 @@ async fn a_re_announce_with_other_metadata_is_409_while_receiving_and_once_compl
     assert_eq!(
         again.json::<wire::RecordingStatus>(),
         status(HandoverStateKind::Complete, vec![0, 1, 2])
+    );
+    let repeated = phone.complete(metadata.recording_id).await;
+    assert_eq!(repeated.status, 200);
+    assert_eq!(
+        repeated.json::<wire::CompleteResponse>().meeting_id,
+        meeting_id()
     );
     assert_eq!(intake.admissions.count(), 1, "no second admission");
     test.stop().await;

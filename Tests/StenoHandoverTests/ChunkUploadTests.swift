@@ -284,12 +284,13 @@ import Testing
     }
   }
 
-  @Test func aReAnnounceWithOtherMetadataIs409WhileReceivingAndOnceComplete() async throws {
+  @Test func aReAnnounceWithOtherBytesIs409AndOtherChunksOnlyWhileReceiving() async throws {
     // A different file under an admitted id is not answered `complete`: the
     // phone would post `complete`, take its 200 and delete a recording the
     // computer does not have. The phone keeps a recording answered 409 and
     // announces it again after its backoff, until the third 409 in a row
-    // marks it `failed` with Retry.
+    // marks it `failed` with Retry. The same bytes in other chunks are the
+    // file the computer holds once it is `complete`, and are delivered.
     let intake = FakeHandoverIntake(meetingID: Self.meetingID)
     try await TestService.run(chunkSize: Self.chunkSize, intake: intake) { test in
       let phone = try await Phone.pair(test.service)
@@ -311,7 +312,13 @@ import Testing
       try await phone.uploadAll(metadata, bytes)
       #expect(try await phone.complete(metadata.recordingID).status == 200)
 
-      try await Self.expectMetadataDiffers(phone, changed, "complete")
+      try await Self.expectMetadataDiffers(phone, Array(changed[..<2]), "complete")
+      let resplit = try await phone.announce(smallerChunks)
+      #expect(resplit.status == 200, "complete: chunkSize")
+      #expect(
+        (try? resplit.json(Wire.RecordingStatus.self))
+          == Wire.RecordingStatus(state: .complete, receivedChunks: Array(0..<5)),
+        "every chunk of the phone's split")
       #expect(
         !test.service.engine.inbox.hasPartial(metadata.recordingID), "no partial is reopened")
       let again = try await phone.announce(metadata)
@@ -319,6 +326,9 @@ import Testing
       #expect(
         try again.json(Wire.RecordingStatus.self)
           == Wire.RecordingStatus(state: .complete, receivedChunks: [0, 1, 2]))
+      let repeated = try await phone.complete(metadata.recordingID)
+      #expect(repeated.status == 200)
+      #expect(try repeated.json(Wire.CompleteResponse.self).meetingID == Self.meetingID)
       #expect(await intake.admissions.count == 1, "no second admission")
     }
   }

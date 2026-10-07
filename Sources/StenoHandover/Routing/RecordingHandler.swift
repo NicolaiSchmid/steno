@@ -11,7 +11,8 @@ extension HandoverEngine {
   /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
   /// recording, 200 for a known one, both with `RecordingStatus`; 409 when
   /// another device owns it or the metadata changed, also once it is
-  /// `.complete`.
+  /// `.complete`; a `.complete` one with other chunks of the same bytes is
+  /// 200 with every chunk of the announced split.
   func announce(_ recordingID: UUID, device: PairedDevice, body: Data) async -> HandoverResponse {
     let metadata: RecordingMetadata
     do {
@@ -33,13 +34,19 @@ extension HandoverEngine {
       // Also for a `.complete` receipt: a phone told `complete` posts
       // `complete`, and the 200 to that deletes its copy. A different file
       // under an admitted id is refused instead, and stays on the phone.
+      // The chunk size matters only while chunks arrive: the same bytes
+      // split otherwise are the file the computer holds, and every chunk of
+      // the phone's split lets it post `complete`.
+      let complete = existing.state.kind == .complete
       guard existing.byteCount == metadata.byteCount, existing.sha256 == metadata.sha256,
-        existing.chunkSize == metadata.chunkSize
+        complete || existing.chunkSize == metadata.chunkSize
       else {
         return .problem(.conflict, "metadata differs from the first announcement")
       }
-      if existing.state.kind == .complete {
-        return .json(.ok, Self.status(of: existing))
+      if complete {
+        let count = MetadataValidation.chunkCount(
+          byteCount: metadata.byteCount, chunkSize: metadata.chunkSize)
+        return .json(.ok, Wire.RecordingStatus(state: .complete, receivedChunks: Array(0..<count)))
       }
       var receipt = existing
       var receivedChunks: [Int]?
