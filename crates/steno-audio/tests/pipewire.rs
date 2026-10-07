@@ -938,16 +938,13 @@ fn a_report_stuck_in_its_handler_does_not_hold_stop() {
     let lanes = CALL;
     let (entered, handler_entered) = channel();
     let (release, released) = channel::<()>();
-    let (entered, released) = (Mutex::new(entered), Mutex::new(released));
+    let released = Mutex::new(released);
     let sink = Arc::new(LaneFrameSink::with_handler(
         &lanes,
         SAMPLE_RATE,
         2.0,
         Box::new(move |reason| {
-            let _ = entered
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .send(reason);
+            let _ = entered.send(reason);
             // Stuck, as a handler waiting for a lock, until the test lets go.
             let _ = released
                 .lock()

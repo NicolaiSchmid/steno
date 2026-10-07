@@ -1152,11 +1152,11 @@ impl LiveCaptureBackend {
     }
 
     /// Closes the gate, asks the thread to quit and joins it, within
-    /// `limit` of the call: the stream, the links and the connection are
-    /// gone when this returns, unless a report is still in the sink's
-    /// handler or the thread hangs at `limit`; each is then logged (the
-    /// thread with where it waits) and left behind the closed gate. Only a
-    /// delivery inside the gate is waited for past `limit` ([`Gate`]).
+    /// `limit` of the call (only a delivery inside the gate is waited for
+    /// past it, see [`Gate`]): the stream, the links and the connection
+    /// are gone when this returns, unless a report in the sink's handler
+    /// or the thread outlasts `limit`; each is then logged (the thread
+    /// with where it waits) and left behind the closed gate.
     fn end(active: Active, limit: Duration) {
         let deadline = Instant::now() + limit;
         if !active.gate.close(deadline) {
@@ -1248,10 +1248,8 @@ impl CaptureBackend for LiveCaptureBackend {
     }
 
     /// Returns within `STOP_TIMEOUT` (2 s), plus the microseconds of a
-    /// delivery inside the gate: no frame reaches the sink after it, and
-    /// no report but one the gate let in before it closed, which `stop()`
-    /// logs and leaves to reach the sink's handler late, as it leaves a
-    /// thread that has not ended (see the module doc).
+    /// delivery inside the gate; what it leaves behind then is in the
+    /// module doc.
     fn stop(&self) {
         let Some(active) = self.lock().take() else {
             return;
