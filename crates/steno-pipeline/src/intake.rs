@@ -140,6 +140,12 @@ impl HandoverIntake for RecordingIntake {
         {
             return Err(StoreError::ReceiptOfAnotherDevice(metadata.recording_id).into());
         }
+        // A retry of an admitted recording is answered from the store with
+        // no write of its own: its admission is on the disk, committed
+        // durably by this process or by an earlier one, whose commits the
+        // launch checkpoint synced before the listener started
+        // (`Store::checkpoint_durably`), even one that recovery read back
+        // after a failed WAL sync.
         if let Some(meeting_id) = existing
             .as_ref()
             .and_then(|receipt| receipt.state.meeting_id())
@@ -216,9 +222,10 @@ impl HandoverIntake for RecordingIntake {
                 // A failed commit is not proof that nothing committed: a
                 // WAL sync that fails leaves the commit's frames in the WAL,
                 // and recovery after a crash replays them. The durable
-                // `failed` save writes over them, so the copy goes only once
-                // that save is on the disk; otherwise it stays, an orphan at
-                // worst, and a replayed admission still finds its master.
+                // `failed` save writes over them, or voids them when the WAL
+                // restarts, so the copy goes only once that save is on the
+                // disk; otherwise it stays, an orphan at worst, and a
+                // replayed admission still finds its master.
                 receipt.state = HandoverState::Failed(format!("admit: {error}"));
                 if self.store.save_handover_receipt_durably(&receipt).is_ok() {
                     let _ = std::fs::remove_file(&destination);
@@ -720,7 +727,8 @@ mod tests {
     /// retried `complete` would answer 200 for a meeting that never existed.
     /// The copy stays too: without a durable `failed` receipt over it, a
     /// failed commit whose frames reached the WAL can be replayed after a
-    /// crash, and its meeting then needs the copy.
+    /// crash, and its meeting then needs the copy. Swift:
+    /// `aFailedAdmissionWhoseFailedSaveFailsKeepsTheCopyAndNoCompleteReceipt`.
     #[tokio::test]
     async fn a_failed_admission_whose_failed_save_fails_keeps_the_copy_and_no_complete_receipt() {
         let dir = tempfile::tempdir().unwrap();
@@ -763,9 +771,9 @@ mod tests {
     /// completed. The admitting phone was revoked and the other one
     /// announced the id, before the intake read the receipt or between its
     /// read and its commit; either way the admitting phone then paired
-    /// again. The intake refuses, and the other phone's receipt stays as it was:
-    /// completed, it would answer that phone's `complete` with this meeting,
-    /// and that phone would delete a recording never admitted.
+    /// again. The intake refuses, and the other phone's receipt stays as it
+    /// was: completed, it would answer that phone's `complete` with this
+    /// meeting, and that phone would delete a recording never admitted.
     #[tokio::test]
     async fn a_receipt_of_another_phone_is_never_completed() {
         for after_the_read in [false, true] {
@@ -1037,13 +1045,14 @@ mod tests {
         assert!(store.meeting(meeting_id).unwrap().is_some());
     }
 
-    /// A refused admission commits nothing but its `failed` receipt, and
-    /// that one under `FULL`, while the copy is still there: a failed
-    /// commit is not proof that nothing committed, and the durable `failed`
-    /// commit is what writes over a commit a crash could replay. Only then
-    /// is the copy removed, and the connection is back at `NORMAL`.
+    /// A failed admission commit leaves one commit, its `failed` receipt,
+    /// under `FULL`, while the copy is still there: a failed commit is not
+    /// proof that nothing committed, and the durable `failed` commit is
+    /// what writes over a commit a crash could replay. Only then is the
+    /// copy removed, and the connection is back at `NORMAL`. Swift:
+    /// `aFailedAdmissionCommitSavesFailedDurablyBeforeItRemovesTheCopy`.
     #[tokio::test]
-    async fn a_refused_admission_saves_failed_durably_before_it_removes_the_copy() {
+    async fn a_failed_admission_commit_saves_failed_durably_before_it_removes_the_copy() {
         /// A commit's level, the receipt's state and the copies on the disk.
         type Seen = (i64, Option<String>, usize);
         let dir = tempfile::tempdir().unwrap();

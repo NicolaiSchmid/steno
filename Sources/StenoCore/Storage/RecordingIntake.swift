@@ -93,6 +93,12 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     if let existing, existing.deviceID != device.id {
       throw MeetingStoreError.receiptOfAnotherDevice(metadata.recordingID)
     }
+    // A retry of an admitted recording is answered from the store with no
+    // write of its own: its admission is on the disk, committed durably by
+    // this process or by an earlier one, whose commits the launch
+    // checkpoint synced before the listener started
+    // (`MeetingStore.checkpointDurably()`), even one that recovery read
+    // back after a failed WAL sync.
     if let meetingID = existing?.state.meetingID, try await store.meeting(id: meetingID) != nil {
       return meetingID
     }
@@ -170,9 +176,9 @@ public struct RecordingIntake: HandoverIntake, Sendable {
         // A failed commit is not proof that nothing committed: a WAL sync
         // that fails leaves the commit's frames in the WAL, and recovery
         // after a crash replays them. The durable `.failed` save writes over
-        // them, so the copy goes only once that save is on the disk;
-        // otherwise it stays, an orphan at worst, and a replayed admission
-        // still finds its master.
+        // them, or voids them when the WAL restarts, so the copy goes only
+        // once that save is on the disk; otherwise it stays, an orphan at
+        // worst, and a replayed admission still finds its master.
         receipt.state = .failed("admit: \(error)")
         if (try? await store.saveDurably(receipt)) != nil {
           try? FileManager.default.removeItem(at: destination)

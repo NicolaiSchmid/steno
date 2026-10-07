@@ -196,6 +196,7 @@ import Testing
   /// meeting that never existed. The copy stays too: without a durable
   /// `.failed` receipt over it, a failed commit whose frames reached the WAL
   /// can be replayed after a crash, and its meeting then needs the copy.
+  /// Rust: `a_failed_admission_whose_failed_save_fails_keeps_the_copy_and_no_complete_receipt`.
   @Test func aFailedAdmissionWhoseFailedSaveFailsKeepsTheCopyAndNoCompleteReceipt() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -427,12 +428,13 @@ import Testing
     #expect(try await CommitLog.synchronous(of: store) == 1, "the writer is back at NORMAL")
   }
 
-  /// A refused admission commits nothing but its `.failed` receipt, and
-  /// that one under `FULL`, while the copy is still there: a failed commit
-  /// is not proof that nothing committed, and the durable `.failed` commit
-  /// is what writes over a commit a crash could replay. Only then is the
-  /// copy removed, and the writer is back at `NORMAL`.
-  @Test func aRefusedAdmissionSavesFailedDurablyBeforeItRemovesTheCopy() async throws {
+  /// A failed admission commit leaves one commit, its `.failed` receipt,
+  /// under `FULL`, while the copy is still there: a failed commit is not
+  /// proof that nothing committed, and the durable `.failed` commit is what
+  /// writes over a commit a crash could replay. Only then is the copy
+  /// removed, and the writer is back at `NORMAL`. Rust:
+  /// `a_failed_admission_commit_saves_failed_durably_before_it_removes_the_copy`.
+  @Test func aFailedAdmissionCommitSavesFailedDurablyBeforeItRemovesTheCopy() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
