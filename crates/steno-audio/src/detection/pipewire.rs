@@ -60,7 +60,9 @@ use pipewire as pw;
 use pw::types::ObjectType;
 
 use super::activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
-use crate::capture::live::pipewire::{STREAM_NODE_NAME, is_source_class};
+use crate::capture::live::pipewire::{
+    PUMP_SLICE, STREAM_NODE_NAME, connect, failure, is_source_class,
+};
 
 /// How long a snapshot waits for a new connection's first view.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
@@ -70,8 +72,6 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// How long dropping the source waits for its thread to end.
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
-/// The longest single wait on the loop while connecting.
-const PUMP_SLICE: Duration = Duration::from_millis(20);
 /// The wait on the loop once connected; the quit wakes it earlier.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
@@ -448,24 +448,9 @@ struct Connection {
     main_loop: pw::main_loop::MainLoopRc,
 }
 
-/// A `pipewire` error as text naming what failed.
-fn failed(what: &'static str) -> impl FnOnce(pw::Error) -> String {
-    move |error| format!("{what}: {error}")
-}
-
 impl Connection {
     fn open(shared: &Arc<Shared>) -> Result<Self, String> {
-        pw::init();
-        let main_loop =
-            pw::main_loop::MainLoopRc::new(None).map_err(failed("the PipeWire main loop"))?;
-        let context = pw::context::ContextRc::new(&main_loop, None)
-            .map_err(failed("the PipeWire context"))?;
-        let core = context
-            .connect_rc(None)
-            .map_err(failed("connecting to PipeWire (is it running?)"))?;
-        let registry = core
-            .get_registry_rc()
-            .map_err(failed("the PipeWire registry"))?;
+        let (main_loop, context, core, registry) = connect()?;
         let local = Rc::new(Local::default());
         let core_listener = core
             .add_listener_local()
@@ -522,7 +507,7 @@ impl Connection {
 
     /// Waits until the daemon has answered everything sent before.
     fn roundtrip(&self, deadline: Instant) -> Result<(), String> {
-        let pending = self.core.sync(0).map_err(failed("a PipeWire roundtrip"))?;
+        let pending = self.core.sync(0).map_err(failure("a PipeWire roundtrip"))?;
         while self.local.done.get() != Some(pending) {
             if let Some(error) = self.local.failed.borrow().clone() {
                 return Err(error);

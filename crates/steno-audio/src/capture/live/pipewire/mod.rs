@@ -124,7 +124,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(3);
 const LATENCY_TIMEOUT: Duration = Duration::from_millis(500);
 /// The longest single wait on the loop while starting, so the deadline is
 /// checked often.
-const PUMP_SLICE: Duration = Duration::from_millis(20);
+pub(crate) const PUMP_SLICE: Duration = Duration::from_millis(20);
 /// The wait on the loop while nothing is pending.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
@@ -325,9 +325,40 @@ fn latency_frames(
     (input.frames(cycle, rate), output.frames(cycle, rate))
 }
 
+/// A `pipewire` error as text naming what failed.
+pub(crate) fn failure(what: &'static str) -> impl FnOnce(pw::Error) -> String {
+    move |error| format!("{what}: {error}")
+}
+
 /// A `pipewire` error as a backend failure naming what failed.
 fn failed(what: &'static str) -> impl FnOnce(pw::Error) -> CaptureError {
-    move |error| CaptureError::BackendFailed(format!("{what}: {error}"))
+    move |error| CaptureError::BackendFailed(failure(what)(error))
+}
+
+/// A new connection to the daemon: its loop, context, core and registry,
+/// for the caller's listeners; the error names the step that failed. The
+/// capture, the device list and the meeting detection open theirs here.
+pub(crate) fn connect() -> Result<
+    (
+        pw::main_loop::MainLoopRc,
+        pw::context::ContextRc,
+        pw::core::CoreRc,
+        pw::registry::RegistryRc,
+    ),
+    String,
+> {
+    pw::init();
+    let main_loop =
+        pw::main_loop::MainLoopRc::new(None).map_err(failure("the PipeWire main loop"))?;
+    let context =
+        pw::context::ContextRc::new(&main_loop, None).map_err(failure("the PipeWire context"))?;
+    let core = context
+        .connect_rc(None)
+        .map_err(failure("connecting to PipeWire (is it running?)"))?;
+    let registry = core
+        .get_registry_rc()
+        .map_err(failure("the PipeWire registry"))?;
+    Ok((main_loop, context, core, registry))
 }
 
 /// What the PipeWire callbacks share on the PipeWire thread.
@@ -478,17 +509,8 @@ impl Drop for Connection {
 
 impl Connection {
     fn open() -> Result<Self, CaptureError> {
-        pw::init();
-        let main_loop =
-            pw::main_loop::MainLoopRc::new(None).map_err(failed("the PipeWire main loop"))?;
-        let context = pw::context::ContextRc::new(&main_loop, None)
-            .map_err(failed("the PipeWire context"))?;
-        let core = context
-            .connect_rc(None)
-            .map_err(failed("connecting to PipeWire (is it running?)"))?;
-        let registry = core
-            .get_registry_rc()
-            .map_err(failed("the PipeWire registry"))?;
+        let (main_loop, context, core, registry) =
+            connect().map_err(CaptureError::BackendFailed)?;
         let shared = Rc::new(Shared::default());
         let core_listener = core
             .add_listener_local()
