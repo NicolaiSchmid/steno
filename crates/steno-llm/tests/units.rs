@@ -995,7 +995,7 @@ async fn stub_accepts_a_post_returns_the_script_and_records_the_parsed_request()
         max_completion_tokens: None,
         response_format: Some(ChatResponseFormat::json_object()),
     };
-    let http = steno_llm::transport::default_http_client();
+    let http = steno_llm::transport::default_http_client().unwrap();
     let response = http
         .post(server.base_url().join("/v1/chat/completions").unwrap())
         .header("Authorization", "Bearer sk-test")
@@ -1026,7 +1026,7 @@ async fn stub_accepts_a_post_returns_the_script_and_records_the_parsed_request()
 #[tokio::test]
 async fn stub_answers_unscripted_requests_with_404_and_consults_the_responder() {
     let server = StubChatServer::start().await.unwrap();
-    let http = steno_llm::transport::default_http_client();
+    let http = steno_llm::transport::default_http_client().unwrap();
     let url = server.base_url().join("/v1/models").unwrap();
     let first = http.get(url.clone()).send().await.unwrap();
     assert_eq!(first.status().as_u16(), 404);
@@ -1047,6 +1047,7 @@ async fn stub_held_responses_show_up_as_in_flight_until_released() {
     let url = server.base_url().join("/v1/chat/completions").unwrap();
     let status = |url: url::Url| async move {
         steno_llm::transport::default_http_client()
+            .unwrap()
             .post(url)
             .body("{}")
             .send()

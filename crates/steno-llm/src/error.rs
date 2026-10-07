@@ -45,6 +45,12 @@ pub enum LlmError {
     /// The transcript does not fit two levels of map and reduce.
     #[error("transcript too long: about {estimated_tokens} tokens against a budget of {budget}")]
     TranscriptTooLong { estimated_tokens: i64, budget: i64 },
+    /// The HTTP client could not be built, so no request is sent; Rust
+    /// only (Swift's `URLSession` always exists). The message is plain:
+    /// "no TLS certificates were found on this computer" when the system
+    /// has none, else the builder's error.
+    #[error("{0}")]
+    HttpClientUnavailable(String),
 }
 
 fn rate_limited_message(retry_after: Option<&Duration>) -> String {

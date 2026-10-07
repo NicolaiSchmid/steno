@@ -132,7 +132,8 @@ pub type Now = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 /// [`CodexCredentials`] and attach the access token themselves.
 pub struct CodexCredentialStore {
     home: PathBuf,
-    http: reqwest::Client,
+    /// The error instead when the default client could not be built.
+    http: Result<reqwest::Client, crate::LlmError>,
     token_endpoint: Url,
     client_id: String,
     now: Now,
@@ -313,7 +314,7 @@ impl CodexCredentialStore {
     /// without a TLS provider here, and that builder installs one.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
-        self.http = http;
+        self.http = Ok(http);
         self
     }
 
@@ -549,8 +550,11 @@ impl CodexCredentialStore {
             "client_id": self.client_id,
             "refresh_token": file.credentials.refresh_token,
         });
-        let response = self
-            .http
+        // No client (no CA certificates): a failure like a dropped
+        // connection, which leaves the sign-in as it is.
+        let http = transport::client(&self.http)
+            .map_err(|error| CodexCredentialError::RefreshFailed(error.to_string()))?;
+        let response = http
             .post(self.token_endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
