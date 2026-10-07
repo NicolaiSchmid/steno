@@ -20,6 +20,7 @@ use std::path::Path;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use chrono::{FixedOffset, Utc};
 use steno_audio::{
