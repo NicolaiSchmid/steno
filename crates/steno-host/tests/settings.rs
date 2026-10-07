@@ -1188,6 +1188,22 @@ fn export_waits_for_a_vault_validates_through_the_destination_and_saves() {
     );
 }
 
+/// An Obsidian value with a field this build does not know.
+const FUTURE_OBSIDIAN: &str =
+    r#"{"futureFolder":"Daily","includeAudio":false,"vaultPath":"/vault"}"#;
+
+fn put_setting_row(store: &steno_core::Store, key: &str, value: &str) {
+    store
+        .write(|transaction| {
+            transaction.execute(
+                "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
+                [key, value],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
 fn setting_row(harness: &Harness, key: &str) -> Option<String> {
     harness
         .store
@@ -1208,22 +1224,8 @@ fn setting_row(harness: &Harness, key: &str) -> Option<String> {
 fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
     let harness = Harness::builder()
         .seed(|store, _| {
-            store
-                .write(|transaction| {
-                    transaction.execute(
-                        "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
-                        [
-                            "obsidian",
-                            r#"{"futureFolder":"Daily","includeAudio":false,"vaultPath":"/vault"}"#,
-                        ],
-                    )?;
-                    transaction.execute(
-                        "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
-                        ["aFutureSetting", "7"],
-                    )?;
-                    Ok(())
-                })
-                .unwrap();
+            put_setting_row(store, "obsidian", FUTURE_OBSIDIAN);
+            put_setting_row(store, "aFutureSetting", "7");
         })
         .build();
     harness
@@ -1240,16 +1242,11 @@ fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
     );
 
     // A field another writer added after the host loaded is kept too.
-    harness
-        .store
-        .write(|transaction| {
-            transaction.execute(
-                "UPDATE setting SET value = ?1 WHERE key = 'obsidian'",
-                [r#"{"futureFolder":"Daily","includeAudio":true,"laterField":1,"vaultPath":"/vault"}"#],
-            )?;
-            Ok(())
-        })
-        .unwrap();
+    put_setting_row(
+        &harness.store,
+        "obsidian",
+        r#"{"futureFolder":"Daily","includeAudio":true,"laterField":1,"vaultPath":"/vault"}"#,
+    );
     harness
         .host
         .settings_export_update(ExportUpdateParams {
@@ -1278,28 +1275,12 @@ fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
     );
 }
 
-/// Seeds an Obsidian value with a field this build does not know.
-fn seed_obsidian_with_a_future_field(store: &steno_core::Store) {
-    store
-        .write(|transaction| {
-            transaction.execute(
-                "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
-                [
-                    "obsidian",
-                    r#"{"futureFolder":"Daily","includeAudio":false,"vaultPath":"/vault"}"#,
-                ],
-            )?;
-            Ok(())
-        })
-        .unwrap();
-}
-
 /// The unknown fields may belong to the vault, so choosing another vault
 /// stores the new one without them.
 #[test]
 fn another_vault_starts_without_the_unknown_obsidian_fields() {
     let harness = Harness::builder()
-        .seed(|store, _| seed_obsidian_with_a_future_field(store))
+        .seed(|store, _| put_setting_row(store, "obsidian", FUTURE_OBSIDIAN))
         .choose(Some("/other"))
         .build();
     harness.host.settings_export_choose_vault().unwrap();
@@ -1314,7 +1295,7 @@ fn another_vault_starts_without_the_unknown_obsidian_fields() {
 #[test]
 fn a_commit_without_an_edit_saves_nothing_when_unknown_fields_are_stored() {
     let harness = Harness::builder()
-        .seed(|store, _| seed_obsidian_with_a_future_field(store))
+        .seed(|store, _| put_setting_row(store, "obsidian", FUTURE_OBSIDIAN))
         .build();
     harness
         .host
