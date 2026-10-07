@@ -725,8 +725,7 @@ pub fn host(app: &AppHandle) -> tauri::State<'_, Host> {
 }
 
 /// Whether the host is managed: false before `setup` built it, and for good
-/// in an app that refused to start because another process holds the
-/// database (`refuse_to_start` in `main.rs`).
+/// in an app that refused to start (`refuse_to_start` in `main.rs`).
 pub fn is_running(app: &AppHandle) -> bool {
     app.try_state::<Host>().is_some()
 }

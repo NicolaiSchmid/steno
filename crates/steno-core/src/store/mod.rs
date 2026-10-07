@@ -81,7 +81,8 @@ pub enum StoreError {
     UnknownMigration(String),
     /// [`Store::open_without_migrating`] only: the database lacks a
     /// migration this build would apply (the payload, the first of them),
-    /// so an older app still runs on it. Rust only.
+    /// so an older app still runs on it, or the app is still migrating it.
+    /// Rust only.
     #[error("the database lacks migration {0}, which this version would apply")]
     PendingMigration(String),
     /// GRDB's check before a migration commits: its rows no longer satisfy
