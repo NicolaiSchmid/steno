@@ -198,10 +198,25 @@ impl std::fmt::Debug for Launch {
             Launch::Done => f.write_str("Done"),
             Launch::Pending(pending) => f
                 .debug_struct("Pending")
-                .field("read_key", &pending.read_key)
+                .field("key", &pending.key)
                 .finish_non_exhaustive(),
         }
     }
+}
+
+/// Where the API key stands at a launch whose import is pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchKey {
+    /// No earlier launch's step read or was refused the key
+    /// ([`KEY_READ_KEY`]): the graph reads none until the step ran. The
+    /// step reads the item when it is the Swift app's, and lets the graph
+    /// read another app's (a desktop-id build's), which may prompt once.
+    Unread(ApiKeyItem),
+    /// An earlier step read it: the store answers.
+    Read,
+    /// An earlier step was refused it ([`KEY_DENIED_KEY`]): the graph
+    /// answers no key until the user saves one.
+    Denied,
 }
 
 /// The import the graph is built over while it waits for the step:
@@ -212,18 +227,8 @@ pub struct PendingImport {
     /// overwrites the other's keys.
     pub preferences: Arc<FilePreferences>,
     pub keychain: Arc<dyn SwiftKeychain>,
-    /// The graph reads no API key until the step ran: no earlier launch's
-    /// step read or was refused the key ([`KEY_READ_KEY`]).
-    pub gate_key: bool,
-    /// An earlier launch's step was refused the key ([`KEY_DENIED_KEY`]):
-    /// the graph answers no key until the user saves one.
-    pub key_denied: bool,
-    /// The step reads the Swift API key: the key is gated and the item is
-    /// the Swift app's.
-    pub read_key: bool,
-    /// The key is gated and its item is not the Swift app's (a desktop-id
-    /// build's): the step lets the graph read it, which may prompt once.
-    pub other_key: bool,
+    /// Where the API key stands.
+    pub key: LaunchKey,
     /// The keychain already holds a `handover-identity` entry (a
     /// desktop-id build's): replacing it may prompt once more, since
     /// `keyring` reads an item before it overwrites it.
@@ -261,28 +266,26 @@ pub fn launch(
             if let Err(error) = found {
                 tracing::warn!(%error, "the Swift handover certificate could not be looked up");
             }
-            let gate_key = !preferences.flag(KEY_READ_KEY);
-            let key_item = if gate_key {
+            let key = if preferences.flag(KEY_DENIED_KEY) {
+                LaunchKey::Denied
+            } else if preferences.flag(KEY_READ_KEY) {
+                LaunchKey::Read
+            } else {
                 // An item the query could not classify may prompt: it
                 // counts as one that is not the Swift app's.
-                keychain.api_key_item().unwrap_or_else(|error| {
+                LaunchKey::Unread(keychain.api_key_item().unwrap_or_else(|error| {
                     tracing::warn!(%error, "the API key item could not be looked up");
                     ApiKeyItem::Other
-                })
-            } else {
-                ApiKeyItem::Missing
+                }))
             };
             let replaces_identity = keychain.has_stored_identity().unwrap_or_else(|error| {
                 tracing::warn!(%error, "the stored handover identity could not be looked up");
                 false
             });
             Launch::Pending(PendingImport {
-                key_denied: preferences.flag(KEY_DENIED_KEY),
                 preferences,
                 keychain,
-                gate_key,
-                read_key: key_item == ApiKeyItem::Swift,
-                other_key: key_item == ApiKeyItem::Other,
+                key,
                 replaces_identity,
             })
         }
@@ -521,12 +524,10 @@ impl GraphImport {
     /// Wraps `secrets` for the graph.
     #[must_use]
     pub fn new(pending: PendingImport, secrets: Arc<dyn SecretStore>) -> Self {
-        let key = if pending.gate_key {
-            KeyGate::Closed
-        } else if pending.key_denied {
-            KeyGate::Read(None)
-        } else {
-            KeyGate::Open
+        let key = match pending.key {
+            LaunchKey::Unread(_) => KeyGate::Closed,
+            LaunchKey::Denied => KeyGate::Read(None),
+            LaunchKey::Read => KeyGate::Open,
         };
         let gate = Arc::new(ImportGate::new(key));
         GraphImport {
@@ -540,8 +541,8 @@ impl GraphImport {
             raw_secrets: secrets,
             keychain: pending.keychain,
             items: StepItems {
-                read_key: pending.read_key,
-                other_key: pending.other_key,
+                read_key: pending.key == LaunchKey::Unread(ApiKeyItem::Swift),
+                other_key: pending.key == LaunchKey::Unread(ApiKeyItem::Other),
                 replaces_identity: pending.replaces_identity,
             },
         }

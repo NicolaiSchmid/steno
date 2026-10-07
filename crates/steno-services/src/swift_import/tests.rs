@@ -186,7 +186,7 @@ fn the_launch_half_copies_the_onboarding_flag_and_the_update_flags_and_nothing_e
         &defaults,
         keychain.clone(),
     ));
-    assert!(pending.gate_key && pending.read_key);
+    assert_eq!(pending.key, LaunchKey::Unread(ApiKeyItem::Swift));
     let again = FilePreferences::in_support_directory(dir.path());
     assert!(again.flag(OnboardingViewModel::COMPLETED_KEY));
     assert!(again.flag(AUTOMATIC_CHECKS_KEY));
@@ -219,11 +219,11 @@ fn a_flag_the_swift_domain_lacks_stays_unset_and_a_key_that_is_not_the_swift_one
         ..FakeKeychain::swift_app()
     });
     let pending = pending(launch(&at_home(), preferences.clone(), &defaults, keychain));
-    assert!(
-        pending.gate_key,
+    assert_eq!(
+        pending.key,
+        LaunchKey::Unread(ApiKeyItem::Other),
         "the key is gated while pending all the same"
     );
-    assert!(!pending.read_key && pending.other_key);
     assert!(preferences.contains(OnboardingViewModel::COMPLETED_KEY));
     assert!(!preferences.flag(OnboardingViewModel::COMPLETED_KEY));
     assert!(!preferences.contains(AUTOMATIC_CHECKS_KEY));
@@ -768,7 +768,7 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
         &FakeDefaults::new(fixture("swift-domain.plist")),
         keychain.clone(),
     ));
-    assert!(!again.gate_key && again.key_denied);
+    assert_eq!(again.key, LaunchKey::Denied);
     let graph = GraphImport::new(again, first.raw.clone());
     first.raw.reads.lock().unwrap().clear();
     let key = SecretKey::llm_api_key();
@@ -873,7 +873,7 @@ fn skipping_the_step_counts_as_both_denied_and_the_next_launch_asks_again() {
         &defaults,
         step.keychain.clone(),
     ));
-    assert!(again.read_key);
+    assert_eq!(again.key, LaunchKey::Unread(ApiKeyItem::Swift));
 }
 
 /// `SecItemExport`'s PKCS#12 of the committed test identity, written on a
@@ -1004,7 +1004,7 @@ async fn a_waiting_gate_keeps_the_listener_closed_until_the_identity_came_over()
         let _ = opened.send(());
     }));
     let mut context = Context::from_waker(Waker::noop());
-    assert!(follow.as_mut().poll(&mut context) == Poll::Pending);
+    assert_eq!(follow.as_mut().poll(&mut context), Poll::Pending);
     assert!(gated.service().is_none(), "no listener while waiting");
     assert!(
         !std::fs::read_to_string(&secrets_path)
