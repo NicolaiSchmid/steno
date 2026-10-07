@@ -180,17 +180,15 @@ impl ObsidianFolderDestination {
         self
     }
 
-    #[cfg(feature = "testing")]
+    /// Calls the tests' hook; without the `testing` feature every step
+    /// passes straight through.
+    #[cfg_attr(not(feature = "testing"), allow(clippy::unused_self, unused_variables))]
     fn reached(&self, step: DeliveryStep<'_>) {
+        #[cfg(feature = "testing")]
         if let Some(StepHook(hook)) = &self.steps {
             hook(step);
         }
     }
-
-    /// No hook outside the tests: every step passes straight through.
-    #[cfg(not(feature = "testing"))]
-    #[allow(clippy::unused_self)]
-    fn reached(&self, _step: DeliveryStep<'_>) {}
 
     #[must_use]
     pub fn settings(&self) -> &ObsidianSettings {
