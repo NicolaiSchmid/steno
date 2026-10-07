@@ -283,8 +283,8 @@ function RecordControl({
 
 /**
  * The 256 px column: a header-high spacer under the traffic lights on the
- * Mac, the Record control, the filters with counts, the tags, then the paired iPhone
- * and Settings at the foot.
+ * Mac, the Record control, the filters with counts, the tags, then the
+ * paired iPhone and Settings at the foot.
  */
 export function Sidebar() {
 	const client = useBridge();

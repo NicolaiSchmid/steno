@@ -19,10 +19,10 @@ export interface OnboardingPageProps {
 /**
  * The frame both onboarding pages share: the step caption, the title as the
  * page's only heading, the intro, then the cards, scrolling under a pinned
- * footer band with the page's buttons (the dialog footer). On the Mac the 52 px top inset leaves the traffic lights their
- * room; elsewhere the native title bar sits above the page and the top is
- * the sides' 24 px. Either keeps the step caption clear of the 1.5 rem
- * scroll fade.
+ * footer band with the page's buttons (the dialog footer). On the Mac the
+ * 52 px top inset leaves the traffic lights their room; elsewhere the
+ * native title bar sits above the page and the top is the sides' 24 px.
+ * Either keeps the step caption clear of the 1.5 rem scroll fade.
  */
 export function OnboardingPage({
 	step,
