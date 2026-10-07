@@ -133,16 +133,12 @@ pub struct SaveAndQuit {
 }
 
 impl SaveAndQuit {
-    /// The app's: the pipeline quits first, as for an exit signal, then
-    /// the shutdown runs on the calling thread's behalf
-    /// (`shut_down_before_exit`), then Quit.
+    /// The app's: the save before an end (`save_before_end` in `main.rs`),
+    /// then Quit.
     fn of(app: &tauri::AppHandle) -> Self {
         let (saving, quitting) = (app.clone(), app.clone());
         Self {
-            save: Arc::new(move || {
-                crate::host::host(&saving).quit_pipeline();
-                crate::shut_down_before_exit(&saving);
-            }),
+            save: Arc::new(move || crate::save_before_end(&saving)),
             quit: Arc::new(move || crate::actions::quit(&quitting)),
         }
     }

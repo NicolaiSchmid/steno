@@ -520,6 +520,17 @@ fn shut_down_before_exit(app: &tauri::AppHandle) {
     steno_services::flush_logs();
 }
 
+/// The save before an end that no exit request announced, on Linux: the
+/// pipeline quits first, as for an exit signal (`Host::quit_pipeline`),
+/// then the shutdown runs on the calling thread's behalf
+/// (`shut_down_before_exit`). The logout and shutdown clients
+/// (`session_end`) and the lost display (`display_lost`) call it.
+#[cfg(target_os = "linux")]
+fn save_before_end(app: &tauri::AppHandle) {
+    host::host(app).quit_pipeline();
+    shut_down_before_exit(app);
+}
+
 /// One turn of the run loop; nothing for an app that refused to start
 /// (`refuse_to_start`), which has no host and ends without a shutdown.
 fn on_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
