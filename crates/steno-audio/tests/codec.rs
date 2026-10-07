@@ -478,7 +478,7 @@ fn the_sinc_resampler_keeps_level_and_period_at_44100() {
 /// the master's frame), and one a sample off either way all decode from
 /// the master, sample for sample; the writer's own sidecar is still taken.
 #[tokio::test]
-async fn a_sidecar_whose_length_disagrees_with_the_master_falls_back_to_it() {
+async fn a_sidecar_whose_length_disagrees_with_the_master_is_not_taken() {
     let directory = tempfile::tempdir().unwrap();
     let layout = RecordingLayout::new(directory.path(), Uuid::new_v4());
     let asset = call_asset(&write_call(&layout, 3.0, true).files());
