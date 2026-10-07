@@ -80,7 +80,7 @@ pub mod speech;
 #[cfg(test)]
 mod testing;
 
-pub use app::{App, AppOptions, BuildError, build, open_store};
+pub use app::{App, AppOptions, BuildError, build, lock_database, open_store};
 pub use logs::{LOG_FILTER, flush_logs, log_to_stderr};
 pub use secrets::{FileSecretStore, KeyringSecretStore, secret_store};
 /// The durable writes live with the pipeline, whose phone intake needs
