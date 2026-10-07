@@ -36,7 +36,13 @@ import Testing
       try await phone.uploadAll(metadata, bytes)
       try #require(try await phone.complete(metadata.recordingID).status == 200)
 
-      let receipt = await collector.value
+      // A `.complete` that never reaches the stream ends at the time limit,
+      // which cancels this wait and with it the collector.
+      let receipt = await withTaskCancellationHandler {
+        await collector.value
+      } onCancel: {
+        collector.cancel()
+      }
       #expect(receipt?.state == .complete(meetingID: meetingID))
       #expect(receipt?.receivedChunks == [0, 1])
     }

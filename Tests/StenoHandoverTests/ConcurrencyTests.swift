@@ -112,7 +112,8 @@ import Testing
     }
   }
 
-  @Test func theGateAnswersWhileAWholeFileHashRuns() async throws {
+  @Test(.timeLimit(.minutes(1)))
+  func theGateAnswersWhileAWholeFileHashRuns() async throws {
     // Verifying a 4 GiB upload takes seconds; `/v1/hello` and every other
     // connection's auth gate must not queue behind it on the actor.
     let chunkSize = 16 * 1024 * 1024
