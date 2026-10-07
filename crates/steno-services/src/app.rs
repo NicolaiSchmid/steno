@@ -864,18 +864,7 @@ mod tests {
         store.save_settings(&settings).unwrap();
         drop(store);
 
-        let app = build(AppOptions {
-            paths,
-            database_path: None,
-            keyring: false,
-            opener: Arc::new(steno_host::fakes::FakeOpener::default()),
-            login_item: None,
-            runtime: tokio::runtime::Handle::current(),
-            version: "0.0.0".to_owned(),
-            make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
-            lock_patience: std::time::Duration::ZERO,
-        })
-        .unwrap();
+        let app = build(options_under(&dir.path().join("support"))).unwrap();
         let prepare = async || {
             let engine = app.pipeline.current().dependencies().speech_engine.clone();
             engine.prepare().await.unwrap_err().to_string()
@@ -943,15 +932,8 @@ mod tests {
         let options = |login_item| {
             let dir = tempfile::tempdir().unwrap();
             let options = AppOptions {
-                paths: StenoPaths::new(dir.path().join("support")),
-                database_path: None,
-                keyring: false,
-                opener: Arc::new(steno_host::fakes::FakeOpener::default()),
                 login_item,
-                runtime: tokio::runtime::Handle::current(),
-                version: "0.0.0".to_owned(),
-                make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
-                lock_patience: std::time::Duration::ZERO,
+                ..options_under(&dir.path().join("support"))
             };
             (dir, options)
         };
