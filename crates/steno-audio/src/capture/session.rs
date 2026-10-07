@@ -2,7 +2,8 @@
 //! Swift: `Sources/StenoAudio/Capture/CaptureSession.swift`.
 //!
 //! `Idle → Starting → Recording → Stopping → Idle`, or `Failed` when a
-//! device stays lost or the writer fails. Owns the sink, the processing
+//! device stays lost, a write or the close fails, or a sync failed while
+//! recording. Owns the sink, the processing
 //! thread, the relay, the writer thread and the [`RecordingWriting`]
 //! implementation; `stop()` tears them down in order (an in-flight rebuild,
 //! the backend, processing, writer, files; see Threads) and returns the
@@ -22,10 +23,11 @@
 //! Only when every restart fails does the recording end in
 //! `Failed(DeviceLost)`.
 //!
-//! A recording cut short (device loss, writer failure, a full disk while
-//! closing) is finalised and travels in the state: `Failed { error,
-//! recording }`; `stop()` returns the same result, or fails when the
-//! failure left no recording.
+//! A recording cut short (device loss, a failed write) is finalised and
+//! travels in the state: `Failed { error, recording }`. So does the whole
+//! recording when the close failed (a full disk while closing) or, with
+//! nothing else ending it, a sync failed while recording. `stop()` returns
+//! the same result, or fails when the failure left no recording.
 //!
 //! A writer failure and a device loss finalise on their own threads (the
 //! writer failure's and the rebuild's) and hold `Stopping` meanwhile. A
