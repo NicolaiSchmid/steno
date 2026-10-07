@@ -310,12 +310,12 @@ impl Store {
     /// and segment of the meeting, replaced. The merge stage calls this.
     ///
     /// A speaker the user confirmed keeps its confirmation when its id
-    /// comes back (ids derive from the meeting id and the cluster label, so
-    /// a re-run's do), and so does the model's name suggestion for it;
-    /// every person who had a confirmed speaker here has their voice
-    /// recomputed from the speakers now stored. A first write recomputes
-    /// nothing, as in Swift. Rust only: Swift's `replaceTranscript`
-    /// replaces the assignments and drops the suggestions
+    /// comes back (speaker ids derive from the meeting id and the cluster
+    /// label, so a re-run produces the same ids), and so does the model's
+    /// name suggestion for it; every person who had a confirmed speaker
+    /// here has their voice recomputed from the speakers now stored. A
+    /// first write recomputes nothing, as in Swift. Rust only: Swift's
+    /// `replaceTranscript` replaces the assignments and drops the suggestions
     /// (`.plans/2026-09-29-speaker-calibration.md`, decision 5).
     pub fn replace_transcript(
         &self,
