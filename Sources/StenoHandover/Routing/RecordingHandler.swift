@@ -9,7 +9,9 @@ import StenoCore
 /// established; a recording belongs to the device that announced it.
 extension HandoverEngine {
   /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
-  /// recording, 200 for a known one, both with `RecordingStatus`.
+  /// recording, 200 for a known one, both with `RecordingStatus`; 409 when
+  /// another device owns it or the metadata changed, also once it is
+  /// `.complete`.
   func announce(_ recordingID: UUID, device: PairedDevice, body: Data) async -> HandoverResponse {
     let metadata: RecordingMetadata
     do {
@@ -28,13 +30,16 @@ extension HandoverEngine {
       guard existing.deviceID == device.id else {
         return .problem(.conflict, "another device owns this recording")
       }
-      if existing.state.kind == .complete {
-        return .json(.ok, Self.status(of: existing))
-      }
+      // Also for a `.complete` receipt: the phone answered `complete` posts
+      // `complete`, and that 200 deletes its copy. A different file under an
+      // admitted id is refused instead, and stays on the phone.
       guard existing.byteCount == metadata.byteCount, existing.sha256 == metadata.sha256,
         existing.chunkSize == metadata.chunkSize
       else {
         return .problem(.conflict, "metadata differs from the first announcement")
+      }
+      if existing.state.kind == .complete {
+        return .json(.ok, Self.status(of: existing))
       }
       var receipt = existing
       var receivedChunks: [Int]?
