@@ -412,8 +412,8 @@ fn export_beside(db: &Path, home: &Path) -> Run {
 
 /// A command that only reads, beside the app, opens the database without
 /// migrating it: it runs on a database at this build's version and changes
-/// nothing, and refuses one an older app still runs on rather than migrate
-/// the schema under it.
+/// nothing, and refuses one an older app still runs on (or the app is
+/// still migrating) rather than migrate the schema under it.
 #[test]
 fn a_reading_command_beside_the_app_never_migrates() {
     let home = tempfile::tempdir().unwrap();
@@ -441,10 +441,9 @@ fn a_reading_command_beside_the_app_never_migrates() {
     let refused = export_beside(&older, home);
     assert_eq!(refused.status, 2, "{}", refused.stderr);
     assert!(
-        refused.stderr.contains(&format!(
-            "Steno is running an older version on {}; quit it first, then run this command again.",
-            older.display()
-        )),
+        refused.stderr.contains(
+            "Steno is updating its database, or an older Steno is running; quit it first, then run this command again."
+        ),
         "{}",
         refused.stderr
     );
