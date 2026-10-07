@@ -30,10 +30,19 @@ import Testing
         }
         return nil
       }
+      // A failed upload or `complete` ends the test at its line, and the
+      // collector ends with it instead of waiting out the time limit.
+      defer { collector.cancel() }
       try await phone.uploadAll(metadata, bytes)
-      #expect(try await phone.complete(metadata.recordingID).status == 200)
+      try #require(try await phone.complete(metadata.recordingID).status == 200)
 
-      let receipt = await collector.value
+      // A `.complete` that never reaches the stream ends at the time limit,
+      // which cancels this wait and with it the collector.
+      let receipt = await withTaskCancellationHandler {
+        await collector.value
+      } onCancel: {
+        collector.cancel()
+      }
       #expect(receipt?.state == .complete(meetingID: meetingID))
       #expect(receipt?.receivedChunks == [0, 1])
     }

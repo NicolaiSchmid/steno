@@ -32,9 +32,14 @@ links on Linux (`linuxOnlyExclusions`), where Security does not exist.
 timeout tests), `EngineClient` (the protocol core driven without a
 listener, for the ordering tests), `StoreGate` (an on-disk store that holds
 a chosen statement's transaction open, for the revoke races and the
-requests that race a receipt read), `HeldSave` (receipt saves that hold one
-on its way to the store, for the write order), `HeldWrite` (chunk writes
-that hold one after its bytes landed, for a chunk that lands during a
-`complete`), `HeldIntake` (the fake intake with its first admission held,
-for a revoke during the intake) and `until` (polls a condition the test
-waits on, failing after five seconds).
+requests that race a receipt read), `HeldSave` (receipt saves that hold a
+chosen one on its way to the store, for the write order, and can fail it
+on release, for a failed first save), `HeldWrite` (chunk writes that hold
+one after its bytes landed, for a chunk that lands during a `complete`),
+`HeldHash` (the whole-file hash held after it ran, for a revoke during the
+verify), `HeldIntake` (the fake intake with its first admission held, for
+a revoke during the intake), `MovingIntake` (takes the verified file out
+of the inbox before the intake behind it, as the real intake has done by
+the time it returns) and `until` (polls a condition the test waits on,
+failing at the caller's line after 50 seconds, before the test's
+one-minute time limit).

@@ -73,7 +73,12 @@ extension HandoverEngine {
     do {
       try await persist(receipt)
     } catch {
-      inbox.discard(recordingID)
+      // A revoke while the save waited lets another phone announce the same
+      // recording id; its files and receipt stay. Checked after the save,
+      // in the same actor step as the discard.
+      if !ownedByAnotherDevice(recordingID, device: device) {
+        inbox.discard(recordingID)
+      }
       return .internalError("saving the receipt", error)
     }
     return .json(.created, Self.status(of: receipt))
@@ -156,7 +161,8 @@ extension HandoverEngine {
   /// partial is gone and the phone starts over; 401 while a revoke of the
   /// device is in flight, and in place of any of these when one landed
   /// during the store read or the verify of a recording not yet admitted
-  /// (its files are then discarded).
+  /// (its files are then discarded, unless another device announced the
+  /// recording id meanwhile).
   func complete(_ recordingID: UUID, device: PairedDevice) async -> HandoverResponse {
     guard revoking[device.id] == nil else { return Self.unauthorized }
     let revocation = revocations[device.id, default: 0]
@@ -195,7 +201,9 @@ extension HandoverEngine {
     // revoke then discards the files itself, but a phone that still passes
     // the gate (before the delete commits, or paired again) can announce
     // and send the chunks again: this check discards the new partial and
-    // answers 401. Nothing suspends between it and the intake call.
+    // answers 401. Another phone's announce of the same recording id after
+    // the revoke keeps its files and receipt. Nothing suspends between this
+    // check and the intake call.
     if let refused = refusal(recordingID, device: device, revokedSince: revocation) {
       return refused
     }
@@ -209,14 +217,28 @@ extension HandoverEngine {
 
   /// 401 when the device was revoked since `complete` took `revocation`.
   /// That revoke may have missed the receipt, so the files are discarded and
-  /// the receipt forgotten here.
+  /// the receipt forgotten here, unless memory holds another device's
+  /// receipt of the recording id (`ownedByAnotherDevice`).
   private func refusal(_ recordingID: UUID, device: PairedDevice, revokedSince revocation: Int)
     -> HandoverResponse?
   {
     guard revocations[device.id, default: 0] != revocation else { return nil }
-    inbox.discard(recordingID)
-    forget(recordingID)
+    if !ownedByAnotherDevice(recordingID, device: device) {
+      inbox.discard(recordingID)
+      forget(recordingID)
+    }
     return Self.unauthorized
+  }
+
+  /// Whether memory holds the receipt of `recordingID` for a device other
+  /// than `device`: another phone announced the same recording id after
+  /// `device` was revoked, so the files in the inbox are taken as that
+  /// phone's upload and the receipt is its own. The caller checks and removes files in one
+  /// actor step, with no suspension in between, so no announce lands between
+  /// the two.
+  private func ownedByAnotherDevice(_ recordingID: UUID, device: PairedDevice) -> Bool {
+    guard let held = activeReceipts[recordingID] else { return false }
+    return held.deviceID != device.id
   }
 
   private enum Verification {
@@ -263,7 +285,7 @@ extension HandoverEngine {
     do {
       verified =
         try ReceivingFile.size(of: partial) == receipt.byteCount
-        ? try await ReceivingFile.hashMatches(partial, expected: receipt.sha256) : false
+        ? try await hashMatches(partial, receipt.sha256) : false
     } catch {
       return .answered(.internalError("verifying the file", error))
     }
@@ -292,11 +314,18 @@ extension HandoverEngine {
 
   /// Hands the verified file to the intake. On success the receipt is
   /// `.complete` and the answer is 200 whatever the receipt write did: the
-  /// real intake wrote this same receipt and deleted the file, a test intake
-  /// did neither. The metadata sidecar is ours to remove; a replayed
-  /// complete returns the same id through the early `.complete` check. On
-  /// failure the verified file stays for the phone's retry and the reason is
-  /// fixed text, because the error may name the file's path.
+  /// real intake wrote this same receipt and deleted the file. Every file
+  /// of the recording left in the inbox then goes: the metadata sidecar,
+  /// and a partial and sidecar that a re-announce opened during the intake,
+  /// after the intake took the verified file. When another device announced
+  /// the same recording id meanwhile (this one was revoked during the
+  /// intake), only the verified file goes, if the intake left it, and the
+  /// rest is that phone's upload (`ownedByAnotherDevice`); no other request
+  /// creates the verified file while this `complete` holds the `completing`
+  /// mark. A replayed complete returns the same id through the early
+  /// `.complete` check. On failure the verified file stays for the phone's
+  /// retry and the reason is fixed text, because the error may name the
+  /// file's path.
   private func admit(
     _ file: URL, metadata: RecordingMetadata, device: PairedDevice,
     receipt: inout HandoverReceipt
@@ -310,7 +339,13 @@ extension HandoverEngine {
       return .internalError("the intake", error)
     }
     try? await transition(&receipt, to: .complete(meetingID: meetingID))
-    try? FileManager.default.removeItem(at: inbox.metadata(recordingID))
+    try? FileManager.default.removeItem(at: file)
+    // A revoke during the intake lets another phone announce the same
+    // recording id; its files and receipt stay. Checked after the last
+    // suspension, in the same actor step as the discard.
+    if !ownedByAnotherDevice(recordingID, device: device) {
+      inbox.discard(recordingID)
+    }
     return .json(.ok, Wire.CompleteResponse(meetingID: meetingID))
   }
 
