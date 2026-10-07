@@ -1,5 +1,44 @@
 # Mac cutover: the Tauri app replaces the Swift app
 
+Extended by `.plans/2026-10-07-stable-promotion.md` (2026-10-07), which
+changes this plan in these places:
+
+- the opening gate (every unticked parity line) becomes its blocking list (its
+  D3: nothing that can lose data ships), and this plan's one pull request
+  becomes its packages;
+- step 1's bundle id becomes `com.nicolaischmid.steno.desktop` (its D5), so the app no
+  longer keeps the Swift app's id;
+- step 2's beta staging and signing, and all of step 3 (distribution), become
+  its "Release mechanics" and "The Sparkle handoff"; step 2's frozen `appcast`
+  branch stands, with one handoff item (its D8);
+- step 4 reads the Swift app's preference domain explicitly, copies one key and
+  Sparkle's two update flags, and drops the panel anchor (its S6);
+- step 5's open choice is its D4, which keeps `SMAppService`; the new app
+  registers itself, and the Swift entry is handled as its S6 says;
+- step 6 also replaces an identity that a `uno.schmid.steno.desktop` build
+  stored (its D5) and expects a keychain prompt; a denied or failed export mints
+  nothing: the listener waits with Try again, and only the user's Pair again
+  mints a new identity (its D3);
+- step 7 is its S9, apart from `release.yml`, which its S7 deletes.
+
+The inventory table and the tests still apply: that plan's Rehearsal runs tests
+1 to 6, its R8 runs test 7 and its S9 runs test 8. These details no longer hold
+(that plan's Facts):
+
+- the risks that TCC grants and keychain items carry over with the bundle id:
+  with a new id they do not, and that plan accepts one re-grant and one keychain
+  prompt per item;
+- test 1's premise that a Swift release build reads no channel holds only for
+  `v0.9.0-rc.1`; every later build is a release candidate and reads `beta` too;
+- test 1's check that the designated requirements match: with a new identifier
+  they cannot, and Sparkle does not need them to;
+- the first risk: Sparkle never refuses a bundle for its id, so only the missing
+  key and the signature remain;
+- the two-login-items risk becomes the old Login Items entry that its S6
+  handles;
+- step 6's and the Risks' "the app mints a new identity and phones pair again"
+  after a failed export.
+
 Status: planned 2026-10-04, not started. WP9b, the second half of WP9 in
 `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP9a (signed, notarised
 bundles that carry the speech sidecar, `cargo deny`, the `desktop-v*`

@@ -2,7 +2,8 @@
 
 Status: every work package from WP1 to WP10b except WP9b is merged on `main`; the port's
 last pull request, #187, merged on 2026-10-05. Left: the Mac cutover (WP9b,
-`.plans/2026-10-04-mac-cutover.md`), the first Linux release and the first Windows
+`.plans/2026-10-04-mac-cutover.md`, ordered and gated by
+`.plans/2026-10-07-stable-promotion.md`), the first Linux release and the first Windows
 release (WP10's hardware checks; the Windows installers from #184 are unsigned). "Open
 after the port" lists each open item and its owner. Started 2026-10-02 on branch
 `refactor/rust-workspace`. Amends `.plans/2026-09-24-initial-scope.md` (removes
@@ -133,9 +134,9 @@ platform; Sparkle retires at cutover).
 Parallel build. The Swift app ships from `main` throughout. The Rust app is usable on
 Linux first (no Swift app competes there), then on the Mac once the parity list is
 empty, then on Windows once its capture backend passes the capture tests. Cutover on
-the Mac is a release that ships the Tauri app under the same bundle id, reading the
-same database and settings, with Sparkle pointing at the last Swift build's appcast
-entry for the handoff.
+the Mac is a release that ships the Tauri app as an ordinary Sparkle update, reading the
+same database and settings; `.plans/2026-10-07-stable-promotion.md` gives it the new
+identifier `com.nicolaischmid.steno.desktop` (its D5).
 
 Parity list (kept at the end of this file): every user-visible behaviour of the Swift
 app, ticked when the Rust app matches it on the Mac. Feature PRs on the Swift app add a
@@ -510,8 +511,8 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   onboarding permissions per OS, deep links, single instance, dialogs, the six
   installer bundles, and `.github/workflows/desktop-release.yml`: a manual run that
   builds the bundles on the three platforms, unsigned, as workflow artifacts.
-- **WP9 Mac cutover and signed releases.** Parity list empty (apart from the two
-  Rust-only "Speech" lines), same bundle id, Sparkle handoff, Swift app removed, web
+- **WP9 Mac cutover and signed releases.** The blocking list of
+  `.plans/2026-10-07-stable-promotion.md` (D3) closed, the identifier `com.nicolaischmid.steno.desktop` (its D5), Sparkle handoff, Swift app removed, web
   app moved to `apps/web`, Swift rows removed from `AGENTS.md`; `cargo deny` with a
   licence allow list in CI; the signing key for the updater artifacts, notarisation,
   and the tag-triggered release workflow that publishes the bundles and the updater
@@ -538,10 +539,12 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   (`apps/desktop/README.md`, "Checksums and OpenPGP signatures"); the Windows
   installers stay unsigned and the release notes say so. WP9b is the cutover:
   `.plans/2026-10-04-mac-cutover.md`.
-  The shell's gaps that must close before the cutover (WP9b) opens ("Open after the
-  port"): the tray's badge for pending speaker reviews; the QR encoder, a fake until a
-  QR crate draws the pairing code; the clip player, a fake with no audio output; and
-  the update schedule behind the host's `Updater`.
+  The shell's gaps ("Open after the port"): the tray's badge for pending speaker
+  reviews; the QR encoder, a fake until a QR crate draws the pairing code; the clip
+  player, a fake with no audio output; and the update schedule behind the host's
+  `Updater`. Which of them block the stable release is decided by the blocking list
+  in `.plans/2026-10-07-stable-promotion.md` (D3): the QR encoder and the update
+  schedule do, the badge and the clip player follow.
   The phone handover identity: on first launch on macOS the cutover either imports the
   Swift `SecIdentity` (certificate plus private key, exported from the keychain item
   `Sources/StenoHandover/Identity/IdentityKeychain.swift` writes) into the Rust PEM
@@ -703,10 +706,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   marked failed at launch, unfinished processing resumed at launch
   (`steno_services::App::launch`).
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
-  the host republishes `progress`; the tray (WP8) shows no badge for it; it must close
-  before the cutover (WP9b) opens.
-- [ ] Updates: Sparkle today, the Tauri updater after the cutover; must close before the
-  cutover (WP9b) opens: the `Updater` trait is still the services' fake, since WP8's
+  the host republishes `progress`; the tray (WP8) shows no badge for it; it follows the
+  stable release (`.plans/2026-10-07-stable-promotion.md`, D3).
+- [ ] Updates: Sparkle today, the Tauri updater after the cutover; blocks the stable
+  release (`.plans/2026-10-07-stable-promotion.md`, S4): the `Updater` trait is still the services' fake, since WP8's
   `updater` has no automatic-check or automatic-download flag and no last check time to
   report (see "Pipeline and services (WP6b)").
 - [x] Login item: registered on the first launch when the setting says so
@@ -996,7 +999,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   shell's `UpdateOutcome` stays beside the host's until then; (4) the QR encoder and
   the clip player are fakes, so the pairing code shows no QR image and a speaker's
   sample clip does not play: each needs new code (a QR crate, an audio output), not
-  wiring; both must close before the cutover (WP9b) opens.
+  wiring; the QR encoder blocks the stable release and the clip player follows it
+  (`.plans/2026-10-07-stable-promotion.md`, D3).
 - The two-second pairing poll (`Host::refresh_pairing`) rides on the store poll in
   `App::launch` and runs whether or not a code is shown, where Swift ran it only while
   the Phones pane showed one.
@@ -1626,9 +1630,10 @@ touch lines; each fix is ported to Swift before cutover.
 
 - Launch at login is a Launch Agent through `tauri-plugin-autostart`, where the Swift
   app registers with `SMAppService`; the `requiresApproval` state never occurs on the
-  Rust side. At cutover (WP9) the Swift registration has to be removed or migrated so
-  the user does not end up with two login items, and the General section's copy for
-  the approval state becomes unreachable.
+  Rust side. On macOS the cutover moves the Rust app onto `SMAppService.mainApp` too,
+  so the approval copy stays reachable; with the new identifier the app registers
+  itself, and the Swift entry is handled as `.plans/2026-10-07-stable-promotion.md`
+  (D4, S6) says.
 - The menu bar on macOS carries the application, Edit and Window menus; the Swift
   Record menu (`⌘⇧R`, Record In Person) and Find Meetings (`⌘F`) are not in it yet.
   The page answers the shortcuts it shows itself (`useShortcut` in
@@ -1749,15 +1754,21 @@ Rust fixes these Swift behaviours; each is ported to Swift or accepted before cu
 ## Open after the port
 
 What the merged packages left open. Each item starts with its owner: **WP9b** (the Mac
-cutover, `.plans/2026-10-04-mac-cutover.md`), **First Linux release**, **First Windows
-release** (WP10's hardware checks and the unsigned installers), the branch of a
-follow-up pull request, or **Unowned** (no package or release has it yet). Then it
-says what is open, where it lives (pointing to this plan where the plan already covers
-it) and which pull requests found it. The pull request that fixes an item deletes it.
+cutover, `.plans/2026-10-04-mac-cutover.md`; which items block the stable release, and the
+package that closes each, are in `.plans/2026-10-07-stable-promotion.md`), **First Linux
+release**, **First Windows release** (WP10's hardware checks and the unsigned installers),
+the branch of a follow-up pull request, or **Unowned** (no package or release has it yet).
+Then it says what is open, where it lives (pointing to this plan where the plan already
+covers it) and which pull requests found it. The pull request that fixes an item deletes it.
+Whatever its owner, an item that can lose a recording, a transcript, a note or a pairing
+blocks the stable release (`.plans/2026-10-07-stable-promotion.md`, D3). An item that a row of that
+plan's tables names belongs to that row's package (S, A, P or X), whatever its label here.
 
-- **WP9b.** The unticked lines of the parity list must all be ticked before the
-  cutover opens: the menu bar's queue and recent meetings, the detection prompt, the
-  auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
+- **WP9b.** The unticked lines of the parity list; which of them block the stable
+  release, and which follow it, is the blocking list of
+  `.plans/2026-10-07-stable-promotion.md` (D3), which replaces the rule that all must
+  be ticked before the cutover opens. The lines: the menu bar's queue and recent
+  meetings, the detection prompt, the auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
   bar's Record and Find Meetings items, and the "Where the speech sidecar runs
   Parakeet v3" line under "Speech" (its two items below). Several name WP5 or WP8,
   which merged without them. The two other unticked "Speech" lines, `SpeechSettings`
@@ -1804,7 +1815,10 @@ it) and which pull requests found it. The pull request that fixes an item delete
   cutover (the WAV mixdown, the resampler, the sidecar's 2 ms lag, AAC priming, call
   mode without an output client). Where: "Store", "Adapters", "Handover", "LLM",
   "Audio" and "Bridge" in the parity list, and the CLI's `--title` under "Pipeline
-  and services (WP6b)". Found: #155, #165, #166, #167, #169, #190.
+  and services (WP6b)". `.plans/2026-10-07-stable-promotion.md` (D9) settles all of
+  them, the parity notes' other "before cutover" ports to Swift included, apart from call
+  mode, which its A9 checks; its S7 deletes this item, and A9 the call-mode part.
+  Found: #155, #165, #166, #167, #169, #190.
 - **WP9b.** The Bonjour record is not published again after a network change, on
   every platform, where Swift's `NWListener` follows it; and the shell passes no
   computer name on any platform, so the Mac and Windows advertise `HOSTNAME`,
@@ -1816,10 +1830,6 @@ it) and which pull requests found it. The pull request that fixes an item delete
 - **WP9b.** No concurrency group spans the two release workflows, so two macOS signing
   jobs can run at once; only both READMEs state the one-at-a-time rule, until
   `release.yml` retires at the cutover. Where: `.github/workflows/release.yml`,
-  `.github/workflows/desktop-release.yml`. Found: #184.
-- **WP9b.** The first `desktop-v*` tag, which the Mac's pre-releases bring before any
-  Linux or Windows release, is the first run of the `publish` job against GitHub and
-  the first MSI built for an `-rc.N` version. Where:
   `.github/workflows/desktop-release.yml`. Found: #184.
 - **First Linux release.** A logout on KDE Plasma, or on Xfce under Wayland, saves
   the recording only when systemd ends the session's processes with a signal; when
@@ -1975,7 +1985,7 @@ PR off `main`.
 | WP10a WASAPI capture (`steno-audio`) | `feat/rust-wasapi` | #175 | merged |
 | Shared TDT decoder (the decode-loop half of the WP4 integration notes) | `refactor/rust-shared-tdt-decoder` | #182 | merged |
 | WP9a signed and notarised release bundles with the speech sidecar, `cargo deny`, the `desktop-v*` release and the updater lanes | `feat/rust-release-signing` | #184 | merged |
-| WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`) | | | planned |
+| WP9b Mac cutover (`.plans/2026-10-04-mac-cutover.md`), ordered by the stable promotion (`.plans/2026-10-07-stable-promotion.md`) | | | planned |
 | Services on the speech sidecar: the platform policy, the release after each job, the speech settings | `fix/rust-services-sidecar` | #183 | merged |
 | fp32 Parakeet export downloads from Hugging Face (`nicolaischmid/steno-models`) | `feat/rust-host-parakeet-export` | #189 | merged |
 | WP10b DirectML for the speech encoder on Windows, behind a probe | `feat/rust-directml` | #188 | merged |
