@@ -1192,6 +1192,18 @@ parity item until a plan says otherwise:
   skips). Whether a GUI session also loses its first seconds is
   unchecked. Check on the Swift app before cutover; a plan decides any
   remedy.
+- **The master is synced while recording, the relay holds 20 s, and the
+  warnings are joined** (stable plan rows P21 and P23,
+  `.plans/2026-10-07-stable-promotion.md`). The writer thread syncs the
+  master (`File::sync_data`, `F_FULLFSYNC` on the Mac) after every 500
+  frames written, so a power loss loses about the last 5 s, more while the
+  writer is behind; a failed sync is logged once and tried again at the
+  next interval, and only a failed write ends the recording. The relay
+  between the processing thread and the writer holds 2 000 frames (20 s)
+  instead of 200. A recording that lost frames says how many seconds are
+  missing beside the other warnings, which are now joined (a device loss
+  no longer hides a silent call), and logs the counts per lane at `warn`.
+  Swift synced at the close alone, held 2 s and showed one warning.
 
 What the Windows backend (WP10a, `capture::live::wasapi`) does differently
 from the macOS one, each a parity item until a Windows machine has checked
