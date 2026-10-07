@@ -99,6 +99,10 @@ use crate::windows::BridgeWindow;
 
 fn main() {
     steno_services::log_to_stderr(steno_services::LOG_FILTER);
+    // After the log output, whose hook it runs after its own: a panic
+    // leaves a file under the support directory, since an app opened from
+    // the Finder or at login has no stderr anyone reads.
+    steno_services::crash_log::write_crash_logs(steno_core::StenoPaths::default_support_directory());
     #[cfg(target_os = "linux")]
     display::choose();
     // Before the app is built: GTK unsets it when it starts.

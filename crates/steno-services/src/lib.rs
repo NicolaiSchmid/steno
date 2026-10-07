@@ -14,6 +14,7 @@
 //! | [`speech`] | The models directory, the speech settings, the speech engine per platform (the speech sidecar off the Mac), the ONNX diarizer, the host's `SpeechModels`, and [`SpeechEngines`](speech::SpeechEngines), the engines and the diarizer the pipelines share across reloads |
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
+//! | [`crash_log`] | A file under the support directory for every panic, which a release build launched from the Finder would otherwise lose: [`crash_log::write_crash_logs`] |
 //! | [`handover`] | The identity in the secret store and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring and the 0600 secrets file behind `SecretStore` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
@@ -68,6 +69,7 @@
 //! ```
 
 pub mod app;
+pub mod crash_log;
 pub mod export;
 pub mod handover;
 pub mod llm;
