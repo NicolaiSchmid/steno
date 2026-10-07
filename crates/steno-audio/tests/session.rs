@@ -2143,9 +2143,10 @@ fn a_write_failing_during_stops_drain_ends_failed_with_the_recording() {
     }
 }
 
-/// In production the relay holds two seconds; a gap wider than that waits
-/// for the writer in 5 ms steps on the clock, and every frame of silence
-/// still arrives: 1.75 s of gap through a one-second relay. The old
+/// A gap wider than the relay waits for the writer in 5 ms steps on the
+/// clock, and every frame of silence still arrives: 1.75 s of gap through
+/// a one-second relay (production's holds 20 s, more than `MAXIMUM_GAP`,
+/// so there only a stalled writer makes a gap wait). The old
 /// device's half second fits the relay however late the writer runs; only
 /// a writer stalled for longer than the relay could refuse the new
 /// device's frames, and those are counted as dropped.
