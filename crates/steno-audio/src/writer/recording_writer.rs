@@ -60,8 +60,8 @@ pub trait RecordingWriting: Send {
     fn files(&self) -> RecordingFiles;
     /// One frame for every lane.
     fn write(&mut self, frames: &LaneFrames<'_>) -> Result<(), CaptureError>;
-    /// Makes what the master holds so far durable (`fdatasync`), so a power
-    /// loss keeps it; the writer thread calls it every
+    /// Makes what the master holds so far durable, so a power loss keeps
+    /// it; the writer thread calls it every
     /// [`SYNC_INTERVAL_FRAMES`](super::writer_thread::SYNC_INTERVAL_FRAMES)
     /// frames. A failure is a write failure.
     fn sync(&mut self) -> Result<(), CaptureError>;

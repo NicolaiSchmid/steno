@@ -4,17 +4,15 @@
 //! 10 Hz level stream costs the processing thread nothing).
 //! Swift: `Sources/StenoAudio/Writer/WriterThread.swift`.
 //!
-//! Every [`SYNC_INTERVAL_FRAMES`] frames written (5 s of audio) the thread
-//! asks the writer to [`sync`](RecordingWriting::sync) the master to disk,
-//! so a power loss or a kernel crash loses at most the last 5 s of a
-//! recording, not everything still in the page cache; a crash or a kill
-//! loses nothing written, since the kernel holds it. Only this thread syncs,
-//! never a real-time one. Rust only: Swift synced at the close alone.
+//! Every [`SYNC_INTERVAL_FRAMES`] frames the thread
+//! [`sync`](RecordingWriting::sync)s the master, so a power loss or a kernel
+//! crash loses at most the last 5 s of a recording, not everything still in
+//! the page cache. Rust only: Swift synced at the close alone.
 //!
 //! A write or sync error is kept (for [`WriterThread::take_error`]),
 //! reported once and stops further writes; the loop keeps draining so the
-//! relay never fills. The lane slices handed to the writer sit in a stack array sized
-//! by [`AudioLane::ALL`], so a drained frame allocates nothing (not a
+//! relay never fills. The lane slices handed to the writer sit in a stack
+//! array sized by [`AudioLane::ALL`], so a drained frame allocates nothing (not a
 //! real-time requirement here, the thread does file I/O, but one less
 //! allocation per 10 ms).
 
@@ -39,8 +37,8 @@ const MAX_LANES: usize = AudioLane::ALL.len();
 
 /// Frames written between two syncs of the master: 5 s of 10 ms frames,
 /// counted in audio rather than wall time, so gap silence counts and a
-/// test needs no clock. A sync can take long on a busy disk; the relay
-/// holds 20 s meanwhile ([`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]).
+/// test needs no clock. A slow sync is covered by the relay's 20 s
+/// ([`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]).
 ///
 /// [`CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES`]: crate::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES
 pub const SYNC_INTERVAL_FRAMES: usize = 500;
@@ -82,14 +80,14 @@ impl Worker {
                     .has_raw_mic
                     .then(|| self.buffers[self.lane_count].as_slice()),
             };
-            let mut written = self.writer.write(&frames);
-            if written.is_ok() {
+            let written = self.writer.write(&frames).and_then(|()| {
                 self.unsynced_frames += 1;
-                if self.unsynced_frames >= SYNC_INTERVAL_FRAMES {
-                    self.unsynced_frames = 0;
-                    written = self.writer.sync();
+                if self.unsynced_frames < SYNC_INTERVAL_FRAMES {
+                    return Ok(());
                 }
-            }
+                self.unsynced_frames = 0;
+                self.writer.sync()
+            });
             if let Err(error) = written {
                 self.failed.store(true, Ordering::Release);
                 self.error = Some(error.clone());
@@ -274,7 +272,7 @@ mod tests {
     /// fake and returns its calls and the errors it reported. The relay
     /// holds them all, so none is dropped.
     fn run(frames: usize, fail_sync: Option<usize>) -> (Vec<Call>, Vec<CaptureError>) {
-        let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, frames.max(1)));
+        let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, frames));
         let calls = Arc::new(Mutex::new(Vec::new()));
         let errors = Arc::new(Mutex::new(Vec::new()));
         let mut thread = WriterThread::new(

@@ -240,11 +240,9 @@ impl CaptureSession {
     pub const MAXIMUM_GAP: Duration = Duration::from_secs(10);
     /// Frames the writer may fall behind the processing thread before
     /// frames are dropped and counted: 2000 (20 s) by default, so a disk
-    /// that stalls for seconds (a sync on a busy disk, a sleeping external
-    /// drive, a network home folder) loses nothing. The relay's rings round
-    /// up to a power of two: 2^20 samples, 4 MiB and about 21.8 s per
-    /// written channel, allocated at start, never on the real-time thread.
-    /// Rust only: Swift's relay held 2 s.
+    /// that stalls for seconds (a slow sync, a sleeping external drive)
+    /// loses nothing. The rings round up to 2^20 samples, 4 MiB per written
+    /// channel, allocated at start. Rust only: Swift's relay held 2 s.
     pub const DEFAULT_WRITER_HEADROOM_FRAMES: usize = 2_000;
 
     /// The production session: the live backend, Speex when the

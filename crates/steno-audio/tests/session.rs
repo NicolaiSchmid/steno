@@ -30,13 +30,15 @@ use steno_audio::capture::{
     CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult,
     CaptureSession, CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
 };
-use steno_audio::realtime::LaneFrameSink;
+use steno_audio::realtime::{FrameRelay, LaneFrameSink};
 use steno_audio::testing::synthetic::SyntheticOptions;
 use steno_audio::testing::{ManualClock, SyntheticCaptureBackend, SyntheticLane};
 use steno_audio::writer::{
     CafFile, LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting, WavFile,
 };
-use steno_audio::{Clock, EchoMetrics, PassthroughEchoCanceller, SAMPLE_RATE, SystemClock};
+use steno_audio::{
+    Clock, EchoMetrics, FRAME_SIZE, PassthroughEchoCanceller, SAMPLE_RATE, SystemClock,
+};
 use steno_core::paths::file_url_path;
 use steno_core::{AudioFormat, AudioLane, AudioRetention, EchoCanceller, RecordingLayout};
 use uuid::Uuid;
@@ -316,12 +318,12 @@ fn a_silent_system_lane_is_reported_in_statistics_and_levels() {
 #[test]
 fn the_default_relay_holds_fifteen_seconds_with_the_writer_stalled() {
     let frames_per_second = CaptureSession::gap_frames(Duration::from_secs(1));
-    let relay = steno_audio::realtime::FrameRelay::new(
+    let relay = FrameRelay::new(
         3,
-        steno_audio::FRAME_SIZE,
+        FRAME_SIZE,
         CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
     );
-    let zeros = vec![0.0f32; steno_audio::FRAME_SIZE];
+    let zeros = vec![0.0f32; FRAME_SIZE];
     for frame in 0..15 * frames_per_second {
         assert!(relay.begin_frame(), "frame {frame} refused");
         for channel in 0..3 {
