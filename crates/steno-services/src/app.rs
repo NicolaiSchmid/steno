@@ -124,19 +124,22 @@ pub fn local_zone() -> FixedOffset {
 
 /// Opens (and migrates) the database at `path`, creating its folder.
 pub fn open_store(path: &std::path::Path) -> Result<Arc<Store>, BuildError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(BuildError::DatabaseFolder)?;
-    }
+    create_database_folder(path)?;
     Ok(Arc::new(Store::open(path)?))
 }
 
 /// Takes the lock of the database at `path` ([`DatabaseLock`]), creating
 /// its folder.
 pub fn lock_database(path: &std::path::Path) -> Result<DatabaseLock, BuildError> {
+    create_database_folder(path)?;
+    Ok(DatabaseLock::acquire(path)?)
+}
+
+fn create_database_folder(path: &std::path::Path) -> Result<(), BuildError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(BuildError::DatabaseFolder)?;
     }
-    Ok(DatabaseLock::acquire(path)?)
+    Ok(())
 }
 
 /// The LLM API key, or `None` with the reason when the secret store could
@@ -268,24 +271,23 @@ fn handover_listener(
 
 /// Builds the graph. First the database's lock ([`DatabaseLock`]): with
 /// another process on the database the build fails with
-/// [`BuildError::Locked`] before the database is opened. Real: store, settings, secret store, speech engine
-/// (`CoreML` in this process on the Mac, the ONNX speech sidecar elsewhere
-/// and as the Mac's fallback; [`SpeechSetup::runtime`]), ONNX diarizer,
-/// cosine speaker memory over the store, LLM passes, delivery coordinator,
-/// handover listener, capture session, recorder, the speech models, folder
-/// usage, preferences, and the login item when the shell passes its own
-/// ([`AppOptions::login_item`]). Fakes where no platform side exists yet
-/// (the plan's "Pipeline and services (WP6b)" list says why for each):
-/// permissions (all granted), updater, clip player, QR encoder; the audio
-/// device list is empty off the Mac until the `PipeWire` and WASAPI backends
-/// enumerate devices.
+/// [`BuildError::Locked`] before the database is opened. Real: store,
+/// settings, secret store, speech engine (`CoreML` in this process on the
+/// Mac, the ONNX speech sidecar elsewhere and as the Mac's fallback;
+/// [`SpeechSetup::runtime`]), ONNX diarizer, cosine speaker memory over the
+/// store, LLM passes, delivery coordinator, handover listener, capture
+/// session, recorder, the speech models, folder usage, preferences, and the
+/// login item when the shell passes its own ([`AppOptions::login_item`]).
+/// Fakes where no platform side exists yet (the plan's "Pipeline and
+/// services (WP6b)" list says why for each): permissions (all granted),
+/// updater, clip player, QR encoder; the audio device list is empty off the
+/// Mac until the `PipeWire` and WASAPI backends enumerate devices.
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
     let database_path = options
         .database_path
         .unwrap_or_else(|| paths.database_path());
-    // Before the database opens: a second process must not even migrate it.
     let database_lock = lock_database(&database_path)?;
     let store = open_store(&database_path)?;
     let secrets = secret_store(options.keyring, &paths);
