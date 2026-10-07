@@ -24,16 +24,23 @@ final class CommitLog: Sendable {
 
   private static let tables = ["handoverReceipt", "meeting", "audioAsset", "pairedDevice"]
   private let state: Mutex<State>
+  private let committing: @Sendable () -> Void
 
-  private init(synchronous: Int) {
+  private init(synchronous: Int, committing: @escaping @Sendable () -> Void) {
     state = Mutex(State(synchronous: synchronous))
+    self.committing = committing
   }
 
   /// A log of `store`'s writer, which must be a `DatabasePool`'s: a queue's
-  /// reads would land in it too.
-  static func install(on store: MeetingStore) async throws -> CommitLog {
+  /// reads would land in it too. `committing` runs as each `COMMIT`
+  /// statement starts, before it commits.
+  static func install(
+    on store: MeetingStore, committing: @escaping @Sendable () -> Void = {}
+  ) async throws -> CommitLog {
     try await store.writer.writeWithoutTransaction { db in
-      let log = CommitLog(synchronous: try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? -1)
+      let log = CommitLog(
+        synchronous: try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? -1,
+        committing: committing)
       db.trace { event in
         guard case .statement(let statement) = event else { return }
         log.observe(statement.sql)
@@ -52,6 +59,7 @@ final class CommitLog: Sendable {
   var commits: [Commit] { state.withLock { $0.commits } }
 
   private func observe(_ sql: String) {
+    if sql.hasPrefix("COMMIT") { committing() }
     state.withLock { state in
       if let level = Self.level(set: sql) {
         state.synchronous = level

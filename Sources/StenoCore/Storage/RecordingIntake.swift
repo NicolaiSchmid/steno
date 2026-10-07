@@ -1,5 +1,9 @@
 import Foundation
 
+#if canImport(os)
+  import os
+#endif
+
 /// Admits a fully received phone recording: copies the file into
 /// `audioFolder/<meetingID>/` (`RecordingLayout`), commits the
 /// `HandoverReceipt` as `.complete(meetingID)` together with a `.phone`
@@ -10,14 +14,17 @@ import Foundation
 /// and does nothing else.
 ///
 /// The phone deletes its copy once `complete` answers 200, so everything
-/// the admission wrote is on the disk first. The copy, its meeting folder
-/// and every folder `admit` created are synced (`F_FULLFSYNC`, `fsync`
-/// where that fails), and the receipt, the meeting and its asset commit in
-/// one durable transaction (`MeetingStore.saveDurably(_:meeting:asset:)`),
-/// so no crash, full disk or busy store leaves a `.complete` receipt
-/// without its meeting. When that commit fails, the copy is removed and the
-/// receipt becomes `.failed(reason)` as usual, so the handover service's
-/// retry with the same path admits again: the phone keeps its copy then.
+/// the admission wrote is on the disk first. The parent of every folder
+/// `admit` created, the copy and its meeting folder are synced
+/// (`F_FULLFSYNC`, `fsync` where that fails), and the receipt, the meeting
+/// and its asset commit in one durable transaction
+/// (`MeetingStore.saveDurably(_:meeting:asset:)`), so no crash, full disk
+/// or busy store leaves a `.complete` receipt without its meeting. When
+/// that commit fails, the receipt is saved `.failed(reason)` durably
+/// (`MeetingStore.saveDurably(_:)`), so the handover service's retry with
+/// the same path admits again, and the copy is removed only once that save
+/// succeeds: a failed commit can still be replayed after a crash, and its
+/// meeting then needs the copy. The phone keeps its own copy either way.
 /// `enqueue` after the commit is `ProcessingPipeline.enqueueSaved` in the
 /// production wiring (`init(currentPipeline:)`); its failure does not undo
 /// the admission, the meeting waits `.queued` for the next launch's resume.
@@ -155,19 +162,51 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     do {
       try await store.saveDurably(receipt, meeting: meeting, asset: asset)
     } catch {
-      try? FileManager.default.removeItem(at: destination)
-      // Another phone's receipt is left as it is.
-      if error as? MeetingStoreError != .receiptOfAnotherDevice(metadata.recordingID) {
+      if error as? MeetingStoreError == .receiptOfAnotherDevice(metadata.recordingID) {
+        // The refusal wrote nothing, and another phone's receipt is left as
+        // it is.
+        try? FileManager.default.removeItem(at: destination)
+      } else {
+        // A failed commit is not proof that nothing committed: a WAL sync
+        // that fails leaves the commit's frames in the WAL, and recovery
+        // after a crash replays them. The durable `.failed` save writes over
+        // them, so the copy goes only once that save is on the disk;
+        // otherwise it stays, an orphan at worst, and a replayed admission
+        // still finds its master.
         receipt.state = .failed("admit: \(error)")
-        try? await store.save(receipt)
+        if (try? await store.saveDurably(receipt)) != nil {
+          try? FileManager.default.removeItem(at: destination)
+        }
       }
       throw error
     }
     try? FileManager.default.removeItem(at: file)
     // Admitted: a pipeline that cannot take the meeting now leaves it
     // `.queued`, and the next launch resumes it.
-    try? await enqueue(meeting, asset)
+    do {
+      try await enqueue(meeting, asset)
+    } catch {
+      Self.logNotEnqueued(meetingID, error)
+    }
     return meetingID
+  }
+
+  #if canImport(os)
+    private static let logger = Logger(subsystem: "app.steno.core", category: "intake")
+  #endif
+
+  /// Logs an enqueue that failed after the admission committed; the error
+  /// may carry a path, so it stays private. Rust: the `warn` in
+  /// `RecordingIntake::admit`.
+  private static func logNotEnqueued(_ meetingID: UUID, _ error: any Error) {
+    #if canImport(os)
+      let (id, detail) = (meetingID.uuidString, String(describing: error))
+      logger.warning(
+        "admitted meeting \(id, privacy: .public) not enqueued: \(detail, privacy: .private)")
+    #else
+      FileHandle.standardError.write(
+        Data("steno intake: admitted meeting \(meetingID) not enqueued: \(error)\n".utf8))
+    #endif
   }
 
   /// `folder` and the folders above it that do not exist yet, deepest

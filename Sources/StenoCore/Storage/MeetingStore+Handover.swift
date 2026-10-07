@@ -67,6 +67,16 @@ extension MeetingStore {
     try await writer.write { db in try HandoverReceiptRow(receipt).save(db) }
   }
 
+  /// `save(_:)` on the disk when it returns (`writeDurably`): the phone
+  /// intake's `.failed` receipt after a failed admission commit, whose
+  /// frames may still sit in the WAL for recovery to replay. This commit
+  /// writes over them, or voids them when the WAL restarts, so once it
+  /// returns no restart brings the admission back.
+  /// Rust: `Store::save_handover_receipt_durably`.
+  public func saveDurably(_ receipt: HandoverReceipt) async throws {
+    try await writeDurably { db in try HandoverReceiptRow(receipt).save(db) }
+  }
+
   /// The phone intake's admission: the `.complete` receipt, the meeting and
   /// its asset in one transaction, on the disk when it returns
   /// (`writeDurably`). The phone deletes its copy once `complete` answers

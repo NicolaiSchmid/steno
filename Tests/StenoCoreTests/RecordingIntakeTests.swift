@@ -189,12 +189,14 @@ import Testing
   /// stays as the listener left it and the upload stays for the retry.
   /// Two separate commits would leave a `.complete` receipt without its
   /// meeting, and the phone's retried `complete` would answer 200 for a
-  /// meeting that never existed.
-  @Test func aFailedAdmissionLeavesNoCompleteReceiptEvenWhenTheFailedSaveFails() async throws {
+  /// meeting that never existed. The copy stays too: without a durable
+  /// `.failed` receipt over it, a failed commit whose frames reached the WAL
+  /// can be replayed after a crash, and its meeting then needs the copy.
+  @Test func aFailedAdmissionWhoseFailedSaveFailsKeepsTheCopyAndNoCompleteReceipt() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.inMemory()
-    let (settingsStore, _) = try await Self.audioFolder(in: directory, for: store)
+    let (settingsStore, audio) = try await Self.audioFolder(in: directory, for: store)
     var verifying = SampleData.handoverReceipt()
     verifying.state = .verifying
     try await store.save(verifying)
@@ -211,12 +213,24 @@ import Testing
       "never .complete without its meeting")
     #expect(try await store.meetings().isEmpty)
     #expect(FileManager.default.fileExists(atPath: upload.path), "the upload stays for the retry")
+    let copies = try Self.copies(in: audio)
+    #expect(copies.count == 1, "the copy stays")
+    #expect(try copies.first.map { try Data(contentsOf: $0) } == Data([1]))
+  }
+
+  /// The files in the meeting folders under `audio`.
+  static func copies(in audio: URL) throws -> [URL] {
+    guard FileManager.default.fileExists(atPath: audio.path) else { return [] }
+    return try FileManager.default.contentsOfDirectory(at: audio, includingPropertiesForKeys: nil)
+      .flatMap { folder in
+        try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+      }
   }
 
   /// A receipt of another phone under the same recording id is never
   /// completed. The admitting phone was revoked and the other one announced
   /// the id, before the intake read the receipt or between its read and its
-  /// commit (where the admitting phone also paired again). The intake
+  /// commit; either way the admitting phone then paired again. The intake
   /// refuses, and the other phone's receipt stays as it was: completed, it
   /// would answer that phone's `complete` with this meeting, and that phone
   /// would delete a recording never admitted.
@@ -384,7 +398,8 @@ import Testing
   /// `synchronous = FULL`, and leaves the writer at `NORMAL`. Every commit
   /// is a point a crash could stop at, and none holds the receipt without
   /// the meeting. A power loss after the commit cannot be tested; that it
-  /// ran under `FULL` can.
+  /// ran under `FULL` can. The enqueue (`ProcessingPipeline.enqueueSaved`)
+  /// writes nothing: no other commit saves the meeting with its asset.
   @Test func theProductionIntakeCommitsItsReceiptAndMeetingDurably() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -417,32 +432,47 @@ import Testing
       $0.tables.contains("handoverReceipt") && !$0.tables.contains("meeting")
     }
     #expect(receiptWithoutMeeting.isEmpty, "no commit holds the receipt without the meeting")
+    let meetingWithAsset = commits.filter { $0.tables.isSuperset(of: ["meeting", "audioAsset"]) }
+    #expect(meetingWithAsset.count == 1, "the enqueue writes nothing: \(commits)")
     #expect(try await CommitLog.synchronous(of: store) == 1, "the writer is back at NORMAL")
   }
 
-  /// A refused admission commits nothing under `FULL`: its durable
-  /// transaction rolls back, the `.failed` receipt commits as usual, and
-  /// the writer is back at `NORMAL`.
-  @Test func aRefusedAdmissionLeavesTheWriterAtNormal() async throws {
+  /// A refused admission commits nothing but its `.failed` receipt, and
+  /// that one under `FULL`, while the copy is still there: a failed commit
+  /// is not proof that nothing committed, and the durable `.failed` commit
+  /// is what writes over a commit a crash could replay. Only then is the
+  /// copy removed, and the writer is back at `NORMAL`.
+  @Test func aRefusedAdmissionSavesFailedDurablyBeforeItRemovesTheCopy() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
     let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
-    let (settingsStore, _) = try await Self.audioFolder(in: directory, for: store)
+    let (settingsStore, audio) = try await Self.audioFolder(in: directory, for: store)
     let intake = RecordingIntake(store: store, settings: settingsStore, enqueue: { _, _ in })
     let upload = try Self.upload(in: directory)
     try await Self.refuseWrites(store)
-    let log = try await CommitLog.install(on: store)
+    // The copies on the disk as each commit starts.
+    let copiesAtCommit = Mutex<[Int]>([])
+    let log = try await CommitLog.install(on: store) {
+      let count = (try? Self.copies(in: audio).count) ?? -1
+      copiesAtCommit.withLock { $0.append(count) }
+    }
 
     await #expect(throws: (any Error).self) {
       _ = try await intake.admit(
         file: upload, metadata: SampleData.recordingMetadata(), device: SampleData.pairedDevice())
     }
 
-    let receipts = log.commits.filter { $0.tables.contains("handoverReceipt") }
-    #expect(receipts.map(\.synchronous) == [1])
+    #expect(log.commits == [CommitLog.Commit(synchronous: 2, tables: ["handoverReceipt"])])
+    #expect(copiesAtCommit.withLock { $0 } == [1], "the copy is there when the receipt commits")
+    #expect(try Self.copies(in: audio).isEmpty, "and removed after")
     #expect(try await CommitLog.synchronous(of: store) == 1)
   }
 
+  /// A `.complete` receipt whose meeting is gone (the separate receipt and
+  /// meeting commits of earlier releases, with a crash or a full disk
+  /// between them) is not an idempotent return: the intake admits the file
+  /// again into a new meeting, since the phone never got its 200 and still
+  /// holds the recording. Rust: `a_complete_receipt_whose_meeting_is_gone_is_admitted_again`.
   @Test func aCompleteReceiptWhoseMeetingIsGoneIsAdmittedAgain() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
