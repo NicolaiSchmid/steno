@@ -1,12 +1,13 @@
 //! `delivery` rows.
 //! Swift: the delivery methods of `Sources/StenoCore/Storage/MeetingStore.swift`.
 
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, Row, params};
 use uuid::Uuid;
 
 use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
 use super::{Result, Store, execute_cached, query_all, upsert_sql};
-use crate::model::{Delivery, DeliveryStatus};
+use crate::model::{Delivery, DeliveryStatus, DeliveryStatusKind, MeetingStateKind};
 
 const COLUMNS: &str =
     "id, meetingID, destinationID, status, failureMessage, lastAttemptAt, receipt";
@@ -63,6 +64,34 @@ impl Store {
                 )?;
             }
             Ok(())
+        })
+    }
+
+    /// The ready meetings with an export left unfinished, oldest first: a
+    /// delivery still `pending` (the process ended while it ran) or one
+    /// that `failed` with its last attempt before `attempted_before` (or
+    /// none). The launch delivers these again. Rust only: Swift retried a
+    /// failed export only when asked.
+    pub fn meetings_with_unfinished_deliveries(
+        &self,
+        attempted_before: DateTime<Utc>,
+    ) -> Result<Vec<Uuid>> {
+        self.read(|connection| {
+            query_all(
+                connection,
+                "SELECT meeting.id AS id FROM meeting WHERE meeting.state = ?1 AND EXISTS ( \
+                 SELECT 1 FROM delivery WHERE delivery.meetingID = meeting.id AND ( \
+                 delivery.status = ?2 OR (delivery.status = ?3 AND \
+                 (delivery.lastAttemptAt IS NULL OR delivery.lastAttemptAt < ?4)))) \
+                 ORDER BY meeting.startedAt, meeting.id",
+                params![
+                    MeetingStateKind::Ready.as_str(),
+                    DeliveryStatusKind::Pending.as_str(),
+                    DeliveryStatusKind::Failed.as_str(),
+                    DbDate(attempted_before),
+                ],
+                |row| row.col::<DbUuid>("id"),
+            )
         })
     }
 

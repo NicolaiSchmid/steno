@@ -81,9 +81,9 @@ pub use intake::{
 };
 pub use lane_merger::LaneMerger;
 pub use pipeline::{
-    BACKGROUND_RUN_LOG, MonotonicClock, Now, OPERATION_PANICKED, Operation, PipelineDependencies,
-    PipelineFailure, ProcessingPipeline, QuitLatch, ReprocessError, SharedSpeechEngine,
-    SystemClock, WeakSpeechEngine,
+    BACKGROUND_RUN_LOG, MonotonicClock, Now, OPERATION_PANICKED, Operation, PipelineClaims,
+    PipelineDependencies, PipelineFailure, ProcessingPipeline, QuitLatch, ReprocessError,
+    SharedSpeechEngine, SystemClock, WeakSpeechEngine,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use speaker_memory::StoreSpeakerMemory;

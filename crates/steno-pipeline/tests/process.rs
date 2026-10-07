@@ -3183,3 +3183,124 @@ fn the_generated_fixtures_match_the_committed_files() {
         assert_eq!(generated, committed, "{}", output.relative_path);
     }
 }
+
+/// What the app does after `resume_unfinished` at launch: an export a
+/// previous process left `pending` (it ended mid-delivery) or that failed
+/// before the launch is delivered again; a failure after the launch and a
+/// meeting that is not ready are left alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn exports_left_unfinished_are_delivered_again_at_launch() {
+    let world = world(
+        false,
+        Some(|vault| FakeDestination::new(vault)),
+        AudioRetention::KeepForever,
+    );
+    let pipeline = &world.pipeline;
+    let mut ids = Vec::new();
+    for _ in 0..4 {
+        ids.push(enqueue_call(&world, pipeline));
+    }
+    pipeline.wait_until_idle().await;
+    let launch = world.now + Duration::minutes(5);
+    let mark = |id: Uuid, status: DeliveryStatus, attempt: DateTime<Utc>| {
+        let mut delivery = world.store.deliveries(id).unwrap().remove(0);
+        delivery.status = status;
+        delivery.last_attempt_at = Some(attempt);
+        world.store.save_delivery(&delivery).unwrap();
+    };
+    let failed = || DeliveryStatus::Failed("the vault was offline".to_owned());
+    mark(ids[0], DeliveryStatus::Pending, world.now);
+    mark(ids[1], failed(), world.now);
+    mark(ids[2], failed(), launch + Duration::seconds(1));
+    mark(ids[3], DeliveryStatus::Pending, world.now);
+    world
+        .store
+        .set_state(ids[3], MeetingState::Queued, world.now)
+        .unwrap();
+
+    let mut started = pipeline.redeliver_unfinished(launch).unwrap();
+    started.sort();
+    let mut expected = vec![ids[0], ids[1]];
+    expected.sort();
+    assert_eq!(started, expected);
+    pipeline.wait_until_idle().await;
+    for id in &ids[..2] {
+        assert_eq!(
+            world.store.deliveries(*id).unwrap()[0].status,
+            DeliveryStatus::Delivered
+        );
+    }
+    assert!(matches!(
+        world.store.deliveries(ids[2]).unwrap()[0].status,
+        DeliveryStatus::Failed(_)
+    ));
+    assert_eq!(
+        world.store.deliveries(ids[3]).unwrap()[0].status,
+        DeliveryStatus::Pending
+    );
+    assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
+}
+
+/// A meeting another operation holds is skipped at launch, and once the
+/// pipeline quits nothing is started.
+#[tokio::test(flavor = "multi_thread")]
+async fn redelivering_at_launch_skips_a_meeting_in_flight_and_stops_once_quitting() {
+    let world = world(
+        false,
+        Some(|vault| FakeDestination::new(vault)),
+        AudioRetention::KeepForever,
+    );
+    let pipeline = &world.pipeline;
+    let id = enqueue_call(&world, pipeline);
+    pipeline.wait_until_idle().await;
+    let mut delivery = world.store.deliveries(id).unwrap().remove(0);
+    delivery.status = DeliveryStatus::Pending;
+    world.store.save_delivery(&delivery).unwrap();
+    let launch = world.now + Duration::minutes(5);
+
+    let held = pipeline.claim_redeliver(id).unwrap();
+    assert_eq!(
+        pipeline.redeliver_unfinished(launch).unwrap(),
+        Vec::<Uuid>::new()
+    );
+    drop(held);
+    pipeline.quit();
+    assert_eq!(
+        pipeline.redeliver_unfinished(launch).unwrap(),
+        Vec::<Uuid>::new()
+    );
+}
+
+/// Pipelines over dependencies that share their claims (the services'
+/// reloads) refuse a meeting another of them holds, so a reload's new
+/// pipeline never runs a second operation on a meeting the retired one is
+/// still delivering.
+#[tokio::test(flavor = "multi_thread")]
+async fn pipelines_that_share_claims_refuse_each_others_meetings() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let id = enqueue_call(&world, &world.pipeline);
+    world.pipeline.wait_until_idle().await;
+    let claims = steno_pipeline::PipelineClaims::default();
+    let retired = ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_claims(claims.clone()),
+    );
+    let replacement =
+        ProcessingPipeline::new(world.pipeline.dependencies().clone().with_claims(claims));
+
+    let held = retired.claim_redeliver(id).unwrap();
+    assert_eq!(replacement.in_flight(), vec![id]);
+    let refused = replacement.claim_redeliver(id).map(drop).unwrap_err();
+    assert!(
+        refused.reason.contains("already being processed"),
+        "{refused}"
+    );
+    let stored = world.store.meeting(id).unwrap().unwrap();
+    let asset = world.store.asset(id).unwrap().unwrap();
+    assert!(replacement.enqueue(&stored, &asset).is_err());
+    drop(held);
+    assert_eq!(replacement.in_flight(), Vec::<Uuid>::new());
+}

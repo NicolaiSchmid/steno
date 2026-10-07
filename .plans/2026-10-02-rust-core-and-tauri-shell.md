@@ -939,6 +939,17 @@ still has to draw the window side. `[ ]` is not ported yet.
     panics after that write (`a_panic_after_the_ready_write_leaves_the_meeting_ready`).
     Swift has no counterpart. P13's resume guard is the crash-loop bullet under the
     services list (#228).
+- An export the app was writing when it ended is not left `pending` for good: after
+  `resume_unfinished`, the launch delivers again every ready meeting whose delivery is
+  still `pending`, or failed before the launch
+  (`ProcessingPipeline::redeliver_unfinished`, `Store::meetings_with_unfinished_deliveries`;
+  `exports_left_unfinished_are_delivered_again_at_launch`). A meeting that became ready
+  but whose dispatcher never wrote a row stays without an export until "Export again".
+  The pipelines a reload builds share one set of claims (`PipelineClaims`, as they share
+  the `QuitLatch`), so the new pipeline refuses a meeting the retired one still
+  processes or delivers
+  (`a_re_export_the_retired_pipeline_runs_holds_its_meeting_after_a_reload`). Rust only:
+  Swift retried a failed export only when asked, and its reload had the same gap.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file

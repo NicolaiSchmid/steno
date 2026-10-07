@@ -10,8 +10,8 @@ use steno_core::AudioRetention;
 use steno_core::protocols::BoundaryResult;
 use steno_host::services::Pipeline;
 use steno_pipeline::{
-    Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline, QuitLatch,
-    RetentionSweep, SweepIncomplete,
+    Operation, PipelineClaims, PipelineDependencies, PipelineFailure, ProcessingPipeline,
+    QuitLatch, RetentionSweep, SweepIncomplete,
 };
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
@@ -53,10 +53,15 @@ struct Current {
 }
 
 impl Current {
-    /// The pipeline over `built`, sharing `latch`.
-    fn new(built: BuiltPipeline, latch: &QuitLatch) -> Self {
+    /// The pipeline over `built`, sharing `latch` and `claims`.
+    fn new(built: BuiltPipeline, latch: &QuitLatch, claims: &PipelineClaims) -> Self {
         Current {
-            pipeline: ProcessingPipeline::new(built.dependencies.with_quit_latch(latch.clone())),
+            pipeline: ProcessingPipeline::new(
+                built
+                    .dependencies
+                    .with_quit_latch(latch.clone())
+                    .with_claims(claims.clone()),
+            ),
             engine: built.engine,
         }
     }
@@ -68,13 +73,16 @@ impl Current {
 /// started with. Everything that enqueues resolves `current()` per call,
 /// so a recording that ends after a reload goes through the new one.
 /// Every pipeline it builds shares one [`QuitLatch`], so
-/// [`quit`](Self::quit) reaches the retired ones too. Held by `App`, the
+/// [`quit`](Self::quit) reaches the retired ones too, and one set of
+/// [`PipelineClaims`], so a meeting a retired pipeline still processes or
+/// delivers is refused by the new one instead of run twice at once. Held by `App`, the
 /// recorder, the phone intake and [`HostPipeline`].
 pub struct CurrentPipeline {
     current: Mutex<Current>,
     make: MakeDependencies,
     runtime: tokio::runtime::Handle,
     quit_latch: QuitLatch,
+    claims: PipelineClaims,
 }
 
 impl CurrentPipeline {
@@ -86,11 +94,13 @@ impl CurrentPipeline {
         runtime: tokio::runtime::Handle,
     ) -> Self {
         let quit_latch = QuitLatch::default();
+        let claims = PipelineClaims::default();
         CurrentPipeline {
-            current: Mutex::new(Current::new(built, &quit_latch)),
+            current: Mutex::new(Current::new(built, &quit_latch, &claims)),
             make,
             runtime,
             quit_latch,
+            claims,
         }
     }
 
@@ -130,7 +140,7 @@ impl CurrentPipeline {
     /// the retired pipeline's jobs and the new one's share them and the
     /// one sidecar child.
     pub fn reload(&self) -> Result<(), BuildError> {
-        let replacement = Current::new((self.make)()?, &self.quit_latch);
+        let replacement = Current::new((self.make)()?, &self.quit_latch, &self.claims);
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });
@@ -523,6 +533,52 @@ mod tests {
         );
         release.notify_one();
         eventually("the re-export released its meeting", || {
+            service.pipeline.current().in_flight().is_empty()
+        })
+        .await;
+    }
+
+    /// A reload builds its pipeline from fresh dependencies, yet a re-export
+    /// the retired pipeline is still running holds its meeting on the new
+    /// one too: a second re-export is refused instead of running alongside.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_re_export_the_retired_pipeline_runs_holds_its_meeting_after_a_reload() {
+        let (_dir, store) = temp_store();
+        let id = ready_meeting(&store).id;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let make: MakeDependencies = {
+            let (store, release, asked) = (store.clone(), release.clone(), asked.clone());
+            Arc::new(move || {
+                let mut dependencies = fake_dependencies(&store, "fake-engine");
+                dependencies.dispatcher = Arc::new(HeldDispatcher {
+                    release: release.clone(),
+                    asked: asked.clone(),
+                    panics: false,
+                });
+                Ok(crate::testing::built(dependencies))
+            })
+        };
+        let service = Arc::new(HostPipeline {
+            pipeline: Arc::new(CurrentPipeline::new(
+                make().unwrap(),
+                make,
+                tokio::runtime::Handle::current(),
+            )),
+            sweep: RetentionSweep::new(store.clone()),
+        });
+        let first = service.clone();
+        assert_eq!(call(move || first.redeliver(id)), Ok(()));
+        reached(&asked).await;
+        service.pipeline.reload().unwrap();
+        assert_eq!(service.pipeline.current().in_flight(), vec![id]);
+        let second = service.clone();
+        assert_eq!(
+            call(move || second.redeliver(id)),
+            Err(format!("deliver: meeting {id} is already being processed"))
+        );
+        release.notify_one();
+        eventually("the retired re-export released its meeting", || {
             service.pipeline.current().in_flight().is_empty()
         })
         .await;

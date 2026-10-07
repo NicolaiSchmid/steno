@@ -235,6 +235,36 @@ impl QuitLatch {
     }
 }
 
+/// The meetings with an operation in progress and the recordings being
+/// processed, shared by every pipeline built over dependencies that carry
+/// it (the services' reloads share the app's), so a reload's new pipeline
+/// refuses a meeting the retired one still processes or delivers instead
+/// of running a second operation on it alongside. A fresh set from
+/// [`PipelineDependencies::new`]; clones share theirs. Rust only: Swift
+/// had one pipeline actor per reload, with the same gap.
+#[derive(Debug, Clone, Default)]
+pub struct PipelineClaims(Arc<Mutex<Claimed>>);
+
+#[derive(Debug, Default)]
+struct Claimed {
+    /// Meetings with an operation in progress.
+    meetings: BTreeSet<Uuid>,
+    /// Counts every admission to `meetings`; a stage whose count moved
+    /// was not alone for its whole span.
+    admissions: u64,
+    /// The assets of the background runs `enqueue` and `resume_unfinished`
+    /// started.
+    assets: BTreeSet<Uuid>,
+}
+
+impl PipelineClaims {
+    fn lock(&self) -> MutexGuard<'_, Claimed> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// A speech engine with the jobs that claim it, shared by every pipeline
 /// built over it: a job claims the engine from its warm-up to its last
 /// lane, and the engine is released only once no job on any of those
@@ -400,6 +430,9 @@ pub struct PipelineDependencies {
     /// A fresh latch from [`new`](Self::new); clones share theirs, and
     /// [`with_quit_latch`](Self::with_quit_latch) shares the caller's.
     pub quit_latch: QuitLatch,
+    /// Fresh claims from [`new`](Self::new); clones share theirs, and
+    /// [`with_claims`](Self::with_claims) shares the caller's.
+    pub claims: PipelineClaims,
 }
 
 impl PipelineDependencies {
@@ -427,6 +460,7 @@ impl PipelineDependencies {
             now: Arc::new(Utc::now),
             clock: Arc::new(SystemClock::default()),
             quit_latch: QuitLatch::default(),
+            claims: PipelineClaims::default(),
         }
     }
 
@@ -469,23 +503,25 @@ impl PipelineDependencies {
         self.quit_latch = latch;
         self
     }
+
+    /// Carries `claims` instead of the fresh ones from [`new`](Self::new),
+    /// so every pipeline built over dependencies that carry them refuses a
+    /// meeting another of them holds (the services' reloads share the
+    /// app's).
+    #[must_use]
+    pub fn with_claims(mut self, claims: PipelineClaims) -> Self {
+        self.claims = claims;
+        self
+    }
 }
 
 /// The bookkeeping behind the pipeline's one mutex.
 #[derive(Default)]
 struct State {
-    /// Meetings with an operation in progress.
-    in_flight: BTreeSet<Uuid>,
-    /// Counts every admission to `in_flight`; a stage whose count moved
-    /// was not alone for its whole span.
-    admissions: u64,
     runs: HashMap<Uuid, ProcessingRun>,
     /// The background runs started by `enqueue` and `resume_unfinished`,
-    /// by asset id.
+    /// by asset id, and by `redeliver_unfinished`, by a key of their own.
     running: HashMap<Uuid, JoinHandle<()>>,
-    /// Assets claimed for a background run that has not started yet
-    /// ([`Starting`]).
-    starting: BTreeSet<Uuid>,
 }
 
 struct Inner {
@@ -756,6 +792,11 @@ impl ProcessingPipeline {
         (self.inner.dependencies.now)()
     }
 
+    /// The claims every pipeline sharing them sees.
+    fn claims(&self) -> MutexGuard<'_, Claimed> {
+        self.inner.dependencies.claims.lock()
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.inner
             .state
@@ -767,7 +808,7 @@ impl ProcessingPipeline {
     /// run has been admitted.
     #[must_use]
     pub fn in_flight(&self) -> Vec<Uuid> {
-        self.state().in_flight.iter().copied().collect()
+        self.claims().meetings.iter().copied().collect()
     }
 
     /// Sets the pipeline's [`QuitLatch`] for the app's exit, which quits
@@ -790,7 +831,7 @@ impl ProcessingPipeline {
     /// `queued` for the next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
         let starting = self.claim_or_refuse(meeting, asset)?;
-        self.enqueue_claimed(meeting, asset, &starting)
+        self.enqueue_claimed(meeting, asset, starting)
     }
 
     /// [`ProcessingPipeline::enqueue`] of a meeting the caller saved
@@ -802,8 +843,8 @@ impl ProcessingPipeline {
     /// nothing starts and the meeting waits `queued` for the next launch.
     /// Swift: `ProcessingPipeline.enqueueSaved`.
     pub fn enqueue_saved(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let _starting = self.claim_or_refuse(meeting, asset)?;
-        self.start(asset, Turn::Now(None));
+        let starting = self.claim_or_refuse(meeting, asset)?;
+        self.start(asset, Turn::Now(None), starting);
         Ok(())
     }
 
@@ -819,13 +860,13 @@ impl ProcessingPipeline {
     }
 
     /// `enqueue` once the asset is claimed: the claim is held from the
-    /// check to the run's start, so a second call cannot start a second
+    /// check to the run's end, so a second call cannot start a second
     /// run.
     fn enqueue_claimed(
         &self,
         meeting: &Meeting,
         asset: &AudioAsset,
-        _starting: &Starting,
+        starting: Starting,
     ) -> Result<()> {
         let mut queued = meeting.clone();
         queued.state = MeetingState::Queued;
@@ -839,7 +880,7 @@ impl ProcessingPipeline {
         // Processed afresh: earlier runs that ended with the app no longer
         // count against it.
         RunCount::of(&asset).clear();
-        self.start(&asset, Turn::Now(None));
+        self.start(&asset, Turn::Now(None), starting);
         Ok(())
     }
 
@@ -877,24 +918,23 @@ impl ProcessingPipeline {
             .claim_start(meeting_id, asset.id)
             .ok_or(ReprocessError::Busy(meeting_id))?;
         asset.expires_at = None;
-        Ok(self.enqueue_claimed(&meeting, &asset, &starting)?)
+        Ok(self.enqueue_claimed(&meeting, &asset, starting)?)
     }
 
-    /// Claims `asset_id` for a background run of `meeting_id`, until the
-    /// claim drops; `None` while the asset runs or is claimed, or the
-    /// meeting is in flight. The check and the claim are one step under
-    /// the state lock.
+    /// Claims `asset_id` for a background run of `meeting_id` in the
+    /// shared claims, until the claim drops before its run starts or the
+    /// run ends; `None` while the asset runs or is claimed, or the meeting
+    /// is in flight, on any pipeline sharing the claims. The check and the
+    /// claim are one step under the claims' lock.
     fn claim_start(&self, meeting_id: Uuid, asset_id: Uuid) -> Option<Starting> {
-        let mut state = self.state();
-        if state.running.contains_key(&asset_id)
-            || state.in_flight.contains(&meeting_id)
-            || !state.starting.insert(asset_id)
-        {
+        let mut claims = self.claims();
+        if claims.meetings.contains(&meeting_id) || !claims.assets.insert(asset_id) {
             return None;
         }
         Some(Starting {
             pipeline: self.clone(),
             asset_id,
+            started: false,
         })
     }
 
@@ -922,7 +962,7 @@ impl ProcessingPipeline {
         let mut resumed = Vec::new();
         let mut alone = Vec::new();
         for meeting in meetings {
-            if self.state().in_flight.contains(&meeting.id) {
+            if self.claims().meetings.contains(&meeting.id) {
                 continue;
             }
             let Some(mut asset) =
@@ -977,14 +1017,14 @@ impl ProcessingPipeline {
             }
             // Never refused: no run asks to go alone before the loop ends.
             let shared = turns.clone().try_read_owned().ok();
-            self.start(&asset, Turn::Now(shared));
+            self.start(&asset, Turn::Now(shared), starting);
             resumed.push(meeting.id);
         }
         let mut turns_alone = Vec::new();
-        for (meeting_id, asset, _starting) in alone {
+        for (meeting_id, asset, starting) in alone {
             let (turn, waiting) = oneshot::channel();
             turns_alone.push(turn);
-            self.start(&asset, Turn::Alone(waiting));
+            self.start(&asset, Turn::Alone(waiting), starting);
             resumed.push(meeting_id);
         }
         if !turns_alone.is_empty() {
@@ -999,6 +1039,53 @@ impl ProcessingPipeline {
         Ok(resumed)
     }
 
+    /// Launch recovery for the exports: every ready meeting whose delivery
+    /// a previous process left `pending` (it ended mid-delivery) or that
+    /// failed before `attempted_before` is delivered again in the
+    /// background, as a re-export, so an export the app was writing when it
+    /// ended is finished and a failed one is tried once more. A meeting
+    /// another operation holds is skipped: its own run delivers it. The app
+    /// passes its launch time, before `resume_unfinished`. Returns the
+    /// meetings whose delivery was started: none once the pipeline
+    /// [quits](Self::quit). Needs a `tokio` runtime. Rust only.
+    pub fn redeliver_unfinished(&self, attempted_before: DateTime<Utc>) -> Result<Vec<Uuid>> {
+        if self.quitting() {
+            return Ok(Vec::new());
+        }
+        let meetings = attributing(
+            PipelineStage::Deliver,
+            self.store()
+                .meetings_with_unfinished_deliveries(attempted_before),
+        )?;
+        let mut started = Vec::new();
+        for meeting_id in meetings {
+            // A refusal is a meeting in flight, which delivers at the end
+            // of its own run.
+            let Ok(operation) = self.claim_redeliver(meeting_id) else {
+                continue;
+            };
+            self.spawn_tracked(async move {
+                let _ = operation.await;
+            });
+            started.push(meeting_id);
+        }
+        Ok(started)
+    }
+
+    /// Spawns `work` among the background runs
+    /// [`wait_until_idle`](Self::wait_until_idle) waits for, under a key of
+    /// its own.
+    fn spawn_tracked(&self, work: impl Future<Output = ()> + Send + 'static) {
+        let key = Uuid::new_v4();
+        let pipeline = self.clone();
+        let mut state = self.state();
+        let handle = tokio::spawn(async move {
+            let _running = Running { pipeline, key };
+            work.await;
+        });
+        state.running.insert(key, handle);
+    }
+
     /// The state lock is held from the spawn to the insert, so the task
     /// cannot finish and remove its entry before the entry exists; the
     /// task's [`Running`] mark removes the entry however the task ends, a
@@ -1006,8 +1093,9 @@ impl ProcessingPipeline {
     /// counted in the meeting's folder before it starts (on this thread,
     /// unless it waits for its [`Turn`]), and the count is cleared when it
     /// ends or the run taken back when the app exits first
-    /// ([`CountedRun`]). The caller holds the asset's [`Starting`] claim.
-    fn start(&self, asset: &AudioAsset, turn: Turn) {
+    /// ([`CountedRun`]). It takes the asset's [`Starting`] claim, which the
+    /// run holds until it ends; a run that does not start releases it.
+    fn start(&self, asset: &AudioAsset, turn: Turn, starting: Starting) {
         let asset_id = asset.id;
         let latch = self.inner.dependencies.quit_latch.clone();
         let count = RunCount::of(asset);
@@ -1024,7 +1112,7 @@ impl ProcessingPipeline {
         let handle = tokio::spawn(async move {
             let _running = Running {
                 pipeline: pipeline.clone(),
-                asset_id,
+                key: asset_id,
             };
             let (_shared, _alone) = match turn {
                 Turn::Now(shared) => (shared, None),
@@ -1065,6 +1153,8 @@ impl ProcessingPipeline {
             }
         });
         state.running.insert(asset_id, handle);
+        drop(state);
+        starting.started();
     }
 
     /// Waits for every processing task started by `enqueue` or
@@ -1592,14 +1682,14 @@ impl ProcessingPipeline {
     /// cleared however the operation ends: completed, failed, panicked or
     /// dropped mid-way (a cancelled task).
     fn admit(&self, meeting_id: Uuid, stage: PipelineStage) -> Result<Admitted> {
-        let mut guard = self.state();
-        if !guard.in_flight.insert(meeting_id) {
+        let mut claims = self.claims();
+        if !claims.meetings.insert(meeting_id) {
             return Err(PipelineFailure::new(
                 stage,
                 format!("meeting {meeting_id} is already being processed"),
             ));
         }
-        guard.admissions += 1;
+        claims.admissions += 1;
         Ok(Admitted {
             pipeline: self.clone(),
             meeting_id,
@@ -1668,16 +1758,16 @@ impl ProcessingPipeline {
     ) -> Result<T> {
         self.post(stage, lane, meeting_id);
         let (alone, admissions_before) = {
-            let guard = self.state();
-            (guard.in_flight.len() == 1, guard.admissions)
+            let claims = self.claims();
+            (claims.meetings.len() == 1, claims.admissions)
         };
         let clock = &self.inner.dependencies.clock;
         let started = clock.seconds();
         let value = attributing(stage, body.await)?;
         let seconds = clock.seconds() - started;
         let sample = {
+            let alone = alone && self.claims().admissions == admissions_before;
             let mut guard = self.state();
-            let alone = alone && guard.admissions == admissions_before;
             let now = self.now();
             guard
                 .runs
@@ -2193,9 +2283,8 @@ struct Admitted {
 
 impl Drop for Admitted {
     fn drop(&mut self) {
-        let mut guard = self.pipeline.state();
-        guard.in_flight.remove(&self.meeting_id);
-        guard.runs.remove(&self.meeting_id);
+        self.pipeline.claims().meetings.remove(&self.meeting_id);
+        self.pipeline.state().runs.remove(&self.meeting_id);
     }
 }
 
@@ -2233,29 +2322,43 @@ fn not_started(asset_id: Uuid) {
     );
 }
 
-/// An asset claimed for a background run ([`ProcessingPipeline::claim_start`]);
-/// dropping it releases the claim, by which time the run is in `running`
-/// or was not started.
+/// An asset claimed in the shared claims for a background run
+/// ([`ProcessingPipeline::claim_start`]). Dropped before the run starts, it
+/// releases the claim; once [`started`](Self::started), the run's
+/// [`Running`] mark releases it when the run ends.
 struct Starting {
     pipeline: ProcessingPipeline,
     asset_id: Uuid,
+    started: bool,
+}
+
+impl Starting {
+    /// Hands the claim to the run that just started.
+    fn started(mut self) {
+        self.started = true;
+    }
 }
 
 impl Drop for Starting {
     fn drop(&mut self) {
-        self.pipeline.state().starting.remove(&self.asset_id);
+        if !self.started {
+            self.pipeline.claims().assets.remove(&self.asset_id);
+        }
     }
 }
 
-/// A background run's entry in `running`; dropping it removes the entry.
+/// A background run's entry in `running` (keyed by its asset id, or by a
+/// key of its own for a re-export), and in the claims' assets for a
+/// processing run; dropping it removes both.
 struct Running {
     pipeline: ProcessingPipeline,
-    asset_id: Uuid,
+    key: Uuid,
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.pipeline.state().running.remove(&self.asset_id);
+        self.pipeline.state().running.remove(&self.key);
+        self.pipeline.claims().assets.remove(&self.key);
     }
 }
 

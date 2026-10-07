@@ -696,12 +696,21 @@ impl App {
         {
             tracing::warn!(%error, "interrupted recordings could not be marked");
         }
-        match self.pipeline.current().resume_unfinished() {
+        let launched = Utc::now();
+        let pipeline = self.pipeline.current();
+        match pipeline.resume_unfinished() {
             Ok(resumed) if !resumed.is_empty() => {
                 tracing::info!(count = resumed.len(), "resumed unfinished meetings");
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
+        }
+        match pipeline.redeliver_unfinished(launched) {
+            Ok(started) if !started.is_empty() => {
+                tracing::info!(count = started.len(), "delivering unfinished exports again");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "unfinished exports could not be delivered"),
         }
         run_sweep(&self.sweep);
         host.register_login_item_on_first_launch();
