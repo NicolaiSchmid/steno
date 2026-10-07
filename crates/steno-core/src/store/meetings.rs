@@ -95,6 +95,20 @@ pub(super) fn current(connection: &Connection, id: Uuid) -> Result<Meeting> {
     fetch(connection, id)?.ok_or(StoreError::MeetingNotFound(id))
 }
 
+/// Writes `meeting` back `failed(reason)` with `updatedAt = now`.
+fn save_failed(
+    connection: &Connection,
+    meeting: &mut Meeting,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    meeting.state = MeetingState::Failed {
+        reason: reason.to_owned(),
+    };
+    meeting.updated_at = now;
+    save(connection, meeting)
+}
+
 /// Reads the row and overlays `results`' processing columns, so a stage
 /// that started minutes ago never writes back the scratchpad or tags it
 /// read then.
@@ -256,11 +270,7 @@ impl Store {
                 from_row,
             )?;
             for meeting in &mut meetings {
-                meeting.state = MeetingState::Failed {
-                    reason: reason.to_owned(),
-                };
-                meeting.updated_at = now;
-                save(transaction, meeting)?;
+                save_failed(transaction, meeting, reason, now)?;
             }
             Ok(meetings.into_iter().map(|meeting| meeting.id).collect())
         })
@@ -288,11 +298,7 @@ impl Store {
                 if meeting.state != MeetingState::Recording {
                     continue;
                 }
-                meeting.state = MeetingState::Failed {
-                    reason: reason.to_owned(),
-                };
-                meeting.updated_at = now;
-                save(transaction, &meeting)?;
+                save_failed(transaction, &mut meeting, reason, now)?;
                 failed.push(id);
             }
             Ok(failed)
