@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use chrono::{FixedOffset, Local, Offset as _, Utc};
+use chrono::{FixedOffset, Local, Offset as _};
 use steno_adapters::DeliveryCoordinator;
 use steno_audio::{CaptureSession, SymphoniaAudioCodec};
 use steno_core::{
@@ -30,6 +30,7 @@ use crate::pipeline::{
 };
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
+use crate::recovery::{LiveRecordingCheck, reconcile_interrupted};
 use crate::secrets::secret_store;
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 
@@ -126,6 +127,11 @@ pub struct App {
     /// What went wrong while building, for the shell's log; an unreadable
     /// API key is logged where it is read.
     pub startup_warnings: Vec<String>,
+    /// When the launch counts an interrupted recording's master as still
+    /// being written ([`crate::recovery`]).
+    pub live_recording_check: LiveRecordingCheck,
+    /// The launch's background half, for [`App::launch_finished`].
+    launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Held while the graph lives, so no second app or CLI command takes
     /// the same database; `None` on a filesystem without locks
     /// ([`DatabaseLockError::Unsupported`], a startup warning). Declared
@@ -424,8 +430,38 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         runtime,
         version: options.version,
         startup_warnings: warnings,
+        live_recording_check: LiveRecordingCheck::default(),
+        launch_work: std::sync::Mutex::default(),
         database_lock,
     })
+}
+
+/// The launch's work on the meetings a previous process left unfinished,
+/// in order: the interrupted recordings in `interrupted` are recovered,
+/// left alone while another process still writes them, or failed
+/// ([`reconcile_interrupted`]); meetings left queued or processing are
+/// processed again; the retention sweep runs. Blocks while a fresh master
+/// is sampled, so [`App::launch`] runs it on a blocking task.
+pub fn reconcile_at_launch(
+    store: &Arc<Store>,
+    pipeline: &CurrentPipeline,
+    sweep: &RetentionSweep,
+    interrupted: &[steno_core::Meeting],
+    check: &LiveRecordingCheck,
+    zone: FixedOffset,
+    runtime: &tokio::runtime::Handle,
+) {
+    let intake =
+        steno_pipeline::LocalRecordingIntake::over(store.clone(), pipeline.current(), zone);
+    reconcile_interrupted(store, &intake, interrupted, check, runtime);
+    match pipeline.current().resume_unfinished() {
+        Ok(resumed) if !resumed.is_empty() => {
+            tracing::info!(count = resumed.len(), "resumed unfinished meetings");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
+    }
+    run_sweep(sweep);
 }
 
 /// How long an exit waits for [`App::shutdown`] before the process ends
@@ -646,13 +682,18 @@ impl App {
     }
 
     /// Everything that happens once at launch, in order: the pipeline's
-    /// events are subscribed and routed into the host, interrupted
-    /// recordings become failed, meetings left queued or processing are
+    /// events are subscribed and routed into the host; the meetings left
+    /// `recording` are listed, before anything here can start a recording;
+    /// on a blocking task, since it may wait 1.5 s for a master that is
+    /// still written ([`reconcile_at_launch`]), those recordings are
+    /// recovered or failed, meetings left queued or processing are
     /// processed again, exports left unfinished are re-exported
     /// ([`ProcessingPipeline::redeliver_unfinished`](steno_pipeline::ProcessingPipeline::redeliver_unfinished)),
-    /// the retention sweep runs, the login item is registered the first
-    /// time, and the handover listener starts when a phone is already
-    /// paired. Swift: `AppController.launch`, which re-exported nothing.
+    /// the retention sweep runs, and the list is
+    /// refreshed; meanwhile the login item is registered the first time,
+    /// and the handover listener starts when a phone is already paired.
+    /// Swift: `AppController.launch`, which failed every interrupted
+    /// recording instead of recovering it.
     pub fn launch(&self, host: &Arc<Host>) {
         let recorder_host = host.clone();
         self.recorder
@@ -704,30 +745,51 @@ impl App {
             }
         });
 
-        if let Err(error) = self
+        let interrupted = self
             .store
-            .fail_interrupted_recordings(Store::INTERRUPTED_RECORDING_REASON, Utc::now())
-        {
-            tracing::warn!(%error, "interrupted recordings could not be marked");
-        }
-        let pipeline = self.pipeline.current();
-        match pipeline.resume_unfinished() {
-            Ok(resumed) if !resumed.is_empty() => {
-                tracing::info!(count = resumed.len(), "resumed unfinished meetings");
-            }
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
-        }
-        // After `resume_unfinished`, so a meeting it resumed is skipped:
-        // its run exports it.
-        match pipeline.redeliver_unfinished(&self.export_retries) {
+            .meetings_in_states(&[steno_core::MeetingStateKind::Recording])
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "interrupted recordings could not be listed");
+                Vec::new()
+            });
+        // Exports left unfinished go out again; a meeting the launch's work
+        // resumes exports itself.
+        match self.pipeline.current().redeliver_unfinished(&self.export_retries) {
             Ok(owed) if !owed.is_empty() => {
                 tracing::info!(count = owed.len(), "re-exporting unfinished exports");
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "unfinished exports could not be re-exported"),
         }
-        run_sweep(&self.sweep);
+        let work = {
+            let (store, pipeline, sweep) = (
+                self.store.clone(),
+                self.pipeline.clone(),
+                self.sweep.clone(),
+            );
+            let (check, zone, runtime) = (
+                self.live_recording_check.clone(),
+                self.zone,
+                self.runtime.clone(),
+            );
+            let host = host.clone();
+            tokio::task::spawn_blocking(move || {
+                reconcile_at_launch(
+                    &store,
+                    &pipeline,
+                    &sweep,
+                    &interrupted,
+                    &check,
+                    zone,
+                    &runtime,
+                );
+                host.store_changed();
+            })
+        };
+        *self
+            .launch_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(work);
         host.register_login_item_on_first_launch();
         if let Some(handover) = &self.handover {
             let handover = handover.clone();
@@ -742,12 +804,28 @@ impl App {
         }
         host.store_changed();
     }
+
+    /// Waits until the launch's background half ([`reconcile_at_launch`])
+    /// has run; at once when [`App::launch`] was not called or this was
+    /// already awaited.
+    pub async fn launch_finished(&self) {
+        let work = self
+            .launch_work
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(work) = work {
+            let _ = work.await;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use chrono::Utc;
 
     use steno_core::{
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
@@ -906,6 +984,7 @@ mod tests {
         app.store.save_meeting(&meeting).unwrap();
         let host = Arc::new(app.host().unwrap());
         app.launch(&host);
+        app.launch_finished().await;
         assert_eq!(
             app.store.meeting(meeting.id).unwrap().unwrap().state,
             steno_core::MeetingState::Failed {
@@ -952,6 +1031,60 @@ mod tests {
         let delivery = app.store.deliveries(meeting.id).unwrap().remove(0);
         assert_eq!(delivery.status, steno_core::DeliveryStatus::Delivered);
         assert!(delivery.receipt.is_some());
+    }
+
+    /// `App::launch` itself, over fakes: a call recording whose process
+    /// died (its writer dropped without `finish`) is recovered on the
+    /// launch's blocking task, queued with the `failed` end reason and
+    /// processed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_recovers_a_recording_the_last_process_left() {
+        let (dir, store) = crate::testing::temp_store();
+        let mut app = recording_app(&dir, &store);
+        app.live_recording_check.now =
+            Arc::new(|| std::time::SystemTime::now() + std::time::Duration::from_secs(3_600));
+        let meeting = steno_pipeline::LocalRecordingIntake::over(
+            store.clone(),
+            app.pipeline.current(),
+            app.zone,
+        )
+        .begin(
+            steno_core::MeetingSource::MacCall,
+            None,
+            None,
+            &[],
+            Utc::now(),
+        )
+        .unwrap();
+        let layout = steno_core::RecordingLayout::new(&dir.path().join("audio"), meeting.id);
+        let lanes = [steno_core::AudioLane::Mic, steno_core::AudioLane::System];
+        let mut writer = steno_audio::RecordingWriter::new(&layout, &lanes, false).unwrap();
+        let silence = [0.0f32; steno_audio::FRAME_SIZE];
+        for _ in 0..100 {
+            steno_audio::writer::RecordingWriting::write(
+                &mut writer,
+                &steno_audio::writer::LaneFrames {
+                    frame_count: steno_audio::FRAME_SIZE,
+                    lanes: &[&silence, &silence],
+                    raw_mic: None,
+                },
+            )
+            .unwrap();
+        }
+        drop(writer);
+
+        let host = Arc::new(app.host().unwrap());
+        app.launch(&host);
+        app.launch_finished().await;
+        app.pipeline.current().wait_until_idle().await;
+        let recovered = store.meeting(meeting.id).unwrap().unwrap();
+        assert_eq!(recovered.state, steno_core::MeetingState::Ready);
+        assert_eq!(
+            recovered.end_reason,
+            Some(steno_core::RecordingEndReason::Failed)
+        );
+        assert_eq!(recovered.duration, 1.0);
+        assert_eq!(store.asset(meeting.id).unwrap().unwrap().lanes, lanes);
     }
 
     /// The models directory is decided once, when the app is built: a
@@ -1107,6 +1240,8 @@ mod tests {
             runtime: tokio::runtime::Handle::current(),
             version: "0.0.0".to_owned(),
             startup_warnings: Vec::new(),
+            live_recording_check: LiveRecordingCheck::default(),
+            launch_work: std::sync::Mutex::default(),
             database_lock: None,
         }
     }
