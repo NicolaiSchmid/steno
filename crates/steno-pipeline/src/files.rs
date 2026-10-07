@@ -6,7 +6,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// The syncs a durable write makes; the disk in the product, a recorder in
@@ -196,6 +196,41 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
     }
 }
 
+/// Moves `path` aside to `<name>.corrupt-<UTC time>` beside it, with `-2`,
+/// `-3` and on added when that name is taken, so an earlier copy set aside
+/// is never replaced; the folder is synced after the rename. A reader that
+/// cannot parse a file it owns calls this before it starts empty, so the
+/// next write cannot replace bytes nobody has looked at. Returns the new
+/// path.
+pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} names no file", path.display()),
+        )
+    })?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let base = format!("{}.corrupt-{stamp}", name.to_string_lossy());
+    let mut attempt = 1_u32;
+    let aside = loop {
+        let candidate = if attempt == 1 {
+            path.with_file_name(&base)
+        } else {
+            path.with_file_name(format!("{base}-{attempt}"))
+        };
+        match candidate.symlink_metadata() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break candidate,
+            Err(error) => return Err(error),
+            Ok(_) => attempt += 1,
+        }
+    };
+    std::fs::rename(path, &aside)?;
+    if let Some(directory) = aside.parent() {
+        Disk.directory(directory);
+    }
+    Ok(aside)
+}
+
 /// Makes `options` create the file with mode 0600 where the platform has
 /// modes.
 pub fn restrict_new_file(options: &mut OpenOptions) -> &mut OpenOptions {
@@ -213,6 +248,33 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    /// A second file set aside gets a name of its own; the first copy
+    /// keeps its bytes.
+    #[test]
+    fn set_aside_never_replaces_an_earlier_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preferences.json");
+        std::fs::write(&path, b"first").unwrap();
+        let first = set_aside(&path).unwrap();
+        std::fs::write(&path, b"second").unwrap();
+        let second = set_aside(&path).unwrap();
+        std::fs::write(&path, b"third").unwrap();
+        let third = set_aside(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+        assert_eq!(std::fs::read(&third).unwrap(), b"third");
+        let names: BTreeSet<_> = [&first, &second, &third].into_iter().collect();
+        assert_eq!(names.len(), 3);
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("preferences.json.corrupt-")
+        );
+    }
 
     fn temporaries(directory: &Path) -> Vec<String> {
         std::fs::read_dir(directory)
