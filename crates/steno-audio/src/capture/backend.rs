@@ -27,9 +27,11 @@ pub trait CaptureBackend: Send + Sync {
     /// says so in [`CaptureStream::input`], and reports a change once the
     /// chosen device is back, so the rebuild's `start` returns to it; the
     /// recording never fails or ends because the chosen microphone is
-    /// missing while another input exists. A chosen device that is
-    /// connected but fails to open fails this `start`; the session then
-    /// starts again without a UID (see `CaptureSession`).
+    /// missing while the default input can be opened. A chosen device that
+    /// is connected but fails to open fails this `start` (with
+    /// [`CaptureError::DidNotRun`] when it was linked but delivered
+    /// nothing); the session then starts again without a UID (see
+    /// `CaptureSession`).
     fn start(
         &self,
         lanes: &[AudioLane],

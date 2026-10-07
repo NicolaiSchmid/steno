@@ -29,7 +29,11 @@
 //! restart, fails on it, the session starts the backend once more without
 //! a UID and marks that input as the fallback, so the recording ends only
 //! when the default input cannot be opened either (Rust only: Swift fails
-//! the start, and ends the recording after its restarts).
+//! the start, and ends the recording after its restarts). A rebuild tries
+//! the default already after its first failed restart when the stream it
+//! replaces was on the fallback, or when the chosen microphone did not run
+//! ([`CaptureError::DidNotRun`]): the gap then stays one restart long,
+//! under [`CaptureSession::MAXIMUM_GAP`], so the master stays on wall time.
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole
@@ -914,7 +918,7 @@ impl Core {
         // `stop()` take tens to hundreds of milliseconds during a device
         // transition, and that is dead time in the master too.
         let started = self.clock.now();
-        let (sink, relay, processing) = {
+        let (sink, relay, processing, on_the_fallback) = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
                 return (0, 0.0);
@@ -926,6 +930,11 @@ impl Core {
                 Arc::clone(&active.sink),
                 Arc::clone(&active.relay),
                 active.processing.take(),
+                active
+                    .stream
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| input.is_fallback),
             )
         };
         // Whatever whole frames the rings hold are the old device's last
@@ -958,7 +967,7 @@ impl Core {
         // `device_changed` late and costs one more rebuild (see the
         // PipeWire backend's module doc).
         sink.rearm_device_change();
-        let unaccounted = match self.restart_backend(&sink, generation, cancel) {
+        let unaccounted = match self.restart_backend(&sink, on_the_fallback, generation, cancel) {
             Restart::Started(stream, attempt) => {
                 // The gap grows through every failed attempt and is written
                 // once, in full, when a start succeeds.
@@ -985,16 +994,23 @@ impl Core {
     }
 
     /// `start` again, `RESTART_BACKOFF` apart on the clock, and once more on
-    /// the default input after the last failure (`start_on_the_default`):
-    /// `Started` with the attempt that succeeded (the last one for the
-    /// default), `Exhausted` when that failed too, `Abandoned` when `stop()`
-    /// cancelled a sleep or the recording is gone.
+    /// the default input (`start_on_the_default`) after the last failure,
+    /// or already after the first when waiting buys nothing: the stream
+    /// replaced was on the fallback (`on_the_fallback`), so the default
+    /// worked a moment ago, or the chosen microphone did not run
+    /// ([`CaptureError::DidNotRun`]: on Linux each such attempt waits out
+    /// the 3 s start deadline). That early try comes once; when it fails,
+    /// the restarts go on. `Started` with the attempt that succeeded,
+    /// `Exhausted` when the last one and the default failed, `Abandoned`
+    /// when `stop()` cancelled a sleep or the recording is gone.
     fn restart_backend(
         &self,
         sink: &Arc<LaneFrameSink>,
+        on_the_fallback: bool,
         generation: usize,
         cancel: &Cancel,
     ) -> Restart {
+        let mut default_tried = false;
         for attempt in 1..=CaptureSession::RESTART_ATTEMPTS {
             let result = {
                 let inner = self.lock();
@@ -1008,9 +1024,12 @@ impl Core {
                         Arc::clone(sink),
                     )
                     .or_else(|error| {
-                        if attempt < CaptureSession::RESTART_ATTEMPTS {
+                        let early = !default_tried
+                            && (on_the_fallback || matches!(error, CaptureError::DidNotRun(_)));
+                        if !early && attempt < CaptureSession::RESTART_ATTEMPTS {
                             return Err(error);
                         }
+                        default_tried = true;
                         self.start_on_the_default(sink).ok_or(error)
                     })
             };

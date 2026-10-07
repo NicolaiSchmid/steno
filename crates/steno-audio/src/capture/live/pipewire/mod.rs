@@ -56,7 +56,8 @@
 //! through the server's `link-factory` (not lingering: the links die with
 //! the connection). `start` returns once the first cycle arrived; a graph
 //! that does not run within `START_TIMEOUT` (3 s) is an error rather than a
-//! silent recording, and so is a link that failed. The latencies come
+//! silent recording ([`CaptureError::DidNotRun`]), and so is a link that
+//! failed. The latencies come
 //! from the `SPA_PARAM_Latency` of the microphone port (capture side) and
 //! of the sink's first playback port (playback side), in frames of the
 //! first cycle's length.
@@ -618,12 +619,22 @@ impl Connection {
     /// The error for a start step that did not finish: the connection's
     /// loss, or the deadline.
     fn stalled(&self, step: &str) -> CaptureError {
+        self.stalled_as(step, CaptureError::BackendFailed)
+    }
+
+    /// [`Self::stalled`] for the first cycle: its deadline, with the
+    /// connection and the links intact, is [`CaptureError::DidNotRun`].
+    fn did_not_run(&self) -> CaptureError {
+        self.stalled_as("run the capture", CaptureError::DidNotRun)
+    }
+
+    fn stalled_as(&self, step: &str, timed_out: fn(String) -> CaptureError) -> CaptureError {
         if self.shared.lost.get().any() {
             CaptureError::BackendFailed(
                 "the connection to PipeWire, the capture stream or a link failed".into(),
             )
         } else {
-            CaptureError::BackendFailed(format!(
+            timed_out(format!(
                 "PipeWire did not {step} within {} s",
                 START_TIMEOUT.as_secs()
             ))
@@ -959,7 +970,7 @@ impl Capture {
         let connection = &self.connection;
         let linked = Instant::now();
         if !connection.pump_until(deadline, || self.cycle_frames.load(Ordering::Acquire) > 0) {
-            return Err(connection.stalled("run the capture"));
+            return Err(connection.did_not_run());
         }
         let cycle = self.cycle_frames.load(Ordering::Relaxed);
         tracing::debug!(

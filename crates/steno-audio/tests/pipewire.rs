@@ -661,8 +661,10 @@ fn session_choosing_the_stalled_source(directory: &Path) -> CaptureSession {
 /// A chosen source that is connected but does not run never costs the
 /// recording while the default source works. At the start, its failed
 /// start is followed by one on the default. During a recording on the
-/// fallback, its arrival is a change whose restarts all fail on it, and
-/// the last is followed by one on the default, so the recording goes on.
+/// fallback, its arrival is a change whose first restart fails on it after
+/// the 3 s start deadline and is followed by one on the default, so the
+/// recording goes on after a gap of about that long, which the silence
+/// fills: the master stays on wall time.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
@@ -687,6 +689,7 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
     }
 
     let notices = session.notices();
+    let started = Instant::now();
     session.start(Uuid::new_v4()).expect("the start");
     assert_eq!(input(&session), on_the_fallback, "missing at the start");
     let _stalled = StalledSource::create();
@@ -709,8 +712,28 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
     );
     assert!(matches!(session.state(), CaptureState::Recording { .. }));
     assert_eq!(input(&session), on_the_fallback, "after the rebuild");
+    let Some(&CaptureNotice::DeviceResumed {
+        attempt,
+        gap_seconds,
+    }) = seen.last()
+    else {
+        unreachable!("the loop ends on a resume");
+    };
+    assert_eq!(attempt, 1, "the default right after the first restart");
+    assert!(
+        gap_seconds < 4.5,
+        "a gap of one start deadline, not four: {gap_seconds} s"
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    let wall = started.elapsed().as_secs_f64();
     let result = session.stop().expect("the second recording");
     assert!(!result.statistics.ended_on_device_loss);
+    let master = result.statistics.duration;
+    println!("the master: {master:.2} s against {wall:.2} s of wall time");
+    assert!(
+        (wall - master).abs() < 1.0,
+        "the master stays on wall time: {master:.2} s against {wall:.2} s"
+    );
 }
 
 #[test]
