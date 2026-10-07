@@ -598,8 +598,8 @@ async fn a_complete_of_a_revoked_phone_leaves_another_phones_upload_alone() {
     // another phone announces the same recording id, which opens a partial
     // and a sidecar. The intake then answers, and the admission leaves
     // those files alone: they are the other phone's upload, which goes on
-    // to its own admission. Removed, its `complete` would answer 404
-    // ("announce again") and the phone would send every chunk again.
+    // to its own admission. Removed, its next chunk or its `complete` would
+    // answer 404 ("announce again"), and it would send every chunk again.
     let intake = ScriptedIntake::gated(meeting_id(), false);
     let (test, phone, metadata, chunks) = uploaded_two_chunks(73, Some(intake.clone())).await;
     let id = metadata.recording_id;
@@ -624,7 +624,8 @@ async fn a_complete_of_a_revoked_phone_leaves_another_phones_upload_alone() {
     );
 
     sent(&other, id, &chunks).await;
-    // The gated intake lets the other phone's admission through at once.
+    // Released ahead, the gated intake lets the other phone's admission
+    // through without waiting.
     intake.release();
     assert_eq!(completed(&other, id).await, meeting_id());
     assert_eq!(intake.count(), 2);
@@ -634,8 +635,7 @@ async fn a_complete_of_a_revoked_phone_leaves_another_phones_upload_alone() {
 /// with `metadata`, and a late one of `late` with another `format`. Each
 /// is held at its clock read, after its receipt read found nothing, the
 /// receipt's first. The receipt's goes on first and makes the receipt, and
-/// the late one then finds it. Before, each had written its sidecar by its
-/// clock read, the late one last. Returns the two answers.
+/// the late one then finds it. Returns the two answers.
 fn racing_first_announces(
     test: &TestService,
     phone: &EngineDevice,
@@ -684,8 +684,7 @@ async fn racing_first_announces_with_another_format_keep_the_receipts_sidecar() 
     // The phone announces a new recording twice at once, the second time
     // with another format. Only the announce that made the receipt opens
     // the files; the late one answers as a re-announce and leaves the
-    // sidecar alone. Before, each announce wrote its sidecar before it made
-    // the receipt, so the late one's `format` reached the intake with the
+    // sidecar alone, so its `format` never reaches the intake with the
     // other one's receipt.
     let (test, phone, metadata, chunks) = two_chunk_recording(75, None).await;
     let (first, late) = racing_first_announces(&test, &phone, &phone, &metadata);
@@ -737,7 +736,7 @@ async fn an_announce_whose_files_cannot_be_opened_keeps_its_receipt() {
 }
 
 #[tokio::test]
-async fn a_reannounce_during_the_intake_leaves_no_file_after_the_admission() {
+async fn an_admission_removes_the_files_a_reannounce_opened_during_the_intake() {
     // The intake took the verified file, as the real one does, and the
     // phone announces again (a retry after its own timeout). The announce
     // finds no file, opens a new partial and sidecar and answers. The
