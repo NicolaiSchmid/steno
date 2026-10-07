@@ -642,7 +642,9 @@ Every package is written in parallel except where a dependency is named:
       pending (without a Swift certificate there is no step, and the second half
       counts as done): the step says that
       macOS will ask for the login password once for each item it finds (at most
-      twice) so the new Steno can read
+      three times: the API key, the identity's export, and a `handover-identity`
+      entry a desktop-id build left, which the store replaces; attribute queries
+      that do not prompt find them) so the new Steno can read
       what the old one stored, and that the user should choose Always Allow.
       Then it reads the API key through `keyring` (one prompt; the item stays as
       it is, shared with the Swift app, which still reads it after a rollback),
@@ -652,7 +654,8 @@ Every package is written in parallel except where a dependency is named:
       PKCS#12 crate (for example `p12-keystore`, which reads Apple's legacy
       encryption; `cargo deny` must allow it) into the PEM entry
       `handover-identity`, replacing a desktop-id identity. A denied read leaves
-      the key empty, and Settings asks for it. A denied or failed export never
+      the key empty, and Settings asks for it; no later launch asks the keychain
+      for it until a key is saved. A denied or failed export never
       mints an identity (D3): the handover listener stays off, and Settings'
       iPhone section says that Steno could not bring over this Mac's phone
       pairing, with Try again, which repeats the export and its prompt. Only
