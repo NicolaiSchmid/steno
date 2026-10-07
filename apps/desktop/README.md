@@ -64,8 +64,8 @@ exits reach the shutdown these ways:
   xfce4-session quits right after it asked, with no end and no cancel to
   follow, so there the app saves when asked, answers, and ends with the
   display. Should the session go on after all (the app took it for a
-  Wayland one wrongly), the app says so 30 seconds later and relaunches,
-  so a recorder runs again.
+  Wayland one wrongly), the app says so 30 seconds later and relaunches
+  once the message is closed, so a recorder runs again.
 - Where no session manager runs (KDE Plasma, wlroots desktops), the app
   follows the desktop portal's session monitor. It answers the portal's
   query at once, since the user can still call the logout off then, and
