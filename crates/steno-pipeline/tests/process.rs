@@ -4472,6 +4472,15 @@ struct Uninstalled {
 }
 
 impl Uninstalled {
+    fn refusing(refusal: Refusal) -> Arc<Self> {
+        Arc::new(Uninstalled {
+            refusal,
+            installed: false.into(),
+            engine: FakeSpeechEngine::default(),
+            diarizer: FakeDiarizer::default(),
+        })
+    }
+
     fn check(
         &self,
         at: Refusal,
@@ -4541,12 +4550,7 @@ async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are
         Refusal::DiarizerPrepare,
     ] {
         let world = world(false, None, AudioRetention::KeepForever);
-        let gate = Arc::new(Uninstalled {
-            refusal,
-            installed: false.into(),
-            engine: FakeSpeechEngine::default(),
-            diarizer: FakeDiarizer::default(),
-        });
+        let gate = Uninstalled::refusing(refusal);
         let mut dependencies = with_engine(&world, gate.clone());
         dependencies.diarizer = Arc::new(UninstalledDiarizer(gate.clone()));
         let pipeline = ProcessingPipeline::new(dependencies);
@@ -4587,12 +4591,7 @@ async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are
 #[tokio::test(flavor = "multi_thread")]
 async fn process_returns_the_models_missing_refusal() {
     let world = world(false, None, AudioRetention::KeepForever);
-    let gate = Arc::new(Uninstalled {
-        refusal: Refusal::Transcribe,
-        installed: false.into(),
-        engine: FakeSpeechEngine::default(),
-        diarizer: FakeDiarizer::default(),
-    });
+    let gate = Uninstalled::refusing(Refusal::Transcribe);
     let pipeline = ProcessingPipeline::new(with_engine(&world, gate));
     let mut meeting = call_meeting(world.now);
     meeting.id = Uuid::new_v4();

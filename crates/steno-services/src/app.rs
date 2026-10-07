@@ -1545,6 +1545,9 @@ mod tests {
     /// get past the gate. No network.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_reload_keeps_the_models_directory_the_app_was_built_with() {
+        use crate::speech::testing::{
+            install_coreml_parakeet, install_onnx_diarizer, install_speech_asset, models_in,
+        };
         let dir = tempfile::tempdir().unwrap();
         let paths = StenoPaths::new(dir.path().join("support"));
         let (first, reloaded) = (
@@ -1552,12 +1555,12 @@ mod tests {
             dir.path().join("reloaded-models"),
         );
         std::fs::create_dir_all(&first).unwrap();
-        let full = crate::speech::testing::models_in(&reloaded);
-        crate::speech::testing::install_coreml_parakeet(&full.coreml);
+        let full = models_in(&reloaded);
+        install_coreml_parakeet(&full.coreml);
         for asset in steno_speech::ModelAsset::all() {
-            crate::speech::testing::install_speech_asset(&full, &asset);
+            install_speech_asset(&full, &asset);
         }
-        crate::speech::testing::install_onnx_diarizer(&full);
+        install_onnx_diarizer(&full);
         let store = open_store(&paths.database_path()).unwrap();
         let mut settings = store.settings().unwrap();
         settings.models_directory = Some(file_url(&first, true));
