@@ -13,7 +13,7 @@
 
 use std::ptr;
 
-use core_foundation::base::TCFType;
+use core_foundation::base::{CFTypeRef, TCFType};
 use core_foundation::data::CFData;
 use core_foundation::string::CFString;
 use security_framework::identity::SecIdentity;
@@ -71,16 +71,7 @@ impl KeychainError {
 /// Swift app never exported its identity).
 pub fn export_pkcs12(identity: &SecIdentity, passphrase: &str) -> Result<Vec<u8>, KeychainError> {
     let passphrase = CFString::new(passphrase);
-    let parameters = SecItemImportExportKeyParameters {
-        version: SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION,
-        flags: 0,
-        passphrase: passphrase.as_CFTypeRef(),
-        alertTitle: ptr::null(),
-        alertPrompt: ptr::null(),
-        accessRef: ptr::null_mut(),
-        keyUsage: ptr::null(),
-        keyAttributes: ptr::null(),
-    };
+    let parameters = key_parameters(passphrase.as_CFTypeRef());
     let mut exported = ptr::null();
     // SAFETY: `identity` is a live `SecIdentityRef` (the wrapper holds a
     // reference for the borrow), a valid `secItemOrArray`. `parameters` is
@@ -111,6 +102,21 @@ pub fn export_pkcs12(identity: &SecIdentity, passphrase: &str) -> Result<Vec<u8>
     Ok(data.bytes().to_vec())
 }
 
+/// Version-0 import and export parameters with `passphrase` (null for
+/// none) as their only reference.
+fn key_parameters(passphrase: CFTypeRef) -> SecItemImportExportKeyParameters {
+    SecItemImportExportKeyParameters {
+        version: SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION,
+        flags: 0,
+        passphrase,
+        alertTitle: ptr::null(),
+        alertPrompt: ptr::null(),
+        accessRef: ptr::null_mut(),
+        keyUsage: ptr::null(),
+        keyAttributes: ptr::null(),
+    }
+}
+
 /// The keychain test's fixture calls: an identity stored the way
 /// `IdentityKeychain.store` stores it, into a keychain the test owns, and
 /// that keychain's deletion.
@@ -128,15 +134,14 @@ pub mod fixture {
     use security_framework::os::macos::keychain::SecKeychain;
     use security_framework_sys::base::{SecKeychainRef, errSecDuplicateItem};
     use security_framework_sys::import_export::{
-        SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION, SecExternalFormat, SecExternalItemType,
-        SecItemImport, SecItemImportExportKeyParameters, kSecFormatOpenSSL,
+        SecExternalFormat, SecExternalItemType, SecItemImport, kSecFormatOpenSSL,
     };
     use security_framework_sys::item::{
         kSecAttrLabel, kSecClass, kSecClassCertificate, kSecClassKey, kSecValueRef,
     };
     use security_framework_sys::keychain_item::SecItemUpdate;
 
-    use super::KeychainError;
+    use super::{KeychainError, key_parameters};
 
     /// `kSecItemTypePrivateKey` in `SecImportExport.h`; the sys crate
     /// declares the type but not the cases.
@@ -171,16 +176,7 @@ pub mod fixture {
         let data = CFData::from_buffer(der);
         let mut format: SecExternalFormat = kSecFormatOpenSSL;
         let mut item_type = ITEM_TYPE_PRIVATE_KEY;
-        let parameters = SecItemImportExportKeyParameters {
-            version: SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION,
-            flags: 0,
-            passphrase: ptr::null(),
-            alertTitle: ptr::null(),
-            alertPrompt: ptr::null(),
-            accessRef: ptr::null_mut(),
-            keyUsage: ptr::null(),
-            keyAttributes: ptr::null(),
-        };
+        let parameters = key_parameters(ptr::null());
         let mut imported = ptr::null();
         // SAFETY: `data` and `keychain` are live references owned by this
         // frame for the whole call; `format` and `item_type` are valid
@@ -224,28 +220,20 @@ pub mod fixture {
     /// Access and a label query find it, as `IdentityKeychain.store`'s
     /// `SecItemUpdate(key)` does.
     pub fn label_key(key: &SecKey, label: &str) -> Result<(), KeychainError> {
-        // SAFETY: the four keys are Security framework constants.
-        let (class, class_key, value_ref, label_key, tag_key) = unsafe {
-            (
-                constant(kSecClass),
-                constant(kSecClassKey),
-                constant(kSecValueRef),
-                constant(kSecAttrLabel),
-                constant(kSecAttrApplicationTag),
-            )
-        };
-        let query = CFDictionary::from_CFType_pairs(&[
-            (class.as_CFType(), class_key.as_CFType()),
-            (value_ref.as_CFType(), key.as_CFType()),
-        ]);
-        let update = CFDictionary::from_CFType_pairs(&[
-            (label_key.as_CFType(), CFString::new(label).as_CFType()),
-            (
-                tag_key.as_CFType(),
-                CFData::from_buffer(label.as_bytes()).as_CFType(),
-            ),
-        ]);
-        update_item(&query, &update, "SecItemUpdate(key)")
+        // SAFETY: both keys are Security framework constants.
+        let (class_key, tag_key) =
+            unsafe { (constant(kSecClassKey), constant(kSecAttrApplicationTag)) };
+        let tag = (
+            tag_key.as_CFType(),
+            CFData::from_buffer(label.as_bytes()).as_CFType(),
+        );
+        relabel(
+            &class_key,
+            key.as_CFType(),
+            label,
+            Some(tag),
+            "SecItemUpdate(key)",
+        )
     }
 
     /// Labels a stored certificate, as `IdentityKeychain.store`'s
@@ -256,33 +244,43 @@ pub mod fixture {
         certificate: &SecCertificate,
         label: &str,
     ) -> Result<(), KeychainError> {
-        // SAFETY: the four keys are Security framework constants.
-        let (class, class_certificate, value_ref, label_key) = unsafe {
+        // SAFETY: the key is a Security framework constant.
+        let class_certificate = unsafe { constant(kSecClassCertificate) };
+        relabel(
+            &class_certificate,
+            certificate.as_CFType(),
+            label,
+            None,
+            "SecItemUpdate(certificate)",
+        )
+    }
+
+    /// `SecItemUpdate` of the `class` item `item`: sets its label to
+    /// `label`, and `extra` with it.
+    fn relabel(
+        class: &CFString,
+        item: CFType,
+        label: &str,
+        extra: Option<(CFType, CFType)>,
+        call: &'static str,
+    ) -> Result<(), KeychainError> {
+        // SAFETY: the three keys are Security framework constants.
+        let (class_key, value_ref, label_key) = unsafe {
             (
                 constant(kSecClass),
-                constant(kSecClassCertificate),
                 constant(kSecValueRef),
                 constant(kSecAttrLabel),
             )
         };
         let query = CFDictionary::from_CFType_pairs(&[
-            (class.as_CFType(), class_certificate.as_CFType()),
-            (value_ref.as_CFType(), certificate.as_CFType()),
+            (class_key.as_CFType(), class.as_CFType()),
+            (value_ref.as_CFType(), item),
         ]);
-        let update = CFDictionary::from_CFType_pairs(&[(
-            label_key.as_CFType(),
-            CFString::new(label).as_CFType(),
-        )]);
-        update_item(&query, &update, "SecItemUpdate(certificate)")
-    }
-
-    fn update_item(
-        query: &CFDictionary<CFType, CFType>,
-        update: &CFDictionary<CFType, CFType>,
-        call: &'static str,
-    ) -> Result<(), KeychainError> {
+        let mut attributes = vec![(label_key.as_CFType(), CFString::new(label).as_CFType())];
+        attributes.extend(extra);
+        let update = CFDictionary::from_CFType_pairs(&attributes);
         // SAFETY: both dictionaries are live `CFDictionaryRef`s owned by
-        // the caller for the whole call; `SecItemUpdate` only reads them.
+        // this frame for the whole call; `SecItemUpdate` only reads them.
         let status =
             unsafe { SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
         KeychainError::check(call, status)
