@@ -16,7 +16,9 @@ changes this plan in these places:
 - step 5's open choice is its D4, which keeps `SMAppService`; the new app
   registers itself, and the Swift entry is handled as its S6 says;
 - step 6 also replaces an identity that a `uno.schmid.steno.desktop` build
-  stored (its D5), and expects a keychain prompt;
+  stored (its D5) and expects a keychain prompt; a denied or failed export mints
+  nothing: the listener waits with Try again, and only the user's Pair again
+  mints a new identity (its D3);
 - step 7 is its S9, apart from `release.yml`, which its S7 deletes.
 
 The inventory table and the tests still apply: that plan's Rehearsal runs tests
@@ -33,7 +35,9 @@ The inventory table and the tests still apply: that plan's Rehearsal runs tests
 - the first risk: Sparkle never refuses a bundle for its id, so only the missing
   key and the signature remain;
 - the two-login-items risk becomes the old Login Items entry that its S6
-  handles.
+  handles;
+- step 6's and the Risks' "the app mints a new identity and phones pair again"
+  after a failed export.
 
 Status: planned 2026-10-04, not started. WP9b, the second half of WP9 in
 `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP9a (signed, notarised

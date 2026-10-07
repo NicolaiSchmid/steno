@@ -390,14 +390,14 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P5 | The recording in progress: a save that outlasts the session's wait. Measure the save; an autostarted Linux app gets a systemd drop-in raising `TimeoutStopSec` from the generator's 5 s to 20 s, in the `.deb`, the AUR and Nix packages and written by the app for the AppImage (for the generator's `app-steno\x2ddesktop@autostart.service` under uwsm and Plasma, named after the Linux product name `steno-desktop`; GNOME starts autostart apps in its own `app-gnome-steno\x2ddesktop-<pid>.scope`, whose drop-in directory `app-gnome-steno\x2ddesktop-.scope.d` gets one too if its stop timeout is under 20 s); the save logs its duration at `warn`, so it shows under the default filter; on Windows, `ShutdownBlockReasonCreate` while recording | Linux desktop (with #220) |
 | P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux | Linux desktop |
 | P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
-| P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221. During #221's move from `secrets.json`, the API key in the file wins until the move has finished; the handover identity never takes the file's copy | audio (with #221) |
+| P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221. At #221's first move, a key only `secrets.json` holds is copied; where both hold one, the file's API key wins and the Secret Service keeps its own `handover-identity`; after the move's mark, the Secret Service wins for every key | audio (with #221) |
 | P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess`, a `meeting.processAgain` bridge method and its button, and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`); a meeting refused for missing models stays queued and resumes once they install | pipeline, store and export (`wp-pse-*`) |
 | P10 | A meeting's whole result: a diarizer or speaker-match failure fails the meeting. It merges without diarization instead | pipeline, store and export (`wp-pse-*`) |
 | P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | pipeline, store and export (`wp-pse-*`) |
 | P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
 | P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard) |
 | P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | pipeline, store and export (`wp-pse-*`) |
-| P15 | Anything two processes write at once: one exclusive lock per data directory for the app's lifetime (#225). A second app instance is refused outright with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run; on the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs | capture and recovery (`wp-cap-*`) (#225) |
+| P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); #225 leaves this out, so it is a follow-up on `wp-cap-*` | capture and recovery (`wp-cap-*`, #225) |
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
 | P17 | A local recording's folder: a failed enqueue saves the asset row, so the folder is not orphaned; the recorder's rebuild thread survives a panic | capture and recovery (`wp-cap-*`) |
 | P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
@@ -420,7 +420,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P35 | Pairings: the pairing writes are durable and the intake runs in one transaction (beyond #213, which makes the receipt and meeting commits durable); the identity-fingerprint guard gets a macOS test and its Swift mirror | handover |
 | P36 | Secrets and files on Windows: credentials persist, and renames are durable | handover |
 | P37 | A recording through a cancelled logout: the save that a logout started is undone cleanly when the logout is cancelled (#220) | Linux desktop (#220) |
-| P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic under the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
+| P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic in the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |
 
 **The final audio path (D9), on every platform:**
 
@@ -599,17 +599,20 @@ Every package is written in parallel except where a dependency is named:
       encryption; `cargo deny` must allow it) into the PEM entry
       `handover-identity`, replacing a desktop-id identity. A denied read leaves
       the key empty, and Settings asks for it. A denied or failed export never
-      mints an identity (D3): the handover listener stays off, and Settings >
-      Phones says that Steno could not bring over this Mac's phone pairing,
-      with Try again, which repeats the export and its prompt. Only when the
-      user chooses Pair again there, which says that every phone must pair
-      again, is a new identity minted. Then the pipeline starts, and the
+      mints an identity (D3): the handover listener stays off, and Settings'
+      iPhone section says that Steno could not bring over this Mac's phone
+      pairing, with Try again, which repeats the export and its prompt. Only
+      when the user chooses Pair again there, which says that every phone must
+      pair again, is a new identity minted: Pair again removes the paired phones
+      and the recorded fingerprint, then mints through `HandoverIdentity::store`.
+      S6 adds both as bridge methods, a waiting state for the listener with its
+      fixtures, and a test that a refused read mints nothing. Then the pipeline starts, and the
       listener once the identity is in place. Skipping the step counts as a
       denied read and a denied export. The same rule holds outside the import:
       when an existing `handover-identity` cannot be read (a denied prompt, a
       locked keychain), `handover_listener` waits with Try again and never mints
-      over it; it mints only when no identity exists or the user chooses Pair
-      again.
+      over it; it mints only where #221's guard allows (no identity, no recorded
+      fingerprint and no paired phone), or when the user chooses Pair again.
   - **Login item** (D4). On macOS, `autostart.rs` uses `SMAppService.mainApp`.
     At the first launch after the handoff the new app registers its own
     identifier explicitly when the stored `launch_at_login` setting (shared
@@ -691,11 +694,13 @@ Each lands before `0.11.0-rc.1`.
     call recording while no app plays audio, and play a short tone at 10 s.
     Pass when the tone's onset in the system channel and its residual in the
     echo-cancelled mic channel lie within 50 ms (if the cancellation hides the
-    residual, a second take with `steno record --raw-mic` gives the raw mic), and
+    residual, a second take with `steno record --keep-raw-mic --out ~/a9-raw`
+    from A9's branch keeps the raw mic as `mic.raw.caf`), and
     the tap's first callback comes within 100 ms of the capture's start. A9 adds
     an `info` line with that callback's offset from the capture's start, stored
     by the IOProc in an atomic and logged off the audio thread. Nicolai quits
-    Steno and runs `open --env RUST_LOG=info --stderr ~/a9.log
+    every Steno, the Swift app included, creates the log (`: > ~/a9.log`) and
+    runs `open --env RUST_LOG=info --stderr ~/a9.log
     ~/Applications/Steno.app`, so Launch Services starts it under its own grants.
     If either bound is missed, the remedy becomes an A-package before the first
     candidate.
@@ -725,6 +730,9 @@ The table above names each package and its owner. Their tests:
 - **P6.** In the Omarchy gate, while a meeting processes, `cat /proc/$(pidof -s
   steno-speech-sidecar)/cgroup` names a scope of its own, not the app's.
 - **P8.** A test that no secret written to #221's fake service holds a newline.
+- **P30.** A note changed in the vault since Steno wrote it (its hash differs
+  from the ledger's) gets the new version beside it as `<name> (Steno
+  <date>).md` and a warning, and stays as it was; an unchanged note is replaced.
 - **P9.** A failed meeting with its master processes again from the button and
   from `steno process --meeting <id>`; a meeting queued for missing models
   resumes after the install.
@@ -1110,10 +1118,11 @@ except case e.
   - on the Mac, no import step appears; onboarding opens on its permissions page
     at the first launch and each TCC prompt appears once; one keychain prompt
     with the login password appears per item the desktop-id
-    build created (`handover-identity` and the API key, both at launch). The
-    `handover-identity` prompt is first denied: no identity is minted
-    (`dns-sd -B _steno._tcp` shows no Steno, and Settings > Phones offers Try
-    again); Try again brings it back, and with Always Allow none appears again;
+    build created (`handover-identity` and the API key, both at launch), and the
+    `handover-identity` prompt appears again after Try again. It is first
+    denied: no identity is minted (`lsof -nP -a -c steno-desktop -iTCP -sTCP:LISTEN` in this account shows no listener, and Settings' iPhone section
+    offers Try again); Try again brings it back, and with Always Allow none
+    appears again;
   - the phone uploads without pairing again;
   - both calls are listed, transcribed and summarised.
 - **R2 Handoff mechanics** (Forge; the cutover plan's test 6).
@@ -1153,16 +1162,15 @@ except case e.
   4. Pass when:
      - the app comes back as `com.nicolaischmid.steno`, and the meeting is
        listed;
-     - the import step comes first and shows its note; then exactly two
-       keychain prompts appear, each asking for the login password, one for the
-       API key and one to export the handover key (record each prompt's
-       wording). Always Allow is chosen for the key. The export prompt is first
+     - the import step comes first and shows its note; then two keychain
+       prompts appear, each asking for the login password, one for the API key
+       and one to export the handover key, which appears again after Try again
+       (record each prompt's wording). Always Allow is chosen for the key. The export prompt is first
        denied: no identity is minted (`security find-generic-password -s
        uno.schmid.steno.mac -a handover-identity` finds nothing new, and
-       `dns-sd -B _steno._tcp` shows no Steno), and Settings > Phones offers Try
-       again. Try again brings the prompt back, and Always Allow is chosen;
+       `lsof -nP -a -c steno-desktop -iTCP -sTCP:LISTEN` in this account shows no listener), and Settings' iPhone section offers Try again. Try again brings the prompt back, and Always Allow is chosen;
      - no keychain prompt appears before the step, and until the step ends
-       `dns-sd -B _steno._tcp` on the Mac shows no Steno;
+       `lsof -nP -a -c steno-desktop -iTCP -sTCP:LISTEN` in this account shows no listener;
      - onboarding then opens on its permissions page, and each of microphone,
        system audio and calendar prompts once;
      - after that, a summary runs with the stored key and no prompt, and the
@@ -1284,21 +1292,24 @@ except case e.
   - **Nix on the Mac:** on Forge or Nicolai's Mac, the flake bump branch builds,
     and its `result/Applications/Steno.app/Contents/Info.plist` names
     `steno-desktop`, `com.nicolaischmid.steno` and 0.11.0;
-  - **AUR and Nix on Linux:** on the Omarchy and NixOS machines, each gate's
-    install step and one recording run against `v0.11.0`.
+  - **Linux:** on the GNOME, Omarchy and NixOS machines, each gate's step 0,
+    from the last candidate to `v0.11.0`, and one recording.
 
 ### The Linux gates
 
 Each runs on Nicolai's own machine, in a new user account, before the site lists
 the target, from `0.11.0-rc.2` on (`rc.1` has no previous candidate). Step 0 on
-each target installs the previous candidate (`rc.<N-1>`), pairs the phone,
-records a one-minute meeting and turns on launch at login, then upgrades to the
+each target installs the previous candidate (`rc.<N-1>`), opens the firewall
+where there is one, pairs the phone, records a one-minute meeting and turns on
+launch at login (on NixOS the module's `steno.service` does), then upgrades to
+the
 candidate under test: `sudo apt install ./<new>.deb` on GNOME; `makepkg -si` in
 `packaging/aur/` at the new tag on Omarchy; the flake input moved to the new
 tag, `nixos-rebuild switch` and `sudo nix-collect-garbage -d` on NixOS. Step 0
 passes when the meeting and the pairing are kept and, after a logout and login,
-Steno starts once, as the new version. Steps 1 onward run on the candidate under
-test. On `v0.11.0`, R8 repeats step 0 from the last candidate and one recording.
+Steno starts once, as the new version. Each target's step 1 sets up its step 0;
+steps 2 onward run on the candidate under test. On `v0.11.0`, R8 repeats step 0
+from the last candidate and one recording.
 The status query used throughout (`sqlite3`, or `nix-shell -p sqlite` on NixOS):
 
 ```sh
@@ -1315,16 +1326,17 @@ interrupted" after one. On the GNOME machine,
 `coredumpctl list`.
 
 - **GNOME** (Ubuntu 24.04 or Debian 13, named in the result).
-  1. The `.deb` of the candidate under test, installed in step 0, was verified
-     first with the README's `gpg --verify` and `sha256sum --check`.
+  1. Step 0 verifies each `.deb` first with the README's `gpg --verify` and
+     `sha256sum --check`.
   2. Onboarding shows no permission as missing; Settings downloads the speech
      model with progress; Settings > Recording lists the input devices (A7).
-  3. Pair the phone; it uploads a recording.
+  3. The phone, paired in step 0, uploads a recording.
   4. Join a Google Meet call in Firefox: the detection prompt appears (A8);
      record it, with the floating panel on top; stop; the meeting has a
      microphone lane and a system lane, and is transcribed, diarized and
      exported.
-  5. Turn on launch at login; log out and in; the last path component of `cat
+  5. With launch at login on since step 0, log out and in; the last path
+     component of `cat
      /proc/$(pidof -s steno-desktop)/cgroup` names the unit that holds Steno, and
      `systemctl --user show '<that unit>' -p TimeoutStopUSec` (single-quoted) is
      at least 20 s (P5).
@@ -1332,17 +1344,18 @@ interrupted" after one. On the GNOME machine,
      the meeting with its full length and `quit` as `endReason`, it processes,
      and `journalctl --user -b 0 --since '<logout time>' | grep -i steno` shows
      the save's logged duration before the app exits, and neither "timed out.
-     Killing" nor "Failed with result" (P5). Record, then reboot: the same, with
+     Killing" nor "Failed with result 'timeout'" (P5). Record, then reboot: the same, with
      `journalctl --user -b -1`. Record, then `kill -9` the app: at the next launch the
      meeting is recovered with `failed` as `endReason` and processes (P3).
   7. Quit the `.deb`'s Steno; the AppImage starts (`pgrep -a steno-desktop`
      shows only its path) and finds the same meetings.
 - **Omarchy** (Omarchy 4, Arch with Hyprland on Wayland).
-  1. Before step 0, import the release key (`gpg --recv-keys
-     048B527950E4F609B90E63495F8810A6E6D4DB46`); the PKGBUILD verified each
-     `.deb`'s signature (from `v0.11.0` on, step 0 installs with `yay -S
-     steno-desktop-bin`). `sudo ufw allow Steno`. Add the README's Lua window
-     rules to `~/.config/hypr/` and reload Hyprland.
+  1. Before step 0: import the release key (`gpg --recv-keys
+     048B527950E4F609B90E63495F8810A6E6D4DB46`), so the PKGBUILD verifies each
+     `.deb`'s signature; add the README's Lua window rules to `~/.config/hypr/`
+     and reload Hyprland. In step 0, `sudo ufw allow Steno` runs right after the
+     install and before the pairing. From `v0.11.0` on, step 0 installs with
+     `yay -S steno-desktop-bin`.
   2. Start Steno from the Omarchy launcher. `cat /proc/$(pidof -s
      steno-desktop)/cgroup` names an `app-…scope` (not Hyprland's unit). The
      tray icon is in the bar's drawer; a right click opens the menu, and every
@@ -1353,8 +1366,8 @@ interrupted" after one. On the GNOME machine,
      shows the bubble as `xwayland: true`, floating and pinned; it did not take
      focus (`hyprctl activewindow`); a drag moves it, and the place survives a
      restart (X2).
-  4. Secrets: save a password in Chromium, set an API key, pair the phone, then
-     reboot. Pass when no keyring
+  4. Secrets: save a password in Chromium, set an API key, then reboot (the
+     pairing from step 0 stands). Pass when no keyring
      prompt appears at boot; `journalctl -b | grep -i 'unrecognized format'` is
      empty; `secret-tool search --all service uno.schmid.steno.mac` lists
      `llm-api-key` and `handover-identity`; `~/.local/share/Steno/secrets.json`
@@ -1373,15 +1386,16 @@ interrupted" after one. On the GNOME machine,
      (`github:NicolaiSchmid/steno/v0.11.0-rc.<N-1>`), with
      `steno.nixosModules.default` in the system's modules and
      `programs.steno.enable = true`.
-  2. Steps 2 to 4 and 6 of the GNOME gate, the unit being the module's user
-     service, with the phone through the firewall the module opened.
+  2. Steps 2 to 4 and 6 of the GNOME gate, with the phone through the firewall
+     the module opened.
   3. Open Settings and choose a folder: the file chooser opens (the wrapper's
      schemas).
   4. Launch at login: after step 0's upgrade and collection, `systemctl --user
      cat steno.service` names the profile path, and About shows the new version.
   5. Settings says updates come from the package manager.
-  6. A package-only install: set `programs.steno.enable = false` and
-     `nixos-rebuild switch`; `nix profile install
+  6. A package-only install: set `programs.steno.enable = false`,
+     `nixos-rebuild switch`, and log out and in so the module's Steno is gone;
+     `nix profile install
      github:NicolaiSchmid/steno/v0.11.0-rc.<N-1>#steno`, launch at login on;
      replace it with the candidate under test (`nix profile remove steno`, then
      `nix profile install github:NicolaiSchmid/steno/v0.11.0-rc.N#steno`);
