@@ -63,10 +63,8 @@ impl AudioDevices for PlatformAudioDevices {
     fn inputs(&self) -> BoundaryResult<Vec<InputDevice>> {
         #[cfg(any(target_os = "macos", target_os = "linux", windows))]
         {
-            let devices = steno_audio::capture::live::AudioDevices::inputs().map_err(|error| {
-                tracing::warn!("listing the input devices failed: {error}");
-                error
-            })?;
+            let devices = steno_audio::capture::live::AudioDevices::inputs()
+                .inspect_err(|error| tracing::warn!("listing the input devices failed: {error}"))?;
             Ok(devices
                 .into_iter()
                 .map(|device| InputDevice {

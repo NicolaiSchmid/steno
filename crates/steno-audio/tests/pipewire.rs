@@ -1356,8 +1356,7 @@ fn a_recorder_holds_the_microphone_until_it_ends_and_steno_is_not_listed() {
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let backend = Arc::new(LiveCaptureBackend::new());
     start(&backend, &lanes, None, &sink).expect("start");
-    #[allow(clippy::cast_possible_wrap)]
-    let own = std::process::id() as i32;
+    let own = i32::try_from(std::process::id()).expect("a pid");
     assert!(
         eventually(Duration::from_secs(2), || node_id(CAPTURE_NODE).is_some()),
         "the capture runs"
