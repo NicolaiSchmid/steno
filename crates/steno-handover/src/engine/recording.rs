@@ -34,7 +34,7 @@ pub(super) fn no_such_recording() -> HandoverResponse {
 impl Engine {
     /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
     /// recording, 200 for a known one, both with `RecordingStatus`; 401 when
-    /// the device was revoked during the receipt read.
+    /// the device was revoked since its receipt read.
     pub(super) async fn announce(
         &self,
         recording_id: Uuid,
@@ -98,7 +98,7 @@ impl Engine {
         // line goes to the save whatever `open_files` did, and nothing
         // between `change` and the save yields. A failed opening leaves the
         // receipt saved without files, so the phone's retried announce
-        // reopens them as a re-announce. A device revoked during the receipt
+        // reopens them as a re-announce. A device revoked since its receipt
         // read opens none and is answered 401: its receipt stayed out of
         // memory.
         let opened = self.open_files(&metadata, device.id);
@@ -118,13 +118,14 @@ impl Engine {
 
     /// A known recording announced again: 200 with the status, 409 when
     /// another device owns it or the metadata changed. The partial is
-    /// reopened when it is gone (a sweep, a crash before the first chunk),
-    /// with the same receipt and an empty chunk set; a verified file waiting
-    /// for a second intake attempt keeps its chunk set, so the phone's retry
-    /// (announce, then complete) sends no chunk twice. 401 with nothing
-    /// opened when the device was revoked during the receipt read. A receipt a
-    /// `complete` admitted meanwhile stays `complete` ([`Engine::update`]),
-    /// the answer says so, and the files this announce opened go.
+    /// reopened when it or the sidecar is gone (a sweep, a crash before the
+    /// first chunk, a refusal), with the same receipt and an empty chunk
+    /// set; a verified file waiting for a second intake attempt keeps its
+    /// chunk set, so the phone's retry (announce, then complete) sends no
+    /// chunk twice. 401 with nothing opened when the device was revoked
+    /// since its receipt read. A receipt a `complete` admitted meanwhile
+    /// stays `complete` ([`Engine::update`]), the answer says so, and the
+    /// files this announce opened go.
     async fn reannounce(
         &self,
         mut receipt: HandoverReceipt,
@@ -522,8 +523,8 @@ impl Engine {
     /// `complete` and the answer is 200 whatever the receipt write did: the
     /// real intake wrote this same receipt and deleted the file. Then every
     /// file of the recording goes: the verified file if the intake left it,
-    /// the metadata sidecar, and a partial and sidecar that a re-announce
-    /// opened during the intake. A replayed complete returns the same id
+    /// the metadata sidecar, and a partial a re-announce opened during the
+    /// intake. A replayed complete returns the same id
     /// through the early `complete` check. When another device announced
     /// the same recording id meanwhile (this one was revoked during the
     /// intake), only the verified file goes, and the rest is that phone's
@@ -606,11 +607,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_leaves_another_devices_receipt_and_files_alone() {
-        // Phone X's `complete` read X's receipt from the store (not
-        // remembered, X revoked), X's revoke bumped the count, and phone Y
-        // announced the same recording id, which made its receipt and
-        // opened its files, all on other threads between the read's return
-        // and the refusal. The refusal then leaves Y's upload alone.
+        // X's revoke landed during the store read of phone X's `complete`
+        // and bumped the count, so the read did not remember X's receipt.
+        // In the stretch after the read, phone Y announced the same
+        // recording id on another thread, which made its receipt and opened
+        // its files. The refusal then leaves Y's upload alone.
         let directory = tempfile::tempdir().unwrap();
         let now = Utc.timestamp_opt(1_790_000_000, 0).unwrap();
         let configuration = HandoverConfiguration {

@@ -297,7 +297,8 @@ pub struct Engine {
     /// ([`Engine::open_files`], [`Engine::reopen_missing_files`]) and while
     /// [`Engine::discard_own`], [`Engine::discard_own_while_revoked`] and
     /// [`Engine::discard_and_forget_own`] check memory and discard; see
-    /// there.
+    /// there. Swift: none; the actor runs the check, `begin` and the
+    /// receipt in one step.
     files: Mutex<()>,
 }
 
@@ -677,12 +678,31 @@ impl Engine {
     /// The check and the discard are one step under the files lock. Files
     /// are created only under the same lock, for a device that `revoked`
     /// does not hold ([`Engine::files_for`]): by the announce whose change
-    /// made the receipt, or by a re-announce of the receipt's owner, whose
-    /// read put the receipt in memory. So another phone's announce either
-    /// made its receipt before the check, and its files stay, or opens them
-    /// once the discard is over. (A re-announce whose device paired again
-    /// during its read puts the receipt in memory right after it opens the
-    /// files, with no yield in between.)
+    /// made the receipt, or by a re-announce of the receipt's owner. So
+    /// another phone's announce that opened its files made its receipt
+    /// before the check, and its files stay, or opens them once the
+    /// discard is over. Three stretches with no yield in them, on other
+    /// threads, leave files whose receipt memory does not hold at the
+    /// check:
+    ///
+    /// - A pairing again after the read of a re-announce, or after the
+    ///   `change` of a first announce, and before the opening. The
+    ///   re-announce's write puts the receipt in memory right after; the
+    ///   first announce's stays in the store only, so another phone's
+    ///   announce is answered 409.
+    /// - Another phone's receipt in memory before the check, its files not
+    ///   open yet. The check skips, this device's files stay, and that
+    ///   phone's `begin` keeps the old partial.
+    /// - A second revoke between [`Engine::reopen_missing_files`] and the
+    ///   re-announce's write, which then keeps the receipt out of memory:
+    ///   the reopened partial and sidecar belong to no receipt in memory or
+    ///   the store until the next start's sweep, and a later first announce
+    ///   of the recording id keeps that partial.
+    ///
+    /// A first announce that finds no receipt and discards every file of
+    /// its recording id before `begin` closes the last two; the plan's
+    /// "Open after the port" item owned by
+    /// `fix/handover-first-announce-discard` tracks it.
     ///
     /// Swift: `inbox.discard` in `RecordingHandler`, by the recording id
     /// alone; the "Files by recording id" parity note in
@@ -734,7 +754,8 @@ impl Engine {
     /// `device_id`; `None` while `revoked` holds the device. Its receipts
     /// stay out of memory then, so files made for it would belong to no
     /// receipt there, and a discard on behalf of another device would take
-    /// them.
+    /// them. Swift: none; the actor runs the check, `begin` and the receipt
+    /// in one step.
     fn files_for(&self, device_id: Uuid) -> Option<MutexGuard<'_, ()>> {
         let files = self.files();
         let revoked = self.state().revoked.contains(&device_id);
@@ -745,7 +766,7 @@ impl Engine {
     /// for `device_id`: an empty partial (or the one there, never
     /// truncated) and the metadata sidecar, under the files lock
     /// ([`Engine::discard_own`]). `None`, with nothing opened, when the
-    /// device was revoked since the gate ([`Engine::files_for`]).
+    /// device was revoked since its receipt read ([`Engine::files_for`]).
     /// Swift: `inbox.begin` in `RecordingHandler.announce`.
     pub(crate) fn open_files(
         &self,
@@ -756,15 +777,16 @@ impl Engine {
         Some(self.inbox.begin(metadata))
     }
 
-    /// Opens the files of a known recording of `device_id` again when they
-    /// are gone (a sweep, a crash before the first chunk, a refusal) and no
-    /// verified file waits for a second intake attempt; true when it opened
-    /// them. `None`, with nothing opened, when the device was revoked since
-    /// the gate ([`Engine::files_for`]). The check and the creation are one
-    /// step under the files lock, so two re-announces, or a re-announce and
-    /// the announce that made the receipt, never write the sidecar over a
-    /// partial another one opened. Swift: the `inbox.begin` of a known
-    /// recording in `RecordingHandler.announce`.
+    /// Opens the files of a known recording of `device_id` again when the
+    /// partial or the sidecar is gone (a sweep, a crash before the first
+    /// chunk, a refusal) and no verified file waits for a second intake
+    /// attempt; true when it opened them. `None`, with nothing opened, when
+    /// the device was revoked since its receipt read ([`Engine::files_for`]).
+    /// The check and the creation are one step under the files lock, so two
+    /// re-announces, or a re-announce and the announce that made the
+    /// receipt, never write the sidecar over a partial another one opened.
+    /// Swift: the `inbox.begin` of a known recording in
+    /// `RecordingHandler.announce`.
     pub(crate) fn reopen_missing_files(
         &self,
         metadata: &RecordingMetadata,
