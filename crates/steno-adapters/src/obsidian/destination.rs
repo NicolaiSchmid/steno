@@ -68,13 +68,12 @@ impl std::fmt::Debug for StepHook {
 }
 
 /// The lock every delivery into the vault at `vault_path` holds from start
-/// to end, one per vault in the process: two meetings finishing at once, or
-/// a delivery and a redeliver, read and merge a shared person page, claim
-/// meeting folders and sweep temp files one after the other. The key is the
-/// canonical path, so two spellings of one vault share a lock; the
-/// configured path when it cannot be resolved. Another process on the same
-/// vault (the Swift app, a second CLI) is not covered; the folder claim
-/// holds across processes, the rest does not.
+/// to end, one per vault in the process, so two deliveries merge a shared
+/// person page, claim meeting folders and sweep temp files one after the
+/// other. Keyed by the canonical path (the configured one when it cannot be
+/// resolved), so two spellings of one vault share a lock. Another process
+/// on the vault is not covered; only the folder claim holds across
+/// processes.
 fn vault_lock(vault_path: &str) -> Arc<Mutex<()>> {
     static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = LazyLock::new(Mutex::default);
     let key = fs::canonicalize(vault_path).unwrap_or_else(|_| PathBuf::from(vault_path));
@@ -228,14 +227,6 @@ impl ObsidianFolderDestination {
                 lock.lock().unwrap_or_else(PoisonError::into_inner)
             }
         };
-        self.deliver_holding_vault(meeting, previous)
-    }
-
-    fn deliver_holding_vault(
-        &self,
-        meeting: &MeetingExport,
-        previous: Option<&DeliveryReceipt>,
-    ) -> Result<DeliveryReceipt, ObsidianError> {
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
         let folder = match ledger.pinned_folder() {
@@ -431,12 +422,8 @@ impl ObsidianFolderDestination {
             |candidate| {
                 self.reached(DeliveryStep::ClaimingFolder(candidate));
                 match self.sink.create_new_directory(candidate) {
-                    Ok(()) => Ok(true),
                     Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
-                    Err(error) => Err(ObsidianError::WriteFailed {
-                        path: self.absolute(candidate),
-                        underlying: error.to_string(),
-                    }),
+                    created => self.writing(candidate, || created.map(|()| true)),
                 }
             },
             |folder| self.meeting_of(folder),
