@@ -504,6 +504,44 @@ mod tests {
         (device, metadata)
     }
 
+    /// The phone intake over `store` with `enqueue` and `now`, in UTC.
+    fn phone_intake(store: &Arc<Store>, enqueue: Enqueue, now: Now) -> RecordingIntake {
+        RecordingIntake::new(
+            store.clone(),
+            enqueue,
+            now,
+            FixedOffset::east_opt(0).unwrap(),
+        )
+    }
+
+    /// The nine-byte upload [`paired_phone`]'s metadata describes, in `dir`.
+    fn upload_in(dir: &Path) -> std::path::PathBuf {
+        let upload = dir.join("upload.m4a");
+        std::fs::write(&upload, b"aac bytes").unwrap();
+        upload
+    }
+
+    /// `device`'s receipt of the recording `metadata` describes, in
+    /// `state`, with its first chunk received at `now`.
+    fn receipt_of(
+        device: &PairedDevice,
+        metadata: &RecordingMetadata,
+        state: HandoverState,
+        now: DateTime<Utc>,
+    ) -> HandoverReceipt {
+        HandoverReceipt {
+            recording_id: metadata.recording_id,
+            device_id: device.id,
+            state,
+            byte_count: metadata.byte_count,
+            sha256: metadata.sha256.clone(),
+            chunk_size: metadata.chunk_size,
+            received_chunks: vec![0],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
     #[tokio::test]
     async fn completing_a_meeting_that_is_not_recording_writes_and_enqueues_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -612,15 +650,9 @@ mod tests {
             .unwrap()
             .with_timezone(&Utc);
         let (enqueue, admitted) = recording_enqueue();
-        let intake = RecordingIntake::new(
-            store.clone(),
-            enqueue,
-            Arc::new(move || now),
-            FixedOffset::east_opt(0).unwrap(),
-        );
+        let intake = phone_intake(&store, enqueue, Arc::new(move || now));
         let (device, metadata) = paired_phone(&store, now);
-        let upload = dir.path().join("upload.m4a");
-        std::fs::write(&upload, b"aac bytes").unwrap();
+        let upload = upload_in(dir.path());
 
         let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
         let (meeting, asset) = admitted.lock().unwrap()[0].clone();
@@ -677,27 +709,17 @@ mod tests {
         let store = store_with_audio_folder(dir.path());
         let now = Utc::now();
         let (enqueue, admitted) = recording_enqueue();
-        let intake = RecordingIntake::new(
-            store.clone(),
-            enqueue,
-            Arc::new(move || now),
-            FixedOffset::east_opt(0).unwrap(),
-        );
+        let intake = phone_intake(&store, enqueue, Arc::new(move || now));
         let (device, metadata) = paired_phone(&store, now);
-        let verifying = HandoverReceipt {
-            recording_id: metadata.recording_id,
-            device_id: device.id,
-            state: HandoverState::Verifying,
-            byte_count: metadata.byte_count,
-            sha256: metadata.sha256.clone(),
-            chunk_size: metadata.chunk_size,
-            received_chunks: vec![0],
-            created_at: now,
-            updated_at: now,
-        };
-        store.save_handover_receipt(&verifying).unwrap();
-        let upload = dir.path().join("upload.m4a");
-        std::fs::write(&upload, b"aac bytes").unwrap();
+        store
+            .save_handover_receipt(&receipt_of(
+                &device,
+                &metadata,
+                HandoverState::Verifying,
+                now,
+            ))
+            .unwrap();
+        let upload = upload_in(dir.path());
         refuse_writes(&store, true);
 
         intake.admit(&upload, &metadata, &device).await.unwrap_err();
@@ -739,22 +761,11 @@ mod tests {
                 name: "Other phone".to_owned(),
                 ..device.clone()
             };
-            let receipt_of = |device: &PairedDevice, state: HandoverState| HandoverReceipt {
-                recording_id: metadata.recording_id,
-                device_id: device.id,
-                state,
-                byte_count: metadata.byte_count,
-                sha256: metadata.sha256.clone(),
-                chunk_size: metadata.chunk_size,
-                received_chunks: vec![0],
-                created_at: now,
-                updated_at: now,
-            };
             // The revoke, the other phone's announce, and this phone pairing
             // again under the same device id.
             let takeover = {
                 let (store, device, other) = (store.clone(), device.clone(), other.clone());
-                let theirs = receipt_of(&other, HandoverState::Receiving);
+                let theirs = receipt_of(&other, &metadata, HandoverState::Receiving, now);
                 move || {
                     store.delete_paired_device(device.id).unwrap();
                     store.save_paired_device(&other, &[2; 32]).unwrap();
@@ -764,7 +775,12 @@ mod tests {
             };
             let clock: Now = if after_the_read {
                 store
-                    .save_handover_receipt(&receipt_of(&device, HandoverState::Verifying))
+                    .save_handover_receipt(&receipt_of(
+                        &device,
+                        &metadata,
+                        HandoverState::Verifying,
+                        now,
+                    ))
                     .unwrap();
                 // The intake reads the clock once, after its receipt read
                 // and before its commit.
@@ -780,14 +796,8 @@ mod tests {
                 Arc::new(move || now)
             };
             let (enqueue, admitted) = recording_enqueue();
-            let intake = RecordingIntake::new(
-                store.clone(),
-                enqueue,
-                clock,
-                FixedOffset::east_opt(0).unwrap(),
-            );
-            let upload = dir.path().join("upload.m4a");
-            std::fs::write(&upload, b"aac bytes").unwrap();
+            let intake = phone_intake(&store, enqueue, clock);
+            let upload = upload_in(dir.path());
 
             let error = intake.admit(&upload, &metadata, &device).await.unwrap_err();
 
@@ -825,15 +835,9 @@ mod tests {
         let enqueue: Enqueue = Arc::new(|_, _| {
             Box::pin(async { Err(PipelineFailure::new(PipelineStage::Decode, "no runtime")) })
         });
-        let intake = RecordingIntake::new(
-            store.clone(),
-            enqueue,
-            Arc::new(move || now),
-            FixedOffset::east_opt(0).unwrap(),
-        );
+        let intake = phone_intake(&store, enqueue, Arc::new(move || now));
         let (device, metadata) = paired_phone(&store, now);
-        let upload = dir.path().join("upload.m4a");
-        std::fs::write(&upload, b"aac bytes").unwrap();
+        let upload = upload_in(dir.path());
 
         let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
 
@@ -868,12 +872,7 @@ mod tests {
                 Box::pin(async { Ok(()) })
             })
         };
-        let intake = RecordingIntake::new(
-            store.clone(),
-            enqueue,
-            Arc::new(move || now),
-            FixedOffset::east_opt(0).unwrap(),
-        );
+        let intake = phone_intake(&store, enqueue, Arc::new(move || now));
         let (device, metadata) = paired_phone(&store, now);
         let missing = dir.path().join("gone.m4a");
         intake
@@ -998,8 +997,7 @@ mod tests {
         let intake =
             RecordingIntake::over(store.clone(), pipeline, FixedOffset::east_opt(0).unwrap());
         let (device, metadata) = paired_phone(&store, now);
-        let upload = dir.path().join("upload.m4a");
-        std::fs::write(&upload, b"aac bytes").unwrap();
+        let upload = upload_in(dir.path());
         assert_eq!(synchronous(&store), 1);
         let commits = commits_of(&store, metadata.recording_id);
 
@@ -1036,15 +1034,9 @@ mod tests {
         let now = Utc::now();
         let (enqueue, _) = recording_enqueue();
         refuse_writes(&store, false);
-        let intake = RecordingIntake::new(
-            store.clone(),
-            enqueue,
-            Arc::new(move || now),
-            FixedOffset::east_opt(0).unwrap(),
-        );
+        let intake = phone_intake(&store, enqueue, Arc::new(move || now));
         let (device, metadata) = paired_phone(&store, now);
-        let upload = dir.path().join("upload.m4a");
-        std::fs::write(&upload, b"aac bytes").unwrap();
+        let upload = upload_in(dir.path());
         let commits = commits_of(&store, metadata.recording_id);
 
         intake.admit(&upload, &metadata, &device).await.unwrap_err();
