@@ -501,13 +501,9 @@ impl CodexCredentialStore {
         };
         let mut document = match document {
             Ok(document) if refresh_token_in(&document) == Some(kept.replaces.as_str()) => document,
-            Err(CodexCredentialError::Malformed(_)) => {
-                let latest = kept.auth.clone();
-                *slot = Some(kept);
-                return Ok(latest);
-            }
+            Err(CodexCredentialError::Malformed(_)) => return Ok(slot.insert(kept).auth.clone()),
             other => {
-                remove_left(kept.left.as_deref());
+                remove_left(kept.left);
                 return other.and_then(Self::auth_file);
             }
         };
@@ -531,7 +527,7 @@ impl CodexCredentialStore {
     fn write_kept(&self, mut kept: Kept) -> Option<Kept> {
         match self.write(&kept.auth.document) {
             Ok(()) => {
-                remove_left(kept.left.as_deref());
+                remove_left(kept.left);
                 None
             }
             Err(failure) => {
@@ -540,8 +536,7 @@ impl CodexCredentialStore {
                     failure.detail
                 );
                 if let Some(left) = failure.left {
-                    remove_left(kept.left.as_deref());
-                    kept.left = Some(left);
+                    remove_left(kept.left.replace(left));
                 }
                 Some(kept)
             }
@@ -763,7 +758,8 @@ impl CodexCredentialStore {
             "last_refresh".to_owned(),
             Value::String(steno_core::json::format_date((self.now)())),
         );
-        let credentials = Self::credentials_in(&document)?;
+        let auth = Self::auth_file(document)?;
+        let credentials = auth.credentials.clone();
         // A write that fails keeps them for the next call. After an
         // earlier failed write the file still holds that refresh's spent
         // token, so `replaces` stays the earlier one.
@@ -773,10 +769,7 @@ impl CodexCredentialStore {
             None => (file.credentials.refresh_token, None),
         };
         *slot = self.write_kept(Kept {
-            auth: AuthFile {
-                document,
-                credentials: credentials.clone(),
-            },
+            auth,
             replaces,
             left,
         });
@@ -795,12 +788,13 @@ impl CodexCredentialStore {
     /// Temp file beside the target with mode 0600, synced, then `rename`,
     /// then the folder synced: readers see the old or the new file, never
     /// a partial one, the mode never opens up on the way, and, where both
-    /// syncs succeed, the new tokens survive a power loss. A temporary that could
-    /// not be written whole holds no usable copy and is removed. A rename
-    /// that fails leaves the temporary, mode 0600, with the new tokens in
-    /// it, in case the app quits before a later write lands; that write
-    /// removes it, and one left by a run that quit first stays until
-    /// removed by hand. The failure names the file, never what it holds.
+    /// syncs succeed, the new tokens survive a power loss. A temporary
+    /// that could not be written whole holds no usable copy and is
+    /// removed. A rename that fails leaves the temporary, mode 0600, with
+    /// the new tokens in it, in case the app quits before a later write
+    /// lands; that write removes it, and one left by a run that quit first
+    /// stays until removed by hand. The failure names the file, never what
+    /// it holds.
     fn write(&self, document: &Map<String, Value>) -> Result<(), WriteFailure> {
         let text = crate::wire::swift_pretty(&Value::Object(document.clone()));
         let temporary = self
@@ -823,7 +817,6 @@ impl CodexCredentialStore {
             Ok(())
         });
         if let Err(error) = written {
-            // A partly written file is no usable copy of the tokens.
             let _ = std::fs::remove_file(&temporary);
             return Err(WriteFailure {
                 detail: format!("could not write the Codex sign-in file: {error}"),
@@ -851,7 +844,7 @@ impl CodexCredentialStore {
 }
 
 /// Removes the temporary a failed rename left.
-fn remove_left(path: Option<&Path>) {
+fn remove_left(path: Option<PathBuf>) {
     if let Some(path) = path {
         let _ = std::fs::remove_file(path);
     }
