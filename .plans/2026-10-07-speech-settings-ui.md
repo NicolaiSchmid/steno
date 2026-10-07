@@ -76,11 +76,10 @@ switch, off by default until G4 decides the default.
   `ModelStore::with_mirror` takes any string unchecked; open question 3.
 - Details: "Steno checks every file it downloads against the copy it expects, so another
   server cannot change what is installed." (Checksums and sizes come from the manifest.)
-- Today the source covers the speech models only: the speaker recognition models keep
-  their own hosts (`SpeechSettings::models_mirror`). Once the diarizer's models move onto
-  the shared model store (the "One model store" item under "Speech" in
-  `.plans/2026-10-02-rust-core-and-tauri-shell.md`), the source covers them as well, and
-  the label and Details above already fit.
+- The source covers the speaker recognition models as well as the speech models: the
+  diarizer's models install through the shared model store (the "One model store" item
+  under "Speech" in `.plans/2026-10-02-rust-core-and-tauri-shell.md`), so the label and
+  Details above fit both.
 
 ### When a change applies
 

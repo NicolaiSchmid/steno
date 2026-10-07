@@ -63,9 +63,9 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    - the model downloads, which send nothing but the request: `steno-speech`'s
      `ModelStore` (`crates/steno-speech/src/model_store.rs`) fetches the fp32 Parakeet
      export from Hugging Face at a pinned commit and Silero VAD from a GitHub release
-     asset, or both from the mirror the speech settings name; `steno-diarize`
-     (`crates/steno-diarize/src/models.rs`) fetches its two models from Hugging Face
-     and a GitHub release asset;
+     asset, and `steno-diarize`'s two models (`crates/steno-diarize/src/models.rs`)
+     from Hugging Face and a GitHub release asset, or all of them from the mirror the
+     speech settings name;
    - the Tauri updater, which fetches `latest.json` and the signed bundle from the
      repository's GitHub releases and sends nothing (the `desktop-stable` endpoint in
      `apps/desktop/src-tauri/tauri.conf.json`, the `desktop-beta` one in
@@ -432,8 +432,9 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
   - Models: a file's source is a URL (GitHub release assets, 2 GB at most: Silero)
     or a Hugging Face repository at a pinned commit,
     `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the 2.6 GB fp32
-    export (`encoder.weights` alone is 2.4 GB); `steno-diarize` fetches its own
-    models (`crates/steno-diarize/src/models.rs`). `scripts/upload-models.sh` verifies
+    export (`encoder.weights` alone is 2.4 GB); the diarizer's two models are an
+    asset of the same store (`crates/steno-diarize/src/models.rs`, folder
+    `onnx/diarization/`). `scripts/upload-models.sh` verifies
     the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and uploads
     it to `nicolaischmid/steno-models`, pinned at commit `4a133253`
     (`STENO_MODELS_REPO`, `PARAKEET_V3_FP32_REVISION`). The files on disk and what may
@@ -679,8 +680,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   Rust-only: Swift has none of them. `steno-services` reads them from `speech.json` in
   the support directory (`steno_services::speech::speech_settings`), not from the
   `setting` table, which the Swift app rewrites whole on every save;
-  `STENO_MODELS_MIRROR` overrides the mirror (the speech models only: the diarizer's
-  models keep their hosts). Nothing writes the file and the bridge contract has no
+  `STENO_MODELS_MIRROR` overrides the mirror, which serves the diarizer's models
+  too. Nothing writes the file and the bridge contract has no
   field for any of them, so the Settings window shows none:
   `.plans/2026-10-07-speech-settings-ui.md` proposes their place and wording.
 - [ ] Where the speech sidecar runs Parakeet v3, processing a meeting before its models
@@ -691,11 +692,17 @@ still has to draw the window side. `[ ]` is not ported yet.
   pipeline-side downloads in the row of the engine that runs (and map those engines'
   rows to Parakeet v3's models), or fail processing with "Download the speech model in
   Settings" until the engine's models are installed.
-- [ ] One model store: `steno-diarize` keeps its own `ModelStore` and `ModelAsset`
-  (`crates/steno-diarize/src/models.rs`: `.part` files, no resume, no lock, no
-  mirror), so a mirror serves only the speech models. It could fetch through
-  `steno_speech::ModelStore`; its root `onnx/diarization` already fits
-  `<root>/<asset id>/`.
+- [x] One model store: the diarizer's two models are the `steno_speech::ModelAsset`
+  `diarization` (`crates/steno-diarize/src/models.rs`), installed by
+  `steno_speech::ModelStore` into `<models directory>/onnx/diarization/`, the folder
+  the diarizer's own store used, so no installed file moves. They get the store's
+  lock, resume, ranges, progress and the mirror (`<mirror>/diarization/<file>`); the
+  services build the diarizer over `SpeechSetup::model_store`, and Settings and
+  `steno dev models` read the asset. A download cut off while a meeting processes
+  fails that job in `diarize`, keeps the recording (no expiry) and the partial, and
+  the next attempt resumes it
+  (`a_diarizer_download_cut_off_mid_job_fails_the_meeting_and_keeps_the_recording`).
+  Content is checked at download, not at every load, as for the speech models.
 
 ### Beyond the bridge
 
@@ -2348,9 +2355,9 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   meetings, the detection prompt, the auto-stop after a call, the calendar lookup, the permissions probe, the macOS menu
   bar's Record and Find Meetings items, and the "Where the speech sidecar runs
   Parakeet v3" line under "Speech" (its two items below). Several name WP5 or WP8,
-  which merged without them. The two other unticked "Speech" lines, `SpeechSettings`
-  and "One model store", cover Rust-only settings and code with no Swift behaviour to
-  match: they do not gate the cutover and have their own **Unowned.** items. Where:
+  which merged without them. The other unticked "Speech" line, `SpeechSettings`,
+  covers Rust-only settings with no Swift behaviour to match: it does not gate the
+  cutover and has its own **Unowned.** item. Where:
   the unticked lines under "Beyond the bridge" and "Speech" and the open items under
   "Pipeline and services (WP6b)" and "Shell" in the parity list. Found: #170, #172,
   #173.
@@ -2554,10 +2561,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   no field for them; `.plans/2026-10-07-speech-settings-ui.md` proposes where they
   appear and how they read, and the item stays open until that UI ships. Where: the
   `SpeechSettings` item under "Speech" in the parity list. Found: #177, #187.
-- **Unowned.** The diarizer keeps its own model store (no resume, no lock, no mirror),
-  so a mirror serves only the speech models. Where:
-  `crates/steno-diarize/src/models.rs`; the "One model store" item under "Speech" in
-  the parity list. Found: #183.
 - **Unowned.** Untested paths with no seam to test them: the system calls behind the
   phone intake's syncs (Rust's `Disk` in `crates/steno-pipeline/src/files.rs`, Swift's
   `RecordingIntake.Syncs.disk`; the tests record which syncs run, not that the disk

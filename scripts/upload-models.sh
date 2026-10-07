@@ -5,8 +5,8 @@
 # prints the commit to pin in the manifest. GitHub release assets cap at
 # 2 GB a file and encoder.weights is 2.4 GB, so this asset lives on Hugging
 # Face; Silero VAD stays on the sherpa-onnx GitHub release
-# (crates/steno-speech/src/model_store.rs) and steno-diarize fetches its own
-# models (crates/steno-diarize/src/models.rs).
+# (crates/steno-speech/src/model_store.rs) and the diarizer's two models
+# keep their own hosts (crates/steno-diarize/src/models.rs).
 #
 # Usage: scripts/upload-models.sh [--repo <owner/name>] [--models <store root>]
 #        [--private] [--dry-run]
