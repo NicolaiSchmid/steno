@@ -289,15 +289,12 @@ impl FakeCollection {
                 .iter()
                 .find(|(_, stored)| replace && stored.attributes == item.attributes)
                 .map(|(id, _)| *id);
-            if let Some(id) = existing {
-                state.items.insert(id, item);
-                (id, false)
-            } else {
+            let id = existing.unwrap_or_else(|| {
                 state.next += 1;
-                let id = state.next;
-                state.items.insert(id, item);
-                (id, true)
-            }
+                state.next
+            });
+            state.items.insert(id, item);
+            (id, existing.is_none())
         };
         if new {
             server
