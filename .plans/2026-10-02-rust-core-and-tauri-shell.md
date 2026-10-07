@@ -1394,7 +1394,9 @@ touch lines; each fix is ported to Swift before cutover.
   first announces that race, the sidecar is the metadata of the one whose receipt
   memory holds, and the late one leaves it alone; a failed opening still saves the
   receipt at its place in line, and the phone's retried announce opens the files as a
-  re-announce. Swift checks memory, runs `begin` and makes the receipt in one step on
+  re-announce. A first announce whose device was revoked since its receipt read also
+  saves the receipt at its place in line, which memory keeps out, opens no files and
+  answers 401. Swift checks memory, runs `begin` and makes the receipt in one step on
   the actor. The intake's own receipt saves (`RecordingIntake::admit`,
   `RecordingIntake.admit`) run outside the line in both apps.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
@@ -1460,32 +1462,42 @@ touch lines; each fix is ported to Swift before cutover.
   paired in the store but its recording routes answer 401 until it pairs again, a
   retried revoke finishes or the app restarts: a half-revoked phone that cannot hand
   over is safer than one that can.
-- Files by recording id: Rust discards a recording's inbox files, and forgets its
-  receipt, on behalf of one device under two rules. Nothing goes while memory holds
-  another device's receipt of that recording id (`Engine::discard_own`,
-  `Engine::discard_and_forget_own`, `Engine::forget_own`). And files are created only
-  for a device that `revoked` does not hold, by the announce whose change made the
-  receipt or by a re-announce of its owner, so memory holds that receipt; a first
-  announce or re-announce whose device was revoked during its receipt read opens none
-  and answers 401 (`Engine::open_files`, `Engine::reopen_missing_files`). The check
-  and the discard, like the creation, hold the engine's files lock (taken before the
-  state lock, held across those file calls only), so no announce opens files between
-  the two. Every discard but the start's sweep follows the rules: the first announce's
-  failed save (`announce` in `crates/steno-handover/src/engine/recording.rs`), the
-  admission, a `complete` refused for a revoke (after the read, which also forgets the
-  receipt, and after the verify), the revoke, the 422 and a re-announce that finds the
-  receipt `complete`; so does the forget of a recording admitted before, whose
-  `complete` answers 200 after a revoke. So when a phone is revoked while its
-  recording is verified or in the intake and another phone announces the same
-  recording id, that phone keeps its receipt, partial and sidecar, and its upload goes
-  on. On success the admission removes every file of the recording, also the partial
-  and sidecar a re-announce opened during the intake, else an empty partial would wait
-  for the next start's sweep. Swift's `RecordingHandler.admit` removes only the
-  metadata sidecar, whatever memory holds, until it takes the same two rules, and its
-  `refusal` after the verify and its `forget` go by recording id alone: a phone that
-  announced the same recording id during a revoked phone's verify loses its receipt
-  from memory and its files, is answered 404 "announce again" and sends again; nothing
-  is lost.
+- Files by recording id: Rust keeps a recording's inbox files to one device under two
+  rules. Nothing goes, and no receipt is forgotten, while memory holds another
+  device's receipt of that recording id (`Engine::discard_own`,
+  `Engine::discard_own_while_revoked`, `Engine::discard_and_forget_own`,
+  `Engine::forget_own`). And files are created only for a device that `revoked` does
+  not hold, by the announce whose change made the receipt or by a re-announce of its
+  owner; a first announce or re-announce whose device was revoked since its receipt
+  read opens none and answers 401 (`Engine::open_files`,
+  `Engine::reopen_missing_files`). The check and the discard, like the creation, hold
+  the engine's files lock (taken before the state lock, held across those file calls
+  only), so no announce opens files between the two. Three stretches with no yield in
+  them, on other threads, still leave files whose receipt memory does not hold at the
+  check: a pairing again after a re-announce's read or a first announce's `change` and
+  before the opening (the re-announce's write puts the receipt in memory right after,
+  the first announce's stays in the store only, so another phone's announce gets 409);
+  another phone's receipt in memory whose files are not open yet (the check skips, and
+  that phone's `begin` keeps the old partial); and a second revoke between
+  `Engine::reopen_missing_files` and the re-announce's write (the reopened partial and
+  sidecar belong to no receipt in memory or the store until the next start's sweep).
+  The last two wait for the first-announce discard owned by
+  `fix/handover-first-announce-discard` in "Open after the port". Every discard but
+  the start's sweep follows the rules: the first announce's failed save (`announce` in
+  `crates/steno-handover/src/engine/recording.rs`), the admission, a `complete`
+  refused for a revoke (after the read, which also forgets the receipt, and after the
+  verify), the revoke, the 422 and a re-announce that finds the receipt `complete`; so
+  does the forget of a recording admitted before, whose `complete` answers 200 after a
+  revoke. So when a phone is revoked while its recording is verified or in the intake
+  and another phone announces the same recording id, that phone keeps its receipt,
+  partial and sidecar, and its upload goes on. On success the admission removes every
+  file of the recording, also the partial and sidecar a re-announce opened during the
+  intake, else an empty partial would wait for the next start's sweep. Swift's
+  `RecordingHandler.admit` removes only the metadata sidecar, whatever memory holds,
+  until it takes the same two rules, and its `refusal` after the verify and its
+  `forget` go by recording id alone: a phone that announced the same recording id
+  during a revoked phone's verify loses its receipt from memory and its files, is
+  answered 404 "announce again" and sends again; nothing is lost.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
@@ -1617,10 +1629,10 @@ Rust fixes these Swift behaviours; each is ported to Swift or accepted before cu
 
 What the merged packages left open. Each item starts with its owner: **WP9b** (the Mac
 cutover, `.plans/2026-10-04-mac-cutover.md`), **First Linux release**, **First Windows
-release** (WP10's hardware checks and the unsigned installers) or **Unowned** (no
-package or release has it yet). Then it says what is open, where it lives (pointing to
-this plan where the plan already covers it) and which pull requests found it. The pull
-request that fixes an item deletes it.
+release** (WP10's hardware checks and the unsigned installers), the branch of a
+follow-up pull request, or **Unowned** (no package or release has it yet). Then it
+says what is open, where it lives (pointing to this plan where the plan already covers
+it) and which pull requests found it. The pull request that fixes an item deletes it.
 
 - **WP9b.** The unticked lines of the parity list must all be ticked before the
   cutover opens: the menu bar's queue and recent meetings, the detection prompt, the
@@ -1792,11 +1804,31 @@ request that fixes an item deletes it.
   limit when `complete` fails, because its collector task is never cancelled; the
   failure shows as a timeout instead of the assertion. Swift only. Where:
   `Tests/StenoHandoverTests/IdempotencyTests.swift`. Found: #209.
-- **Unowned.** A `complete` the computer admitted whose answer never reaches the phone
-  (the 10 s timeout, a dropped connection, the app killed or suspended) leaves the row
-  pending with its file. When an unpair follows, the revoke deletes the receipt, so the
-  next pairing uploads the recording again and the computer admits it as a second
-  meeting. Both apps. Where: `revoke` in `crates/steno-handover/src/engine/mod.rs` and
+- **`fix/handover-first-announce-discard`.** Opens once #219 and the Swift #212 have
+  merged. A first announce that finds no receipt in memory or the store leaves the
+  files of that recording id that no receipt owns: `begin` keeps a partial, and a
+  verified file waits. After an intake failure, a restart and a revoke (the receipt is
+  only in the store, so the revoke's discard skips the files and its delete cascades
+  the row), another phone that announces the same id gets a fresh receipt, and its
+  `complete` admits the waiting verified file unhashed (Rust: the early return of
+  `verified_file` in `crates/steno-handover/src/engine/recording.rs`; Swift:
+  `verifiedFile` returns it without a hash). The same holds for a revoked phone's
+  files when its refusal lands between another phone's `change` and that phone's
+  `open_files`, and for the partial and sidecar a second revoke leaves after
+  `Engine::reopen_missing_files`. Discarding every file of that id before `begin`
+  closes it (Swift: in the same actor step; Rust: in `open_files` under the `files`
+  lock), with a deterministic test of the restart path in each app. Both apps. Where:
+  `announce` in `crates/steno-handover/src/engine/recording.rs` and in
+  `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #219.
+- **`fix/handover-lost-complete-answer`.** Opens after
+  `fix/handover-first-announce-discard`. A `complete` the computer admitted whose
+  answer never reaches the phone (the 10 s timeout, a dropped connection, the app
+  killed or suspended) leaves the row pending with its file. When an unpair follows,
+  the revoke deletes the receipt, so the next pairing uploads the recording again and
+  the computer admits it as a second meeting. The fix needs a durable record of
+  admitted recording ids and hashes that outlives the revoke (a schema migration), so
+  its timing waits on the stable plan's rollback-window rule. Both apps. Where:
+  `revoke` in `crates/steno-handover/src/engine/mod.rs` and
   `Sources/StenoHandover/Routing/HandoverEngine.swift`, the `complete` case in
   `mobile/src/features/sync/upload-executor.ts`. Found: #211.
 - **Unowned.** The phone intake's receipt and meeting commits run under
