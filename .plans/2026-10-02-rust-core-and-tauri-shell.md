@@ -1146,7 +1146,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   `init(pipeline:)` go through). A refused admission's `failed` receipt and every
   other write stay `NORMAL`. Tests read the level inside the commits (Rust's
   `Store::probe_commits` behind `testing`, Swift's `CommitLog` over the writer's
-  trace); a power loss itself is not tested.
+  trace); a power loss itself is not tested. The Rust store also turns
+  `checkpoint_fullfsync` on (`Store::open`), which the bundled SQLite leaves off and
+  Apple's system SQLite under GRDB has on, so a checkpoint on a Mac cannot undo a
+  durable commit.
 
 ### Adapters
 

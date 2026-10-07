@@ -716,6 +716,21 @@ fn processing_results_leave_the_template_and_a_typed_title_to_the_user() {
     assert_eq!(stored.title_origin, TitleOrigin::User);
 }
 
+/// A checkpoint syncs with `F_FULLFSYNC` on Apple platforms, as Apple's
+/// system SQLite under GRDB does by default, so no checkpoint can undo a
+/// durable commit; the bundled SQLite defaults it off.
+#[test]
+fn an_opened_store_checkpoints_with_fullfsync() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+    let checkpoint_fullfsync: bool = store
+        .read(|connection| {
+            Ok(connection.query_row("PRAGMA checkpoint_fullfsync", [], |row| row.get(0))?)
+        })
+        .unwrap();
+    assert!(checkpoint_fullfsync);
+}
+
 /// `synchronous` and `fullfsync` as the connection has them now.
 fn sync_levels(connection: &rusqlite::Connection) -> steno_core::store::Result<(i64, bool)> {
     let synchronous = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;

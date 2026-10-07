@@ -167,7 +167,11 @@ impl Store {
     /// first commit after one, so a power loss or OS crash can roll back
     /// commits that no checkpoint has copied into the database yet; an app
     /// crash loses nothing. A commit that must be on the disk when it
-    /// returns goes through [`Store::write_durably`].
+    /// returns goes through [`Store::write_durably`]. `checkpoint_fullfsync`
+    /// is on, as in Apple's system SQLite that GRDB uses (the bundled SQLite
+    /// here defaults it off), so a checkpoint on Apple platforms flushes the
+    /// drive's cache before the WAL it copied can be overwritten, and a
+    /// power loss after it cannot undo a durable commit.
     /// Swift: `MeetingStore.onDisk`, whose `DatabasePool` runs GRDB's
     /// `Database.setUpWALMode`.
     ///
@@ -198,6 +202,8 @@ impl Store {
         migrator::check(&connection)?;
         Ok(Store {
             connection: Mutex::new(connection),
+            #[cfg(any(test, feature = "testing"))]
+            commit_probe: std::sync::OnceLock::new(),
         })
     }
 
@@ -334,11 +340,12 @@ impl Store {
 }
 
 /// The file connection set up as [`Store::open`] says: the busy timeout,
-/// WAL mode and `synchronous = NORMAL`.
+/// WAL mode, `synchronous = NORMAL` and `checkpoint_fullfsync` on.
 fn set_up(connection: Connection) -> Result<Connection> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     enable_wal(&connection)?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.pragma_update(None, "checkpoint_fullfsync", true)?;
     Ok(connection)
 }
 
