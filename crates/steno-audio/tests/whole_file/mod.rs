@@ -4,8 +4,8 @@
 //! at the source rate, then resampled in one pass. Its own copies of the
 //! CAF and WAV readers and of the windowed sinc, so a change to the
 //! crate's readers or resamplers cannot move the reference with them; the
-//! 3:1 FIR is the writer's (`Resampler48kTo16k`), which the change does
-//! not touch.
+//! 3:1 FIR is the writer's (`Resampler48kTo16k`), which the streaming
+//! decoder shares.
 
 #![allow(dead_code)]
 

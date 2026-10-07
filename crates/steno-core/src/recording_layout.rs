@@ -82,7 +82,8 @@ impl RecordingLayout {
     }
 
     /// `.processing-runs`, the pipeline's count of runs that ended with the
-    /// app before the meeting settled (`steno_pipeline::runs`). Rust only.
+    /// app while the meeting was processed (`steno_pipeline::crash_loop`).
+    /// Rust only.
     #[must_use]
     pub fn processing_runs(&self) -> PathBuf {
         self.directory.join(".processing-runs")

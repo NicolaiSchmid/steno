@@ -5,7 +5,7 @@
 //! - **What is counted.** Each background run of a meeting adds one to a
 //!   count in the meeting's audio folder (`.processing-runs`,
 //!   [`RecordingLayout::processing_runs`]) before it starts
-//!   ([`CountedRun`]). Every end the app lives through takes the run off
+//!   (`CountedRun`). Every end the app lives through takes the run off
 //!   again: a return, ready or failed, and a panic unwinding through it
 //!   clear the count; the app's exit ([`QuitLatch::set`]) takes back each
 //!   run still going, on every pipeline that shares the latch, and leaves
