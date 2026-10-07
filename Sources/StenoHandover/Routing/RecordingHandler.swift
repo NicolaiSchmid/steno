@@ -317,10 +317,14 @@ extension HandoverEngine {
   /// real intake wrote this same receipt and deleted the file. Every file
   /// of the recording left in the inbox then goes: the metadata sidecar,
   /// and a partial and sidecar that a re-announce opened during the intake,
-  /// after the intake took the verified file. A replayed complete returns
-  /// the same id through the early `.complete` check. On failure the
-  /// verified file stays for the phone's retry and the reason is fixed text,
-  /// because the error may name the file's path.
+  /// after the intake took the verified file. When another device announced
+  /// the same recording id meanwhile (this one was revoked during the
+  /// intake), only the verified file goes, and the rest is that phone's
+  /// upload (`ownedByAnotherDevice`); no other request creates the verified
+  /// file while this `complete` holds the `completing` mark. A replayed
+  /// complete returns the same id through the early `.complete` check. On
+  /// failure the verified file stays for the phone's retry and the reason
+  /// is fixed text, because the error may name the file's path.
   private func admit(
     _ file: URL, metadata: RecordingMetadata, device: PairedDevice,
     receipt: inout HandoverReceipt
@@ -334,6 +338,7 @@ extension HandoverEngine {
       return .internalError("the intake", error)
     }
     try? await transition(&receipt, to: .complete(meetingID: meetingID))
+    try? FileManager.default.removeItem(at: file)
     // A revoke during the intake lets another phone announce the same
     // recording id; its files and receipt stay. Checked after the last
     // suspension, in the same actor step as the discard.
