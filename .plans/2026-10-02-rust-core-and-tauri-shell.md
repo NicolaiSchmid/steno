@@ -1193,7 +1193,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   with a startup warning; the rest of the app runs (`handover_listener` in
   `crates/steno-services/src/app.rs`, `AppEnvironment.makeHandover`). Tests hold
   another connection's write lock so the checkpoint fails, and expect no listener and
-  no identity read.
+  no identity read. The guard is one helper, `HandoverService::checkpoint_store` and
+  `HandoverService.checkpointStore(_:)`, which fails with `StoreNotSynced`; the CLI's
+  `steno dev handover serve` in both apps runs it before it mints the identity and
+  exits nonzero when it fails. The CLI's store is in memory, so its checkpoint has no
+  WAL to copy and no test can make it fail; the helper is tested through the apps.
 
 ### Adapters
 
