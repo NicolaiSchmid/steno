@@ -1412,3 +1412,28 @@ fn a_case_only_rename_on_a_case_sensitive_vault_moves_the_line_to_the_new_page()
         "the old page is another file and loses the line"
     );
 }
+
+#[test]
+fn a_person_named_after_a_windows_device_gets_a_page_windows_can_create() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let receipt = deliver(&destination, &with_anna_named("Con"), None);
+
+    let (page, link) = if cfg!(windows) {
+        ("People/Con_.md", "[[Con_|Con]]")
+    } else {
+        ("People/Con.md", "[[Con]]")
+    };
+    assert!(managed(&receipt).contains(&page.to_owned()));
+    assert!(
+        vault
+            .text(page)
+            .contains(&ManagedBlock::marker(export().meeting.id))
+    );
+    assert!(
+        vault
+            .text(&format!("{FOLDER}/{FOLDER_SLUG}.md"))
+            .contains(link),
+        "the folder note links the page"
+    );
+}

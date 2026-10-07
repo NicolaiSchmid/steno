@@ -7,8 +7,10 @@ use unicode_normalization::char::is_combining_mark;
 
 use crate::rendering::markdown_text;
 
-/// Both functions are pure and machine-independent: no locale enters, so
-/// `de_DE` and `en_US` processes produce the same bytes.
+/// Pure and locale-independent: `de_DE` and `en_US` processes produce the
+/// same bytes. One rule depends on the platform: on Windows
+/// [`Slug::file_name`] keeps a person's page off the reserved device names
+/// ([`Slug::file_name_reserving`]).
 pub struct Slug;
 
 impl Slug {
@@ -44,9 +46,62 @@ impl Slug {
 
     /// A display name as a note file name: strips `/ \ : * ? " < > | # ^ [ ]`
     /// and control characters, collapses whitespace, trims spaces and dots.
-    /// `"Unnamed"` when nothing is left.
+    /// `"Unnamed"` when nothing is left. On Windows a reserved device name
+    /// gets a `_` ([`Slug::file_name_reserving`]); elsewhere `Con` stays
+    /// `Con`, so the page the Swift app already wrote on the Mac keeps its
+    /// name.
     #[must_use]
     pub fn file_name(text: &str) -> String {
+        Self::file_name_reserving(text, cfg!(windows))
+    }
+
+    /// [`Slug::file_name`] with the platform made explicit: when
+    /// `device_names_reserved` (Windows), a name whose stem is one of
+    /// Windows' reserved device names, which no file there can be named
+    /// after, gets a `_` after the stem: `Con` becomes `Con_`, `nul.tar`
+    /// `nul_.tar`. The stem is the name up to its first `.`, its trailing
+    /// spaces dropped as Windows drops them, compared without case: `CON`,
+    /// `PRN`, `AUX`, `NUL`, `COM1` to `COM9` and `LPT1` to `LPT9`, the
+    /// digit also `¹`, `²` or `³`, the list Microsoft's "Naming Files,
+    /// Paths, and Namespaces" gives. The page gets `.md` after the name,
+    /// which Windows ignores for this check.
+    #[must_use]
+    pub fn file_name_reserving(text: &str, device_names_reserved: bool) -> String {
+        let name = Self::sanitized_file_name(text);
+        if !device_names_reserved {
+            return name;
+        }
+        let stem_end = name.find('.').unwrap_or(name.len());
+        let stem = name[..stem_end].trim_end_matches(' ');
+        if Self::is_reserved_device_name(stem) {
+            format!("{stem}_{}", &name[stem.len()..])
+        } else {
+            name
+        }
+    }
+
+    /// `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` and the
+    /// `COM`/`LPT` names with a superscript `¹ ² ³`, in any case.
+    fn is_reserved_device_name(stem: &str) -> bool {
+        let upper = stem.to_ascii_uppercase();
+        if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+            return true;
+        }
+        let Some(digit) = upper
+            .strip_prefix("COM")
+            .or_else(|| upper.strip_prefix("LPT"))
+        else {
+            return false;
+        };
+        let mut digits = digit.chars();
+        matches!(
+            (digits.next(), digits.next()),
+            (Some('1'..='9' | '\u{B9}' | '\u{B2}' | '\u{B3}'), None)
+        )
+    }
+
+    /// [`Slug::file_name`] before the device-name rule.
+    fn sanitized_file_name(text: &str) -> String {
         let kept: String = text
             .chars()
             .filter(|character| {

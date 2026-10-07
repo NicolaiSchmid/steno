@@ -4,7 +4,9 @@
 //! (`Sources/StenoAdapters/Rendering`), pinned by the goldens in
 //! `Tests/Fixtures/snapshots/obsidian`; a Windows or Linux call's folder
 //! note differs in its info line's one word
-//! (`Tests/Fixtures/snapshots/platforms`).
+//! (`Tests/Fixtures/snapshots/platforms`). The one machine-dependent rule
+//! is Windows' reserved device names: there a person named `Con` gets
+//! `Con_.md` and links `[[Con_|Con]]` ([`Slug::file_name`](crate::naming::Slug::file_name)).
 
 mod artifact;
 pub mod date_text;

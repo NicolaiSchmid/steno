@@ -5,13 +5,22 @@ use crate::naming::Slug;
 
 /// `[[Anna Müller]]` or `[[2026-09-24-slug|Title]]`. The target goes
 /// through [`Slug::file_name`] (a link names a note file) and the alias
-/// loses `|`, `]]` and line breaks so it cannot break out of the link.
+/// loses `|`, `]]` and line breaks so it cannot break out of the link. A
+/// target the device-name rule renamed (`Con` to `Con_` on Windows) shows
+/// the name as written: `[[Con_|Con]]`.
 #[must_use]
 pub fn wikilink(target: &str, alias: Option<&str>) -> String {
     let name = Slug::file_name(target);
     match alias {
         Some(alias) if !alias.is_empty() => format!("[[{name}|{}]]", link_alias(alias)),
-        _ => format!("[[{name}]]"),
+        _ => {
+            let written = Slug::file_name_reserving(target, false);
+            if written == name {
+                format!("[[{name}]]")
+            } else {
+                format!("[[{name}|{}]]", link_alias(&written))
+            }
+        }
     }
 }
 

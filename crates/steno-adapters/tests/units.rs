@@ -87,6 +87,74 @@ fn slug_file_name_strips_forbidden_characters() {
 }
 
 #[test]
+fn slug_file_name_keeps_off_windows_device_names_only_where_they_are_reserved() {
+    for (name, on_windows) in [
+        ("Con", "Con_"),
+        ("con", "con_"),
+        ("PRN", "PRN_"),
+        ("Aux", "Aux_"),
+        ("nul", "nul_"),
+        ("COM1", "COM1_"),
+        ("com9", "com9_"),
+        ("LPT1", "LPT1_"),
+        ("lpt9", "lpt9_"),
+        ("COM\u{B9}", "COM\u{B9}_"),
+        ("lpt\u{B3}", "lpt\u{B3}_"),
+        ("nul.tar", "nul_.tar"),
+        ("Con .x", "Con_ .x"),
+        ("Con.", "Con_"),
+        ("  Con  ", "Con_"),
+    ] {
+        assert_eq!(Slug::file_name_reserving(name, true), on_windows, "{name}");
+        assert_eq!(
+            Slug::file_name_reserving(name, false),
+            Slug::file_name_reserving(on_windows, false).replacen('_', "", 1),
+            "{name}: kept where the names are not reserved"
+        );
+    }
+    for name in [
+        "COM0",
+        "LPT0",
+        "COM10",
+        "COM",
+        "LPT",
+        "Connie",
+        "Console",
+        "Con_",
+        "Nul2",
+        "aux-1",
+        "x.con",
+        "Anna Müller",
+    ] {
+        assert_eq!(
+            Slug::file_name_reserving(name, true),
+            Slug::file_name_reserving(name, false),
+            "{name} is not a device name"
+        );
+    }
+    assert_eq!(Slug::file_name_reserving("Con", false), "Con");
+    assert_eq!(
+        Slug::file_name("Con"),
+        if cfg!(windows) { "Con_" } else { "Con" },
+        "the rule applies on Windows only"
+    );
+}
+
+#[test]
+fn a_wikilink_to_a_renamed_device_name_shows_the_name_as_written() {
+    if cfg!(windows) {
+        assert_eq!(markdown_text::wikilink("Con", None), "[[Con_|Con]]");
+        assert_eq!(markdown_text::wikilink("Con", Some("C")), "[[Con_|C]]");
+    } else {
+        assert_eq!(markdown_text::wikilink("Con", None), "[[Con]]");
+    }
+    assert_eq!(
+        markdown_text::wikilink("Anna Müller", None),
+        "[[Anna Müller]]"
+    );
+}
+
+#[test]
 fn slug_is_independent_of_the_process_locale() {
     for title in ["Straße İstanbul", "ÄÖÜ äöü", "Ærø Œuvre", "İ ı I i"] {
         let slug = Slug::title(title);
