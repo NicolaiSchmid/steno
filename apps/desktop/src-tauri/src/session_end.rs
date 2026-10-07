@@ -12,26 +12,34 @@
 //!   that name only. It answers `QueryEndSession` at once, and on
 //!   `EndSession` saves, answers `EndSessionResponse` and quits:
 //!   gnome-session asks before its confirmation dialog and gives a query
-//!   one second, and on X11 another client can still call an Xfce logout
-//!   off after the query (`CancelEndSession`), so a recording goes on
-//!   until the end really comes. gnome-session waits about ten seconds for
-//!   the answer at the end, xfce4-session seven. Xfce on Wayland is the
-//!   exception: xfce4-session quits right after the query, with no
-//!   `EndSession` and no cancel to follow, so there the app saves at the
-//!   query, then answers and quits. Where no session manager runs
+//!   one second, and the user can still call the logout off there
+//!   (`CancelEndSession`); on X11 another client can still call an Xfce
+//!   logout off after the query, and xfce4-session then sends the app no
+//!   signal at all. Either way a recording goes on until the end really
+//!   comes. gnome-session waits about ten seconds for the answer at the
+//!   end, xfce4-session seven. `Stop` quits only once a query has been
+//!   answered: xfce4-session also sends it when a checkpoint ("Save
+//!   Session") times out, a minute after it began, with no logout at all.
+//!   Xfce on Wayland is the exception: xfce4-session quits right after
+//!   the query, with no `EndSession` and no cancel to follow, so there the
+//!   app saves at the query and answers; the display closing then ends
+//!   it. Should the session go on after all (a Wayland session taken for
+//!   X11's, `wayland_session`), the app tells the user and relaunches
+//!   (`SaveAndQuit::of`). Where no session manager runs
 //!   (KDE Plasma, wlroots desktops), through the desktop portal's session
 //!   monitor (`follow_portal`): the app opens it (`CreateMonitor` on
 //!   `org.freedesktop.portal.Inhibit`), answers query-end at once
 //!   (`QueryEndResponse`; the portal gives a second, and the end can still
 //!   be called off), and at ending saves and quits. Plasma 6.6's portal
 //!   serves the monitor, but nothing in Plasma 6.6 asks it yet, so it
-//!   never reports the end there; Plasma before 6.6 and the GTK portal off
-//!   GNOME report no end.
+//!   never reports the end there; Plasma before 6.6 and the GTK portal
+//!   outside GNOME report no end.
 //! - **The logout inhibitor** (`hold_logout_inhibitor`, told through
 //!   `LogoutInhibitor`): while a recording runs the app holds the portal's
 //!   `Inhibit` with the `Logout` flag. GNOME shows it in its logout
-//!   dialog, Plasma 6.6 notes it for its monitor, and the GTK portal off
-//!   GNOME refuses it.
+//!   dialog, Plasma 6.6's portal records it for its session monitor, which
+//!   nothing in Plasma asks yet, and the GTK portal outside GNOME (Xfce,
+//!   wlroots) refuses it.
 //! - **A system shutdown or reboot** (`hold_shutdown_lock`): the app holds
 //!   logind's `shutdown` delay lock (`Inhibit` on the system bus), and on
 //!   `PrepareForShutdown(true)` it saves and then releases the lock. logind
@@ -57,6 +65,9 @@
 //! `applicationShouldTerminate`, which Quit goes through too.
 
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::os::unix::fs::FileTypeExt as _;
+use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
@@ -105,10 +116,14 @@ impl SessionApi {
         client: "org.xfce.Session.Client",
         // On X11 xfce4-session waits up to a minute for the query's answer
         // and seven seconds after `EndSession`, and another client can still
-        // call the logout off between the two (XSMP's interact-cancel, then
-        // `CancelEndSession`). On Wayland it quits right after sending the
-        // query (`xfsm_manager_save_yourself_global`), with no `EndSession`
-        // and no cancel to follow.
+        // call the logout off between the two (XSMP's interact-cancel); the
+        // app's client is then set back to idle and hears nothing. A
+        // checkpoint, and a query whose answer it refused because the
+        // logout was called off first, end with that minute's save timeout,
+        // which sends `Stop` though no logout follows. On Wayland it quits
+        // right after sending the query
+        // (`xfsm_manager_save_yourself_global`), with no `EndSession` and no
+        // cancel to follow.
         query_ends_on_wayland: true,
     };
     /// In the order the app looks for them on the bus.
@@ -131,23 +146,72 @@ const CALL_PATIENCE: Duration = Duration::from_secs(5);
 /// What the app does when its session or the system ends: `save` runs the
 /// shutdown Quit runs and returns once it ended, at most
 /// `SHUTDOWN_PATIENCE` later (at once when it already ran); `quit` asks
-/// for the exit, which then goes through at once.
+/// for the exit, which then goes through at once; `await_end`, after a
+/// save at a query that should have been the session's end, returns at
+/// once and starts the wait for that end.
 #[derive(Clone)]
 pub struct SaveAndQuit {
     save: Arc<dyn Fn() + Send + Sync>,
     quit: Arc<dyn Fn() + Send + Sync>,
+    await_end: Arc<dyn Fn() + Send + Sync>,
 }
+
+/// How long the app, saved at a query that should have been the session's
+/// end, waits for that end before it takes the logout as called off
+/// (`SaveAndQuit::of`). xfce4-session on Wayland ends the session a second
+/// or two after its query.
+const END_AFTER_QUERY: Duration = Duration::from_secs(30);
+
+/// What the app tells the user when the session went on after the save at
+/// its query.
+const CALLED_OFF_NOTICE: &str = "The session looked like it was ending, so Steno saved \
+    the recording and stopped. The session went on: relaunch Steno to record again.";
 
 impl SaveAndQuit {
     /// The app's: the save before an end (`save_before_end` in `main.rs`),
-    /// then Quit.
+    /// then Quit. Its `await_end` waits `END_AFTER_QUERY` on a thread of
+    /// its own: a session that really ends takes the process with it
+    /// first. Once the wait is over the app, which saved and so records
+    /// nothing more, tells the user and relaunches when the message is
+    /// closed, so a recorder runs again, as the user expects after a
+    /// logout called off.
     fn of(app: &tauri::AppHandle) -> Self {
-        let (saving, quitting) = (app.clone(), app.clone());
+        let (saving, quitting, waiting) = (app.clone(), app.clone(), app.clone());
         Self {
             save: Arc::new(move || crate::save_before_end(&saving)),
             quit: Arc::new(move || crate::actions::quit(&quitting)),
+            await_end: Arc::new(move || {
+                let app = waiting.clone();
+                let spawned = std::thread::Builder::new()
+                    .name("steno-session-end-wait".to_owned())
+                    .spawn(move || {
+                        std::thread::sleep(END_AFTER_QUERY);
+                        tracing::warn!(
+                            "the session went on after the save at its query; relaunching"
+                        );
+                        relaunch_after_notice(&app);
+                    });
+                if let Err(error) = spawned {
+                    tracing::warn!(%error, "the app saved at the query and waits for nothing");
+                }
+            }),
         }
     }
+}
+
+/// Shows `CALLED_OFF_NOTICE` and relaunches the app however the message is
+/// closed, through the exit request as the updater's relaunch goes
+/// (`AppHandle::request_restart`); the shutdown already ran, so none runs
+/// again.
+fn relaunch_after_notice(app: &tauri::AppHandle) {
+    use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
+    let relaunching = app.clone();
+    app.dialog()
+        .message(CALLED_OFF_NOTICE)
+        .title("Steno")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCustom("Relaunch Steno".to_owned()))
+        .show(move |_| relaunching.request_restart());
 }
 
 /// The startup id the session manager gave the app when it started it (an
@@ -191,11 +255,49 @@ pub fn watch(app: &tauri::AppHandle, startup_id: String) {
     );
 }
 
-/// Whether the app runs in a Wayland session: `WAYLAND_DISPLAY` is set,
-/// also when the shell runs under `XWayland` (`display`), since GTK leaves
-/// it in place.
+/// Whether the app runs in a Wayland session, also when the shell runs
+/// under `XWayland` (`display.rs` chooses it): `wayland_session_of` this
+/// process's environment.
 fn wayland_session() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some_and(|display| !display.is_empty())
+    use std::env::var_os;
+    wayland_session_of(
+        var_os("XDG_SESSION_TYPE").as_deref(),
+        var_os("WAYLAND_DISPLAY").as_deref(),
+        var_os("XDG_RUNTIME_DIR").as_deref(),
+    )
+}
+
+/// Whether a session with these `XDG_SESSION_TYPE`, `WAYLAND_DISPLAY` and
+/// `XDG_RUNTIME_DIR` values is a Wayland one. The session type decides when
+/// it is `wayland` or `x11`; otherwise a `WAYLAND_DISPLAY` decides whose
+/// socket exists (the value itself when it is a path, else the name under
+/// `XDG_RUNTIME_DIR`). An app started by the systemd user manager can
+/// inherit an earlier session's `WAYLAND_DISPLAY`, whose compositor and
+/// socket are gone. An empty value counts as none.
+fn wayland_session_of(
+    session_type: Option<&OsStr>,
+    display: Option<&OsStr>,
+    runtime_dir: Option<&OsStr>,
+) -> bool {
+    fn set(value: Option<&OsStr>) -> Option<&Path> {
+        value.filter(|value| !value.is_empty()).map(Path::new)
+    }
+    match session_type.and_then(OsStr::to_str) {
+        Some("wayland") => return true,
+        Some("x11") => return false,
+        _ => {}
+    }
+    let Some(display) = set(display) else {
+        return false;
+    };
+    let socket = if display.is_absolute() {
+        display.to_owned()
+    } else if let Some(runtime_dir) = set(runtime_dir) {
+        runtime_dir.join(display)
+    } else {
+        return false;
+    };
+    std::fs::metadata(socket).is_ok_and(|socket| socket.file_type().is_socket())
 }
 
 /// The connection `builder` makes, whose method calls wait `CALL_PATIENCE`
@@ -239,32 +341,60 @@ fn proxy<'a>(
         .build()
 }
 
+/// Where a session client stands in a logout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// No logout asked, or the last one was called off or its answer
+    /// refused.
+    Running,
+    /// A query was answered, and the logout may go on.
+    Asked,
+    /// The app saved at the query, which should have been the end, and
+    /// answered it (`SaveAndQuit::await_end`).
+    Saved,
+}
+
 /// What a session client does on one of the session manager's signals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ClientStep {
     /// Answers yes at once: the logout can still be called off, and the
     /// logout inhibitor is what asks the user.
     Answer,
+    /// Saves, answers and waits for the end (`SaveAndQuit::await_end`): the
+    /// query is the session's end.
+    SaveAnswer,
     /// Saves, answers, then quits: the session ends.
     SaveAnswerQuit,
-    /// Quits: the session manager asks the client to leave.
+    /// Answers, then quits: the session ends, and the app saved at the
+    /// query.
+    AnswerQuit,
+    /// Quits: the session manager asks the client to leave during a
+    /// logout.
     Quit,
-    /// Nothing (`CancelEndSession`, and a signal this client does not know).
+    /// Nothing.
     Wait,
 }
 
-/// The step for the session manager's signal `member`: the query is
-/// answered at once or, where it is the session's end
-/// (`saves_at_query`, `SessionApi::query_ends_on_wayland`), after the save.
-/// A query answered at once can still be called off (`CancelEndSession`),
-/// and the recording goes on.
-fn client_step(saves_at_query: bool, member: &str) -> ClientStep {
-    match member {
-        "QueryEndSession" if saves_at_query => ClientStep::SaveAnswerQuit,
-        "QueryEndSession" => ClientStep::Answer,
-        "EndSession" => ClientStep::SaveAnswerQuit,
-        "Stop" => ClientStep::Quit,
-        _ => ClientStep::Wait,
+/// The step for the session manager's signal `member` in `phase`, and the
+/// phase it leads to, should its answer go through (`follow_session` keeps
+/// the phase when the answer is refused). The query is answered at once
+/// or, where it is the session's end (`saves_at_query`,
+/// `SessionApi::query_ends_on_wayland`), after the save. A query answered
+/// at once can still be called off (gnome-session sends
+/// `CancelEndSession`, xfce4-session nothing), and the recording goes on.
+/// `Stop` quits only once a query was answered: xfce4-session also sends
+/// it when a checkpoint, or a query whose answer it refused, times out,
+/// with no logout to follow.
+fn client_step(saves_at_query: bool, phase: Phase, member: &str) -> (ClientStep, Phase) {
+    match (member, phase) {
+        ("QueryEndSession", Phase::Saved) => (ClientStep::Answer, Phase::Saved),
+        ("QueryEndSession", _) if saves_at_query => (ClientStep::SaveAnswer, Phase::Saved),
+        ("QueryEndSession", _) => (ClientStep::Answer, Phase::Asked),
+        ("EndSession", Phase::Saved) => (ClientStep::AnswerQuit, phase),
+        ("EndSession", _) => (ClientStep::SaveAnswerQuit, phase),
+        ("Stop", Phase::Asked | Phase::Saved) => (ClientStep::Quit, phase),
+        ("CancelEndSession", Phase::Asked) => (ClientStep::Wait, Phase::Running),
+        _ => (ClientStep::Wait, phase),
     }
 }
 
@@ -314,8 +444,8 @@ fn follow_session_end(
 
 /// Registers the app with `manager`, the session manager on `session`
 /// (a Wayland one when `wayland`), and follows its signals to this client
-/// until the session ends; an error when the bus goes away before the app
-/// quit.
+/// (`client_step`, from `Phase::Running`) until the session ends; an error
+/// when the bus goes away before the app quit.
 fn follow_session(
     session: &Connection,
     (api, owner): (SessionApi, OwnedUniqueName),
@@ -347,6 +477,10 @@ fn follow_session(
             )
             .map(drop)
     };
+    let unanswered = |error: zbus::Error| {
+        tracing::warn!(%error, "the session manager's query went unanswered");
+    };
+    let mut phase = Phase::Running;
     for signal in signals {
         let signal = signal?;
         let header = signal.header();
@@ -357,13 +491,22 @@ fn follow_session(
         let Some(member) = header.member() else {
             continue;
         };
-        match client_step(saves_at_query, member.as_str()) {
-            // A lost answer leaves the client following: the end may still
-            // come.
-            ClientStep::Answer => {
-                if let Err(error) = answer() {
-                    tracing::warn!(%error, "the session manager's query went unanswered");
-                }
+        let (step, next) = client_step(saves_at_query, phase, member.as_str());
+        match step {
+            // A lost or refused answer leaves the client following in the
+            // phase it was in: the end may still come, and xfce4-session
+            // refuses the answer to a query called off first.
+            ClientStep::Answer => match answer() {
+                Ok(()) => phase = next,
+                Err(error) => unanswered(error),
+            },
+            // Saved, whatever became of the answer.
+            ClientStep::SaveAnswer => {
+                tracing::info!(signal = member.as_str(), "the session is ending; saving");
+                (on_end.save)();
+                answer().unwrap_or_else(unanswered);
+                phase = next;
+                (on_end.await_end)();
             }
             ClientStep::SaveAnswerQuit => {
                 tracing::info!(signal = member.as_str(), "the session is ending; saving");
@@ -372,11 +515,22 @@ fn follow_session(
                 (on_end.quit)();
                 return answered;
             }
+            ClientStep::AnswerQuit => {
+                let answered = answer();
+                (on_end.quit)();
+                return answered;
+            }
             ClientStep::Quit => {
+                tracing::info!("the session manager asked the app to leave; quitting");
                 (on_end.quit)();
                 return Ok(());
             }
-            ClientStep::Wait => {}
+            ClientStep::Wait => {
+                if member.as_str() == "Stop" {
+                    tracing::info!("the session manager asked the app to leave outside a logout");
+                }
+                phase = next;
+            }
         }
     }
     Err(zbus::Error::Failure("the session bus closed".to_owned()))
@@ -600,9 +754,9 @@ pub fn note_recording(app: &tauri::AppHandle, state: crate::recording::Recording
 /// releases it (`Close` on its request) when it turns idle. A desktop that
 /// honours it asks the user before a logout while a recording runs (GNOME,
 /// through gnome-session, even for `gnome-session-quit --no-prompt`);
-/// Plasma notes it for its session monitor; one that does not (the GTK
-/// portal off GNOME: Xfce, wlroots) refuses it. Either way the save at the
-/// end is the same. A call that fails is logged and tried again at the
+/// Plasma 6.6's portal records it for its session monitor, which nothing
+/// in Plasma asks yet; the GTK portal outside GNOME (Xfce, wlroots)
+/// refuses it. Either way the save at the end is the same. A call that fails is logged and tried again at the
 /// next recording; returns once `busy` has no sender.
 fn hold_logout_inhibitor(session: &Connection, busy: &mpsc::Receiver<bool>) {
     let mut held: Option<OwnedObjectPath> = None;
@@ -643,23 +797,80 @@ fn hold_logout_inhibitor(session: &Connection, busy: &mpsc::Receiver<bool>) {
 mod tests {
     use super::*;
     use std::io::{BufRead as _, Read as _};
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     /// A query is answered at once unless it is the session's end, which
-    /// saves first; the end saves, and a cancel changes nothing.
+    /// saves first and then waits for the end; the end saves unless the
+    /// query did; `Stop` quits only after a query; a cancel sends the
+    /// client back to running.
     #[test]
     fn the_session_managers_signals_map_to_their_steps() {
-        assert_eq!(client_step(false, "QueryEndSession"), ClientStep::Answer);
-        assert_eq!(
-            client_step(true, "QueryEndSession"),
-            ClientStep::SaveAnswerQuit
-        );
-        for saves_at_query in [false, true] {
-            let step = |member| client_step(saves_at_query, member);
-            assert_eq!(step("EndSession"), ClientStep::SaveAnswerQuit);
-            assert_eq!(step("Stop"), ClientStep::Quit);
-            assert_eq!(step("CancelEndSession"), ClientStep::Wait);
-            assert_eq!(step("Unknown"), ClientStep::Wait);
+        use ClientStep::{Answer, AnswerQuit, Quit, SaveAnswer, SaveAnswerQuit, Wait};
+        use Phase::{Asked, Running, Saved};
+        let cases = [
+            (false, Running, "QueryEndSession", (Answer, Asked)),
+            (false, Asked, "QueryEndSession", (Answer, Asked)),
+            (true, Running, "QueryEndSession", (SaveAnswer, Saved)),
+            (true, Asked, "QueryEndSession", (SaveAnswer, Saved)),
+            (true, Saved, "QueryEndSession", (Answer, Saved)),
+            (false, Running, "EndSession", (SaveAnswerQuit, Running)),
+            (false, Asked, "EndSession", (SaveAnswerQuit, Asked)),
+            (true, Saved, "EndSession", (AnswerQuit, Saved)),
+            (false, Running, "Stop", (Wait, Running)),
+            (false, Asked, "Stop", (Quit, Asked)),
+            (true, Saved, "Stop", (Quit, Saved)),
+            (false, Running, "CancelEndSession", (Wait, Running)),
+            (false, Asked, "CancelEndSession", (Wait, Running)),
+            (true, Saved, "CancelEndSession", (Wait, Saved)),
+            (false, Asked, "Unknown", (Wait, Asked)),
+            (true, Saved, "Unknown", (Wait, Saved)),
+        ];
+        for (saves_at_query, phase, member, step) in cases {
+            assert_eq!(
+                client_step(saves_at_query, phase, member),
+                step,
+                "{member} in {phase:?}, saving at the query: {saves_at_query}"
+            );
         }
+    }
+
+    /// The session type decides when it names Wayland or X11; otherwise a
+    /// `WAYLAND_DISPLAY` whose socket exists, by name under the runtime
+    /// directory or by path, makes the session a Wayland one, and an
+    /// empty or stale one does not.
+    #[test]
+    fn a_wayland_session_is_told_by_its_type_or_its_live_socket() {
+        let dir = std::env::temp_dir().join(format!("steno-wayland-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let live = dir.join("wayland-1");
+        let _compositor = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        std::fs::write(dir.join("wayland-file"), "").unwrap();
+        let runtime = Some(dir.as_os_str());
+        let os = |value: &'static str| Some(OsStr::new(value));
+        let cases = [
+            (os("wayland"), None, None, true),
+            (os("wayland"), os("wayland-9"), runtime, true),
+            (os("x11"), os("wayland-1"), runtime, false),
+            (None, os("wayland-1"), runtime, true),
+            (os("tty"), os("wayland-1"), runtime, true),
+            (os(""), os("wayland-1"), runtime, true),
+            (None, Some(live.as_os_str()), None, true),
+            (None, os("wayland-1"), None, false),
+            (None, os("wayland-1"), os(""), false),
+            (None, os("wayland-9"), runtime, false),
+            (None, os("wayland-file"), runtime, false),
+            (None, os(""), runtime, false),
+            (None, None, runtime, false),
+        ];
+        for (session_type, display, runtime_dir, wayland) in cases {
+            assert_eq!(
+                wayland_session_of(session_type, display, runtime_dir),
+                wayland,
+                "{session_type:?} {display:?} {runtime_dir:?}"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The portal's query-end is answered and its end saves; running,
@@ -756,13 +967,14 @@ mod tests {
     /// lock released or an answer sent before it ended would be noted
     /// first.
     fn noting(steps: &Steps) -> SaveAndQuit {
-        let (saving, quitting) = (steps.clone(), steps.clone());
+        let (saving, quitting, waiting) = (steps.clone(), steps.clone(), steps.clone());
         SaveAndQuit {
             save: Arc::new(move || {
                 std::thread::sleep(SAVE);
                 saving.lock().unwrap().push("saved".to_owned());
             }),
             quit: Arc::new(move || quitting.lock().unwrap().push("quit".to_owned())),
+            await_end: Arc::new(move || waiting.lock().unwrap().push("awaits the end".to_owned())),
         }
     }
 
@@ -942,14 +1154,16 @@ mod tests {
 
     /// A session manager under `api`'s names as far as one client goes, on
     /// `manager`: it registers the client at `client` and notes the ids,
-    /// and notes the client's answers. A call that names another object,
-    /// interface or method goes unanswered.
+    /// and notes the client's answers, refusing the next one when
+    /// `refuse` is set (as xfce4-session refuses an answer to a query
+    /// called off first), which clears it. A call that names another
+    /// object, interface or method goes unanswered.
     fn serve_session_manager(
         manager: &Connection,
         api: SessionApi,
         client: OwnedObjectPath,
         registered: mpsc::Sender<(String, String)>,
-        steps: Steps,
+        (steps, refuse): (Steps, Arc<AtomicBool>),
         answered: mpsc::Sender<()>,
     ) {
         let (manager, calls) = (manager.clone(), MessageIterator::from(manager));
@@ -972,11 +1186,23 @@ mod tests {
                         if to == (Some(client.as_str()), Some(api.client)) =>
                     {
                         let (is_ok, reason): (bool, String) = call.body().deserialize().unwrap();
+                        let refused = refuse.swap(false, Ordering::SeqCst);
                         // "answered true" for the yes without a reason the
                         // client gives.
-                        let step = [format!("answered {is_ok}"), reason].concat();
+                        let verb = if refused { "refused" } else { "answered" };
+                        let step = [format!("{verb} {is_ok}"), reason].concat();
                         steps.lock().unwrap().push(step);
-                        manager.reply(&header, &()).unwrap();
+                        if refused {
+                            manager
+                                .reply_error(
+                                    &header,
+                                    "org.xfce.Session.Client.Error.InvalidState",
+                                    &("Invalid time to respond",),
+                                )
+                                .unwrap();
+                        } else {
+                            manager.reply(&header, &()).unwrap();
+                        }
                         let _ = answered.send(());
                     }
                     _ => {}
@@ -995,6 +1221,8 @@ mod tests {
         client_name: String,
         manager: Connection,
         steps: Steps,
+        /// Refuses the client's next answer (`serve_session_manager`).
+        refuse: Arc<AtomicBool>,
         answers: mpsc::Receiver<()>,
         result: mpsc::Receiver<zbus::Result<()>>,
     }
@@ -1003,6 +1231,7 @@ mod tests {
         /// On X11 (`wayland` false) or Wayland.
         fn follow(daemon: &Daemon, api: SessionApi, wayland: bool) -> Self {
             let steps = Steps::default();
+            let refuse = Arc::new(AtomicBool::new(false));
             let (registered, registrations) = mpsc::channel();
             let (answered, answers) = mpsc::channel();
             let client = format!("{}/Client1", api.path);
@@ -1012,7 +1241,7 @@ mod tests {
                 api,
                 OwnedObjectPath::try_from(client.as_str()).unwrap(),
                 registered,
-                steps.clone(),
+                (steps.clone(), refuse.clone()),
                 answered,
             );
             let (connection, on_end) = (daemon.connect(), noting(&steps));
@@ -1029,6 +1258,7 @@ mod tests {
                 client_name,
                 manager,
                 steps,
+                refuse,
                 answers,
                 result,
             }
@@ -1048,18 +1278,29 @@ mod tests {
         /// Asks the client whether the session may end and waits for its
         /// yes, which it gives without saving.
         fn query(&self) {
+            self.query_answered("answered true");
+        }
+
+        /// `query`, with the manager refusing the answer.
+        fn query_refused(&self) {
+            self.refuse.store(true, Ordering::SeqCst);
+            self.query_answered("refused true");
+        }
+
+        fn query_answered(&self, answer: &str) {
             let before = self.steps().len();
             self.emit(&self.client, "QueryEndSession");
             self.answers
                 .recv_timeout(WAIT)
                 .expect("the query was answered");
-            assert_eq!(self.steps()[before..].to_vec(), ["answered true"]);
+            assert_eq!(self.steps()[before..].to_vec(), [answer]);
         }
 
-        /// Calls the logout off: the client neither saves nor quits.
-        fn cancel(&self) {
+        /// The manager sends `member`, which the client lets pass: it
+        /// neither saves nor quits.
+        fn passes(&self, member: &str) {
             let before = self.steps();
-            self.emit(&self.client, "CancelEndSession");
+            self.emit(&self.client, member);
             // Longer than a save, so a client that acted on it would be
             // seen.
             std::thread::sleep(SAVE * 2);
@@ -1067,31 +1308,49 @@ mod tests {
             assert!(self.result.try_recv().is_err(), "the client ended");
         }
 
+        /// Calls the logout off: gnome-session sends `CancelEndSession`,
+        /// and xfce4-session sends the client nothing (it is set back to
+        /// idle). The client neither saves nor quits.
+        fn cancel(&self) {
+            if self.api.name == GNOME_SESSION.name {
+                self.passes("CancelEndSession");
+            }
+        }
+
         /// Asks the client whether the session may end, where the query
-        /// is the end: the client saves, answers and quits, in that order.
+        /// is the end: the client saves, answers and then waits for the
+        /// end, in that order.
         fn query_ends(&self) {
             self.emit(&self.client, "QueryEndSession");
+            self.answers
+                .recv_timeout(WAIT)
+                .expect("the query was answered");
+            let deadline = std::time::Instant::now() + WAIT;
+            while self.steps().len() < 3 && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(self.steps(), ["saved", "answered true", "awaits the end"]);
+            assert!(self.result.try_recv().is_err(), "the client ended");
+        }
+
+        /// The manager sends `member`, and the client ends with `steps`
+        /// noted after what it had noted before.
+        fn ends_on(&self, member: &str, steps: &[&str]) {
+            let before = self.steps().len();
+            self.emit(&self.client, member);
             self.result
                 .recv_timeout(WAIT)
                 .expect("the client ended")
                 .unwrap();
-            assert_eq!(self.steps(), ["saved", "answered true", "quit"]);
+            assert_eq!(self.steps()[before..].to_vec(), steps);
         }
 
         /// Ends the session: the client saves, answers and quits, in that
         /// order, having saved nothing before.
         fn end(&self) {
             let before = self.steps();
-            self.emit(&self.client, "EndSession");
-            self.result
-                .recv_timeout(WAIT)
-                .expect("the client ended")
-                .unwrap();
             assert!(!before.contains(&"saved".to_owned()), "{before:?}");
-            assert_eq!(
-                self.steps()[before.len()..].to_vec(),
-                ["saved", "answered true", "quit"]
-            );
+            self.ends_on("EndSession", &["saved", "answered true", "quit"]);
         }
     }
 
@@ -1099,7 +1358,9 @@ mod tests {
     /// another client's signals, and saves, answers and quits, in that
     /// order. Where the query is not the end, it answers the query at once
     /// without saving, records on through a logout called off, and saves
-    /// at the end; where it is (Xfce on Wayland), it saves at the query.
+    /// at the end; where it is (Xfce on Wayland), it saves at the query,
+    /// answers and waits for the end, which it answers without a second
+    /// save before it quits.
     fn a_logout_saves_before_the_session_manager_is_answered(api: SessionApi, wayland: bool) {
         let Some(daemon) = Daemon::start() else {
             return;
@@ -1108,6 +1369,8 @@ mod tests {
         session.emit(&format!("{}/Client2", api.path), "EndSession");
         if api.query_ends_on_wayland && wayland {
             session.query_ends();
+            session.query();
+            session.ends_on("EndSession", &["answered true", "quit"]);
         } else {
             session.query();
             session.cancel();
@@ -1130,6 +1393,43 @@ mod tests {
     #[test]
     fn an_xfce_logout_on_wayland_saves_at_the_query() {
         a_logout_saves_before_the_session_manager_is_answered(XFCE4_SESSION, true);
+    }
+
+    /// `Stop` outside a logout, as xfce4-session sends it when a checkpoint
+    /// times out, leaves the client recording; once a query was answered
+    /// it quits, without a save of its own (Quit saves).
+    #[test]
+    fn a_stop_quits_only_after_a_query() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let session = Session::follow(&daemon, XFCE4_SESSION, false);
+        session.passes("Stop");
+        session.query();
+        session.ends_on("Stop", &["quit"]);
+        // After the save at the query, too.
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let session = Session::follow(&daemon, XFCE4_SESSION, true);
+        session.query_ends();
+        session.ends_on("Stop", &["quit"]);
+    }
+
+    /// A refused answer, as xfce4-session gives one to a query called off
+    /// before the answer came, keeps the client following as if no query
+    /// had come: a `Stop` (that query's save timeout) lets it record on,
+    /// and the next query and the end save and quit.
+    #[test]
+    fn a_refused_answer_keeps_the_client_recording() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let session = Session::follow(&daemon, XFCE4_SESSION, false);
+        session.query_refused();
+        session.passes("Stop");
+        session.query_refused();
+        session.end();
     }
 
     /// A peer other than the session manager that sends the client's
@@ -1185,7 +1485,7 @@ mod tests {
             XFCE4_SESSION,
             OwnedObjectPath::try_from("/org/xfce/SessionManager/Client1").unwrap(),
             xfce_registered,
-            Steps::default(),
+            (Steps::default(), Arc::default()),
             xfce_answered,
         );
         let session = Session::follow(&daemon, GNOME_SESSION, false);
@@ -1224,6 +1524,7 @@ mod tests {
         let on_end = SaveAndQuit {
             save: Arc::new(|| panic!("saved")),
             quit: Arc::new(|| panic!("quit")),
+            await_end: Arc::new(|| panic!("awaits the end")),
         };
         assert!(follow_session_end(&daemon.connect(), "", false, &on_end).is_err());
         assert!(hold_shutdown_lock(&daemon.connect(), &on_end).is_err());
@@ -1260,16 +1561,22 @@ mod tests {
 
     /// The desktop portal's inhibitor as far as the app goes: it notes the
     /// monitors and inhibitors asked of it on `calls`, the answers to a
-    /// query in `steps` ("answered <session>"), and serves each
-    /// inhibitor's request until it is closed. The states and the
+    /// query in `steps` ("answered <session>", or "refused <session>" for
+    /// the next one once `refuse` is set, which clears it), and serves
+    /// each inhibitor's request until it is closed. The states and the
     /// responses are the test's to send (`state`).
     struct FakePortal {
         calls: mpsc::Sender<PortalCall>,
         steps: Steps,
+        refuse: Arc<AtomicBool>,
     }
 
     impl FakePortal {
-        fn serve(daemon: &Daemon, steps: &Steps) -> (Connection, mpsc::Receiver<PortalCall>) {
+        fn serve(
+            daemon: &Daemon,
+            steps: &Steps,
+            refuse: &Arc<AtomicBool>,
+        ) -> (Connection, mpsc::Receiver<PortalCall>) {
             let (calls, called) = mpsc::channel();
             let portal = daemon
                 .builder()
@@ -1280,6 +1587,7 @@ mod tests {
                     Self {
                         calls,
                         steps: steps.clone(),
+                        refuse: refuse.clone(),
                     },
                 )
                 .unwrap()
@@ -1311,9 +1619,15 @@ mod tests {
             OwnedObjectPath::try_from(request).unwrap()
         }
 
-        fn query_end_response(&self, session_handle: OwnedObjectPath) {
-            let step = format!("answered {}", session_handle.as_str());
+        fn query_end_response(&self, session_handle: OwnedObjectPath) -> zbus::fdo::Result<()> {
+            let refused = self.refuse.swap(false, Ordering::SeqCst);
+            let verb = if refused { "refused" } else { "answered" };
+            let step = format!("{verb} {}", session_handle.as_str());
             self.steps.lock().unwrap().push(step);
+            if refused {
+                return Err(zbus::fdo::Error::AccessDenied("not now".to_owned()));
+            }
+            Ok(())
         }
 
         async fn inhibit(
@@ -1395,13 +1709,15 @@ mod tests {
         client: String,
         session: String,
         steps: Steps,
+        /// Refuses the client's next answer (`FakePortal`).
+        refuse: Arc<AtomicBool>,
         result: mpsc::Receiver<zbus::Result<()>>,
     }
 
     impl Monitor {
         fn follow(daemon: &Daemon, response: u32) -> Self {
-            let steps = Steps::default();
-            let (portal, calls) = FakePortal::serve(daemon, &steps);
+            let (steps, refuse) = (Steps::default(), Arc::default());
+            let (portal, calls) = FakePortal::serve(daemon, &steps, &refuse);
             let (connection, on_end) = (daemon.connect(), noting(&steps));
             let client = connection.unique_name().unwrap().to_string();
             let result = spawn(move || follow_session_end(&connection, "", false, &on_end));
@@ -1433,6 +1749,7 @@ mod tests {
                 client,
                 session,
                 steps,
+                refuse,
                 result,
             }
         }
@@ -1505,6 +1822,25 @@ mod tests {
         assert_eq!(monitor.steps(), [answered.as_str(), "saved", "quit"]);
     }
 
+    /// A refused answer to the portal's query keeps the client following,
+    /// and the end saves and quits.
+    #[test]
+    fn a_refused_portal_answer_keeps_the_client_recording() {
+        let Some(daemon) = Daemon::start() else {
+            return;
+        };
+        let monitor = Monitor::follow(&daemon, 0);
+        let (portal, client, session) = (&monitor.portal, &monitor.client, &monitor.session);
+        monitor.refuse.store(true, Ordering::SeqCst);
+        state(portal, client, session, 2);
+        let refused = format!("refused {session}");
+        monitor.reaches(&[refused.as_str()]);
+        monitor.waits(&[refused.as_str()]);
+        state(portal, client, session, 3);
+        monitor.ended().unwrap();
+        assert_eq!(monitor.steps(), [refused.as_str(), "saved", "quit"]);
+    }
+
     /// At the session's end the client saves and quits; there is no query
     /// to answer.
     #[test]
@@ -1558,7 +1894,7 @@ mod tests {
         let Some(daemon) = Daemon::start() else {
             return;
         };
-        let (_portal, calls) = FakePortal::serve(&daemon, &Steps::default());
+        let (_portal, calls) = FakePortal::serve(&daemon, &Steps::default(), &Arc::default());
         let client = daemon.connect();
         let name = client.unique_name().unwrap().to_string();
         let (busy, recording) = mpsc::channel();
