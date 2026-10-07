@@ -1,9 +1,10 @@
 //! Pure renderers from the canonical model to bytes. No I/O, no clock;
-//! equal inputs give equal bytes on every machine, and on the Mac
-//! ([`RenderOptions::platform`]) the bytes are the Swift renderers'
+//! equal inputs give equal bytes on every machine. With
+//! [`RenderOptions::platform`] the Mac, the bytes are the Swift renderers'
 //! (`Sources/StenoAdapters/Rendering`), pinned by the goldens in
 //! `Tests/Fixtures/snapshots/obsidian`; a Windows or Linux call's folder
-//! note differs in its info line's one word (`snapshots/platforms`).
+//! note differs in its info line's one word
+//! (`Tests/Fixtures/snapshots/platforms`).
 
 mod artifact;
 pub mod date_text;

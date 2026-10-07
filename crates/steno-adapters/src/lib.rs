@@ -7,7 +7,7 @@
 //!   equal bytes on every machine, and on the Mac the bytes are the Swift
 //!   renderers' (`Tests/Fixtures/snapshots/obsidian`); a Windows or Linux
 //!   call's folder note differs in its info line's one word
-//!   (`snapshots/platforms`).
+//!   (`Tests/Fixtures/snapshots/platforms`).
 //! - [`naming`]: the meeting folder layout and the slugs.
 //! - [`obsidian`]: the Obsidian vault folder destination and the managed
 //!   block it owns on person pages.

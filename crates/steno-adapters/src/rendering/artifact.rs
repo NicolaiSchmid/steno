@@ -62,8 +62,9 @@ pub struct ArtifactRenderer;
 impl ArtifactRenderer {
     /// Bumped whenever the Mac's bytes change (the goldens Swift shares);
     /// recorded in every receipt and pinned by
-    /// `Tests/Fixtures/snapshots/obsidian/VERSION`. A platform's own word in
-    /// the info line ([`RenderOptions::platform`]) is not a version.
+    /// `Tests/Fixtures/snapshots/obsidian/VERSION`. A Windows or Linux
+    /// call's word in the info line ([`RenderOptions::platform`]) does not
+    /// bump it.
     pub const VERSION: i64 = 2;
 
     #[must_use]

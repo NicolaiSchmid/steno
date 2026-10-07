@@ -30,7 +30,8 @@ pub struct RenderOptions {
     pub time_zone: Tz,
     /// The platform a call was recorded on, which the folder note's info
     /// line names ("Mac call", "Windows call", "Linux call"). The meeting row
-    /// does not store it; the app records every call itself, so
+    /// does not store it; the app records every call on the machine it runs
+    /// on (`steno process` takes a file as recorded here), so
     /// [`ObsidianFolderDestination`](crate::ObsidianFolderDestination) passes
     /// [`Platform::CURRENT`]. Swift: none; the Swift app is the Mac.
     pub platform: Platform,
