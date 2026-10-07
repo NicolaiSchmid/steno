@@ -265,14 +265,17 @@ impl Meeting {
 
     /// Copies the columns the pipeline owns from `results`: title with its
     /// origin, language, state, summary, usage and `updatedAt`. Everything
-    /// the user or the app owns stays as stored, the template included: the
-    /// user picks it, so a run that read the meeting before a pick never
-    /// writes the old one back, and only a summary re-run stores the
-    /// template it ran with (`Store::replace_summary_with_template`). Rust
-    /// only: Swift's `writeProcessingResults` copies the template too.
+    /// the user or the app owns stays as stored. The template is the
+    /// user's alone (the summary's `template_id` records which one made
+    /// it), so a run that read the meeting before a pick never writes the
+    /// old one back; a title the user typed (stored origin `user`) stays
+    /// too, so a rename during a run is kept. Rust only: Swift's
+    /// `writeProcessingResults` copies the template, title and origin.
     pub fn apply_processing_results(&mut self, results: &Meeting) {
-        self.title.clone_from(&results.title);
-        self.title_origin = results.title_origin;
+        if self.title_origin != TitleOrigin::User {
+            self.title.clone_from(&results.title);
+            self.title_origin = results.title_origin;
+        }
         self.language.clone_from(&results.language);
         self.state.clone_from(&results.state);
         self.summary.clone_from(&results.summary);

@@ -43,7 +43,7 @@ impl ProcessingRun {
 
     /// The stage of the last posted event; `None` before the first.
     #[must_use]
-    pub fn last_stage(&self) -> Option<PipelineStage> {
+    pub(crate) fn last_stage(&self) -> Option<PipelineStage> {
         self.last.as_ref().map(|last| last.stage)
     }
 

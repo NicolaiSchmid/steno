@@ -104,7 +104,9 @@ fn state_updates_touch_only_their_columns() {
     store.rename(meeting.id, "   ", now).unwrap();
     assert_eq!(store.meeting(meeting.id).unwrap().unwrap().title, "Kickoff");
 
-    // A stage that read the meeting earlier must not revert the user's edits.
+    // A stage that read the meeting earlier must not revert the user's
+    // edits, the title they typed included (Rust only: Swift writes the
+    // stage's title over it).
     let mut stale = meeting.clone();
     stale.state = MeetingState::Ready;
     stale.title = "From the model".to_owned();
@@ -112,7 +114,11 @@ fn state_updates_touch_only_their_columns() {
     stale.scratchpad = "stale".to_owned();
     store.replace_transcript(&stale, &[], &[]).unwrap();
     let read = store.meeting(meeting.id).unwrap().unwrap();
-    assert_eq!(read.title, "From the model");
+    assert_eq!(read.state, MeetingState::Ready);
+    assert_eq!(
+        (read.title.as_str(), read.title_origin),
+        ("Kickoff", TitleOrigin::User)
+    );
     assert_eq!(read.scratchpad, meeting.scratchpad);
     assert_eq!(store.segments(meeting.id).unwrap(), Vec::new());
 
@@ -588,36 +594,31 @@ fn saving_processing_results_keeps_the_summary_tasks_and_decisions() {
 }
 
 /// A stage that read the meeting before the user picked another template
-/// does not write the old one back; a summary re-run's write stores the
-/// template it ran with.
+/// or typed a title does not write the old ones back: the template is the
+/// user's, and so is a title whose stored origin is `user`.
 #[test]
-fn processing_results_leave_the_template_to_the_user_and_the_rerun() {
+fn processing_results_leave_the_template_and_a_typed_title_to_the_user() {
     let (store, meeting) = populated();
     let now = date("2026-09-30T09:00:00.000Z");
     store
         .update_meeting(meeting.id, now, |stored| {
             "interview".clone_into(&mut stored.template_id);
+            "Typed by the user".clone_into(&mut stored.title);
+            stored.title_origin = TitleOrigin::User;
             Ok(())
         })
         .unwrap();
-    let stale = meeting.clone();
+    let mut stale = meeting.clone();
     assert_eq!(stale.template_id, Meeting::DEFAULT_TEMPLATE_ID);
+    assert_ne!(stale.title_origin, TitleOrigin::User);
+    "The model's title".clone_into(&mut stale.title);
+    stale.title_origin = TitleOrigin::Summary;
     store.replace_transcript(&stale, &[], &[]).unwrap();
     store.update_segment_texts(&stale, &[]).unwrap();
     store.save_processing_results(&stale).unwrap();
     store.replace_summary(&stale, &[], &[], &[]).unwrap();
-    assert_eq!(
-        store.meeting(meeting.id).unwrap().unwrap().template_id,
-        "interview"
-    );
-
-    let mut rerun = stale;
-    "daily-standup".clone_into(&mut rerun.template_id);
-    store
-        .replace_summary_with_template(&rerun, &[], &[], &[])
-        .unwrap();
-    assert_eq!(
-        store.meeting(meeting.id).unwrap().unwrap().template_id,
-        "daily-standup"
-    );
+    let stored = store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(stored.template_id, "interview");
+    assert_eq!(stored.title, "Typed by the user");
+    assert_eq!(stored.title_origin, TitleOrigin::User);
 }

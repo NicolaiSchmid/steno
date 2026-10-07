@@ -104,41 +104,6 @@ fn write_processing_results(connection: &Connection, results: &Meeting) -> Resul
     save(connection, &meeting)
 }
 
-/// The rows [`Store::replace_summary`] writes, inside the caller's
-/// transaction.
-fn replace_summary_rows(
-    transaction: &Connection,
-    meeting: &Meeting,
-    tasks: &[MeetingTask],
-    decisions: &[String],
-    speaker_names: &[SpeakerNameSuggestion],
-) -> Result<()> {
-    write_processing_results(transaction, meeting)?;
-    people::replace_name_suggestions(transaction, meeting.id, speaker_names)?;
-    transaction.execute(
-        "DELETE FROM meetingTask WHERE meetingID = ?1",
-        [DbUuid(meeting.id)],
-    )?;
-    for task in tasks {
-        let mut task = task.clone();
-        task.meeting_id = meeting.id;
-        tasks::insert_task(transaction, &task)?;
-    }
-    transaction.execute(
-        "DELETE FROM decision WHERE meetingID = ?1",
-        [DbUuid(meeting.id)],
-    )?;
-    for (index, text) in decisions.iter().enumerate() {
-        let decision = Decision {
-            id: derived_uuid(meeting.id, &format!("decision-{index}")),
-            meeting_id: meeting.id,
-            text: text.clone(),
-        };
-        tasks::insert_decision(transaction, &decision)?;
-    }
-    Ok(())
-}
-
 /// What `delete_meeting` leaves for the caller: the files the rows pointed
 /// at, which the caller removes once the transaction has committed, through
 /// [`DeletedMeeting::files_to_remove`].
@@ -420,10 +385,11 @@ impl Store {
         })
     }
 
-    /// One transaction: the meeting's processing columns only (state,
-    /// language, summary, usage and title, over the row as it is now). The
-    /// summarize stage calls this when no summarizer is set up, so the
-    /// summary, tasks and decisions an earlier run wrote stay.
+    /// One transaction: the columns [`Meeting::apply_processing_results`]
+    /// copies, over the row as it is now, and nothing else. The summarize
+    /// stage calls this when no summarizer is set up, so the summary, tasks,
+    /// decisions and name suggestions an earlier run wrote stay. Rust only:
+    /// Swift's summarize stage without an LLM clears the summary.
     pub fn save_processing_results(&self, meeting: &Meeting) -> Result<()> {
         self.write(|transaction| write_processing_results(transaction, meeting))
     }
@@ -433,7 +399,8 @@ impl Store {
     /// from the meeting id so re-runs are stable. Of `speaker_names`, only
     /// suggestions that carry a name and point at one of the meeting's
     /// speakers are kept, the strongest per speaker. The stored template
-    /// stays (see [`Meeting::apply_processing_results`]).
+    /// stays: the user picks it, and the summary's `template_id` records
+    /// which template made it (see [`Meeting::apply_processing_results`]).
     pub fn replace_summary(
         &self,
         meeting: &Meeting,
@@ -442,26 +409,29 @@ impl Store {
         speaker_names: &[SpeakerNameSuggestion],
     ) -> Result<()> {
         self.write(|transaction| {
-            replace_summary_rows(transaction, meeting, tasks, decisions, speaker_names)
-        })
-    }
-
-    /// [`Store::replace_summary`] that also stores `meeting.template_id`,
-    /// in the same transaction: a summary re-run's write, so the template
-    /// a summary was made with is the meeting's.
-    pub fn replace_summary_with_template(
-        &self,
-        meeting: &Meeting,
-        tasks: &[MeetingTask],
-        decisions: &[String],
-        speaker_names: &[SpeakerNameSuggestion],
-    ) -> Result<()> {
-        self.write(|transaction| {
-            replace_summary_rows(transaction, meeting, tasks, decisions, speaker_names)?;
+            write_processing_results(transaction, meeting)?;
+            people::replace_name_suggestions(transaction, meeting.id, speaker_names)?;
             transaction.execute(
-                "UPDATE meeting SET templateID = ?1 WHERE id = ?2",
-                params![meeting.template_id, DbUuid(meeting.id)],
+                "DELETE FROM meetingTask WHERE meetingID = ?1",
+                [DbUuid(meeting.id)],
             )?;
+            for task in tasks {
+                let mut task = task.clone();
+                task.meeting_id = meeting.id;
+                tasks::insert_task(transaction, &task)?;
+            }
+            transaction.execute(
+                "DELETE FROM decision WHERE meetingID = ?1",
+                [DbUuid(meeting.id)],
+            )?;
+            for (index, text) in decisions.iter().enumerate() {
+                let decision = Decision {
+                    id: derived_uuid(meeting.id, &format!("decision-{index}")),
+                    meeting_id: meeting.id,
+                    text: text.clone(),
+                };
+                tasks::insert_decision(transaction, &decision)?;
+            }
             Ok(())
         })
     }

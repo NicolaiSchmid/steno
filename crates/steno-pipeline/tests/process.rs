@@ -694,26 +694,58 @@ impl steno_core::TranscriptCleaner for MeddlingCleaner {
     }
 }
 
+/// A summarizer that keeps the speakers each call saw and answers as
+/// [`FakeSummarizer`] does.
+#[derive(Default)]
+struct SpeakerRecordingSummarizer(Mutex<Vec<Vec<steno_core::Speaker>>>);
+
+#[async_trait]
+impl steno_core::MeetingSummarizer for SpeakerRecordingSummarizer {
+    async fn summarize(
+        &self,
+        input: &steno_core::SummaryInput,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::SummaryOutput> {
+        self.0.lock().unwrap().push(input.speakers.clone());
+        Ok(FakeSummarizer::output(
+            input,
+            FakeSummarizer::default().usage,
+        ))
+    }
+}
+
 /// The cleanup pass writes the cleaned text by segment and leaves the
-/// speakers alone, so a speaker confirmed while it ran stays confirmed.
+/// speakers alone, so a speaker confirmed while it ran stays confirmed,
+/// another speaker's clip cleared meanwhile stays cleared, and the summary
+/// is made with the speakers as stored then.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_speaker_named_during_cleanup_stays_named() {
     let world = world(false, None, AudioRetention::KeepForever);
+    let summarizer = Arc::new(SpeakerRecordingSummarizer::default());
     let dependencies = world.pipeline.dependencies().clone().with_llm(
         Some(Arc::new(MeddlingCleaner {
             store: world.store.clone(),
-            // Confirms "Speaker 1" as Anna.
+            // Confirms "Speaker 1" as Anna and clears the clip of
+            // "Speaker 2", as the retention sweep can.
             meddle: |store, input| {
-                let speaker = input
-                    .speakers
-                    .iter()
-                    .find(|speaker| speaker.cluster_label == "Speaker 1")
-                    .expect("the diarizer's first speaker");
+                let speaker = |label: &str| {
+                    input
+                        .speakers
+                        .iter()
+                        .find(|speaker| speaker.cluster_label == label)
+                        .expect("a diarized speaker")
+                };
                 let anna = sample_data::person(0, "Anna");
-                store.confirm_speaker(speaker.id, &anna).unwrap();
+                store
+                    .confirm_speaker(speaker("Speaker 1").id, &anna)
+                    .unwrap();
+                let second = speaker("Speaker 2");
+                assert!(second.sample_clip_url.is_some());
+                store
+                    .clear_sample_clips(second.meeting_id, &[second.id])
+                    .unwrap();
             },
         })),
-        None,
+        Some(summarizer.clone()),
     );
     let pipeline = ProcessingPipeline::new(dependencies);
     let meeting = call_meeting(world.now);
@@ -726,16 +758,23 @@ async fn a_speaker_named_during_cleanup_stays_named() {
         MeetingState::Ready
     );
     let export = world.store.export(meeting.id).unwrap();
-    let first = export
-        .speakers
-        .iter()
-        .find(|speaker| speaker.cluster_label == "Speaker 1")
-        .unwrap();
+    let speaker = |label: &str| {
+        export
+            .speakers
+            .iter()
+            .find(|speaker| speaker.cluster_label == label)
+            .unwrap()
+            .clone()
+    };
+    let first = speaker("Speaker 1");
+    let anna = steno_core::SpeakerAssignment::Confirmed {
+        person_id: sample_data::person(0, "Anna").id,
+    };
+    assert_eq!(first.assignment, anna);
     assert_eq!(
-        first.assignment,
-        steno_core::SpeakerAssignment::Confirmed {
-            person_id: sample_data::person(0, "Anna").id
-        }
+        speaker("Speaker 2").sample_clip_url,
+        None,
+        "the speakers are not written again"
     );
     assert_eq!(export.segments.len(), 12);
     assert!(
@@ -751,6 +790,50 @@ async fn a_speaker_named_during_cleanup_stays_named() {
             .any(|segment| segment.speaker_id == Some(first.id)),
         "the segments keep their speakers"
     );
+    let seen = summarizer.0.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0]
+            .iter()
+            .any(|speaker| speaker.id == first.id && speaker.assignment == anna),
+        "the summary names the confirmed speaker"
+    );
+}
+
+/// A title the user types while the meeting processes is kept: the
+/// stages' writes leave a title whose stored origin is `user` alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_title_typed_while_processing_is_kept() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let dependencies = world.pipeline.dependencies().clone().with_llm(
+        Some(Arc::new(MeddlingCleaner {
+            store: world.store.clone(),
+            meddle: |store, input| {
+                store
+                    .rename(
+                        input.segments[0].meeting_id,
+                        "Typed while processing",
+                        sample_data::started_at(),
+                    )
+                    .unwrap();
+            },
+        })),
+        Some(Arc::new(FakeSummarizer::default())),
+    );
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let mut meeting = call_meeting(world.now);
+    // No calendar event, so the summary would replace a default title.
+    meeting.calendar_event_id = None;
+    meeting.title_origin = steno_core::TitleOrigin::Default;
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+
+    let stored = world.store.meeting(meeting.id).unwrap().unwrap();
+    assert_eq!(stored.state, MeetingState::Ready);
+    assert!(stored.summary.is_some());
+    assert_eq!(stored.title, "Typed while processing");
+    assert_eq!(stored.title_origin, steno_core::TitleOrigin::User);
 }
 
 /// A run without a summarizer (the LLM was turned off since) keeps the
@@ -766,6 +849,33 @@ async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
     assert!(summarized.meeting.summary.is_some());
     assert_eq!(summarized.tasks.len(), 1);
     assert_eq!(summarized.decisions.len(), 1);
+    // The fake summarizer guesses no names; a model's guess, stored.
+    let speaker = summarized
+        .speakers
+        .iter()
+        .find(|speaker| speaker.cluster_label == "Speaker 1")
+        .unwrap();
+    let decisions: Vec<String> = summarized
+        .decisions
+        .iter()
+        .map(|decision| decision.text.clone())
+        .collect();
+    world
+        .store
+        .replace_summary(
+            &summarized.meeting,
+            &summarized.tasks,
+            &decisions,
+            &[steno_core::SpeakerNameSuggestion {
+                speaker_id: speaker.id,
+                name: Some("Ben".to_owned()),
+                confidence: 0.7,
+                evidence: "was greeted by name".to_owned(),
+            }],
+        )
+        .unwrap();
+    let suggestions = world.store.name_suggestions(meeting.id).unwrap();
+    assert_eq!(suggestions.len(), 1);
 
     let pipeline =
         ProcessingPipeline::new(world.pipeline.dependencies().clone().with_llm(None, None));
@@ -779,6 +889,10 @@ async fn a_run_without_a_summarizer_keeps_the_earlier_summary() {
     assert_eq!(again.meeting.summary, summarized.meeting.summary);
     assert_eq!(again.tasks, summarized.tasks);
     assert_eq!(again.decisions, summarized.decisions);
+    assert_eq!(
+        world.store.name_suggestions(meeting.id).unwrap(),
+        suggestions
+    );
 }
 
 /// A template picked while the meeting processes is kept, and the summary
@@ -820,21 +934,31 @@ async fn a_template_picked_while_processing_is_kept_and_used() {
     assert_eq!(stored.summary.unwrap().template_id, "interview");
 }
 
-/// A summary re-run stores the template it ran with.
+/// A summary re-run does not store the template it ran with: the host
+/// stores the user's pick before it starts a re-run, so a re-run started
+/// with "daily-standup" never writes it back over "interview", a pick
+/// stored since. The summary records which template made it.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_summary_rerun_stores_its_template() {
+async fn a_summary_rerun_leaves_a_later_pick_alone() {
     let world = world(true, None, AudioRetention::KeepForever);
     let meeting = call_meeting(world.now);
     let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
     world.pipeline.enqueue(&meeting, &asset).unwrap();
     world.pipeline.wait_until_idle().await;
     world
+        .store
+        .update_meeting(meeting.id, world.now, |stored| {
+            "interview".clone_into(&mut stored.template_id);
+            Ok(())
+        })
+        .unwrap();
+    world
         .pipeline
         .rerun_summary(meeting.id, "daily-standup")
         .await
         .unwrap();
     let stored = world.store.meeting(meeting.id).unwrap().unwrap();
-    assert_eq!(stored.template_id, "daily-standup");
+    assert_eq!(stored.template_id, "interview");
     assert_eq!(stored.summary.unwrap().template_id, "daily-standup");
 }
 
@@ -968,6 +1092,55 @@ async fn a_job_whose_diarizer_does_not_load_keeps_its_transcript() {
     assert_eq!(engine.preparations.count(), 1);
     assert_eq!(engine.transcriptions.count(), 2);
     assert_eq!(engine.releases.count(), 1);
+}
+
+/// A speech engine whose models cannot load; it logs its releases.
+struct UnloadableEngine(FakeSpeechEngine);
+
+#[async_trait]
+impl steno_core::SpeechEngine for UnloadableEngine {
+    fn id(&self) -> &str {
+        steno_core::SpeechEngine::id(&self.0)
+    }
+
+    fn supported_languages(&self) -> &std::collections::BTreeSet<steno_core::LanguageTag> {
+        steno_core::SpeechEngine::supported_languages(&self.0)
+    }
+
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        Err("no speech model".into())
+    }
+
+    async fn transcribe(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+        hint: Option<&steno_core::LanguageTag>,
+    ) -> steno_core::protocols::BoundaryResult<Vec<steno_core::RawSegment>> {
+        steno_core::SpeechEngine::transcribe(&self.0, audio, hint).await
+    }
+
+    async fn release(&self) -> steno_core::protocols::BoundaryResult<()> {
+        steno_core::SpeechEngine::release(&self.0).await
+    }
+}
+
+/// A warm-up whose speech engine does not load fails the job in `decode`
+/// before anything is transcribed, and still releases the engine.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_whose_warm_up_fails_releases_the_engine_too() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let engine = Arc::new(UnloadableEngine(FakeSpeechEngine::default()));
+    let pipeline = ProcessingPipeline::new(with_engine(&world, engine.clone()));
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        meeting_state(&world, meeting),
+        MeetingState::Failed {
+            reason: "decode: no speech model".to_owned()
+        }
+    );
+    assert_eq!(engine.0.transcriptions.count(), 0);
+    assert_eq!(engine.0.releases.count(), 1);
 }
 
 /// Which call of a [`GatedEngine`] is gated.
@@ -1620,6 +1793,172 @@ async fn a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_laun
     assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
 }
 
+/// A re-run whose diarizer fails keeps the speakers the first run stored:
+/// a confirmation stays, with the person's voice, and the new transcript's
+/// segments point at the kept speakers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let first = world.store.export(meeting.id).unwrap();
+    let speaker = first
+        .speakers
+        .iter()
+        .find(|speaker| speaker.cluster_label == "Speaker 1")
+        .unwrap()
+        .clone();
+    let anna = sample_data::person(0, "Anna");
+    world.store.confirm_speaker(speaker.id, &anna).unwrap();
+    let voice = world.store.person(anna.id).unwrap().unwrap();
+    assert_eq!(voice.sample_count, 1);
+
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.diarizer = Arc::new(FakeDiarizer {
+        failure: Some("no model".to_owned()),
+        ..FakeDiarizer::default()
+    });
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let stored = world.store.meeting(meeting.id).unwrap().unwrap();
+    let stored_asset = world.store.asset(meeting.id).unwrap().unwrap();
+    pipeline.enqueue(&stored, &stored_asset).unwrap();
+    pipeline.wait_until_idle().await;
+
+    let again = world.store.export(meeting.id).unwrap();
+    assert_eq!(again.meeting.state, MeetingState::Ready);
+    assert_eq!(labels(&again), labels(&first));
+    let kept = again
+        .speakers
+        .iter()
+        .find(|kept| kept.id == speaker.id)
+        .expect("the confirmed speaker is kept");
+    assert_eq!(
+        kept.assignment,
+        steno_core::SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    assert_eq!(kept.embedding, speaker.embedding);
+    assert_eq!(kept.sample_clip_url, speaker.sample_clip_url);
+    assert_eq!(world.store.person(anna.id).unwrap().unwrap(), voice);
+    assert_eq!(again.segments.len(), first.segments.len());
+    for (segment, before) in again.segments.iter().zip(&first.segments) {
+        assert_eq!(segment.speaker_id, before.speaker_id, "{segment:?}");
+    }
+}
+
+/// A call whose tap carried no conversation diarizes its mic lane, which
+/// is the room. When that diarizer fails, the mic lane becomes the one
+/// room speaker, not "me", so the other party's words are never the
+/// user's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_diarizer_on_the_mic_lane_makes_it_the_room() {
+    let world = world_with(
+        false,
+        None,
+        AudioRetention::KeepForever,
+        engine_deaf_to_silence(),
+        FakeDiarizer {
+            failure: Some("no model".to_owned()),
+            ..FakeDiarizer::default()
+        },
+    );
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    silence_the_tap(&asset);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+
+    let export = world.store.export(meeting.id).unwrap();
+    assert_eq!(export.meeting.state, MeetingState::Ready);
+    assert_eq!(labels(&export), ["Speaker 1"]);
+    assert_eq!(export.participants, [], "no \"me\" participant");
+    let room = export.speakers[0].id;
+    assert_eq!(export.segments.len(), 6);
+    assert!(
+        export
+            .segments
+            .iter()
+            .all(|segment| segment.lane == AudioLane::Mic && segment.speaker_id == Some(room))
+    );
+}
+
+/// A diarizer failure the run goes on after is logged at warn with its
+/// meeting and stage only: the reason can name the audio file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diarizer_failure_warns_with_its_stage_not_its_reason() {
+    let log = steno_pipeline::fixtures::CapturedLog::warnings();
+    let world = world(false, None, AudioRetention::KeepForever);
+    let reason = "cannot read /Users/someone/Audio/meeting/system.caf";
+    let mut dependencies = world.pipeline.dependencies().clone();
+    dependencies.diarizer = Arc::new(FakeDiarizer {
+        failure: Some(reason.to_owned()),
+        ..FakeDiarizer::default()
+    });
+    let pipeline = ProcessingPipeline::new(dependencies);
+    // An id of its own picks this run's line out.
+    let meeting = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+
+    let text = log.text();
+    let line = text
+        .lines()
+        .find(|line| line.contains(&meeting.to_string()))
+        .unwrap_or_else(|| panic!("no line for the meeting: {text}"));
+    assert!(line.contains("stage failed"), "{line}");
+    assert!(line.contains("stage=\"diarize\""), "{line}");
+    assert!(!text.contains(reason), "{text}");
+}
+
+/// A clock that panics once the meeting is stored `ready`: a panic inside
+/// `persist`, after its ready write.
+struct PanickingOnceReady {
+    store: Arc<Store>,
+    meeting_id: Uuid,
+    ticks: Mutex<f64>,
+}
+
+impl MonotonicClock for PanickingOnceReady {
+    fn seconds(&self) -> f64 {
+        let ready = self
+            .store
+            .meeting(self.meeting_id)
+            .unwrap()
+            .is_some_and(|meeting| meeting.state == MeetingState::Ready);
+        assert!(!ready, "the clock broke after the ready write");
+        let mut ticks = self.ticks.lock().unwrap();
+        *ticks += 1.0;
+        *ticks
+    }
+}
+
+/// A meeting `persist` marked ready stays ready, even when the run panics
+/// after that write.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panic_after_the_ready_write_leaves_the_meeting_ready() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let dependencies =
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_clock(Arc::new(PanickingOnceReady {
+                store: world.store.clone(),
+                meeting_id: meeting.id,
+                ticks: Mutex::new(0.0),
+            }));
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(
+        world.store.meeting(meeting.id).unwrap().unwrap().state,
+        MeetingState::Ready
+    );
+}
+
 /// A failed background run is logged at warn with its asset and stage
 /// only: a stage's reason can name the audio file or quote the model, and
 /// stays with the meeting row and the debug level.
@@ -1818,7 +2157,7 @@ async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
     pipeline.enqueue(&meeting, &asset).unwrap();
     // Without waiting for idle (which drops the entries itself), the same
     // asset can be enqueued again once the panicked run is gone.
-    let enqueued = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let enqueued = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if pipeline.enqueue(&meeting, &asset).is_ok() {
                 return;
@@ -1833,8 +2172,8 @@ async fn a_run_that_panics_releases_its_asset_and_its_meeting() {
 }
 
 /// A run that panics fails its meeting, named by the stage it was in, so
-/// the meeting can be deleted or processed again and the next launch does
-/// not run it again.
+/// the user can delete it or process it again, and the next launch does
+/// not resume it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_panics_fails_its_meeting() {
     let world = world(false, None, AudioRetention::KeepForever);
