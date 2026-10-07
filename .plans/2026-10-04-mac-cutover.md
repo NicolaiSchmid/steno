@@ -1,27 +1,31 @@
 # Mac cutover: the Tauri app replaces the Swift app
 
-Extended by `.plans/2026-10-07-stable-promotion.md` (2026-10-07). That plan:
+Extended by `.plans/2026-10-07-stable-promotion.md` (2026-10-07), which
+changes this plan in these places:
 
-- replaces the opening gate (every unticked parity line) with its blocking list,
-  and this plan's one pull request with its packages S6 to S9;
-- replaces step 2's beta staging and signing and all of step 3 (distribution);
-  step 2's frozen `appcast` branch stands, with one handoff item (its D8), and
-  step 7's removal of `release.yml` moves to its S7;
-- answers the open choices in step 1 (its D5) and step 5 (its D4, which keeps
-  `SMAppService`, so the two-login-items risk is moot);
-- carries step 4 as two preference keys plus Sparkle's update flags.
+- the opening gate (every unticked parity line) becomes its blocking list (its
+  D3), and this plan's one pull request becomes its packages S6 to S9;
+- step 1's open choice is its D5, and step 5's is its D4, which keeps
+  `SMAppService`, so the two-login-items risk is moot;
+- step 2's beta staging and signing, and all of step 3 (distribution), become
+  its "Release mechanics" and "The Sparkle handoff"; step 2's frozen `appcast`
+  branch stands, with one handoff item (its D8);
+- step 4 copies two preference keys and Sparkle's two update flags, and drops
+  the panel anchor (its S6);
+- step 6 also replaces an identity that the `uno.schmid.steno.desktop` build
+  stored (its D5);
+- step 7 is its S9, apart from `release.yml`, which its S7 deletes.
 
-The inventory, steps 4, 6 and 7, and the tests stand, with three corrections
+The inventory table and the tests still apply: that plan's Rehearsal runs tests
+1 to 6, its R8 runs test 7 and its S9 runs test 8. Three details no longer hold
 (that plan's Facts):
 
-- test 1's premise that a Swift release build reads no channel matches no
-  installed build: every one is a release candidate, and from `v0.9.0-rc.2`
-  on each reads `beta` too, while `v0.9.0-rc.1` reads
-  `releases/latest/download/appcast.xml`;
-- test 1's `codesign -dr -` texts never match, so `codesign --verify -R` is
-  the check;
-- Sparkle does not refuse a bundle for its id, so the first risk keeps only the
-  missing key and the signature.
+- test 1's premise that a Swift release build reads no channel holds only for
+  `v0.9.0-rc.1`; every later build is a release candidate and reads `beta` too;
+- test 1's `codesign -dr -` texts never match, so `codesign --verify -R` is the
+  check;
+- the first risk: Sparkle never refuses a bundle for its id, so only the missing
+  key and the signature remain.
 
 Status: planned 2026-10-04, not started. WP9b, the second half of WP9 in
 `.plans/2026-10-02-rust-core-and-tauri-shell.md`; WP9a (signed, notarised
