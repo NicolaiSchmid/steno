@@ -265,8 +265,6 @@ mod tests {
         assert_eq!(std::fs::read(&first).unwrap(), b"first");
         assert_eq!(std::fs::read(&second).unwrap(), b"second");
         assert_eq!(std::fs::read(&third).unwrap(), b"third");
-        let names: BTreeSet<_> = [&first, &second, &third].into_iter().collect();
-        assert_eq!(names.len(), 3);
         assert!(
             first
                 .file_name()
