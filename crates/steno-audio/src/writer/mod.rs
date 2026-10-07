@@ -1,6 +1,7 @@
 //! The recording files: a crash-tolerant CAF master, 16 kHz WAV sidecars
 //! through an exact 3:1 resampler, the writer thread that drains the relay
-//! into them, and the readers the tests and the bench tools use.
+//! into them and syncs the master every 5 s, the one sync every file goes
+//! through (`durable`), and the readers the tests and the bench tools use.
 //! Swift: `Sources/StenoAudio/Writer/`.
 
 use std::path::Path;
@@ -8,6 +9,7 @@ use std::path::Path;
 use crate::capture::CaptureError;
 
 pub mod caf;
+mod durable;
 pub mod recording_writer;
 pub mod resampler;
 pub mod wav;

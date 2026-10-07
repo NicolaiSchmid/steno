@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use super::io_error;
+use super::{durable, io_error};
 use crate::capture::CaptureError;
 
 /// Streams Float32 PCM into a CAF whose data size stays -1 until `finish`;
@@ -123,10 +123,13 @@ impl CafStreamWriter {
     /// (the samples and the file size, not the timestamps): `fdatasync` on
     /// Linux, `F_FULLFSYNC` on the Mac, which also flushes the drive's
     /// cache (5 to 14 ms per 5 s of audio on an internal SSD), and
-    /// `FlushFileBuffers` on Windows. Nothing after `finish`. Rust only:
-    /// Swift synced at the close alone.
+    /// `FlushFileBuffers` on Windows; on the Mac a plain `fsync` when the
+    /// filesystem refuses `F_FULLFSYNC` (the `durable` module). Nothing after
+    /// `finish`. Rust only: Swift synced at the close alone.
     pub fn sync(&mut self) -> std::io::Result<()> {
-        self.file.as_ref().map_or(Ok(()), File::sync_data)
+        self.file
+            .as_ref()
+            .map_or(Ok(()), |file| durable::sync(file, File::sync_data))
     }
 
     /// Patches the data chunk size (edit count plus samples), flushes and
@@ -142,7 +145,7 @@ impl CafStreamWriter {
             .map_err(|e| io_error(&self.path, &e))?;
         file.write_all(&size.to_be_bytes())
             .map_err(|e| io_error(&self.path, &e))?;
-        file.sync_all().map_err(|e| io_error(&self.path, &e))?;
+        durable::sync(&file, File::sync_all).map_err(|e| io_error(&self.path, &e))?;
         Ok(())
     }
 
