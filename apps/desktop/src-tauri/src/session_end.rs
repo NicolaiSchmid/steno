@@ -3,33 +3,36 @@
 //! its own, run the shutdown Quit runs before the app goes (`SaveAndQuit`)
 //! or tell the desktop a recording runs:
 //!
-//! - **A logout, through the session manager** on GNOME and on Xfce: the
-//!   app registers as a client on the session bus (`RegisterClient` on
-//!   GNOME's `org.gnome.SessionManager`, else Xfce's
-//!   `org.xfce.SessionManager`, `SessionApi`). It finds the manager's
-//!   unique name with `GetNameOwner`, so it starts none, and takes the
-//!   client signals from that name only. On GNOME it answers
-//!   `QueryEndSession` at once (gnome-session asks before its confirmation
-//!   dialog, which the user can still cancel, and gives a query one
-//!   second), and on `EndSession` saves, answers `EndSessionResponse` and
-//!   quits; gnome-session waits about ten seconds for that answer. On Xfce
-//!   it saves at `QueryEndSession`, answers and quits: xfce4-session asks
-//!   once the user chose to log out and waits up to a minute for the
-//!   answer, but only seven seconds after `EndSession`, and on Wayland it
-//!   quits after the query without sending `EndSession`.
-//! - **A logout, through the desktop portal**, where no session manager
-//!   runs (KDE Plasma, wlroots desktops): the app opens the portal's
-//!   session monitor (`CreateMonitor` on `org.freedesktop.portal.Inhibit`)
-//!   and at query-end or ending (`StateChanged`) saves, answers
-//!   `QueryEndResponse` after the save and quits (`follow_portal`). Plasma
-//!   6.6's portal serves the monitor, but nothing in Plasma 6.6 asks it
-//!   yet, so it never reports the end there; Plasma before 6.6 and the GTK
-//!   portal off GNOME report none. While a recording runs the app also
-//!   holds the portal's logout inhibitor (`hold_logout_inhibitor`): GNOME
-//!   shows it in its logout dialog, Plasma 6.6 notes it for its monitor,
-//!   and the GTK portal off GNOME refuses it.
-//! - **A system shutdown or reboot**: the app holds logind's `shutdown`
-//!   delay lock (`Inhibit` on the system bus), and on
+//! - **A logout** (`follow_session_end`), through the session manager on
+//!   GNOME and on Xfce (`follow_session`): the app registers as a client
+//!   on the session bus (`RegisterClient` on GNOME's
+//!   `org.gnome.SessionManager`, else Xfce's `org.xfce.SessionManager`,
+//!   `SessionApi`). It finds the manager's unique name with
+//!   `GetNameOwner`, so it starts none, and takes the client signals from
+//!   that name only. On GNOME it answers `QueryEndSession` at once
+//!   (gnome-session asks before its confirmation dialog, which the user
+//!   can still cancel, and gives a query one second), and on `EndSession`
+//!   saves, answers `EndSessionResponse` and quits; gnome-session waits
+//!   about ten seconds for that answer. On Xfce it saves at
+//!   `QueryEndSession`, answers and quits: xfce4-session asks once the
+//!   user chose to log out and waits up to a minute for the answer, but
+//!   only seven seconds after `EndSession`, and on Wayland it quits after
+//!   the query without sending `EndSession`. Where no session manager runs
+//!   (KDE Plasma, wlroots desktops), through the desktop portal's session
+//!   monitor (`follow_portal`): the app opens it (`CreateMonitor` on
+//!   `org.freedesktop.portal.Inhibit`), answers query-end at once
+//!   (`QueryEndResponse`; the portal gives a second, and the end can still
+//!   be called off), and at ending saves and quits. Plasma 6.6's portal
+//!   serves the monitor, but nothing in Plasma 6.6 asks it yet, so it
+//!   never reports the end there; Plasma before 6.6 and the GTK portal off
+//!   GNOME report no end.
+//! - **The logout inhibitor** (`hold_logout_inhibitor`, told through
+//!   `LogoutInhibitor`): while a recording runs the app holds the portal's
+//!   `Inhibit` with the `Logout` flag. GNOME shows it in its logout
+//!   dialog, Plasma 6.6 notes it for its monitor, and the GTK portal off
+//!   GNOME refuses it.
+//! - **A system shutdown or reboot** (`hold_shutdown_lock`): the app holds
+//!   logind's `shutdown` delay lock (`Inhibit` on the system bus), and on
 //!   `PrepareForShutdown(true)` it saves and then releases the lock. logind
 //!   waits for the lock at most its `InhibitDelayMaxSec`, five seconds by
 //!   default, and then goes ahead; the SIGTERM that follows waits for the
@@ -423,9 +426,12 @@ fn portal_paths(sender: &str, token: &str) -> (String, String) {
 /// What the monitor client does on a session state the portal reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MonitorStep {
-    /// The session is being asked to end (2, query-end): saves, then
-    /// answers (`QueryEndResponse`), then quits.
-    SaveAnswerQuit,
+    /// The session is being asked to end (2, query-end): answers at once
+    /// (`QueryEndResponse`) and goes on following. The portal gives the
+    /// answer a second, and the end can still be called off (the session
+    /// goes back to running): a desktop that asks may wait on the app's
+    /// own logout inhibitor, so the recording runs on until the end.
+    Answer,
     /// The session is ending (3): saves, then quits.
     SaveQuit,
     /// Running (1), unknown, or none.
@@ -435,7 +441,7 @@ enum MonitorStep {
 /// The step for the portal's `session-state`.
 fn monitor_step(state: Option<u32>) -> MonitorStep {
     match state {
-        Some(2) => MonitorStep::SaveAnswerQuit,
+        Some(2) => MonitorStep::Answer,
         Some(3) => MonitorStep::SaveQuit,
         _ => MonitorStep::Wait,
     }
@@ -443,12 +449,11 @@ fn monitor_step(state: Option<u32>) -> MonitorStep {
 
 /// Opens the desktop portal's session monitor (`CreateMonitor` on
 /// `org.freedesktop.portal.Inhibit`) and follows its `StateChanged` until
-/// the session ends: at the query or at the end it saves, answers a query
-/// after the save (`QueryEndResponse`, so the portal waits as long as it
-/// will) and quits. Started when needed (the portal is activated on
-/// demand); its signals are taken from its unique name only. An error when
-/// the portal is missing, refuses the monitor, or the bus goes away before
-/// the app quit.
+/// the session ends: it answers a query at once (`QueryEndResponse`) and
+/// at the end saves and quits (`monitor_step`). Started when needed (the
+/// portal is activated on demand); its signals are taken from its unique
+/// name only. An error when the portal is missing, refuses the monitor, or
+/// the bus goes away before the app quit.
 fn follow_portal(session: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()> {
     let owner = if let Some(owner) = owner_of(session, PORTAL)? {
         owner
@@ -502,14 +507,17 @@ fn follow_portal(session: &Connection, on_end: &SaveAndQuit) -> zbus::Result<()>
                     .get("session-state")
                     .and_then(|state| u32::try_from(state).ok());
                 match monitor_step(state) {
-                    MonitorStep::SaveAnswerQuit => {
-                        (on_end.save)();
+                    // A lost answer leaves the client following: the end
+                    // may still come.
+                    MonitorStep::Answer => {
                         let answered =
                             inhibit.call::<_, _, ()>("QueryEndResponse", &(session_handle,));
-                        (on_end.quit)();
-                        return answered;
+                        if let Err(error) = answered {
+                            tracing::warn!(%error, "the portal's query went unanswered");
+                        }
                     }
                     MonitorStep::SaveQuit => {
+                        tracing::info!("the portal reports the session ending; saving");
                         (on_end.save)();
                         (on_end.quit)();
                         return Ok(());
@@ -628,11 +636,11 @@ mod tests {
         }
     }
 
-    /// The portal's query-end and end save; running, unknown and missing
-    /// states wait.
+    /// The portal's query-end is answered and its end saves; running,
+    /// unknown and missing states wait.
     #[test]
     fn the_portals_session_states_map_to_their_steps() {
-        assert_eq!(monitor_step(Some(2)), MonitorStep::SaveAnswerQuit);
+        assert_eq!(monitor_step(Some(2)), MonitorStep::Answer);
         assert_eq!(monitor_step(Some(3)), MonitorStep::SaveQuit);
         for state in [None, Some(0), Some(1), Some(4)] {
             assert_eq!(monitor_step(state), MonitorStep::Wait, "{state:?}");
@@ -1304,14 +1312,25 @@ mod tests {
     /// The portal's `session-state` for `session` to `client`, as the
     /// portal sends it, from `from`.
     fn state(from: &Connection, client: &str, session: &str, state: u32) {
+        state_on(from, client, (PORTAL_PATH, PORTAL_INHIBIT), session, state);
+    }
+
+    /// `state`, sent on another object or interface than the portal's.
+    fn state_on(
+        from: &Connection,
+        client: &str,
+        (path, interface): (&str, &str),
+        session: &str,
+        state: u32,
+    ) {
         let fields = HashMap::from([
             ("screensaver-active", Value::from(false)),
             ("session-state", Value::from(state)),
         ]);
         from.emit_signal(
             Some(client),
-            PORTAL_PATH,
-            PORTAL_INHIBIT,
+            path,
+            interface,
             "StateChanged",
             &(OwnedObjectPath::try_from(session).unwrap(), fields),
         )
@@ -1385,27 +1404,60 @@ mod tests {
         fn ended(&self) -> zbus::Result<()> {
             self.result.recv_timeout(WAIT).expect("the client ended")
         }
+
+        /// Waits until the steps are `wanted`, `WAIT` at most.
+        fn reaches(&self, wanted: &[&str]) {
+            let deadline = std::time::Instant::now() + WAIT;
+            while self.steps() != wanted && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert_eq!(self.steps(), wanted);
+        }
     }
 
     /// Without a session manager the client opens the portal's session
-    /// monitor with its tokens, waits while the session runs and through
-    /// another monitor's states, and at the query saves, answers and
-    /// quits, in that order.
+    /// monitor with its tokens and waits while the session runs, through
+    /// another monitor's states and through a response or a state on
+    /// another object or interface. It answers the query at once without
+    /// saving and goes on recording when the end is called off; at the end
+    /// it saves and quits, in that order.
     #[test]
-    fn a_portal_query_saves_before_it_is_answered_and_then_quits() {
+    fn a_portal_query_is_answered_at_once_and_the_end_saves_then_quits() {
         let Some(daemon) = Daemon::start() else {
             return;
         };
         let monitor = Monitor::follow(&daemon, 0);
-        let (_, other) = portal_paths(":1.999", MONITOR_TOKEN);
-        state(&monitor.portal, &monitor.client, &monitor.session, 1);
-        state(&monitor.portal, &monitor.client, &other, 2);
-        state(&monitor.portal, &monitor.client, &other, 3);
+        let (portal, client, session) = (&monitor.portal, &monitor.client, &monitor.session);
+        let (other_request, other) = portal_paths(":1.999", MONITOR_TOKEN);
+        state(portal, client, session, 1);
+        state(portal, client, &other, 2);
+        state(portal, client, &other, 3);
+        // A refusal on another request would end the client.
+        let refused = HashMap::from([("session_handle", Value::from(session.as_str()))]);
+        portal
+            .emit_signal(
+                Some(client.as_str()),
+                other_request.as_str(),
+                PORTAL_REQUEST,
+                "Response",
+                &(2_u32, refused),
+            )
+            .unwrap();
+        let elsewhere = format!("{PORTAL_PATH}/elsewhere");
+        state_on(portal, client, (&elsewhere, PORTAL_INHIBIT), session, 3);
+        state_on(portal, client, (PORTAL_PATH, PORTAL_REQUEST), session, 3);
         monitor.waits();
-        state(&monitor.portal, &monitor.client, &monitor.session, 2);
+        state(portal, client, session, 2);
+        let answered = format!("answered {session}");
+        monitor.reaches(&[answered.as_str()]);
+        // The logout was called off: the session runs again.
+        state(portal, client, session, 1);
+        std::thread::sleep(SAVE * 2);
+        assert_eq!(monitor.steps(), [answered.as_str()]);
+        assert!(monitor.result.try_recv().is_err(), "the client ended");
+        state(portal, client, session, 3);
         monitor.ended().unwrap();
-        let answered = format!("answered {}", monitor.session);
-        assert_eq!(monitor.steps(), ["saved", answered.as_str(), "quit"]);
+        assert_eq!(monitor.steps(), [answered.as_str(), "saved", "quit"]);
     }
 
     /// At the session's end the client saves and quits; there is no query

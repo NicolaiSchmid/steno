@@ -59,18 +59,21 @@ exits reach the shutdown these ways:
   out, waits up to a minute for the answer and on Wayland never sends the
   end, so the app saves when asked, then answers and quits.
 - Where no session manager runs (KDE Plasma, wlroots desktops), the app
-  follows the desktop portal's session monitor and saves when it reports
-  the session ending. Plasma 6.6's portal serves the monitor, but nothing
-  in Plasma 6.6 asks it yet, and the other portals report nothing; the
-  next point is what saves there.
+  follows the desktop portal's session monitor. It answers the portal's
+  query at once, since the user can still call the logout off then, and
+  saves when the portal reports the session ending. Plasma 6.6's portal
+  serves the monitor, but nothing in Plasma 6.6 asks it yet, and the
+  other portals report no end; the next point is what saves there.
 - Every logout ends the display server, and so does a shutdown once
   logind goes ahead; GDK would end the process with it. The app's log
   writer sees GDK's last line and holds that exit until the save has
   ended (`display_lost.rs`), so a save that outlasts a session manager's
   or logind's wait still ends, at most ten seconds after it began. On
-  KDE Plasma this is the save: the logout asks nothing of a GTK 3 app,
-  and closes the session's windows only for native Wayland ones, not the
-  app's, which run under XWayland. Only a kill ends the save early:
+  KDE Plasma this is the save: ksmserver asks only XSMP clients, which
+  GTK 3 is not, and on Wayland KWin closes only native Wayland windows,
+  not the app's, which run under XWayland. The writer knows GDK's lines
+  by GTK 3.24.52's wording; a GTK that rewords them ends the app unsaved
+  again. Only a kill ends the save early:
   systemd's `SIGKILL` once a stop has waited its timeout (90 s by
   default), or a second SIGTERM.
 - While a recording runs the app holds the portal's logout inhibitor

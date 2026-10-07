@@ -1181,12 +1181,13 @@ still has to draw the window side. `[ ]` is not ported yet.
     sending `EndSession`.
   - Where no session manager runs (KDE Plasma, wlroots desktops), the shell opens
     the desktop portal's session monitor (`CreateMonitor` on
-    `org.freedesktop.portal.Inhibit`) and at query-end or ending saves, answers
-    `QueryEndResponse` after the save and quits. Plasma 6.6's portal serves the
-    monitor (waiting 1.5 s for the answer at the query and not at the end), but
-    nothing in Plasma 6.6 asks it, so it never reports the end there; Plasma
-    before 6.6 has no monitor, and the GTK portal off GNOME reports only a running
-    session. While a recording runs the shell holds the portal's logout inhibitor
+    `org.freedesktop.portal.Inhibit`), answers query-end at once
+    (`QueryEndResponse`: the portal gives a second, and the user can still call the
+    logout off, where a desktop may wait on the shell's own inhibitor) and at ending
+    saves and quits. Plasma 6.6's portal serves the monitor (waiting 1.5 s for the
+    answer at the query and not at the end), but nothing in Plasma 6.6 asks it, so it
+    never reports the end there; Plasma before 6.6 has no monitor, and the GTK portal
+    off GNOME reports no end. While a recording runs the shell holds the portal's logout inhibitor
     (the `Logout` flag, "A meeting is being recorded") and closes its request when
     the recorder turns idle: on GNOME the GTK portal passes it to gnome-session,
     which then shows its logout dialog, even for `--no-prompt`; Plasma 6.6 notes it
