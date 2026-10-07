@@ -442,11 +442,13 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
 }
 
 /// The secret store the graph reads through: the import's gate over
-/// `secrets` (the app's [`KeepsApiKey`], so a write the gate swallows
-/// never reaches it) while an import is pending, `secrets` itself
-/// otherwise.
+/// `secrets` while an import is pending, else `secrets` behind the gate of
+/// a refused key read, if any ([`crate::swift_import::key_denied_secrets`]).
+/// `secrets` is the app's [`KeepsApiKey`], so a write a gate swallows
+/// never reaches it.
 fn gated_secrets(
     pending: Option<crate::swift_import::PendingImport>,
+    preferences: &Arc<FilePreferences>,
     secrets: Arc<dyn SecretStore>,
 ) -> (Option<GraphImport>, Arc<dyn SecretStore>) {
     match pending {
@@ -455,7 +457,10 @@ fn gated_secrets(
             let gated = import.secrets.clone();
             (Some(import), gated)
         }
-        None => (None, secrets),
+        None => (
+            None,
+            crate::swift_import::key_denied_secrets(preferences, secrets),
+        ),
     }
 }
 
@@ -599,7 +604,7 @@ pub fn build_with_import(
     let store = open_store(&database_path)?;
     let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
     let kept = Arc::new(KeepsApiKey::new(secrets));
-    let (import, secrets) = gated_secrets(pending, kept.clone());
+    let (import, secrets) = gated_secrets(pending, &preferences, kept.clone());
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;

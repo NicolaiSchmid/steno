@@ -35,7 +35,8 @@
 //!   it as the PEM entry `handover-identity`
 //!   ([`store_imported_identity`]), replacing a desktop-id identity (D5):
 //!   the Swift one is the identity the paired phones pin. A denied key read
-//!   leaves the key empty, and Settings asks for it. A denied or failed
+//!   leaves the key empty, and Settings asks for it; no later launch asks
+//!   the keychain for it until a key is saved ([`KEY_DENIED_KEY`]). A denied or failed
 //!   export never mints an identity and never replaces one: the gate
 //!   ([`HandoverGate`]) says the handover waits, the step offers Try again,
 //!   and the step comes back at the next launch. Skipping the step counts
@@ -83,6 +84,11 @@ pub const IMPORT_RAN_KEY: &str = "steno.swiftImportRan";
 /// launch whose import still waits for the identity reads the key as it
 /// always does, and the step asks for the identity alone.
 pub const KEY_READ_KEY: &str = "steno.swiftImportKeyRead";
+/// Set when the step's read of the Swift API key was refused, cleared once
+/// the user saves a key: until then every launch answers no key without
+/// asking the keychain, so no prompt comes before the step, or at all
+/// once the import is over ([`key_denied_secrets`]).
+pub const KEY_DENIED_KEY: &str = "steno.swiftImportKeyDenied";
 /// Sparkle's `SUEnableAutomaticChecks`, for the updater's schedule (S4).
 pub const AUTOMATIC_CHECKS_KEY: &str = "steno.updates.automaticChecks";
 /// Sparkle's `SUAutomaticallyUpdate`, for the updater's schedule (S4).
@@ -189,6 +195,9 @@ pub struct PendingImport {
     /// The graph reads no API key until the step ran: no earlier launch's
     /// step read or was refused the key ([`KEY_READ_KEY`]).
     pub gate_key: bool,
+    /// An earlier launch's step was refused the key ([`KEY_DENIED_KEY`]):
+    /// the graph answers no key until the user saves one.
+    pub key_denied: bool,
     /// The step reads the Swift API key: the key is gated and the item is
     /// the Swift app's.
     pub read_key: bool,
@@ -232,6 +241,7 @@ pub fn launch(
                     false
                 });
             Launch::Pending(PendingImport {
+                key_denied: preferences.flag(KEY_DENIED_KEY),
                 preferences,
                 keychain,
                 gate_key,
@@ -339,14 +349,10 @@ pub struct ImportGate {
 }
 
 impl ImportGate {
-    fn new(gate_key: bool) -> Self {
+    fn new(key: KeyGate) -> Self {
         ImportGate {
             handover: watch::Sender::new(HandoverGate::Pending),
-            key: Mutex::new(if gate_key {
-                KeyGate::Closed
-            } else {
-                KeyGate::Open
-            }),
+            key: Mutex::new(key),
         }
     }
 
@@ -377,6 +383,8 @@ impl ImportGate {
 struct GatedSecrets {
     inner: Arc<dyn SecretStore>,
     gate: Arc<ImportGate>,
+    /// Where a saved key clears [`KEY_DENIED_KEY`].
+    preferences: Arc<FilePreferences>,
 }
 
 #[async_trait]
@@ -410,9 +418,31 @@ impl SecretStore for GatedSecrets {
         self.inner.set_secret(key, value).await?;
         if saving {
             *self.gate.key() = KeyGate::Open;
+            if self.preferences.flag(KEY_DENIED_KEY) {
+                self.preferences.set_flag(KEY_DENIED_KEY, false);
+            }
         }
         Ok(())
     }
+}
+
+/// The secret store of a graph without a pending import: `secrets` itself,
+/// or, while the step's read of the Swift API key stands refused
+/// ([`KEY_DENIED_KEY`]), `secrets` behind a gate that answers no key
+/// without asking the keychain, until the user saves one.
+#[must_use]
+pub fn key_denied_secrets(
+    preferences: &Arc<FilePreferences>,
+    secrets: Arc<dyn SecretStore>,
+) -> Arc<dyn SecretStore> {
+    if !preferences.flag(KEY_DENIED_KEY) {
+        return secrets;
+    }
+    Arc::new(GatedSecrets {
+        inner: secrets,
+        gate: Arc::new(ImportGate::new(KeyGate::Read(None))),
+        preferences: preferences.clone(),
+    })
 }
 
 /// A pending import inside the graph: the gated secret store, the gate,
@@ -431,13 +461,21 @@ impl GraphImport {
     /// Wraps `secrets` for the graph.
     #[must_use]
     pub fn new(pending: PendingImport, secrets: Arc<dyn SecretStore>) -> Self {
-        let gate = Arc::new(ImportGate::new(pending.gate_key));
+        let key = if pending.gate_key {
+            KeyGate::Closed
+        } else if pending.key_denied {
+            KeyGate::Read(None)
+        } else {
+            KeyGate::Open
+        };
+        let gate = Arc::new(ImportGate::new(key));
         GraphImport {
-            preferences: pending.preferences,
             secrets: Arc::new(GatedSecrets {
                 inner: secrets.clone(),
                 gate: gate.clone(),
+                preferences: pending.preferences.clone(),
             }),
+            preferences: pending.preferences,
             gate,
             raw_secrets: secrets,
             keychain: pending.keychain,
@@ -573,6 +611,7 @@ impl SwiftImport for ImportStep {
         if self.state().read_key {
             let key = self.keychain.read_api_key().unwrap_or_else(|refusal| {
                 tracing::warn!(%refusal, "the Swift API key was not read");
+                self.preferences.set_flag(KEY_DENIED_KEY, true);
                 None
             });
             self.preferences.set_flag(KEY_READ_KEY, true);

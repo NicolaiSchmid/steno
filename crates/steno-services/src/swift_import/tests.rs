@@ -580,6 +580,91 @@ fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
     assert_eq!(read(&*step.raw, &key), None);
 }
 
+/// A refused key read is remembered: the next launch, whose import still
+/// waits for the identity, answers no key without asking the keychain
+/// (so nothing prompts before the step), and so does every launch after
+/// the import is over, until the user saves a key.
+#[test]
+fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
+    let denied_key = || FakeKeychain {
+        key: Err(KeychainRefusal {
+            denied: true,
+            detail: "userCanceledErr".to_owned(),
+        }),
+        ..FakeKeychain::swift_app()
+    };
+    let first = step(denied_key(), None);
+    first.keychain.deny_export();
+    let status = first.import.run();
+    assert_eq!(status.stage, SwiftImportStage::Waiting);
+    assert!(first.preferences.flag(KEY_DENIED_KEY));
+
+    // The next launch: still pending, the key stays unread.
+    let keychain = Arc::new(denied_key());
+    let again = pending(launch(
+        &at_home(),
+        first.preferences.clone(),
+        &FakeDefaults::new(fixture("swift-domain.plist")),
+        keychain.clone(),
+    ));
+    assert!(!again.gate_key && again.key_denied);
+    let graph = GraphImport::new(again, first.raw.clone());
+    first.raw.reads.lock().unwrap().clear();
+    let key = SecretKey::llm_api_key();
+    assert_eq!(read(&*graph.secrets, &key), None);
+    let step = graph.step(RUNTIME.handle().clone(), Box::new(|| {}));
+    assert_eq!(step.status().prompts, 1, "the identity alone");
+    assert_eq!(
+        step.run().stage,
+        SwiftImportStage::Done
+    );
+    assert_eq!(read(&*graph.secrets, &key), None);
+    assert!(
+        first.raw.reads.lock().unwrap().iter().all(|read| read != SecretKey::LLM_API_KEY),
+        "the keychain was asked for the key"
+    );
+    assert!(!keychain.calls().contains(&"read key"));
+
+    // The import is over: the graph's store still answers no key...
+    let over = key_denied_secrets(&first.preferences, first.raw.clone());
+    assert_eq!(read(&*over, &key), None);
+    assert!(
+        first.raw.reads.lock().unwrap().iter().all(|read| read != SecretKey::LLM_API_KEY),
+        "the keychain was asked for the key"
+    );
+    // ...until the user saves one, which clears the flag for good.
+    RUNTIME.block_on(over.set_secret(&key, Some("sk-new"))).unwrap();
+    assert_eq!(read(&*over, &key).as_deref(), Some("sk-new"));
+    assert!(!first.preferences.flag(KEY_DENIED_KEY));
+    assert_flags_only(first.dir.path());
+    let later = key_denied_secrets(&first.preferences, first.raw.clone());
+    assert_eq!(read(&*later, &key).as_deref(), Some("sk-new"));
+}
+
+/// The graph of a launch after the import, with the key read refused,
+/// answers no key from its store though the store holds one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_graph_after_a_refused_key_read_reads_no_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = steno_core::StenoPaths::new(dir.path().join("support"));
+    std::fs::create_dir_all(&paths.support_directory).unwrap();
+    std::fs::write(
+        paths.support_directory.join("preferences.json"),
+        format!(r#"{{"{IMPORT_RAN_KEY}": true, "{KEY_READ_KEY}": true, "{KEY_DENIED_KEY}": true}}"#),
+    )
+    .unwrap();
+    let file = crate::FileSecretStore::new(
+        paths.support_directory.join("secrets.json"),
+        std::collections::BTreeMap::new(),
+    );
+    let key = SecretKey::llm_api_key();
+    file.set_secret(&key, Some("sk-swift")).await.unwrap();
+    let app = crate::build(test_options(paths)).unwrap();
+    assert_eq!(app.secrets.secret(&key).await.unwrap(), None);
+    assert_eq!(file.secret(&key).await.unwrap().as_deref(), Some("sk-swift"));
+    app.shutdown();
+}
+
 #[test]
 fn skipping_the_step_counts_as_both_denied_and_the_next_launch_asks_again() {
     let step = step(FakeKeychain::swift_app(), None);
