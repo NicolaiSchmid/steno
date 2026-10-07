@@ -12,24 +12,22 @@ use std::sync::{Mutex, MutexGuard};
 use chrono::TimeDelta;
 use uuid::Uuid;
 
-use crate::files::{Access, create_dir_all_durably, replace_file, set_aside};
+use crate::files::{read_json, write_json};
 
 /// The failed launch re-exports in a row of each meeting
 /// ([`ProcessingPipeline::redeliver_unfinished`](crate::ProcessingPipeline::redeliver_unfinished)
 /// counts them; the user's Export again [resets](Self::reset) the count).
-/// A write replaces the file in one durable step ([`replace_file`]). A
-/// missing file counts 0 for every meeting. A file that does not parse is
-/// moved aside ([`set_aside`]) and logged before the counts start at 0; a
-/// file that cannot be read for another reason, or that cannot be moved
-/// aside, is left alone and never written, and the counts of this run live
-/// in memory only, as `preferences.json`'s flags do.
+/// Read with [`read_json`], so a missing or corrupt file counts 0 for every
+/// meeting, and replaced with [`write_json`] on every change; a file that
+/// may not be written leaves the counts of this run in memory only, as
+/// `preferences.json`'s flags do.
 ///
 /// ```
 /// use steno_pipeline::ExportRetries;
 /// use uuid::Uuid;
 ///
 /// let dir = tempfile::tempdir()?;
-/// let retries = ExportRetries::new(dir.path().join(ExportRetries::FILE_NAME));
+/// let retries = ExportRetries::in_directory(dir.path());
 /// let meeting = Uuid::new_v4();
 /// assert_eq!(retries.count(meeting), 0);
 /// assert!(!retries.stopped(meeting));
@@ -60,7 +58,7 @@ impl ExportRetries {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let (counts, writable) = load(&path);
+        let (counts, writable) = read_json(&path);
         ExportRetries {
             path,
             counts: Mutex::new(counts),
@@ -139,55 +137,8 @@ impl ExportRetries {
         if !self.writable {
             return;
         }
-        let written = serde_json::to_vec_pretty(counts)
-            .map_err(std::io::Error::from)
-            .and_then(|data| {
-                if let Some(parent) = self.path.parent() {
-                    create_dir_all_durably(parent)?;
-                }
-                replace_file(&self.path, &data, Access::Default)
-            });
-        if let Err(error) = written {
+        if let Err(error) = write_json(&self.path, counts) {
             tracing::warn!("{} could not be written: {error}", self.path.display());
-        }
-    }
-}
-
-/// The counts in `path` and whether it may be written.
-fn load(path: &Path) -> (BTreeMap<Uuid, u32>, bool) {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return (BTreeMap::new(), true);
-        }
-        Err(error) => {
-            tracing::warn!(
-                "{} could not be read ({error}); it stays and is not written",
-                path.display()
-            );
-            return (BTreeMap::new(), false);
-        }
-    };
-    let error = match serde_json::from_slice(&bytes) {
-        Ok(counts) => return (counts, true),
-        Err(error) => error,
-    };
-    match set_aside(path) {
-        Ok(aside) => {
-            tracing::warn!(
-                "{} did not parse ({error}); moved it to {} and started from 0",
-                path.display(),
-                aside.display()
-            );
-            (BTreeMap::new(), true)
-        }
-        Err(move_error) => {
-            tracing::warn!(
-                "{} did not parse ({error}) and could not be moved aside \
-                 ({move_error}); it stays and is not written",
-                path.display()
-            );
-            (BTreeMap::new(), false)
         }
     }
 }
@@ -196,30 +147,26 @@ fn load(path: &Path) -> (BTreeMap<Uuid, u32>, bool) {
 mod tests {
     use super::*;
 
-    fn retries_in(dir: &Path) -> ExportRetries {
-        ExportRetries::new(dir.join(ExportRetries::FILE_NAME))
-    }
-
     /// The counts survive a restart, a reset removes the meeting from the
     /// file, and a meeting stops at the limit.
     #[test]
     fn counts_are_kept_across_launches_and_reset() {
         let dir = tempfile::tempdir().unwrap();
         let (meeting, other) = (Uuid::new_v4(), Uuid::new_v4());
-        let retries = retries_in(dir.path());
+        let retries = ExportRetries::in_directory(dir.path());
         for _ in 0..ExportRetries::LIMIT {
             assert!(!retries.stopped(meeting));
             retries.failed(meeting);
         }
         retries.failed(other);
-        let relaunched = retries_in(dir.path());
+        let relaunched = ExportRetries::in_directory(dir.path());
         assert_eq!(relaunched.count(meeting), ExportRetries::LIMIT);
         assert!(relaunched.stopped(meeting));
         assert_eq!(relaunched.count(other), 1);
 
         relaunched.reset(meeting);
         relaunched.retain(|id| id != other);
-        let relaunched = retries_in(dir.path());
+        let relaunched = ExportRetries::in_directory(dir.path());
         assert_eq!(relaunched.count(meeting), 0);
         assert_eq!(relaunched.count(other), 0);
         assert_eq!(
@@ -236,10 +183,10 @@ mod tests {
         let path = dir.path().join(ExportRetries::FILE_NAME);
         std::fs::write(&path, b"{not json").unwrap();
         let meeting = Uuid::new_v4();
-        let retries = retries_in(dir.path());
+        let retries = ExportRetries::in_directory(dir.path());
         assert_eq!(retries.count(meeting), 0);
         retries.failed(meeting);
-        assert_eq!(retries_in(dir.path()).count(meeting), 1);
+        assert_eq!(ExportRetries::in_directory(dir.path()).count(meeting), 1);
         let aside: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .flatten()

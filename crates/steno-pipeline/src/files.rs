@@ -2,13 +2,17 @@
 //! `preferences.json`, the CLI's `meeting.json`; Swift:
 //! `Data.write(to:options: .atomic)`), copying a recording so it survives a
 //! power loss (the phone intake), creating folders whose entries survive
-//! one, and setting aside a file that does not parse (`preferences.json`).
+//! one, and reading and writing a JSON file this process owns, set aside
+//! when it does not parse (`preferences.json`, `export-retries.json`).
 //! The services and the CLI use these too, so there is one implementation.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// The syncs a durable write makes; the disk in the product, a recorder in
 /// the tests, which check what is synced and when.
@@ -252,6 +256,61 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
         Disk.directory(directory);
     }
     Ok(aside)
+}
+
+/// The JSON in `path`, a file this process alone writes, and whether it
+/// may be written. A missing file reads as the default. A file that does
+/// not parse is moved aside ([`set_aside`]) and logged before the default
+/// is used; a file that cannot be read for another reason, or that cannot
+/// be moved aside, is left alone, logged, and must never be written
+/// (`false`). `preferences.json` and `export-retries.json` read through
+/// this.
+pub fn read_json<T: DeserializeOwned + Default>(path: &Path) -> (T, bool) {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (T::default(), true);
+        }
+        Err(error) => {
+            tracing::warn!(
+                "{} could not be read ({error}); it stays and is not written",
+                path.display()
+            );
+            return (T::default(), false);
+        }
+    };
+    let error = match serde_json::from_slice(&bytes) {
+        Ok(value) => return (value, true),
+        Err(error) => error,
+    };
+    match set_aside(path) {
+        Ok(aside) => {
+            tracing::warn!(
+                "{} did not parse ({error}); moved it to {} and started empty",
+                path.display(),
+                aside.display()
+            );
+            (T::default(), true)
+        }
+        Err(move_error) => {
+            tracing::warn!(
+                "{} did not parse ({error}) and could not be moved aside \
+                 ({move_error}); it stays and is not written",
+                path.display()
+            );
+            (T::default(), false)
+        }
+    }
+}
+
+/// Replaces `path` with `value` as pretty-printed JSON ([`replace_file`],
+/// [`Access::Default`]), creating its folder first.
+pub fn write_json<T: Serialize + ?Sized>(path: &Path, value: &T) -> std::io::Result<()> {
+    let data = serde_json::to_vec_pretty(value)?;
+    if let Some(parent) = path.parent() {
+        create_dir_all_durably(parent)?;
+    }
+    replace_file(path, &data, Access::Default)
 }
 
 /// Makes `options` create the file with mode 0600 where the platform has
