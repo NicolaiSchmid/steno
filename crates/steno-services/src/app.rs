@@ -260,8 +260,13 @@ pub fn handover_intake(
 }
 
 /// The handover listener over a loaded or minted identity, with the mac id
-/// the Phones settings show; `None`, with the reason, when the identity
-/// could not be read or stored.
+/// the Phones settings show; `None`, with the reason, when the store could
+/// not sync its WAL to the disk ([`Store::checkpoint_durably`]) or the
+/// identity could not be read or stored. The checkpoint comes first: the
+/// intake answers a phone's retry `complete` from a stored receipt, so the
+/// listener only runs over a store whose commits are on the disk. A failed
+/// one keeps the handover off until the next launch, and the rest of the
+/// app runs. Swift: `AppEnvironment.makeHandover`.
 fn handover_listener(
     store: &Arc<Store>,
     pipeline: &Arc<CurrentPipeline>,
@@ -269,6 +274,9 @@ fn handover_listener(
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(Arc<HandoverService>, uuid::Uuid), String> {
+    store
+        .checkpoint_durably()
+        .map_err(|error| format!("the database could not be synced to the disk: {error}"))?;
     let identity = block_on(
         runtime,
         steno_handover::HandoverIdentity::load_or_create(
@@ -1502,6 +1510,36 @@ mod tests {
                 .starts_with("Could not create the database folder: "),
             "{error}"
         );
+    }
+
+    /// The handover listener is built only over a store whose WAL is on
+    /// the disk: a checkpoint that fails (here one another connection
+    /// blocks, with no busy timeout so the test does not wait) keeps the
+    /// handover off, before an identity is minted; once the checkpoint
+    /// succeeds the listener is built.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_store_that_cannot_sync_keeps_the_handover_off() {
+        let (dir, store) = temp_store();
+        let pipeline = crate::testing::current_pipeline(fake_dependencies(&store, "fake-engine"));
+        let memory = Arc::new(steno_core::testing::InMemorySecretStore::new());
+        let secrets: Arc<dyn SecretStore> = memory.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let listener = || handover_listener(&store, &pipeline, &secrets, local_zone(), &runtime);
+        store
+            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+            .unwrap();
+        let writer = rusqlite::Connection::open(dir.path().join("steno.sqlite")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let error = listener().err().unwrap();
+        assert!(
+            error.starts_with("the database could not be synced to the disk: "),
+            "{error}"
+        );
+        assert!(memory.keys().is_empty(), "no identity is minted");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(listener().is_ok());
     }
 
     /// A secret store whose reads fail, as the keyring does without a
