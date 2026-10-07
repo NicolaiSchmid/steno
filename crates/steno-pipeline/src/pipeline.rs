@@ -36,18 +36,18 @@ use steno_core::{
     Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
     SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
     SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
-    paths::file_url,
+    paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::crash_loop::{CountedRun, MAX_CRASHED_RUNS, OpenRuns, RunCount, TOO_MANY_CRASHED_RUNS};
 use crate::estimator::{ProcessingEstimator, StageRates, StageSample, absorbing};
 use crate::events::MeetingEventBus;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
 use crate::run::ProcessingRun;
-use crate::runs::{MAX_UNSETTLED_RUNS, Runs, TOO_MANY_UNSETTLED_RUNS};
 
 /// The one failure type: any error inside a stage becomes this, and
 /// [`ProcessingPipeline::process`] marks the meeting failed in one place.
@@ -91,6 +91,38 @@ impl fmt::Display for PipelineFailure {
 }
 
 type Result<T> = std::result::Result<T, PipelineFailure>;
+
+/// Why [`ProcessingPipeline::reprocess`] did not start a run: a refusal,
+/// or the store failing. The text is for logs and the CLI; a button shows
+/// its own words for each variant. Rust only.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ReprocessError {
+    /// No meeting has the id.
+    #[error("meeting {0} not found")]
+    MeetingNotFound(Uuid),
+    /// The meeting is recording, queued or processing.
+    #[error("meeting {meeting_id} is {} and cannot be processed again", state.as_str())]
+    Unfinished {
+        /// The meeting asked for.
+        meeting_id: Uuid,
+        /// Its state.
+        state: MeetingStateKind,
+    },
+    /// The meeting has no audio asset row.
+    #[error("meeting {0} has no audio asset")]
+    NoAsset(Uuid),
+    /// The master is not on disk: the retention sweep removed it, or
+    /// something else did. The sidecars alone are not enough, since the
+    /// run ends by mixing the master down.
+    #[error("meeting {0}'s audio is no longer on disk")]
+    AudioGone(Uuid),
+    /// The meeting or its asset is in flight.
+    #[error("meeting {0} is already being processed")]
+    InFlight(Uuid),
+    /// The store failed reading the meeting or saving it queued.
+    #[error(transparent)]
+    Failed(#[from] PipelineFailure),
+}
 
 /// The log target of a background run's failure (`enqueue`,
 /// `resume_unfinished`). The CLI, which waits for its run and prints the
@@ -142,21 +174,55 @@ impl MonotonicClock for SystemClock {
 /// [`resume_unfinished`](ProcessingPipeline::resume_unfinished) instead of
 /// marking it `failed`: the exit can end a job (a session's end can kill
 /// the speech sidecar before the app), and that is no failure of the
-/// meeting's. Rust only: the Swift pipeline ran in the app's process and
-/// died with it, and the next launch resumed the job.
+/// meeting's. Setting it also takes back every background run still going
+/// on those pipelines from the crash-loop guard's count
+/// ([`crate::crash_loop`]), so an ordinary exit never counts as a crash.
+/// Rust only: the Swift pipeline ran in the app's process and died with
+/// it, and the next launch resumed the job.
 #[derive(Debug, Clone, Default)]
-pub struct QuitLatch(Arc<AtomicBool>);
+pub struct QuitLatch(Arc<Latch>);
+
+/// The flag, and the runs counted while it was clear, under one lock.
+#[derive(Debug, Default)]
+struct Latch {
+    set: AtomicBool,
+    open: Mutex<OpenRuns>,
+}
 
 impl QuitLatch {
-    /// Sets the latch; it is never cleared.
+    /// Sets the latch; it is never cleared. Every run counted on a
+    /// pipeline sharing it and still going is taken back.
     pub fn set(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        let mut open = self.open();
+        self.0.set.store(true, Ordering::SeqCst);
+        open.take_back_all();
     }
 
     /// Whether the latch is set: the app is exiting.
     #[must_use]
     pub fn is_set(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.set.load(Ordering::SeqCst)
+    }
+
+    /// Counts a run under `count`, unless the latch is set; the check and
+    /// the count are one step, so the exit takes back every run counted
+    /// before it.
+    pub(crate) fn open_run(&self, count: RunCount) -> Option<u64> {
+        let mut open = self.open();
+        (!self.is_set()).then(|| open.open(count))
+    }
+
+    /// Whether the run under `key` was still counted: false once the exit
+    /// took it back.
+    pub(crate) fn close_run(&self, key: u64) -> bool {
+        self.open().close(key)
+    }
+
+    fn open(&self) -> MutexGuard<'_, OpenRuns> {
+        self.0
+            .open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -408,6 +474,9 @@ struct State {
     /// The background runs started by `enqueue` and `resume_unfinished`,
     /// by asset id.
     running: HashMap<Uuid, JoinHandle<()>>,
+    /// Assets claimed for a background run that has not started yet
+    /// ([`Starting`]).
+    starting: BTreeSet<Uuid>,
 }
 
 struct Inner {
@@ -710,15 +779,24 @@ impl ProcessingPipeline {
     /// [quits](Self::quit), the meeting is saved and stays `queued` for the
     /// next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        {
-            let state = self.state();
-            if state.running.contains_key(&asset.id) || state.in_flight.contains(&meeting.id) {
-                return Err(PipelineFailure::new(
-                    PipelineStage::Decode,
-                    format!("meeting {} is already being processed", meeting.id),
-                ));
-            }
-        }
+        let Some(starting) = self.claim_start(meeting.id, asset.id) else {
+            return Err(PipelineFailure::new(
+                PipelineStage::Decode,
+                format!("meeting {} is already being processed", meeting.id),
+            ));
+        };
+        self.enqueue_claimed(meeting, asset, &starting)
+    }
+
+    /// `enqueue` once the asset is claimed: the claim is held from the
+    /// check to the run's start, so a second call cannot start a second
+    /// run.
+    fn enqueue_claimed(
+        &self,
+        meeting: &Meeting,
+        asset: &AudioAsset,
+        _starting: &Starting,
+    ) -> Result<()> {
         let mut queued = meeting.clone();
         queued.state = MeetingState::Queued;
         queued.updated_at = self.now();
@@ -730,50 +808,65 @@ impl ProcessingPipeline {
         )?;
         // Processed afresh: earlier runs that ended with the app no longer
         // count against it.
-        Runs::of(&asset).clear();
+        RunCount::of(&asset).clear();
         self.start(&asset);
         Ok(())
     }
 
     /// Processes a `ready` or `failed` meeting again from `decode`, with its
-    /// audio asset, as [`enqueue`](Self::enqueue) does: the count of runs
-    /// that ended with the app starts afresh, so a meeting launch recovery
-    /// gave up on ([`TOO_MANY_UNSETTLED_RUNS`]) gets new tries. Fails when
-    /// the meeting or its asset is missing, when it is recording, queued or
-    /// processing, and when it is in flight. Rust only: Swift had no such
-    /// action.
-    pub fn reprocess(&self, meeting_id: Uuid) -> Result<()> {
-        let meeting = required(
-            PipelineStage::Decode,
-            self.store().meeting(meeting_id),
-            || format!("meeting {meeting_id} not found"),
-        )?;
-        if !matches!(
-            meeting.state.kind(),
-            MeetingStateKind::Ready | MeetingStateKind::Failed
-        ) {
-            return Err(PipelineFailure::new(
-                PipelineStage::Decode,
-                format!(
-                    "meeting {meeting_id} is {} and cannot be processed again",
-                    meeting.state.kind().as_str()
-                ),
-            ));
+    /// audio asset, as [`enqueue`](Self::enqueue) does: the crash-loop
+    /// guard's count starts afresh, so a meeting launch recovery gave up on
+    /// ([`TOO_MANY_CRASHED_RUNS`]) gets new tries. Refused, with the
+    /// [`ReprocessError`] that says why, when the meeting or its asset is
+    /// missing, when it is recording, queued or processing, when its master
+    /// is gone (the retention sweep keeps the asset row when it removes the
+    /// files), and when it is in flight. The refusals' text is for logs and
+    /// the CLI; a button shows its own words for each variant. Rust only:
+    /// Swift had no such action.
+    pub fn reprocess(&self, meeting_id: Uuid) -> std::result::Result<(), ReprocessError> {
+        let meeting = attributing(PipelineStage::Decode, self.store().meeting(meeting_id))?
+            .ok_or(ReprocessError::MeetingNotFound(meeting_id))?;
+        let state = meeting.state.kind();
+        if !matches!(state, MeetingStateKind::Ready | MeetingStateKind::Failed) {
+            return Err(ReprocessError::Unfinished { meeting_id, state });
         }
-        let asset = required(
-            PipelineStage::Decode,
-            self.store().asset(meeting_id),
-            || format!("meeting {meeting_id} has no audio asset"),
-        )?;
-        self.enqueue(&meeting, &asset)
+        let asset = attributing(PipelineStage::Decode, self.store().asset(meeting_id))?
+            .ok_or(ReprocessError::NoAsset(meeting_id))?;
+        // The persist stage mixes the master down, so sidecars alone would
+        // fail the run at its end.
+        if !file_url_path(&asset.url).is_some_and(|master| master.exists()) {
+            return Err(ReprocessError::AudioGone(meeting_id));
+        }
+        let starting = self
+            .claim_start(meeting_id, asset.id)
+            .ok_or(ReprocessError::InFlight(meeting_id))?;
+        Ok(self.enqueue_claimed(&meeting, &asset, &starting)?)
+    }
+
+    /// Claims `asset_id` for a background run of `meeting_id`, until the
+    /// claim drops; `None` while the asset runs or is claimed, or the
+    /// meeting is in flight. The check and the claim are one step under
+    /// the state lock.
+    fn claim_start(&self, meeting_id: Uuid, asset_id: Uuid) -> Option<Starting> {
+        let mut state = self.state();
+        if state.running.contains_key(&asset_id)
+            || state.in_flight.contains(&meeting_id)
+            || !state.starting.insert(asset_id)
+        {
+            return None;
+        }
+        Some(Starting {
+            pipeline: self.clone(),
+            asset_id,
+        })
     }
 
     /// Launch recovery for the queue: every meeting a previous process left
     /// `queued` or `processing` is processed again from `decode`, oldest
     /// first, in the background like `enqueue`. A meeting whose asset row
     /// is missing is marked failed, and so is one whose runs ended with the
-    /// app [`MAX_UNSETTLED_RUNS`] times ([`crate::runs`]), with
-    /// [`TOO_MANY_UNSETTLED_RUNS`]; its audio is kept, and a retention
+    /// app [`MAX_CRASHED_RUNS`] times ([`crate::crash_loop`]), with
+    /// [`TOO_MANY_CRASHED_RUNS`]; its audio is kept, and a retention
     /// stamp an earlier run left is cleared so the sweep keeps it too.
     /// Returns the meetings whose processing was started: none once the
     /// pipeline [quits](Self::quit).
@@ -807,15 +900,15 @@ impl ProcessingPipeline {
                 )?;
                 continue;
             };
-            if self.state().running.contains_key(&asset.id) {
+            let Some(_starting) = self.claim_start(meeting.id, asset.id) else {
                 continue;
-            }
-            let runs = Runs::of(&asset);
-            let unsettled = runs.unsettled();
-            if unsettled >= MAX_UNSETTLED_RUNS {
+            };
+            let count = RunCount::of(&asset);
+            let crashed = count.read();
+            if crashed >= MAX_CRASHED_RUNS {
                 tracing::warn!(
                     meeting_id = %meeting.id,
-                    runs = unsettled,
+                    runs = crashed,
                     "processing ended with the app too often; marked failed"
                 );
                 // Processing it again needs the audio: a stamp left from
@@ -830,12 +923,12 @@ impl ProcessingPipeline {
                     self.store().set_state(
                         meeting.id,
                         MeetingState::Failed {
-                            reason: TOO_MANY_UNSETTLED_RUNS.to_owned(),
+                            reason: TOO_MANY_CRASHED_RUNS.to_owned(),
                         },
                         self.now(),
                     ),
                 )?;
-                runs.clear();
+                count.clear();
                 continue;
             }
             self.start(&asset);
@@ -848,20 +941,22 @@ impl ProcessingPipeline {
     /// cannot finish and remove its entry before the entry exists; the
     /// task's [`Running`] mark removes the entry however the task ends, a
     /// panic included. Once the pipeline quits, nothing starts. The run is
-    /// counted in the meeting's folder before it starts, and the count is
-    /// settled when it ends ([`CountedRun`]).
+    /// counted in the meeting's folder before it starts, and taken off the
+    /// count when it ends or the app exits first ([`CountedRun`]). The
+    /// caller holds the asset's [`Starting`] claim.
     fn start(&self, asset: &AudioAsset) {
         let asset_id = asset.id;
-        if self.quitting() {
+        let Some(mut counted) =
+            CountedRun::start(&self.inner.dependencies.quit_latch, RunCount::of(asset))
+        else {
             tracing::debug!(
                 target: BACKGROUND_RUN_LOG,
                 %asset_id,
                 "not started: the app is quitting"
             );
             return;
-        }
+        };
         let pipeline = self.clone();
-        let mut counted = CountedRun::start(Runs::of(asset), self.clone());
         let mut state = self.state();
         let handle = tokio::spawn(async move {
             let _running = Running {
@@ -869,7 +964,9 @@ impl ProcessingPipeline {
                 asset_id,
             };
             let result = pipeline.process(asset_id).await;
-            counted.succeeded = result.is_ok();
+            if result.is_ok() {
+                counted.succeeded();
+            }
             drop(counted);
             if let Err(failure) = result {
                 if pipeline.quitting() {
@@ -2041,39 +2138,17 @@ impl Drop for SpeechClaim {
     }
 }
 
-/// A background run counted in its meeting's folder ([`crate::runs`]):
-/// counted when made, and the count settled when dropped, which every end
-/// the process lives through does: the run's return, a panic unwinding
-/// through it, the runtime dropping it at the exit. A run that ends with
-/// the process (an abort, an out-of-memory kill, a power loss) is never
-/// dropped and leaves its count, the one kind of end the count is for; a
-/// panic is the pipeline's to report, not a run that took the app down.
-struct CountedRun {
-    runs: Runs,
+/// An asset claimed for a background run ([`ProcessingPipeline::claim_start`]);
+/// dropping it releases the claim, by which time the run is in `running`
+/// or was not started.
+struct Starting {
     pipeline: ProcessingPipeline,
-    succeeded: bool,
+    asset_id: Uuid,
 }
 
-impl CountedRun {
-    fn start(runs: Runs, pipeline: ProcessingPipeline) -> Self {
-        runs.started();
-        Self {
-            runs,
-            pipeline,
-            succeeded: false,
-        }
-    }
-}
-
-impl Drop for CountedRun {
+impl Drop for Starting {
     fn drop(&mut self) {
-        if !self.succeeded && self.pipeline.quitting() {
-            // The exit stopped it; earlier runs that ended with the app
-            // still count.
-            self.runs.stopped_by_exit();
-        } else {
-            self.runs.clear();
-        }
+        self.pipeline.state().starting.remove(&self.asset_id);
     }
 }
 
