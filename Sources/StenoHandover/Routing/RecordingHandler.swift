@@ -80,21 +80,25 @@ extension HandoverEngine {
       return .json(.ok, Self.status(of: receipt))
     }
 
-    // No receipt in memory or the store: every file of the recording id
-    // goes before `begin`, in the same actor step as the read's last look
-    // at memory and the `remember` in `persist`. Whatever is there belongs
-    // to no receipt (a verified file left by an intake failure whose
-    // receipt a revoke deleted after a restart, the files a revoked phone's
-    // re-announce opened before the revoke's delete committed). Kept,
-    // `begin` would add this upload's chunks to an old partial, and
-    // `complete` would hand an old verified file to the intake unhashed.
-    // No live upload of another device can be in them: a device's
+    // No receipt in memory or the store, so every file of the recording id
+    // goes before `begin`. This runs in the same actor step as the read's
+    // last look at memory and the `remember` in `persist`, so no request
+    // lands in between. Whatever is there belongs to no receipt (a
+    // verified file left by an intake failure whose receipt a revoke
+    // deleted after a restart, the files a revoked phone's re-announce
+    // opened before the revoke's delete committed). Kept, `begin` would add
+    // this upload's chunks to an old partial, and `complete` would hand an
+    // old verified file to the intake unhashed.
+    //
+    // No live upload of another device can be in them. A device's
     // recording routes read its receipt into memory before they touch a
     // file, and memory drops it only when that device is revoked, so only
-    // a revoked device's request can still be at work on them: its answer
-    // is a refusal or an error, after which the phone keeps its recording,
-    // or the 200 of an admission whose intake copied the verified file
-    // before this.
+    // a revoked device's request can still be at work on them. The phone
+    // deletes its copy only on a 200 from `complete`, and such a request
+    // answers a refusal, an error or a re-announce's status, after which
+    // the phone keeps its recording, or the 200 of an admission whose
+    // intake opened the verified file before the discard and copies it
+    // whole.
     inbox.discard(recordingID)
     do {
       try inbox.begin(metadata)
@@ -399,8 +403,8 @@ extension HandoverEngine {
     return Wire.RecordingStatus(state: receipt.state.kind, receivedChunks: receipt.receivedChunks)
   }
 
-  /// The receipt from memory or the store, kept in memory (`remember`); a
-  /// failed store read counts as none (`readReceipt` throws it).
+  /// `readReceipt` with a failed store read counted as none, so status,
+  /// chunk and complete keep their 404 (the plan's "Store reads" note).
   func receipt(_ recordingID: UUID) async -> HandoverReceipt? {
     try? await readReceipt(recordingID)
   }
