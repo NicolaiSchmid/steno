@@ -10,9 +10,9 @@ import StenoCore
 extension HandoverEngine {
   /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
   /// recording, 200 for a known one, both with `RecordingStatus`; 409 when
-  /// another device owns it or the metadata changed, also once it is
-  /// `.complete`; a `.complete` one with other chunks of the same bytes is
-  /// 200 with every chunk of the announced split.
+  /// another device owns it, its size or SHA-256 changed, or its chunk size
+  /// changed before it is `.complete`; a `.complete` one in other chunks of
+  /// the same bytes is 200 with every chunk of the announced split.
   func announce(_ recordingID: UUID, device: PairedDevice, body: Data) async -> HandoverResponse {
     let metadata: RecordingMetadata
     do {
@@ -34,20 +34,22 @@ extension HandoverEngine {
       // Also for a `.complete` receipt: a phone told `complete` posts
       // `complete`, and the 200 to that deletes its copy. A different file
       // under an admitted id is refused instead, and stays on the phone.
-      // The chunk size matters only while chunks arrive: the same bytes
-      // split otherwise are the file the computer holds, and every chunk of
-      // the phone's split lets it post `complete`.
       let complete = existing.state.kind == .complete
       guard existing.byteCount == metadata.byteCount, existing.sha256 == metadata.sha256,
         complete || existing.chunkSize == metadata.chunkSize
       else {
         return .problem(.conflict, "metadata differs from the first announcement")
       }
-      var receipt = existing
+      // The chunk size matters only until the receipt is `.complete`: the
+      // same bytes split otherwise are the file the computer holds. The
+      // answer lists every chunk of the phone's split, so it posts
+      // `complete`; the copy it is built from is never saved.
       if complete {
-        receipt.chunkSize = metadata.chunkSize
-        return .json(.ok, Self.status(of: receipt))
+        var resplit = existing
+        resplit.chunkSize = metadata.chunkSize
+        return .json(.ok, Self.status(of: resplit))
       }
+      var receipt = existing
       var receivedChunks: [Int]?
       if !inbox.hasVerified(recordingID, format: metadata.format),
         !inbox.hasPartial(recordingID) || inbox.loadMetadata(recordingID) == nil

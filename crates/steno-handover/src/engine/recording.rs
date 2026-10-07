@@ -116,18 +116,18 @@ impl Engine {
         HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
     }
 
-    /// A known recording announced again: 200 with the status, 409 when
-    /// another device owns it or the metadata changed, also once it is
-    /// `complete`; a `complete` one with other chunks of the same bytes is
-    /// 200 with every chunk of the announced split. The partial is reopened
-    /// when it or the sidecar is gone (a sweep, a crash before the first
-    /// chunk, a refusal), with the same receipt and an empty chunk set; a
-    /// verified file waiting for a second intake attempt keeps its chunk
-    /// set, so the phone's retry (announce, then complete) sends no chunk
-    /// twice. 401 with nothing opened when the device was revoked since its
-    /// receipt read. A receipt a `complete` admitted meanwhile stays
-    /// `complete` ([`Engine::update`]), the answer says so, and the files
-    /// this announce opened go.
+    /// A known recording announced again: 200 with the status, 409 when another
+    /// device owns it, its size or SHA-256 changed, or its chunk size changed
+    /// before it is `complete`; a `complete` one in other chunks of the same
+    /// bytes is 200 with every chunk of the announced split. The partial is
+    /// reopened when it or the sidecar is gone (a sweep, a crash before the
+    /// first chunk, a refusal), with the same receipt and an empty chunk set; a
+    /// verified file waiting for a second intake attempt keeps its chunk set,
+    /// so the phone's retry (announce, then complete) sends no chunk twice. 401
+    /// with nothing opened when the device was revoked since its receipt read.
+    /// A receipt a `complete` admitted meanwhile stays `complete`
+    /// ([`Engine::update`]), the answer says so, and the files this announce
+    /// opened go.
     async fn reannounce(
         &self,
         mut receipt: HandoverReceipt,
@@ -144,9 +144,6 @@ impl Engine {
         // Also for a `complete` receipt: a phone told `complete` posts
         // `complete`, and the 200 to that deletes its copy. A different file
         // under an admitted id is refused instead, and stays on the phone.
-        // The chunk size matters only while chunks arrive: the same bytes
-        // split otherwise are the file the computer holds, and every chunk
-        // of the phone's split lets it post `complete`.
         let complete = receipt.state.kind() == HandoverStateKind::Complete;
         if receipt.byte_count != metadata.byte_count
             || receipt.sha256 != metadata.sha256
@@ -157,9 +154,16 @@ impl Engine {
                 "metadata differs from the first announcement",
             );
         }
+        // The chunk size matters only until the receipt is `complete`: the
+        // same bytes split otherwise are the file the computer holds. The
+        // answer lists every chunk of the phone's split, so it posts
+        // `complete`; the copy it is built from is never saved.
         if complete {
-            receipt.chunk_size = metadata.chunk_size;
-            return HandoverResponse::json(StatusCode::OK, &Self::status_of(&receipt));
+            let resplit = HandoverReceipt {
+                chunk_size: metadata.chunk_size,
+                ..receipt
+            };
+            return HandoverResponse::json(StatusCode::OK, &Self::status_of(&resplit));
         }
         let received_chunks = match self.reopen_missing_files(metadata, device.id) {
             None => return Self::unauthorized(),
