@@ -23,8 +23,8 @@ use steno_core::{
 use steno_pipeline::crash_loop::{MAX_CRASHED_RUNS, TOO_MANY_CRASHED_RUNS};
 use steno_pipeline::pipeline::{diarized_lane_after_transcription, tap_carried_no_conversation};
 use steno_pipeline::{
-    LaneMerger, MeetingEventBus, MonotonicClock, PipelineDependencies, ProcessingPipeline,
-    QuitLatch, ReprocessError, RetentionSweep, SharedSpeechEngine, StageRates,
+    LaneMerger, MeetingEventBus, MonotonicClock, PipelineClaims, PipelineDependencies,
+    ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep, SharedSpeechEngine, StageRates,
 };
 use uuid::Uuid;
 
@@ -3196,23 +3196,14 @@ async fn exports_left_unfinished_are_delivered_again_at_launch() {
         AudioRetention::KeepForever,
     );
     let pipeline = &world.pipeline;
-    let mut ids = Vec::new();
-    for _ in 0..4 {
-        ids.push(enqueue_call(&world, pipeline));
-    }
+    let ids: Vec<Uuid> = (0..4).map(|_| enqueue_call(&world, pipeline)).collect();
     pipeline.wait_until_idle().await;
     let launch = world.now + Duration::minutes(5);
-    let mark = |id: Uuid, status: DeliveryStatus, attempt: DateTime<Utc>| {
-        let mut delivery = world.store.deliveries(id).unwrap().remove(0);
-        delivery.status = status;
-        delivery.last_attempt_at = Some(attempt);
-        world.store.save_delivery(&delivery).unwrap();
-    };
     let failed = || DeliveryStatus::Failed("the vault was offline".to_owned());
-    mark(ids[0], DeliveryStatus::Pending, world.now);
-    mark(ids[1], failed(), world.now);
-    mark(ids[2], failed(), launch + Duration::seconds(1));
-    mark(ids[3], DeliveryStatus::Pending, world.now);
+    mark_delivery(&world, ids[0], DeliveryStatus::Pending, world.now);
+    mark_delivery(&world, ids[1], failed(), world.now);
+    mark_delivery(&world, ids[2], failed(), launch + Duration::seconds(1));
+    mark_delivery(&world, ids[3], DeliveryStatus::Pending, world.now);
     world
         .store
         .set_state(ids[3], MeetingState::Queued, world.now)
@@ -3241,6 +3232,15 @@ async fn exports_left_unfinished_are_delivered_again_at_launch() {
     assert_eq!(pipeline.in_flight(), Vec::<Uuid>::new());
 }
 
+/// Stores the meeting's first delivery row as `status`, last attempted at
+/// `attempt`.
+fn mark_delivery(world: &World, id: Uuid, status: DeliveryStatus, attempt: DateTime<Utc>) {
+    let mut delivery = world.store.deliveries(id).unwrap().remove(0);
+    delivery.status = status;
+    delivery.last_attempt_at = Some(attempt);
+    world.store.save_delivery(&delivery).unwrap();
+}
+
 /// A meeting another operation holds is skipped at launch, and once the
 /// pipeline quits nothing is started.
 #[tokio::test(flavor = "multi_thread")]
@@ -3253,9 +3253,7 @@ async fn redelivering_at_launch_skips_a_meeting_in_flight_and_stops_once_quittin
     let pipeline = &world.pipeline;
     let id = enqueue_call(&world, pipeline);
     pipeline.wait_until_idle().await;
-    let mut delivery = world.store.deliveries(id).unwrap().remove(0);
-    delivery.status = DeliveryStatus::Pending;
-    world.store.save_delivery(&delivery).unwrap();
+    mark_delivery(&world, id, DeliveryStatus::Pending, world.now);
     let launch = world.now + Duration::minutes(5);
 
     let held = pipeline.claim_redeliver(id).unwrap();
@@ -3280,7 +3278,7 @@ async fn pipelines_that_share_claims_refuse_each_others_meetings() {
     let world = world(false, None, AudioRetention::KeepForever);
     let id = enqueue_call(&world, &world.pipeline);
     world.pipeline.wait_until_idle().await;
-    let claims = steno_pipeline::PipelineClaims::default();
+    let claims = PipelineClaims::default();
     let retired = ProcessingPipeline::new(
         world
             .pipeline
