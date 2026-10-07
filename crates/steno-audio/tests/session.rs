@@ -1462,6 +1462,39 @@ fn a_device_change_while_idle_or_after_stop_is_ignored() {
     assert_eq!(inner.starts(), 1, "nothing was restarted");
 }
 
+/// A report the first recording's backend sends once the second recording
+/// started, as one left in its handler past the first's stop: the second
+/// recording is not rebuilt.
+#[test]
+fn a_report_from_an_earlier_recordings_backend_is_ignored() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(HandsOverTheSink {
+        sink: Mutex::new(None),
+    });
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        200,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    let first = backend.sink.lock().unwrap().clone().unwrap();
+    session.stop().unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    first.report_device_change(DeviceChangeReason::OutputDeviceGone);
+    settle();
+    assert!(
+        matches!(session.state(), CaptureState::Recording { .. }),
+        "the second recording runs on"
+    );
+    assert!(notices.try_iter().next().is_none(), "no rebuild began");
+    let result = session.stop().unwrap();
+    assert_eq!(result.statistics.device_changes, 0);
+}
+
 /// The writer fails while a rebuild is under way (on the first frame of gap
 /// silence, the 51st frame written): the session ends `Failed(WriterFailed)`
 /// with what was written, not `DeviceLost`, and the rebuild does not

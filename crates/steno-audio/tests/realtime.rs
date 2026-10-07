@@ -1,11 +1,12 @@
 //! The real-time promise, checked rather than grepped: the IOProc body
 //! (`LaneFrameSink` producer calls through `deliver`), the PipeWire
 //! `process` body (`interleaved_view` over one interleaved buffer, then
-//! `deliver_slices`), the WASAPI capture threads' two stream bodies
-//! (`FollowerLane` and `PacketRouter`), the processing loop with the real
-//! Speex canceller, its far-end delay line, metering, the raw-mic copy and
-//! the relay hand-off run one second of audio on the test's thread under
-//! the counting allocator and allocate nothing. `tests/pipewire.rs` counts
+//! `deliver_slices` through the capture's gate on Linux), the WASAPI
+//! capture threads' two stream bodies (`FollowerLane` and
+//! `PacketRouter`), the processing loop with the real Speex canceller, its
+//! far-end delay line, metering, the raw-mic copy and the relay hand-off
+//! run one second of audio on the test's thread under the counting
+//! allocator and allocate nothing. `tests/pipewire.rs` counts
 //! the real data-loop thread against a PipeWire daemon on Linux.
 //! Swift: `Tests/StenoAudioTests/RealTimeAllocationTests.swift` (Darwin's
 //! `malloc_logger` hook); here the crate's own `#[global_allocator]`, so it
@@ -185,6 +186,17 @@ fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
     );
 }
 
+/// `work` through the PipeWire capture's gate, as `process` delivers a
+/// cycle; the backend and its gate are Linux only.
+fn through_the_gate(work: impl FnOnce()) {
+    #[cfg(target_os = "linux")]
+    assert!(steno_audio::capture::live::pipewire::through_an_open_gate(
+        work
+    ));
+    #[cfg(not(target_os = "linux"))]
+    work();
+}
+
 /// `samples` as the bytes of a mapped PipeWire buffer.
 fn as_bytes(samples: &[f32]) -> &[u8] {
     // SAFETY: initialised `f32`s are valid bytes; the length is the
@@ -241,7 +253,7 @@ fn the_pipewire_process_body_allocates_nothing() {
                 i32::try_from(stride).unwrap(),
                 CHANNELS,
             );
-            deliver_slices(&[view], &sources, &sink);
+            through_the_gate(|| deliver_slices(&[view], &sources, &sink));
             offset += count;
         }
     });

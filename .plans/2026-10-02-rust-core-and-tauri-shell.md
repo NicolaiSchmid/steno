@@ -1264,8 +1264,45 @@ item to settle before the Linux release:
 
 - **The system lane is the whole default sink.** The Mac's tap leaves out
   Steno's own process; the PipeWire backend records the default sink's
-  monitor, Steno's output included (Steno plays nothing while recording),
-  and only that sink: an app routed to another output is not in the lane.
+  monitor, Steno's output included, and only that sink: an app routed to
+  another output is not in the lane. Steno plays no audio today (no
+  playback in the Rust crates, no `<audio>` in the web UI), so nothing of
+  its own is in the lane. Leaving its output out was weighed and not done
+  until Steno plays audio while it records (#214); the measurements, on
+  the private daemon `scripts/pipewire-headless.sh` starts (PipeWire
+  1.6.5, WirePlumber 0.5.14):
+  - A playback node names its process only through its client: the node
+    carries `client.id`, and that client `application.process.id` (equal
+    to `pipewire.sec.pid` for a native client). A property Steno would set
+    on its own streams (`steno.own = true`, given to `pw-play -P`) shows on
+    the node.
+  - WirePlumber converts every stream to the sink's channels: a 5.1
+    `pw-play` into the stereo null sink had only `FL` and `FR` output
+    ports, each linked to the sink's input of the same channel. Channel
+    maps would match; the downmix stays in each stream's adapter.
+  - A stream's links go when it ends, and the sink falls from `running` to
+    `idle` (later `suspended`) once nothing plays; the monitor link keeps
+    it running today.
+  - Behind a filter the origin is gone: with a `pw-loopback` whose capture
+    side is a virtual sink and whose playback side goes into the default
+    sink, the node linked into the sink is the loopback's, in the
+    loopback's process, and what it carries is already mixed. An
+    equaliser, an echo-cancel sink or a combined sink as the default
+    output does the same, so an exclusion at the default sink cannot take
+    Steno's audio out of it.
+
+  Doing it would mean one link from each `Stream/Output/Audio` node
+  linked into the default sink (Steno's own excepted) to each of the
+  capture's system ports, created and destroyed from the PipeWire thread
+  as streams come, go and move between sinks (the registry's link globals
+  tracked to see where each stream goes; the input ports sum the links);
+  those links going must not read as a device gone, unlike Steno's links
+  today; and with no monitor link the sink no longer runs with the
+  capture, so a stream starting mid-call can move the capture's driver.
+  That is a second linking policy beside WirePlumber's, for audio Steno
+  does not play, still blind behind a filter. Once Steno plays audio
+  while it records, pausing that playback, or sending it to a device
+  other than the default, may be simpler.
 - **Latencies are the ports' `SPA_PARAM_Latency` lower bounds**: the
   microphone port's capture side plus the sink's first playback port's
   playback side, in frames of the first cycle. Null devices report zero, so
@@ -1292,7 +1329,8 @@ item to settle before the Linux release:
   sink, the source the microphone follows) or a port of one is a change,
   so other apps' streams ending do not hold a report back, and a burst of
   changes is judged at most 2 s after its first.
-- **A default move can go unreported.** With WirePlumber 0.5.14 and
+- **A default move can go unreported before PipeWire 1.6.9
+  (pipewire#5445).** With WirePlumber 0.5.14 and
   PipeWire 1.6.5, a client binding the `default` metadata holds its
   events back from every client bound before it until WirePlumber answers
   the bind, so a move made meanwhile never reaches Steno's capture (seen
@@ -1327,21 +1365,78 @@ item to settle before the Linux release:
   With the second bind run in the background instead
   (`pw-metadata -n default &`), so it outlives the pong, the monitor
   prints the set.
-- **`stop()` is bounded, except in `Gate::close`.** It closes the
-  capture's gate to the sink, waiting without a bound for a pass already
-  inside (a cycle's delivery, or a report and its handler), so
-  no frame or report reaches the sink after it, and waits 2 s for the
-  PipeWire thread; a thread that has not ended by then is logged with the
-  system call it waits in and left behind, and the devices may stay open
-  until Steno quits. Such a hang was seen once in testing, most likely in
-  a log write: logs were written synchronously then, a capture thread left
-  behind in a later run was blocked in `write(2)` to stderr, waiting on the
-  disk's journal at idle I/O priority, and `stop()`'s own log of the hang
-  waited for the same stderr lock. Since #202 the binaries queue log lines
-  for one writer thread and drop a line rather than wait
-  (`steno_services::logs`), so a stalled stderr holds neither the capture
-  thread nor `stop()`. Only log lines are queued: the shell's `stderr_line!`
-  and the CLI's progress lines still write to stderr directly.
+
+  Upstream (checked 2026-10-07, #214): this is
+  [pipewire#5445](https://gitlab.freedesktop.org/pipewire/pipewire/-/work_items/5445),
+  reported against PipeWire 1.6.8 with WirePlumber 0.5.15 and fixed by
+  "metadata: remove pending pong on unbind" (06de0ed2 on `master`,
+  cherry-picked as b784720b on `1.6`), which calls `remove_pending`
+  first thing in `global_unbind`. PipeWire 1.6.9 (2026-09-17) is the
+  first release with it. `metadata.c` is identical in 1.2.7, 1.4.11, the
+  head of the `1.4` branch and 1.6.5 to 1.6.8, and has the same code at
+  the same lines in 1.0.5, so a distribution on 1.0 to 1.4 keeps the
+  miss unless it carries the fix. Both variants of the reproduction
+  still hold with PipeWire 1.6.5 and WirePlumber 0.5.14;
+  neither was run against 1.6.9. Nothing is left to report for 1.6. A
+  backport to 1.4 could still be asked; the text below is ready and not
+  filed (Nicolai files it if the Linux release targets a distribution on
+  1.4):
+
+  > **metadata: backport "remove pending pong on unbind" (#5445) to 1.4**
+  >
+  > PipeWire 1.4.11 and the `1.4` branch still have the bug that
+  > 06de0ed2 fixed on `master` (b784720b on `1.6`, released in 1.6.9).
+  > In `src/modules/module-metadata/metadata.c`, `global_bind` pings the
+  > metadata's owner and raises `impl->pending` (lines 189 and 190);
+  > `metadata_property` forwards an event only while `pending` is 0 or
+  > to a resource still waiting for its pong (line 53); `global_unbind`
+  > (line 106) removes the pong listener without calling
+  > `remove_pending` (line 122). So a client that unbinds before the
+  > owner answers its ping stops property events for every bound client
+  > until the owner restarts. Reproduced with PipeWire 1.6.5, whose
+  > `metadata.c` is identical to 1.4.11's, and WirePlumber 0.5.14:
+  >
+  > ```sh
+  > wp=$(pgrep -u "$(id -u)" -x wireplumber)
+  > pw-metadata -m -n default &
+  > kill -STOP "$wp"
+  > timeout 1 pw-metadata -n default
+  > kill -CONT "$wp"
+  > pw-metadata -n default 0 test.after 1
+  > pw-metadata -n default
+  > ```
+  >
+  > Expected: the monitor prints `test.after`. Actual: it never does,
+  > while a fresh `pw-metadata -n default` lists it. Could 06de0ed2 go
+  > into 1.4?
+- **`stop()` is bounded.** It closes the capture's gate to the sink and
+  joins the PipeWire thread, all within 2 s once it has the backend (a
+  `start` in progress holds it); a device-change report still inside the
+  gate then is logged and left to finish, with the thread it runs on, and
+  a thread that has not ended otherwise is logged with the system call it
+  waits in and left behind (the devices may stay open until Steno quits).
+  Only a cycle's delivery inside the gate is waited for without a bound:
+  it takes microseconds, and one still writing the rings once `stop()`
+  returned would write them beside the next backend's thread. A report
+  runs the session's handler, which may wait for the session mutex; one
+  left behind reaches the session late. The session ignores it unless it
+  is still recording the recording that backend served, and otherwise
+  rebuilds once more: the report starts a rebuild, or becomes the pending
+  change of the one in progress. A late report that takes the sink's latch
+  after the rebuild re-armed it holds back the rebuilt backend's first
+  report, but starts a rebuild itself. So once `stop()` returned no frame
+  reaches the sink, and no report but one the gate let in before it
+  closed.
+
+  A hang was seen once in testing, most likely in a log write: logs were
+  written synchronously then, a capture thread left behind in a later run
+  was blocked in `write(2)` to stderr, waiting on the disk's journal at
+  idle I/O priority, and `stop()`'s own log of the hang waited for the
+  same stderr lock. Since #202 the binaries queue log lines for one writer
+  thread and drop a line rather than wait (`steno_services::logs`), so a
+  stalled stderr holds neither the capture thread nor `stop()`. Only log
+  lines are queued: the shell's `stderr_line!` and the CLI's progress
+  lines still write to stderr directly.
 - **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
   names no Linux node, so a synced or copied settings file shows the input
   device as unavailable and the user picks again. A virtual source (a null
@@ -1741,24 +1836,19 @@ it) and which pull requests found it. The pull request that fixes an item delete
   xfce4-session seven) or logind's (five) can be cut off. Where:
   `apps/desktop/src-tauri/src/session_end.rs`; the shutdown items under "Pipeline and
   services (WP6b)". Found: #185, #203.
-- **First Linux release.** The PipeWire backend's `stop()` hung once (both PipeWire
-  threads alive, the node and its links left in the graph) and was never reproduced;
-  the likely cause, a blocking log write, is gone since #202 queues log lines for one
-  writer thread.
-  `stop()` now gives the thread `STOP_TIMEOUT` (2 s) and then leaves it behind the
-  closed gate, and `Gate::close` itself waits without a bound for a pass to leave.
-  Where: `crates/steno-audio/src/capture/live/pipewire/mod.rs`; the `stop()` item in
-  the Linux list under "Audio". Found: #176, #197.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
-  system lane is the whole default sink (Steno's own output included), a Mac device
+  system lane is the whole default sink (Steno's own output included; leaving it out
+  was weighed and not done, see the note), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
   list and no meeting detection, the latencies are unmeasured on real hardware, and
   the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
   Where: the Linux items under "Audio". Found: #166, #176.
-- **First Linux release.** A default move can go unreported (PipeWire 1.6.5 with
-  WirePlumber 0.5.14): report it to PipeWire upstream and check it on the release's
-  versions. Where: "A default move can go unreported" in the Linux list under
-  "Audio". Found: #197, #201.
+- **First Linux release.** A default move can go unreported on PipeWire before 1.6.9
+  (pipewire#5445, fixed upstream by 06de0ed2 on `master` and b784720b on `1.6`; seen
+  with 1.6.5 and WirePlumber 0.5.14). Check the versions the release's distributions
+  ship; for one on 1.4, file the backport request whose text is ready (not filed); on
+  1.0 or 1.2 only the distribution's own package can carry the fix. Where: "A default move can go
+  unreported" in the Linux list under "Audio". Found: #197, #201.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has

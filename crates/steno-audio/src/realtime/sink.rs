@@ -54,7 +54,8 @@ impl LaneFrameSink {
     /// `on_device_change` runs on the backend's listener thread. It must
     /// not stop or start the backend that reports to it, nor drop the last
     /// owner of that backend: the backend's `stop()` may wait for the
-    /// report in flight (on Linux it does), so it would wait on itself.
+    /// report in flight, so it would wait on itself (on Linux for 2 s,
+    /// then `stop()` leaves the report behind).
     #[must_use]
     pub fn with_handler(
         lanes: &[AudioLane],

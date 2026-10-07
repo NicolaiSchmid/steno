@@ -559,7 +559,7 @@ impl Core {
             2.0,
             Box::new(move |reason| {
                 if let Some(core) = weak.upgrade() {
-                    core.device_changed(reason);
+                    core.device_changed_in(recording, reason);
                 }
             }),
         ));
@@ -826,6 +826,16 @@ impl Core {
         self.begin_rebuild(&mut inner, reason);
     }
 
+    /// [`Self::device_changed`] for a report from the backend of
+    /// `recording`: one an older recording's backend left in its handler
+    /// past that recording's stop reaches nothing.
+    fn device_changed_in(self: &Arc<Self>, recording: usize, reason: DeviceChangeReason) {
+        let mut inner = self.lock();
+        if inner.recordings_started == recording {
+            self.begin_rebuild(&mut inner, reason);
+        }
+    }
+
     /// [`Self::device_changed`] under the caller's guard.
     fn begin_rebuild(self: &Arc<Self>, inner: &mut Inner, reason: DeviceChangeReason) {
         if !matches!(inner.state, CaptureState::Recording { .. }) {
@@ -910,10 +920,12 @@ impl Core {
                 active.system_peak_so_far = active.system_peak_so_far.max(peak);
             }
         }
-        // The old backend reports nothing once its `stop()` returned, so
-        // the latch can open now: a report from the rebuilt backend before
-        // the gap is written reaches `device_changed`, which keeps it for
-        // `resume`.
+        // The old backend's `stop()` lets no new report through, so the
+        // latch can open now: a report from the rebuilt backend before the
+        // gap is written reaches `device_changed`, which keeps it for
+        // `resume`. A report the old backend left in the handler reaches
+        // `device_changed` late and costs one more rebuild (see the
+        // PipeWire backend's module doc).
         sink.rearm_device_change();
         let unaccounted = match self.restart_backend(&sink, generation, cancel) {
             Restart::Started(stream, attempt) => {
