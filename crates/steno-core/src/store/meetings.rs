@@ -161,21 +161,6 @@ impl Store {
         })
     }
 
-    /// [`Store::save_meeting_with_asset`] on the disk when it returns
-    /// ([`Store::write_durably`]): the phone intake's meeting, whose rows
-    /// must outlive a power loss once the phone deleted its copy.
-    /// Swift: `MeetingStore.saveDurably(_:asset:)`.
-    pub fn save_meeting_with_asset_durably(
-        &self,
-        meeting: &Meeting,
-        asset: &AudioAsset,
-    ) -> Result<()> {
-        self.write_durably(|transaction| {
-            save(transaction, meeting)?;
-            assets::save(transaction, asset)
-        })
-    }
-
     /// The meeting and its participants in one transaction (recording
     /// start); every participant is re-pointed at the meeting.
     pub fn save_meeting_with_participants(

@@ -1,30 +1,26 @@
 import Foundation
 
 /// Admits a fully received phone recording: copies the file into
-/// `audioFolder/<meetingID>/` (`RecordingLayout`), writes the
-/// `HandoverReceipt` as `.complete(meetingID)`, enqueues a `.phone` meeting
-/// with a `.mixed` `AudioAsset` under the default retention, and only then
-/// deletes the upload. Idempotent on `recordingID`: a recording whose
-/// receipt is `.complete` and whose meeting still exists returns the same
-/// meeting id and does nothing else.
-///
-/// Order of writes, so that a failure at any point leaves a retryable state:
-/// copy (the source stays), receipt `.complete`, enqueue (meeting and asset
-/// in one transaction, processing starts). If enqueue throws, the copy is
-/// removed and the receipt becomes `.failed(reason)`, so the handover
-/// service's retry with the same path admits again instead of finding the
-/// file gone or a second meeting created.
+/// `audioFolder/<meetingID>/` (`RecordingLayout`), commits the
+/// `HandoverReceipt` as `.complete(meetingID)` together with a `.phone`
+/// meeting `.queued` with a `.mixed` `AudioAsset` under the default
+/// retention, deletes the upload, and only then hands the meeting to the
+/// pipeline. Idempotent on `recordingID`: a recording whose receipt is
+/// `.complete` and whose meeting still exists returns the same meeting id
+/// and does nothing else.
 ///
 /// The phone deletes its copy once `complete` answers 200, so everything
-/// the admission wrote is on the disk before the receipt says complete.
-/// The copy, its meeting folder and every folder `admit` created are
-/// synced (`F_FULLFSYNC`, `fsync` where that fails), and the `.complete`
-/// receipt and the meeting commit durably (`MeetingStore.writeDurably`):
-/// the receipt here, the meeting in `enqueue`, which is
-/// `ProcessingPipeline.enqueueDurably` in the production wiring
-/// (`init(currentPipeline:)`) and must be in any other production
-/// `enqueue`. The `.failed` receipt of a refused admission commits as
-/// usual: the phone keeps its copy then.
+/// the admission wrote is on the disk first. The copy, its meeting folder
+/// and every folder `admit` created are synced (`F_FULLFSYNC`, `fsync`
+/// where that fails), and the receipt, the meeting and its asset commit in
+/// one durable transaction (`MeetingStore.saveDurably(_:meeting:asset:)`),
+/// so no crash, full disk or busy store leaves a `.complete` receipt
+/// without its meeting. When that commit fails, the copy is removed and the
+/// receipt becomes `.failed(reason)` as usual, so the handover service's
+/// retry with the same path admits again: the phone keeps its copy then.
+/// `enqueue` after the commit is `ProcessingPipeline.enqueueSaved` in the
+/// production wiring (`init(currentPipeline:)`); its failure does not undo
+/// the admission, the meeting waits `.queued` for the next launch's resume.
 /// Rust: `RecordingIntake` in `crates/steno-pipeline/src/intake.rs`.
 public struct RecordingIntake: HandoverIntake, Sendable {
   public typealias Enqueue = @Sendable (Meeting, AudioAsset) async throws -> Void
@@ -37,8 +33,9 @@ public struct RecordingIntake: HandoverIntake, Sendable {
   /// tests.
   var syncs = Syncs.disk
 
-  /// `enqueue` is `ProcessingPipeline.enqueue(_:asset:)` in the app and the
-  /// CLI; tests pass a counting closure.
+  /// `enqueue` hands the meeting `admit` saved to the pipeline
+  /// (`ProcessingPipeline.enqueueSaved` in the production wiring); tests
+  /// pass a counting closure.
   public init(
     store: MeetingStore,
     settings: SettingsStore,
@@ -51,7 +48,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     self.now = now
   }
 
-  /// The production wiring: `enqueue` is `ProcessingPipeline.enqueueDurably`
+  /// The production wiring: `enqueue` is `ProcessingPipeline.enqueueSaved`
   /// on the pipeline `currentPipeline` returns when a recording is
   /// admitted, so a pipeline reload never strands the intake
   /// (`AppEnvironment.makeIntake`).
@@ -64,7 +61,7 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     self.init(
       store: store, settings: settings,
       enqueue: { meeting, asset in
-        try await currentPipeline().enqueueDurably(meeting, asset: asset)
+        try await currentPipeline().enqueueSaved(meeting, asset: asset)
       },
       now: now)
   }
@@ -83,6 +80,12 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     -> UUID
   {
     let existing = try await store.handoverReceipt(recordingID: metadata.recordingID)
+    // Another phone's receipt under this id (this one was revoked, and that
+    // one announced the id) is never completed or answered from: that phone
+    // would take this meeting for its own and delete its copy.
+    if let existing, existing.deviceID != device.id {
+      throw MeetingStoreError.receiptOfAnotherDevice(metadata.recordingID)
+    }
     if let meetingID = existing?.state.meetingID, try await store.meeting(id: meetingID) != nil {
       return meetingID
     }
@@ -150,15 +153,20 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     receipt.updatedAt = timestamp
 
     do {
-      try await store.saveDurably(receipt)
-      try await enqueue(meeting, asset)
+      try await store.saveDurably(receipt, meeting: meeting, asset: asset)
     } catch {
       try? FileManager.default.removeItem(at: destination)
-      receipt.state = .failed("admit: \(error)")
-      try? await store.save(receipt)
+      // Another phone's receipt is left as it is.
+      if error as? MeetingStoreError != .receiptOfAnotherDevice(metadata.recordingID) {
+        receipt.state = .failed("admit: \(error)")
+        try? await store.save(receipt)
+      }
       throw error
     }
     try? FileManager.default.removeItem(at: file)
+    // Admitted: a pipeline that cannot take the meeting now leaves it
+    // `.queued`, and the next launch resumes it.
+    try? await enqueue(meeting, asset)
     return meetingID
   }
 

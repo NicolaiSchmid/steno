@@ -238,9 +238,10 @@ fn make_dependencies(
 }
 
 /// The phone intake over whichever pipeline is current when a recording
-/// arrives, so a reload is not bypassed. Its meeting commits durably
-/// ([`steno_pipeline::ProcessingPipeline::enqueue_durably`]), as
-/// `RecordingIntake::over`'s does. Swift: `AppEnvironment.makeIntake`.
+/// arrives, so a reload is not bypassed. The intake commits the meeting
+/// with its receipt and the pipeline only processes it
+/// ([`steno_pipeline::ProcessingPipeline::enqueue_saved`]), as in
+/// `RecordingIntake::over`. Swift: `AppEnvironment.makeIntake`.
 pub fn handover_intake(
     store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
@@ -251,7 +252,7 @@ pub fn handover_intake(
         store,
         Arc::new(move |meeting, asset| {
             let pipeline = pipeline.current();
-            Box::pin(async move { pipeline.enqueue_durably(&meeting, &asset) })
+            Box::pin(async move { pipeline.enqueue_saved(&meeting, &asset) })
         }),
         now,
         zone,

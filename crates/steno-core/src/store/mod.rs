@@ -75,6 +75,11 @@ pub enum StoreError {
     /// the meeting's files.
     #[error("meeting {0} is {1} and cannot be deleted")]
     MeetingBusy(Uuid, MeetingStateKind),
+    /// `save_admission_durably` for a recording whose receipt belongs to
+    /// another device: the admitting phone was revoked and another one
+    /// announced the same recording id.
+    #[error("recording {0} belongs to another device")]
+    ReceiptOfAnotherDevice(Uuid),
     /// The database has a migration this build does not know: a newer app
     /// wrote it, and this one must not touch it.
     #[error("the database was migrated by a newer version ({0})")]
@@ -264,7 +269,8 @@ impl Store {
 
     /// [`Store::write`] whose commit is on the disk when it returns, for
     /// the commits an answer to another device depends on: the phone
-    /// intake's, before `complete` tells the phone to delete its copy.
+    /// intake's admission, before `complete` tells the phone to delete its
+    /// copy, a pairing, whose token the phone keeps, and a revoke.
     /// The transaction runs under `synchronous = FULL` with `fullfsync`
     /// on, so its commit syncs the WAL (with `F_FULLFSYNC` on Apple
     /// platforms, which also flushes the drive's cache) instead of leaving

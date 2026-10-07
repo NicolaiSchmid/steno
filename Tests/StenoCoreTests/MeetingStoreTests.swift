@@ -702,6 +702,28 @@ import Testing
     #expect(try await writerLevels() == [1, 0], "after a failure")
   }
 
+  /// A pairing and a revoke commit under `synchronous = FULL` (2): the
+  /// phone keeps the token from the pairing's answer, so a power loss must
+  /// not forget the pairing, nor bring a revoked phone back. The last-seen
+  /// touch stays at `NORMAL`.
+  @Test func aPairingAndARevokeCommitDurably() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
+    let device = SampleData.pairedDevice()
+    let tokenHash = Data(repeating: 1, count: 32)
+    let log = try await CommitLog.install(on: store)
+
+    try await store.save(device, tokenHash: tokenHash)
+    try await store.touchPairedDevice(id: device.id, tokenHash: tokenHash, seenAt: Date())
+    try await store.delete(deviceID: device.id)
+
+    let commits = log.commits.filter { $0.tables.contains("pairedDevice") }
+    #expect(commits.map(\.synchronous) == [2, 1, 2])
+    #expect(try await store.pairedDevice(id: device.id) == nil)
+    #expect(try await CommitLog.synchronous(of: store) == 1)
+  }
+
   @Test func derivedIDsAreStableDistinctAndWellFormed() {
     let a = UUID(derivedFrom: SampleData.meetingID, salt: "decision-0")
     #expect(a == UUID(derivedFrom: SampleData.meetingID, salt: "decision-0"))

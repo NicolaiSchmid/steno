@@ -405,8 +405,8 @@ final class AppEnvironment {
   }
 
   /// Core's `RecordingIntake` over whatever pipeline is current when a phone
-  /// recording completes, so a pipeline reload never strands the listener;
-  /// `init(currentPipeline:)` commits its meeting durably.
+  /// recording completes, so a pipeline reload never strands the listener
+  /// (`init(currentPipeline:)`).
   func makeIntake() -> RecordingIntake {
     RecordingIntake(
       store: store, settings: settings,

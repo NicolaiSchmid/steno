@@ -84,37 +84,37 @@ public actor ProcessingPipeline {
   var now: Date { dependencies.now() }
 
   /// Writes `Meeting(.queued)` plus the asset in one transaction and starts
-  /// `process` in the background. The app (Mac recordings) calls this, and
-  /// `RecordingIntake` (phone) calls `enqueueDurably`. Throws when the asset
-  /// or the meeting is already in flight.
+  /// `process` in the background. The app (Mac recordings) calls this;
+  /// `RecordingIntake` (phone) saves its rows itself and calls
+  /// `enqueueSaved`. Throws when the asset or the meeting is already in
+  /// flight.
   public func enqueue(_ meeting: Meeting, asset: AudioAsset) async throws {
-    try await enqueue(meeting, asset: asset, durably: false)
-  }
-
-  /// `enqueue(_:asset:)` whose meeting and asset are on the disk when it
-  /// returns (`MeetingStore.saveDurably(_:asset:)`): the phone intake's,
-  /// because the phone deletes its copy once the recording is admitted.
-  /// Rust: `ProcessingPipeline::enqueue_durably`.
-  public func enqueueDurably(_ meeting: Meeting, asset: AudioAsset) async throws {
-    try await enqueue(meeting, asset: asset, durably: true)
-  }
-
-  private func enqueue(_ meeting: Meeting, asset: AudioAsset, durably: Bool) async throws {
-    guard running[asset.id] == nil, !inFlight.contains(meeting.id) else {
-      throw PipelineFailure(
-        stage: .decode, reason: "meeting \(meeting.id) is already being processed")
-    }
+    try refuseInFlight(meeting, asset: asset)
     var queued = meeting
     queued.state = .queued
     queued.updatedAt = now
     var asset = asset
     asset.meetingID = meeting.id
-    if durably {
-      try await store.saveDurably(queued, asset: asset)
-    } else {
-      try await store.save(queued, asset: asset)
-    }
+    try await store.save(queued, asset: asset)
     start(assetID: asset.id)
+  }
+
+  /// `enqueue(_:asset:)` of a meeting the caller saved `.queued` with its
+  /// asset: starts `process` in the background and writes nothing. The
+  /// phone intake's, which commits the meeting with its `.complete` receipt
+  /// in one durable transaction (`MeetingStore.saveDurably(_:meeting:asset:)`).
+  /// Throws when the asset or the meeting is already in flight.
+  /// Rust: `ProcessingPipeline::enqueue_saved`.
+  public func enqueueSaved(_ meeting: Meeting, asset: AudioAsset) throws {
+    try refuseInFlight(meeting, asset: asset)
+    start(assetID: asset.id)
+  }
+
+  private func refuseInFlight(_ meeting: Meeting, asset: AudioAsset) throws {
+    guard running[asset.id] == nil, !inFlight.contains(meeting.id) else {
+      throw PipelineFailure(
+        stage: .decode, reason: "meeting \(meeting.id) is already being processed")
+    }
   }
 
   /// Launch recovery for the queue: every meeting a previous process left

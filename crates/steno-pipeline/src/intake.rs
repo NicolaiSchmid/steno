@@ -21,9 +21,9 @@ use uuid::Uuid;
 use crate::pipeline::{Now, PipelineFailure, ProcessingPipeline};
 
 /// Hands a queued meeting and its asset to the pipeline. The production
-/// wiring is [`ProcessingPipeline::enqueue`] for the local intake and
-/// [`ProcessingPipeline::enqueue_durably`] for the phone's; tests pass a
-/// counting closure.
+/// wiring is [`ProcessingPipeline::enqueue`] for the local intake, which
+/// saves the rows, and [`ProcessingPipeline::enqueue_saved`] for the
+/// phone's, which saved them itself; tests pass a counting closure.
 pub type Enqueue = Arc<
     dyn Fn(Meeting, AudioAsset) -> Pin<Box<dyn Future<Output = Result<(), PipelineFailure>> + Send>>
         + Send
@@ -67,21 +67,23 @@ pub fn default_title(
 }
 
 /// Admits a fully received phone recording: copies the file into the
-/// audio folder (`RecordingLayout`), writes the `HandoverReceipt` as
-/// complete, enqueues a `phone` meeting with a `mixed` asset under the
-/// default retention, and only then deletes the upload. Idempotent on
-/// `recording_id`.
+/// audio folder (`RecordingLayout`), commits the `HandoverReceipt` as
+/// complete together with a `phone` meeting `queued` with a `mixed`
+/// asset under the default retention, deletes the upload, and only then
+/// hands the meeting to the pipeline. Idempotent on `recording_id`.
 ///
-/// The copy and the meeting folder are synced to the disk before the
-/// receipt is marked complete ([`crate::files::copy_durably`]), because
-/// the phone deletes its own copy once `complete` answers 200; Swift
-/// syncs its `copyItem` copy and the folders the same way. For the same
-/// reason the `complete` receipt and the meeting commit durably
-/// ([`Store::write_durably`]), as in Swift: the receipt here, the meeting
-/// in the enqueue, which is [`ProcessingPipeline::enqueue_durably`] in
-/// [`RecordingIntake::over`] and must be in any other production
-/// `enqueue`. The `failed` receipt of a refused admission commits as
-/// usual: the phone keeps its copy then.
+/// The phone deletes its own copy once `complete` answers 200, so
+/// everything the admission wrote is on the disk first. The copy and the
+/// meeting folder are synced before the receipt is marked complete
+/// ([`crate::files::copy_durably`]); Swift syncs its `copyItem` copy and
+/// the folders the same way. The receipt, the meeting and its asset
+/// commit in one durable transaction ([`Store::save_admission_durably`]),
+/// so no crash, full disk or busy store leaves a `complete` receipt
+/// without its meeting. When that commit fails, the copy is removed and
+/// the receipt is saved `failed` as usual: the phone keeps its copy then.
+/// The enqueue after the commit is [`ProcessingPipeline::enqueue_saved`]
+/// in [`RecordingIntake::over`]; its failure does not undo the admission,
+/// the meeting waits `queued` for the next launch's resume.
 /// Swift: `Sources/StenoCore/Storage/RecordingIntake.swift`.
 pub struct RecordingIntake {
     store: Arc<Store>,
@@ -101,14 +103,14 @@ impl RecordingIntake {
         }
     }
 
-    /// The production wiring over `pipeline`, whose meeting commits
-    /// durably ([`ProcessingPipeline::enqueue_durably`]).
+    /// The production wiring over `pipeline`, which processes the
+    /// meetings the intake saved ([`ProcessingPipeline::enqueue_saved`]).
     #[must_use]
     pub fn over(store: Arc<Store>, pipeline: ProcessingPipeline, zone: FixedOffset) -> Self {
         let now = pipeline.dependencies().now.clone();
         Self::new(
             store,
-            enqueue_through(pipeline, ProcessingPipeline::enqueue_durably),
+            enqueue_through(pipeline, ProcessingPipeline::enqueue_saved),
             now,
             zone,
         )
@@ -124,6 +126,15 @@ impl HandoverIntake for RecordingIntake {
         device: &PairedDevice,
     ) -> BoundaryResult<Uuid> {
         let existing = self.store.handover_receipt(metadata.recording_id)?;
+        // Another phone's receipt under this id (this one was revoked, and
+        // that one announced the id) is never completed or answered from:
+        // that phone would take this meeting for its own and delete its copy.
+        if existing
+            .as_ref()
+            .is_some_and(|receipt| receipt.device_id != device.id)
+        {
+            return Err(StoreError::ReceiptOfAnotherDevice(metadata.recording_id).into());
+        }
         if let Some(meeting_id) = existing
             .as_ref()
             .and_then(|receipt| receipt.state.meeting_id())
@@ -188,19 +199,24 @@ impl HandoverIntake for RecordingIntake {
         receipt.state = HandoverState::Complete { meeting_id };
         receipt.updated_at = timestamp;
 
-        let admitted: BoundaryResult<()> = async {
-            self.store.save_handover_receipt_durably(&receipt)?;
-            (self.enqueue)(meeting, asset).await?;
-            Ok(())
-        }
-        .await;
-        if let Err(error) = admitted {
+        if let Err(error) = self
+            .store
+            .save_admission_durably(&receipt, &meeting, &asset)
+        {
             let _ = std::fs::remove_file(&destination);
-            receipt.state = HandoverState::Failed(format!("admit: {error}"));
-            let _ = self.store.save_handover_receipt(&receipt);
-            return Err(error);
+            // Another phone's receipt is left as it is.
+            if !matches!(error, StoreError::ReceiptOfAnotherDevice(_)) {
+                receipt.state = HandoverState::Failed(format!("admit: {error}"));
+                let _ = self.store.save_handover_receipt(&receipt);
+            }
+            return Err(error.into());
         }
         let _ = std::fs::remove_file(file);
+        // Admitted: a pipeline that cannot take the meeting now leaves it
+        // `queued`, and the next launch resumes it.
+        if let Err(failure) = (self.enqueue)(meeting, asset).await {
+            tracing::warn!(%meeting_id, stage = failure.stage.as_str(), "admitted meeting not enqueued");
+        }
         Ok(meeting_id)
     }
 }
@@ -432,6 +448,7 @@ pub fn participants_from(attendees: &[Attendee], meeting_id: Uuid) -> Vec<Partic
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -549,6 +566,43 @@ mod tests {
         assert!(!enqueued.load(Ordering::SeqCst));
     }
 
+    /// Makes every meeting insert fail, as a full disk or a busy store
+    /// would fail the admission's commit; with `failed_receipts_too`, the
+    /// save of a `failed` receipt fails as well.
+    fn refuse_writes(store: &Store, failed_receipts_too: bool) {
+        let mut sql = String::from(
+            "CREATE TRIGGER refuse_meetings BEFORE INSERT ON meeting \
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        );
+        if failed_receipts_too {
+            for event in ["INSERT", "UPDATE"] {
+                write!(
+                    sql,
+                    "CREATE TRIGGER refuse_failed_{event} BEFORE {event} ON handoverReceipt \
+                     WHEN NEW.state = 'failed' BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+                )
+                .unwrap();
+            }
+        }
+        store
+            .write(|transaction| Ok(transaction.execute_batch(&sql)?))
+            .unwrap();
+    }
+
+    /// What [`recording_enqueue`] was handed, in order.
+    type Enqueued = Arc<Mutex<Vec<(Meeting, AudioAsset)>>>;
+
+    /// An enqueue that records what it was handed.
+    fn recording_enqueue() -> (Enqueue, Enqueued) {
+        let admitted: Enqueued = Arc::default();
+        let seen = admitted.clone();
+        let enqueue: Enqueue = Arc::new(move |meeting, asset| {
+            seen.lock().unwrap().push((meeting, asset));
+            Box::pin(async { Ok(()) })
+        });
+        (enqueue, admitted)
+    }
+
     #[tokio::test]
     async fn a_phone_recording_lands_in_the_audio_folder_and_a_refused_one_leaves_no_copy() {
         let dir = tempfile::tempdir().unwrap();
@@ -557,22 +611,7 @@ mod tests {
         let now = DateTime::parse_from_rfc3339("2026-09-24T09:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let admitted: Arc<Mutex<Vec<(Meeting, AudioAsset)>>> = Arc::default();
-        let refusing = Arc::new(AtomicBool::new(false));
-        let enqueue: Enqueue = {
-            let (admitted, refusing) = (admitted.clone(), refusing.clone());
-            Arc::new(move |meeting, asset| {
-                let admitted = admitted.clone();
-                let refuse = refusing.load(Ordering::SeqCst);
-                Box::pin(async move {
-                    if refuse {
-                        return Err(PipelineFailure::new(PipelineStage::Decode, "no runtime"));
-                    }
-                    admitted.lock().unwrap().push((meeting, asset));
-                    Ok(())
-                })
-            })
-        };
+        let (enqueue, admitted) = recording_enqueue();
         let intake = RecordingIntake::new(
             store.clone(),
             enqueue,
@@ -587,25 +626,27 @@ mod tests {
         let (meeting, asset) = admitted.lock().unwrap()[0].clone();
         assert_eq!(meeting.id, meeting_id);
         assert_eq!(meeting.title, "Phone recording 2026-09-24 09:00");
+        assert_eq!(store.meeting(meeting_id).unwrap(), Some(meeting));
+        assert_eq!(store.asset(meeting_id).unwrap(), Some(asset.clone()));
         let master = RecordingLayout::new(&audio, meeting_id).master(AudioFormat::M4aAac);
         assert!(master.starts_with(&audio));
         assert_eq!(asset.url, file_url(&master, false));
         assert_eq!(asset.lanes, vec![AudioLane::Mixed]);
         assert_eq!(std::fs::read(&master).unwrap(), b"aac bytes");
-        assert!(!upload.exists(), "the upload is deleted once enqueued");
+        assert!(!upload.exists(), "the upload is deleted once admitted");
         assert!(matches!(
             store.handover_receipt(metadata.recording_id).unwrap().unwrap().state,
             HandoverState::Complete { meeting_id: id } if id == meeting_id
         ));
 
-        refusing.store(true, Ordering::SeqCst);
+        refuse_writes(&store, false);
         std::fs::write(&upload, b"aac bytes").unwrap();
         let second = RecordingMetadata {
             recording_id: Uuid::new_v4(),
             ..metadata.clone()
         };
         let error = intake.admit(&upload, &second, &device).await.unwrap_err();
-        assert!(error.to_string().contains("no runtime"), "{error}");
+        assert!(error.to_string().contains("disk full"), "{error}");
         assert_eq!(
             files_under(&audio),
             vec![master.clone()],
@@ -620,7 +661,196 @@ mod tests {
                 .state,
             HandoverState::Failed(_)
         ));
-        assert_eq!(admitted.lock().unwrap().len(), 1);
+        assert_eq!(store.all_meetings().unwrap().len(), 1);
+        assert_eq!(admitted.lock().unwrap().len(), 1, "nothing is enqueued");
+    }
+
+    /// A failed admission commit leaves no `complete` receipt behind, also
+    /// when the save of the `failed` one fails too (a full disk): the
+    /// receipt stays as the listener left it, the upload stays for the
+    /// retry, and the engine's sweep keeps it. Two separate commits would
+    /// leave a `complete` receipt without its meeting, and the phone's
+    /// retried `complete` would answer 200 for a meeting that never existed.
+    #[tokio::test]
+    async fn a_failed_admission_leaves_no_complete_receipt_even_when_the_failed_save_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_audio_folder(dir.path());
+        let now = Utc::now();
+        let (enqueue, admitted) = recording_enqueue();
+        let intake = RecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(move || now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let (device, metadata) = paired_phone(&store, now);
+        let verifying = HandoverReceipt {
+            recording_id: metadata.recording_id,
+            device_id: device.id,
+            state: HandoverState::Verifying,
+            byte_count: metadata.byte_count,
+            sha256: metadata.sha256.clone(),
+            chunk_size: metadata.chunk_size,
+            received_chunks: vec![0],
+            created_at: now,
+            updated_at: now,
+        };
+        store.save_handover_receipt(&verifying).unwrap();
+        let upload = dir.path().join("upload.m4a");
+        std::fs::write(&upload, b"aac bytes").unwrap();
+        refuse_writes(&store, true);
+
+        intake.admit(&upload, &metadata, &device).await.unwrap_err();
+
+        let receipt = store
+            .handover_receipt(metadata.recording_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            receipt.state,
+            HandoverState::Verifying,
+            "never complete without its meeting"
+        );
+        assert_eq!(store.all_meetings().unwrap(), []);
+        assert!(upload.exists(), "the upload stays for the retry");
+        assert_eq!(
+            files_under(&dir.path().join("audio")),
+            Vec::<std::path::PathBuf>::new()
+        );
+        assert!(admitted.lock().unwrap().is_empty());
+    }
+
+    /// A receipt of another phone under the same recording id is never
+    /// completed. The admitting phone was revoked and the other one
+    /// announced the id, before the intake read the receipt or between its
+    /// read and its commit (where the admitting phone also paired again).
+    /// The intake refuses, and the other phone's receipt stays as it was:
+    /// completed, it would answer that phone's `complete` with this meeting,
+    /// and that phone would delete a recording never admitted.
+    #[tokio::test]
+    async fn a_receipt_of_another_phone_is_never_completed() {
+        for after_the_read in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store_with_audio_folder(dir.path());
+            let now = Utc::now();
+            let (device, metadata) = paired_phone(&store, now);
+            let other = PairedDevice {
+                id: Uuid::new_v4(),
+                name: "Other phone".to_owned(),
+                ..device.clone()
+            };
+            let receipt_of = |device: &PairedDevice, state: HandoverState| HandoverReceipt {
+                recording_id: metadata.recording_id,
+                device_id: device.id,
+                state,
+                byte_count: metadata.byte_count,
+                sha256: metadata.sha256.clone(),
+                chunk_size: metadata.chunk_size,
+                received_chunks: vec![0],
+                created_at: now,
+                updated_at: now,
+            };
+            // The revoke, the other phone's announce, and this phone pairing
+            // again under the same device id.
+            let takeover = {
+                let (store, device, other) = (store.clone(), device.clone(), other.clone());
+                let theirs = receipt_of(&other, HandoverState::Receiving);
+                move || {
+                    store.delete_paired_device(device.id).unwrap();
+                    store.save_paired_device(&other, &[2; 32]).unwrap();
+                    store.save_handover_receipt(&theirs).unwrap();
+                    store.save_paired_device(&device, &[1; 32]).unwrap();
+                }
+            };
+            let clock: Now = if after_the_read {
+                store
+                    .save_handover_receipt(&receipt_of(&device, HandoverState::Verifying))
+                    .unwrap();
+                // The intake reads the clock once, after its receipt read
+                // and before its commit.
+                let takeover = Mutex::new(Some(takeover));
+                Arc::new(move || {
+                    if let Some(takeover) = takeover.lock().unwrap().take() {
+                        takeover();
+                    }
+                    now
+                })
+            } else {
+                takeover();
+                Arc::new(move || now)
+            };
+            let (enqueue, admitted) = recording_enqueue();
+            let intake = RecordingIntake::new(
+                store.clone(),
+                enqueue,
+                clock,
+                FixedOffset::east_opt(0).unwrap(),
+            );
+            let upload = dir.path().join("upload.m4a");
+            std::fs::write(&upload, b"aac bytes").unwrap();
+
+            let error = intake.admit(&upload, &metadata, &device).await.unwrap_err();
+
+            assert!(
+                error.to_string().contains("belongs to another device"),
+                "{error}"
+            );
+            let receipt = store
+                .handover_receipt(metadata.recording_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                (receipt.device_id, receipt.state),
+                (other.id, HandoverState::Receiving),
+                "the other phone's receipt is untouched (after the read: {after_the_read})"
+            );
+            assert_eq!(store.all_meetings().unwrap(), []);
+            assert_eq!(
+                files_under(&dir.path().join("audio")),
+                Vec::<std::path::PathBuf>::new()
+            );
+            assert!(upload.exists());
+            assert!(admitted.lock().unwrap().is_empty());
+        }
+    }
+
+    /// Once the rows committed, the recording is admitted: an enqueue that
+    /// fails then (the pipeline is gone) leaves the meeting `queued` for
+    /// the next launch, and the phone is told `complete`.
+    #[tokio::test]
+    async fn an_enqueue_that_fails_after_the_commit_still_admits() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_audio_folder(dir.path());
+        let now = Utc::now();
+        let enqueue: Enqueue = Arc::new(|_, _| {
+            Box::pin(async { Err(PipelineFailure::new(PipelineStage::Decode, "no runtime")) })
+        });
+        let intake = RecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(move || now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let (device, metadata) = paired_phone(&store, now);
+        let upload = dir.path().join("upload.m4a");
+        std::fs::write(&upload, b"aac bytes").unwrap();
+
+        let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
+
+        assert_eq!(
+            store.meeting(meeting_id).unwrap().unwrap().state,
+            MeetingState::Queued
+        );
+        assert!(store.asset(meeting_id).unwrap().is_some());
+        assert_eq!(
+            store
+                .handover_receipt(metadata.recording_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            HandoverState::Complete { meeting_id }
+        );
+        assert!(!upload.exists());
     }
 
     /// A copy that fails leaves the receipt short of complete and admits
@@ -741,9 +971,11 @@ mod tests {
     }
 
     /// The production intake commits the `complete` receipt and the
-    /// meeting under `synchronous = FULL`, each the first commit that holds
-    /// it, and leaves the connection at `NORMAL`. A power loss after the
-    /// commits cannot be tested; that they ran under `FULL` can.
+    /// meeting in one transaction under `synchronous = FULL`, and leaves
+    /// the connection at `NORMAL`. Every commit is a point a crash could
+    /// stop at, and none holds the receipt without the meeting. A power
+    /// loss after the commit cannot be tested; that it ran under `FULL`
+    /// can.
     #[tokio::test]
     async fn the_production_intake_commits_its_receipt_and_meeting_durably() {
         let dir = tempfile::tempdir().unwrap();
@@ -774,31 +1006,36 @@ mod tests {
         let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
 
         let commits = commits.lock().unwrap().clone();
-        let receipt = commits
-            .iter()
-            .find(|commit| commit.receipt.as_deref() == Some("complete"))
-            .expect("a commit wrote the complete receipt");
-        assert_eq!(receipt.synchronous, 2, "the receipt commits under FULL");
-        let meeting = commits
-            .iter()
-            .find(|commit| commit.meeting)
-            .expect("a commit wrote the meeting");
-        assert_eq!(meeting.synchronous, 2, "the meeting commits under FULL");
+        let admitted = Commit {
+            synchronous: 2,
+            receipt: Some("complete".to_owned()),
+            meeting: true,
+        };
+        assert_eq!(
+            commits.first(),
+            Some(&admitted),
+            "the first commit holds the receipt and the meeting, under FULL"
+        );
+        assert!(
+            commits
+                .iter()
+                .all(|commit| commit.meeting || commit.receipt.as_deref() != Some("complete")),
+            "no commit holds the complete receipt without the meeting: {commits:?}"
+        );
         assert_eq!(synchronous(&store), 1, "the connection is back at NORMAL");
         assert!(store.meeting(meeting_id).unwrap().is_some());
     }
 
-    /// A refused admission's `failed` receipt commits as usual, after the
-    /// `complete` one committed under `FULL`, and the connection is back
-    /// at `NORMAL`.
+    /// A refused admission commits nothing under `FULL`: its durable
+    /// transaction rolls back, the `failed` receipt commits as usual, and
+    /// the connection is back at `NORMAL`.
     #[tokio::test]
     async fn a_refused_admission_leaves_the_connection_at_normal() {
         let dir = tempfile::tempdir().unwrap();
         let store = store_with_audio_folder(dir.path());
         let now = Utc::now();
-        let enqueue: Enqueue = Arc::new(|_, _| {
-            Box::pin(async { Err(PipelineFailure::new(PipelineStage::Decode, "no runtime")) })
-        });
+        let (enqueue, _) = recording_enqueue();
+        refuse_writes(&store, false);
         let intake = RecordingIntake::new(
             store.clone(),
             enqueue,
@@ -818,13 +1055,7 @@ mod tests {
             .iter()
             .map(|commit| (commit.synchronous, commit.receipt.clone()))
             .collect();
-        assert_eq!(
-            levels,
-            [
-                (2, Some("complete".to_owned())),
-                (1, Some("failed".to_owned())),
-            ]
-        );
+        assert_eq!(levels, [(1, Some("failed".to_owned()))]);
         assert_eq!(synchronous(&store), 1);
     }
 

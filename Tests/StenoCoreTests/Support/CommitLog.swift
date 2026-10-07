@@ -22,7 +22,7 @@ final class CommitLog: Sendable {
     var commits: [Commit] = []
   }
 
-  private static let tables = ["handoverReceipt", "meeting", "audioAsset"]
+  private static let tables = ["handoverReceipt", "meeting", "audioAsset", "pairedDevice"]
   private let state: Mutex<State>
 
   private init(synchronous: Int) {

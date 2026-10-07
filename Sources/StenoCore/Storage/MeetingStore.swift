@@ -12,6 +12,10 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   case meetingBusy(UUID, MeetingState.Kind)
   /// `resolvePerson(named:)` with nothing but whitespace.
   case blankPersonName
+  /// `saveDurably(_:meeting:asset:)` for a recording whose receipt belongs
+  /// to another device: the admitting phone was revoked and another one
+  /// announced the same recording id.
+  case receiptOfAnotherDevice(UUID)
 
   public var description: String {
     switch self {
@@ -22,6 +26,7 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
     case .speakersInDifferentMeetings(let a, let b):
       "speakers \(a) and \(b) belong to different meetings"
     case .blankPersonName: "a person needs a name"
+    case .receiptOfAnotherDevice(let id): "recording \(id) belongs to another device"
     }
   }
 }
@@ -76,20 +81,10 @@ public final class MeetingStore: Sendable {
     }
   }
 
-  /// `save(_:asset:)` on the disk when it returns (`writeDurably`): the
-  /// phone intake's meeting, whose rows must outlive a power loss once the
-  /// phone deleted its copy; `ProcessingPipeline.enqueueDurably`.
-  /// Rust: `Store::save_meeting_with_asset_durably`.
-  public func saveDurably(_ meeting: Meeting, asset: AudioAsset) async throws {
-    try await writeDurably { db in
-      try MeetingRow(meeting).save(db)
-      try AudioAssetRow(asset).save(db)
-    }
-  }
-
   /// One write transaction whose commit is on the disk when this returns,
   /// for the commits an answer to another device depends on: the phone
-  /// intake's, before `complete` tells the phone to delete its copy. The
+  /// intake's admission, before `complete` tells the phone to delete its
+  /// copy, a pairing, whose token the phone keeps, and a revoke. The
   /// pool's writer commits under `synchronous = NORMAL`, which syncs the
   /// WAL only at a checkpoint, so a power loss can roll a commit back.
   /// This transaction runs under `synchronous = FULL` with `fullfsync` on,
