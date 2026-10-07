@@ -74,9 +74,9 @@ impl Current {
 /// so a recording that ends after a reload goes through the new one.
 /// Every pipeline it builds shares one [`QuitLatch`], so
 /// [`quit`](Self::quit) reaches the retired ones too, and one set of
-/// [`PipelineClaims`], so a meeting a retired pipeline still processes or
-/// delivers is refused by the new one instead of run twice at once. Held by `App`, the
-/// recorder, the phone intake and [`HostPipeline`].
+/// [`PipelineClaims`], so the new one refuses a meeting a retired one
+/// still holds. Held by `App`, the recorder, the phone intake and
+/// [`HostPipeline`].
 pub struct CurrentPipeline {
     current: Mutex<Current>,
     make: MakeDependencies,

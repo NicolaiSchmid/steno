@@ -236,12 +236,9 @@ impl QuitLatch {
 }
 
 /// The meetings with an operation in progress and the recordings being
-/// processed, shared by every pipeline built over dependencies that carry
-/// it (the services' reloads share the app's), so a reload's new pipeline
-/// refuses a meeting the retired one still processes or delivers instead
-/// of running a second operation on it alongside. A fresh set from
-/// [`PipelineDependencies::new`]; clones share theirs. Rust only: Swift
-/// had one pipeline actor per reload, with the same gap.
+/// processed, shared by every pipeline whose dependencies carry it, so a
+/// reload's new pipeline refuses a meeting the retired one still holds.
+/// Clones share one set. Rust only: Swift's reload had the same gap.
 #[derive(Debug, Clone, Default)]
 pub struct PipelineClaims(Arc<Mutex<Claimed>>);
 
@@ -505,9 +502,7 @@ impl PipelineDependencies {
     }
 
     /// Carries `claims` instead of the fresh ones from [`new`](Self::new),
-    /// so every pipeline built over dependencies that carry them refuses a
-    /// meeting another of them holds (the services' reloads share the
-    /// app's).
+    /// as [`with_quit_latch`](Self::with_quit_latch) carries a latch.
     #[must_use]
     pub fn with_claims(mut self, claims: PipelineClaims) -> Self {
         self.claims = claims;
@@ -1039,15 +1034,13 @@ impl ProcessingPipeline {
         Ok(resumed)
     }
 
-    /// Launch recovery for the exports: every ready meeting whose delivery
-    /// a previous process left `pending` (it ended mid-delivery) or that
-    /// failed before `attempted_before` is delivered again in the
-    /// background, as a re-export, so an export the app was writing when it
-    /// ended is finished and a failed one is tried once more. A meeting
-    /// another operation holds is skipped: its own run delivers it. The app
-    /// passes its launch time, before `resume_unfinished`. Returns the
-    /// meetings whose delivery was started: none once the pipeline
-    /// [quits](Self::quit). Needs a `tokio` runtime. Rust only.
+    /// Launch recovery for the exports: re-exports in the background every
+    /// ready meeting whose delivery a previous process left `pending` or
+    /// that failed before `attempted_before` (the app's launch time; it
+    /// calls this after `resume_unfinished`). A meeting another operation
+    /// holds is skipped: its own run delivers it. Returns the meetings
+    /// started, none once the pipeline [quits](Self::quit). Needs a `tokio`
+    /// runtime. Rust only.
     pub fn redeliver_unfinished(&self, attempted_before: DateTime<Utc>) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
@@ -1059,8 +1052,7 @@ impl ProcessingPipeline {
         )?;
         let mut started = Vec::new();
         for meeting_id in meetings {
-            // A refusal is a meeting in flight, which delivers at the end
-            // of its own run.
+            // Refused: a meeting in flight delivers at the end of its run.
             let Ok(operation) = self.claim_redeliver(meeting_id) else {
                 continue;
             };
@@ -2350,9 +2342,9 @@ impl Drop for Starting {
     }
 }
 
-/// A background run's entry in `running` (keyed by its asset id, or by a
-/// key of its own for a re-export), and in the claims' assets for a
-/// processing run; dropping it removes both.
+/// A background run's entry in `running` (by asset id, or a key of its
+/// own for a re-export) and, for a processing run, in the claims'
+/// `assets`; dropping it removes both.
 struct Running {
     pipeline: ProcessingPipeline,
     key: Uuid,
