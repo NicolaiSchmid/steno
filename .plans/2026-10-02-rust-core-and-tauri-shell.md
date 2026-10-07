@@ -873,21 +873,29 @@ still has to draw the window side. `[ ]` is not ported yet.
   `MeetingDetailViewModel` did. Difference: a re-export after a speaker change that
   fails once started shows there too, where Swift kept it quiet and retried on the
   next `.ready` tick.
-- No stage throws away what an earlier stage or the user produced (P8 of the stable
-  promotion plan, `.plans/2026-10-07-stable-promotion.md`). Rust only, each item:
+- No stage throws away what an earlier stage or the user produced (P10 to P13 of
+  `.plans/2026-10-07-stable-promotion.md`; the template and title item is under its
+  D3). Rust only, each item:
   - Speakers: a diarizer that fails or does not load, and a voice match that fails,
     cost only the speaker labels, and the stage is logged with its meeting and stage
     only. A re-run keeps the speakers stored for the meeting, confirmations, voices
     and clips included, and maps the new segments onto them by the spans of the
-    stored segments each owned; a first run's diarized lane becomes one unknown
-    "Speaker 1" without an embedding, the mic lane too when it is the room, so the
-    other party is never "me"
+    stored segments each owned on the lane diarized now; an earlier fallback speaker
+    alone on that lane covers the whole recording again. For a meeting with no
+    stored speakers, or none on that lane (the lane diarized last time was the other
+    one), the diarized lane becomes one unknown "Speaker 1" without an embedding, the
+    mic lane too when it is the room, so the other party is never "me"
     (`a_failing_diarizer_keeps_the_transcript_with_one_room_speaker`,
     `a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers`,
     `a_failing_diarizer_on_the_mic_lane_makes_it_the_room`,
+    `a_rerun_of_a_mic_room_whose_diarizer_fails_keeps_its_speakers`,
+    `a_rerun_on_the_other_lane_whose_diarizer_fails_gives_it_the_room_speaker`,
+    `a_second_diarizer_failure_keeps_the_named_room_speaker`,
     `a_job_whose_diarizer_does_not_load_keeps_its_transcript`,
     `a_failing_speaker_match_keeps_the_speakers_unknown`,
-    `a_diarizer_failure_warns_with_its_stage_not_its_reason`). Once the app quits,
+    `a_diarizer_failure_warns_with_its_stage_not_its_reason`). `diarize` moves its
+    sample clips into place only once every one is written, so a failure partway
+    never leaves a kept speaker's clip holding another voice. Once the app quits,
     such a failure ends the run unpersisted, so the meeting is processed again at the
     next launch (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
     Swift fails the meeting.
@@ -901,9 +909,10 @@ still has to draw the window side. `[ ]` is not ported yet.
     differs keeps a confirmation on whatever voice gets that label. Swift replaces the
     assignments and drops the suggestions.
   - Cleanup: the pass writes each segment's text by id and leaves the speakers alone,
-    and summarize reads the speakers as stored then, so a speaker named during the
-    pass stays named and is named in the summary (`Store::update_segment_texts`,
-    `a_speaker_named_during_cleanup_stays_named`). Swift rewrites the speakers.
+    and summarize reads the speakers and segments as stored then, so a speaker named
+    or merged during the pass stays so and is named in the summary
+    (`Store::update_segment_texts`, `a_speaker_named_during_cleanup_stays_named`).
+    Swift rewrites the speakers.
   - Summary: a run without a summarizer keeps the summary, tasks, decisions and name
     suggestions (`Store::save_processing_results`,
     `a_run_without_a_summarizer_keeps_the_earlier_summary`). Swift clears them.
@@ -918,9 +927,9 @@ still has to draw the window side. `[ ]` is not ported yet.
     writes back the template and title a run started with.
   - Panic: a panic inside `process` fails the meeting, named by the stage it was in,
     instead of leaving it `processing` (`a_run_that_panics_fails_its_meeting`); a
-    meeting `persist` marked ready stays ready, whatever fails or panics after that
-    write (`a_panic_after_the_ready_write_leaves_the_meeting_ready`). Swift has no
-    counterpart.
+    meeting `persist` marked ready stays ready, and is delivered, whatever fails or
+    panics after that write (`a_panic_after_the_ready_write_leaves_the_meeting_ready`).
+    Swift has no counterpart. The resume guard of P13 is not part of this change.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file
