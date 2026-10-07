@@ -81,6 +81,7 @@ impl ObsidianFolderDestination {
     ///         people_folder: Some("People".to_owned()),
     ///         include_audio: false,
     ///         task_tag: None,
+    ///         extra: serde_json::Map::new(),
     ///     },
     ///     Tz::Europe__Berlin,
     /// );

@@ -64,7 +64,11 @@ impl ObsidianSettingsViewModel {
         self.enabled && self.vault_path.trim().is_empty()
     }
 
-    /// The typed settings as entered; `None` when disabled.
+    /// The typed settings as entered; `None` when disabled. Fields this
+    /// build does not know come from the stored value, so a draft nobody
+    /// edited equals it and [`commit`](Self::commit) saves nothing; the
+    /// save takes them again from the value stored at that moment, since
+    /// another writer may have added some.
     #[must_use]
     pub fn draft(&self) -> Option<ObsidianSettings> {
         if !self.enabled {
@@ -77,6 +81,11 @@ impl ObsidianSettingsViewModel {
             people_folder: (!people.is_empty()).then(|| people.to_owned()),
             include_audio: self.include_audio,
             task_tag: (!tag.is_empty()).then(|| tag.to_owned()),
+            extra: self
+                .stored
+                .as_ref()
+                .map(|stored| stored.extra.clone())
+                .unwrap_or_default(),
         })
     }
 
@@ -117,10 +126,22 @@ impl ObsidianSettingsViewModel {
             self.validation_message = Some(message.to_string());
             return;
         }
-        let stored = draft.clone();
-        match update_settings(store, move |settings| settings.obsidian = stored) {
-            Ok(_) => {
-                self.stored = draft;
+        let result = update_settings(store, |settings| {
+            // The unknown fields as stored now, not as loaded: another
+            // writer may have added some since. They may belong to the
+            // vault, so another vault starts without them.
+            let mut next = draft;
+            if let Some(next) = &mut next {
+                next.extra = match &settings.obsidian {
+                    Some(current) if current.vault_path == next.vault_path => current.extra.clone(),
+                    _ => serde_json::Map::new(),
+                };
+            }
+            settings.obsidian = next;
+        });
+        match result {
+            Ok(settings) => {
+                self.stored = settings.obsidian;
                 self.saved = true;
                 self.errors.clear();
             }

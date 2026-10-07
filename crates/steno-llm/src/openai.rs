@@ -31,7 +31,8 @@ use crate::{
 pub struct OpenAiCompatibleClient {
     endpoint: LlmEndpoint,
     api_key: Option<String>,
-    http: reqwest::Client,
+    /// The error instead when the default client could not be built.
+    http: Result<reqwest::Client, LlmError>,
     retry: RetryPolicy,
     clock: Arc<dyn Clock>,
     observer: Option<Observer>,
@@ -102,7 +103,7 @@ impl OpenAiCompatibleClient {
     /// provider here, and that builder installs one.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
-        self.http = http;
+        self.http = Ok(http);
         self
     }
 
@@ -215,8 +216,7 @@ impl OpenAiCompatibleClient {
     pub async fn probe_llm(&self) -> Result<EndpointProbe, LlmError> {
         let start = self.clock.now();
         let mut model_listed = None;
-        let models = self
-            .http
+        let models = transport::client(&self.http)?
             .get(self.endpoint.models_url())
             .headers(self.headers("probe"))
             .build()
@@ -300,7 +300,7 @@ impl OpenAiCompatibleClient {
             response_format: Self::response_format(&request.response_format, mode),
         };
         let bytes = wire::encode(&body).map_err(|error| LlmError::Transport(error.to_string()))?;
-        self.http
+        transport::client(&self.http)?
             .post(self.endpoint.chat_completions_url())
             .headers(self.headers(&request.purpose))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -353,7 +353,7 @@ impl OpenAiCompatibleClient {
     /// One attempt raced against `endpoint.request_timeout` on the clock.
     async fn perform(&self, request: reqwest::Request) -> Result<HttpReply, LlmError> {
         transport::perform(
-            &self.http,
+            transport::client(&self.http)?,
             request,
             self.clock.as_ref(),
             self.endpoint.request_timeout,
@@ -492,6 +492,35 @@ mod tests {
         let debug = format!("{headers:?}");
         assert!(!debug.contains("sk-unit-secret"), "{debug}");
         assert!(debug.contains("Sensitive"), "{debug}");
+    }
+
+    /// A client whose HTTP client could not be built answers every call
+    /// with that failure, final, and never panics.
+    #[tokio::test]
+    async fn without_an_http_client_every_call_fails_with_the_reason() {
+        let mut client = client();
+        let reason = transport::http_client_unavailable(
+            "builder error: No CA certificates were loaded from the system",
+        );
+        assert_eq!(
+            reason.to_string(),
+            "no trusted root certificates were found on this computer"
+        );
+        assert!(!reason.is_retryable());
+        client.http = Err(reason.clone());
+        let request = LlmRequest {
+            messages: Vec::new(),
+            response_format: steno_core::LlmResponseFormat::Text,
+            temperature: None,
+            max_tokens: None,
+            purpose: "test".to_owned(),
+        };
+        assert_eq!(client.complete_llm(&request).await.unwrap_err(), reason);
+        assert_eq!(client.probe_llm().await.unwrap_err(), reason);
+        assert_eq!(
+            transport::http_client_unavailable("builder error: bad proxy").to_string(),
+            "the HTTP client could not be built: builder error: bad proxy"
+        );
     }
 
     #[test]

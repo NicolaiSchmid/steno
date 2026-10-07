@@ -14,8 +14,9 @@ use std::time::Duration;
 ///
 /// `Display` mirrors Swift's `description` word for word, which is why it
 /// is lowercase and technical where [`CodexCredentialError`] speaks to the
-/// user. The one difference is the retry delay of `RateLimited`: Swift
-/// prints its `Duration` in its own form, Rust as `{:?}` (`30s`).
+/// user. Two differences: the retry delay of `RateLimited` (Swift prints
+/// its `Duration` in its own form, Rust as `{:?}`, `30s`), and
+/// `HttpClientUnavailable`, which Swift does not have.
 ///
 /// [`CodexCredentialError`]: crate::CodexCredentialError
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -45,6 +46,12 @@ pub enum LlmError {
     /// The transcript does not fit two levels of map and reduce.
     #[error("transcript too long: about {estimated_tokens} tokens against a budget of {budget}")]
     TranscriptTooLong { estimated_tokens: i64, budget: i64 },
+    /// The HTTP client could not be built, so no request is sent; Rust
+    /// only (Swift's `URLSession` always exists). The message is plain:
+    /// "no trusted root certificates were found on this computer" when the system
+    /// has none, else the builder's error.
+    #[error("{0}")]
+    HttpClientUnavailable(String),
 }
 
 fn rate_limited_message(retry_after: Option<&Duration>) -> String {

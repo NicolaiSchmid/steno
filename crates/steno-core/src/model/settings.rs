@@ -122,4 +122,10 @@ pub struct ObsidianSettings {
     /// Tag appended to every task line; `None` for none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_tag: Option<String>,
+    /// Fields this build does not know (a newer build's), kept as stored
+    /// so a load, edit and save writes them back. Empty for settings made
+    /// here; an edit for the same vault starts from the stored value's
+    /// `extra`. Rust only: Swift's `Codable` drops them.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }

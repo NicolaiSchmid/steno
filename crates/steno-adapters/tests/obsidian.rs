@@ -75,6 +75,7 @@ fn destination_at(
             people_folder: people_folder.map(str::to_owned),
             include_audio,
             task_tag: Some("task".to_owned()),
+            extra: serde_json::Map::new(),
         },
         BERLIN,
     )

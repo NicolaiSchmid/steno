@@ -43,7 +43,15 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
    `Sources/StenoCore/Storage/Migrations.swift` as SQL and proves it with a schema
    diff against a database the Swift CLI created. New migrations after this plan
    starts are written once in SQL and mirrored in `Migrations.swift` and the Rust
-   `.sql` files until cutover; the parity test proves them equal.
+   `.sql` files until cutover; the parity test proves them equal. The `setting` table
+   is shared too: the Rust store writes only the keys `Settings` knows, deletes only
+   those of them that are now `None`, and keeps the rows it does not know and the
+   Obsidian value's fields it does not know (for the same vault only: another vault
+   starts without them). Swift's `SettingsStore` still deletes and rewrites every row
+   on each save. Both stores fail to load a stored enum value they do not know. So
+   until the Swift removal (S9 of `.plans/2026-10-07-stable-promotion.md`), no new
+   setting key or stored enum value lands unless its PR says what the rolled-back Swift
+   app or an older Rust build does with it.
 3. **Audio never leaves the device.** Only these code paths use the network, and a
    new one needs a plan first:
    - the LLM client (`steno-llm`), text only: the prompts and the transcript to the
@@ -1084,6 +1092,9 @@ still has to draw the window side. `[ ]` is not ported yet.
 
 ### Store
 
+- `SettingsStore.save` should write and delete only the keys `Settings` knows and
+  keep the fields of `ObsidianSettings` it does not know, as the Rust store does;
+  today it deletes every `setting` row first, so a save drops what a newer build wrote.
 - `StenoJSON` date output truncates to the millisecond; Rust rounds like GRDB; fix the
   Swift formatter before cutover.
 - `MeetingStore.init` should check the migrator's `hasBeenSuperseded` and refuse a

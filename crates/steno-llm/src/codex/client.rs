@@ -57,7 +57,8 @@ impl CodexError {
 pub struct CodexResponsesClient {
     endpoint: LlmEndpoint,
     credentials: Arc<CodexCredentialStore>,
-    http: reqwest::Client,
+    /// The error instead when the default client could not be built.
+    http: Result<reqwest::Client, LlmError>,
     retry: RetryPolicy,
     clock: Arc<dyn Clock>,
     observer: Option<Observer>,
@@ -119,7 +120,7 @@ impl CodexResponsesClient {
     /// provider here, and that builder installs one.
     #[must_use]
     pub fn with_http(mut self, http: reqwest::Client) -> Self {
-        self.http = http;
+        self.http = Ok(http);
         self
     }
 
@@ -333,7 +334,7 @@ impl CodexResponsesClient {
     ) -> Result<reqwest::Request, LlmError> {
         let body = Self::request_body(request, &self.endpoint.model, mode);
         let bytes = wire::encode(&body).map_err(|error| LlmError::Transport(error.to_string()))?;
-        self.http
+        transport::client(&self.http)?
             .post(self.endpoint.responses_url())
             .headers(self.headers(&request.purpose, credentials))
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -347,7 +348,7 @@ impl CodexResponsesClient {
         let mut url = self.endpoint.models_url();
         url.query_pairs_mut()
             .append_pair("client_version", Self::MODEL_LIST_CLIENT_VERSION);
-        self.http
+        transport::client(&self.http)?
             .get(url)
             .headers(self.headers("models", credentials))
             .header(reqwest::header::ACCEPT, "application/json")
@@ -395,7 +396,7 @@ impl CodexResponsesClient {
         secrets: &[String],
     ) -> Result<HttpReply, LlmError> {
         transport::perform(
-            &self.http,
+            transport::client(&self.http)?,
             request,
             self.clock.as_ref(),
             self.endpoint.request_timeout,

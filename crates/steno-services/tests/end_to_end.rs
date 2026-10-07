@@ -76,6 +76,7 @@ async fn a_mac_call_fixture_lands_in_the_vault() {
         people_folder: Some("People".to_owned()),
         include_audio: true,
         task_tag: Some("task".to_owned()),
+        extra: serde_json::Map::new(),
     });
     store.save_settings(&settings).unwrap();
     for person in [

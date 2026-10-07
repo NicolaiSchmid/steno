@@ -3,7 +3,7 @@
 
 mod common;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use steno_core::store::convert::{DbDate, DbUuid};
 use steno_core::*;
 
@@ -251,6 +251,7 @@ fn settings_round_trip_one_row_per_property() {
         people_folder: None,
         include_audio: true,
         task_tag: Some("#steno".to_owned()),
+        extra: serde_json::Map::new(),
     });
     store.save_settings(&settings).unwrap();
     assert_eq!(store.settings_with_defaults(&defaults).unwrap(), settings);
@@ -280,6 +281,98 @@ fn settings_round_trip_one_row_per_property() {
     );
     assert_eq!(row("inputDeviceUID"), None, "a nil property has no row");
     assert_eq!(rows.len(), 13, "one row per non-nil property");
+}
+
+fn setting_row(store: &Store, key: &str) -> Option<String> {
+    store
+        .read(|connection| {
+            Ok(connection
+                .query_row("SELECT value FROM setting WHERE key = ?1", [key], |row| {
+                    row.get(0)
+                })
+                .optional()?)
+        })
+        .unwrap()
+}
+
+fn put_setting_row(store: &Store, key: &str, value: &str) {
+    store
+        .write(|transaction| {
+            transaction.execute(
+                "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// The Swift app and a newer build share the file: a key this build does
+/// not know is no reason to drop it.
+#[test]
+fn saving_settings_keeps_rows_for_unknown_keys() {
+    let store = Store::in_memory().unwrap();
+    let defaults = Settings::defaults(&StenoPaths::new("/support"));
+    put_setting_row(&store, "aFutureSetting", r#"{"on":true}"#);
+    let mut settings = store.settings_with_defaults(&defaults).unwrap();
+    settings.launch_at_login = false;
+    store.save_settings(&settings).unwrap();
+    assert_eq!(
+        setting_row(&store, "aFutureSetting").as_deref(),
+        Some(r#"{"on":true}"#)
+    );
+    assert_eq!(
+        setting_row(&store, "launchAtLogin").as_deref(),
+        Some("false")
+    );
+    assert_eq!(store.settings_with_defaults(&defaults).unwrap(), settings);
+}
+
+#[test]
+fn a_known_property_set_to_none_loses_its_row() {
+    let store = Store::in_memory().unwrap();
+    let defaults = Settings::defaults(&StenoPaths::new("/support"));
+    let mut settings = defaults.clone();
+    settings.llm_model = Some("gpt".to_owned());
+    settings.obsidian = Some(ObsidianSettings {
+        vault_path: "/vault".to_owned(),
+        people_folder: None,
+        include_audio: false,
+        task_tag: None,
+        extra: serde_json::Map::new(),
+    });
+    store.save_settings(&settings).unwrap();
+    assert!(setting_row(&store, "llmModel").is_some());
+    assert!(setting_row(&store, "obsidian").is_some());
+
+    settings.llm_model = None;
+    settings.obsidian = None;
+    store.save_settings(&settings).unwrap();
+    assert_eq!(setting_row(&store, "llmModel"), None);
+    assert_eq!(setting_row(&store, "obsidian"), None);
+    assert_eq!(store.settings_with_defaults(&defaults).unwrap(), settings);
+}
+
+/// A field inside the Obsidian value that this build does not know comes
+/// back on save, next to the edit.
+#[test]
+fn an_unknown_obsidian_field_survives_a_load_edit_save() {
+    let store = Store::in_memory().unwrap();
+    let defaults = Settings::defaults(&StenoPaths::new("/support"));
+    put_setting_row(
+        &store,
+        "obsidian",
+        r#"{"futureFolder":"Daily","includeAudio":false,"vaultPath":"/vault"}"#,
+    );
+    let mut settings = store.settings_with_defaults(&defaults).unwrap();
+    let obsidian = settings.obsidian.as_mut().unwrap();
+    assert_eq!(obsidian.extra["futureFolder"], "Daily");
+    obsidian.include_audio = true;
+    store.save_settings(&settings).unwrap();
+    assert_eq!(
+        setting_row(&store, "obsidian").as_deref(),
+        Some(r#"{"futureFolder":"Daily","includeAudio":true,"vaultPath":"/vault"}"#)
+    );
 }
 
 #[test]

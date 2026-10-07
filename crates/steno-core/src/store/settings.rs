@@ -1,10 +1,14 @@
 //! `Settings` as one row per property in the `setting` table, each value a
 //! one-line `StenoJSON` fragment. A property missing from the table loads
-//! as its default and an unknown row is ignored, so a property can be added
-//! without a migration.
-//! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`.
+//! as its default. A row this build does not know (a newer build's or the
+//! Swift app's, which share the file until the Mac cutover) is ignored on
+//! load and kept on save.
+//! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`, which still
+//! deletes and rewrites every row.
 
 use rusqlite::params;
+use serde::Deserialize;
+use serde::de::{self, Deserializer, Visitor};
 use serde_json::Value;
 
 use super::{Result, Store, execute_cached, query_all};
@@ -15,6 +19,44 @@ use crate::model::Settings;
 /// keeps its shortest form (`0.6`) as in [`json::to_column_string`].
 fn object(settings: &Settings) -> Result<serde_json::Map<String, Value>> {
     Ok(serde_json::from_str(&serde_json::to_string(settings)?)?)
+}
+
+/// Every key `Settings` reads and writes, the `None` ones included: the
+/// field names its derived `Deserialize` hands to `deserialize_struct`, so
+/// a new field is a known key without a list to keep in step.
+fn known_keys() -> &'static [&'static str] {
+    let mut fields = None;
+    // Always an error: the deserializer stops at the field list.
+    let _ = Settings::deserialize(FieldNames(&mut fields));
+    fields.expect("Settings deserializes as a struct")
+}
+
+/// A deserializer that records the field list of the struct it is asked
+/// for and fails everything else.
+struct FieldNames<'a>(&'a mut Option<&'static [&'static str]>);
+
+impl<'de> Deserializer<'de> for FieldNames<'_> {
+    type Error = de::value::Error;
+
+    fn deserialize_any<V: Visitor<'de>>(self, _: V) -> std::result::Result<V::Value, Self::Error> {
+        Err(de::Error::custom("only the field names are read"))
+    }
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _: &'static str,
+        fields: &'static [&'static str],
+        _: V,
+    ) -> std::result::Result<V::Value, Self::Error> {
+        *self.0 = Some(fields);
+        Err(de::Error::custom("only the field names are read"))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map enum identifier ignored_any
+    }
 }
 
 impl Store {
@@ -38,23 +80,64 @@ impl Store {
         Ok(serde_json::from_value(Value::Object(merged))?)
     }
 
-    /// Writes every property, removing rows for properties that are now
-    /// `None`.
+    /// Writes every property and removes the rows of known properties that
+    /// are now `None`. Rows for keys this build does not know stay.
     pub fn save_settings(&self, settings: &Settings) -> Result<()> {
         let object = object(settings)?;
         let mut keys: Vec<&String> = object.keys().collect();
         keys.sort();
         self.write(|transaction| {
-            transaction.execute("DELETE FROM setting", [])?;
+            for key in known_keys() {
+                if !object.contains_key(*key) {
+                    execute_cached(
+                        transaction,
+                        "DELETE FROM setting WHERE key = ?1",
+                        params![key],
+                    )?;
+                }
+            }
             for key in keys {
                 let fragment = json::to_column_string(&object[key])?;
                 execute_cached(
                     transaction,
-                    "INSERT INTO setting (key, value) VALUES (?1, ?2)",
+                    "INSERT INTO setting (key, value) VALUES (?1, ?2) \
+                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
                     params![key, fragment],
                 )?;
             }
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::ObsidianSettings;
+
+    /// The known keys are exactly the keys of a `Settings` with every
+    /// `Option` filled, so none of them can be left out of the deletes.
+    #[test]
+    fn known_keys_are_every_serialized_key() {
+        let settings = Settings {
+            input_device_uid: Some("device".to_owned()),
+            models_directory: Some("/models".to_owned()),
+            llm_base_url: Some("http://localhost".to_owned()),
+            llm_model: Some("model".to_owned()),
+            codex_model: Some("codex".to_owned()),
+            codex_confirmed_at: Some(chrono::DateTime::UNIX_EPOCH),
+            obsidian: Some(ObsidianSettings {
+                vault_path: "/vault".to_owned(),
+                people_folder: None,
+                include_audio: false,
+                task_tag: None,
+                extra: serde_json::Map::new(),
+            }),
+            ..Settings::default()
+        };
+        let serialized: Vec<String> = object(&settings).unwrap().keys().cloned().collect();
+        let mut known = known_keys().to_vec();
+        known.sort_unstable();
+        assert_eq!(known, serialized);
     }
 }

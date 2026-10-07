@@ -271,6 +271,7 @@ mod tests {
                 people_folder: None,
                 include_audio: false,
                 task_tag: None,
+                extra: serde_json::Map::new(),
             }),
             ..Settings::default()
         }

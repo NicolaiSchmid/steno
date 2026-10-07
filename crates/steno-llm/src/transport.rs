@@ -138,12 +138,32 @@ pub fn http_client_builder() -> reqwest::ClientBuilder {
 }
 
 /// The HTTP client both clients and the credential store share by default:
-/// [`http_client_builder`] with reqwest's default settings.
-#[must_use]
-pub fn default_http_client() -> reqwest::Client {
+/// [`http_client_builder`] with reqwest's default settings. Building it
+/// fails where the system has no trusted root certificates (a minimal
+/// Linux install): the clients then keep the [`LlmError::HttpClientUnavailable`]
+/// and answer every request with it, so the app still starts and records,
+/// and only the summaries fail.
+pub fn default_http_client() -> Result<reqwest::Client, LlmError> {
     http_client_builder()
         .build()
-        .expect("a reqwest client with the default settings")
+        .map_err(|error| http_client_unavailable(&error_chain(&error)))
+}
+
+/// The plain failure for a client builder's error `chain`.
+#[must_use]
+pub(crate) fn http_client_unavailable(chain: &str) -> LlmError {
+    LlmError::HttpClientUnavailable(if chain.contains("No CA certificates") {
+        "no trusted root certificates were found on this computer".to_owned()
+    } else {
+        format!("the HTTP client could not be built: {chain}")
+    })
+}
+
+/// The client in `http`, or the error it could not be built with.
+pub(crate) fn client(
+    http: &Result<reqwest::Client, LlmError>,
+) -> Result<&reqwest::Client, LlmError> {
+    http.as_ref().map_err(Clone::clone)
 }
 
 /// `Retry-After` in delta seconds is capped at an hour before it becomes a

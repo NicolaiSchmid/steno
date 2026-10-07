@@ -1,12 +1,13 @@
-//! Durable file writes: replacing a file in one step (the secrets file, the
-//! CLI's `meeting.json`; Swift: `Data.write(to:options: .atomic)`), copying
-//! a recording so it survives a power loss (the phone intake), and creating
-//! folders whose entries survive one. The services and the CLI use these
-//! too, so there is one implementation.
+//! Durable file writes: replacing a file in one step (the secrets file,
+//! `preferences.json`, the CLI's `meeting.json`; Swift:
+//! `Data.write(to:options: .atomic)`), copying a recording so it survives a
+//! power loss (the phone intake), creating folders whose entries survive
+//! one, and setting aside a file that does not parse (`preferences.json`).
+//! The services and the CLI use these too, so there is one implementation.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// The syncs a durable write makes; the disk in the product, a recorder in
@@ -196,6 +197,62 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
     }
 }
 
+/// Moves `path` aside to `<name>.corrupt-<UTC time>` beside it, with `-2`,
+/// `-3` and so on added when that name is taken, so an earlier copy set
+/// aside is never replaced; the folder is synced after the move. A reader
+/// that cannot parse a file it owns calls this before it starts empty, so
+/// the next write cannot replace bytes nobody has looked at. Returns the
+/// new path.
+///
+/// The new name is claimed with a hard link, which fails when the name is
+/// taken, so a copy another process sets aside in the same second is never
+/// replaced; the old name is removed after. Where no hard link can be made
+/// the move is a rename, which replaces a taken name, so a check that the
+/// name is free comes first and is all that guards it there. If the old
+/// name cannot be removed after the link, the error is returned and both
+/// names hold the bytes.
+pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{} names no file", path.display()),
+        )
+    })?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let base = format!("{}.corrupt-{stamp}", name.to_string_lossy());
+    let mut attempt = 1_u32;
+    let aside = loop {
+        let candidate = if attempt == 1 {
+            path.with_file_name(&base)
+        } else {
+            path.with_file_name(format!("{base}-{attempt}"))
+        };
+        match std::fs::hard_link(path, &candidate) {
+            Ok(()) => {
+                std::fs::remove_file(path)?;
+                break candidate;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
+            // No hard link here (FAT, some network shares, a Linux that
+            // protects links to files of other users), so fall back to a
+            // rename; where the link failed for another reason (a
+            // read-only folder), the rename fails the same way.
+            Err(_) => match candidate.symlink_metadata() {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    std::fs::rename(path, &candidate)?;
+                    break candidate;
+                }
+                Err(error) => return Err(error),
+                Ok(_) => attempt += 1,
+            },
+        }
+    };
+    if let Some(directory) = aside.parent() {
+        Disk.directory(directory);
+    }
+    Ok(aside)
+}
+
 /// Makes `options` create the file with mode 0600 where the platform has
 /// modes.
 pub fn restrict_new_file(options: &mut OpenOptions) -> &mut OpenOptions {
@@ -213,6 +270,31 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     use super::*;
+
+    /// A second file set aside gets a name of its own; the first copy
+    /// keeps its bytes.
+    #[test]
+    fn set_aside_never_replaces_an_earlier_copy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preferences.json");
+        std::fs::write(&path, b"first").unwrap();
+        let first = set_aside(&path).unwrap();
+        std::fs::write(&path, b"second").unwrap();
+        let second = set_aside(&path).unwrap();
+        std::fs::write(&path, b"third").unwrap();
+        let third = set_aside(&path).unwrap();
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+        assert_eq!(std::fs::read(&third).unwrap(), b"third");
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("preferences.json.corrupt-")
+        );
+    }
 
     fn temporaries(directory: &Path) -> Vec<String> {
         std::fs::read_dir(directory)

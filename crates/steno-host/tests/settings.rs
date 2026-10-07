@@ -1188,6 +1188,136 @@ fn export_waits_for_a_vault_validates_through_the_destination_and_saves() {
     );
 }
 
+/// An Obsidian value with a field this build does not know.
+const FUTURE_OBSIDIAN: &str =
+    r#"{"futureFolder":"Daily","includeAudio":false,"vaultPath":"/vault"}"#;
+
+fn put_setting_row(store: &steno_core::Store, key: &str, value: &str) {
+    store
+        .write(|transaction| {
+            transaction.execute(
+                "INSERT OR REPLACE INTO setting (key, value) VALUES (?1, ?2)",
+                [key, value],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+}
+
+fn setting_row(harness: &Harness, key: &str) -> Option<String> {
+    harness
+        .store
+        .read(|connection| {
+            let mut statement = connection.prepare("SELECT value FROM setting WHERE key = ?1")?;
+            let mut rows = statement.query([key])?;
+            Ok(match rows.next()? {
+                Some(row) => Some(row.get(0)?),
+                None => None,
+            })
+        })
+        .unwrap()
+}
+
+/// Rows and fields this build does not know (a newer build's, the Swift
+/// app's) outlive an edit of the export settings.
+#[test]
+fn an_export_edit_keeps_unknown_rows_and_obsidian_fields() {
+    let harness = Harness::builder()
+        .seed(|store, _| {
+            put_setting_row(store, "obsidian", FUTURE_OBSIDIAN);
+            put_setting_row(store, "aFutureSetting", "7");
+        })
+        .build();
+    harness
+        .host
+        .settings_export_update(ExportUpdateParams {
+            people_folder: None,
+            include_audio: Some(true),
+            task_tag: None,
+        })
+        .unwrap();
+    assert_eq!(
+        setting_row(&harness, "obsidian").as_deref(),
+        Some(r#"{"futureFolder":"Daily","includeAudio":true,"vaultPath":"/vault"}"#)
+    );
+
+    // A field another writer added after the host loaded is kept too.
+    put_setting_row(
+        &harness.store,
+        "obsidian",
+        r#"{"futureFolder":"Daily","includeAudio":true,"laterField":1,"vaultPath":"/vault"}"#,
+    );
+    harness
+        .host
+        .settings_export_update(ExportUpdateParams {
+            people_folder: None,
+            include_audio: None,
+            task_tag: Some("todo".to_owned()),
+        })
+        .unwrap();
+    harness.host.settings_export_save().unwrap();
+    assert_eq!(
+        setting_row(&harness, "obsidian").as_deref(),
+        Some(
+            r#"{"futureFolder":"Daily","includeAudio":true,"laterField":1,"taskTag":"todo","vaultPath":"/vault"}"#
+        )
+    );
+    assert_eq!(
+        setting_row(&harness, "aFutureSetting").as_deref(),
+        Some("7")
+    );
+    assert!(
+        !harness
+            .snapshot(BridgeTopic::SettingsExport)
+            .to_string()
+            .contains("futureFolder"),
+        "the bridge shows only the fields it knows"
+    );
+}
+
+/// The unknown fields may belong to the vault, so choosing another vault
+/// stores the new one without them.
+#[test]
+fn another_vault_starts_without_the_unknown_obsidian_fields() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", FUTURE_OBSIDIAN))
+        .choose(Some("/other"))
+        .build();
+    harness.host.settings_export_choose_vault().unwrap();
+    assert_eq!(
+        setting_row(&harness, "obsidian").as_deref(),
+        Some(r#"{"includeAudio":false,"vaultPath":"/other"}"#)
+    );
+}
+
+/// A commit with nothing edited saves nothing, unknown fields or not: the
+/// draft carries the stored ones, so it equals what is stored.
+#[test]
+fn a_commit_without_an_edit_saves_nothing_when_unknown_fields_are_stored() {
+    let harness = Harness::builder()
+        .seed(|store, _| put_setting_row(store, "obsidian", FUTURE_OBSIDIAN))
+        .build();
+    harness
+        .host
+        .settings_export_set_enabled(SetBoolParams { value: true })
+        .unwrap();
+    harness.host.settings_export_save().unwrap();
+    assert!(
+        harness
+            .fakes
+            .export_validator
+            .validated
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "nothing was validated, so nothing was saved"
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsExport)["saved"],
+        false
+    );
+}
+
 /// Swift: `testPhonesPairingListsDevicesAndRevokes`, `testPhonesWithoutAHandoverServiceIsUnavailable`.
 #[test]
 fn phones_pair_list_and_revoke_devices() {
