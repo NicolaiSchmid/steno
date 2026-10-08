@@ -34,7 +34,7 @@ use uuid::Uuid;
 pub use assets::ExpiredAsset;
 pub use meetings::DeletedMeeting;
 pub use search::{SearchHit, fts5_pattern};
-pub use settings::{PARAKEET_V3_ENGINE_ID, RETIRED_SPEECH_ENGINE_IDS, SPEECH_ENGINE_NOTICE_KEY};
+pub use settings::PARAKEET_V3_ENGINE_ID;
 pub use timings::StageRateRow;
 
 use crate::model::MeetingStateKind;

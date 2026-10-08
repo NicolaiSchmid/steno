@@ -4,7 +4,6 @@
 mod common;
 
 use rusqlite::{OptionalExtension as _, params};
-use steno_core::store::RETIRED_SPEECH_ENGINE_IDS;
 use steno_core::store::convert::{DbDate, DbUuid};
 use steno_core::*;
 
@@ -426,39 +425,70 @@ fn an_unknown_obsidian_field_survives_a_load_edit_save() {
     );
 }
 
-/// Each engine the Swift app offered beyond Parakeet v3 becomes
-/// `parakeet-v3`, which Swift decodes too, with the notice pending once;
-/// the notice survives a save and goes when dismissed, and nothing moves
-/// again. `parakeet-v3`, an unknown id or no row change nothing.
+/// Every stored engine id but `parakeet-v3` becomes `parakeet-v3`, which
+/// Swift decodes too: the three the Swift app offered beyond it and one
+/// this build has never heard of. `before_rewrite` runs once and the move
+/// happens once; `parakeet-v3` or no row change nothing and call nothing.
 #[test]
-fn a_retired_speech_engine_becomes_parakeet_v3_with_one_notice() {
-    for retired in RETIRED_SPEECH_ENGINE_IDS {
+fn every_stored_engine_but_parakeet_v3_becomes_parakeet_v3_once() {
+    for retired in [
+        "whisperkit-large-v3-turbo",
+        "parakeet-ultra",
+        "parakeet-de",
+        "some-later-engine",
+    ] {
         let store = Store::in_memory().unwrap();
         put_setting_row(&store, "speechEngineID", &format!("\"{retired}\""));
-        assert_eq!(store.speech_engine_notice().unwrap(), None);
-        assert!(store.retire_speech_engine().unwrap(), "{retired}");
+        put_setting_row(&store, "aFutureSetting", "1");
+        let mut calls = 0;
+        assert!(
+            store.retire_speech_engine(|| calls += 1).unwrap(),
+            "{retired}"
+        );
+        assert_eq!(calls, 1, "{retired}");
+        assert_eq!(
+            setting_row(&store, "speechEngineID").as_deref(),
+            Some(r#""parakeet-v3""#)
+        );
         assert_eq!(store.settings().unwrap().speech_engine_id, "parakeet-v3");
-        assert_eq!(
-            store.speech_engine_notice().unwrap().as_deref(),
-            Some(retired)
+        assert_eq!(setting_row(&store, "aFutureSetting").as_deref(), Some("1"));
+        assert!(
+            !store
+                .retire_speech_engine(|| panic!("called again for {retired}"))
+                .unwrap(),
+            "only once"
         );
-        assert!(!store.retire_speech_engine().unwrap(), "only once");
-        let settings = store.settings().unwrap();
-        store.save_settings(&settings).unwrap();
-        assert_eq!(
-            store.speech_engine_notice().unwrap().as_deref(),
-            Some(retired),
-            "a save keeps the pending notice"
-        );
-        store.dismiss_speech_engine_notice().unwrap();
-        assert_eq!(store.speech_engine_notice().unwrap(), None);
     }
-    for kept in [r#""parakeet-v3""#, r#""some-later-engine""#] {
+    for kept in [Some(r#""parakeet-v3""#), None] {
         let store = Store::in_memory().unwrap();
-        put_setting_row(&store, "speechEngineID", kept);
-        assert!(!store.retire_speech_engine().unwrap(), "{kept:?}");
-        assert_eq!(store.speech_engine_notice().unwrap(), None);
+        if let Some(value) = kept {
+            put_setting_row(&store, "speechEngineID", value);
+        }
+        assert!(
+            !store
+                .retire_speech_engine(|| panic!("called for {kept:?}"))
+                .unwrap()
+        );
+        assert_eq!(setting_row(&store, "speechEngineID").as_deref(), kept);
     }
+}
+
+/// `before_rewrite` comes before the rewrite: when it does not return
+/// (the process ends there), the old id stays stored, so the next launch
+/// retires it and records the notice again.
+#[test]
+fn an_engine_retirement_that_ends_in_before_rewrite_stores_nothing() {
+    let store = Store::in_memory().unwrap();
+    put_setting_row(&store, "speechEngineID", r#""parakeet-ultra""#);
+    let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.retire_speech_engine(|| panic!("the process ends here"))
+    }));
+    assert!(ended.is_err());
+    assert_eq!(
+        setting_row(&store, "speechEngineID").as_deref(),
+        Some(r#""parakeet-ultra""#)
+    );
+    assert!(store.retire_speech_engine(|| {}).unwrap());
 }
 
 #[test]

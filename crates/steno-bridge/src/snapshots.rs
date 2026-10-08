@@ -55,6 +55,11 @@ pub struct AppSetupBanner {
     pub body: String,
     pub offers_summaries: bool,
     pub offers_vault: bool,
+    /// A one-time notice in the banner's place, which the page dismisses
+    /// with OK rather than "Not now"; left out when false. Rust only: the
+    /// Swift app shows no notice there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_notice: bool,
 }
 
 /// Swift: `AppSnapshot.Phone`.

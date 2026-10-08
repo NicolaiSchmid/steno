@@ -73,7 +73,7 @@ pub struct AppState {
     pub requested_meeting_id: Option<Uuid>,
     pub requested_settings_section: Option<SettingsSection>,
     pub setup_banner_dismissed: bool,
-    /// The engine notice is pending (`Store::speech_engine_notice`); it
+    /// The engine notice is pending ([`engine_notice::PENDING_KEY`]); it
     /// takes the setup banner's place until dismissed. Rust only.
     pub speech_engine_notice: bool,
     pub stored_settings: Option<Settings>,
@@ -99,6 +99,7 @@ pub fn app_snapshot(
         body: engine_notice::BODY.to_owned(),
         offers_summaries: false,
         offers_vault: false,
+        is_notice: true,
     });
     let banner = notice.or_else(|| {
         app.stored_settings
@@ -110,6 +111,7 @@ pub fn app_snapshot(
                 body: message.body(platform).to_owned(),
                 offers_summaries: message.offers_summaries(),
                 offers_vault: message.offers_vault(),
+                is_notice: false,
             })
     });
     AppSnapshot {

@@ -91,15 +91,15 @@ export interface MeetingDetailProps {
 
 /**
  * The notice at the top of the reading column: summaries or export still
- * need setting up, or, with neither to offer, a one-time notice the host
- * records as seen once it is dismissed.
+ * need setting up, or a one-time notice (`isNotice`) the host records as
+ * seen once it is dismissed with OK.
  */
 function SetupBanner({ banner }: { banner: AppSnapshot["setupBanner"] }) {
 	const client = useBridge();
 	if (!banner) {
 		return null;
 	}
-	const notice = !(banner.offersSummaries || banner.offersVault);
+	const notice = banner.isNotice === true;
 	return (
 		<Callout
 			actions={

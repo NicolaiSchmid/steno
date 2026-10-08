@@ -232,7 +232,13 @@ impl SetupBannerMessage {
 /// Rust only.
 pub mod engine_notice {
     pub const TITLE: &str = "Steno now transcribes with Parakeet v3";
-    pub const BODY: &str = "The speech model you chose before is not part of this version, so Steno switched to Parakeet v3, which understands 25 European languages.";
+    pub const BODY: &str = "The speech model you chose before is not part of this version, so Steno switched to Parakeet v3, which understands 25 European languages. If it is not downloaded yet, download it in Settings > Transcription.";
+
+    /// The `Preferences` flag (`preferences.json`) that is true while the
+    /// notice is pending: the app sets it when it retires the stored
+    /// engine, before the database changes, and OK clears it. Not a
+    /// `setting` row, which the Swift app's save would delete.
+    pub const PENDING_KEY: &str = "steno.speechEngineNotice";
 }
 
 /// The onboarding plan's user-facing strings for the main window, in one

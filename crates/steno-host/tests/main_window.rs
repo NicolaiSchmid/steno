@@ -2238,29 +2238,33 @@ fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
     assert_eq!(entry(&harness)["stage"], "decode");
 }
 
-/// A pending engine notice takes the setup banner's place, with no action
-/// to offer; dismissing it records it as seen, so the next host (the next
-/// launch) shows the setup banner again and the notice never.
+/// A pending engine notice (its `preferences.json` flag) takes the setup
+/// banner's place, marked as a notice and with no action to offer;
+/// dismissing it clears the flag, so the next host (the next launch) shows
+/// the setup banner again and the notice never.
 #[test]
 fn the_engine_notice_shows_once_in_the_banners_place() {
+    use steno_host::services::Preferences as _;
     let seed = |store: &steno_core::Store, fakes: &steno_host::fakes::FakeServices| {
         populate_sample(store, fakes);
-        let mut settings = store.settings().unwrap();
-        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
-        store.save_settings(&settings).unwrap();
-        assert!(store.retire_speech_engine().unwrap());
+        fakes
+            .preferences
+            .set_flag(steno_host::setup::engine_notice::PENDING_KEY, true);
     };
     let harness = Harness::builder().seed(seed).build();
     let banner = harness.snapshot(BridgeTopic::App)["setupBanner"].clone();
     assert_eq!(banner["title"], "Steno now transcribes with Parakeet v3");
+    assert_eq!(banner["isNotice"], true);
     assert_eq!(banner["offersSummaries"], false);
     assert_eq!(banner["offersVault"], false);
     harness.host.setup_dismiss_banner().unwrap();
-    assert_eq!(harness.store.speech_engine_notice().unwrap(), None);
+    assert!(
+        !harness
+            .fakes
+            .preferences
+            .flag(steno_host::setup::engine_notice::PENDING_KEY)
+    );
     let after = harness.snapshot(BridgeTopic::App)["setupBanner"].clone();
     assert_ne!(after["title"], "Steno now transcribes with Parakeet v3");
-    assert_eq!(
-        harness.store.settings().unwrap().speech_engine_id,
-        "parakeet-v3"
-    );
+    assert_eq!(after.get("isNotice"), None, "the setup banner is no notice");
 }

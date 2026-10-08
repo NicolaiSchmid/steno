@@ -6,12 +6,10 @@
 //! Swift: `Sources/StenoCore/Storage/SettingsStore.swift`, which still
 //! deletes and rewrites every row.
 //!
-//! The speech engines the Swift app offered beyond Parakeet v3
-//! ([`RETIRED_SPEECH_ENGINE_IDS`]) have no Rust engine:
-//! [`Store::retire_speech_engine`] moves a stored one to `parakeet-v3`,
-//! which the Swift app decodes too, and leaves the one-time notice that says
-//! so pending in the row [`SPEECH_ENGINE_NOTICE_KEY`] until
-//! [`Store::dismiss_speech_engine_notice`]. Rust only.
+//! Parakeet v3 ([`PARAKEET_V3_ENGINE_ID`]) is the one engine the Rust app
+//! runs; [`Store::retire_speech_engine`] moves any other stored engine id
+//! (Whisper, Parakeet Ultra and the German Parakeet the Swift app offered)
+//! to it. Rust only.
 
 use rusqlite::{OptionalExtension as _, params};
 use serde::Deserialize;
@@ -22,18 +20,11 @@ use super::{Result, Store, execute_cached, query_all};
 use crate::json;
 use crate::model::Settings;
 
-/// The engine ids the Swift app offered that the Rust app has no engine
-/// for: Whisper large-v3 turbo, Parakeet Ultra and the German Parakeet.
-pub const RETIRED_SPEECH_ENGINE_IDS: [&str; 3] =
-    ["whisperkit-large-v3-turbo", "parakeet-ultra", "parakeet-de"];
-
-/// The engine a retired id becomes, a Swift engine too.
+/// The one engine the Rust app runs, a Swift engine too: what
+/// [`Store::retire_speech_engine`] stores in place of any other id.
+/// Swift: `SpeechEngineID.parakeetV3`
+/// (`Sources/StenoSpeech/Engines/SpeechEngineID.swift`).
 pub const PARAKEET_V3_ENGINE_ID: &str = "parakeet-v3";
-
-/// The `setting` row of the pending engine notice; its value is the
-/// retired engine id, as a JSON string. Not a [`Settings`] property, so no
-/// save writes it and the Swift app's load ignores it.
-pub const SPEECH_ENGINE_NOTICE_KEY: &str = "speechEngineNotice";
 
 /// The key [`Settings::speech_engine_id`] is stored under.
 const SPEECH_ENGINE_KEY: &str = "speechEngineID";
@@ -132,12 +123,15 @@ impl Store {
         })
     }
 
-    /// When the stored engine id is one of [`RETIRED_SPEECH_ENGINE_IDS`],
-    /// stores [`PARAKEET_V3_ENGINE_ID`] in its place and leaves the engine
-    /// notice pending, in one transaction; returns whether it did. Any
-    /// other id, or none, changes nothing, so the notice comes once per
-    /// move. The app calls it at launch, before anything reads the engine.
-    pub fn retire_speech_engine(&self) -> Result<bool> {
+    /// When an engine id other than [`PARAKEET_V3_ENGINE_ID`] is stored
+    /// (an engine the Swift app offered and the Rust app does not run),
+    /// calls `before_rewrite`, then stores `parakeet-v3` in its place, in
+    /// one transaction; returns whether it did. No id, or `parakeet-v3`,
+    /// changes nothing and calls nothing. The app calls it at launch,
+    /// before anything reads the engine, and records the one-time notice
+    /// in `before_rewrite`, so a crash between the two shows the notice
+    /// once too often rather than switching the engine without a word.
+    pub fn retire_speech_engine(&self, before_rewrite: impl FnOnce()) -> Result<bool> {
         self.write(|transaction| {
             let stored: Option<String> = transaction
                 .query_row(
@@ -150,53 +144,19 @@ impl Store {
                 return Ok(false);
             };
             let id: Value = json::from_column_str(&stored)?;
-            let Some(id) = id
-                .as_str()
-                .filter(|id| RETIRED_SPEECH_ENGINE_IDS.contains(id))
-            else {
+            if id.as_str() == Some(PARAKEET_V3_ENGINE_ID) {
                 return Ok(false);
-            };
-            for (key, value) in [
-                (SPEECH_ENGINE_KEY, PARAKEET_V3_ENGINE_ID),
-                (SPEECH_ENGINE_NOTICE_KEY, id),
-            ] {
-                execute_cached(
-                    transaction,
-                    "INSERT INTO setting (key, value) VALUES (?1, ?2) \
-                     ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                    params![key, json::to_column_string(&value)?],
-                )?;
             }
-            Ok(true)
-        })
-    }
-
-    /// The retired engine id whose notice is pending, if any.
-    pub fn speech_engine_notice(&self) -> Result<Option<String>> {
-        let stored: Option<String> = self.read(|connection| {
-            Ok(connection
-                .query_row(
-                    "SELECT value FROM setting WHERE key = ?1",
-                    params![SPEECH_ENGINE_NOTICE_KEY],
-                    |row| row.get(0),
-                )
-                .optional()?)
-        })?;
-        Ok(stored
-            .map(|value| json::from_column_str::<Value>(&value))
-            .transpose()?
-            .and_then(|value| value.as_str().map(str::to_owned)))
-    }
-
-    /// Records the engine notice as seen, so it never shows again.
-    pub fn dismiss_speech_engine_notice(&self) -> Result<()> {
-        self.write(|transaction| {
+            before_rewrite();
             execute_cached(
                 transaction,
-                "DELETE FROM setting WHERE key = ?1",
-                params![SPEECH_ENGINE_NOTICE_KEY],
+                "UPDATE setting SET value = ?2 WHERE key = ?1",
+                params![
+                    SPEECH_ENGINE_KEY,
+                    json::to_column_string(&PARAKEET_V3_ENGINE_ID)?
+                ],
             )?;
-            Ok(())
+            Ok(true)
         })
     }
 }

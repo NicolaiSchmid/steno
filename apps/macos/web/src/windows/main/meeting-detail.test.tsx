@@ -15,7 +15,7 @@ async function fixtureDetail(): Promise<MeetingDetailSnapshot> {
 }
 
 describe("MeetingDetail", () => {
-	it("shows the setup banner's Not now, and OK on a notice without actions", async () => {
+	it("shows the setup banner's Not now, and OK on a notice", async () => {
 		const user = userEvent.setup();
 		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
 		const setup = await createBridgeHarness();
@@ -32,6 +32,7 @@ describe("MeetingDetail", () => {
 					body: "The speech model you chose before is not part of this version.",
 					offersSummaries: false,
 					offersVault: false,
+					isNotice: true,
 				},
 			} satisfies AppSnapshot,
 		});
@@ -43,6 +44,25 @@ describe("MeetingDetail", () => {
 		await user.click(ok);
 		await vi.waitFor(() =>
 			expect(callsTo(harness.transport, "setup.dismissBanner")).toHaveLength(1),
+		);
+	});
+
+	it("keeps Not now on a banner with nothing to offer that is no notice", async () => {
+		const app = (await loadFixtureSnapshots()).app as AppSnapshot;
+		const harness = await createBridgeHarness("", {
+			app: {
+				...app,
+				setupBanner: {
+					title: "A later banner",
+					body: "Nothing to set up here.",
+					offersSummaries: false,
+					offersVault: false,
+				},
+			} satisfies AppSnapshot,
+		});
+		renderWithBridge(<MeetingDetail />, harness);
+		expect(await screen.findByTestId("banner-not-now")).toHaveTextContent(
+			"Not now",
 		);
 	});
 

@@ -457,6 +457,31 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
     }
 }
 
+/// `preferences.json` under the support directory, once a stored engine
+/// id other than Parakeet v3 (Whisper, Ultra or the German Parakeet the
+/// Swift app offered) became Parakeet v3, before anything reads the
+/// engine, with the notice the main window shows once: its pending flag
+/// ([`engine_notice::PENDING_KEY`](steno_host::setup::engine_notice::PENDING_KEY))
+/// is written before the database changes. A failed update is a warning.
+fn preferences_retiring_the_engine(
+    store: &Store,
+    paths: &StenoPaths,
+    warnings: &mut Vec<String>,
+) -> Arc<FilePreferences> {
+    let preferences = Arc::new(FilePreferences::new(
+        paths.support_directory.join("preferences.json"),
+    ));
+    let retired = store.retire_speech_engine(|| {
+        preferences.set_flag(steno_host::setup::engine_notice::PENDING_KEY, true);
+    });
+    if let Err(error) = retired {
+        warnings.push(format!(
+            "The speech engine setting could not be updated: {error}"
+        ));
+    }
+    preferences
+}
+
 /// Builds the graph. First the database's lock ([`DatabaseLock`]): while
 /// another process holds it past [`AppOptions::lock_patience`] the build
 /// fails with [`BuildError::Lock`] before the database is opened; on a
@@ -491,14 +516,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let runtime = options.runtime;
     let zone = local_zone();
 
-    // A Whisper, Ultra or German engine the Swift app stored becomes
-    // Parakeet v3 before anything reads the engine; the main window shows
-    // the notice once.
-    if let Err(error) = store.retire_speech_engine() {
-        warnings.push(format!(
-            "The speech engine setting could not be updated: {error}"
-        ));
-    }
+    let preferences = preferences_retiring_the_engine(&store, &paths, &mut warnings);
     // The speech settings and the models directory are read once, here:
     // the pipeline (and every reload, which keeps its engine when it runs
     // where the last one did) and the model service share them.
@@ -1534,6 +1552,33 @@ mod tests {
         );
         app.recorder.clear_messages();
         assert_eq!(app.recorder.status().warning, None);
+    }
+
+    /// A stored engine the Rust app does not run (the Swift app's Whisper)
+    /// is Parakeet v3 once the app is built, with the notice's pending flag
+    /// in `preferences.json`, which the main window then shows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_build_retires_a_stored_whisper_engine_with_the_notice_pending() {
+        use steno_host::setup::engine_notice::PENDING_KEY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let support = dir.path().join("support");
+        let paths = StenoPaths::new(&support);
+        let store = open_store(&paths.database_path()).unwrap();
+        let mut settings = store.settings().unwrap();
+        "whisperkit-large-v3-turbo".clone_into(&mut settings.speech_engine_id);
+        store.save_settings(&settings).unwrap();
+        drop(store);
+        let preferences = support.join("preferences.json");
+
+        let app = build(options_under(&support)).unwrap();
+        assert_eq!(
+            app.store.settings().unwrap().speech_engine_id,
+            "parakeet-v3"
+        );
+        assert!(FilePreferences::new(&preferences).flag(PENDING_KEY));
+        assert!(app.services.preferences.flag(PENDING_KEY));
+        app.pipeline.quit();
     }
 
     /// The models directory is decided once, when the app is built: a
