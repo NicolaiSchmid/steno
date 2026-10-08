@@ -164,16 +164,20 @@ struct Mount {
 /// a network mount: one of [`NETWORK_MAGIC_NUMBERS`], or a FUSE mount
 /// (`fuse_mount`, read only for FUSE) whose type is one of
 /// [`REMOTE_FUSE_TYPES`], or whose type is a bare `fuse` and whose source
-/// starts with `http://` or `https://`, as davfs2 mounts a `WebDAV` share.
+/// starts with `http://` or `https://`, in upper or lower case, as davfs2
+/// mounts a `WebDAV` share.
 #[cfg(any(target_os = "linux", test))]
 fn is_a_linux_network_file_system(magic: u32, fuse_mount: impl FnOnce() -> Option<Mount>) -> bool {
     if magic == FUSE_SUPER_MAGIC {
         fuse_mount().is_some_and(|mount| {
             REMOTE_FUSE_TYPES.contains(&mount.file_system.as_str())
                 || (mount.file_system == "fuse"
-                    && ["http://", "https://"]
-                        .iter()
-                        .any(|scheme| mount.source.starts_with(scheme)))
+                    && ["http://", "https://"].iter().any(|scheme| {
+                        mount
+                            .source
+                            .get(..scheme.len())
+                            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(scheme))
+                    }))
         })
     } else {
         NETWORK_MAGIC_NUMBERS.contains(&magic)
@@ -345,7 +349,11 @@ mod tests {
             );
         }
         // davfs2.
-        for source in ["http://127.0.0.1:47811/", "https://cloud.example.com/dav/"] {
+        for source in [
+            "http://127.0.0.1:47811/",
+            "https://cloud.example.com/dav/",
+            "HTTPS://cloud.example.com/dav/",
+        ] {
             assert!(
                 is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(mount("fuse", source))),
                 "{source}"
