@@ -772,6 +772,32 @@ mod tests {
         assert!(!meeting.exists());
     }
 
+    /// An error `busy` accepts is retried 49 times on Windows and not at
+    /// all elsewhere; any other error, or a success, ends the attempts.
+    #[test]
+    fn retried_tries_fifty_times_on_windows_and_once_elsewhere() {
+        let attempts = std::cell::Cell::new(0);
+        let outcome: std::io::Result<()> = retried(
+            |_| true,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(std::io::Error::other("busy"))
+            },
+        );
+        assert!(outcome.is_err());
+        assert_eq!(attempts.get(), if cfg!(windows) { 50 } else { 1 });
+        attempts.set(0);
+        let outcome: std::io::Result<()> = retried(
+            |_| false,
+            || {
+                attempts.set(attempts.get() + 1);
+                Err(std::io::Error::other("not busy"))
+            },
+        );
+        assert!(outcome.is_err());
+        assert_eq!(attempts.get(), 1);
+    }
+
     /// A folder sync that fails fails the folder creation and the copy, so
     /// the phone intake answers 500 and the phone keeps its copy.
     #[test]
