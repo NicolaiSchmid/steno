@@ -1,0 +1,22 @@
+name: Windows replace race diagnostic
+
+on:
+  pull_request:
+    paths:
+      - 'spikes/winrace-diag/**'
+      - '.github/workflows/winrace-diag.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run
+        working-directory: spikes/winrace-diag
+        env:
+          ROUNDS: '20'
+        run: cargo run --release
