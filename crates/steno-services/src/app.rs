@@ -485,20 +485,18 @@ fn refuse_to_mint_over_paired_phones(
         runtime,
         secrets.secret(&steno_handover::HandoverIdentity::secret_key()),
     );
-    if matches!(stored, Ok(Some(_))) {
-        return Ok(());
-    }
-    let paired = store
-        .paired_devices()
-        .map_or(true, |devices| !devices.is_empty());
     match stored {
+        Ok(Some(_)) => Ok(()),
         Err(error) => Err(format!(
             "the handover identity could not be read, so none is minted: {error}"
         )),
-        Ok(_) if paired => Err(
-            "phones are paired but no handover identity is stored, so none is minted".to_owned(),
-        ),
-        Ok(_) => Ok(()),
+        Ok(None) => match store.paired_devices() {
+            Ok(devices) if devices.is_empty() => Ok(()),
+            _ => Err(
+                "phones are paired but no handover identity is stored, so none is minted"
+                    .to_owned(),
+            ),
+        },
     }
 }
 
