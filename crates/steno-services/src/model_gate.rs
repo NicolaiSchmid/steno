@@ -38,13 +38,18 @@ use crate::pipeline::CurrentPipeline;
 /// Whether the models a boundary loads are installed now.
 pub type InstalledCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
-/// `Ok` while `installed` holds, else the refusal for `stage`.
-fn check(installed: &InstalledCheck, stage: PipelineStage) -> BoundaryResult<()> {
-    if installed() {
-        Ok(())
-    } else {
-        Err(Box::new(PipelineFailure::models_missing(stage)))
+/// `call`, run only while `installed` holds, else the refusal for
+/// `stage`; its error as [`refusing`] maps it.
+async fn gated<T>(
+    installed: &InstalledCheck,
+    stage: PipelineStage,
+    call: impl Future<Output = BoundaryResult<T>>,
+) -> BoundaryResult<T> {
+    if !installed() {
+        return Err(Box::new(PipelineFailure::models_missing(stage)));
     }
+    call.await
+        .map_err(|error| refusing(installed, stage, error))
 }
 
 /// An error of the boundary behind the gate as the refusal for `stage`
@@ -95,11 +100,7 @@ impl SpeechEngine for GatedSpeechEngine {
     }
 
     async fn prepare(&self) -> BoundaryResult<()> {
-        check(&self.installed, PipelineStage::Decode)?;
-        self.inner
-            .prepare()
-            .await
-            .map_err(|error| refusing(&self.installed, PipelineStage::Decode, error))
+        gated(&self.installed, PipelineStage::Decode, self.inner.prepare()).await
     }
 
     async fn transcribe(
@@ -107,11 +108,12 @@ impl SpeechEngine for GatedSpeechEngine {
         audio: &AudioBuffer16k,
         hint: Option<&LanguageTag>,
     ) -> BoundaryResult<Vec<RawSegment>> {
-        check(&self.installed, PipelineStage::Transcribe)?;
-        self.inner
-            .transcribe(audio, hint)
-            .await
-            .map_err(|error| refusing(&self.installed, PipelineStage::Transcribe, error))
+        gated(
+            &self.installed,
+            PipelineStage::Transcribe,
+            self.inner.transcribe(audio, hint),
+        )
+        .await
     }
 
     async fn release(&self) -> BoundaryResult<()> {
@@ -136,19 +138,21 @@ impl GatedDiarizer {
 #[async_trait]
 impl Diarizer for GatedDiarizer {
     async fn prepare(&self) -> BoundaryResult<()> {
-        check(&self.installed, PipelineStage::Diarize)?;
-        self.inner
-            .prepare()
-            .await
-            .map_err(|error| refusing(&self.installed, PipelineStage::Diarize, error))
+        gated(
+            &self.installed,
+            PipelineStage::Diarize,
+            self.inner.prepare(),
+        )
+        .await
     }
 
     async fn diarize(&self, audio: &AudioBuffer16k) -> BoundaryResult<DiarizationResult> {
-        check(&self.installed, PipelineStage::Diarize)?;
-        self.inner
-            .diarize(audio)
-            .await
-            .map_err(|error| refusing(&self.installed, PipelineStage::Diarize, error))
+        gated(
+            &self.installed,
+            PipelineStage::Diarize,
+            self.inner.diarize(audio),
+        )
+        .await
     }
 }
 
