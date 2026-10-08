@@ -6,11 +6,14 @@
 //! these assert is that enumeration returns, that `start` and `stop` return
 //! within a bound, that nothing hangs, that the in-person `IOProc` runs, and
 //! that a UID naming no device records the default input.
-//! Call mode's `IOProc` runs only while another client has the output device
-//! open (see `capture::live::backend`), so a call capture with no callbacks
-//! is reported as skipped rather than as silence. Each run happens on its
-//! own thread joined with a deadline, so a hang fails instead of stalling
-//! the suite.
+//! Call mode's tap aggregate runs only while a process the tap includes
+//! drives the output, so the capture starts a silent output `IOProc` of its
+//! own first (A10, see `capture::live::backend`): with nothing playing, the
+//! call tests assert the first callback within 100 ms of the start and
+//! about one second of frames per second; without the silent output
+//! they fail with no callback at all. Nothing may play during those runs.
+//! Each run happens on its own thread joined with a deadline, so a hang
+//! fails instead of stalling the suite.
 //! Swift: `Tests/StenoAudioTests/LiveCaptureBackendTests.swift`.
 #![cfg(target_os = "macos")]
 // The docs name Core Audio's IOProc as the HAL spells it.
@@ -181,76 +184,147 @@ fn in_person_capture_starts_and_stops_within_bounds() {
 /// capture with nothing playing.
 const FIRST_CALLBACK: Duration = Duration::from_millis(100);
 
-/// How long the call capture records.
-const CALL_SECONDS: u64 = 4;
+/// What one call capture measured.
+struct CallRun {
+    /// The first callback after `start` returned.
+    first: Option<Duration>,
+    /// Frames on every lane, in seconds at the stream's rate.
+    seconds: f64,
+    elapsed: Duration,
+    /// The system lane's loudest sample.
+    system_peak: f32,
+}
 
-/// Plays nothing itself, and nothing else may play during the run: call
-/// mode's IOProc zero-fills the aggregate's output, so the capture is the
-/// output device's client and runs from its start. The first callback
-/// comes within [`FIRST_CALLBACK`] of `start` returning, and four seconds
-/// of capture hold about four seconds of frames on every lane (drained
-/// every 10 ms, so the rings never fill).
-#[test]
-#[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
-fn call_capture_runs_from_its_start_with_nothing_playing() {
-    let lanes: &'static [AudioLane] = &[AudioLane::Mic, AudioLane::System];
-    let measured = within(Duration::from_secs(30), "start, capture, stop", move || {
-        let backend = LiveCaptureBackend::new();
-        let sink = Arc::new(LaneFrameSink::new(lanes));
-        let starting = Instant::now();
-        let stream = match backend.start(lanes, None, Arc::clone(&sink)) {
-            Ok(stream) => stream,
-            Err(error) => {
-                println!("SKIPPED call capture: start failed after {:?}: {error}", starting.elapsed());
-                return None;
-            }
-        };
-        let started = Instant::now();
-        println!("started {lanes:?} in {:?}: {stream:?}", started - starting);
-        let mut first = None;
-        let mut callbacks = 0usize;
-        let mut frames = 0usize;
-        let mut scratch = vec![0.0f32; 4_800];
-        while started.elapsed() < Duration::from_secs(CALL_SECONDS) {
-            if sink.wake().wait(Duration::from_millis(10)) {
-                callbacks += 1;
-                first.get_or_insert_with(|| started.elapsed());
-            }
-            // The lanes move together, so the first ring counts the frames.
-            loop {
-                let available = sink.available_to_read().min(scratch.len());
-                if available == 0 {
-                    break;
-                }
-                for lane in 0..lanes.len() {
-                    sink.ring(lane).read(&mut scratch[..available]);
-                }
-                frames += available;
-            }
+/// Starts a call capture on `backend`, records `length` (drained every
+/// 10 ms, so the rings never fill), stops, and prints what it measured.
+/// `None` when the start failed (printed, not failed).
+#[allow(clippy::cast_precision_loss)]
+fn call_run(backend: &LiveCaptureBackend, what: &str, length: Duration) -> Option<CallRun> {
+    let lanes = [AudioLane::Mic, AudioLane::System];
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let starting = Instant::now();
+    let stream = match backend.start(&lanes, None, Arc::clone(&sink)) {
+        Ok(stream) => stream,
+        Err(error) => {
+            println!(
+                "SKIPPED {what}: start failed after {:?}: {error}",
+                starting.elapsed()
+            );
+            return None;
         }
-        let elapsed = started.elapsed();
-        let stopping = Instant::now();
-        backend.stop();
-        println!(
-            "first callback {first:?} after start returned, {callbacks} callbacks, {frames} frames \
-             ({:.2} s at {} Hz) in {elapsed:?}, dropped {:?}; stopped in {:?}",
-            frames as f64 / stream.sample_rate,
-            stream.sample_rate,
-            sink.dropped_samples(),
-            stopping.elapsed()
-        );
-        Some((first, frames as f64 / stream.sample_rate, elapsed))
-    });
-    let Some((first, seconds, elapsed)) = measured else {
-        return;
     };
-    let first = first.expect("call mode's IOProc never ran with nothing playing");
+    let started = Instant::now();
+    println!("{what}: started in {:?}: {stream:?}", started - starting);
+    let mut first = None;
+    let mut callbacks = 0usize;
+    let mut frames = 0usize;
+    let mut system_peak = 0.0f32;
+    let mut scratch = vec![0.0f32; 4_800];
+    while started.elapsed() < length {
+        if sink.wake().wait(Duration::from_millis(10)) {
+            callbacks += 1;
+            first.get_or_insert_with(|| started.elapsed());
+        }
+        // The lanes move together, so the first ring counts the frames.
+        loop {
+            let available = sink.available_to_read().min(scratch.len());
+            if available == 0 {
+                break;
+            }
+            for (index, lane) in lanes.iter().enumerate() {
+                sink.ring(index).read(&mut scratch[..available]);
+                if *lane == AudioLane::System {
+                    system_peak = system_peak.max(peak(&scratch[..available]));
+                }
+            }
+            frames += available;
+        }
+    }
+    let elapsed = started.elapsed();
+    let stopping = Instant::now();
+    backend.stop();
+    let seconds = frames as f64 / stream.sample_rate;
+    println!(
+        "{what}: first callback {first:?} after start returned ({:?} after it was called), \
+         {callbacks} callbacks, {frames} frames ({seconds:.2} s at {} Hz) in {elapsed:?}, \
+         system peak {system_peak}, dropped {:?}; stopped in {:?}",
+        first.map(|first| first + (started - starting)),
+        stream.sample_rate,
+        sink.dropped_samples(),
+        stopping.elapsed()
+    );
+    Some(CallRun {
+        first,
+        seconds,
+        elapsed,
+        system_peak,
+    })
+}
+
+/// What a call capture with nothing playing must show: its first callback
+/// within [`FIRST_CALLBACK`] of the start and about as many seconds of
+/// frames as it ran.
+fn assert_ran_from_the_start(run: &CallRun) {
+    let first = run
+        .first
+        .expect("call mode's IOProc never ran with nothing playing");
     assert!(
         first <= FIRST_CALLBACK,
         "the first callback came {first:?} after the start, more than {FIRST_CALLBACK:?}"
     );
     assert!(
-        seconds >= elapsed.as_secs_f64() - 0.2,
-        "{seconds:.2} s of frames in {elapsed:?}"
+        run.seconds >= run.elapsed.as_secs_f64() - 0.2,
+        "{:.2} s of frames in {:?}",
+        run.seconds,
+        run.elapsed
     );
+}
+
+/// Plays nothing itself, and nothing else may play during the run: the
+/// call capture's own silent output keeps its tap aggregate running, so
+/// the first callback comes within [`FIRST_CALLBACK`] of `start` returning
+/// and four seconds hold about four seconds of frames on every lane. The
+/// system lane is all zeros too, which over SSH proves nothing about its
+/// content (a session without the capture grant gets a silent tap anyway);
+/// it does show the silent output itself reaches it as zeros.
+#[test]
+#[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
+fn call_capture_runs_from_its_start_with_nothing_playing() {
+    let run = within(Duration::from_secs(30), "start, capture, stop", || {
+        call_run(
+            &LiveCaptureBackend::new(),
+            "call capture",
+            Duration::from_secs(4),
+        )
+    });
+    let Some(run) = run else {
+        return;
+    };
+    assert_ran_from_the_start(&run);
+    assert_eq!(run.system_peak, 0.0, "the system lane is digital silence");
+}
+
+/// A rebuild as the session runs it after a device change, `stop()` and
+/// `start` again on the same backend: the rebuilt capture starts its silent
+/// output again and runs from its start too. Forge cannot change its
+/// default output (built-in speakers only), so the device change itself is
+/// not exercised here.
+#[test]
+#[ignore = "needs a Mac with audio devices; run with -- --ignored --nocapture"]
+fn a_rebuilt_call_capture_keeps_its_silent_output() {
+    let runs = within(
+        Duration::from_secs(30),
+        "two starts, captures, stops",
+        || {
+            let backend = LiveCaptureBackend::new();
+            let first = call_run(&backend, "before the rebuild", Duration::from_secs(1))?;
+            let second = call_run(&backend, "after the rebuild", Duration::from_secs(2))?;
+            Some((first, second))
+        },
+    );
+    let Some((first, second)) = runs else {
+        return;
+    };
+    assert_ran_from_the_start(&first);
+    assert_ran_from_the_start(&second);
 }

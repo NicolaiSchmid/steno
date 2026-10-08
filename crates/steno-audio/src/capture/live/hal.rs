@@ -1,5 +1,5 @@
 //! The CoreAudio HAL calls behind the capture: property reads and writes,
-//! default devices, process objects, the process tap
+//! default devices, the process tap
 //! (`AudioHardwareCreateProcessTap` with a `CATapDescription`), the private
 //! aggregate device, one IOProc and property listeners.
 //! Swift: `Sources/StenoAudio/Capture/AudioObjectProperties.swift`,
@@ -34,11 +34,10 @@ use objc2_core_audio::{
     kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
     kAudioDevicePropertyDeviceIsAlive, kAudioDevicePropertyDeviceUID, kAudioDevicePropertyLatency,
     kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertySafetyOffset,
-    kAudioDevicePropertyStreamConfiguration, kAudioHardwarePropertyTranslatePIDToProcessObject,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectSystemObject, kAudioObjectUnknown, kAudioSubDeviceDriftCompensationKey,
-    kAudioSubDeviceUIDKey, kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey,
-    kAudioTapPropertyFormat,
+    kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyElementMain,
+    kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject,
+    kAudioObjectUnknown, kAudioSubDeviceDriftCompensationKey, kAudioSubDeviceUIDKey,
+    kAudioSubTapDriftCompensationKey, kAudioSubTapUIDKey, kAudioTapPropertyFormat,
 };
 use objc2_core_audio_types::{
     AudioBufferList, AudioStreamBasicDescription, kAudioFormatFlagIsNonInterleaved,
@@ -346,34 +345,13 @@ pub fn is_alive(id: Id) -> bool {
     read_bool(id, kAudioDevicePropertyDeviceIsAlive)
 }
 
-/// The HAL's process object for `pid`.
-pub fn process_object(pid: i32) -> Result<Id, CoreAudioError> {
-    read_pod(
-        SYSTEM,
-        kAudioHardwarePropertyTranslatePIDToProcessObject,
-        kAudioObjectPropertyScopeGlobal,
-        Some(&pid.to_ne_bytes()),
-    )
-}
-
-/// The HAL's process object for this process. Fails rather than returning
-/// `kAudioObjectUnknown`: a tap that "excludes" object 0 excludes nothing
-/// and would record Steno's own playback.
-pub fn own_process_object() -> Result<Id, CaptureError> {
-    // A pid fits i32 on macOS.
-    #[allow(clippy::cast_possible_wrap)]
-    let pid = std::process::id() as i32;
-    let object = process_object(pid)?;
-    if object == UNKNOWN {
-        return Err(CaptureError::BackendFailed(format!(
-            "no process object for pid {pid}"
-        )));
-    }
-    Ok(object)
-}
-
-/// A private, unmuted global process tap of everything the Mac plays
-/// except the excluded processes (Steno itself). Destroyed on drop.
+/// A private, unmuted global process tap of everything the Mac plays,
+/// Steno's own process included: the call capture's silent output IOProc
+/// is what keeps the tap aggregate running, and the HAL counts only the
+/// output of a process the tap includes (A10 of
+/// `.plans/2026-10-07-stable-promotion.md`). So nothing else of Steno's may
+/// play while it records, which [`crate::playback::Playback`] enforces.
+/// Destroyed on drop.
 pub struct ProcessTap {
     pub id: Id,
     /// The tap's UID as `kAudioSubTapUIDKey` wants it.
@@ -391,12 +369,9 @@ impl std::fmt::Debug for ProcessTap {
 }
 
 impl ProcessTap {
-    pub fn new(exclude: &[Id], name: &str) -> Result<Self, CaptureError> {
-        let numbers: Vec<Retained<NSNumber>> = exclude
-            .iter()
-            .map(|&o| NSNumber::numberWithUnsignedInt(o))
-            .collect();
-        let array = NSArray::from_retained_slice(&numbers);
+    pub fn new(name: &str) -> Result<Self, CaptureError> {
+        // Excluding no process: the global tap of everything.
+        let array: Retained<NSArray<NSNumber>> = NSArray::new();
         // SAFETY: Objective-C initialiser and setters on a freshly allocated
         // description; the array outlives the call.
         let description = unsafe {

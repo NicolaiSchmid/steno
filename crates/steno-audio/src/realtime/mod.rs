@@ -20,6 +20,8 @@ pub mod wake;
 pub use io_proc::{
     BufferView, MAX_SLICE_BUFFERS, SliceView, deliver, deliver_slices, interleaved_view,
 };
+#[cfg(target_os = "macos")]
+pub use io_proc::{MAX_BUFFERS, silence_output};
 pub use level_meter::{LevelMeter, LevelSlot};
 pub use processing::{ProcessingConfiguration, ProcessingThread};
 pub use rate_converter::RateConverter;

@@ -6,7 +6,8 @@
 //! `PacketRouter`), the processing loop with the real Speex canceller, its
 //! far-end delay line, metering, the raw-mic copy and the relay hand-off
 //! run one second of audio on the test's thread under the counting
-//! allocator and allocate nothing. `tests/pipewire.rs` counts
+//! allocator and allocate nothing, as does the macOS call capture's silent
+//! output IOProc body (`silence_output`). `tests/pipewire.rs` counts
 //! the real data-loop thread against a PipeWire daemon on Linux.
 //! Swift: `Tests/StenoAudioTests/RealTimeAllocationTests.swift` (Darwin's
 //! `malloc_logger` hook); here the crate's own `#[global_allocator]`, so it
@@ -466,4 +467,56 @@ fn the_two_stream_bodies_allocate_nothing() {
         follower.underrun_frames(),
         follower.slipped_frames()
     );
+}
+
+/// The body of the call capture's silent output IOProc zeroes the HAL's
+/// output buffers (a null `mData` and a size of 0 skipped) without
+/// allocating.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_silent_output_allocates_nothing() {
+    use std::ptr::NonNull;
+
+    use objc2_core_audio_types::AudioBuffer;
+    use steno_audio::realtime::silence_output;
+
+    #[repr(C)]
+    struct List {
+        count: u32,
+        buffers: [AudioBuffer; 3],
+    }
+    let mut stereo = vec![1.0f32; 2 * CALLBACK_FRAMES];
+    let mut untouched = vec![0.5f32; 8];
+    let mut list = List {
+        count: 3,
+        buffers: [
+            AudioBuffer {
+                mNumberChannels: 2,
+                mDataByteSize: 4 * 512,
+                mData: std::ptr::null_mut(),
+            },
+            AudioBuffer {
+                mNumberChannels: 1,
+                mDataByteSize: 0,
+                mData: untouched.as_mut_ptr().cast(),
+            },
+            AudioBuffer {
+                mNumberChannels: 2,
+                mDataByteSize: (4 * stereo.len()) as u32,
+                mData: stereo.as_mut_ptr().cast(),
+            },
+        ],
+    };
+    let output = NonNull::from(&mut list).cast();
+    let allocations = CountingAllocator::allocations_during(|| {
+        // SAFETY: the non-null buffers are vectors of their stated size that
+        // outlive the call, laid out as an `AudioBufferList` of three.
+        unsafe { silence_output(output) };
+    });
+    assert_eq!(
+        allocations, 0,
+        "{allocations} allocations in the silent output"
+    );
+    assert!(stereo.iter().all(|s| s.to_bits() == 0));
+    assert!(untouched.iter().all(|s| *s == 0.5));
 }

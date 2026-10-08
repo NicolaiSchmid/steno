@@ -107,6 +107,50 @@ pub unsafe fn deliver(buffers: &[BufferView], sources: &[LaneSource], sink: &Lan
     sink.end_callback();
 }
 
+/// The most buffers of one list an IOProc of the macOS backend reads or
+/// writes: on input the output device's inputs (usually none), the
+/// microphone's and the tap's, on output the output device's streams.
+/// Sixteen leaves room for a many-channel interface.
+#[cfg(target_os = "macos")]
+pub const MAX_BUFFERS: usize = 16;
+
+/// The body of the call capture's silent output IOProc: zero-fills the
+/// first [`MAX_BUFFERS`] output buffers the HAL handed it, skipping a
+/// buffer without data or of size 0. The HAL zeroes an IOProc's output
+/// before the call already (measured on the Mac, A10 of
+/// `.plans/2026-10-07-stable-promotion.md`); writing the zeros again keeps
+/// the promise that the capture plays nothing but digital silence from
+/// depending on that. One `write_bytes` per buffer over memory the HAL
+/// owns: no allocation, no lock, no syscall.
+///
+/// # Safety
+///
+/// `list` must point at an `AudioBufferList` whose `mNumberBuffers`
+/// buffers are laid out after it, each `mData` either null or valid for
+/// writes of `mDataByteSize` bytes for the duration of the call, as the HAL
+/// guarantees for an IOProc's output list and the tests with owned memory.
+#[cfg(target_os = "macos")]
+#[inline(always)]
+pub unsafe fn silence_output(list: std::ptr::NonNull<objc2_core_audio_types::AudioBufferList>) {
+    let list = list.as_ptr();
+    // SAFETY: `list` is valid for reads by the caller's guarantee, and its
+    // buffers follow it (`mBuffers` is declared with one element; the
+    // pointer keeps the provenance of the whole list).
+    unsafe {
+        let count = ((*list).mNumberBuffers as usize).min(MAX_BUFFERS);
+        let buffers = (&raw mut (*list).mBuffers).cast::<objc2_core_audio_types::AudioBuffer>();
+        for index in 0..count {
+            let buffer = &*buffers.add(index);
+            if !buffer.mData.is_null() && buffer.mDataByteSize > 0 {
+                // SAFETY: a non-null `mData` is valid for writes of
+                // `mDataByteSize` bytes by the caller's guarantee; zero
+                // bytes are digital silence in every linear PCM format.
+                std::ptr::write_bytes(buffer.mData.cast::<u8>(), 0, buffer.mDataByteSize as usize);
+            }
+        }
+    }
+}
+
 /// One input buffer as safe code holds it: a WASAPI capture packet (valid
 /// from `GetBuffer` to `ReleaseBuffer`), the follower's staging copy, or a
 /// dequeued PipeWire buffer ([`interleaved_view`]), its interleaved samples

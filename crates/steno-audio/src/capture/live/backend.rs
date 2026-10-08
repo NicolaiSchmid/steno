@@ -31,17 +31,26 @@
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
 //! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
-//! `AudioHardwareDestroyAggregateDevice`, `AudioHardwareDestroyProcessTap`.
+//! `AudioHardwareDestroyAggregateDevice`, `AudioHardwareDestroyProcessTap`,
+//! and last the silent output IOProc (below), which starts before the
+//! aggregate's.
 //!
-//! Call mode needs an output client. The aggregate's clock master is the
-//! system output device; where the capture permission is missing (a
-//! session without a GUI, over SSH) the HAL runs the IOProc only while
-//! another client has that output open, so the capture delivers no
-//! callbacks at all until something plays (measured in
-//! `.plans/spikes/2026-10-01-spike-rust-capture.md`: the first callback
-//! arrived when `afplay` opened the speakers, and a run with nothing
-//! playing got none). In-person mode has no tap and runs on the
-//! microphone's clock.
+//! Call mode is its own output client (A10 of
+//! `.plans/2026-10-07-stable-promotion.md`). An aggregate with a process
+//! tap runs only while a process the tap includes drives the output: with
+//! nothing playing, `AudioDeviceStart` succeeds and the IOProc is never
+//! called, so neither the tap nor the microphone delivered until some app
+//! played (0 callbacks on a Mac over SSH; a silent `afplay` already
+//! playing gave the first at 67 ms). So the tap includes Steno's own
+//! process, and a call capture first starts a silent IOProc of its own on
+//! the default output device (`silent_io_proc`): the tap aggregate's
+//! first callback then comes within 100 ms of the start. The silent
+//! IOProc follows the default output (a change of it rebuilds the
+//! capture), and one that does not start is logged and the capture goes
+//! on as before. No in-app playback while recording, enforced by
+//! [`Playback`](crate::playback::Playback): Steno's own output would land
+//! in the system lane, and the capture session holds that gate while it
+//! records. In-person mode has no tap and needs no output client.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -68,7 +77,9 @@ use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource, NominalSampleRate, StreamLayout,
 };
-use crate::realtime::{BufferView, LaneFrameSink, RateConverter, deliver};
+use crate::realtime::{
+    BufferView, LaneFrameSink, MAX_BUFFERS, RateConverter, deliver, silence_output,
+};
 
 /// Shared with the IOProc through a raw pointer; boxed so it never moves,
 /// alive until the `IoProc` is dropped.
@@ -76,11 +87,6 @@ struct CallbackContext {
     sink: Arc<LaneFrameSink>,
     sources: Vec<LaneSource>,
 }
-
-/// The most input buffers an aggregate of ours produces: the output device's
-/// inputs (usually none), the microphone's and the tap's. Sixteen leaves
-/// room for a many-channel interface.
-const MAX_BUFFERS: usize = 16;
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
 /// buffer list and hands it to [`deliver`]: no allocation, no lock, no
@@ -121,6 +127,48 @@ unsafe extern "C-unwind" fn io_proc(
         }
     });
     0
+}
+
+/// The call capture's silent output IOProc on the default output device:
+/// writes zeros over its output buffers ([`silence_output`]; the HAL has
+/// zeroed them already) and reads nothing, so the capture is a client of
+/// the output that the tap includes. No allocation, no lock, no syscall;
+/// behind [`hal::abort_on_panic`]. See the module doc.
+unsafe extern "C-unwind" fn silent_io_proc(
+    _device: Id,
+    _now: NonNull<AudioTimeStamp>,
+    _input: NonNull<AudioBufferList>,
+    _input_time: NonNull<AudioTimeStamp>,
+    output: NonNull<AudioBufferList>,
+    _output_time: NonNull<AudioTimeStamp>,
+    _client: *mut c_void,
+) -> OSStatus {
+    hal::abort_on_panic(|| {
+        // SAFETY: `output` is the HAL's output list for this cycle, its
+        // buffers writable for their `mDataByteSize` for the call.
+        unsafe { silence_output(output) };
+    });
+    0
+}
+
+/// Starts [`silent_io_proc`] on the default output device, the one the tap
+/// follows, or on the system output (`fallback`, the clock master) when
+/// the default output does not resolve. A failure is logged and the
+/// capture goes on without it, as it did before A10.
+fn start_silent_output(fallback: &AudioDeviceInfo) -> Option<IoProc> {
+    let device = AudioDevices::default_output().map_or(fallback.id, |device| device.id);
+    // SAFETY: `silent_io_proc` reads no client data, so a null client
+    // stays valid for as long as the IOProc runs.
+    match unsafe { IoProc::start(device, Some(silent_io_proc), std::ptr::null_mut()) } {
+        Ok(io) => Some(io),
+        Err(error) => {
+            tracing::warn!(
+                "the silent output on audio device {device} did not start ({error}); \
+                 the call capture runs only while another app plays"
+            );
+            None
+        }
+    }
 }
 
 /// The input a capture asked for `uid` records now ([`chosen_or_default`]):
@@ -213,6 +261,9 @@ struct Active {
     _listeners: Vec<PropertyListener>,
     _aggregate: AggregateDevice,
     _tap: Option<ProcessTap>,
+    /// Started before the aggregate's IOProc, stopped after the tap is
+    /// destroyed; `None` in-person, and when it did not start.
+    _silent_output: Option<IoProc>,
     watcher: Arc<Watcher>,
     watcher_thread: Option<JoinHandle<()>>,
 }
@@ -417,8 +468,7 @@ impl CaptureBackend for LiveCaptureBackend {
         };
 
         let tap = if needs_tap {
-            let own = hal::own_process_object()?;
-            Some(ProcessTap::new(&[own], "Steno system lane")?)
+            Some(ProcessTap::new("Steno system lane")?)
         } else {
             None
         };
@@ -476,6 +526,16 @@ impl CaptureBackend for LiveCaptureBackend {
                 .unwrap_or_default(),
             mic_sub_device,
         )?;
+
+        // The call capture's own output client, started once the aggregate
+        // is built (building it over a running output device took about
+        // 300 ms longer on a Mac) and before the aggregate starts; see the
+        // module doc.
+        let silent_output = if needs_tap {
+            start_silent_output(&output)
+        } else {
+            None
+        };
 
         let context = Box::new(CallbackContext {
             sink: Arc::clone(&sink),
@@ -590,6 +650,7 @@ impl CaptureBackend for LiveCaptureBackend {
         };
 
         *active = Some(Active {
+            _silent_output: silent_output,
             _tap: tap,
             _aggregate: aggregate,
             _io_proc: io,
@@ -624,13 +685,14 @@ impl CaptureBackend for LiveCaptureBackend {
             let _ = thread.join();
         }
         // The teardown order: IOProc (stop, destroy) before the context it
-        // reads, then listeners, aggregate, tap.
+        // reads, then listeners, aggregate, tap, silent output.
         let Active {
             _io_proc: io_proc,
             _context: context,
             _listeners: listeners,
             _aggregate: aggregate,
             _tap: tap,
+            _silent_output: silent_output,
             ..
         } = active;
         drop(io_proc);
@@ -638,6 +700,7 @@ impl CaptureBackend for LiveCaptureBackend {
         drop(listeners);
         drop(aggregate);
         drop(tap);
+        drop(silent_output);
     }
 }
 
@@ -765,6 +828,73 @@ mod tests {
         assert_eq!(
             LiveCaptureBackend::mic_latency_frames(481, false, 0.0, 24_000.0),
             481
+        );
+    }
+
+    /// The silent output IOProc zeroes every output buffer it is handed,
+    /// the last one included, goes on past a buffer without data and one of
+    /// size 0, and writes nothing past a buffer's size.
+    #[test]
+    fn the_silent_output_writes_only_zeros() {
+        use objc2_core_audio_types::AudioBuffer;
+
+        /// An `AudioBufferList` of four buffers, laid out as the HAL's.
+        #[repr(C)]
+        struct List {
+            count: u32,
+            buffers: [AudioBuffer; 4],
+        }
+        let mut stereo = vec![0.75f32; 1_024];
+        let mut sized_zero = vec![0.5f32; 16];
+        let mut mono = vec![-0.25f32; 512];
+        let buffer = |channels: u32, data: *mut f32, floats: u32| AudioBuffer {
+            mNumberChannels: channels,
+            mDataByteSize: floats * 4,
+            mData: data.cast(),
+        };
+        let mut output = List {
+            count: 4,
+            buffers: [
+                buffer(2, stereo.as_mut_ptr(), 1_024),
+                buffer(2, std::ptr::null_mut(), 1_024),
+                buffer(1, sized_zero.as_mut_ptr(), 0),
+                buffer(1, mono.as_mut_ptr(), 256),
+            ],
+        };
+        let mut input = List {
+            count: 0,
+            buffers: output.buffers,
+        };
+        // SAFETY: an all-zero `AudioTimeStamp` is a valid, unset stamp.
+        let mut time: AudioTimeStamp = unsafe { std::mem::zeroed() };
+        let time = NonNull::from(&mut time);
+        // SAFETY: every non-null `mData` points at a vector of at least
+        // `mDataByteSize` bytes that outlives the call, and `List` has the
+        // layout of an `AudioBufferList` of four buffers.
+        let status = unsafe {
+            silent_io_proc(
+                0,
+                time,
+                NonNull::from(&mut input).cast(),
+                time,
+                NonNull::from(&mut output).cast(),
+                time,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(status, 0);
+        assert!(stereo.iter().all(|s| s.to_bits() == 0), "zeroed in full");
+        assert!(
+            sized_zero.iter().all(|s| *s == 0.5),
+            "a size of 0 is left alone"
+        );
+        assert!(
+            mono[..256].iter().all(|s| s.to_bits() == 0),
+            "the last buffer, past the null and the empty one"
+        );
+        assert!(
+            mono[256..].iter().all(|s| *s == -0.25),
+            "nothing past the size"
         );
     }
 
