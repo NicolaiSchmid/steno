@@ -1403,9 +1403,8 @@ fn as_writer_failure(error: CaptureError) -> CaptureError {
 struct Unwinding<'a> {
     core: &'a Core,
     error: Option<CaptureError>,
-    /// The state the guarded step holds, and the drop leaves.
-    holds: fn(&CaptureState) -> bool,
-    stops_backend: bool,
+    /// A start's, which holds `Starting`; a finalise's holds `Stopping`.
+    starting: bool,
 }
 
 impl<'a> Unwinding<'a> {
@@ -1413,8 +1412,7 @@ impl<'a> Unwinding<'a> {
         Self {
             core,
             error: Some(error),
-            holds: |state| matches!(state, CaptureState::Stopping),
-            stops_backend: false,
+            starting: false,
         }
     }
 
@@ -1424,8 +1422,7 @@ impl<'a> Unwinding<'a> {
             error: Some(CaptureError::BackendFailed(
                 "starting the recording panicked".into(),
             )),
-            holds: |state| matches!(state, CaptureState::Starting),
-            stops_backend: true,
+            starting: true,
         }
     }
 
@@ -1439,10 +1436,15 @@ impl Drop for Unwinding<'_> {
         if let Some(error) = self.error.take() {
             // The state is the guarded step's until the drop leaves it, so
             // the backend stops with the lock released, as everywhere.
-            if !(self.holds)(&self.core.lock().state) {
+            let holds = if self.starting {
+                CaptureState::Starting
+            } else {
+                CaptureState::Stopping
+            };
+            if self.core.lock().state != holds {
                 return;
             }
-            if self.stops_backend {
+            if self.starting {
                 self.core.backend.stop();
             }
             self.core.set_state(
