@@ -36,7 +36,7 @@ use steno_bridge::{CaptureMode, PermissionKind, RecordingState};
 use steno_core::{MeetingSource, RecordingEndReason, Store};
 use steno_host::services::{LaneLevels, Permissions, Recorder, RecorderStatus, SpeechModels};
 use steno_host::speech::ModelAsset;
-use steno_pipeline::{LocalRecordingIntake, RecordingResult};
+use steno_pipeline::{LocalRecordingIntake, LocalRecordingIntakeError, RecordingResult};
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
 
@@ -214,24 +214,88 @@ fn ended_with(failure: &CaptureError, reason: &RecordingEndReason) -> &'static s
     }
 }
 
-/// A `warn` line for a recording that ended with `failure`: the meeting,
-/// the reason and the failure's kind, never its text (it can hold a path).
-fn log_failure(meeting_id: Uuid, failure: &CaptureError, reason: &RecordingEndReason) {
-    let kind = match failure {
+/// The kind of `failure` a `warn` line names, never its text (it can hold
+/// a path or an OS error).
+fn failure_kind(failure: &CaptureError) -> &'static str {
+    match failure {
         CaptureError::DeviceLost => "device lost",
         CaptureError::WriterFailed(_) => "write failed",
+        CaptureError::InputDeviceUnavailable => "no input device",
+        CaptureError::OutputDeviceUnavailable => "no output device",
+        CaptureError::SampleRateMismatch { .. } => "sample rate",
         _ => "capture failed",
-    };
+    }
+}
+
+/// A `warn` line for a recording that ended with `failure`: the meeting,
+/// the reason and the failure's kind ([`failure_kind`]).
+fn log_failure(meeting_id: Uuid, failure: &CaptureError, reason: &RecordingEndReason) {
     tracing::warn!(
         meeting = %meeting_id,
         reason = ?reason.kind(),
-        kind,
+        kind = failure_kind(failure),
         "the recording ended with a failure"
     );
 }
 
+/// The prefix of the status line of a start that failed; what follows
+/// says why in plain words ([`refused`]). Swift put the error's text
+/// after it; the plain words are Rust only.
+const COULD_NOT_START: &str = "Recording could not start:";
+
 /// Why a recording that `CaptureRecorder::start` refused did not start.
 const NO_ROOM_TO_START: &str = "the disk is almost full. Free some space and try again.";
+
+/// Why a start whose capture session could not be built, or did not open
+/// its devices for a reason with no words of its own, did not start.
+const DEVICES_DID_NOT_OPEN: &str = "Steno could not open the audio devices.";
+
+/// `reason` for the status line of a start that failed, after a `warn`
+/// line that names the failure's `kind`, never the error's text.
+fn refused(kind: &str, reason: impl Into<String>) -> String {
+    tracing::warn!(kind, "the recording could not start");
+    reason.into()
+}
+
+/// Why a capture session's start that failed with `error` did not start,
+/// in plain words.
+fn capture_refused(error: &CaptureError) -> String {
+    let reason = match error {
+        CaptureError::InputDeviceUnavailable => "no microphone is available.".to_owned(),
+        CaptureError::OutputDeviceUnavailable => "no sound output is available.".to_owned(),
+        CaptureError::SampleRateMismatch { actual } => {
+            format!("the audio devices run at {actual} Hz, and Steno records at 48000 Hz.")
+        }
+        CaptureError::DeviceLost => "an audio device disappeared.".to_owned(),
+        CaptureError::WriterFailed(_) => {
+            "Steno could not write to the recordings folder.".to_owned()
+        }
+        _ => DEVICES_DID_NOT_OPEN.to_owned(),
+    };
+    refused(failure_kind(error), reason)
+}
+
+/// The kind of an intake failure a `warn` line names.
+fn intake_kind(error: &LocalRecordingIntakeError) -> &'static str {
+    match error {
+        LocalRecordingIntakeError::NotRecording(..) => "not recording",
+        LocalRecordingIntakeError::Store(_) => "store",
+        LocalRecordingIntakeError::Pipeline(_) => "pipeline",
+    }
+}
+
+/// A `warn` line for the recording of `meeting_id` that could not be
+/// saved, naming the failure's `kind`, never the error's text.
+fn log_not_saved(meeting_id: Uuid, kind: &str) {
+    tracing::warn!(meeting = %meeting_id, kind, "the recording could not be saved");
+}
+
+/// The status line of a stop whose session could not finish the files.
+const FILES_NOT_FINISHED: &str =
+    "Recording could not be saved: Steno could not finish the recording's files.";
+
+/// The status line of a stop whose meeting could not be stored.
+const MEETING_NOT_STORED: &str = "Recording could not be saved: Steno could not store the meeting.";
 
 /// The warning of a recording with `minutes` left; a recording the floor
 /// `stops` ([`DiskWatch::stops`]) is promised the stop, one it does not
@@ -597,11 +661,21 @@ impl CaptureRecorder {
         });
     }
 
-    /// Starts the session and the meeting.
-    fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<(), String> {
-        let settings = self.store.settings().map_err(|e| e.to_string())?;
-        let audio_folder = steno_core::paths::file_url_path(&settings.audio_folder)
-            .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
+    /// The capture configuration of a recording in `mode`, from the
+    /// settings, and its recordings folder; the error says why not in
+    /// plain words, for after [`COULD_NOT_START`].
+    fn configuration(&self, mode: CaptureMode) -> Result<(CaptureConfiguration, PathBuf), String> {
+        let settings = self
+            .store
+            .settings()
+            .map_err(|_| refused("settings", "Steno could not read its settings."))?;
+        let audio_folder =
+            steno_core::paths::file_url_path(&settings.audio_folder).ok_or_else(|| {
+                refused(
+                    "audio folder",
+                    "the recordings folder in Settings is not a folder on this computer.",
+                )
+            })?;
         let audio_mode = match mode {
             CaptureMode::Call => steno_audio::CaptureMode::Call,
             CaptureMode::InPerson => steno_audio::CaptureMode::InPerson,
@@ -610,15 +684,24 @@ impl CaptureRecorder {
         configuration
             .input_device_uid
             .clone_from(&settings.input_device_uid);
+        Ok((configuration, audio_folder))
+    }
+
+    /// Starts the session and the meeting; the error says why not in plain
+    /// words, for after [`COULD_NOT_START`].
+    fn start_inner(&self, mode: CaptureMode, call_app: Option<&str>) -> Result<(), String> {
+        let (configuration, audio_folder) = self.configuration(mode)?;
         let disk = self.disk();
         let rate = bytes_per_second(&configuration);
         let room = disk
             .free_for(&audio_folder)
             .map_or(Room::Enough, |free| Room::of(free, rate, disk.stops));
         if room == Room::Full {
-            return Err(NO_ROOM_TO_START.to_owned());
+            return Err(refused("no room", NO_ROOM_TO_START));
         }
-        let session = Arc::new((self.make_session)(configuration)?);
+        let session = (self.make_session)(configuration)
+            .map_err(|_| refused("no session", DEVICES_DID_NOT_OPEN))?;
+        let session = Arc::new(session);
         let started_at = Utc::now();
         let intake = self.intake();
         let meeting = intake
@@ -632,7 +715,7 @@ impl CaptureRecorder {
                 &[],
                 started_at,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| refused("meeting", "Steno could not create the meeting."))?;
         let begun = BegunMeeting {
             intake: &intake,
             meeting_id: meeting.id,
@@ -645,8 +728,9 @@ impl CaptureRecorder {
         let states = session.states();
         if let Err(error) = session.start(meeting.id) {
             begun.disarm();
-            let _ = intake.fail(meeting.id, &format!("Recording could not start: {error}"));
-            return Err(error.to_string());
+            let reason = capture_refused(&error);
+            let _ = intake.fail(meeting.id, &format!("{COULD_NOT_START} {reason}"));
+            return Err(reason);
         }
         let meeting_id = meeting.id;
         let shared = Arc::new(Mutex::new(None::<LaneLevels>));
@@ -887,13 +971,16 @@ impl CaptureRecorder {
                 );
                 match completed {
                     Ok(_) => Ok((recording_warning(active.mode, &statistics), ended)),
-                    Err(error) => Err(format!("Recording could not be saved: {error}")),
+                    Err(error) => {
+                        log_not_saved(active.meeting_id, intake_kind(&error));
+                        Err(MEETING_NOT_STORED)
+                    }
                 }
             }
             Err(error) => {
-                let message = format!("Recording could not be saved: {error}");
-                let _ = intake.fail(active.meeting_id, &message);
-                Err(message)
+                log_not_saved(active.meeting_id, failure_kind(&error));
+                let _ = intake.fail(active.meeting_id, FILES_NOT_FINISHED);
+                Err(FILES_NOT_FINISHED)
             }
         };
         drop(active.session);
@@ -925,7 +1012,7 @@ impl CaptureRecorder {
                 inner.status.warning = warning;
                 inner.status.error = ended;
             }
-            Err(error) => inner.status.error = Some(error),
+            Err(error) => inner.status.error = Some(error.to_owned()),
         }
         drop(inner);
         std::mem::forget(unwinding);
@@ -1071,7 +1158,7 @@ impl Recorder for CaptureRecorder {
             Err(error) => {
                 let mut inner = self.inner();
                 inner.status.state = RecordingState::Idle;
-                inner.status.error = Some(format!("Recording could not start: {error}"));
+                inner.status.error = Some(format!("{COULD_NOT_START} {error}"));
             }
         }
         std::mem::forget(unwinding);
@@ -2366,6 +2453,37 @@ mod tests {
             ended_with(&write, &RecordingEndReason::Failed),
             "The recording stopped early: Steno could not write the recording to the disk. What was recorded until then is saved."
         );
+    }
+
+    /// A capture that does not start says why in plain words, by case;
+    /// the `warn` line names the kind, never the error's text.
+    #[test]
+    fn a_capture_that_does_not_start_says_why_in_plain_words() {
+        let log = steno_pipeline::fixtures::CapturedLog::warnings();
+        let path = "/home/plain-words-test/Steno: Permission denied";
+        for (error, reason) in [
+            (
+                CaptureError::InputDeviceUnavailable,
+                "no microphone is available.",
+            ),
+            (
+                CaptureError::SampleRateMismatch { actual: 44_100 },
+                "the audio devices run at 44100 Hz, and Steno records at 48000 Hz.",
+            ),
+            (
+                CaptureError::WriterFailed(path.to_owned()),
+                "Steno could not write to the recordings folder.",
+            ),
+            (
+                CaptureError::BackendFailed(path.to_owned()),
+                DEVICES_DID_NOT_OPEN,
+            ),
+        ] {
+            assert_eq!(capture_refused(&error), reason, "{error:?}");
+        }
+        let text = log.text();
+        assert!(text.contains("the recording could not start"), "{text}");
+        assert!(!text.contains("plain-words-test"), "{text}");
     }
 
     /// Without room for the save, a recording does not start, and no

@@ -1153,7 +1153,8 @@ mod tests {
         );
         let host = wired_host(&app);
         let start = serde_json::json!({ "mode": "inPerson" });
-        let failed = Some("Recording could not start: no capture device".to_owned());
+        let failed =
+            Some("Recording could not start: Steno could not open the audio devices.".to_owned());
         for (method, params, error) in [
             (BridgeMethod::RecordingStart, Some(start), failed.clone()),
             (BridgeMethod::RecordingToggle, None, failed.clone()),
