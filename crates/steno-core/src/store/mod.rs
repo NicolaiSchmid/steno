@@ -341,7 +341,9 @@ impl Store {
     }
 
     /// The `IMMEDIATE` transaction of [`Store::write`] on `connection`,
-    /// committed when `body` returns `Ok`.
+    /// committed when `body` returns `Ok`. `self` carries the commit probe,
+    /// which only test builds have.
+    #[cfg_attr(not(any(test, feature = "testing")), allow(clippy::unused_self))]
     fn commit_on<T>(
         &self,
         connection: &mut Connection,
