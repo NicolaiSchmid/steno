@@ -6,26 +6,25 @@
 //! - Under `Install::Allowed` (what `steno process` builds, and
 //!   `SpeechEngines` until the pipeline gains its models-missing gate), a
 //!   download cut off mid-file, then refused, ends the job `ready` with the
-//!   one room speaker. The
-//!   recording's files stay byte for byte, the cut-off download stays as
-//!   a partial in `onnx/diarization/`, and processing the meeting again
-//!   resumes it rather than repeating a cached failure.
-//! - Under `Install::Never` (what `SpeechEngines` builds once the gate
-//!   lands) the job
-//!   falls back the same way and the mirror sees no request; files of the
-//!   right size in the folder Settings installs that fail to load and fail
-//!   their checksum are deleted, so Settings offers Download.
+//!   one room speaker. The recording's files stay byte for byte, the
+//!   cut-off download stays as a partial in `onnx/diarization/`, and
+//!   processing the meeting again resumes it rather than repeating a
+//!   cached failure.
+//! - Under `Install::Never`, with today's pipeline, the job falls back
+//!   the same way and the mirror sees no request; files of the right size
+//!   in the folder Settings installs that fail to load and fail their
+//!   checksum are deleted, so Settings offers Download.
 //!
-//! The recordings here are kept forever. Under `DeleteAfterProcessing`, a
-//! meeting that ends `ready` without its speakers loses its audio, and the
-//! speakers can never be computed again; deferring that meeting's
-//! retention is the pipeline's change (item P14 of
-//! `.plans/2026-10-07-stable-promotion.md`), not this crate's.
+//! The test's recordings are kept forever (`KeepForever`). Under
+//! `DeleteAfterProcessing`, a meeting that ends `ready` without its
+//! speakers loses its audio, and the speakers can never be computed again;
+//! deferring that meeting's retention is the pipeline's change (item P14
+//! of `.plans/2026-10-07-stable-promotion.md`), not this crate's.
 //!
 //! With `STENO_MODEL_TESTS=1` and `STENO_MODELS_DIR` holding
 //! `onnx/diarization/`, the mirror then serves the real files: the job run
-//! again resumes the partial, and a diarizer under `Install::Never` loads
-//! what Settings downloaded without a request.
+//! again resumes the partial and diarizes, and the pipeline's diarizer
+//! under `Install::Never` loads what Settings downloaded without a request.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -306,6 +305,20 @@ impl World {
         assert_eq!(labels, ["Me", "Speaker 1"]);
     }
 
+    /// The meeting is `ready` and diarized: a speaker carries the
+    /// diarizer's embedding and sample clip, which the fallback never
+    /// stores.
+    fn assert_diarized(&self) {
+        assert_eq!(self.state(), MeetingState::Ready);
+        let speakers = self.store.speakers(self.asset.meeting_id).unwrap();
+        assert!(
+            speakers
+                .iter()
+                .any(|speaker| speaker.embedding.is_some() && speaker.sample_clip_range.is_some()),
+            "{speakers:?}"
+        );
+    }
+
     /// Nothing of the recording is gone or changed (a finished run adds
     /// its mixdown beside it), and nothing marks it for deletion: the asset
     /// has no expiry, and a sweep a year from now removes nothing.
@@ -396,7 +409,7 @@ async fn once_the_models_arrive_the_meeting_is_diarized_when_processed_again() {
 
     mirror.recover();
     world.pipeline.process(world.asset.id).await.unwrap();
-    assert_eq!(world.state(), MeetingState::Ready);
+    world.assert_diarized();
     let asset = models::asset();
     world.models.verify(&asset).unwrap();
     let seen = mirror.seen();
@@ -471,9 +484,9 @@ async fn junk_where_settings_installs_is_deleted_so_settings_offers_download() {
     assert_eq!(mirror.seen(), []);
 }
 
-/// Settings downloads the models through the mirror; a diarizer under
-/// `Install::Never` then loads them from that folder without a request,
-/// and the job diarizes.
+/// Settings downloads the models through the mirror; the pipeline's
+/// diarizer under `Install::Never` then loads them from that folder
+/// without a request, and the job diarizes.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_pipelines_diarizer_loads_what_settings_downloaded_without_a_request() {
     let Some(installed) = real_models() else {
@@ -489,10 +502,8 @@ async fn the_pipelines_diarizer_loads_what_settings_downloaded_without_a_request
     let downloads = mirror.seen().len();
     assert_eq!(downloads, 2, "{:?}", mirror.seen());
 
-    let diarizer = steno_services::speech::diarizer(&world.setup, Install::Never);
-    diarizer.prepare().await.unwrap();
     world.run_the_job().await;
-    assert_eq!(world.state(), MeetingState::Ready);
+    world.assert_diarized();
     assert_eq!(mirror.seen().len(), downloads, "{:?}", mirror.seen());
 }
 

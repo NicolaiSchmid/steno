@@ -5,8 +5,9 @@
 //! without a request. Under `Install::Never` a missing file is
 //! `DiarizeError::NotInstalled`, through a `BoxError` too, and no request
 //! is made; files of the right size that fail to load and fail their
-//! checksum are deleted and reported not installed. The store's mechanics
-//! (lock, resume, ranges, the checksum gate) are tested in
+//! checksum are deleted and reported not installed, and with
+//! `STENO_MODEL_TESTS=1` an intact file beside them is kept. The store's
+//! mechanics (lock, resume, ranges, the checksum gate) are tested in
 //! `crates/steno-speech/tests/download.rs`. No network beyond 127.0.0.1.
 
 #![cfg(feature = "onnx")]
@@ -62,12 +63,18 @@ fn the_asset_validates_and_keeps_the_diarizers_folder_and_names() {
     }
     assert_eq!(asset.total_size(), 5_992_913 + 26_530_550);
     assert_eq!(asset.display_name, models::DISPLAY_NAME);
+    for model in ["pyannote segmentation 3.0", "WeSpeaker ResNet34-LM"] {
+        assert!(models::DISPLAY_NAME.contains(model), "{model}");
+    }
     assert_eq!(asset.licence, "MIT AND CC-BY-4.0");
     assert_eq!(asset.attribution, models::ATTRIBUTION);
     for credit in [
         "pyannote",
+        "Copyright (c) 2020 CNRS",
+        "MIT",
         "WeSpeaker",
         "VoxCeleb",
+        "CC-BY-4.0",
         "https://creativecommons.org/licenses/by/4.0/",
         "converted to ONNX",
     ] {
@@ -326,4 +333,39 @@ fn ensure_deletes_the_earlier_stores_part_files() {
     assert!(folder.join("notes.part").exists());
     assert!(folder.join(SEGMENTATION_FILE).is_file());
     assert_eq!(requests.load(Ordering::SeqCst), 0);
+}
+
+/// After a failed load, a file that matches its checksum is kept and only
+/// the bad one is deleted: the real segmentation model beside right-size
+/// junk for the embedding is `NotInstalled` naming the embedding alone.
+/// Needs `STENO_MODEL_TESTS=1` and `STENO_MODELS_DIR` holding
+/// `onnx/diarization/`, which it only reads.
+#[test]
+fn after_a_failed_load_an_intact_file_is_kept() {
+    if std::env::var("STENO_MODEL_TESTS").as_deref() != Ok("1") {
+        eprintln!("set STENO_MODEL_TESTS=1 and STENO_MODELS_DIR to run this with the real models");
+        return;
+    }
+    let installed = ModelStore::from_environment();
+    let asset = models::asset();
+    let real = installed
+        .installed_directory(&asset)
+        .expect("STENO_MODELS_DIR holds onnx/diarization/")
+        .join(SEGMENTATION_FILE);
+    for install in [Install::Never, Install::Allowed] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mirror, requests) = counting_mirror();
+        let store = ModelStore::in_models_directory(dir.path()).with_mirror(Some(mirror));
+        let folder = install_junk(&store);
+        std::fs::copy(&real, folder.join(SEGMENTATION_FILE)).unwrap();
+
+        let error = OnnxBackend::from_store(&store, install, 4).unwrap_err();
+        assert!(
+            matches!(&error, DiarizeError::NotInstalled { missing, .. } if missing == &[EMBEDDING_FILE.to_owned()]),
+            "{install:?}: {error:?}"
+        );
+        assert!(folder.join(SEGMENTATION_FILE).is_file(), "{install:?}");
+        assert!(!folder.join(EMBEDDING_FILE).exists(), "{install:?}");
+        assert_eq!(requests.load(Ordering::SeqCst), 0, "{install:?}");
+    }
 }
