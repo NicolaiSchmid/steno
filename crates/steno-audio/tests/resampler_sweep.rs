@@ -26,7 +26,7 @@
 //! is unmeasured: `steno-speech`'s
 //! `fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k` starts
 //! from 16 kHz recordings, so neither lane carries anything above 7.2 kHz
-//! there. Whether the fold is acceptable rests on this sweep alone (stable
+//! there. Nicolai accepted the fold on this sweep (2026-10-08, stable
 //! plan D9).
 
 #![allow(
