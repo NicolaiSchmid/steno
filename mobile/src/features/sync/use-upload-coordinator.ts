@@ -206,24 +206,25 @@ export function useUploadCoordinator(): UploadCoordinator {
 				token,
 			};
 			const current = adopted.current;
-			if (
+			const samePairing =
 				current?.token === token &&
-				current.endpoint.fingerprint === fingerprint
+				current.endpoint.fingerprint === fingerprint;
+			if (
+				samePairing &&
+				(current.endpoint.origin === found.endpoint.origin ||
+					(await answers(current.endpoint)))
 			) {
-				const moved = current.endpoint.origin !== found.endpoint.origin;
-				if (!moved || (await answers(current.endpoint))) {
-					if (!cancelled) setResolved(current);
-					return;
-				}
-				if (cancelled) return;
-				adopted.current = found;
+				if (!cancelled) setResolved(current);
+				return;
+			}
+			if (cancelled) return;
+			adopted.current = found;
+			if (samePairing) {
 				await cancelAllUploads().catch((error) =>
 					console.warn("[sync] cancel failed", error),
 				);
 			}
-			if (cancelled) return;
-			adopted.current = found;
-			setResolved(found);
+			if (!cancelled) setResolved(found);
 		};
 		void run()
 			.catch((error) => {
