@@ -11,8 +11,10 @@
 //!
 //! Environment:
 //! - `STENO_CALIBRATION_CORPUS`: the corpus directory (required).
-//! - `STENO_MODELS_DIR`: where the ONNX models live or are downloaded to
-//!   (default: a `steno-diarize-models` directory under the system temp dir).
+//! - `STENO_MODELS_DIR`: the models directory whose `onnx/diarization/`
+//!   holds the ONNX models or receives their download (default: the app's,
+//!   `steno_speech::ModelStore::from_environment`), with the mirror
+//!   `STENO_MODELS_MIRROR` names.
 //! - `STENO_DIARIZE_BACKEND`: `onnx` (default) or `coreml`.
 //! - `STENO_COREML_MODELS`: `FluidAudio`'s `speaker-diarization` directory
 //!   for the `CoreML` backend.
@@ -153,17 +155,17 @@ fn backend() -> (String, Box<dyn DiarizationBackend>) {
     match kind.as_str() {
         #[cfg(feature = "onnx")]
         "onnx" => {
-            let dir = std::env::var_os("STENO_MODELS_DIR").map_or_else(
-                || std::env::temp_dir().join("steno-diarize-models"),
-                PathBuf::from,
-            );
             let threads = std::env::var("STENO_DIARIZE_THREADS")
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(4);
-            let store = steno_diarize::models::ModelStore::new(dir);
-            let backend = steno_diarize::onnx::OnnxBackend::from_store(&store, threads)
-                .expect("ONNX backend loads");
+            let store = steno_speech::ModelStore::from_environment();
+            let backend = steno_diarize::onnx::OnnxBackend::from_store(
+                &store,
+                steno_diarize::Install::Allowed,
+                threads,
+            )
+            .expect("ONNX backend loads");
             (
                 format!("ONNX Runtime, CPU, {threads} threads"),
                 Box::new(backend),

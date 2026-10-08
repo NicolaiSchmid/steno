@@ -20,21 +20,27 @@
 //! Parakeet export (2.6 GB, of which `encoder.weights` is 2.4 GB) goes to
 //! Hugging Face, uploaded by `scripts/upload-models.sh` into
 //! [`STENO_MODELS_REPO`] and fetched at the commit
-//! [`PARAKEET_V3_FP32_REVISION`]. `steno-diarize` fetches its own models
-//! (`crates/steno-diarize/src/models.rs`). The checksums are those of the
-//! export `spikes/onnx-speech/export/` produces with torch 2.14.1 and
-//! `NeMo` 3.0.0, and the hosted copy matches them; uploading a different
-//! export means changing them in the manifest too. Every file Steno ships
-//! has a source (a test checks it). Without a mirror, a file the manifest
-//! gives no source has to be put in place by hand: [`ModelStore::ensure`]
-//! reports [`SpeechError::NotHosted`] when it is missing.
+//! [`PARAKEET_V3_FP32_REVISION`]. The checksums are those of the export
+//! `spikes/onnx-speech/export/` produces with torch 2.14.1 and `NeMo`
+//! 3.0.0, and the hosted copy matches them; uploading a different export
+//! means changing them in the manifest too. `steno-diarize` describes its
+//! two models as an asset of this store, id `diarization`
+//! (`crates/steno-diarize/src/models.rs`), one file from a Hugging Face
+//! repository and one from a sherpa-onnx GitHub release, and installs
+//! them through it. Every file Steno ships has a source (a test checks
+//! it). Without a mirror, a file the manifest gives no source has to be
+//! put in place by hand: [`ModelStore::ensure`] reports
+//! [`SpeechError::NotHosted`] when it is missing.
 //!
 //! A mirror ([`ModelStore::with_mirror`], the speech setting
-//! `modelsMirror`) replaces the hosts of the speech models (Parakeet,
-//! Silero VAD); `steno-diarize` fetches its own. With one, a file is
-//! fetched from `<mirror>/<asset id>/<file name>`, the layout of a store
-//! root and of the Hugging Face repository, so a copy of either served
-//! over HTTP is a mirror. It should answer `Range` requests (see
+//! `modelsMirror`) replaces the hosts of every asset the store installs,
+//! the speech models (Parakeet, Silero VAD) and the diarizer's, with no
+//! fallback to the hosts. With one, a file is fetched from
+//! `<mirror>/<asset id>/<file name>`, the layout of a store root, so a
+//! whole store root (`parakeet-tdt-0.6b-v3-fp32/`, `silero-vad/`,
+//! `diarization/`) served over HTTP is a mirror. The Hugging Face
+//! repository [`STENO_MODELS_REPO`] holds only the Parakeet export, so a
+//! copy of it alone is not. A mirror should answer `Range` requests (see
 //! Downloads).
 //!
 //! # On disk
@@ -463,8 +469,10 @@ impl ModelStore {
     }
 
     /// The asset's directory when [`ModelStore::is_installed`], else
-    /// [`SpeechError::NotInstalled`] naming the missing files.
-    pub(crate) fn installed_directory(&self, asset: &ModelAsset) -> Result<PathBuf, SpeechError> {
+    /// [`SpeechError::NotInstalled`] naming the missing files. It hashes
+    /// nothing and fetches nothing, so a loader that must not download
+    /// and a gate that asks whether a job can run give the same answer.
+    pub fn installed_directory(&self, asset: &ModelAsset) -> Result<PathBuf, SpeechError> {
         asset.validate()?;
         let directory = self.directory(asset);
         let missing = self.missing_files(asset);

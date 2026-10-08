@@ -156,8 +156,8 @@ missing local setup, run it. Do not ask first.
     today's one destination, the Obsidian folder, writes to a local folder,
     including the audio mixdown when the user turns that on, and opens no
     connection;
-  - the model downloads (`steno-speech`'s `ModelStore`, `steno-diarize`'s
-    model fetch), which send nothing but the request;
+  - the model downloads (`steno-speech`'s `ModelStore`, which also installs
+    `steno-diarize`'s two models), which send nothing but the request;
   - the Tauri updater, which fetches the manifest and the signed bundle from
     this repository's GitHub releases and sends nothing;
   - the phone handover server (`steno-handover`), which advertises itself over

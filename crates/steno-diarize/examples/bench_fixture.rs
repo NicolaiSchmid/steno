@@ -1,14 +1,15 @@
 //! Times the ONNX backend on the two-voice fixture tiled to ten minutes:
-//! `STENO_MODELS_DIR=... cargo run --release -p steno-diarize --example bench_fixture`.
+//! `STENO_MODELS_DIR=... cargo run --release -p steno-diarize --example bench_fixture`,
+//! the models directory whose `onnx/diarization/` holds the models.
 //! A timing run, not part of the test suite.
 
 use std::path::PathBuf;
 use std::time::Instant;
 
 use steno_core::AudioBuffer16k;
-use steno_diarize::models::ModelStore;
 use steno_diarize::onnx::OnnxBackend;
 use steno_diarize::{DiarizerConfig, Pipeline};
+use steno_speech::ModelStore;
 
 fn main() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -27,16 +28,15 @@ fn main() {
         samples.extend_from_slice(&one);
     }
     let audio = AudioBuffer16k::new(samples);
-    let store = ModelStore::new(
-        std::env::var_os("STENO_MODELS_DIR")
-            .map(PathBuf::from)
-            .expect("STENO_MODELS_DIR"),
+    let store = ModelStore::in_models_directory(
+        &ModelStore::environment_models_directory().expect("STENO_MODELS_DIR"),
     );
     let threads: usize = std::env::var("STENO_DIARIZE_THREADS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(4);
-    let backend = OnnxBackend::from_store(&store, threads).expect("backend");
+    let backend =
+        OnnxBackend::from_store(&store, steno_diarize::Install::Allowed, threads).expect("backend");
     let mut pipeline = Pipeline::new(backend, DiarizerConfig::default());
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
     let started = Instant::now();

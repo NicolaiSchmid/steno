@@ -274,7 +274,7 @@ pub fn dependencies(
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.
                 steno_services::speech::speech_engine(engine, &speech),
-                steno_services::speech::diarizer(&speech.models_directory),
+                process_diarizer(&speech),
                 Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
             )
         }
@@ -301,6 +301,13 @@ pub fn dependencies(
         Some(passes) => dependencies.with_llm(Some(passes.cleaner), Some(passes.summarizer)),
         None => dependencies,
     })
+}
+
+/// The diarizer `steno process --engine` runs over `speech`. An explicit
+/// command run in a terminal, so it may download the diarizer's models on
+/// first use (`Install::Allowed`), also once the app's pipeline may not.
+fn process_diarizer(speech: &SpeechSetup) -> Arc<dyn steno_core::Diarizer> {
+    steno_services::speech::diarizer(speech, steno_diarize::Install::Allowed)
 }
 
 /// A hex SHA-256, `sha256sum`'s spelling.
@@ -374,6 +381,39 @@ mod tests {
         };
         let _store = options.open_to_read().unwrap();
         DatabaseLock::acquire(&database).expect("the read let go of the lock");
+    }
+
+    /// `steno process` may download the diarizer's models: over an empty
+    /// models directory its diarizer's `prepare` asks the mirror.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn steno_process_may_download_the_diarizers_models() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mirror = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                counted.fetch_add(1, Ordering::SeqCst);
+                let mut line = String::new();
+                let mut reader = BufReader::new(&stream);
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let mut speech = SpeechSetup::in_models_directory(
+            dir.path().join("models"),
+            &StenoPaths::new(dir.path()),
+        );
+        speech.speech_settings.models_mirror = Some(mirror);
+        assert!(process_diarizer(&speech).prepare().await.is_err());
+        assert!(requests.load(Ordering::SeqCst) > 0);
     }
 
     /// `--engine` over the models directory `<dir>/models-\xff` (a name

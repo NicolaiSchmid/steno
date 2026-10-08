@@ -1,16 +1,18 @@
 //! The ONNX backend on the repository's two-voice `say` fixture: two
 //! speakers, as the Swift model test expects. Ignored because it needs the
-//! model files; set `STENO_MODELS_DIR` to a directory holding them or
-//! allow the download (about 32 MB).
+//! model files: set `STENO_MODELS_DIR` to a models directory holding
+//! `onnx/diarization/`, or allow the download (about 32 MB) into it or,
+//! without the variable, into the default models directory
+//! (`steno_speech::ModelStore::from_environment`).
 
 #![cfg(feature = "onnx")]
 
 use std::path::PathBuf;
 
 use steno_core::AudioBuffer16k;
-use steno_diarize::models::ModelStore;
 use steno_diarize::onnx::OnnxBackend;
-use steno_diarize::{DiarizerConfig, Pipeline};
+use steno_diarize::{DiarizerConfig, Install, Pipeline};
+use steno_speech::ModelStore;
 
 fn fixture(name: &str) -> AudioBuffer16k {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -26,17 +28,11 @@ fn fixture(name: &str) -> AudioBuffer16k {
     AudioBuffer16k::new(samples)
 }
 
-fn store() -> ModelStore {
-    ModelStore::new(std::env::var_os("STENO_MODELS_DIR").map_or_else(
-        || std::env::temp_dir().join("steno-diarize-models"),
-        PathBuf::from,
-    ))
-}
-
 #[test]
 #[ignore = "needs the ONNX model files (STENO_MODELS_DIR or a download)"]
 fn two_voices_fixture_gives_two_speakers() {
-    let backend = OnnxBackend::from_store(&store(), 2).expect("backend loads");
+    let backend = OnnxBackend::from_store(&ModelStore::from_environment(), Install::Allowed, 2)
+        .expect("backend loads");
     let mut pipeline = Pipeline::new(backend, DiarizerConfig::default());
     let audio = fixture("two-speakers-mf.wav");
     let result = pipeline.diarize(&audio).expect("diarizes");
@@ -61,7 +57,8 @@ fn two_voices_fixture_gives_two_speakers() {
 #[test]
 #[ignore = "needs the ONNX model files (STENO_MODELS_DIR or a download)"]
 fn the_segmentation_model_reports_pyannotes_geometry() {
-    let backend = OnnxBackend::from_store(&store(), 2).expect("backend loads");
+    let backend = OnnxBackend::from_store(&ModelStore::from_environment(), Install::Allowed, 2)
+        .expect("backend loads");
     let geometry = steno_diarize::DiarizationBackend::geometry(&backend);
     assert_eq!(geometry, &steno_diarize::SegmentationGeometry::PYANNOTE_3_0);
     assert_eq!(backend.embedding_dimension(), 256);

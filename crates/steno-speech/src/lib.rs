@@ -43,10 +43,11 @@
 //! # Models
 //!
 //! Nothing is committed. [`ModelStore::new`] takes the store root, which
-//! holds one folder per asset: `<root>/parakeet-tdt-0.6b-v3-fp32/` and
-//! `<root>/silero-vad/`. Steno's root is the `onnx/` folder of its models
-//! directory ([`ModelStore::in_models_directory`]). The app and the CLI
-//! take the models directory from the settings, else `STENO_MODELS_DIR`,
+//! holds one folder per asset: `<root>/parakeet-tdt-0.6b-v3-fp32/`,
+//! `<root>/silero-vad/` and `steno-diarize`'s `<root>/diarization/`.
+//! Steno's root is the `onnx/` folder of its models directory
+//! ([`ModelStore::in_models_directory`]). The app and the CLI take the
+//! models directory from the settings, else `STENO_MODELS_DIR`,
 //! else `<support directory>/Models` (`steno-services`);
 //! [`ModelStore::from_environment`], for the `transcribe` example and the
 //! FLEURS test, takes it from the same variable and default.

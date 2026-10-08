@@ -14,7 +14,8 @@ publish.workspace = true
 default = ["onnx", "coreml"]
 # ONNX Runtime backend (pyannote segmentation 3.0 and WeSpeaker ResNet34-LM).
 # `steno-speech` for `onnx::init_environment`, the one place ONNX Runtime is
-# configured (telemetry off).
+# configured (telemetry off), and for its `ModelStore`, which installs the
+# two models.
 onnx = ["dep:ort", "dep:steno-speech"]
 # CoreML backend over FluidAudio's compiled models; macOS only.
 coreml = ["dep:objc2", "dep:objc2-foundation", "dep:objc2-core-ml"]
@@ -24,15 +25,11 @@ steno-core = { path = "../steno-core" }
 steno-speech = { path = "../steno-speech", optional = true }
 ort = { workspace = true, optional = true }
 rustfft.workspace = true
-sha2.workspace = true
-# A temporary file of its own for each model download.
-tempfile.workspace = true
 thiserror.workspace = true
 # `spawn_blocking` for the `Diarizer` calls; the workspace entry brings
 # `rt`, `rt-multi-thread` and `macros`, nothing more.
 tokio.workspace = true
 tracing.workspace = true
-ureq.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true, optional = true }
@@ -43,6 +40,7 @@ objc2-core-ml = { workspace = true, optional = true }
 hound.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

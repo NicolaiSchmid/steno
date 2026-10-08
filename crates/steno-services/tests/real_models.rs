@@ -1,9 +1,10 @@
 //! The opt-in acceptance over the real engines: the synthetic two-lane
 //! fixture through the Parakeet engine the platform runs (the speech
 //! sidecar off the Mac, `CoreML` on it) and the ONNX diarizer, the way
-//! `steno process --engine parakeet-v3` wires them, asserting the shape of
-//! the exported `meeting.json`. Set `STENO_MODEL_TESTS=1`. The ONNX models
-//! download on first run (off the Mac about 2.6 GB, nearly all of it the
+//! `steno process --engine parakeet-v3` wires them (except that this
+//! diarizer may download its models), asserting the shape of the exported
+//! `meeting.json`. Set `STENO_MODEL_TESTS=1`. The ONNX models download on
+//! first run (off the Mac about 2.6 GB, nearly all of it the
 //! fp32 Parakeet export); on the Mac the `CoreML` Parakeet must already be
 //! in `STENO_MODELS_DIR` (`fluidaudio/parakeet-tdt-0.6b-v3/`).
 //! `STENO_MODELS_DIR` keeps the models between runs. Off the Mac the
@@ -60,7 +61,7 @@ async fn the_synthetic_call_runs_through_the_real_engines_to_a_well_formed_expor
     }
     let speech_store = setup.model_store();
     let engine = steno_services::speech::speech_engine(&settings.speech_engine_id, &setup);
-    let diarizer = steno_services::speech::diarizer(&models);
+    let diarizer = steno_services::speech::diarizer(&setup, steno_diarize::Install::Allowed);
     let vault = dir.path().join("vault");
     let destination: Arc<dyn Destination> = Arc::new(FakeDestination::new(&vault));
     let dispatcher = Arc::new(steno_adapters::DeliveryCoordinator::with_destinations(

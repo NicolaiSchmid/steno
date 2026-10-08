@@ -28,7 +28,7 @@
 //!    cosine 0.60, fragments join at 0.30 or are dropped.
 //!
 //! The two models sit behind [`DiarizationBackend`]:
-//! [`onnx::OnnxBackend`] runs the sherpa-onnx exports through ONNX Runtime
+//! `onnx::OnnxBackend` runs the sherpa-onnx exports through ONNX Runtime
 //! on every platform; `coreml::CoreMlBackend` runs `FluidAudio`'s compiled
 //! models on the Mac, so the Mac keeps the embeddings the Swift app
 //! stored. Everything above the trait is shared and tested without models.
@@ -48,18 +48,21 @@
 //! code it ran.
 //!
 //! Entry points: [`ModelDiarizer`] is the `steno_core::Diarizer` the
-//! meeting pipeline (WP6) holds, built by [`ModelDiarizer::onnx`] over
-//! [`ModelStore::for_paths`] or by `ModelDiarizer::coreml` over
-//! `coreml::model_directory`, where the Swift app installs `FluidAudio`'s
-//! models; [`Pipeline`] exposes `analyze`, `map` and `refine` one at a
-//! time for the calibration harness, which analyses a lane once and
-//! sweeps the cut; [`fbank`] is the feature front end the ONNX backend
-//! puts in front of the embedding model. Features: `onnx` builds the
-//! ONNX Runtime backend, `coreml` the `CoreML` one (a no-op off macOS);
-//! both are on by default.
+//! meeting pipeline (WP6) holds, built by `ModelDiarizer::onnx` over
+//! `steno-speech`'s `ModelStore`, which installs the two ONNX models of
+//! `models::asset` beside the speech models where the caller's `Install`
+//! allows it (`models::installed` is the check without a download), or by
+//! `ModelDiarizer::coreml` over `coreml::model_directory`, where the Swift
+//! app installs `FluidAudio`'s models; [`Pipeline`] exposes `analyze`,
+//! `map` and `refine` one at a time for the calibration harness, which
+//! analyses a lane once and sweeps the cut; [`fbank`] is the feature front
+//! end the ONNX backend puts in front of the embedding model. Features:
+//! `onnx` builds the ONNX Runtime backend and its `models`, `coreml` the
+//! `CoreML` one (a no-op off macOS); both are on by default.
 //!
-//! Audio never leaves the device: the only network access in this crate is
-//! [`ModelStore`] fetching the published model files.
+//! Audio never leaves the device: this crate opens no connection. The ONNX
+//! models are fetched by `steno-speech`'s `ModelStore`, which sends nothing
+//! but the request.
 
 #![deny(unsafe_code)]
 
@@ -72,6 +75,7 @@ mod error;
 pub mod extraction;
 pub mod fbank;
 pub mod mapping;
+#[cfg(feature = "onnx")]
 pub mod models;
 #[cfg(feature = "onnx")]
 pub mod onnx;
@@ -83,7 +87,8 @@ pub mod timeline;
 pub use backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 pub use diarizer::{BackendLoader, ModelDiarizer};
 pub use error::DiarizeError;
-pub use models::ModelStore;
+#[cfg(feature = "onnx")]
+pub use models::Install;
 pub use pipeline::{DEFAULT_CLUSTERING_THRESHOLD, DiarizerConfig, Pipeline};
 
 /// Exact for every count below 2^53, far beyond any sample count.

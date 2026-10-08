@@ -15,7 +15,7 @@ use steno_core::{
     AudioBuffer16k, AudioLane, Diarizer, EchoCanceller, MeetingExport, MeetingSummarizer,
     SpeechEngine, SummaryTemplate, TranscriptCleaner, paths::file_url_path,
 };
-use steno_diarize::{DiarizerConfig, ModelDiarizer};
+use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
 use steno_host::speech::ModelAsset;
 use steno_llm::{LlmClient, LlmEndpoint, LlmMeetingSummarizer, LlmTranscriptCleaner, RetryPolicy};
 use steno_services::speech::{ModelStoreSpeechModels, SpeechSetup};
@@ -886,7 +886,8 @@ struct SweepCluster {
 
 impl DiarizeSweep {
     async fn run(self) -> Outcome {
-        let store = steno_speech::ModelStore::in_models_directory(&self.models.directory()?);
+        // The app's store: the models directory's `onnx/`, with the mirror.
+        let store = self.models.setup()?.model_store();
         let mut runs = Vec::new();
         for threshold in &self.thresholds {
             let config = DiarizerConfig {
@@ -895,9 +896,11 @@ impl DiarizeSweep {
                 refines_clusters: !self.no_refinement,
                 ..DiarizerConfig::default()
             };
+            // An explicit command: it may download the diarizer's models.
             let diarizer = ModelDiarizer::onnx(
                 config,
-                steno_services::speech::diarize_store(&store),
+                store.clone(),
+                Install::Allowed,
                 steno_services::speech::ONNX_THREADS,
             );
             for file in &self.files {

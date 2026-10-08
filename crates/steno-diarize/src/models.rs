@@ -1,449 +1,283 @@
-//! The model files the ONNX backend needs, fetched once into the support
-//! directory and verified by checksum. Nothing is committed; a build
-//! without the files downloads them on first use, a build without network
-//! fails with the URL in the error. This is the only network access in
-//! the crate, and it only receives.
+//! The two model files the ONNX backend loads, described as one
+//! [`steno_speech::ModelAsset`] with the id [`ASSET_ID`], so they install
+//! through `steno-speech`'s [`ModelStore`] like the speech models: into
+//! `<store root>/diarization/` (in Steno,
+//! `<models directory>/onnx/diarization/`), with the store's download
+//! lock, resume, 64 MiB ranges, progress and mirror
+//! (`<mirror>/diarization/<file name>`). Nothing is committed. How a
+//! download runs and what may be deleted: `steno_speech::model_store`.
+//! Rust-only: Swift's `ModelAsset.offlineDiarizer`
+//! (`Sources/StenoSpeech/Models/ModelAsset.swift`) installs `FluidAudio`'s
+//! `CoreML` models instead.
+//!
+//! Who may download them is the caller's [`Install`]: [`ensure`] installs
+//! what is missing ([`Install::Allowed`]), [`installed`] only finds an
+//! installed folder ([`Install::Never`]). A gate that asks whether a job
+//! can diarize calls the same function, so the two never disagree.
+//!
+//! [`DISPLAY_NAME`], [`LICENCE`] and [`ATTRIBUTION`] are the asset's name
+//! and the credit its licences require, for the notices the stable
+//! promotion (`.plans/2026-10-07-stable-promotion.md`) has the app show;
+//! Settings' Acknowledgements still show `steno-host`'s own string.
+//!
+//! This crate opens no connection of its own: the store fetches the
+//! published files and sends nothing but the request.
 
-use std::fmt::Write as _;
-use std::fs;
-use std::io::{self, Read, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-use steno_core::StenoPaths;
+use steno_speech::model_store::sha256_of;
+use steno_speech::{DownloadProgress, ModelAsset, ModelFile, ModelSource, ModelStore};
 
-/// One published model file.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelAsset {
-    /// The file name under the store's directory.
-    pub file_name: &'static str,
-    pub url: &'static str,
-    /// Lowercase hex SHA-256 of the file.
-    pub sha256: &'static str,
-    /// The licence the model ships under, shown in the app's notices.
-    pub licence: &'static str,
-}
+use crate::error::DiarizeError;
 
-/// pyannote segmentation 3.0 as exported by sherpa-onnx (MIT; the
-/// Hugging Face original is gated, the export is public).
-pub const PYANNOTE_SEGMENTATION_3_0: ModelAsset = ModelAsset {
-    file_name: "pyannote-segmentation-3.0.onnx",
-    url: "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
-    sha256: "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
-    licence: "MIT (pyannote.audio, CNRS)",
-};
+/// The asset's id, the name of its folder under the store root.
+pub const ASSET_ID: &str = "diarization";
+
+/// pyannote segmentation 3.0 as exported by sherpa-onnx (the Hugging Face
+/// original is gated, the export is public).
+pub const SEGMENTATION_FILE: &str = "pyannote-segmentation-3.0.onnx";
 
 /// `WeSpeaker` ResNet34-LM trained on `VoxCeleb`, from the sherpa-onnx
-/// speaker recognition assets (Apache-2.0).
-pub const WESPEAKER_RESNET34_LM: ModelAsset = ModelAsset {
-    file_name: "wespeaker-en-voxceleb-resnet34-lm.onnx",
-    url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx",
-    sha256: "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012",
-    licence: "Apache-2.0 (WeSpeaker)",
-};
+/// speaker recognition models.
+pub const EMBEDDING_FILE: &str = "wespeaker-en-voxceleb-resnet34-lm.onnx";
 
-/// What fetching or verifying a model can fail with.
-#[derive(Debug, thiserror::Error)]
-pub enum ModelError {
-    #[error("downloading {url}: {source}")]
-    Download {
-        url: &'static str,
-        #[source]
-        source: Box<ureq::Error>,
-    },
-    #[error("{path}: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("{path} does not match its checksum: expected {expected}, got {got}")]
-    Checksum {
-        path: PathBuf,
-        expected: String,
-        got: String,
-    },
+/// The asset's name.
+pub const DISPLAY_NAME: &str =
+    "Speaker diarization (pyannote segmentation 3.0, WeSpeaker ResNet34-LM)";
+
+/// The models' licences as SPDX ids: MIT for the pyannote segmentation,
+/// CC-BY-4.0 for the `WeSpeaker` embeddings trained on `VoxCeleb`.
+pub const LICENCE: &str = "MIT AND CC-BY-4.0";
+
+/// The credit both licences ask for: creator (with pyannote's copyright
+/// notice, which MIT asks for), source, licence and change.
+pub const ATTRIBUTION: &str = "pyannote segmentation 3.0 by pyannote.audio, Copyright (c) 2020 CNRS (https://github.com/pyannote/pyannote-audio), MIT, converted to ONNX by sherpa-onnx; WeSpeaker ResNet34-LM by WeSpeaker (https://github.com/wenet-e2e/wespeaker), trained on VoxCeleb, CC-BY-4.0 (https://creativecommons.org/licenses/by/4.0/), converted to ONNX by sherpa-onnx";
+
+/// The sherpa-onnx export of the segmentation model on Hugging Face.
+pub const SEGMENTATION_REPO: &str = "csukuangfj/sherpa-onnx-pyannote-segmentation-3-0";
+
+/// The commit of [`SEGMENTATION_REPO`] the segmentation model is fetched
+/// at, so the bytes never change under the manifest's checksum.
+pub const SEGMENTATION_REVISION: &str = "9403a6902bb58e3d5ae8c7e77c3422de279db2e0";
+
+/// Whether building the diarizer's backend may download its models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Install {
+    /// A missing file is downloaded first ([`ensure`]): the CLI's explicit
+    /// commands, `steno process` among them, and the app's pipeline until
+    /// it checks for missing models itself.
+    Allowed,
+    /// A missing file is [`DiarizeError::NotInstalled`] and no request is
+    /// made ([`installed`]): for a pipeline that checks for missing models
+    /// before a job, so it never downloads during one.
+    Never,
 }
 
-/// A directory of model files.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelStore {
-    root: PathBuf,
-}
-
-impl ModelStore {
-    /// A store over `root`; the directory is created on the first fetch.
-    #[must_use]
-    pub fn new(root: impl Into<PathBuf>) -> Self {
-        ModelStore { root: root.into() }
-    }
-
-    /// `<support>/Models/onnx/diarization`, beside the Swift app's
-    /// `Models/fluidaudio`.
-    #[must_use]
-    pub fn for_paths(paths: &StenoPaths) -> Self {
-        ModelStore::new(
-            paths
-                .support_directory
-                .join("Models")
-                .join("onnx")
-                .join("diarization"),
-        )
-    }
-
-    /// The directory the model files live in.
-    #[must_use]
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    /// Where `asset` lives once fetched.
-    #[must_use]
-    pub fn path(&self, asset: &ModelAsset) -> PathBuf {
-        self.root.join(asset.file_name)
-    }
-
-    /// The verified path of `asset`, downloading it when it is missing
-    /// or fails its checksum. The download lands in a temporary file of
-    /// its own in the store's directory, so two processes fetching the
-    /// same model at once (the app and the `steno` command on first use)
-    /// never share a partial file, and moves into place only after it
-    /// verifies; whichever finishes last wins, both end with a verified
-    /// file. A failed or interrupted download leaves nothing behind, and a
-    /// partial file a killed process left is removed on a later call.
-    pub fn ensure(&self, asset: &ModelAsset) -> Result<PathBuf, ModelError> {
-        self.remove_stale_parts(asset);
-        let path = self.path(asset);
-        if verifies(&path, asset) {
-            return Ok(path);
-        }
-        let io_error = |path: &Path| {
-            let path = path.to_path_buf();
-            move |source| ModelError::Io { path, source }
-        };
-        fs::create_dir_all(&self.root).map_err(io_error(&self.root))?;
-        let mut partial = tempfile::Builder::new()
-            .prefix(asset.file_name)
-            .suffix(".part")
-            .tempfile_in(&self.root)
-            .map_err(io_error(&self.root))?;
-        tracing::info!(url = asset.url, "downloading model");
-        download(asset.url, partial.as_file_mut()).map_err(|error| match error {
-            DownloadError::Transfer(source) => ModelError::Download {
-                url: asset.url,
-                source: Box::new(source),
-            },
-            DownloadError::Write(source) => io_error(partial.path())(source),
-        })?;
-        let got = sha256_of(partial.path())?;
-        if got != asset.sha256 {
-            return Err(ModelError::Checksum {
-                path,
-                expected: asset.sha256.to_owned(),
-                got,
-            });
-        }
-        if let Err(error) = partial.persist(&path) {
-            // Another fetch may have put the file there first and still
-            // hold it open, which a Windows rename refuses: a destination
-            // that verifies is as good as our own.
-            if verifies(&path, asset) {
-                return Ok(path);
-            }
-            return Err(io_error(&path)(error.error));
-        }
-        Ok(path)
-    }
-
-    /// Removes the partial downloads of `asset` (`<file_name>*.part`) that
-    /// were last written more than [`STALE_PART_AGE`] ago. A process
-    /// killed mid-download, an app quit on first run, skips the temporary
-    /// file's own cleanup; a download still under way is never that old.
-    /// Best effort: a file that cannot be removed is logged and left.
-    fn remove_stale_parts(&self, asset: &ModelAsset) {
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let is_part = path
-                .extension()
-                .is_some_and(|extension| extension == "part")
-                && entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.starts_with(asset.file_name));
-            let is_stale = || {
-                entry
-                    .metadata()
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > STALE_PART_AGE)
-            };
-            if is_part
-                && is_stale()
-                && let Err(error) = fs::remove_file(&path)
-            {
-                tracing::warn!(path = %path.display(), %error, "stale partial download left in place");
-            }
-        }
-    }
-}
-
-/// Whether the file at `path` exists and matches `asset`'s checksum.
-fn verifies(path: &Path, asset: &ModelAsset) -> bool {
-    path.is_file() && sha256_of(path).is_ok_and(|got| got == asset.sha256)
-}
-
-/// Time to reach the host.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Time for the whole transfer: the larger file is 26 MB, so ten minutes
-/// covers a slow connection without letting a stalled one hang the first
-/// run.
-const TRANSFER_TIMEOUT: Duration = Duration::from_secs(600);
-/// Age past which a partial download is taken as abandoned: a day, not
-/// [`TRANSFER_TIMEOUT`], because the file's age is wall-clock time and
-/// the timeout's clock stops while the machine sleeps, so a download
-/// still under way after a long sleep can be older than the timeout.
-const STALE_PART_AGE: Duration = Duration::from_secs(24 * 60 * 60);
-
-/// Why a download did not land in its file: the transfer or the file.
-enum DownloadError {
-    Transfer(ureq::Error),
-    Write(io::Error),
-}
-
-/// Fetches `url` into `file`, which is positioned at its start.
-fn download(url: &'static str, file: &mut fs::File) -> Result<(), DownloadError> {
-    let agent = ureq::Agent::config_builder()
-        .timeout_connect(Some(CONNECT_TIMEOUT))
-        .timeout_global(Some(TRANSFER_TIMEOUT))
-        .build()
-        .new_agent();
-    let response = agent.get(url).call().map_err(DownloadError::Transfer)?;
-    let mut reader = response.into_body().into_reader();
-    // Copied by hand rather than with `io::copy` so that a short or broken
-    // body, an error from the reader, is a transfer error with the URL and
-    // only a failed write is the file's.
-    let mut buffer = vec![0u8; 1 << 16];
-    loop {
-        let read = match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(DownloadError::Transfer(ureq::Error::from(error))),
-        };
-        file.write_all(&buffer[..read])
-            .map_err(DownloadError::Write)?;
-    }
-    file.flush().map_err(DownloadError::Write)?;
-    Ok(())
-}
-
-/// Lowercase hex SHA-256 of a file.
-pub fn sha256_of(path: &Path) -> Result<String, ModelError> {
-    let io_error = |source| ModelError::Io {
-        path: path.to_path_buf(),
-        source,
+/// The asset: [`SEGMENTATION_FILE`] and [`EMBEDDING_FILE`] with their
+/// sources, sizes and SHA-256, [`DISPLAY_NAME`], [`LICENCE`] and
+/// [`ATTRIBUTION`].
+#[must_use]
+pub fn asset() -> ModelAsset {
+    let file = |name: &str, source: ModelSource, sha256: &str, size: u64| ModelFile {
+        name: name.to_owned(),
+        source: Some(source),
+        sha256: sha256.to_owned(),
+        size,
     };
-    let mut file = fs::File::open(path).map_err(io_error)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 16];
-    loop {
-        let read = file.read(&mut buffer).map_err(io_error)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
+    ModelAsset {
+        id: ASSET_ID.to_owned(),
+        display_name: DISPLAY_NAME.to_owned(),
+        licence: LICENCE.to_owned(),
+        attribution: ATTRIBUTION.to_owned(),
+        files: vec![
+            file(
+                SEGMENTATION_FILE,
+                ModelSource::HuggingFace {
+                    repo: SEGMENTATION_REPO.to_owned(),
+                    revision: SEGMENTATION_REVISION.to_owned(),
+                    path: "model.onnx".to_owned(),
+                },
+                "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+                5_992_913,
+            ),
+            file(
+                EMBEDDING_FILE,
+                ModelSource::Url(
+                    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx"
+                        .to_owned(),
+                ),
+                "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012",
+                26_530_550,
+            ),
+        ],
     }
-    Ok(hasher
-        .finalize()
-        .iter()
-        .fold(String::with_capacity(64), |mut text, byte| {
-            let _ = write!(text, "{byte:02x}");
-            text
-        }))
+}
+
+/// Where the two model files are: plain paths, which
+/// [`crate::onnx::OnnxBackend::load`] opens and a child process can be
+/// handed as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelPaths {
+    pub segmentation: PathBuf,
+    pub embedding: PathBuf,
+}
+
+impl ModelPaths {
+    /// The files in `directory`, the asset's folder
+    /// ([`ModelStore::directory`]).
+    #[must_use]
+    pub fn in_directory(directory: &Path) -> Self {
+        ModelPaths {
+            segmentation: directory.join(SEGMENTATION_FILE),
+            embedding: directory.join(EMBEDDING_FILE),
+        }
+    }
+}
+
+/// The paths of the two files, by `install`: [`ensure`] when it is
+/// [`Install::Allowed`], [`installed`] when it is [`Install::Never`].
+pub fn paths(store: &ModelStore, install: Install) -> Result<ModelPaths, DiarizeError> {
+    match install {
+        Install::Allowed => ensure(store),
+        Install::Never => installed(store),
+    }
+}
+
+/// The paths of the two files when both are present with their manifest
+/// sizes ([`ModelStore::installed_directory`]), else
+/// [`DiarizeError::NotInstalled`] naming the missing ones. It hashes
+/// nothing and opens no connection.
+///
+/// ```no_run
+/// use steno_speech::ModelStore;
+///
+/// let store = ModelStore::from_environment();
+/// let ready = steno_diarize::models::installed(&store).is_ok();
+/// ```
+pub fn installed(store: &ModelStore) -> Result<ModelPaths, DiarizeError> {
+    Ok(ModelPaths::in_directory(
+        &store.installed_directory(&asset())?,
+    ))
+}
+
+/// Installs the asset into `store` when a file is missing
+/// ([`ModelStore::ensure`]; the download's progress goes to the debug log)
+/// and returns the paths of the two files. An installed folder is used as
+/// it is, without a request. The earlier store's partial files are
+/// deleted first ([`remove_old_parts`]). A failed download is
+/// [`DiarizeError::Model`].
+///
+/// ```no_run
+/// use steno_speech::ModelStore;
+///
+/// let paths = steno_diarize::models::ensure(&ModelStore::from_environment())?;
+/// assert!(paths.segmentation.is_file() && paths.embedding.is_file());
+/// # Ok::<(), steno_diarize::DiarizeError>(())
+/// ```
+pub fn ensure(store: &ModelStore) -> Result<ModelPaths, DiarizeError> {
+    remove_old_parts(store);
+    let directory = store.ensure(&asset(), &mut log_download)?;
+    Ok(ModelPaths::in_directory(&directory))
+}
+
+/// After a load over the installed files failed with `error`: hashes each
+/// file against the manifest and deletes those that fail, so the store,
+/// Settings and a gate report the asset not installed and a download
+/// replaces them; the result is then [`DiarizeError::NotInstalled`]
+/// naming them. A file that is gone by then (a Settings Remove during the
+/// load) is reported the same way, without a hash. When every file is
+/// intact, or cannot be hashed, it is `error`. The hash runs only after a
+/// failure, never on a load that works.
+pub(crate) fn after_failed_load(store: &ModelStore, error: DiarizeError) -> DiarizeError {
+    let asset = asset();
+    let directory = match store.installed_directory(&asset) {
+        Ok(directory) => directory,
+        Err(gone) => return gone.into(),
+    };
+    let mut missing = Vec::new();
+    for file in &asset.files {
+        let path = directory.join(&file.name);
+        let Ok(actual) = sha256_of(&path) else {
+            continue;
+        };
+        if actual == file.sha256 {
+            continue;
+        }
+        tracing::warn!(path = %path.display(), %actual, expected = %file.sha256, %error, "diarization model failed its checksum, deleting it");
+        match std::fs::remove_file(&path) {
+            Ok(()) => missing.push(file.name.clone()),
+            Err(remove) => {
+                tracing::warn!(path = %path.display(), error = %remove, "corrupt diarization model left in place");
+            }
+        }
+    }
+    if missing.is_empty() {
+        return error;
+    }
+    DiarizeError::NotInstalled {
+        asset: asset.id,
+        directory,
+        missing,
+    }
+}
+
+/// Deletes `<file name>*.part` in the asset's folder in `store`: the
+/// temporary files of the diarizer's earlier store, which nothing resumes
+/// and the installed size would otherwise count. [`ensure`] and Settings'
+/// Download call it. Best effort: a file that cannot be deleted is logged
+/// and left.
+pub fn remove_old_parts(store: &ModelStore) {
+    let asset = asset();
+    let Ok(entries) = std::fs::read_dir(store.directory(&asset)) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let old_part = Path::new(name).extension().is_some_and(|e| e == "part")
+            && asset.files.iter().any(|file| name.starts_with(&file.name));
+        if old_part && let Err(error) = std::fs::remove_file(entry.path()) {
+            tracing::warn!(path = %entry.path().display(), %error, "old partial download left in place");
+        }
+    }
+}
+
+fn log_download(progress: DownloadProgress<'_>) {
+    tracing::debug!(
+        file = progress.file,
+        received = progress.received,
+        total = progress.total,
+        "diarization model download"
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use std::net::{TcpListener, TcpStream};
-
     use super::*;
 
-    const ABC: &[u8] = b"abc";
-    /// SHA-256 of "abc", the FIPS 180-2 test vector.
-    const ABC_SHA256: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
-
+    /// A file removed between the check and the load (a Settings Remove)
+    /// makes the failed load [`DiarizeError::NotInstalled`] naming it, not
+    /// the backend's error, and the file still there is kept.
     #[test]
-    fn the_store_sits_beside_the_swift_models() {
-        let store = ModelStore::for_paths(&StenoPaths::new("/tmp/support"));
-        assert_eq!(
-            store.path(&WESPEAKER_RESNET34_LM),
-            PathBuf::from(
-                "/tmp/support/Models/onnx/diarization/wespeaker-en-voxceleb-resnet34-lm.onnx"
-            )
-        );
-    }
-
-    #[test]
-    fn checksums_are_lowercase_hex_and_a_bad_file_is_not_accepted() {
+    fn a_file_gone_by_the_failed_load_is_not_installed() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("x.bin");
-        fs::write(&path, ABC).unwrap();
-        assert_eq!(sha256_of(&path).unwrap(), ABC_SHA256);
-        let store = ModelStore::new(dir.path());
-        let asset = ModelAsset {
-            file_name: "x.bin",
-            url: "http://127.0.0.1:9/never",
-            sha256: "00",
-            licence: "",
-        };
-        // The stale file fails its checksum, so the store tries the URL,
-        // which is unreachable; no partial file stays behind.
-        assert!(matches!(
-            store.ensure(&asset),
-            Err(ModelError::Download { .. })
-        ));
-        assert_eq!(entries(dir.path()), vec!["x.bin".to_owned()]);
-    }
-
-    /// The file names in `dir`, sorted.
-    fn entries(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(dir)
+        let store = ModelStore::in_models_directory(dir.path());
+        let asset = asset();
+        let folder = store.directory(&asset);
+        std::fs::create_dir_all(&folder).unwrap();
+        let segmentation = &asset.files[0];
+        std::fs::File::create(folder.join(&segmentation.name))
             .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        names
-    }
+            .set_len(segmentation.size)
+            .unwrap();
 
-    /// A loopback HTTP server that answers `connections` requests with
-    /// `body`, declaring `declared_length` bytes; the URL it serves. It
-    /// accepts every connection before it answers any, so concurrent
-    /// fetches are all under way, each with its partial file, before the
-    /// first one can finish.
-    fn serve(body: &'static [u8], declared_length: usize, connections: usize) -> &'static str {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        std::thread::spawn(move || {
-            let streams: Vec<TcpStream> = listener
-                .incoming()
-                .take(connections)
-                .map(Result::unwrap)
-                .collect();
-            for mut stream in streams {
-                let mut request = Vec::new();
-                let mut byte = [0u8; 1];
-                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
-                    request.push(byte[0]);
-                }
-                let head = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n"
-                );
-                stream.write_all(head.as_bytes()).unwrap();
-                stream.write_all(body).unwrap();
-                stream.flush().unwrap();
-            }
-        });
-        Box::leak(format!("http://{address}/model.onnx").into_boxed_str())
-    }
-
-    /// Two fetches of one model into a cold store at once, as the app and
-    /// the `steno` command on first use: the server holds both responses
-    /// until both requests are in, so each fetch has its own temporary
-    /// file open while the other downloads; both end with the verified
-    /// file in place, and nothing else is left in the directory.
-    #[test]
-    fn concurrent_fetches_of_one_model_both_succeed() {
-        let dir = tempfile::tempdir().unwrap();
-        let asset = ModelAsset {
-            file_name: "model.onnx",
-            url: serve(ABC, ABC.len(), 2),
-            sha256: ABC_SHA256,
-            licence: "",
+        let error = after_failed_load(&store, DiarizeError::metadata("the load failed"));
+        let DiarizeError::NotInstalled { missing, .. } = &error else {
+            panic!("not installed: {error:?}");
         };
-        let store = ModelStore::new(dir.path());
-        let results: Vec<Result<PathBuf, ModelError>> = std::thread::scope(|scope| {
-            let fetches: Vec<_> = (0..2)
-                .map(|_| scope.spawn(|| store.ensure(&asset)))
-                .collect();
-            fetches
-                .into_iter()
-                .map(|fetch| fetch.join().unwrap())
-                .collect()
-        });
-        for result in &results {
-            assert_eq!(result.as_ref().unwrap(), &dir.path().join("model.onnx"));
-        }
-        assert_eq!(fs::read(dir.path().join("model.onnx")).unwrap(), ABC);
-        assert_eq!(entries(dir.path()), vec!["model.onnx".to_owned()]);
-    }
-
-    /// A partial download a killed process left behind goes on the next
-    /// call once no download could still be writing it; a recent one,
-    /// which may belong to a fetch under way, and another model's stay.
-    #[test]
-    fn stale_partial_downloads_are_removed() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("model.onnx"), ABC).unwrap();
-        let old = std::time::SystemTime::now() - STALE_PART_AGE - Duration::from_secs(60);
-        for name in ["model.onnxAbC123.part", "other.onnxAbC123.part"] {
-            let file = fs::File::create(dir.path().join(name)).unwrap();
-            file.set_modified(old).unwrap();
-        }
-        fs::write(dir.path().join("model.onnxXyZ789.part"), b"").unwrap();
-        let asset = ModelAsset {
-            file_name: "model.onnx",
-            url: "http://127.0.0.1:9/never",
-            sha256: ABC_SHA256,
-            licence: "",
-        };
-        let path = ModelStore::new(dir.path()).ensure(&asset).unwrap();
-        assert_eq!(path, dir.path().join("model.onnx"));
-        assert_eq!(
-            entries(dir.path()),
-            vec![
-                "model.onnx".to_owned(),
-                "model.onnxXyZ789.part".to_owned(),
-                "other.onnxAbC123.part".to_owned()
-            ]
-        );
-    }
-
-    /// A body that is not the published file fails the checksum and
-    /// leaves no file behind, not even the one with the wrong content.
-    #[test]
-    fn a_body_with_the_wrong_checksum_leaves_nothing_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        let asset = ModelAsset {
-            file_name: "model.onnx",
-            url: serve(b"not the model", 13, 1),
-            sha256: ABC_SHA256,
-            licence: "",
-        };
-        let error = ModelStore::new(dir.path()).ensure(&asset).unwrap_err();
-        assert!(matches!(error, ModelError::Checksum { .. }), "{error}");
-        assert_eq!(entries(dir.path()), Vec::<String>::new());
-    }
-
-    /// A connection that closes before the declared length arrives is a
-    /// download error that names the URL, and the partial file goes with
-    /// it.
-    #[test]
-    fn a_truncated_body_names_the_url_and_leaves_nothing_behind() {
-        let dir = tempfile::tempdir().unwrap();
-        let asset = ModelAsset {
-            file_name: "model.onnx",
-            url: serve(ABC, 1 << 20, 1),
-            sha256: ABC_SHA256,
-            licence: "",
-        };
-        let error = ModelStore::new(dir.path()).ensure(&asset).unwrap_err();
-        assert!(matches!(error, ModelError::Download { .. }), "{error}");
-        assert!(error.to_string().contains(asset.url), "{error}");
-        assert_eq!(entries(dir.path()), Vec::<String>::new());
+        assert_eq!(missing, &[EMBEDDING_FILE.to_owned()]);
+        assert!(folder.join(SEGMENTATION_FILE).exists(), "not hashed, kept");
     }
 }
