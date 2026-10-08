@@ -68,7 +68,11 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
      `CoreML` Parakeet from the repository FluidAudio reads
      (`FluidInference/parakeet-tdt-0.6b-v3-coreml` on Hugging Face) at a pinned commit,
      or all of them from the mirror the speech settings name; in the app only Settings
-     and onboarding start a download, never a pipeline run;
+     and onboarding start a download, never a pipeline run (the app's engines are built
+     in `SpeechEngines::new` behind gates, with the sidecar's `install_models` off and
+     the diarizer on `steno_diarize::Install::Never`), while the `steno` command's
+     engines, which it builds for itself in `crates/steno-cli/src/wiring.rs`, may
+     download on first use for a command a user runs;
    - the Tauri updater, which fetches `latest.json` and the signed bundle from the
      repository's GitHub releases and sends nothing (the `desktop-stable` endpoint in
      `apps/desktop/src-tauri/tauri.conf.json`, the `desktop-beta` one in
@@ -699,14 +703,18 @@ still has to draw the window side. `[ ]` is not ported yet.
   (`crates/steno-services/src/model_gate.rs`) that refuse a call while their models are
   missing, and the speech sidecar's own install is off in them
   (`SidecarConfig::install_models`). The refusal is `PipelineFailure::models_missing`
-  (`FailureKind::ModelsMissing`): the meeting stays `queued` without a reason, the
-  `ModelsMissing` event gives its progress entry the stage `modelsMissing` and the
-  title "Download the speech model in Settings", and a download from Settings resumes
-  it (`ResumeAfterInstall` calls `resume_unfinished`). A stored Whisper, Ultra or DE id
+  (`FailureKind::ModelsMissing`): the meeting stays `queued` with no failure reason on
+  its row, the `ModelsMissing` event gives its progress entry the stage
+  `modelsMissing` and the title "Download the speech models in Settings", and a
+  download from Settings resumes the meetings runs left waiting since the last resume
+  (`ResumingSpeechModels`, `ModelWaits`, `resume_waiting`), never one a pipeline a
+  reload retired still runs; a run refused while such a resume ran goes again. Any
+  stored engine id other than `parakeet-v3` (Whisper, Ultra and DE from the Swift app)
   becomes `parakeet-v3` at launch (`Store::retire_speech_engine`), with a one-time
-  notice in the setup banner's place, and the Transcription section offers Parakeet v3
-  alone. The CLI's engines still download on first use. Rust only: Swift downloaded
-  inside the run.
+  notice in the setup banner's place whose pending flag is `steno.speechEngineNotice`
+  in `preferences.json`, written before the database changes, and the Transcription
+  section offers Parakeet v3 alone. The `steno` command's engines still download on
+  first use. Rust only: Swift downloaded inside the run.
 - [x] One model store: the diarizer's two models are the `steno_speech::ModelAsset`
   `diarization` (`crates/steno-diarize/src/models.rs`), installed by
   `steno_speech::ModelStore` into `<models directory>/onnx/diarization/`, the folder the
@@ -716,13 +724,14 @@ still has to draw the window side. `[ ]` is not ported yet.
   `steno dev models` read the asset. Who may download is the caller's
   `steno_diarize::Install`: under `Never` a missing file is `DiarizeError::NotInstalled`
   with no request (`steno_diarize::models::installed` is the same check without a load).
-  Every diarizer is on `Allowed` for now. `steno process` stays on it, since a command
-  run in a terminal may download on first use; the app's `SpeechEngines` moves to
-  `Never` together with the pipeline's models-missing gate (S1 in
-  `.plans/2026-10-07-stable-promotion.md`), so a missing model never ends in the
-  fallback while "delete after processing" removes the audio. Under `Allowed`, a
-  download cut off while a meeting processes ends the job `ready` with the one room
-  speaker, keeps the partial, and the next run resumes it
+  The app's `SpeechEngines` builds its diarizer on `Never`, and its gate checks
+  `models::installed`: a missing or removed model, or a corrupt one the load deletes,
+  is `NotInstalled`, which the pipeline takes as `PipelineFailure::models_missing` for
+  the diarize stage, so the meeting waits with its audio instead of ending `ready`
+  with the one room speaker. `steno process` stays on `Allowed`, since a command run
+  in a terminal may download on first use. Under `Allowed`, a download cut off while a
+  meeting processes ends the job `ready` with the one room speaker, keeps the partial,
+  and the next run resumes it
   (`a_diarizer_download_cut_off_mid_job_falls_back_and_keeps_the_recording`); the
   recording's retention after such a fallback is the pipeline's. Content is checked at
   download; a load that fails hashes the files, and one that fails its checksum is
@@ -1247,8 +1256,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   (fp32)" from `nvidia/parakeet-tdt-0.6b-v3` elsewhere and with the Mac's sidecar
   fallback (`SpeechModels::display_name` and `source_repo`). The diarizer is the ONNX
   pyannote segmentation 3.0 and WeSpeaker ResNet34-LM models on every platform: its row
-  is named after them with their 33 MB, and Settings > General acknowledges each with
-  its licence and attribution (MIT; CC BY 4.0 for the VoxCeleb-trained WeSpeaker
+  keeps the title "Speaker recognition" and shows their 33 MB, `steno models` lists
+  them by name, and Settings > General acknowledges each with
+  its licence and attribution (MIT; CC-BY-4.0 for the VoxCeleb-trained WeSpeaker
   model) through `SpeechModels::notices`. Only the assets the Rust app offers are
   acknowledged (`ModelAsset::OFFERED`).
 - The phone intake syncs the copy, its meeting folder and the parent of every folder
@@ -2955,8 +2965,8 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   (`apps/desktop/src-tauri/src/tray.rs`); the WP9 paragraph and seam (4) under
   "Pipeline and services (WP6b)". Found: #173, #185.
 - **WP9b.** The diarizer's manifest still gives WeSpeaker ResNet34-LM the licence
-  Apache-2.0, where its VoxCeleb training data makes it CC BY 4.0; Settings already
-  shows CC BY 4.0 with the attribution. Where: `WESPEAKER_RESNET34_LM` in
+  Apache-2.0, where its VoxCeleb training data makes it CC-BY-4.0; Settings already
+  shows CC-BY-4.0 with the attribution. Where: `WESPEAKER_RESNET34_LM` in
   `crates/steno-diarize/src/models.rs`, which #229 rewrites. Found: #164, #183.
 - **WP9b.** The other Swift fixes and cutover decisions in the parity notes: the
   Swift defects (each ported to Swift if it ships another release, otherwise closed by
