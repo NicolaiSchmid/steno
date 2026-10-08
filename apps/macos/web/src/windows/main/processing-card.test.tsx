@@ -27,7 +27,7 @@ describe("ProcessingCard", () => {
 				entry={{
 					meetingID: MEETING,
 					stage: MODELS_MISSING_STAGE,
-					title: "Download the speech model in Settings",
+					title: "Download the speech models in Settings",
 					fraction: 0,
 				}}
 				state="queued"
@@ -35,7 +35,7 @@ describe("ProcessingCard", () => {
 			harness,
 		);
 		expect(screen.getByTestId("processing-stage")).toHaveTextContent(
-			"Download the speech model in Settings",
+			"Download the speech models in Settings",
 		);
 		expect(
 			screen.queryByTestId("processing-remaining"),

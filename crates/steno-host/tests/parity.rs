@@ -275,6 +275,12 @@ fn progress() {
             lane_count: 1,
         },
     });
+    // A run refused for missing models: the second entry, Rust only.
+    harness
+        .host
+        .apply_meeting_event(&MeetingEvent::ModelsMissing {
+            meeting_id: uuid(0x04),
+        });
     assert_parity(
         "progress",
         &harness.snapshot(BridgeTopic::Progress),

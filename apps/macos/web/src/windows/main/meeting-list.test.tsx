@@ -213,10 +213,10 @@ describe("MeetingList rows", () => {
 			rowPreview(queued, {
 				meetingID: row.id,
 				stage: "modelsMissing",
-				title: "Download the speech model in Settings",
+				title: "Download the speech models in Settings",
 				fraction: 0,
 			}),
-		).toBe("Download the speech model in Settings.");
+		).toBe("Download the speech models in Settings.");
 	});
 
 	it("leads with the source and ends line 1 with the start time once ready", async () => {

@@ -2215,7 +2215,7 @@ fn a_meeting_refused_for_a_missing_model_says_to_download_it() {
     assert_eq!(entry(&harness)["stage"], "modelsMissing");
     assert_eq!(
         entry(&harness)["title"],
-        "Download the speech model in Settings"
+        "Download the speech models in Settings"
     );
     harness.host.store_changed();
     assert_eq!(

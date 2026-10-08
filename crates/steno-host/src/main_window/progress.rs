@@ -37,7 +37,7 @@ impl ProgressEntry {
 
     /// The title of a meeting whose run was refused for a missing model,
     /// `PipelineFailure::MODELS_MISSING` in `steno-pipeline`.
-    pub const MODELS_MISSING_TITLE: &'static str = "Download the speech model in Settings";
+    pub const MODELS_MISSING_TITLE: &'static str = "Download the speech models in Settings";
 
     /// The bridge stage of such a meeting, beside `waiting` and the
     /// pipeline's stages; the page drops "starts when the current meeting

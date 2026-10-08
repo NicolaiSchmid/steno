@@ -45,7 +45,11 @@ public enum BridgeSamples {
   public static let progress = ProgressSnapshot(entries: [
     .init(
       meetingID: uuid(2), stage: "transcribing", title: "Transcribing", fraction: 0.62,
-      estimatedRemainingSeconds: 95)
+      estimatedRemainingSeconds: 95),
+    // The Rust host's entry for a run refused for missing models.
+    .init(
+      meetingID: uuid(4), stage: "modelsMissing", title: "Download the speech models in Settings",
+      fraction: 0, estimatedRemainingSeconds: nil),
   ])
 
   static let chips: [SpeakerChip] = [
