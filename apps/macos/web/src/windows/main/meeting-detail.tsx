@@ -6,6 +6,7 @@ import {
 	EllipsisIcon,
 	FolderIcon,
 	RefreshCwIcon,
+	RotateCcwIcon,
 	ShareIcon,
 	SparklesIcon,
 	TextAlignStartIcon,
@@ -401,6 +402,24 @@ function DetailBody({
 		send(client, "meeting.rerunSummary");
 	}
 
+	// "Process again" runs a failed meeting from the start with its
+	// recording, so it is offered only while the recording is on disk; the
+	// host words any refusal on the error line. The button stays disabled
+	// until the host answers, so a second click cannot start a second run.
+	const canProcessAgain =
+		detail.state === "failed" && detail.retention.filesExist;
+	const [startingAgain, setStartingAgain] = useState(false);
+	async function processAgain() {
+		setStartingAgain(true);
+		try {
+			await client.call("meeting.processAgain");
+		} catch (cause: unknown) {
+			console.error("bridge: meeting.processAgain failed", cause);
+		} finally {
+			setStartingAgain(false);
+		}
+	}
+
 	const canReexport = detail.export.canReexport && !detail.isBusy;
 	useShortcut(
 		SHORTCUTS.exportAgain,
@@ -436,15 +455,28 @@ function DetailBody({
 			return (
 				<EmptyState
 					action={
-						<Button
-							data-testid={`${current}-try-again`}
-							disabled={!detail.canRerunSummary || detail.isBusy}
-							onClick={rerun}
-							variant="outline"
-						>
-							<RefreshCwIcon aria-hidden="true" />
-							Try again
-						</Button>
+						<>
+							{canProcessAgain ? (
+								<Button
+									data-testid={`${current}-process-again`}
+									disabled={detail.isBusy || startingAgain}
+									onClick={processAgain}
+									variant="outline"
+								>
+									<RotateCcwIcon aria-hidden="true" />
+									Process again
+								</Button>
+							) : null}
+							<Button
+								data-testid={`${current}-try-again`}
+								disabled={!detail.canRerunSummary || detail.isBusy}
+								onClick={rerun}
+								variant="outline"
+							>
+								<RefreshCwIcon aria-hidden="true" />
+								Try again
+							</Button>
+						</>
 					}
 					body={
 						detail.failureReason
