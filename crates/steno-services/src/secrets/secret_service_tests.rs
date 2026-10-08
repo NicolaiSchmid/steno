@@ -25,6 +25,15 @@ fn fingerprint(identity: &HandoverIdentity) -> String {
     steno_handover::identity::hex(&identity.fingerprint())
 }
 
+/// The handover's load over `store` and `record`, with no phone paired.
+async fn load(
+    store: &SecretServiceStore,
+    record: &FingerprintFile,
+) -> Result<HandoverIdentity, steno_handover::IdentityError> {
+    let database = steno_core::Store::in_memory().unwrap();
+    HandoverIdentity::load_or_create(store, record, &database, "x", chrono::Utc::now()).await
+}
+
 /// A store over a fresh fake: the daemon, the fake's connection (kept for
 /// its lifetime), the fake's state and the secrets file's folder.
 struct Setup {
@@ -328,29 +337,19 @@ async fn an_identity_the_service_already_holds_is_not_adopted_over_the_files() {
         return;
     };
     let (ours, theirs) = (minted("ours"), minted("theirs"));
+    let ours_pem = ours.to_pem().unwrap();
     setup
         .launch()
         .await
         .set_secret(&identity(), Some(&theirs.to_pem().unwrap()))
         .await
         .unwrap();
-    write_file(
-        &setup.path(),
-        &[("handover-identity", &ours.to_pem().unwrap())],
-    );
+    write_file(&setup.path(), &[("handover-identity", &ours_pem)]);
     assert_eq!(setup.record().recorded().unwrap(), None);
     let store = setup.launch().await;
     assert!(chose_service(&store));
     assert_eq!(setup.record().recorded().unwrap(), Some(fingerprint(&ours)));
-    let database = steno_core::Store::in_memory().unwrap();
-    let load = HandoverIdentity::load_or_create(
-        &store,
-        &setup.record(),
-        &database,
-        "x",
-        chrono::Utc::now(),
-    )
-    .await;
+    let load = load(&store, &setup.record()).await;
     assert!(
         matches!(
             load,
@@ -362,10 +361,7 @@ async fn an_identity_the_service_already_holds_is_not_adopted_over_the_files() {
     );
 
     setup.record().record("recorded-before").unwrap();
-    write_file(
-        &setup.path(),
-        &[("handover-identity", &ours.to_pem().unwrap())],
-    );
+    write_file(&setup.path(), &[("handover-identity", &ours_pem)]);
     drop(setup.launch().await);
     assert_eq!(
         setup.record().recorded().unwrap().as_deref(),
@@ -767,11 +763,7 @@ async fn a_confirmed_identity_store_over_an_identity_keeps_the_new_one() {
     first.store(&store, &record).await.unwrap();
     second.store(&store, &record).await.unwrap();
     assert_eq!(setup.values("handover-identity").len(), 1);
-    let database = steno_core::Store::in_memory().unwrap();
-    let loaded =
-        HandoverIdentity::load_or_create(&store, &record, &database, "x", chrono::Utc::now())
-            .await
-            .unwrap();
+    let loaded = load(&store, &record).await.unwrap();
     assert_eq!(fingerprint(&loaded), fingerprint(&second));
 }
 

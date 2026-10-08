@@ -380,7 +380,7 @@ impl FakeCollection {
             attributes,
             value: secret.value,
         };
-        let (id, new, confirm, unnamed) = {
+        let (id, new, confirm) = {
             let mut state = self.state.lock().unwrap();
             if state.locked {
                 return Err(fdo::Error::AccessDenied("locked".to_owned()));
@@ -401,12 +401,14 @@ impl FakeCollection {
                 state.next
             });
             state.items.insert(id, item);
-            (
-                id,
-                existing.is_none(),
-                state.confirm_writes,
-                state.unnamed_creates,
-            )
+            let confirm = state.confirm_writes.then(|| {
+                if state.unnamed_creates {
+                    Answer::Nothing
+                } else {
+                    Answer::Created(item_path(id))
+                }
+            });
+            (id, existing.is_none(), confirm)
         };
         if new {
             server
@@ -419,13 +421,8 @@ impl FakeCollection {
                 )
                 .await?;
         }
-        if !confirm {
+        let Some(answer) = confirm else {
             return Ok((item_path(id), no_object()));
-        }
-        let answer = if unnamed {
-            Answer::Nothing
-        } else {
-            Answer::Created(item_path(id))
         };
         let prompt = prompt_at(server, &self.state, answer).await?;
         Ok((no_object(), prompt))
