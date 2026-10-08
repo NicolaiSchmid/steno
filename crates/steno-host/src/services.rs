@@ -403,7 +403,8 @@ pub trait FolderUsage: Send + Sync {
     fn measure(&self, folder: &Path) -> BoundaryResult<i64>;
     /// Whether a power cut may lose a recording just written into `folder`
     /// (`steno_pipeline::files::may_lose_recent_writes`: a Windows drive
-    /// that is not NTFS); the Swift app never asks.
+    /// that is neither NTFS nor `ReFS`, or a network drive); the Swift app
+    /// never asks.
     fn may_lose_recent_writes(&self, folder: &Path) -> bool;
 }
 

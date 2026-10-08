@@ -22,7 +22,9 @@
 //! a failed folder sync is on Linux and macOS; the flush of the renamed
 //! file stays an error. exFAT's driver is not published, so Settings warns
 //! about an audio folder on a drive that is neither NTFS nor `ReFS`
-//! ([`file_system_name`]).
+//! ([`file_system_name`]), and about one on a network drive
+//! ([`is_on_a_network_drive`]): a server that acknowledges a flush without
+//! writing it cannot be made durable from this side.
 //!
 //! A long path is passed with the `\\?\` prefix, from the length at which
 //! std adds it, so a long audio folder still takes the written-through
@@ -33,16 +35,17 @@ use std::io;
 use std::os::windows::ffi::OsStrExt as _;
 use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
-use std::path::Path;
+use std::path::{Component, Path, Prefix};
 
 use windows_sys::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
     ERROR_SHARING_VIOLATION, MAX_PATH,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_APPEND_DATA, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_DATA, GetVolumeInformationByHandleW,
-    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    FILE_APPEND_DATA, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_DATA, GetDriveTypeW,
+    GetVolumeInformationByHandleW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
+use windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE;
 
 /// Renames `from` onto `to`, replacing a file there, and returns once the
 /// rename is on the disk (`MOVEFILE_WRITE_THROUGH`).
@@ -173,6 +176,28 @@ pub(super) fn file_system_name(path: &Path) -> io::Result<String> {
         .position(|&unit| unit == 0)
         .unwrap_or(name.len());
     Ok(String::from_utf16_lossy(&name[..length]))
+}
+
+/// Whether `path` is on a network drive: a share (`\\server\share`, also
+/// with the `\\?\UNC\` prefix), read from the path alone, or a drive letter
+/// Windows reports as mapped to one (`GetDriveTypeW`). A relative path is
+/// made absolute first; a device path is not a network drive.
+pub(super) fn is_on_a_network_drive(path: &Path) -> bool {
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let Some(Component::Prefix(prefix)) = absolute.components().next() else {
+        return false;
+    };
+    match prefix.kind() {
+        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+            let root = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
+            // SAFETY: `root` is a NUL-terminated UTF-16 string owned by this
+            // frame and alive until the call returns; `GetDriveTypeW` only
+            // reads it and keeps no pointer to it after it returns.
+            unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
+        }
+        Prefix::Verbatim(_) | Prefix::DeviceNS(_) => false,
+    }
 }
 
 /// `path` as the NUL-terminated UTF-16 string the Win32 calls take, with
@@ -335,6 +360,20 @@ mod tests {
         assert!(!refuses_folder_flush(&io::Error::other("not from the OS")));
         assert!(is_sharing_violation(&error(ERROR_SHARING_VIOLATION)));
         assert!(!is_sharing_violation(&error(ERROR_ACCESS_DENIED)));
+    }
+
+    /// A share is a network drive from its path alone, with or without the
+    /// prefix; the runner's temporary folder, on a local drive, is not, and
+    /// neither is a device path.
+    #[test]
+    fn a_share_is_on_a_network_drive_and_a_local_folder_is_not() {
+        assert!(is_on_a_network_drive(Path::new(r"\\server\share\audio")));
+        assert!(is_on_a_network_drive(Path::new(
+            r"\\?\UNC\server\share\audio"
+        )));
+        let directory = tempfile::tempdir().unwrap();
+        assert!(!is_on_a_network_drive(directory.path()));
+        assert!(!is_on_a_network_drive(Path::new(r"\\.\PhysicalDrive0")));
     }
 
     /// The runner's temporary folder is on NTFS, and a folder that does not

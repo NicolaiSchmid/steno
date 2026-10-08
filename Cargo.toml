@@ -191,7 +191,8 @@ unicode-segmentation = "1.13.3"
 # not report (`GetIfTable2` from IpHelper, `IfOperStatusUp` from Ndis,
 # `NO_ERROR` from Foundation). The version if-addrs already locks. Crates
 # add the features they call on top (`Win32_Storage_FileSystem`: the
-# handover's file id, the pipeline's written-through renames).
+# handover's file id, the pipeline's written-through renames;
+# `Win32_System_WindowsProgramming`: the pipeline's network drive check).
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis"] }
 # Test only: the pinned phone-like client (reqwest, the LLM line above,
 # with a preconfigured rustls config) and the X.509 checks on the minted

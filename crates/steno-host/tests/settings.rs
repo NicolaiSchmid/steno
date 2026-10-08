@@ -297,8 +297,9 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
 }
 
 /// A folder on a drive that may lose recent recordings in a power cut (a
-/// Windows drive that is not NTFS) shows the warning, and a folder chosen
-/// after is checked again. The Swift app has no such warning.
+/// Windows drive that is neither NTFS nor `ReFS`, or a network drive) shows
+/// the warning, and a folder chosen after is checked again. The Swift app
+/// has no such warning.
 #[test]
 fn a_folder_on_a_drive_that_may_lose_recent_writes_shows_the_warning() {
     let chosen = tempfile::tempdir().unwrap();

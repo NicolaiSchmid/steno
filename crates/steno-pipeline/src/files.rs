@@ -63,13 +63,15 @@ impl Syncs for Disk {
 /// Whether a power cut may lose a recording just written into `folder`, for
 /// the warning in Settings: true on Windows for a folder on a drive that is
 /// neither NTFS nor `ReFS` (FAT32, exFAT), whose folder entries the durable
-/// writes cannot be sure to flush (`windows`); false elsewhere, and where
-/// the drive cannot be read.
+/// writes cannot be sure to flush, and for one on a network drive, whose
+/// server may acknowledge a flush without writing it (`windows`); false
+/// elsewhere, and where the drive cannot be read.
 pub fn may_lose_recent_writes(folder: &Path) -> bool {
     #[cfg(windows)]
     {
-        windows::file_system_name(folder)
-            .is_ok_and(|name| !matches!(name.as_str(), "NTFS" | "ReFS"))
+        windows::is_on_a_network_drive(folder)
+            || windows::file_system_name(folder)
+                .is_ok_and(|name| !matches!(name.as_str(), "NTFS" | "ReFS"))
     }
     #[cfg(not(windows))]
     {
