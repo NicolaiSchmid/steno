@@ -1,7 +1,7 @@
 //! The Secret Service (`org.freedesktop.secrets`) on the session bus: the
 //! keyring GNOME Keyring, `KWallet` and `KeePassXC` serve on Linux. A small
 //! client over `zbus`, which the desktop shell already links, so the store
-//! adds no crate, no C library and no second async runtime.
+//! adds no crate, no C library and no second async runtime crate.
 //! No Swift counterpart (the Swift app is macOS-only); the label follows
 //! `KeychainSecretStore.swift`.
 //!
@@ -297,9 +297,16 @@ impl Shared {
         };
         let keyring = match Keyring::open(bus, ask).await {
             Ok(keyring) => keyring,
-            Err(error) => {
+            Err(error @ ServiceError::Bus(_)) => {
                 tracing::warn!(
                     "secrets: no Secret Service ({error}), keeping secrets with the file"
+                );
+                return Backend::File;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "secrets: the Secret Service could not be opened ({error}), keeping \
+                     secrets with the file"
                 );
                 return Backend::File;
             }
@@ -349,13 +356,21 @@ impl Shared {
 
 #[async_trait]
 impl SecretStore for SecretServiceStore {
-    /// Never asks the user.
+    /// Never asks the user. A read of the service has one deadline of
+    /// 25 s, a D-Bus call's, over all its calls, so a provider that stops
+    /// answering holds a caller (the host under its lock) that long once,
+    /// not once per call.
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
         if let Some(value) = self.shared.file.environment_value(key) {
             return Ok(Some(value.to_owned()));
         }
         match self.backend().await? {
-            Backend::Service(keyring) => Ok(keyring.secret(key, Ask::Never).await?),
+            Backend::Service(keyring) => {
+                let read = tokio::time::timeout(CALL_TIMEOUT, keyring.secret(key, Ask::Never))
+                    .await
+                    .map_err(|_| ServiceError::NoAnswer)?;
+                Ok(read?)
+            }
             Backend::File => self.shared.file.secret(key).await,
         }
     }
@@ -421,6 +436,8 @@ pub(super) enum ServiceError {
     PromptTimedOut,
     #[error("the Secret Service closed its prompt without an answer")]
     PromptClosed,
+    #[error("the Secret Service did not answer in time")]
+    NoAnswer,
     #[error("the Secret Service holds `{0}` as bytes that are not UTF-8")]
     NotText(String),
     #[error("`{0}` did not read back from the Secret Service as written")]
