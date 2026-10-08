@@ -337,7 +337,10 @@ fn not_saved(meeting_id: Uuid, error: &LocalRecordingIntakeError) -> Unsaved {
     if matches!(
         error,
         LocalRecordingIntakeError::NotRecording(..)
-            | LocalRecordingIntakeError::Store(steno_core::StoreError::MeetingNotFound(_))
+            | LocalRecordingIntakeError::Store(
+                steno_core::StoreError::NotRecording(..)
+                    | steno_core::StoreError::MeetingNotFound(_)
+            )
     ) {
         Unsaved::Settled(MEETING_NOT_STORED)
     } else {

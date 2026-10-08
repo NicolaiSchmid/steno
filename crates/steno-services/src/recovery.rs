@@ -6,7 +6,10 @@
 //! asset from the master's header and queues the meeting through the Mac
 //! intake, with the end reason `failed` ("the capture failed; the recording
 //! so far was kept"). The recorder does the same for a stop whose capture
-//! failed. Rust only: Swift had no recovery.
+//! failed. A phone meeting arrives whole and `queued`, so a phone row left
+//! `recording` was written by another process: it is queued with the
+//! asset that names its upload, or failed when it has none. Rust only:
+//! Swift had no recovery.
 //!
 //! A row is failed only when its master is provably not there. The launch
 //! looks first in the two folders that decide it: the one the recorder
@@ -36,6 +39,7 @@
 //! | `Interrupted` | What the launch lists before anything can record: the rows left `recording`, the recorded and the known folders |
 //! | `reconcile_interrupted` | The launch's pass over those rows, with what it found in `Reconciled` |
 //! | `recover` | Finds, salvages and queues one meeting; the recorder calls it after a failed stop |
+//! | `queue_upload` | Queues a phone meeting left `recording` with its stored asset |
 //! | `other_folders`, `find_master` | Where else a master may be, and which folder holds it (`Lookup`) |
 //! | `salvage` | The asset a master's header and sidecars give, as its capture would have handed it over |
 //! | [`LiveRecordingCheck`] | When a master counts as still written; the app's field, so tests inject the clock, and the recorder's check before a delete |
@@ -61,10 +65,8 @@ use uuid::Uuid;
 /// did before recovery.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Unrecoverable {
-    /// A phone meeting: its audio arrives whole through the handover.
-    #[error("a {} meeting is not captured on this computer", .0.as_str())]
-    NotCaptured(MeetingSource),
-    /// The writer never created the master, or it is gone.
+    /// The writer never created the master, or it is gone; for a phone
+    /// meeting, no asset names its upload.
     #[error("no audio folder holds the master")]
     NoMaster,
     /// Not a CAF the writer wrote: malformed, or another format.
@@ -94,12 +96,13 @@ pub(crate) enum RecoveryError {
 }
 
 /// The lanes a meeting from `source` records, in master channel order, as
-/// the recorder configures its capture.
-fn lanes(source: MeetingSource) -> Result<Vec<AudioLane>, Unrecoverable> {
+/// the recorder configures its capture; a phone's upload is one mixed lane
+/// (never salvaged: [`queue_upload`]).
+fn lanes(source: MeetingSource) -> Vec<AudioLane> {
     match source {
-        MeetingSource::MacCall => Ok(steno_audio::CaptureMode::Call.lanes()),
-        MeetingSource::MacInPerson => Ok(steno_audio::CaptureMode::InPerson.lanes()),
-        MeetingSource::Phone => Err(Unrecoverable::NotCaptured(source)),
+        MeetingSource::MacCall => steno_audio::CaptureMode::Call.lanes(),
+        MeetingSource::MacInPerson => steno_audio::CaptureMode::InPerson.lanes(),
+        MeetingSource::Phone => vec![AudioLane::Mixed],
     }
 }
 
@@ -188,7 +191,7 @@ pub(crate) fn salvage(
     meeting_id: Uuid,
     source: MeetingSource,
 ) -> Result<RecordingResult, RecoveryError> {
-    let lanes = lanes(source)?;
+    let lanes = lanes(source);
     let layout = RecordingLayout::new(audio_folder, meeting_id);
     let master = layout.master(AudioFormat::Caf48kFloat32);
     let header = CafHeader::read(&master).map_err(|error| match error {
@@ -265,6 +268,30 @@ async fn queue(
 ) -> Result<Meeting, RecoveryError> {
     let result = salvage(audio_folder, meeting_id, source)?;
     Ok(intake.complete(meeting_id, result, None).await?)
+}
+
+/// Queues a phone meeting left `recording` through `intake` with the asset
+/// that names its upload, kept as stored. This app admits a phone recording
+/// whole and `queued`, so such a row was written by another process; the
+/// end reason is `failed`, as for every recovered row. One with no asset
+/// has nothing to queue ([`Unrecoverable::NoMaster`]), and one whose asset
+/// cannot be read now is kept ([`RecoveryError::NotSaved`]).
+async fn queue_upload(
+    store: &Store,
+    intake: &LocalRecordingIntake,
+    meeting: &Meeting,
+) -> Result<Meeting, RecoveryError> {
+    let asset = store
+        .asset(meeting.id)
+        .map_err(|error| RecoveryError::NotSaved(error.into()))?
+        .ok_or(Unrecoverable::NoMaster)?;
+    let retention = asset.retention;
+    let result = RecordingResult {
+        asset,
+        duration: meeting.duration,
+        end_reason: RecordingEndReason::Failed,
+    };
+    Ok(intake.complete(meeting.id, result, Some(retention)).await?)
 }
 
 /// When the launch counts a master as still being written. The clock and
@@ -490,16 +517,21 @@ fn reconcile_listed(
             return reconciled;
         }
     };
-    let lookups: Vec<Lookup> = meetings
+    // A phone meeting's audio is its upload, which an asset names: no
+    // master is looked for (`None`).
+    let lookups: Vec<Option<Lookup>> = meetings
         .iter()
         .map(|meeting| {
+            if meeting.source == MeetingSource::Phone {
+                return None;
+            }
             let recorded = interrupted
                 .recorded
                 .as_ref()
                 .and_then(|recorded| recorded.get(&meeting.id).cloned());
             let deciding = distinct(recorded.into_iter().chain(current.clone()), &[]);
             let others = distinct(others.iter().cloned(), &deciding);
-            match find_master(&deciding, &others, meeting.id) {
+            Some(match find_master(&deciding, &others, meeting.id) {
                 // Settings whose audio folder this build cannot read, or a
                 // record that cannot be read, may name the folder a master
                 // is in: only a master found is recovered.
@@ -507,15 +539,15 @@ fn reconcile_listed(
                     Lookup::Unreachable
                 }
                 lookup => lookup,
-            }
+            })
         })
         .collect();
     let masters: Vec<Option<PathBuf>> = meetings
         .iter()
         .zip(&lookups)
         .map(|(meeting, lookup)| match lookup {
-            Lookup::Found(folder) => Some(master_path(folder, meeting.id)),
-            Lookup::Absent | Lookup::Unreachable => None,
+            Some(Lookup::Found(folder)) => Some(master_path(folder, meeting.id)),
+            Some(Lookup::Absent | Lookup::Unreachable) | None => None,
         })
         .collect();
     let written = check.still_written(&masters);
@@ -525,16 +557,17 @@ fn reconcile_listed(
     for ((meeting, lookup), written) in meetings.iter().zip(lookups).zip(written) {
         let meeting_id = meeting.id;
         let recovered = match lookup {
-            Lookup::Found(_) if written => {
+            None => crate::block_on(runtime, queue_upload(store, intake, meeting)),
+            Some(Lookup::Found(_)) if written => {
                 tracing::warn!(%meeting_id, "a recording another process is writing was left alone");
                 reconciled.live.push(meeting_id);
                 continue;
             }
-            Lookup::Found(folder) => {
+            Some(Lookup::Found(folder)) => {
                 crate::block_on(runtime, queue(intake, &folder, meeting_id, meeting.source))
             }
-            Lookup::Unreachable => Err(RecoveryError::Unreachable),
-            Lookup::Absent => Err(Unrecoverable::NoMaster.into()),
+            Some(Lookup::Unreachable) => Err(RecoveryError::Unreachable),
+            Some(Lookup::Absent) => Err(Unrecoverable::NoMaster.into()),
         };
         match recovered {
             Ok(_) => {
@@ -652,7 +685,7 @@ mod tests {
         /// The production writer for `meeting`, as its capture opens it.
         fn writer(&self, meeting: &Meeting) -> RecordingWriter {
             let layout = RecordingLayout::new(&self.audio_folder(), meeting.id);
-            RecordingWriter::new(&layout, &lanes(meeting.source).unwrap(), false).unwrap()
+            RecordingWriter::new(&layout, &lanes(meeting.source), false).unwrap()
         }
 
         /// Where the known audio folders are listed.
@@ -1137,6 +1170,60 @@ mod tests {
         );
         assert_eq!(harness.recorded(&failed), None);
         assert_eq!(harness.recorded(&started), Some(harness.audio_folder()));
+    }
+
+    /// A phone row left `recording` (this app admits a phone recording
+    /// `queued`, so another process wrote it) is queued with the asset
+    /// that names its upload, kept as stored with the upload where it is,
+    /// and processes; one with no asset fails as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_phone_row_left_recording_is_queued_with_its_upload() {
+        let harness = Harness::new();
+        let uploaded = harness.begin(MeetingSource::Phone);
+        let layout = RecordingLayout::new(&harness.audio_folder(), uploaded.id);
+        std::fs::create_dir_all(&layout.directory).unwrap();
+        let upload = layout.master(AudioFormat::M4aAac);
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../Tests/Fixtures/audio/tone-440-44k1-500ms.m4a"),
+            &upload,
+        )
+        .unwrap();
+        let asset = AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: uploaded.id,
+            url: file_url(&upload, false),
+            format: AudioFormat::M4aAac,
+            lanes: vec![AudioLane::Mixed],
+            sidecars_16k: BTreeMap::new(),
+            mixdown_url: None,
+            retention: AudioRetention::KeepDays(30),
+            expires_at: None,
+        };
+        harness
+            .store
+            .save_meeting_with_asset(&uploaded, &asset)
+            .unwrap();
+        let no_upload = harness.begin(MeetingSource::Phone);
+
+        let meetings = [uploaded.clone(), no_upload.clone()];
+        let reconciled = harness.reconcile(&meetings, &an_hour_later());
+        assert_eq!(reconciled.recovered, [uploaded.id]);
+        assert_eq!(reconciled.failed, [no_upload.id]);
+        harness.pipeline.current().wait_until_idle().await;
+        assert_eq!(harness.state(&uploaded), MeetingState::Ready);
+        let stored = harness.store.asset(uploaded.id).unwrap().unwrap();
+        assert_eq!(
+            (stored.id, &stored.url, stored.retention),
+            (asset.id, &asset.url, asset.retention)
+        );
+        assert!(upload.is_file());
+        assert_eq!(
+            harness.state(&no_upload),
+            MeetingState::Failed {
+                reason: Store::INTERRUPTED_RECORDING_REASON.to_owned()
+            }
+        );
     }
 
     /// A folder that is gone for good keeps a row only when it decides the
