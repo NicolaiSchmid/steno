@@ -857,33 +857,34 @@ impl Engine {
         state: HandoverState,
         received_chunks: Option<Vec<i64>>,
     ) -> store::Result<()> {
-        self.update(receipt, |edit| {
-            edit.state = state;
-            if let Some(received_chunks) = received_chunks {
-                edit.received_chunks = received_chunks;
-            }
-        })
-        .await
+        self.update(receipt, Some(state), received_chunks).await
     }
 
     /// A change of the receipt a request read, through [`Engine::change`]:
-    /// `edit` changes the copy memory holds, or `receipt` when memory holds
-    /// none (a revoked device), and `receipt` comes back as changed. When
-    /// memory holds another upload ([`same_upload`]: another phone
-    /// announced or took over the recording id, or the phone announced
-    /// other bytes under it), nothing changes, `receipt` included: a late
-    /// `complete` of the replaced bytes would otherwise mark the new
-    /// upload `complete` with their meeting, and the phone would delete a
-    /// recording the computer does not have. A receipt memory holds
-    /// as `complete` stays as it is, nothing is saved and `receipt` comes
-    /// back as memory holds it: a request that read it before the phone's
-    /// `complete` admitted the recording must not put it back, or the
-    /// phone's next `complete` would start over and admit it again.
+    /// `state` and `received_chunks`, when given, change the copy memory
+    /// holds, or `receipt` when memory holds none (a revoked device), and
+    /// `receipt` comes back as changed. When memory holds another upload
+    /// ([`same_upload`]: another phone announced or took over the
+    /// recording id, or the phone announced other bytes under it), nothing
+    /// changes, `receipt` included: a late `complete` of the replaced bytes
+    /// would otherwise mark the new upload `complete` with their meeting,
+    /// and the phone would delete a recording the computer does not have.
+    /// A receipt memory holds as `complete` stays as it is, nothing is
+    /// saved and `receipt` comes back as memory holds it: a request that
+    /// read it before the phone's `complete` admitted the recording must
+    /// not put it back, or the phone's next `complete` would start over and
+    /// admit it again. A chunk set is one split's, so it is not written
+    /// over a receipt memory holds in another chunk size (the phone
+    /// announced the same bytes split otherwise since): a late `complete`
+    /// of the earlier split would empty the new split's chunks, and the
+    /// phone would send them again.
     async fn update(
         &self,
         receipt: &mut HandoverReceipt,
-        edit: impl FnOnce(&mut HandoverReceipt),
+        state: Option<HandoverState>,
+        received_chunks: Option<Vec<i64>>,
     ) -> store::Result<()> {
+        let writes_chunks = received_chunks.is_some();
         let picked = self.change(
             receipt.recording_id,
             |held| match held {
@@ -891,9 +892,17 @@ impl Engine {
                 Some(held) if held.state.kind() == HandoverStateKind::Complete => {
                     Err(Some(Box::new(held.clone())))
                 }
+                Some(held) if writes_chunks && held.chunk_size != receipt.chunk_size => Err(None),
                 held => Ok(held.unwrap_or(receipt).clone()),
             },
-            edit,
+            |edit| {
+                if let Some(state) = state {
+                    edit.state = state;
+                }
+                if let Some(received_chunks) = received_chunks {
+                    edit.received_chunks = received_chunks;
+                }
+            },
         );
         match picked {
             Ok((changed, place)) => {
@@ -1075,7 +1084,9 @@ fn stored_receipt(store: &Store, recording_id: Uuid) -> store::Result<Option<Han
 /// same bytes. A receipt of another device (another phone announced the
 /// recording id, or took it over), or of other bytes (the phone announced
 /// another file under the id), is another upload, and a write a request
-/// computed from `read` must not land on it.
+/// computed from `read` must not land on it. The chunk size is not part of
+/// it: only the writes of a chunk set check it ([`Engine::update`],
+/// [`Engine::add_chunk`]). Swift: `HandoverEngine.sameUpload`.
 fn same_upload(held: &HandoverReceipt, read: &HandoverReceipt) -> bool {
     held.device_id == read.device_id
         && held.byte_count == read.byte_count

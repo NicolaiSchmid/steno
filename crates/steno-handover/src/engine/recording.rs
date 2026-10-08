@@ -611,9 +611,7 @@ impl Engine {
             if !has_partial {
                 // The state stays as memory holds it: a re-announce or a
                 // chunk may have changed it since `complete` read it.
-                let _ = self
-                    .update(receipt, |edit| edit.received_chunks.clear())
-                    .await;
+                let _ = self.update(receipt, None, Some(Vec::new())).await;
                 if let Some(meeting_id) = receipt.state.meeting_id() {
                     return Verification::Answered(HandoverResponse::json(
                         StatusCode::OK,
@@ -824,7 +822,9 @@ mod tests {
 
     use chrono::{DateTime, TimeZone as _, Utc};
     use steno_core::testing::FakeHandoverIntake;
-    use steno_core::{AudioFormat, HandoverReceipt, PairedDevice, RecordingMetadata, Store};
+    use steno_core::{
+        AudioFormat, HandoverReceipt, HandoverState, PairedDevice, RecordingMetadata, Store,
+    };
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -972,6 +972,62 @@ mod tests {
                 "resplit: {resplit}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn a_late_complete_of_another_split_leaves_the_new_chunk_set_alone() {
+        // A `complete` read the receipt in the first split and found its
+        // partial replaced during the verify (the phone announced the same
+        // bytes in another split, which restarted the partial, and sent a
+        // chunk of it). Its answer empties the chunk set it read; written
+        // into the new split's receipt, it would drop that chunk, and the
+        // phone would send it again. The same holds for the hash mismatch's
+        // write and for the clear of a `complete` that found no partial.
+        // Swift: `aLateCompleteOfAnotherSplitLeavesTheNewChunkSetAlone`.
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::in_memory().unwrap());
+        let y = device("Y");
+        store.save_paired_device(&y, &[2; 32]).unwrap();
+        let engine = engine(
+            directory.path(),
+            store,
+            Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
+        );
+        let recording_id = Uuid::new_v4();
+        let first = metadata(recording_id, 300_000, "Y");
+        let announced = engine
+            .announce(recording_id, &y, &serde_json::to_vec(&first).unwrap())
+            .await;
+        assert_eq!(announced.status, http::StatusCode::CREATED);
+        let mut stale = engine.state().active_receipts[&recording_id].clone();
+
+        let resplit = RecordingMetadata {
+            chunk_size: 2 * first.chunk_size,
+            ..first.clone()
+        };
+        let restarted = engine
+            .announce(recording_id, &y, &serde_json::to_vec(&resplit).unwrap())
+            .await;
+        assert_eq!(restarted.status, http::StatusCode::OK);
+        let read = engine.state().active_receipts[&recording_id].clone();
+        assert!(matches!(engine.add_chunk(&read, 0).await, Some(Ok(()))));
+
+        let answered = engine.replaced_during_the_verify(&mut stale).await;
+        assert_eq!(answered.status, http::StatusCode::CONFLICT);
+        let _ = engine
+            .transition(
+                &mut stale,
+                HandoverState::Failed("sha256 mismatch".to_owned()),
+                Some(Vec::new()),
+            )
+            .await;
+        let _ = engine.update(&mut stale, None, Some(Vec::new())).await;
+        let held = engine.state().active_receipts[&recording_id].clone();
+        assert_eq!(
+            (held.chunk_size, held.state, held.received_chunks),
+            (resplit.chunk_size, HandoverState::Receiving, vec![0]),
+            "the new split keeps its chunk"
+        );
     }
 
     /// An edit of the receipt memory holds, as a request on another thread
