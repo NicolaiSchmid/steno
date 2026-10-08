@@ -7,11 +7,11 @@
 //!
 //! A new version is one PR that adds `migrations/00N_vN.sql`, its entry in
 //! [`MIGRATIONS`] and the Swift `Step` running the same SQL; neither side
-//! ships alone. The order matters: GRDB ignores identifiers it does not
-//! know, this module refuses them ([`StoreError::UnknownMigration`]), so a
-//! Rust build shipping first would leave the Swift app silently on a newer
-//! schema, while a Swift build shipping first only locks the Rust app out
-//! until it catches up. `migrations/README.md` has the full procedure.
+//! ships alone. Like GRDB, this module ignores an applied identifier it
+//! does not know, with a warning in the log: a newer
+//! build migrated the database, and since a migration only adds tables and
+//! columns and never changes existing ones, this build still reads and
+//! writes what it knows. `migrations/README.md` has the full procedure.
 
 use rusqlite::{Connection, TransactionBehavior};
 
@@ -42,6 +42,10 @@ pub const MIGRATIONS: &[Migration] = &[
         identifier: "v4",
         sql: include_str!("../../migrations/004_v4.sql"),
     },
+    Migration {
+        identifier: "v5",
+        sql: include_str!("../../migrations/005_v5.sql"),
+    },
 ];
 
 /// GRDB's own table, DDL for DDL.
@@ -63,9 +67,9 @@ pub(crate) fn applied(connection: &Connection) -> Result<Vec<String>> {
 /// Applies every migration not yet recorded, each in its own `IMMEDIATE`
 /// transaction with foreign keys off and GRDB's check before the commit:
 /// a migration whose rows no longer satisfy their foreign keys rolls back
-/// and the open fails with [`StoreError::ForeignKeyViolations`]. Fails
-/// before touching anything when the database records an identifier this
-/// build does not know.
+/// and the open fails with [`StoreError::ForeignKeyViolations`]. An
+/// identifier this build does not know is left as it is
+/// ([`ignore_unknown`]).
 ///
 /// The transaction also covers the read of what is applied, so two
 /// processes opening a fresh database at once (the Swift app and this one,
@@ -76,11 +80,10 @@ pub(crate) fn migrate(connection: &mut Connection) -> Result<()> {
     migrate_with(connection, MIGRATIONS)
 }
 
-/// Applies nothing: fails when the database records an identifier this
-/// build does not know ([`StoreError::UnknownMigration`], as [`migrate`]
-/// does) or lacks one this build would apply
-/// ([`StoreError::PendingMigration`], the first of them). For a process
-/// that must not migrate under another one; see
+/// Applies nothing: fails when the database lacks a migration this build
+/// would apply ([`StoreError::PendingMigration`], the first of them), and
+/// ignores one it does not know, as [`migrate`] does. For a process that
+/// must not migrate under another one; see
 /// [`Store::open_without_migrating`](super::Store::open_without_migrating).
 pub(crate) fn check(connection: &Connection) -> Result<()> {
     check_with(connection, MIGRATIONS)
@@ -97,7 +100,7 @@ fn check_with(connection: &Connection, migrations: &[Migration]) -> Result<()> {
     } else {
         Vec::new()
     };
-    refuse_unknown(&applied, migrations)?;
+    ignore_unknown(&applied, migrations);
     match migrations
         .iter()
         .find(|migration| !applied.iter().any(|a| a == migration.identifier))
@@ -107,13 +110,22 @@ fn check_with(connection: &Connection, migrations: &[Migration]) -> Result<()> {
     }
 }
 
-/// [`StoreError::UnknownMigration`] for the first of `applied` that
-/// `migrations` lacks: a newer build migrated the database.
-fn refuse_unknown(applied: &[String], migrations: &[Migration]) -> Result<()> {
+/// Logs a warning for each of `applied` that `migrations` lacks: a newer
+/// build migrated the database. GRDB's migrator ignores them too (it never
+/// reads an identifier it was not given), and the Swift app never asks
+/// `hasBeenSuperseded`. Ignoring them is safe while every migration only
+/// adds tables and columns, a new column with a default or allowing null,
+/// and never alters, drops or constrains an existing one
+/// (`.plans/2026-10-07-stable-promotion.md`, "Migrations add, never
+/// change").
+fn ignore_unknown(applied: &[String], migrations: &[Migration]) {
     let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
-    match applied.iter().find(|identifier| !known(identifier)) {
-        Some(unknown) => Err(StoreError::UnknownMigration(unknown.clone())),
-        None => Ok(()),
+    for identifier in applied.iter().filter(|identifier| !known(identifier)) {
+        tracing::warn!(
+            target: "steno::store",
+            "the database records migration {identifier}, which this version does not know; \
+             a newer version migrated it, and this one leaves it as it is"
+        );
     }
 }
 
@@ -122,8 +134,11 @@ fn refuse_unknown(applied: &[String], migrations: &[Migration]) -> Result<()> {
 pub(crate) fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
     connection.execute_batch(MIGRATIONS_TABLE)?;
     let applied = applied(connection)?;
-    refuse_unknown(&applied, migrations)?;
-    if applied.len() == migrations.len() {
+    ignore_unknown(&applied, migrations);
+    if migrations
+        .iter()
+        .all(|migration| applied.iter().any(|a| a == migration.identifier))
+    {
         return Ok(());
     }
 
@@ -189,10 +204,22 @@ mod tests {
         },
     ];
 
-    /// The check applies nothing and names the first version missing, or
-    /// the first one this build does not know.
+    /// Two versions that apply cleanly.
+    const GOOD: &[Migration] = &[
+        Migration {
+            identifier: "v1",
+            sql: "CREATE TABLE first (id INTEGER PRIMARY KEY);",
+        },
+        Migration {
+            identifier: "v2",
+            sql: "CREATE TABLE second (id INTEGER PRIMARY KEY);",
+        },
+    ];
+
+    /// The check applies nothing, names the first version missing and lets
+    /// one this build does not know pass.
     #[test]
-    fn the_check_names_what_is_missing_or_unknown_and_applies_nothing() {
+    fn the_check_names_what_is_missing_ignores_what_is_unknown_and_applies_nothing() {
         let mut connection = Connection::open_in_memory().unwrap();
         assert!(matches!(
             check_with(&connection, BROKEN),
@@ -208,16 +235,43 @@ mod tests {
         connection
             .execute("INSERT INTO grdb_migrations (identifier) VALUES ('v9')", [])
             .unwrap();
+        check_with(&connection, &BROKEN[..1]).unwrap();
         assert!(matches!(
-            check_with(&connection, &BROKEN[..1]),
-            Err(StoreError::UnknownMigration(newer)) if newer == "v9"
+            check_with(&connection, BROKEN),
+            Err(StoreError::PendingMigration(next)) if next == "v2"
         ));
+        assert_eq!(
+            applied(&connection).unwrap(),
+            ["v1", "v9"],
+            "nothing applied"
+        );
+    }
+
+    /// A version this build knows is applied also when the database records
+    /// one it does not know: the unknown one does not count towards what is
+    /// applied.
+    #[test]
+    fn an_unknown_migration_does_not_stand_in_for_a_missing_one() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        migrate_with(&mut connection, &GOOD[..1]).unwrap();
+        connection
+            .execute("INSERT INTO grdb_migrations (identifier) VALUES ('v9')", [])
+            .unwrap();
+        migrate_with(&mut connection, GOOD).unwrap();
+        assert_eq!(applied(&connection).unwrap(), ["v1", "v9", "v2"]);
+        let second: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'second'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(second, 1, "v2 ran");
     }
 
     /// Opening without migrating reads a database at this build's version,
     /// refuses one an older build left (naming the version it lacks) and
-    /// one a newer build migrated, and changes neither; a missing file is
-    /// not created.
+    /// changes it not; a missing file is not created.
     #[test]
     fn opening_without_migrating_applies_nothing() {
         use crate::Store;
@@ -229,33 +283,21 @@ mod tests {
         let store = Store::open_without_migrating(&current).unwrap();
         assert_eq!(
             store.applied_migrations().unwrap(),
-            ["v1", "v2", "v3", "v4"]
+            ["v1", "v2", "v3", "v4", "v5"]
         );
 
         let behind = directory.path().join("behind.sqlite");
         database_one_version_behind(&behind);
         let error = Store::open_without_migrating(&behind).expect_err("an older schema is refused");
         assert!(
-            matches!(error, StoreError::PendingMigration(ref id) if id == "v4"),
+            matches!(error, StoreError::PendingMigration(ref id) if id == "v5"),
             "{error}"
         );
         assert_eq!(
             recorded_migrations(&behind),
-            ["v1", "v2", "v3"],
+            ["v1", "v2", "v3", "v4"],
             "nothing was migrated"
         );
-
-        Connection::open(&current)
-            .unwrap()
-            .execute(
-                "INSERT INTO grdb_migrations (identifier) VALUES ('v99')",
-                [],
-            )
-            .unwrap();
-        assert!(matches!(
-            Store::open_without_migrating(&current),
-            Err(StoreError::UnknownMigration(ref id)) if id == "v99"
-        ));
 
         let missing = directory.path().join("missing.sqlite");
         assert!(Store::open_without_migrating(&missing).is_err());

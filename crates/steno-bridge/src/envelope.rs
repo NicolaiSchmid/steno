@@ -517,8 +517,8 @@ mod tests {
             BridgeError::failed("This meeting is still being processed.")
         );
         assert_eq!(
-            BridgeError::from(StoreError::UnknownMigration("v99".into())),
-            BridgeError::failed("the database was migrated by a newer version (v99)")
+            BridgeError::from(StoreError::PendingMigration("v99".into())),
+            BridgeError::failed("the database lacks migration v99, which this version would apply")
         );
     }
 

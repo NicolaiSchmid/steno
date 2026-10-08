@@ -15,11 +15,15 @@ know every version.
   `SchemaSnapshotTests` and the Rust `schema_parity` test both fail on an
   edited version.
 - **Both sides in one PR.** A new version ships as one PR, and neither side
-  ships alone. GRDB ignores identifiers it does not know; the Rust store
-  refuses them (`StoreError::UnknownMigration`). A Rust build shipping
-  first would therefore leave the Swift app silently on a newer schema,
-  while a Swift build shipping first only locks the Rust app out until it
-  catches up.
+  ships alone.
+- **Add, never change.** A version only adds tables or columns (a new column
+  has a default or allows null), and never alters, drops or constrains an
+  existing one, nor writes a new value into an existing enum column. Both
+  sides ignore an applied identifier they do not know (GRDB never reads
+  one; the Rust migrator logs a warning), so an older build keeps opening a
+  newer database, and this rule is what lets it keep reading and writing
+  it (`.plans/2026-10-07-stable-promotion.md`, "Migrations add, never
+  change").
 
 ## Adding a version
 

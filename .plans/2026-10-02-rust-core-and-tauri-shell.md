@@ -1227,10 +1227,26 @@ still has to draw the window side. `[ ]` is not ported yet.
   today it deletes every `setting` row first, so a save drops what a newer build wrote.
 - `StenoJSON` date output truncates to the millisecond; Rust rounds like GRDB; fix the
   Swift formatter before cutover.
-- `MeetingStore.init` should check the migrator's `hasBeenSuperseded` and refuse a
-  database with an identifier it does not know, as the Rust store does
-  (`StoreError::UnknownMigration`); today GRDB ignores unknown identifiers and the
-  Swift app would run on a newer schema without noticing.
+- An applied migration a build does not know (a newer build's) is ignored in both
+  apps: GRDB's migrator never reads an identifier it was not given and
+  `MeetingStore.init` does not ask `hasBeenSuperseded`; the Rust migrator logs a
+  warning and goes on (`migrate` and `check` in
+  `crates/steno-core/src/store/migrator.rs`), and an unknown identifier does not
+  count towards the known ones applied. That is safe because a migration only adds
+  tables and columns (`.plans/2026-10-07-stable-promotion.md`, "Migrations add,
+  never change"). The Rust desktop shows a dialog and exits when the store, or
+  anything else the host needs, cannot be opened at launch (`Refusal::Unavailable`
+  in `apps/desktop/src-tauri/src/main.rs`), where it panicked before.
+- Schema v5 adds the handover admission ledger, `handoverAdmission` (recording id,
+  byte count, SHA-256, meeting id, admitted at; no foreign key), in both apps
+  (`.plans/2026-10-08-handover-admission-ledger.md`). The admission transaction
+  below writes its row, or moves a row whose meeting was deleted to the new
+  meeting; every open backfills it from
+  `complete` receipts whose meeting exists (`Store::backfill_handover_admissions`,
+  run by `Store::open` and `Store::in_memory` but not `open_without_migrating`;
+  `MeetingStore.init`, the same SQL), which covers admissions before v5 and those an
+  older app commits during a rollback. A revoke and a meeting delete leave it
+  (`Store::admitted_meeting`, `MeetingStore.admittedMeeting`).
 - `RecordingIntake.admit` commits the `complete` receipt, the meeting and its asset in
   one transaction, on the disk before the computer answers `complete`, because the
   phone then deletes its copy: `Store::save_admission_durably`,
@@ -1250,10 +1266,14 @@ still has to draw the window side. `[ ]` is not ported yet.
   admission still finds its master. The phone keeps its copy either way. Orphan
   masters are not cleaned up or offered for re-import yet (the
   `fix/recovery-adopts-orphans` item in "Open after the port"). The intake completes
-  only a receipt of the admitting device: its read and, again, the admission's
-  transaction refuse another device's receipt under the same recording id
-  (`StoreError::ReceiptOfAnotherDevice`, `MeetingStoreError.receiptOfAnotherDevice`)
-  and leave that receipt as it is, the copy removed. The intake's writes run outside
+  only a receipt of the admitting upload: its read and, again, the admission's
+  transaction refuse another device's receipt under the same recording id, and one
+  of other bytes (`StoreError::ReceiptOfAnotherUpload`,
+  `MeetingStoreError.receiptOfAnotherUpload`), and leave that receipt as it is, the
+  copy removed. When the ledger already holds the bytes and their meeting exists,
+  the transaction completes the receipt with that meeting and writes no other, and
+  the intake removes its copy and enqueues nothing: the same bytes are one
+  recording. The intake's writes run outside
   the engine's line of store writes, so between its read and its commit the admitting
   phone can be revoked and another phone announce the id; completed, that phone's
   receipt would answer its `complete` with this meeting and it would delete a
@@ -2005,36 +2025,59 @@ touch and admission lines; each fix is ported to Swift before cutover.
   recording id's files, runs `begin` and makes the receipt in one step on the actor.
   The intake's own receipt saves (`RecordingIntake::admit`, `RecordingIntake.admit`)
   run outside the line in both apps, so the intake itself checks that it completes
-  only the admitting device's receipt (the Store item on `RecordingIntake.admit`). A
+  only the admitting upload's receipt (the Store item on `RecordingIntake.admit`). A
   line save asked for before the intake's commit (a chunk or a re-announce during
   `complete`) can still land after it and put `verifying` or `receiving` back over
   `complete`; the engine's own `complete` save after the intake sets it right, and if
-  that save fails or the app stops first, the phone's retry admits the recording a
-  second time: a duplicate meeting, never a lost recording. The lost-answer change
-  owns the fix (P2 in `.plans/2026-10-07-stable-promotion.md`,
-  `fix/handover-lost-complete-answer`).
+  that save fails or the app stops first, the stored receipt still reads as
+  admitted, because the admission ledger holds its bytes (the "Admission" item), and
+  the phone's retry gets the first meeting.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
-- Re-announce: both apps compare a known recording's announced byte count and SHA-256
-  with its receipt right after the owner check, also when the receipt is `complete`,
-  and the chunk size while the receipt is not yet `complete`; a difference is 409
-  "metadata differs from the first announcement" (`Engine::reannounce`,
-  `HandoverEngine.announce`). Before, a `complete` receipt answered 200 `complete` to
-  any metadata from its owner, so the phone posted `complete`, took the earlier
-  file's meeting id and deleted a recording the computer does not have. The phone
-  keeps the row and its file: it announces again after the backoff, and the third
-  409 in a row marks the row `failed` with Retry (`failAnnounce` in
-  `mobile/src/features/sync/upload-executor.ts`). The chunk size matters only until
-  the receipt is `complete`: a `complete` receipt announced with the same size and
-  SHA-256 in other chunks is the file the computer holds, answered 200 `complete`
-  with every chunk of the announced split, so the phone posts `complete` and gets
-  the meeting id. The receipt keeps its own split, which `GET status` lists, so a
-  phone that reads the status before its `complete` uploads the chunks of its split
+- Announce, the same in both apps (`.plans/2026-10-08-handover-admission-ledger.md`,
+  #243): `Engine::announce` and `HandoverEngine.announce` read the receipt, and the
+  admission ledger only where it decides something (no receipt, or one of other
+  bytes). Bytes the ledger holds are answered 200 `complete` with every chunk
+  listed, from a `complete` receipt saved for the announcing device with the
+  ledger's meeting id: after a revoke deleted the receipt, after the user deleted
+  the meeting, or over a receipt of other bytes that is `complete` or the announcing
+  device's. Over another device's unfinished upload of other bytes they are 409
+  "another device owns this recording": answering `complete` there could delete that
+  phone's copy. Other bytes the ledger does not hold are a new recording under the
+  same recording id: a fresh receipt and empty partial files, 201, and a meeting of
+  its own once its `complete` commits; the ledger then holds both admissions. The
+  same bytes from another device take the receipt over with its chunks and files
+  (`Engine::take_over`; Swift sets the device and remembers the receipt in the same
+  actor step): the hash proves the same recording, so no check that the new device
+  replaced the old one is needed, and the older device's next announce takes a
+  `complete` receipt back and is answered delivered. The same bytes in another
+  split restart the partial under it before `complete` (200, no chunk listed); a
+  `complete` receipt announced in other chunks answers 200 with every chunk of the
+  announced split, and keeps its own split, which `GET status` lists, so a phone
+  that reads the status before its `complete` uploads the chunks of its split
   missing there again; each PUT on a `complete` receipt answers 204, which wastes
   uploads and loses nothing. Format, duration and `startedAt` are not compared:
-  under the same size and SHA-256 they describe the same bytes, so a difference
-  there loses nothing.
+  under the same size and SHA-256 they describe the same bytes. A replacement
+  (Rust's `Engine::replace` through `Engine::make_and_open`, Swift's `replace`)
+  declines when memory holds another receipt than the one decided on by then (a
+  first announce or a chunk on another thread, or during the ledger read) and the
+  announce decides again with that one. Every receipt write of a request is dropped
+  when memory holds another upload by then (`same_upload`,
+  `HandoverEngine.sameUpload`: another device, or other bytes; in `Engine::update`,
+  `Engine::add_chunk`, `HandoverEngine.transition` and the chunk fold), so a late
+  `complete` of replaced bytes never marks the new upload `complete` with their
+  meeting; a chunk, or any other write of a chunk set, is also dropped over a
+  receipt in another split, so a late `complete` of the earlier split leaves the
+  new split's chunks. When the intake refuses such a `complete`, its verified file
+  goes, so the new upload's `complete` cannot admit it unhashed. A takeover while
+  the older device's `complete` is in the intake can put the newer device's
+  unfinished receipt back after that admission committed; the newer device's upload
+  then reaches an admission whose transaction finds the bytes in the ledger and
+  completes the receipt with the first meeting (the Store item on
+  `RecordingIntake.admit`), so no second meeting is made. One gap stays in both
+  apps: a late request of a replaced upload can still discard the new upload's
+  files (the phone announces again and sends its chunks again).
 - Store reads: Swift's `RecordingHandler.receipt` reads with `try?`, so a failed read,
   with no receipt in memory (after a restart), counts as no receipt: status, chunk and
   complete answer 404. `HandoverEngine.authenticate` reads the device with `try?`, so
@@ -2056,10 +2099,14 @@ touch and admission lines; each fix is ported to Swift before cutover.
   releases leave one (a crash or a full disk between them; the Store item on
   `RecordingIntake.admit`): its phone never got the 200 and holds the recording, so
   the sweep keeps the verified file, a re-announce lists the chunks without saying
-  `complete`, and the phone's `complete` admits the file again. Deleting a meeting
-  deletes its receipt in both apps (`Store::delete_meeting`,
-  `MeetingStore.delete(meetingID:)`), so a meeting the user deleted never reads this
-  way; a receipt in memory is trusted as it is.
+  `complete`, and the phone's `complete` admits the file again. Since schema v5 the
+  admission ledger decides first: a stored receipt whose recording id, size and
+  SHA-256 it holds reads as `complete` with the ledger's meeting id, whatever its
+  state, so a `complete` receipt whose meeting the user deleted (deleting a meeting
+  deletes its receipt, `Store::delete_meeting`, `MeetingStore.delete(meetingID:)`,
+  but a later announce saves one again from the ledger) and one a late line save put
+  back to `verifying` both read as admitted. A receipt in memory is trusted as it
+  is.
 - Pairing windows: Swift's `HandoverEngine.pair` checks only that a window is open,
   not that it is the one whose secret the head matched. The read timeout runs per
   silence, so a head whose body keeps trickling in pairs against a window opened after
@@ -2134,7 +2181,8 @@ touch and admission lines; each fix is ported to Swift before cutover.
   sidecar belong to no receipt in memory or the store until the next start's sweep or
   a first announce of that id). A first announce discards every file of the recording
   id before `begin`, in `Engine::open_files`, within the hold of the files lock that
-  made its receipt. Those files belong to no receipt: a verified file an intake
+  made its receipt; so does an announce that replaces the receipt it read (the
+  "Announce" item), whose files are the replaced upload's. Those files belong to no receipt: a verified file an intake
   failure left whose receipt a revoke deleted after a restart (the revoke found no
   receipt in memory, and its delete cascades the row), or a partial a refusal or a
   second revoke left. Kept, `complete` would admit the old verified file unhashed (the
@@ -2244,15 +2292,16 @@ touch and admission lines; each fix is ported to Swift before cutover.
     not be read, with Try again; pairing and unpairing wait for the load.
   - Re-uploads. A file whose row is `delivered` keeps that row. A file left by a
     `delivered` row the lost index named is uploaded again: the Mac answers the
-    announce from its `complete` receipt with every chunk listed, and answers the
-    phone's `complete` with the meeting id, so no second meeting is made while the
-    receipt exists; after a revoke deleted the receipt it becomes a second meeting.
-  - 409. Three announces in a row answered 409 (the receipt belongs to another
-    device, or holds other metadata) mark the row `failed` with a message and Retry,
-    instead of retrying forever (`ANNOUNCE_CONFLICTS_BEFORE_FAILED` in
-    `mobile/src/features/sync/upload-executor.ts`); the Mac taking such a receipt over,
-    or taking other bytes in as a new recording, belongs to
-    `fix/handover-lost-complete-answer`.
+    announce from its `complete` receipt, or from the admission ledger once a
+    revoke or a meeting delete took the receipt, with every chunk listed, and
+    answers the phone's `complete` with the meeting id, so no second meeting is
+    made.
+  - 409. Three announces in a row answered 409 mark the row `failed` with a message
+    and Retry, instead of retrying forever (`ANNOUNCE_CONFLICTS_BEFORE_FAILED` in
+    `mobile/src/features/sync/upload-executor.ts`). Since schema v5 the Mac answers
+    an announce 409 only for admitted bytes over another device's unfinished upload
+    of other bytes: it takes a receipt of the same bytes over and other bytes in as
+    a new recording (the "Announce" item).
 
 ### Shell
 
@@ -2574,45 +2623,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   platform, against invariant 4, so a crash in ONNX Runtime there ends the app; moving
   it needs its own request in the sidecar protocol. Where: `crates/steno-diarize`; the
   "Open, against invariant 4" item under "Pipeline and services (WP6b)". Found: #183.
-- **`fix/handover-lost-complete-answer`.** Opens after #239
-  (`fix/handover-first-announce-discard`). Three parts, both apps; they share the
-  branch because each changes which receipt an announce lands on.
-  - Lost answer. A `complete` the computer admitted whose answer never reaches the
-    phone (the 10 s timeout, a dropped connection, the app killed or suspended)
-    leaves the row pending with its file. When an unpair follows, the revoke deletes
-    the receipt, so the next pairing uploads the recording again and the computer
-    admits it as a second meeting. The fix needs a durable record of admitted
-    recording ids and hashes that outlives the revoke (a schema migration), so its
-    timing waits on the stable plan's rollback-window rule. Where: `revoke` in
-    `crates/steno-handover/src/engine/mod.rs` and
-    `Sources/StenoHandover/Routing/HandoverEngine.swift`, the `complete` case in
-    `mobile/src/features/sync/upload-executor.ts`. Found: #211.
-  - Other bytes. The same device re-announces a recording id with metadata its
-    receipt on the computer does not match: another size or SHA-256 in any state, or
-    another chunk size before the receipt is `complete`. Every such announce is
-    answered 409, so the recording never reaches the computer. A receipt not yet
-    `complete` announced with the same size and SHA-256 in another chunk size
-    restarts its partial under the new split. An announce with another size or
-    SHA-256, against a receipt in any state, is taken in as a new recording, under a
-    fresh internal receipt key and its own meeting for the same phone-side recording
-    id, and the phone deletes its copy only after that meeting commits. Until this
-    branch lands, both apps answer 409 "metadata differs from the first
-    announcement" (#224) and the phone keeps the recording; the third 409 in a row
-    marks the row `failed` with Retry. Where: `Engine::reannounce` in
-    `crates/steno-handover/src/engine/recording.rs` and `HandoverEngine.announce` in
-    `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #224.
-  - Older device. A recording whose receipt on the computer belongs to an older
-    device id of the same phone is answered 409 "another device owns this
-    recording" on every announce, so the recording never reaches the computer; it
-    stays on the phone. The planned fix: an announce from another device of a
-    recording id whose receipt an older device holds, not yet `complete`, takes that
-    receipt over instead of the 409 when, and only when, its size and SHA-256 match
-    the receipt's. The hash match is the deciding condition: it proves the bytes are
-    the same recording, which is what makes the takeover safe, so no check that the
-    new device replaced the old one is needed. An announce with other bytes is taken
-    in as a new recording, as in the part above. Where: the 409 of `reannounce` (also
-    reached from `announce`) in `crates/steno-handover/src/engine/recording.rs` and of
-    `announce` in `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #223.
 - **`fix/recovery-adopts-orphans`.** Orphan masters, both apps: a recording's master
   in the audio folder with no meeting row, which neither app cleans up or offers for
   re-import. The phone intake copies the master before its commit, so a crash between
@@ -2715,6 +2725,7 @@ PR off `main`.
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
 | Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
 | On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
+| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

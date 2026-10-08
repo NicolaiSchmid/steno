@@ -122,24 +122,50 @@ actor HandoverEngine: RequestHandling {
     }
   }
 
-  /// The stored receipt of `recordingID`, with a `.complete` one whose
-  /// meeting row is missing read as `.failed(meetingMissing)`: not
-  /// admitted. Deleting a meeting deletes its receipt, so only an admission
-  /// whose meeting never committed leaves one behind (the separate receipt
-  /// and meeting commits of earlier releases, a crash or a full disk
-  /// between them). Its phone never got the 200 and still holds the
-  /// recording, so the receipt must neither answer 200 nor let the sweep
-  /// take the verified file; the phone's retried `complete` admits that
-  /// file again. Rust: `stored_receipt` in
-  /// `crates/steno-handover/src/engine/mod.rs`.
+  /// The stored receipt of `recordingID` as admitted or not. A `.complete`
+  /// one whose meeting row exists comes back as it is. Otherwise the
+  /// admission ledger decides (`MeetingStore.admittedMeeting`): when it
+  /// holds the receipt's recording id, size and SHA-256, the receipt reads
+  /// as `.complete` with the ledger's meeting id, whatever its state. That
+  /// is a `.complete` receipt whose meeting the user deleted (the phone's
+  /// retry is answered delivered), or one a line save asked for before the
+  /// intake's commit put back to `.verifying` or `.receiving` (the retry
+  /// gets the first meeting, not a second admission). A `.complete` receipt
+  /// with neither a meeting row nor a ledger row reads as
+  /// `.failed(meetingMissing)`: not admitted. Only an admission whose
+  /// meeting never committed leaves one behind (the separate receipt and
+  /// meeting commits of earlier releases, a crash or a full disk between
+  /// them). Its phone never got the 200 and still holds the recording, so
+  /// the receipt must neither answer 200 nor let the sweep take the
+  /// verified file; the phone's retried `complete` admits that file again.
+  /// Rust: `stored_receipt` in `crates/steno-handover/src/engine/mod.rs`.
   func storedReceipt(_ recordingID: UUID) async throws -> HandoverReceipt? {
     guard var receipt = try await store.handoverReceipt(recordingID: recordingID) else {
       return nil
     }
-    if let meetingID = receipt.state.meetingID, try await store.meeting(id: meetingID) == nil {
+    if let meetingID = receipt.state.meetingID, try await store.meeting(id: meetingID) != nil {
+      return receipt
+    }
+    if let meetingID = try await store.admittedMeeting(
+      recordingID: recordingID, byteCount: receipt.byteCount, sha256: receipt.sha256)
+    {
+      receipt.state = .complete(meetingID: meetingID)
+    } else if receipt.state.kind == .complete {
       receipt.state = .failed(Self.meetingMissing)
     }
     return receipt
+  }
+
+  /// Whether `held` is the upload `read` stands for: the same device and the
+  /// same bytes. A receipt of another device (another phone announced the
+  /// recording id, or took it over), or of other bytes (the phone announced
+  /// another file under the id), is another upload, and a write a request
+  /// computed from `read` must not land on it. The chunk size is not part of
+  /// it: only the writes of a chunk set check it (`transition`, the chunk
+  /// fold in `receiveChunk`). Rust: `same_upload`.
+  static func sameUpload(_ held: HandoverReceipt, _ read: HandoverReceipt) -> Bool {
+    held.deviceID == read.deviceID && held.byteCount == read.byteCount
+      && held.sha256 == read.sha256
   }
 
   // MARK: - Pairing session
@@ -351,14 +377,26 @@ actor HandoverEngine: RequestHandling {
   ///
   /// Two kinds of receipt in memory are left as they are, and nothing is
   /// saved:
-  /// - Another device's. A device's write never changes a receipt another
-  ///   device announced; a late `complete` of a phone revoked during the
-  ///   intake meets one when another device announced the same recording id
-  ///   meanwhile. `receipt` comes back as the caller passed it.
+  /// - Another upload's (`sameUpload`). A device's write never changes a
+  ///   receipt another device announced or took over; a late `complete` of a
+  ///   phone revoked during the intake meets one when another device
+  ///   announced the same recording id meanwhile. Nor does a write of
+  ///   replaced bytes change the receipt of the file the phone announced
+  ///   under the id since: a late `complete` would otherwise mark it
+  ///   `.complete` with the replaced file's meeting, and the phone would
+  ///   delete a recording the computer does not have. `receipt` comes back
+  ///   as the caller passed it.
   /// - A `.complete` one. A request that read the receipt before the
   ///   phone's `complete` admitted the recording must not put it back, or
   ///   the phone's next `complete` would start over and admit it again.
   ///   `receipt` comes back as memory holds it.
+  ///
+  /// A chunk set is one split's, so `receivedChunks` is not written over a
+  /// receipt memory holds in another chunk size (the phone has since
+  /// announced the same bytes in another split): a late `complete` of the
+  /// earlier split would empty the new split's chunks, and the phone would
+  /// send them again. Nothing changes then, and `receipt` comes back as the caller
+  /// passed it.
   ///
   /// Callers that answer the phone whatever the write did use `try?`
   /// deliberately: memory already holds the change and the phone's next
@@ -367,9 +405,13 @@ actor HandoverEngine: RequestHandling {
     _ receipt: inout HandoverReceipt, to state: HandoverState, receivedChunks: [Int]? = nil
   ) async throws {
     let held = activeReceipts[receipt.recordingID]
-    if let held, held.deviceID != receipt.deviceID { return }
+    if let held, !Self.sameUpload(held, receipt) { return }
+    if let held, held.state.kind == .complete {
+      receipt = held
+      return
+    }
+    if let held, receivedChunks != nil, held.chunkSize != receipt.chunkSize { return }
     receipt = held ?? receipt
-    if held?.state.kind == .complete { return }
     receipt.state = state
     if let receivedChunks { receipt.receivedChunks = receivedChunks }
     receipt.updatedAt = now()

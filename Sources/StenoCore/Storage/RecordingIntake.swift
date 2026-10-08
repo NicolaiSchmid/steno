@@ -25,6 +25,10 @@ import Foundation
 /// the same path admits again, and the copy is removed only once that save
 /// succeeds: a failed commit can still be replayed after a crash, and its
 /// meeting then needs the copy. The phone keeps its own copy either way.
+/// Bytes the admission ledger already holds with a meeting (another
+/// device's upload of them, taken over during the first admission) are
+/// that meeting: the receipt is completed with it, the copy goes, and
+/// nothing is enqueued.
 /// `enqueue` after the commit is `ProcessingPipeline.enqueueSaved` in the
 /// production wiring (`init(currentPipeline:)`); its failure does not undo
 /// the admission, the meeting waits `.queued` for the next launch's resume.
@@ -87,11 +91,17 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     -> UUID
   {
     let existing = try await store.handoverReceipt(recordingID: metadata.recordingID)
-    // Another phone's receipt under this id (this one was revoked, and that
-    // one announced the id) is never completed or answered from: that phone
-    // would take this meeting for its own and delete its copy.
-    if let existing, existing.deviceID != device.id {
-      throw MeetingStoreError.receiptOfAnotherDevice(metadata.recordingID)
+    // Another upload's receipt under this id is never completed or answered
+    // from: another phone's (this one was revoked, and that one announced
+    // the id or took the receipt over), which would take this meeting for
+    // its own and delete its copy; or one of other bytes (the phone
+    // announced another file under the id), whose `complete` would get this
+    // meeting and delete a file never admitted.
+    if let existing,
+      existing.deviceID != device.id || existing.byteCount != metadata.byteCount
+        || existing.sha256 != metadata.sha256
+    {
+      throw MeetingStoreError.receiptOfAnotherUpload(metadata.recordingID)
     }
     // A retry of an admitted recording is answered from the store with no
     // write of its own: the launch checkpoint
@@ -163,11 +173,12 @@ public struct RecordingIntake: HandoverIntake, Sendable {
     receipt.state = .complete(meetingID: meetingID)
     receipt.updatedAt = timestamp
 
+    let admitted: UUID
     do {
-      try await store.saveDurably(receipt, meeting: meeting, asset: asset)
+      admitted = try await store.saveDurably(receipt, meeting: meeting, asset: asset)
     } catch {
-      if error as? MeetingStoreError == .receiptOfAnotherDevice(metadata.recordingID) {
-        // The refusal wrote nothing, and another phone's receipt is left as
+      if error as? MeetingStoreError == .receiptOfAnotherUpload(metadata.recordingID) {
+        // The refusal wrote nothing, and another upload's receipt is left as
         // it is.
         try? FileManager.default.removeItem(at: destination)
       } else {
@@ -185,6 +196,13 @@ public struct RecordingIntake: HandoverIntake, Sendable {
       throw error
     }
     try? FileManager.default.removeItem(at: file)
+    guard admitted == meetingID else {
+      // The ledger held these bytes with a meeting: the receipt is complete
+      // with it, and this copy and its folder belong to no meeting.
+      try? FileManager.default.removeItem(at: destination)
+      try? FileManager.default.removeItem(at: layout.directory)
+      return admitted
+    }
     // Admitted: a pipeline that cannot take the meeting now leaves it
     // `.queued`, and the next launch resumes it.
     do {

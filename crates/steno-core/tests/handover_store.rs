@@ -7,6 +7,7 @@ mod common;
 use steno_core::*;
 
 use common::{date, uuid};
+use uuid::Uuid;
 
 const DEVICE_ID: &str = "0BADF00D-0000-4000-8000-000000000001";
 const RECORDING_ID: &str = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
@@ -166,4 +167,328 @@ fn a_receipt_needs_its_device() {
         .save_handover_receipt(&receipt(HandoverState::Receiving))
         .unwrap_err();
     assert!(error.to_string().contains("FOREIGN KEY"), "{error}");
+}
+
+/// The ledger rows the admissions' transactions wrote, as SQLite holds
+/// them: recording id, byte count, meeting id, admitted at.
+fn ledger_rows(store: &Store) -> Vec<(String, i64, String, String)> {
+    store
+        .read(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT recordingID, byteCount, meetingID, admittedAt FROM handoverAdmission \
+                 ORDER BY admittedAt, meetingID",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .unwrap()
+}
+
+/// The meeting a receipt was admitted as, its asset, and the receipt
+/// `complete` with it.
+fn admission(meeting_id: &str, sha256: Vec<u8>) -> (HandoverReceipt, Meeting, AudioAsset) {
+    let meeting = Meeting {
+        id: uuid(meeting_id),
+        ..common::meeting()
+    };
+    let asset = common::asset(meeting.id);
+    let receipt = HandoverReceipt {
+        sha256,
+        ..receipt(HandoverState::Complete {
+            meeting_id: meeting.id,
+        })
+    };
+    (receipt, meeting, asset)
+}
+
+/// The admission's transaction writes the ledger row of the recording id,
+/// size and SHA-256 with its meeting. A revoke's cascade takes the receipt
+/// and a meeting delete takes the meeting and the receipt, and both leave
+/// the row. Other bytes under the same recording id are a second
+/// admission with a row of their own. The same bytes admitted again are
+/// the meeting the ledger holds while it exists, and once it is deleted a
+/// new meeting the row moves to. Swift: `anAdmissionWritesItsLedgerRow`.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave() {
+    let store = Store::in_memory().unwrap();
+    store.save_paired_device(&device(), &[1; 32]).unwrap();
+    let (first, meeting, asset) = admission("516EADE8-40E5-4434-8AAF-000000000001", vec![7; 32]);
+    store
+        .save_admission_durably(&first, &meeting, &asset)
+        .unwrap();
+    let recording_id = first.recording_id;
+    let byte_count = first.byte_count;
+
+    assert_eq!(
+        store
+            .admitted_meeting(recording_id, byte_count, &[7; 32])
+            .unwrap(),
+        Some(meeting.id)
+    );
+    assert_eq!(
+        store
+            .admitted_meeting(recording_id, byte_count + 1, &[7; 32])
+            .unwrap(),
+        None,
+        "another size"
+    );
+    assert_eq!(
+        store
+            .admitted_meeting(recording_id, byte_count, &[8; 32])
+            .unwrap(),
+        None,
+        "another SHA-256"
+    );
+    assert_eq!(
+        ledger_rows(&store),
+        [(
+            RECORDING_ID.to_owned(),
+            byte_count,
+            "516EADE8-40E5-4434-8AAF-000000000001".to_owned(),
+            "2026-09-25 09:02:00.500".to_owned()
+        )],
+        "the receipt's ids, size and time, as GRDB writes them"
+    );
+
+    // Over the stored receipt of other bytes the admission is refused and
+    // writes nothing: built from that receipt, it would say those bytes
+    // were admitted.
+    let (other_bytes, second, second_asset) =
+        admission("516EADE8-40E5-4434-8AAF-000000000002", vec![8; 32]);
+    assert!(matches!(
+        store.save_admission_durably(&other_bytes, &second, &second_asset),
+        Err(StoreError::ReceiptOfAnotherUpload(id)) if id == recording_id
+    ));
+    assert_eq!(store.meeting(second.id).unwrap(), None);
+    assert_eq!(ledger_rows(&store).len(), 1);
+    // The announce of the other bytes saved their receipt first.
+    let unfinished = |admitted: &HandoverReceipt| HandoverReceipt {
+        state: HandoverState::Receiving,
+        ..admitted.clone()
+    };
+    store
+        .save_handover_receipt(&unfinished(&other_bytes))
+        .unwrap();
+    store
+        .save_admission_durably(&other_bytes, &second, &second_asset)
+        .unwrap();
+    let (same_bytes, third, third_asset) =
+        admission("516EADE8-40E5-4434-8AAF-000000000003", vec![7; 32]);
+    store
+        .save_handover_receipt(&unfinished(&same_bytes))
+        .unwrap();
+    assert_eq!(
+        store
+            .save_admission_durably(&same_bytes, &third, &third_asset)
+            .unwrap(),
+        meeting.id,
+        "the same bytes are the meeting the ledger holds"
+    );
+    assert_eq!(store.meeting(third.id).unwrap(), None, "no second meeting");
+    assert_eq!(
+        store.handover_receipt(recording_id).unwrap().unwrap().state,
+        HandoverState::Complete {
+            meeting_id: meeting.id
+        }
+    );
+    assert_eq!(
+        store
+            .admitted_meeting(recording_id, byte_count, &[8; 32])
+            .unwrap(),
+        Some(second.id),
+        "other bytes are an admission of their own"
+    );
+
+    // Once the user deleted that meeting, the same bytes are admitted as a
+    // new one, and the row moves to it.
+    store.delete_meeting(meeting.id).unwrap();
+    assert_eq!(store.handover_receipt(recording_id).unwrap(), None);
+    store
+        .save_handover_receipt(&unfinished(&same_bytes))
+        .unwrap();
+    assert_eq!(
+        store
+            .save_admission_durably(&same_bytes, &third, &third_asset)
+            .unwrap(),
+        third.id
+    );
+    store.delete_paired_device(device().id).unwrap();
+    assert_eq!(
+        store.handover_receipt(recording_id).unwrap(),
+        None,
+        "the revoke cascades"
+    );
+    assert_eq!(ledger_rows(&store).len(), 2, "the ledger keeps both rows");
+    assert_eq!(
+        store
+            .admitted_meeting(recording_id, byte_count, &[7; 32])
+            .unwrap(),
+        Some(third.id)
+    );
+}
+
+/// Bytes admitted again after the user deleted their meeting are one
+/// recording from then on: the ledger row moves to the new meeting, so
+/// another device that took the receipt over during that admission and
+/// uploads the same bytes completes with it instead of writing a third
+/// meeting. Swift: `aReadmissionAfterADeleteIsTheMeetingTheNextUploadFinds`.
+#[test]
+fn a_readmission_after_a_delete_is_the_meeting_the_next_upload_finds() {
+    let store = Store::in_memory().unwrap();
+    let other_device = PairedDevice {
+        id: uuid("0BADF00D-0000-4000-8000-000000000002"),
+        ..device()
+    };
+    store.save_paired_device(&device(), &[1; 32]).unwrap();
+    store.save_paired_device(&other_device, &[2; 32]).unwrap();
+    // The device's announce saves the unfinished receipt, then the intake
+    // admits the bytes as the meeting `meeting_id`.
+    let admit = |device_id: Uuid, meeting_id: &str| {
+        let (admitted, meeting, asset) = admission(meeting_id, vec![7; 32]);
+        let admitted = HandoverReceipt {
+            device_id,
+            ..admitted
+        };
+        store
+            .save_handover_receipt(&HandoverReceipt {
+                state: HandoverState::Receiving,
+                ..admitted.clone()
+            })
+            .unwrap();
+        store
+            .save_admission_durably(&admitted, &meeting, &asset)
+            .unwrap()
+    };
+    let first = admit(device().id, "516EADE8-40E5-4434-8AAF-000000000001");
+    store.delete_meeting(first).unwrap();
+    let second = admit(device().id, "516EADE8-40E5-4434-8AAF-000000000002");
+    assert_eq!(
+        store
+            .admitted_meeting(uuid(RECORDING_ID), 3_000_000, &[7; 32])
+            .unwrap(),
+        Some(second),
+        "the row moved to the meeting that exists"
+    );
+
+    assert_eq!(
+        admit(other_device.id, "516EADE8-40E5-4434-8AAF-000000000003"),
+        second,
+        "the other device's upload is that meeting"
+    );
+    assert_eq!(
+        store
+            .all_meetings()
+            .unwrap()
+            .into_iter()
+            .map(|meeting| meeting.id)
+            .collect::<Vec<_>>(),
+        [second],
+        "no third meeting"
+    );
+    assert_eq!(
+        store
+            .handover_receipt(uuid(RECORDING_ID))
+            .unwrap()
+            .map(|receipt| (receipt.device_id, receipt.state)),
+        Some((
+            other_device.id,
+            HandoverState::Complete { meeting_id: second }
+        ))
+    );
+    assert_eq!(ledger_rows(&store).len(), 1);
+}
+
+/// Every open backfills the ledger from the `complete` receipts whose
+/// meeting row exists: a database an older build left at v4 (with the
+/// rows the Swift `v0.10.0-rc.2` intake writes: a receipt and a meeting,
+/// no ledger), and an admission an older app committed after v5 (it
+/// ignores the table). A `complete` receipt whose meeting is missing and an
+/// unfinished one get no row. Swift: `everyOpenBackfillsTheLedger`.
+#[test]
+fn every_open_backfills_the_ledger_from_admitted_receipts() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store.save_paired_device(&device(), &[1; 32]).unwrap();
+    let (admitted, meeting, asset) = admission("516EADE8-40E5-4434-8AAF-000000000001", vec![7; 32]);
+    // The older intake's two commits, neither of which writes the ledger.
+    store.save_meeting_with_asset(&meeting, &asset).unwrap();
+    store.save_handover_receipt(&admitted).unwrap();
+    let missing = HandoverReceipt {
+        recording_id: uuid("6F9619FF-8B86-D011-B42D-000000000002"),
+        ..receipt(HandoverState::Complete {
+            meeting_id: uuid("516EADE8-40E5-4434-8AAF-0000000000FF"),
+        })
+    };
+    store.save_handover_receipt(&missing).unwrap();
+    let unfinished = HandoverReceipt {
+        recording_id: uuid("6F9619FF-8B86-D011-B42D-000000000003"),
+        ..receipt(HandoverState::Receiving)
+    };
+    store.save_handover_receipt(&unfinished).unwrap();
+    // Back to v4: no table, no identifier, the rows the older build wrote.
+    store
+        .write(|transaction| {
+            transaction.execute_batch(
+                "DROP TABLE handoverAdmission;
+                 DELETE FROM grdb_migrations WHERE identifier = 'v5';",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    drop(store);
+    let recorded: Vec<String> = rusqlite::Connection::open(&path)
+        .unwrap()
+        .prepare("SELECT identifier FROM grdb_migrations ORDER BY rowid")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(recorded, ["v1", "v2", "v3", "v4"]);
+
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        ledger_rows(&store),
+        [(
+            RECORDING_ID.to_owned(),
+            admitted.byte_count,
+            "516EADE8-40E5-4434-8AAF-000000000001".to_owned(),
+            "2026-09-25 09:02:00.500".to_owned()
+        )],
+        "the admitted receipt only, admitted at its last update"
+    );
+
+    // An older app on the v5 database: a receipt and a meeting, no row.
+    let (later, later_meeting, later_asset) =
+        admission("516EADE8-40E5-4434-8AAF-000000000004", vec![9; 32]);
+    let later = HandoverReceipt {
+        recording_id: uuid("6F9619FF-8B86-D011-B42D-000000000004"),
+        ..later
+    };
+    store
+        .save_meeting_with_asset(&later_meeting, &later_asset)
+        .unwrap();
+    store.save_handover_receipt(&later).unwrap();
+    assert_eq!(
+        store
+            .admitted_meeting(later.recording_id, later.byte_count, &[9; 32])
+            .unwrap(),
+        None
+    );
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .admitted_meeting(later.recording_id, later.byte_count, &[9; 32])
+            .unwrap(),
+        Some(later_meeting.id),
+        "the next open backfills it"
+    );
+    assert_eq!(ledger_rows(&store).len(), 2);
 }

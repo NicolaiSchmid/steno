@@ -17,6 +17,7 @@ index|sqlite_autoindex_decision_1|decision|
 index|sqlite_autoindex_delivery_1|delivery|
 index|sqlite_autoindex_delivery_2|delivery|
 index|sqlite_autoindex_grdb_migrations_1|grdb_migrations|
+index|sqlite_autoindex_handoverAdmission_1|handoverAdmission|
 index|sqlite_autoindex_handoverReceipt_1|handoverReceipt|
 index|sqlite_autoindex_meetingTask_1|meetingTask|
 index|sqlite_autoindex_meeting_1|meeting|
@@ -35,6 +36,7 @@ table|audioAsset|audioAsset|CREATE TABLE "audioAsset" ("id" TEXT PRIMARY KEY NOT
 table|decision|decision|CREATE TABLE "decision" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "text" TEXT NOT NULL)
 table|delivery|delivery|CREATE TABLE "delivery" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "destinationID" TEXT NOT NULL, "status" TEXT NOT NULL, "failureMessage" TEXT, "lastAttemptAt" DATETIME, "receipt" TEXT, UNIQUE ("meetingID", "destinationID"))
 table|grdb_migrations|grdb_migrations|CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)
+table|handoverAdmission|handoverAdmission|CREATE TABLE "handoverAdmission" ("recordingID" TEXT NOT NULL, "byteCount" INTEGER NOT NULL, "sha256" BLOB NOT NULL, "meetingID" TEXT NOT NULL, "admittedAt" DATETIME NOT NULL, PRIMARY KEY ("recordingID", "byteCount", "sha256"))
 table|handoverReceipt|handoverReceipt|CREATE TABLE "handoverReceipt" ("recordingID" TEXT PRIMARY KEY NOT NULL, "deviceID" TEXT NOT NULL REFERENCES "pairedDevice"("id") ON DELETE CASCADE, "state" TEXT NOT NULL, "meetingID" TEXT, "failureMessage" TEXT, "byteCount" INTEGER NOT NULL, "sha256" BLOB NOT NULL, "chunkSize" INTEGER NOT NULL, "receivedChunks" TEXT NOT NULL DEFAULT '[]', "createdAt" DATETIME NOT NULL, "updatedAt" DATETIME NOT NULL)
 table|meeting|meeting|CREATE TABLE "meeting" ("id" TEXT PRIMARY KEY NOT NULL, "title" TEXT NOT NULL, "startedAt" DATETIME NOT NULL, "duration" DOUBLE NOT NULL, "language" TEXT, "source" TEXT NOT NULL, "calendarEventID" TEXT, "tags" TEXT NOT NULL DEFAULT '[]', "state" TEXT NOT NULL, "failureReason" TEXT, "templateID" TEXT NOT NULL, "summary" TEXT, "summaryText" TEXT NOT NULL DEFAULT '', "scratchpad" TEXT NOT NULL DEFAULT '', "llmUsage" TEXT, "createdAt" DATETIME NOT NULL, "updatedAt" DATETIME NOT NULL, "endReason" TEXT, "titleOrigin" TEXT NOT NULL DEFAULT 'default')
 table|meetingTask|meetingTask|CREATE TABLE "meetingTask" ("id" TEXT PRIMARY KEY NOT NULL, "meetingID" TEXT NOT NULL REFERENCES "meeting"("id") ON DELETE CASCADE, "text" TEXT NOT NULL, "assigneePersonID" TEXT REFERENCES "person"("id") ON DELETE SET NULL, "assigneeName" TEXT, "priority" TEXT NOT NULL, "dueDate" DATETIME, "done" BOOLEAN NOT NULL DEFAULT 0)
@@ -80,3 +82,4 @@ migration|v1
 migration|v2
 migration|v3
 migration|v4
+migration|v5

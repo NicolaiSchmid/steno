@@ -763,44 +763,49 @@ impl Engine {
         (!revoked).then_some(files)
     }
 
-    /// Opens the files of the receipt a first announce (one whose read found
-    /// no receipt in memory or the store) just made for `device_id`: an
-    /// empty partial and the metadata sidecar. `_files` is the caller's
-    /// guard of the files lock, passed so the signature proves the lock is
-    /// held; the caller holds it from before that `change` until this
-    /// returns, so no file is created or discarded in between
-    /// ([`Engine::discard_own`]). `None`, with nothing opened, when memory
-    /// no longer holds this device's receipt: the device was revoked since
-    /// its receipt read, and memory holds none or, once it paired again,
-    /// another device's receipt.
+    /// Opens the files of the receipt an announce just made for
+    /// `device_id` (a first announce, whose read found no receipt in memory
+    /// or the store, or one that replaced the receipt it read): an empty
+    /// partial and the metadata sidecar of `begin`, or none when `begin` is
+    /// `None` (a receipt answered `complete` from the admission ledger).
+    /// `_files` is the caller's guard of the files lock, passed so the
+    /// signature proves the lock is held; the caller holds it from before
+    /// that `change` until this returns, so no file is created or discarded
+    /// in between ([`Engine::discard_own`]). `None`, with nothing opened,
+    /// when memory no longer holds this device's receipt: the device was
+    /// revoked since its receipt read, and memory holds none or, once it
+    /// paired again, another device's receipt.
     ///
-    /// Every file of the recording id goes first. Whatever is there belongs
-    /// to no receipt: a verified file left by an intake failure whose
-    /// receipt a revoke deleted after a restart, or a partial a refusal or
-    /// a second revoke left. Kept, `begin` would add this upload's chunks
-    /// to an old partial, and `complete` would hand an old verified file to
-    /// the intake without hashing it.
+    /// Every file of the recording id goes first. After a first announce
+    /// whatever is there belongs to no receipt: a verified file left by an
+    /// intake failure whose receipt a revoke deleted after a restart, or a
+    /// partial a refusal or a second revoke left. Kept, `begin` would add
+    /// this upload's chunks to an old partial, and `complete` would hand an
+    /// old verified file to the intake without hashing it. After a
+    /// replacement they are the replaced upload's: of other bytes, of the
+    /// same bytes in another split, or of bytes the ledger shows admitted.
     ///
-    /// No live upload of another device can be in those files. A device's
-    /// recording routes read its receipt into memory before they touch a
-    /// file, and memory drops it only when that device is revoked. `change`
-    /// made this receipt only because memory held none, so only a revoked
-    /// device's request can still be at work on them. Such a request
-    /// answers a refusal, an error or a re-announce's status, and the phone
-    /// deletes its copy only on a 200 from `complete`, so it keeps its
-    /// recording; or it answers the 200 of an admission whose intake opened
-    /// the verified file before the discard and copies it whole (the open
-    /// file outlives its name).
+    /// No live upload of another device the computer could still admit is
+    /// in those files. A device's recording routes read its receipt into
+    /// memory before they touch a file, and memory drops it only when that
+    /// device is revoked. `change` made this receipt only because memory
+    /// held none, or the very receipt the announce decided to replace, so
+    /// only a revoked device's request, or one of the replaced upload, can
+    /// still be at work on them. Such a request answers a refusal, an error,
+    /// a 404 or a re-announce's status, and the phone deletes its copy only
+    /// on a 200 from `complete`, so it keeps its recording; or it answers
+    /// the 200 of an admission whose intake opened the verified file before
+    /// the discard and copies it whole (the open file outlives its name).
     ///
     /// Swift: `inbox.discard` and `inbox.begin` in
     /// `RecordingHandler.announce`.
     pub(crate) fn open_files(
         &self,
         _files: &MutexGuard<'_, ()>,
-        metadata: &RecordingMetadata,
+        recording_id: Uuid,
         device_id: Uuid,
+        begin: Option<&RecordingMetadata>,
     ) -> Option<std::io::Result<()>> {
-        let recording_id = metadata.recording_id;
         let ours = self
             .state()
             .active_receipts
@@ -810,7 +815,7 @@ impl Engine {
             return None;
         }
         self.inbox.discard(recording_id);
-        Some(self.inbox.begin(metadata))
+        Some(begin.map_or(Ok(()), |metadata| self.inbox.begin(metadata)))
     }
 
     /// Opens the files of a known recording of `device_id` again when the
@@ -852,39 +857,53 @@ impl Engine {
         state: HandoverState,
         received_chunks: Option<Vec<i64>>,
     ) -> store::Result<()> {
-        self.update(receipt, |edit| {
-            edit.state = state;
-            if let Some(received_chunks) = received_chunks {
-                edit.received_chunks = received_chunks;
-            }
-        })
-        .await
+        self.update(receipt, Some(state), received_chunks).await
     }
 
     /// A change of the receipt a request read, through [`Engine::change`]:
-    /// `edit` changes the copy memory holds, or `receipt` when memory holds
-    /// none (a revoked device), and `receipt` comes back as changed. When
-    /// memory holds another device's receipt (another phone announced the
-    /// same recording id), nothing changes, `receipt` included. A receipt memory holds
-    /// as `complete` stays as it is, nothing is saved and `receipt` comes
-    /// back as memory holds it: a request that read it before the phone's
-    /// `complete` admitted the recording must not put it back, or the
-    /// phone's next `complete` would start over and admit it again.
+    /// `state` and `received_chunks`, when given, change the copy memory
+    /// holds, or `receipt` when memory holds none (a revoked device), and
+    /// `receipt` comes back as changed. When memory holds another upload
+    /// ([`same_upload`]: another phone announced or took over the
+    /// recording id, or the phone announced other bytes under it), nothing
+    /// changes, `receipt` included: a late `complete` of the replaced bytes
+    /// would otherwise mark the new upload `complete` with their meeting,
+    /// and the phone would delete a recording the computer does not have.
+    /// A receipt memory holds as `complete` stays as it is, nothing is
+    /// saved and `receipt` comes back as memory holds it: a request that
+    /// read it before the phone's `complete` admitted the recording must
+    /// not put it back, or the phone's next `complete` would start over and
+    /// admit it again. A chunk set is one split's, so it is not written
+    /// over a receipt memory holds in another chunk size (the phone has
+    /// since announced the same bytes in another split): a late `complete`
+    /// of the earlier split would empty the new split's chunks, and the
+    /// phone would send them again. Nothing changes then, `receipt`
+    /// included.
     async fn update(
         &self,
         receipt: &mut HandoverReceipt,
-        edit: impl FnOnce(&mut HandoverReceipt),
+        state: Option<HandoverState>,
+        received_chunks: Option<Vec<i64>>,
     ) -> store::Result<()> {
+        let writes_chunks = received_chunks.is_some();
         let picked = self.change(
             receipt.recording_id,
             |held| match held {
-                Some(held) if held.device_id != receipt.device_id => Err(None),
+                Some(held) if !same_upload(held, receipt) => Err(None),
                 Some(held) if held.state.kind() == HandoverStateKind::Complete => {
                     Err(Some(Box::new(held.clone())))
                 }
+                Some(held) if writes_chunks && held.chunk_size != receipt.chunk_size => Err(None),
                 held => Ok(held.unwrap_or(receipt).clone()),
             },
-            edit,
+            |edit| {
+                if let Some(state) = state {
+                    edit.state = state;
+                }
+                if let Some(received_chunks) = received_chunks {
+                    edit.received_chunks = received_chunks;
+                }
+            },
         );
         match picked {
             Ok((changed, place)) => {
@@ -902,19 +921,22 @@ impl Engine {
 
     /// Folds chunk `index` into the receipt as memory holds it, sets it to
     /// `receiving` and saves it. `None`, with nothing changed, when memory
-    /// holds no receipt of `device_id` for `recording_id` (revoked,
-    /// forgotten). A receipt memory holds as `complete` stays as it is, as
-    /// in [`Engine::update`], and the chunk counts as received:
-    /// `Some(Ok(()))` with nothing saved.
+    /// holds no receipt of the upload `read` stands for, in the same split
+    /// (revoked, forgotten, taken over by another device, replaced by other
+    /// bytes or restarted under another chunk size): the chunk was written
+    /// at an offset of that split. A receipt memory holds as `complete`
+    /// stays as it is, as in [`Engine::update`], and the chunk counts as
+    /// received: `Some(Ok(()))` with nothing saved.
     pub(crate) async fn add_chunk(
         &self,
-        recording_id: Uuid,
-        device_id: Uuid,
+        read: &HandoverReceipt,
         index: i64,
     ) -> Option<store::Result<()>> {
         let picked = self.change(
-            recording_id,
-            |held| match held.filter(|held| held.device_id == device_id) {
+            read.recording_id,
+            |held| match held
+                .filter(|held| same_upload(held, read) && held.chunk_size == read.chunk_size)
+            {
                 None => Err(None),
                 Some(held) if held.state.kind() == HandoverStateKind::Complete => Err(Some(Ok(()))),
                 Some(held) => Ok(held.clone()),
@@ -1023,25 +1045,53 @@ impl Engine {
     }
 }
 
-/// The stored receipt of `recording_id`, with a `complete` one whose
-/// meeting row is missing read as `failed` ([`Engine::MEETING_MISSING`]):
-/// not admitted. Deleting a meeting deletes its receipt, so only an
-/// admission whose meeting never committed leaves one behind (the separate
-/// receipt and meeting commits of earlier releases, a crash or a full disk
-/// between them). Its phone never got the 200 and still holds the
-/// recording, so the receipt must neither answer 200 nor let the sweep
-/// take the verified file; the phone's retried `complete` admits that file
-/// again. Swift: `HandoverEngine.storedReceipt`.
+/// The stored receipt of `recording_id` as admitted or not. A `complete`
+/// one whose meeting row exists comes back as it is. Otherwise the
+/// admission ledger decides ([`Store::admitted_meeting`]): when it holds
+/// the receipt's recording id, size and SHA-256, the receipt reads as
+/// `complete` with the ledger's meeting id, whatever its state. That is a
+/// `complete` receipt whose meeting the user deleted (the phone's retry is
+/// answered delivered), or one a line save asked for before the intake's
+/// commit put back to `verifying` or `receiving` (the retry gets the first
+/// meeting, not a second admission). A `complete` receipt with neither a
+/// meeting row nor a ledger row reads as `failed`
+/// ([`Engine::MEETING_MISSING`]): not admitted. Only an admission whose
+/// meeting never committed leaves one behind (the separate receipt and
+/// meeting commits of earlier releases, a crash or a full disk between
+/// them). Its phone never got the 200 and still holds the recording, so the
+/// receipt must neither answer 200 nor let the sweep take the verified
+/// file; the phone's retried `complete` admits that file again. Swift:
+/// `HandoverEngine.storedReceipt`.
 fn stored_receipt(store: &Store, recording_id: Uuid) -> store::Result<Option<HandoverReceipt>> {
     let Some(mut receipt) = store.handover_receipt(recording_id)? else {
         return Ok(None);
     };
     if let Some(meeting_id) = receipt.state.meeting_id()
-        && store.meeting(meeting_id)?.is_none()
+        && store.meeting(meeting_id)?.is_some()
     {
+        return Ok(Some(receipt));
+    }
+    if let Some(meeting_id) =
+        store.admitted_meeting(recording_id, receipt.byte_count, &receipt.sha256)?
+    {
+        receipt.state = HandoverState::Complete { meeting_id };
+    } else if receipt.state.kind() == HandoverStateKind::Complete {
         receipt.state = HandoverState::Failed(Engine::MEETING_MISSING.to_owned());
     }
     Ok(Some(receipt))
+}
+
+/// Whether `held` is the upload `read` stands for: the same device and the
+/// same bytes. A receipt of another device (another phone announced the
+/// recording id, or took it over), or of other bytes (the phone announced
+/// another file under the id), is another upload, and a write a request
+/// computed from `read` must not land on it. The chunk size is not part of
+/// it: only the writes of a chunk set check it ([`Engine::update`],
+/// [`Engine::add_chunk`]). Swift: `HandoverEngine.sameUpload`.
+fn same_upload(held: &HandoverReceipt, read: &HandoverReceipt) -> bool {
+    held.device_id == read.device_id
+        && held.byte_count == read.byte_count
+        && held.sha256 == read.sha256
 }
 
 /// `body` on the blocking pool; a panic there is an I/O error.

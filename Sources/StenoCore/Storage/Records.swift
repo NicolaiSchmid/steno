@@ -550,6 +550,34 @@ struct PairedDeviceRow: StenoRecord {
   }
 }
 
+/// One admitted phone recording (schema v5); `MeetingStore.admittedMeeting`.
+struct HandoverAdmissionRow: StenoRecord {
+  static let databaseTableName = "handoverAdmission"
+
+  var recordingID: UUID
+  var byteCount: Int64
+  var sha256: Data
+  var meetingID: UUID
+  var admittedAt: Date
+
+  enum Columns {
+    static let recordingID = Column(CodingKeys.recordingID)
+    static let byteCount = Column(CodingKeys.byteCount)
+    static let sha256 = Column(CodingKeys.sha256)
+  }
+
+  /// The request for the ledger row of the recording `recordingID` of
+  /// `byteCount` bytes hashing to `sha256`, which finds it if those bytes
+  /// were admitted.
+  static func of(recordingID: UUID, byteCount: Int64, sha256: Data)
+    -> QueryInterfaceRequest<Self>
+  {
+    filter(Columns.recordingID == recordingID.uuidString)
+      .filter(Columns.byteCount == byteCount)
+      .filter(Columns.sha256 == sha256)
+  }
+}
+
 struct HandoverReceiptRow: StenoRecord {
   static let databaseTableName = "handoverReceipt"
 

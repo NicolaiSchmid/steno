@@ -9,7 +9,10 @@
 # crop per window and per panel (`magick` from ImageMagick 7, `convert`
 # from 6); the windows carry what the host's database holds (nothing on
 # a fresh runner). Xvfb has no compositor, so the panels' transparent
-# corners render black there.
+# corners render black there. Then it launches the binary once more over a
+# database it cannot open, in a throwaway XDG_DATA_HOME, and expects the
+# refusal: the "not starting" line and exit 3, and fails (exit 1)
+# otherwise.
 #
 #   [STENO_SMOKE_DPI=<dpi>] apps/desktop/scripts/smoke-linux.sh [path/to/steno-desktop] [seconds]
 #
@@ -68,3 +71,23 @@ xvfb-run --auto-servernum --server-args="$server_args" bash -c '
   fi
   wait "$app"
 ' _ "$binary" "$seconds" "$screens"
+
+# Then a launch over a database it cannot open, in a throwaway support
+# directory: the shell must refuse with its dialog (`refuse_to_start`),
+# which nobody closes here, and exit 3 once the smoke's wait ends, instead
+# of panicking.
+refusal="$(mktemp -d)"
+trap 'rm -rf "$refusal"' EXIT
+mkdir -p "$refusal/Steno"
+printf 'not a database\n' > "$refusal/Steno/steno.sqlite"
+# Both streams go to one file: Debian's xvfb-run sends the command's
+# stderr to its stdout.
+code=0
+XDG_DATA_HOME="$refusal" STENO_SMOKE_SECONDS=3 \
+  xvfb-run --auto-servernum "$binary" > "$refusal/output" 2>&1 || code=$?
+if [[ "$code" != 3 ]] || ! grep -qF "[steno-desktop] not starting:" "$refusal/output"; then
+  cat "$refusal/output" >&2
+  echo "smoke: over a database it cannot open the shell must refuse (exit 3), got $code" >&2
+  exit 1
+fi
+echo "smoke: a database it cannot open is refused (exit 3)"

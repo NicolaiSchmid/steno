@@ -40,11 +40,11 @@ fn identifiers_match_migrations_swift() {
         .iter()
         .map(|migration| migration.identifier)
         .collect();
-    assert_eq!(identifiers, ["v1", "v2", "v3", "v4"]);
+    assert_eq!(identifiers, ["v1", "v2", "v3", "v4", "v5"]);
     let store = Store::in_memory().unwrap();
     assert_eq!(
         store.applied_migrations().unwrap(),
-        ["v1", "v2", "v3", "v4"]
+        ["v1", "v2", "v3", "v4", "v5"]
     );
 }
 
@@ -54,7 +54,7 @@ fn reopening_applies_nothing_and_sets_the_grdb_pragmas() {
     let path = directory.path().join("nested").join("steno.sqlite");
     drop(Store::open(&path).unwrap());
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.applied_migrations().unwrap().len(), 4);
+    assert_eq!(store.applied_migrations().unwrap().len(), 5);
     let (journal, foreign_keys, synchronous, busy_timeout): (String, i64, i64, i64) = store
         .read(|connection| {
             Ok((
@@ -75,7 +75,8 @@ fn reopening_applies_nothing_and_sets_the_grdb_pragmas() {
 
 /// A database the Swift app migrated already records every identifier;
 /// opening it must not re-run anything. A database with an identifier this
-/// build does not know belongs to a newer app and must be left alone.
+/// build does not know belongs to a newer app: it opens, as GRDB opens it,
+/// and the identifier stays recorded.
 #[test]
 fn recorded_identifiers_are_honoured() {
     let directory = tempfile::tempdir().unwrap();
@@ -102,7 +103,7 @@ fn recorded_identifiers_are_honoured() {
     let store = Store::open(&path).unwrap();
     assert_eq!(
         store.applied_migrations().unwrap(),
-        ["v1", "v2", "v3", "v4"]
+        ["v1", "v2", "v3", "v4", "v5"]
     );
     drop(store);
 
@@ -113,9 +114,9 @@ fn recorded_identifiers_are_honoured() {
             [],
         )
         .unwrap();
-    let error = Store::open(&path).expect_err("a newer schema is refused");
-    assert!(
-        matches!(error, steno_core::StoreError::UnknownMigration(ref id) if id == "v99"),
-        "{error}"
+    let store = Store::open(&path).expect("a newer schema opens");
+    assert_eq!(
+        store.applied_migrations().unwrap(),
+        ["v1", "v2", "v3", "v4", "v5", "v99"]
     );
 }

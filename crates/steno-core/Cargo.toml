@@ -29,6 +29,8 @@ serde.workspace = true
 serde_json = { workspace = true, features = ["float_roundtrip"] }
 sha2.workspace = true
 thiserror.workspace = true
+# The migrator's warning about a migration this version does not know.
+tracing.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
 zmij.workspace = true
@@ -41,6 +43,7 @@ libc.workspace = true
 similar.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true
