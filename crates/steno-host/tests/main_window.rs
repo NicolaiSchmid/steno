@@ -1502,6 +1502,58 @@ fn the_list_follows_the_recorders_state_and_meeting() {
     assert_eq!(list["groups"][0]["meetings"][0]["state"], "queued");
 }
 
+/// A meeting left `recording` (a save that failed, a folder gone for
+/// good) can be deleted while the recorder is idle, with its folder, which
+/// no asset row names; while the recorder records, every recording row is
+/// refused, the live one among them. Rust only.
+#[test]
+fn a_recording_row_can_be_deleted_while_the_recorder_is_idle() {
+    let mut left = sample_meeting();
+    left.id = uuid(0x78);
+    left.state = MeetingState::Recording;
+    let seeded = left.clone();
+    let harness = Harness::builder()
+        .confirm(true)
+        .seed(move |store, _| store.save_meeting(&seeded).unwrap())
+        .build();
+    let _ = harness.snapshot(BridgeTopic::MeetingsList);
+    harness
+        .fakes
+        .recorder
+        .set_status(steno_host::services::RecorderStatus {
+            state: RecordingState::Recording,
+            meeting_id: Some(uuid(0x79)),
+            ..steno_host::services::RecorderStatus::idle()
+        });
+    let refused = harness
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: left.id,
+        })
+        .unwrap_err();
+    assert_eq!(refused.message, "This meeting is still recording.");
+    assert!(harness.store.meeting(left.id).unwrap().is_some());
+
+    harness
+        .fakes
+        .recorder
+        .set_status(steno_host::services::RecorderStatus::idle());
+    let reply = harness
+        .host
+        .meetings_delete(MeetingIdParams {
+            meeting_id: left.id,
+        })
+        .unwrap();
+    assert!(reply.confirmed);
+    assert!(harness.store.meeting(left.id).unwrap().is_none());
+    assert_eq!(
+        *harness.fakes.file_system.removed.lock().unwrap(),
+        [harness
+            .audio_folder()
+            .join(steno_core::json::uuid_string(left.id))]
+    );
+}
+
 /// Swift: `DisplayTitleTests`.
 #[test]
 fn derived_titles_read_weekday_or_month_day_and_time() {

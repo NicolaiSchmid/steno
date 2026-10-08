@@ -1409,6 +1409,7 @@ impl BridgeHost for Host {
     }
 
     fn meetings_delete(&self, params: MeetingIdParams) -> Outcome<ConfirmReply> {
+        let recorder_idle = self.shared.services.recorder.status().state == RecordingState::Idle;
         let prompt = {
             let inner = self.lock();
             let meeting = inner
@@ -1417,7 +1418,7 @@ impl BridgeHost for Host {
                 .iter()
                 .find(|meeting| meeting.id == params.meeting_id)
                 .ok_or_else(no_such_meeting)?;
-            if !MeetingListViewModel::can_delete(meeting) {
+            if !MeetingListViewModel::can_delete(meeting, recorder_idle) {
                 let message = if meeting.state.kind() == steno_core::MeetingStateKind::Recording {
                     "This meeting is still recording."
                 } else {
@@ -1449,6 +1450,7 @@ impl BridgeHost for Host {
                         params.meeting_id,
                         &self.shared.store,
                         &*self.shared.services.file_system,
+                        recorder_idle,
                     );
                     inner.list.reload(&self.shared.store);
                     // The store's `deleted` event, posted only when the rows

@@ -490,9 +490,26 @@ impl Store {
     /// app. A delete that must be on the disk first would commit through
     /// [`Store::write_durably`].
     pub fn delete_meeting(&self, id: Uuid) -> Result<DeletedMeeting> {
+        self.delete(id, false)
+    }
+
+    /// [`Self::delete_meeting`] that also removes a meeting left
+    /// `recording`, for a caller that knows no capture of its own writes it
+    /// (the host, while its recorder is idle): a recording whose save
+    /// failed, or one the launch's recovery keeps for a folder that is gone
+    /// for good, so the user can remove the row. Still refuses a meeting
+    /// that is `processing`. The rows name no master for such a meeting;
+    /// the caller removes its folder. Rust only: Swift's list refused a
+    /// recording row.
+    pub fn delete_meeting_left_recording(&self, id: Uuid) -> Result<DeletedMeeting> {
+        self.delete(id, true)
+    }
+
+    fn delete(&self, id: Uuid, left_recording: bool) -> Result<DeletedMeeting> {
         self.write(|transaction| {
             let meeting = current(transaction, id)?;
             match meeting.state.kind() {
+                MeetingStateKind::Recording if left_recording => {}
                 kind @ (MeetingStateKind::Recording | MeetingStateKind::Processing) => {
                     return Err(StoreError::MeetingBusy(id, kind));
                 }
