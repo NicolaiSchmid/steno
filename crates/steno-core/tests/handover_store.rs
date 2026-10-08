@@ -7,6 +7,7 @@ mod common;
 use steno_core::*;
 
 use common::{date, uuid};
+use uuid::Uuid;
 
 const DEVICE_ID: &str = "0BADF00D-0000-4000-8000-000000000001";
 const RECORDING_ID: &str = "6F9619FF-8B86-D011-B42D-00C04FC964FF";
@@ -210,8 +211,7 @@ fn admission(meeting_id: &str, sha256: Vec<u8>) -> (HandoverReceipt, Meeting, Au
 /// the row. Other bytes under the same recording id are a second
 /// admission with a row of their own. The same bytes admitted again are
 /// the meeting the ledger holds while it exists, and once it is deleted a
-/// new meeting whose admission keeps the first row. Swift:
-/// `anAdmissionWritesItsLedgerRow`.
+/// new meeting the row moves to. Swift: `anAdmissionWritesItsLedgerRow`.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave() {
@@ -305,7 +305,7 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
     );
 
     // Once the user deleted that meeting, the same bytes are admitted as a
-    // new one, and the first admission's row stands.
+    // new one, and the row moves to it.
     store.delete_meeting(meeting.id).unwrap();
     assert_eq!(store.handover_receipt(recording_id).unwrap(), None);
     store
@@ -328,8 +328,79 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
         store
             .admitted_meeting(recording_id, byte_count, &[7; 32])
             .unwrap(),
-        Some(meeting.id)
+        Some(third.id)
     );
+}
+
+/// Bytes admitted again after the user deleted their meeting are one
+/// recording from then on: the ledger row moves to the new meeting, so
+/// another device that took the receipt over during that admission and
+/// uploads the same bytes completes with it instead of writing a third
+/// meeting. Swift: `aReadmissionAfterADeleteIsTheMeetingTheNextUploadFinds`.
+#[test]
+fn a_readmission_after_a_delete_is_the_meeting_the_next_upload_finds() {
+    let store = Store::in_memory().unwrap();
+    let other_device = PairedDevice {
+        id: uuid("0BADF00D-0000-4000-8000-000000000002"),
+        ..device()
+    };
+    store.save_paired_device(&device(), &[1; 32]).unwrap();
+    store.save_paired_device(&other_device, &[2; 32]).unwrap();
+    // The device's announce saves the unfinished receipt, then the intake
+    // admits the bytes as the meeting `meeting_id`.
+    let admit = |device_id: Uuid, meeting_id: &str| {
+        let (admitted, meeting, asset) = admission(meeting_id, vec![7; 32]);
+        let admitted = HandoverReceipt {
+            device_id,
+            ..admitted
+        };
+        store
+            .save_handover_receipt(&HandoverReceipt {
+                state: HandoverState::Receiving,
+                ..admitted.clone()
+            })
+            .unwrap();
+        store
+            .save_admission_durably(&admitted, &meeting, &asset)
+            .unwrap()
+    };
+    let first = admit(device().id, "516EADE8-40E5-4434-8AAF-000000000001");
+    store.delete_meeting(first).unwrap();
+    let second = admit(device().id, "516EADE8-40E5-4434-8AAF-000000000002");
+    assert_eq!(
+        store
+            .admitted_meeting(uuid(RECORDING_ID), 3_000_000, &[7; 32])
+            .unwrap(),
+        Some(second),
+        "the row moved to the meeting that exists"
+    );
+
+    assert_eq!(
+        admit(other_device.id, "516EADE8-40E5-4434-8AAF-000000000003"),
+        second,
+        "the other device's upload is that meeting"
+    );
+    assert_eq!(
+        store
+            .all_meetings()
+            .unwrap()
+            .into_iter()
+            .map(|meeting| meeting.id)
+            .collect::<Vec<_>>(),
+        [second],
+        "no third meeting"
+    );
+    assert_eq!(
+        store
+            .handover_receipt(uuid(RECORDING_ID))
+            .unwrap()
+            .map(|receipt| (receipt.device_id, receipt.state)),
+        Some((
+            other_device.id,
+            HandoverState::Complete { meeting_id: second }
+        ))
+    );
+    assert_eq!(ledger_rows(&store).len(), 1);
 }
 
 /// Every open backfills the ledger from the `complete` receipts whose

@@ -47,7 +47,7 @@ import Testing
   /// with a row of their own, once their receipt replaced the first one; over
   /// the first receipt they are refused. The same bytes admitted again are
   /// the meeting the ledger holds while it exists, and once it is deleted a
-  /// new meeting whose admission keeps the first row. Rust:
+  /// new meeting the row moves to. Rust:
   /// `an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave`.
   @Test func anAdmissionWritesItsLedgerRow() async throws {
     let store = try MeetingStore.inMemory()
@@ -105,7 +105,7 @@ import Testing
         == second.id, "other bytes are an admission of their own")
 
     // Once the user deleted that meeting, the same bytes are admitted as a
-    // new one, and the first admission's row stands.
+    // new one, and the row moves to it.
     try await store.delete(meetingID: meeting.id)
     #expect(try await store.handoverReceipt(recordingID: id) == nil)
     try await store.save(unfinished(sameBytes))
@@ -115,7 +115,49 @@ import Testing
     #expect(try await Self.ledgerRows(store).count == 2, "the ledger keeps both rows")
     #expect(
       try await store.admittedMeeting(
-        recordingID: id, byteCount: first.byteCount, sha256: first.sha256) == meeting.id)
+        recordingID: id, byteCount: first.byteCount, sha256: first.sha256) == third.id)
+  }
+
+  /// Bytes admitted again after the user deleted their meeting are one
+  /// recording from then on: the ledger row moves to the new meeting, so
+  /// another device that took the receipt over during that admission and
+  /// uploads the same bytes completes with it instead of writing a third
+  /// meeting. Rust: `a_readmission_after_a_delete_is_the_meeting_the_next_upload_finds`.
+  @Test func aReadmissionAfterADeleteIsTheMeetingTheNextUploadFinds() async throws {
+    let store = try MeetingStore.inMemory()
+    var otherDevice = SampleData.pairedDevice()
+    otherDevice.id = SampleData.uuid(94)
+    try await store.save(SampleData.pairedDevice(), tokenHash: Data(repeating: 1, count: 32))
+    try await store.save(otherDevice, tokenHash: Data(repeating: 2, count: 32))
+    // The device's announce saves the unfinished receipt, then the intake
+    // admits the bytes as the meeting `n`.
+    func admit(deviceID: UUID, _ n: Int) async throws -> UUID {
+      let (completed, meeting, asset) = Self.admission(n, sha256: 7)
+      var admitted = completed
+      admitted.deviceID = deviceID
+      var unfinished = admitted
+      unfinished.state = .receiving
+      try await store.save(unfinished)
+      return try await store.saveDurably(admitted, meeting: meeting, asset: asset)
+    }
+    let first = try await admit(deviceID: SampleData.pairedDevice().id, 501)
+    try await store.delete(meetingID: first)
+    let second = try await admit(deviceID: SampleData.pairedDevice().id, 502)
+    let receipt = SampleData.handoverReceipt()
+    #expect(
+      try await store.admittedMeeting(
+        recordingID: receipt.recordingID, byteCount: receipt.byteCount,
+        sha256: Data(repeating: 7, count: 32)) == second,
+      "the row moved to the meeting that exists")
+
+    #expect(
+      try await admit(deviceID: otherDevice.id, 503) == second,
+      "the other device's upload is that meeting")
+    #expect(try await store.meetings().map(\.id) == [second], "no third meeting")
+    let completed = try await store.handoverReceipt(recordingID: receipt.recordingID)
+    #expect(completed?.deviceID == otherDevice.id)
+    #expect(completed?.state == .complete(meetingID: second))
+    #expect(try await Self.ledgerRows(store).count == 1)
   }
 
   /// Every open backfills the ledger from the `.complete` receipts whose

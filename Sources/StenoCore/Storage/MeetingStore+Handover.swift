@@ -79,10 +79,10 @@ extension MeetingStore {
 
   /// The phone intake's admission: the `.complete` receipt, the meeting,
   /// its asset and the admission's ledger row (`admittedMeeting`) in one
-  /// transaction, on the disk when it returns (`writeDurably`), and the
-  /// meeting the receipt was completed with. The phone deletes its copy once
-  /// `complete` answers 200, so no commit may hold the receipt without the
-  /// meeting, and a power loss must not roll either back.
+  /// transaction, on the disk when it returns (`writeDurably`). It returns
+  /// the meeting the receipt was completed with. The phone deletes its copy
+  /// once `complete` answers 200, so no commit may hold the receipt without
+  /// the meeting, and a power loss must not roll either back.
   ///
   /// When the ledger already holds these bytes (the same recording id, size
   /// and SHA-256) and their meeting still exists, the receipt is completed
@@ -90,9 +90,9 @@ extension MeetingStore {
   /// meeting's id comes back: the same bytes are one recording. Another
   /// device's upload of them can reach the intake after the first admission
   /// committed (it took the receipt over during that intake), and a second
-  /// meeting would be a duplicate. A row whose meeting the user deleted
-  /// stays as it is (`INSERT OR IGNORE`), and the admission writes
-  /// `meeting`.
+  /// meeting would be a duplicate. When the user deleted the row's meeting,
+  /// the admission writes `meeting` and the row moves to it, so a later
+  /// upload of the same bytes finds that meeting instead of writing a third.
   ///
   /// Throws `MeetingStoreError.receiptOfAnotherUpload`, with nothing
   /// written, when the stored receipt belongs to another device than
@@ -128,10 +128,19 @@ extension MeetingStore {
       try MeetingRow(meeting).save(db)
       try AudioAssetRow(asset).save(db)
       try HandoverReceiptRow(receipt).save(db)
-      try HandoverAdmissionRow(
-        recordingID: receipt.recordingID, byteCount: receipt.byteCount, sha256: receipt.sha256,
-        meetingID: meeting.id, admittedAt: receipt.updatedAt
-      ).insert(db, onConflict: .ignore)
+      try db.execute(
+        sql: """
+          INSERT INTO "handoverAdmission" \
+          ("recordingID", "byteCount", "sha256", "meetingID", "admittedAt") \
+          VALUES (?, ?, ?, ?, ?) \
+          ON CONFLICT ("recordingID", "byteCount", "sha256") DO UPDATE \
+          SET "meetingID" = excluded."meetingID", "admittedAt" = excluded."admittedAt" \
+          WHERE "meetingID" NOT IN (SELECT "id" FROM "meeting")
+          """,
+        arguments: [
+          receipt.recordingID.uuidString, receipt.byteCount, receipt.sha256,
+          meeting.id.uuidString, receipt.updatedAt,
+        ])
       return meeting.id
     }
   }

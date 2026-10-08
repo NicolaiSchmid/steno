@@ -163,10 +163,10 @@ impl Store {
     /// The phone intake's admission: the `complete` receipt, the meeting,
     /// its asset and the admission's ledger row (see
     /// [`Store::admitted_meeting`]) in one transaction, on the disk when it
-    /// returns ([`Store::write_durably`]), and the meeting the receipt was
-    /// completed with. The phone deletes its copy once `complete` answers
-    /// 200, so no commit may hold the receipt without the meeting, and a
-    /// power loss must not roll either back.
+    /// returns ([`Store::write_durably`]). It returns the meeting the
+    /// receipt was completed with. The phone deletes its copy once
+    /// `complete` answers 200, so no commit may hold the receipt without
+    /// the meeting, and a power loss must not roll either back.
     ///
     /// When the ledger already holds these bytes (the same recording id,
     /// size and SHA-256) and their meeting still exists, the receipt is
@@ -174,9 +174,10 @@ impl Store {
     /// and that meeting's id comes back: the same bytes are one recording.
     /// Another device's upload of them can reach the intake after the
     /// first admission committed (it took the receipt over during that
-    /// intake), and a second meeting would be a duplicate. A row whose
-    /// meeting the user deleted stays as it is (`INSERT OR IGNORE`), and
-    /// the admission writes `meeting`.
+    /// intake), and a second meeting would be a duplicate. When the
+    /// user deleted the row's meeting, the admission writes `meeting` and
+    /// the row moves to it, so a later upload of the same bytes finds that
+    /// meeting instead of writing a third.
     ///
     /// Fails with [`StoreError::ReceiptOfAnotherUpload`], writing nothing,
     /// when the stored receipt belongs to another device than `receipt` or
@@ -240,9 +241,12 @@ impl Store {
             assets::save(transaction, asset)?;
             save_receipt(transaction, receipt)?;
             transaction.execute(
-                "INSERT OR IGNORE INTO handoverAdmission \
+                "INSERT INTO handoverAdmission \
                  (recordingID, byteCount, sha256, meetingID, admittedAt) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT (recordingID, byteCount, sha256) DO UPDATE \
+                 SET meetingID = excluded.meetingID, admittedAt = excluded.admittedAt \
+                 WHERE meetingID NOT IN (SELECT id FROM meeting)",
                 params![
                     DbUuid(receipt.recording_id),
                     receipt.byte_count,
