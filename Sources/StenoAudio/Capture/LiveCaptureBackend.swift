@@ -38,9 +38,9 @@ struct DeviceSnapshot: Sendable, Equatable {
   /// `.system` comes from the tap, `.mic` and `.mixed` from the first channel
   /// of the selected input device, which the aggregate resamples to the
   /// output device's clock. That clock is 48 kHz where the output device
-  /// accepts it; a Bluetooth headset in the hands-free profile keeps 24 or
-  /// 16 kHz, and the stream then reports that rate for the processing thread
-  /// to convert.
+  /// accepts it; a Bluetooth headset in the hands-free profile keeps 24, 16
+  /// or 8 kHz, and the stream then reports that rate for the processing
+  /// thread to convert.
   ///
   /// Device notifications (a default device moving, a sub-device dying, the
   /// aggregate changing rate) are coalesced for `coalesceDelay` on
@@ -268,10 +268,10 @@ struct DeviceSnapshot: Sendable, Equatable {
       let inputLatency =
         mic.map { mic in
           let id = AudioObjectID(mic.id)
-          let frames = AudioDevices.latencyFrames(of: id, scope: kAudioObjectPropertyScopeInput)
-          guard micSubDevice != 0 else { return frames }
-          return CaptureStream.rescaled(
-            frames, from: AudioDevices.nominalSampleRate(of: id), to: sampleRate)
+          return Self.micLatencyFrames(
+            AudioDevices.latencyFrames(of: id, scope: kAudioObjectPropertyScopeInput),
+            onClockMaster: micSubDevice == 0, micRate: AudioDevices.nominalSampleRate(of: id),
+            streamRate: sampleRate)
         } ?? 0
       let outputLatency = AudioDevices.latencyFrames(
         of: AudioObjectID(output.id), scope: kAudioObjectPropertyScopeOutput)
@@ -319,6 +319,16 @@ struct DeviceSnapshot: Sendable, Equatable {
       -> AudioObjectPropertySelector?
     {
       now != started ? kAudioDevicePropertyNominalSampleRate : nil
+    }
+
+    /// The microphone's latency of `frames` in the stream's frames: as it is
+    /// when the microphone is the clock master, rescaled from its own
+    /// `micRate` to `streamRate` otherwise (rounded down; an unreadable rate
+    /// leaves it as it is).
+    static func micLatencyFrames(
+      _ frames: Int, onClockMaster: Bool, micRate: Double, streamRate: Double
+    ) -> Int {
+      onClockMaster ? frames : CaptureStream.rescaled(frames, from: micRate, to: streamRate)
     }
 
     /// A property listener fired, on `listenerQueue`. Bluetooth transitions

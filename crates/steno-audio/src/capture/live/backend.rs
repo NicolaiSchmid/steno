@@ -6,8 +6,9 @@
 //! `System` comes from the tap, `Mic` and `Mixed` from the first channel of
 //! the chosen input device, which the aggregate resamples to the output
 //! device's clock. That clock is 48 kHz where the output device accepts it;
-//! a Bluetooth headset in the hands-free profile keeps 24 or 16 kHz, and
-//! the stream then reports that rate for the processing thread to convert.
+//! a Bluetooth headset in the hands-free profile keeps 24, 16 or 8 kHz,
+//! and the stream then reports that rate for the processing thread to
+//! convert.
 //! A chosen device that is not connected records the default input
 //! instead ([`chosen_or_default_input`]), and the device list is watched so
 //! the rebuild returns to it once it is back; Swift fails the start with
@@ -320,6 +321,23 @@ impl LiveCaptureBackend {
         (now != started).then_some(kAudioDevicePropertyNominalSampleRate)
     }
 
+    /// The microphone's latency of `frames` in the stream's frames: as it
+    /// is when the microphone is the clock master, rescaled from its own
+    /// `mic_rate` to `stream_rate` otherwise (rounded down; an unreadable
+    /// rate leaves it as it is).
+    fn mic_latency_frames(
+        frames: usize,
+        on_clock_master: bool,
+        mic_rate: f64,
+        stream_rate: f64,
+    ) -> usize {
+        if on_clock_master {
+            frames
+        } else {
+            CaptureStream::rescaled(frames, mic_rate, stream_rate)
+        }
+    }
+
     /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
     /// capture on the fallback, none otherwise.
     fn recheck_for(is_fallback: bool) -> Option<Duration> {
@@ -534,12 +552,12 @@ impl CaptureBackend for LiveCaptureBackend {
         // rate (a 48 kHz built-in microphone beside a headset at 24 kHz) and
         // is rescaled to the stream's.
         let input_latency = mic.as_ref().map_or(0, |m| {
-            let frames = hal::latency_frames(m.id, kAudioObjectPropertyScopeInput);
-            if mic_sub_device == Some(0) {
-                frames
-            } else {
-                CaptureStream::rescaled(frames, hal::nominal_sample_rate(m.id), sample_rate)
-            }
+            Self::mic_latency_frames(
+                hal::latency_frames(m.id, kAudioObjectPropertyScopeInput),
+                mic_sub_device == Some(0),
+                hal::nominal_sample_rate(m.id),
+                sample_rate,
+            )
         });
         let output_latency = hal::latency_frames(output.id, kAudioObjectPropertyScopeOutput);
 
@@ -728,6 +746,25 @@ mod tests {
         assert_eq!(
             LiveCaptureBackend::judgement(judged, &relocked, &baseline),
             Some(DeviceChangeReason::SampleRateChanged)
+        );
+    }
+
+    /// A 48 kHz built-in microphone beside a headset at 24 kHz: its
+    /// latency is halved into the stream's frames, never doubled, while a
+    /// microphone on the clock master keeps its own count.
+    #[test]
+    fn a_microphone_on_its_own_clock_has_its_latency_rescaled() {
+        assert_eq!(
+            LiveCaptureBackend::mic_latency_frames(481, false, 48_000.0, 24_000.0),
+            240
+        );
+        assert_eq!(
+            LiveCaptureBackend::mic_latency_frames(481, true, 48_000.0, 24_000.0),
+            481
+        );
+        assert_eq!(
+            LiveCaptureBackend::mic_latency_frames(481, false, 0.0, 24_000.0),
+            481
         );
     }
 
