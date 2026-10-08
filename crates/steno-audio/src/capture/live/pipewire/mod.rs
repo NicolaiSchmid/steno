@@ -801,6 +801,19 @@ impl Capture {
     /// A2DP profile to the hands-free one, which moves the output the
     /// system lane records. Runs on the calling thread, which owns every
     /// PipeWire object it makes; not the real-time path. Rust only.
+    ///
+    /// The recording stays untouched as long as the probe's stream and the
+    /// chosen source share no driver with the recording's nodes: a source
+    /// whose owner stopped never finishes negotiating the probe's link, so
+    /// it joins no driver at all, which is the case the probe exists for. A
+    /// source that negotiated and then hung in its data thread would be
+    /// scheduled under the driver it follows, which can be the one the
+    /// recording runs on, and hold that graph up as long as it hangs; the
+    /// watchdog then rebuilds the recording as for any stall. Not seen on
+    /// the private daemon. Making the probe a driver of its own
+    /// (`PW_STREAM_FLAG_DRIVER`) is no fix: the stream would have to
+    /// trigger its own cycles and would then answer for its clock, not the
+    /// source's.
     fn probe(uid: &str) -> bool {
         let lanes = [AudioLane::Mixed];
         let deadline = Instant::now() + START_TIMEOUT;
