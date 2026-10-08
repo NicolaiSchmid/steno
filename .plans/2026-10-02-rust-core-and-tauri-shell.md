@@ -1198,6 +1198,16 @@ still has to draw the window side. `[ ]` is not ported yet.
   one check-and-insert on the set, held until the run ends, so a second start across
   pipelines is refused too (`a_reprocess_is_refused_while_a_retired_pipeline_runs_the_meeting`).
   Swift kept it per pipeline.
+- The automatic retention keeps a recording whose results could still need it (P14 of
+  `.plans/2026-10-07-stable-promotion.md`): a ready meeting whose diarizer failed, so its
+  room is one unknown "Speaker 1", or whose transcript is empty although the recording
+  runs longer than 30 s, is not stamped after its run or a re-export, even under "delete
+  after processing". A later run that finds the speakers (Process again) stamps it, and a
+  rule the user applies is stamped as chosen
+  (`a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers`,
+  `a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed`,
+  `a_long_recording_with_no_transcript_keeps_its_recording`). Rust only: Swift stamps
+  once every delivery succeeded, and its diarizer failure fails the meeting.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file

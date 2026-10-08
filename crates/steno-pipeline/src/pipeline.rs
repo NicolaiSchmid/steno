@@ -1485,7 +1485,9 @@ impl ProcessingPipeline {
                         .is_some_and(|stored| stored.state == MeetingState::Ready);
                     if ready {
                         self.deliver(meeting_id).await;
-                        let _ = self.stamp_deferred_retention(meeting_id).await;
+                        let _ = self
+                            .stamp_deferred_retention(meeting_id, Stamp::WhenComplete)
+                            .await;
                         return Err(failure);
                     }
                     let _ = self.store().set_state(
@@ -1499,7 +1501,7 @@ impl ProcessingPipeline {
                 }
             };
             self.deliver(meeting_id).await;
-            self.retention(&persisted).await
+            self.retention(&persisted, Stamp::WhenComplete).await
         })
         .await
     }
@@ -1821,7 +1823,8 @@ impl ProcessingPipeline {
         // `deliver` leaves `pending` rows for the next launch.
         self.inner.dependencies.dispatcher.mark_pending(meeting_id);
         self.deliver(meeting_id).await;
-        self.stamp_deferred_retention(meeting_id).await
+        self.stamp_deferred_retention(meeting_id, Stamp::WhenComplete)
+            .await
     }
 
     /// Deliver only: the one re-export entry point. Stamps an audio asset
@@ -1909,7 +1912,8 @@ impl ProcessingPipeline {
             &settings,
         )?;
         self.deliver(meeting_id).await;
-        self.stamp_deferred_retention(meeting_id).await
+        self.stamp_deferred_retention(meeting_id, Stamp::WhenComplete)
+            .await
     }
 
     /// Posts `OperationFailed` for a failed `operation` and hands the
@@ -1947,7 +1951,8 @@ impl ProcessingPipeline {
         asset.retention = rule;
         asset.expires_at = None;
         attributing(PipelineStage::Retention, self.store().save_asset(&asset))?;
-        self.stamp_deferred_retention(meeting_id).await
+        self.stamp_deferred_retention(meeting_id, Stamp::UserChose)
+            .await
     }
 
     // Stage plumbing
@@ -2562,8 +2567,10 @@ impl ProcessingPipeline {
     /// Stamps `expires_at` from the asset's retention, then posts
     /// `RetentionApplied`. Deletion waits for delivery: when any delivery of
     /// the meeting is not delivered the asset is left unstamped and nothing
-    /// is posted, not even the stage's progress.
-    async fn retention(&self, asset: &AudioAsset) -> Result<()> {
+    /// is posted, not even the stage's progress. With
+    /// [`Stamp::WhenComplete`] it also waits while the meeting's results
+    /// could still need the audio ([`Self::results_need_the_audio`]).
+    async fn retention(&self, asset: &AudioAsset, stamp: Stamp) -> Result<()> {
         let store = self.store();
         let events = &self.inner.dependencies.events;
         let meeting_id = asset.meeting_id;
@@ -2571,6 +2578,14 @@ impl ProcessingPipeline {
             .iter()
             .all(|delivery| delivery.status == DeliveryStatus::Delivered);
         if !delivered {
+            return Ok(());
+        }
+        if stamp == Stamp::WhenComplete && self.results_need_the_audio(meeting_id)? {
+            tracing::info!(
+                target: BACKGROUND_RUN_LOG,
+                %meeting_id,
+                "the recording is kept: the meeting's speakers or transcript are incomplete"
+            );
             return Ok(());
         }
         let now = self.now();
@@ -2586,10 +2601,32 @@ impl ProcessingPipeline {
         .await
     }
 
+    /// Whether a ready meeting's results could still need its recording,
+    /// so the automatic retention keeps it unstamped: the diarizer failed
+    /// and the room fell back to one unknown speaker
+    /// ([`Diarization::one_room_speaker`]), or the transcript is empty
+    /// although the recording runs longer than
+    /// [`TRANSCRIPT_EXPECTED_AFTER_SECONDS`]. A later run that succeeds
+    /// (Process again) stamps it, and so does a rule the user applies. Rust
+    /// only: Swift stamps once every delivery succeeded.
+    fn results_need_the_audio(&self, meeting_id: Uuid) -> Result<bool> {
+        let store = self.store();
+        let room = Diarization::room_speaker_id(meeting_id);
+        let fell_back = attributing(PipelineStage::Retention, store.speakers(meeting_id))?
+            .iter()
+            .any(|speaker| speaker.id == room);
+        if fell_back {
+            return Ok(true);
+        }
+        let long = attributing(PipelineStage::Retention, store.meeting(meeting_id))?
+            .is_some_and(|meeting| meeting.duration > TRANSCRIPT_EXPECTED_AFTER_SECONDS);
+        Ok(long && attributing(PipelineStage::Retention, store.segments(meeting_id))?.is_empty())
+    }
+
     /// The deferred case after `deliver` ran again: an asset with a finite
     /// retention and no stamp gets one now if every delivery succeeded. Only
     /// a `ready` meeting whose master is still on disk is stamped.
-    async fn stamp_deferred_retention(&self, meeting_id: Uuid) -> Result<()> {
+    async fn stamp_deferred_retention(&self, meeting_id: Uuid, stamp: Stamp) -> Result<()> {
         let store = self.store();
         let Some(asset) = attributing(PipelineStage::Retention, store.asset(meeting_id))? else {
             return Ok(());
@@ -2604,9 +2641,22 @@ impl ProcessingPipeline {
         if !ready || !master_exists {
             return Ok(());
         }
-        self.retention(&asset).await
+        self.retention(&asset, stamp).await
     }
 }
+
+/// Who asks for a retention stamp: the pipeline after a run or a
+/// re-export, which waits while the results could still need the audio,
+/// or the user's own rule (`apply_retention`), which is stamped as chosen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stamp {
+    WhenComplete,
+    UserChose,
+}
+
+/// A recording longer than this with no transcript at all most likely
+/// failed to transcribe, so the automatic retention keeps it.
+const TRANSCRIPT_EXPECTED_AFTER_SECONDS: f64 = 30.0;
 
 /// The in-flight mark of one operation; dropping it clears the mark and
 /// the run, whichever way the operation ended.

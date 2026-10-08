@@ -4454,3 +4454,108 @@ async fn a_row_failed_without_an_attempt_waits_a_day() {
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(export_retries(&world).count(id), 1);
 }
+
+/// A meeting whose diarizer failed is ready with one unknown room speaker,
+/// but its speakers can still be found from the recording: the automatic
+/// retention keeps it unstamped, even under "delete after processing",
+/// until a run with speakers succeeds.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers() {
+    let world = world(false, None, AudioRetention::DeleteAfterProcessing);
+    let pipeline = with_failing_diarizer(&world, "no model");
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert_eq!(
+        world
+            .store
+            .asset_by_id(asset.id)
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        None,
+        "the speakers still need the recording"
+    );
+
+    // A run whose diarizer works stamps it as the rule says.
+    world.pipeline.reprocess(meeting.id).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+    assert_eq!(
+        world
+            .store
+            .asset_by_id(asset.id)
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        Some(world.now)
+    );
+}
+
+/// The user's own rule is applied as chosen, also while the speakers are
+/// incomplete.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let pipeline = with_failing_diarizer(&world, "no model");
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    pipeline.enqueue(&meeting, &asset).unwrap();
+    pipeline.wait_until_idle().await;
+    pipeline
+        .apply_retention(meeting.id, AudioRetention::DeleteAfterProcessing)
+        .await
+        .unwrap();
+    assert_eq!(
+        world
+            .store
+            .asset_by_id(asset.id)
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        Some(world.now)
+    );
+}
+
+/// A recording longer than half a minute that came out with no transcript
+/// at all most likely failed to transcribe: the automatic retention keeps
+/// it; a short one is stamped as usual.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_recording_with_no_transcript_keeps_its_recording() {
+    for (duration, kept) in [(31.0, true), (6.0, false)] {
+        let world = world_with(
+            false,
+            None,
+            AudioRetention::DeleteAfterProcessing,
+            FakeSpeechEngine {
+                silent_below_peak: Some(f32::MAX),
+                ..FakeSpeechEngine::default()
+            },
+            FakeDiarizer::default(),
+        );
+        let mut meeting = call_meeting(world.now);
+        meeting.duration = duration;
+        let asset = call_asset(
+            &world.audio,
+            meeting.id,
+            AudioRetention::DeleteAfterProcessing,
+        );
+        world.pipeline.enqueue(&meeting, &asset).unwrap();
+        world.pipeline.wait_until_idle().await;
+        assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
+        assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
+        let stamp = world
+            .store
+            .asset_by_id(asset.id)
+            .unwrap()
+            .unwrap()
+            .expires_at;
+        assert_eq!(stamp.is_none(), kept, "{duration} s");
+    }
+}
