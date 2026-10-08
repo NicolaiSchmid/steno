@@ -136,6 +136,9 @@ pub struct State {
     pub garble_writes: bool,
     /// Whether the `default` alias names no collection.
     pub no_default: bool,
+    /// Whether the collection left the bus, as `KeePassXC`'s does when its
+    /// database locks: an unlock that names it fails with `UnknownObject`.
+    pub collection_gone: bool,
     /// How many prompts were shown.
     pub prompts: usize,
     /// How many prompts were made, shown or not.
@@ -323,6 +326,11 @@ impl FakeService {
         objects: Vec<OwnedObjectPath>,
         #[zbus(object_server)] server: &ObjectServer,
     ) -> fdo::Result<(Vec<OwnedObjectPath>, OwnedObjectPath)> {
+        if self.state.lock().unwrap().collection_gone
+            && objects.iter().any(|object| object.as_str() == COLLECTION_PATH)
+        {
+            return Err(fdo::Error::UnknownObject(COLLECTION_PATH.to_owned()));
+        }
         if !self.state.lock().unwrap().needs_prompt(&objects) {
             return Ok((objects, no_object()));
         }

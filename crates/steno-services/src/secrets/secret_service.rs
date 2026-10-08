@@ -768,9 +768,19 @@ impl Keyring {
         Ok(items)
     }
 
+    /// Unlocks the default collection. A collection that left the bus
+    /// since the choice (`KeePassXC` removes a locked database's) reads as
+    /// locked, so the user sees the keyring's sentence, not the bus's.
     async fn unlock_collection(&self, ask: Ask<'_>) -> Result<(), ServiceError> {
-        self.unlock(std::slice::from_ref(self.collection.inner().path()), ask)
+        match self
+            .unlock(std::slice::from_ref(self.collection.inner().path()), ask)
             .await
+        {
+            Err(ServiceError::Bus(error)) if unknown_object(&error) => {
+                Err(KeyringUnavailable::Locked.into())
+            }
+            unlocked => unlocked,
+        }
     }
 
     /// Unlocks `objects`, which asks the user when one is locked; a no-op
@@ -836,6 +846,17 @@ fn pin_file_identity(record: &FingerprintFile, pem: &str) -> Result<(), ServiceE
     record
         .record(&steno_handover::identity::hex(&identity.fingerprint()))
         .map_err(ServiceError::Record)
+}
+
+/// Whether `error` says the object a call named is not on the bus.
+fn unknown_object(error: &zbus::Error) -> bool {
+    match error {
+        zbus::Error::MethodError(name, _, _) => {
+            name.as_str() == "org.freedesktop.DBus.Error.UnknownObject"
+        }
+        zbus::Error::FDO(error) => matches!(**error, zbus::fdo::Error::UnknownObject(_)),
+        _ => false,
+    }
 }
 
 /// Whether every address in a D-Bus address list is a `unix:` socket, so

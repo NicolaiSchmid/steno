@@ -927,6 +927,28 @@ async fn a_write_the_keyring_refused_keeps_the_files_copy() {
     assert_eq!(setup.contents(), moved(&[("llm-api-key", "sk-file")]));
 }
 
+/// A collection that leaves the bus while the app runs (`KeePassXC`
+/// removes a locked database's) fails reads and writes as a locked
+/// keyring, in the keyring's own words.
+#[tokio::test]
+async fn a_collection_that_left_the_bus_reads_as_locked() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    let store = setup.launch().await;
+    assert!(chose_service(&store));
+    let key = SecretKey::llm_api_key();
+    store.set_secret(&key, Some("sk-1")).await.unwrap();
+    setup.state().collection_gone = true;
+    let locked = KeyringUnavailable::Locked.to_string();
+    assert_eq!(store.secret(&key).await.unwrap_err().to_string(), locked);
+    assert_eq!(
+        store.set_secret(&key, None).await.unwrap_err().to_string(),
+        locked
+    );
+    assert_eq!(setup.values("llm-api-key"), ["sk-1"]);
+}
+
 /// A choice that panics settles on the file instead of leaving every call
 /// waiting for it.
 #[tokio::test]
