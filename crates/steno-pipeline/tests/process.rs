@@ -4459,6 +4459,7 @@ enum Refusal {
     SpeechPrepare,
     Transcribe,
     DiarizerPrepare,
+    Diarize,
 }
 
 /// The fakes behind a gate that refuses at one point with
@@ -4534,20 +4535,24 @@ impl steno_core::Diarizer for UninstalledDiarizer {
         &self,
         audio: &steno_core::AudioBuffer16k,
     ) -> steno_core::protocols::BoundaryResult<steno_core::DiarizationResult> {
+        self.0.check(Refusal::Diarize, PipelineStage::Diarize)?;
         self.0.diarizer.diarize(audio).await
     }
 }
 
 /// A run refused because a model is missing, whether the speech engine's
-/// warm-up, a transcription or the diarizer's warm-up refuses it, leaves
-/// the meeting `queued` without a reason and posts `ModelsMissing`; once
-/// the models are installed, `resume_unfinished` processes it to `ready`.
+/// warm-up, a transcription, the diarizer's warm-up or the diarize stage
+/// refuses it, leaves the meeting `queued` with no failure reason on its
+/// row and posts `ModelsMissing`, and never reaches `ready` without its
+/// speakers; once the models are installed, `resume_unfinished` processes
+/// it to `ready`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_refused_for_missing_models_stays_queued_and_resumes_once_they_are_installed() {
     for refusal in [
         Refusal::SpeechPrepare,
         Refusal::Transcribe,
         Refusal::DiarizerPrepare,
+        Refusal::Diarize,
     ] {
         let world = world(false, None, AudioRetention::KeepForever);
         let gate = Uninstalled::refusing(refusal);
@@ -4603,6 +4608,108 @@ async fn process_returns_the_models_missing_refusal() {
     let failure = pipeline.process(asset.id).await.unwrap_err();
     assert!(failure.is_models_missing());
     assert_eq!(failure.stage, PipelineStage::Transcribe);
-    assert_eq!(failure.reason, "Download the speech model in Settings");
+    assert_eq!(failure.reason, "Download the speech models in Settings");
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Queued);
+}
+
+/// A diarizer whose gate decided "missing" and is held before it returns
+/// the refusal, so a test can finish the install and resume in between.
+struct HeldRefusingDiarizer {
+    installed: std::sync::atomic::AtomicBool,
+    entered: tokio::sync::Notify,
+    open: tokio::sync::Notify,
+    inner: FakeDiarizer,
+}
+
+#[async_trait]
+impl steno_core::Diarizer for HeldRefusingDiarizer {
+    async fn prepare(&self) -> steno_core::protocols::BoundaryResult<()> {
+        if !self.installed.load(std::sync::atomic::Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.open.notified().await;
+            return Err(Box::new(steno_pipeline::PipelineFailure::models_missing(
+                PipelineStage::Diarize,
+            )));
+        }
+        self.inner.prepare().await
+    }
+
+    async fn diarize(
+        &self,
+        audio: &steno_core::AudioBuffer16k,
+    ) -> steno_core::protocols::BoundaryResult<steno_core::DiarizationResult> {
+        self.inner.diarize(audio).await
+    }
+}
+
+/// An install that finishes while a run is being refused, with its resume
+/// skipping the meeting because it is in flight: the run goes again
+/// instead of leaving the meeting waiting with every model installed.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_install_during_the_refusing_run_still_processes_the_meeting() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let diarizer = Arc::new(HeldRefusingDiarizer {
+        installed: false.into(),
+        entered: tokio::sync::Notify::new(),
+        open: tokio::sync::Notify::new(),
+        inner: FakeDiarizer::default(),
+    });
+    let mut dependencies = with_engine(&world, Arc::new(FakeSpeechEngine::default()));
+    dependencies.diarizer = diarizer.clone();
+    let waits = dependencies.model_waits.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let meeting = enqueue_call(&world, &pipeline);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        diarizer.entered.notified(),
+    )
+    .await
+    .unwrap();
+    diarizer
+        .installed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        pipeline.resume_waiting().unwrap(),
+        Vec::<Uuid>::new(),
+        "the meeting is in flight"
+    );
+    diarizer.open.notify_one();
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, meeting), MeetingState::Ready);
+    assert_eq!(
+        waits.waiting(),
+        Vec::<Uuid>::new(),
+        "nothing is left waiting"
+    );
+}
+
+/// Only a meeting a run left waiting is resumed by `resume_waiting`, once:
+/// a queued meeting no run refused stays for `resume_unfinished`, and a
+/// second resume finds nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn resume_waiting_starts_only_the_meetings_runs_left_waiting() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let gate = Uninstalled::refusing(Refusal::Transcribe);
+    let dependencies = with_engine(&world, gate.clone());
+    let waits = dependencies.model_waits.clone();
+    let pipeline = ProcessingPipeline::new(dependencies);
+    let refused = enqueue_call(&world, &pipeline);
+    pipeline.wait_until_idle().await;
+    assert_eq!(waits.waiting(), [refused]);
+    let mut untouched = call_meeting(world.now);
+    untouched.id = Uuid::new_v4();
+    untouched.state = MeetingState::Queued;
+    let asset = call_asset(&world.audio, untouched.id, AudioRetention::KeepForever);
+    world
+        .store
+        .save_meeting_with_asset(&untouched, &asset)
+        .unwrap();
+
+    gate.installed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(pipeline.resume_waiting().unwrap(), [refused]);
+    pipeline.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, refused), MeetingState::Ready);
+    assert_eq!(meeting_state(&world, untouched.id), MeetingState::Queued);
+    assert_eq!(pipeline.resume_waiting().unwrap(), Vec::<Uuid>::new());
 }

@@ -82,16 +82,16 @@ pub enum FailureKind {
     #[default]
     Failed,
     /// A model the run needs is not installed, and the run downloads
-    /// none: the meeting stays `queued` without a reason, the
-    /// [`MeetingEvent::ModelsMissing`] event says why, and
-    /// [`ProcessingPipeline::resume_unfinished`] processes it once the
-    /// models are installed.
+    /// none: the meeting stays `queued` with no failure reason on its row,
+    /// the [`MeetingEvent::ModelsMissing`] event says why, and
+    /// [`ProcessingPipeline::resume_waiting`] processes it once the models
+    /// are installed.
     ModelsMissing,
 }
 
 impl PipelineFailure {
     /// The reason of [`PipelineFailure::models_missing`].
-    pub const MODELS_MISSING: &'static str = "Download the speech model in Settings";
+    pub const MODELS_MISSING: &'static str = "Download the speech models in Settings";
 
     /// A failure of the kind [`FailureKind::Failed`].
     #[must_use]
@@ -351,6 +351,74 @@ impl InFlight {
     }
 }
 
+/// The meetings runs left `queued` for missing models since the last
+/// resume, and how many resumes ran, shared by every pipeline built over
+/// dependencies that carry it ([`PipelineDependencies::with_model_waits`];
+/// the services' reloads share the app's). A resume
+/// ([`ProcessingPipeline::resume_unfinished`],
+/// [`ProcessingPipeline::resume_waiting`]) counts itself and takes the
+/// waiting meetings. A run refused for missing models while a resume ran
+/// is run again rather than left waiting: the install that resumed may
+/// have brought its models, and the resume skipped it because it was in
+/// flight. So [`ProcessingPipeline::resume_waiting`] starts only meetings
+/// no run holds, on any pipeline sharing the value. Rust only: the Swift
+/// pipeline downloaded inside the run.
+#[derive(Debug, Clone, Default)]
+pub struct ModelWaits(Arc<Mutex<Waits>>);
+
+/// The waiting meetings and the resume count, under one lock.
+#[derive(Debug, Default)]
+struct Waits {
+    waiting: BTreeSet<Uuid>,
+    resumes: u64,
+}
+
+impl ModelWaits {
+    /// The meetings waiting now, for the tests and the logs.
+    #[must_use]
+    pub fn waiting(&self) -> Vec<Uuid> {
+        self.lock().waiting.iter().copied().collect()
+    }
+
+    /// How many resumes ran, read when a run starts.
+    fn resumes(&self) -> u64 {
+        self.lock().resumes
+    }
+
+    /// Records `meeting_id` as waiting and returns true, unless a resume
+    /// ran since `seen`: then `seen` moves to now and nothing is recorded.
+    /// The check and the record are one step, so a resume either comes
+    /// after the record and takes the meeting, or before it and the run
+    /// goes again.
+    fn wait_unless_resumed(&self, meeting_id: Uuid, seen: &mut u64) -> bool {
+        let mut waits = self.lock();
+        if waits.resumes != *seen {
+            *seen = waits.resumes;
+            return false;
+        }
+        waits.waiting.insert(meeting_id);
+        true
+    }
+
+    /// Counts a resume and takes every waiting meeting.
+    fn resume(&self) -> BTreeSet<Uuid> {
+        let mut waits = self.lock();
+        waits.resumes += 1;
+        std::mem::take(&mut waits.waiting)
+    }
+
+    /// Puts back meetings a resume took and could not start.
+    fn put_back(&self, meetings: impl IntoIterator<Item = Uuid>) {
+        self.lock().waiting.extend(meetings);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Waits> {
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// A speech engine with the jobs that claim it, shared by every pipeline
 /// built over it: a job claims the engine from its warm-up to its last
 /// lane, and the engine is released only once no job on any of those
@@ -528,6 +596,9 @@ pub struct PipelineDependencies {
     /// a run there as a crash would; `None` unless a test build sets it
     /// with [`with_clip_probe`](Self::with_clip_probe).
     clip_probe: Option<ClipProbe>,
+    /// Fresh from [`new`](Self::new); clones share theirs, and
+    /// [`with_model_waits`](Self::with_model_waits) shares the caller's.
+    pub model_waits: ModelWaits,
 }
 
 impl PipelineDependencies {
@@ -558,6 +629,7 @@ impl PipelineDependencies {
             in_flight: InFlight::default(),
             damaged_audio: Arc::new(DamagedAudio::in_memory()),
             clip_probe: None,
+            model_waits: ModelWaits::default(),
         }
     }
 
@@ -623,6 +695,15 @@ impl PipelineDependencies {
     #[must_use]
     pub fn with_clip_probe(mut self, probe: ClipProbe) -> Self {
         self.clip_probe = Some(probe);
+        self
+    }
+
+    /// Carries `waits` instead of the fresh one from [`new`](Self::new),
+    /// so a resume on any pipeline built over dependencies that carry it
+    /// sees the meetings every one of them left waiting for models.
+    #[must_use]
+    pub fn with_model_waits(mut self, waits: ModelWaits) -> Self {
+        self.model_waits = waits;
         self
     }
 }
@@ -1125,11 +1206,49 @@ impl ProcessingPipeline {
     /// meeting with any such run waits, then runs alone, so its crashes
     /// are charged to it, not to the meetings waiting behind it. Returns
     /// the meetings whose processing was started, those that wait last:
-    /// none once the pipeline [quits](Self::quit).
+    /// none once the pipeline [quits](Self::quit). It counts as a resume
+    /// of the meetings waiting for models ([`ModelWaits`]): a run in
+    /// flight that is refused for missing models runs again.
     pub fn resume_unfinished(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
         }
+        self.inner.dependencies.model_waits.resume();
+        Ok(self.resume_among(None)?.0)
+    }
+
+    /// [`resume_unfinished`](Self::resume_unfinished) for the meetings
+    /// runs left `queued` for missing models since the last resume
+    /// ([`ModelWaits`]) alone, which no run holds: the services call it
+    /// once a model install finished, while other meetings may still run
+    /// on a pipeline a reload retired. A waiting meeting that a run on this
+    /// pipeline still holds stays waiting, and so do all of them when the
+    /// store fails.
+    pub fn resume_waiting(&self) -> Result<Vec<Uuid>> {
+        if self.quitting() {
+            return Ok(Vec::new());
+        }
+        let waits = &self.inner.dependencies.model_waits;
+        let waiting = waits.resume();
+        if waiting.is_empty() {
+            return Ok(Vec::new());
+        }
+        match self.resume_among(Some(&waiting)) {
+            Ok((resumed, busy)) => {
+                waits.put_back(busy);
+                Ok(resumed)
+            }
+            Err(failure) => {
+                waits.put_back(waiting);
+                Err(failure)
+            }
+        }
+    }
+
+    /// The body of both resumes, over every `queued` or `processing`
+    /// meeting, or those in `among`: the meetings started, and those
+    /// skipped because a run holds them.
+    fn resume_among(&self, among: Option<&BTreeSet<Uuid>>) -> Result<(Vec<Uuid>, Vec<Uuid>)> {
         let meetings = attributing(
             PipelineStage::Decode,
             self.store()
@@ -1137,9 +1256,14 @@ impl ProcessingPipeline {
         )?;
         let turns = Arc::new(AsyncRwLock::new(()));
         let mut resumed = Vec::new();
+        let mut busy = Vec::new();
         let mut alone = Vec::new();
         for meeting in meetings {
+            if among.is_some_and(|among| !among.contains(&meeting.id)) {
+                continue;
+            }
             if self.in_flight_set().meetings.contains(&meeting.id) {
+                busy.push(meeting.id);
                 continue;
             }
             let Some(mut asset) =
@@ -1160,6 +1284,7 @@ impl ProcessingPipeline {
                 continue;
             };
             let Some(claim) = self.claim_start(meeting.id, asset.id) else {
+                busy.push(meeting.id);
                 continue;
             };
             let count = RunCount::of(&asset);
@@ -1213,7 +1338,7 @@ impl ProcessingPipeline {
                 }
             });
         }
-        Ok(resumed)
+        Ok((resumed, busy))
     }
 
     /// Launch recovery for the exports (P28 of
@@ -1521,7 +1646,9 @@ impl ProcessingPipeline {
     /// with whatever was persisted so far; a panic fails the meeting too. A
     /// run refused because a model is not installed
     /// ([`PipelineFailure::is_models_missing`]) leaves the meeting `queued`
-    /// instead, and the call returns the refusal. A failing `diarize` or
+    /// instead, waiting for a resume ([`ModelWaits`]), and the call returns
+    /// the refusal; when a resume ran during the run, it runs again first.
+    /// A failing `diarize` or
     /// `match_speakers` does not fail it: the transcript is kept with the
     /// speakers stored for the meeting, or, when none are stored, one
     /// unknown speaker for the diarized lane. Once `persist` has marked the
@@ -1552,22 +1679,38 @@ impl ProcessingPipeline {
         )?;
         let meeting_id = meeting.id;
         self.exclusively(meeting_id, PipelineStage::Decode, async {
-            // A panic fails the meeting like any stage failure, so it
-            // never stays `processing` (undeletable, and run again at every
-            // launch). Boxed: the stages' future is too large to move
-            // into the helper by value.
-            let until_persist = unless_it_panics(
-                || self.stage_in_progress(meeting_id),
-                Box::pin(self.process_until_persist(&asset, meeting)),
-            )
-            .await;
+            let waits = &self.inner.dependencies.model_waits;
+            let mut resumes_seen = waits.resumes();
+            let until_persist = loop {
+                // A panic fails the meeting like any stage failure, so it
+                // never stays `processing` (undeletable, and run again at
+                // every launch). Boxed: the stages' future is too large to
+                // move into the helper by value.
+                let until_persist = unless_it_panics(
+                    || self.stage_in_progress(meeting_id),
+                    Box::pin(self.process_until_persist(&asset, meeting.clone())),
+                )
+                .await;
+                match until_persist {
+                    Err(failure) if failure.is_models_missing() && !self.quitting() => {
+                        self.park(meeting_id);
+                        if waits.wait_unless_resumed(meeting_id, &mut resumes_seen) {
+                            return Err(failure);
+                        }
+                        // An install finished during the run and its
+                        // resume skipped this meeting, which was in flight.
+                        tracing::info!(
+                            target: BACKGROUND_RUN_LOG,
+                            %meeting_id,
+                            "a resume ran during the refused run; processing again"
+                        );
+                    }
+                    until_persist => break until_persist,
+                }
+            };
             let persisted = match until_persist {
                 Ok(asset) => asset,
                 Err(failure) if self.quitting() => return Err(failure),
-                Err(failure) if failure.is_models_missing() => {
-                    self.park(meeting_id);
-                    return Err(failure);
-                }
                 Err(failure) => {
                     // A failure after `persist` marked the meeting ready
                     // leaves it ready, and a ready meeting is delivered:
@@ -1703,13 +1846,15 @@ impl ProcessingPipeline {
 
     /// A stage whose failure costs only the speaker labels (`diarize`,
     /// `match_speakers`, the diarizer's warm-up) is logged with `meeting_id`
-    /// and its stage only, and the run goes on with the transcript. Once
-    /// the pipeline quits the failure is returned instead: the exit may
-    /// have caused it, and the meeting stays `processing` for the next
-    /// launch rather than being finished without its speakers. Rust only:
-    /// Swift fails the meeting.
+    /// and its stage only, and the run goes on with the transcript. Two
+    /// failures are returned instead. A refusal for missing models
+    /// ([`PipelineFailure::is_models_missing`]): the meeting waits for the
+    /// diarizer's models rather than being finished without its speakers.
+    /// And any failure once the pipeline quits: the exit may have caused
+    /// it, and the meeting stays `processing` for the next launch. Rust
+    /// only: Swift fails the meeting.
     fn carry_on_after(&self, failure: &PipelineFailure, meeting_id: Uuid) -> Result<()> {
-        if self.quitting() {
+        if failure.is_models_missing() || self.quitting() {
             return Err(failure.clone());
         }
         tracing::warn!(
@@ -2911,10 +3056,10 @@ mod tests {
         assert!(!PipelineFailure::new(PipelineStage::Decode, "x").is_models_missing());
         let refusal = PipelineFailure::models_missing(PipelineStage::Diarize);
         assert_eq!(refusal.kind, FailureKind::ModelsMissing);
-        assert_eq!(refusal.reason, "Download the speech model in Settings");
+        assert_eq!(refusal.reason, "Download the speech models in Settings");
         assert_eq!(
             refusal.to_string(),
-            "diarize: Download the speech model in Settings"
+            "diarize: Download the speech models in Settings"
         );
         let boxed: BoxError = Box::new(refusal.clone());
         for wrapped in [

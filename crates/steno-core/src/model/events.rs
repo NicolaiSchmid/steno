@@ -65,8 +65,8 @@ pub enum MeetingEvent {
     /// Posted once a meeting's rows are gone.
     Deleted { meeting_id: Uuid },
     /// Posted when a run is refused because a model it needs is not
-    /// installed: the meeting stays `queued` without a reason and is
-    /// processed once the models are installed. Rust only: the Swift
+    /// installed: the meeting stays `queued` with no failure reason on its
+    /// row and is processed once the models are installed. Rust only: the Swift
     /// pipeline downloaded the model inside the run.
     ModelsMissing { meeting_id: Uuid },
     /// Posted when a summary re-run or a re-export fails after the
