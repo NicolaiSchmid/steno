@@ -952,7 +952,17 @@ still has to draw the window side. `[ ]` is not ported yet.
     `a_failing_speaker_match_keeps_the_speakers_unknown`,
     `a_diarizer_failure_warns_with_its_stage_not_its_reason`). `diarize` moves its
     sample clips into place only once every one is written, so a failure partway
-    never leaves a kept speaker's clip holding another voice. Once the app quits,
+    never leaves a kept speaker's clip holding another voice. Each new clip replaces
+    the earlier one in one rename, with a copy of the earlier clip beside it until every
+    clip is in place, so a clip's path is never empty; a failed replace puts every
+    earlier clip back (`a_failed_replace_puts_every_earlier_clip_back_and_writes_none`,
+    `a_failed_restore_leaves_a_clip_at_its_path_and_the_earlier_beside_it`,
+    `a_crash_between_the_copy_and_the_replace_leaves_every_clip_playable`), and an
+    earlier clip left beside a path that holds none is put back by the next write and at
+    launch (`an_earlier_clip_left_aside_is_put_back_by_the_next_write`,
+    `an_earlier_clip_left_aside_is_put_back_at_launch`,
+    `a_confirmed_clip_left_aside_by_a_crash_is_back_after_the_next_launch`). Rust only:
+    Swift writes each clip in place. Once the app quits,
     such a failure ends the run unpersisted, so the meeting is processed again at the
     next launch (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
     Swift fails the meeting.
@@ -1359,7 +1369,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   target such a handle holds open or on a file being replaced or deleted that instant),
   after waits of 5 ms doubling to 200 ms, about 0.9 s in all; two writers of one path
   (spelled the same) in the process rename and flush one after the other, so one
-  writer's flush does not make another's write fail. A flush that fails is an error, so
+  writer's flush does not make another's write fail. The vault writer, the handover
+  inbox, the Codex sign-in file, the model downloads and the speaker clips share these
+  retries through `steno_core::busy_file`. A flush that fails is an error, so
   the phone intake answers 500 and the phone keeps its copy. `create_dir_all_durably`
   flushes the parent of each folder it creates, and a durable write flushes the folder
   it renamed into (`FlushFileBuffers` on the folder). A folder that does not open, or a
@@ -2809,8 +2821,7 @@ PR off `main`.
 | The Bonjour record follows a network change on every platform, and the Mac advertises its computer name (`steno-handover`, `whoami` 2) | `fix/handover-republish` | #247 | open |
 | On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | open |
 | The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
-| On Windows every other rename of a file Steno writes shares #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads and the speaker clips; a failed clip move puts every clip moved so far back (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | | open |
-| On Windows every other rename of a file Steno writes shares #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads and the speaker clips; a failed clip move puts every clip moved so far back (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
+| On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips; a failed clip write keeps every earlier clip, a clip's path is never empty, and an earlier clip a crash left aside is put back at the next write and at launch (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
