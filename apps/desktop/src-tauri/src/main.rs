@@ -183,8 +183,9 @@ fn main() {
 
 /// Builds the host, the tray and the main window, opens onboarding when
 /// the host asks for it, and runs the launch sequence. False when the
-/// Swift app runs or another process holds the database: this app then
-/// shows why and ends (`refuse_to_start`), with no host, tray or window.
+/// Swift app runs, another process holds the database, or the host cannot
+/// be built (the database cannot be opened or read): this app then shows
+/// why and ends (`refuse_to_start`), with no host, tray or window.
 fn setup(
     handle: &tauri::AppHandle,
     runtime: &'static tokio::runtime::Runtime,
@@ -201,11 +202,10 @@ fn setup(
     #[cfg(not(feature = "fixture-host"))]
     let host = match host::Host::real(handle, runtime) {
         Ok(host) => host,
-        Err(error) if error.is_database_held() => {
-            refuse_to_start(handle, Refusal::DatabaseHeld, &error);
+        Err(error) => {
+            refuse_to_start(handle, Refusal::after(&error), &error);
             return Ok(false);
         }
-        Err(error) => return Err(error.into()),
     };
     #[cfg(feature = "fixture-host")]
     let host = host::Host::fixtures();
@@ -249,13 +249,30 @@ enum Refusal {
     /// guard missed: Linux without a session bus, a failed connect on the
     /// Mac), or a `steno` command.
     DatabaseHeld,
+    /// The host could not be built for another reason: the database cannot
+    /// be opened, migrated or read, or the support directory cannot be
+    /// created. The error goes to the log; the database is as it was.
+    Unavailable,
 }
 
 impl Refusal {
+    /// The refusal for a host that could not be built:
+    /// [`Refusal::DatabaseHeld`] while another process holds the database,
+    /// else [`Refusal::Unavailable`].
+    #[cfg(not(feature = "fixture-host"))]
+    fn after(error: &host::ShellHostError) -> Self {
+        if error.is_database_held() {
+            Refusal::DatabaseHeld
+        } else {
+            Refusal::Unavailable
+        }
+    }
+
     fn title(self) -> &'static str {
         match self {
             Refusal::OlderSteno => "An older Steno is running",
             Refusal::DatabaseHeld => "Steno is already running",
+            Refusal::Unavailable => "Steno could not start",
         }
     }
 
@@ -265,6 +282,10 @@ impl Refusal {
             Refusal::DatabaseHeld => {
                 "Another Steno is already open, or a steno command is running in a terminal. \
                  Quit it, then open Steno again."
+            }
+            Refusal::Unavailable => {
+                "Steno could not open your meetings. Nothing was changed. \
+                 Install the latest Steno, then open it again."
             }
         }
     }
@@ -301,10 +322,11 @@ fn platform_app_running(bundle_id: &str) -> bool {
     }
 }
 
-/// Says why this app does not start ([`Refusal`]) and ends with
-/// [`REFUSED_CODE`] once the alert is closed, before it opens a window or
-/// touches the database: two apps on one database would fail each other's
-/// recordings at launch. Its run loop has no host to shut down
+/// Says why this app does not start ([`Refusal`]), logs `reason`, and ends
+/// with [`REFUSED_CODE`] once the alert is closed, before it opens a window
+/// or writes to the database: two apps on one database would fail each
+/// other's recordings at launch, and a database this build cannot open is
+/// left as it is. Its run loop has no host to shut down
 /// (`host::is_running`). Should the alert never show, or its callback never
 /// run, the process ends after [`REFUSED_PATIENCE`] all the same: it holds
 /// nothing to save. Rust only: the Swift app relied on macOS opening one
@@ -758,6 +780,23 @@ mod tests {
         );
         assert_eq!(refusal_before_build(|_| false), None);
         assert_eq!(Refusal::OlderSteno.title(), "An older Steno is running");
+    }
+
+    /// A host that cannot be built is refused with the alert, not a panic:
+    /// a store that cannot be opened is [`Refusal::Unavailable`], a
+    /// database another process holds [`Refusal::DatabaseHeld`].
+    #[cfg(not(feature = "fixture-host"))]
+    #[test]
+    fn a_store_that_cannot_be_opened_is_refused_with_the_alert() {
+        let unopened = host::ShellHostError::Build(steno_services::BuildError::Store(
+            steno_core::StoreError::PendingMigration("v5".to_owned()),
+        ));
+        assert_eq!(Refusal::after(&unopened), Refusal::Unavailable);
+        assert_eq!(Refusal::Unavailable.title(), "Steno could not start");
+        let held = host::ShellHostError::Build(steno_services::BuildError::Lock(
+            steno_core::DatabaseLockError::Held("steno.sqlite.lock".into()),
+        ));
+        assert_eq!(Refusal::after(&held), Refusal::DatabaseHeld);
     }
 
     /// The Mac's query answers false for a bundle id no app carries.
