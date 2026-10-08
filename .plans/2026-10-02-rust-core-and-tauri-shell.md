@@ -1281,12 +1281,22 @@ still has to draw the window side. `[ ]` is not ported yet.
   `steno dev handover serve` in both apps runs it before it mints the identity and
   exits nonzero when it fails. The CLI's store is in memory, so its checkpoint has no
   WAL to copy and no test can make it fail; the helper is tested through the apps.
-- On Windows, which cannot sync a folder, the durable writes (`steno_pipeline::files`:
-  `replace_file`, `copy_durably`) rename with `MoveFileExW` and `MOVEFILE_WRITE_THROUGH`,
-  which returns only once the rename is on the disk, and where that call fails (a target
-  another handle holds open, a path past `MAX_PATH`) rename with std and flush the renamed
-  file, whose flush commits NTFS's journal; Linux and macOS sync the folder after std's
-  rename as before, and the Swift app runs only on macOS.
+- On Windows, which cannot sync a folder the way Linux and macOS do, the durable writes
+  (`steno_pipeline::files`: `replace_file`, `copy_durably`) rename with `MoveFileExW` and
+  `MOVEFILE_WRITE_THROUGH`, which returns only once the rename is on the disk. Where that
+  call fails (a target another handle holds open), they rename with std. Either way they
+  then flush the renamed file, which on NTFS commits the journal that holds the rename and
+  the folders created before it, and on FAT32 also flushes every folder above the file.
+  `create_dir_all_durably` flushes the parent of each folder it creates, and a durable
+  write the folder it renamed into (`FlushFileBuffers` on the folder); a flush that fails
+  is an error, so the phone intake answers 500 and the phone keeps its copy. The FAT
+  driver flushes a folder other than the drive's root as a no-op, and exFAT's driver is
+  not published, so Settings warns under an audio folder on a drive that is not NTFS
+  ("This drive may lose recent recordings in a power cut."). Linux and macOS sync the
+  folder after std's rename, best effort. The Swift app runs only on macOS and has no
+  such warning. The adapters' `AtomicFileWriter` flushes the renamed file on Windows as
+  well, and a failed flush fails the export: with "delete after processing" the vault's
+  copy of the mixdown is the only audio left once the sweep has run.
 
 ### Adapters
 
@@ -2650,7 +2660,7 @@ PR off `main`.
 | The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
 | Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
-| On Windows the durable writes (`replace_file`, `copy_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`), and a rename std makes instead is followed by a flush of the renamed file (`steno-pipeline`) | `fix/windows-durable-rename` | #242 | open |
+| On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500, and Settings warns under an audio folder on a drive that is not NTFS (`steno-pipeline`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
