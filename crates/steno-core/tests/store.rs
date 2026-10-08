@@ -739,9 +739,10 @@ fn sync_levels(connection: &rusqlite::Connection) -> steno_core::store::Result<(
 }
 
 /// A durable write commits under `FULL` with `fullfsync` (2, on), and the
-/// connection is back at `NORMAL` (1, off) after a commit, a failed body
-/// and a panic in the body; a plain write never sees `FULL`. That the
-/// commit then survives a power loss is SQLite's and cannot be tested.
+/// connection is back at `NORMAL` (1, off) after a commit, a failed body and a
+/// panic in the body; a plain write never sees `FULL`. That the commit then
+/// survives a power loss is SQLite's and cannot be tested. Swift:
+/// `aDurableWriteCommitsUnderFullAndSetsNormalBack`.
 #[test]
 fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
     let dir = tempfile::tempdir().unwrap();
@@ -836,18 +837,27 @@ fn a_checkpoint_another_connection_blocks_fails_as_busy() {
     store.checkpoint_durably().unwrap();
 }
 
+/// The WAL file of the database at `database`.
+fn wal_file(database: &std::path::Path) -> Vec<u8> {
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::read(wal).unwrap()
+}
+
 /// The salt in the WAL file's header (bytes 16 to 24), which every valid
 /// frame repeats: recovery replays only frames under the header's salt.
 fn wal_salt(database: &std::path::Path) -> Vec<u8> {
-    let mut wal = database.as_os_str().to_owned();
-    wal.push("-wal");
-    std::fs::read(wal).unwrap()[16..24].to_vec()
+    wal_file(database)
+        .get(16..24)
+        .expect("the WAL file has a header")
+        .to_vec()
 }
 
-/// A durable checkpoint starts the WAL over: the file's header has a new
-/// salt, so recovery after a power loss replays none of the frames written
-/// before it. The write that restarts it leaves the schema and the applied
-/// migrations as they were. Swift: `aDurableCheckpointRestartsTheWAL`.
+/// A durable checkpoint starts the WAL over: the file was truncated, and
+/// its header has a new salt, so recovery after a power loss replays none
+/// of the frames written before it. The write that restarts it leaves the
+/// schema and the applied migrations as they were. Swift:
+/// `aDurableCheckpointRestartsTheWAL`.
 #[test]
 fn a_durable_checkpoint_restarts_the_wal() {
     let dir = tempfile::tempdir().unwrap();
@@ -855,16 +865,23 @@ fn a_durable_checkpoint_restarts_the_wal() {
     let store = Store::open(&path).unwrap();
     store
         .write(|transaction| {
-            transaction.execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (42);")?;
+            transaction.execute_batch(
+                "CREATE TABLE probe(x); INSERT INTO probe VALUES (zeroblob(65536));",
+            )?;
             Ok(())
         })
         .unwrap();
     let salt = wal_salt(&path);
+    let length = wal_file(&path).len();
     let schema = store.schema_dump().unwrap();
 
     store.checkpoint_durably().unwrap();
 
     assert_ne!(wal_salt(&path), salt, "the WAL restarted");
+    assert!(
+        wal_file(&path).len() < length,
+        "the WAL file was truncated before the write"
+    );
     assert_eq!(store.schema_dump().unwrap(), schema);
     assert_eq!(store.read(sync_levels).unwrap(), (1, false));
 }

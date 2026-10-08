@@ -4,11 +4,11 @@ import Synchronization
 
 @testable import StenoCore
 
-/// The statements of a store's writer folded into its commits, from the
-/// moment it is installed: the `synchronous` level each commit ran under
-/// and the tables it wrote. The levels come from the `PRAGMA synchronous`
-/// statements the writer runs, starting from the level it had when the log
-/// was installed.
+/// The statements of a store's writer folded into its commits, from the moment
+/// it is installed: the `synchronous` level each commit ran under and the
+/// tables it wrote. The levels come from the `PRAGMA synchronous` statements
+/// the writer runs, starting from the level it had when the log was installed.
+/// Rust: `Store::probe_commits`.
 final class CommitLog: Sendable {
   struct Commit: Equatable, Sendable {
     /// 1 is `NORMAL`, 2 is `FULL`.

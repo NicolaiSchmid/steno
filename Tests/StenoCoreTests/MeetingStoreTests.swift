@@ -673,10 +673,10 @@ import Testing
     ]
   }
 
-  /// A durable write commits under `FULL` with `fullfsync` (2, 1), and the
-  /// pool's writer is back at `NORMAL` (1, 0) after a commit and after a
-  /// failed body; a plain write never sees `FULL`. That the commit then
-  /// survives a power loss is SQLite's and cannot be tested.
+  /// A durable write commits under `FULL` with `fullfsync` (2, 1), and the pool's writer is back at
+  /// `NORMAL` (1, 0) after a commit and after a failed body; a plain write never sees `FULL`. That
+  /// the commit then survives a power loss is SQLite's and cannot be tested. Rust:
+  /// `a_durable_write_commits_under_full_and_sets_normal_back_on_every_path`.
   @Test func aDurableWriteCommitsUnderFullAndSetsNormalBack() async throws {
     struct Boom: Error {}
     let directory = try Fixtures.temporaryDirectory()
@@ -702,10 +702,11 @@ import Testing
     #expect(try await writerLevels() == [1, 0], "after a failure")
   }
 
-  /// A pairing and a revoke commit under `synchronous = FULL` (2): the
-  /// phone keeps the token from the pairing's answer, so a power loss must
-  /// not forget the pairing, nor bring a revoked phone back. The last-seen
-  /// touch stays at `NORMAL`.
+  /// A pairing and a revoke commit under `synchronous = FULL` (2): the phone
+  /// keeps the token from the pairing's answer, so a power loss must not forget
+  /// the pairing, nor bring a revoked phone back. The last-seen touch stays at
+  /// `NORMAL`. Rust: `a_pairing_and_a_revoke_commit_durably` in
+  /// `store/handover.rs`.
   @Test func aPairingAndARevokeCommitDurably() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -764,11 +765,17 @@ import Testing
     try await store.checkpointDurably()
   }
 
+  /// The WAL file of the database at `database`.
+  static func walFile(_ database: URL) throws -> Data {
+    try Data(contentsOf: URL(fileURLWithPath: database.path + "-wal"))
+  }
+
   /// The salt in the WAL file's header (bytes 16 to 24), which every valid
   /// frame repeats: recovery replays only frames under the header's salt.
   static func walSalt(_ database: URL) throws -> Data {
-    let wal = URL(fileURLWithPath: database.path + "-wal")
-    return try Data(contentsOf: wal).subdata(in: 16..<24)
+    let wal = try walFile(database)
+    try #require(wal.count >= 24, "the WAL file has a header")
+    return wal.subdata(in: 16..<24)
   }
 
   /// The schema rows and the applied migrations, as the schema dump reads
@@ -781,11 +788,13 @@ import Testing
         """) + String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations")
   }
 
-  /// A durable checkpoint starts the WAL over: the file's header has a new
-  /// salt, so recovery after a power loss replays none of the frames
-  /// written before it. The write that restarts it leaves the schema and
-  /// the applied migrations as they were.
-  /// Rust: `a_durable_checkpoint_restarts_the_wal`.
+  /// A durable checkpoint starts the WAL over: the file was truncated, and
+  /// its header has a new salt, so recovery after a power loss replays none
+  /// of the frames written before it. The write that restarts it is the
+  /// checkpoint's only commit and runs under `synchronous = FULL` (2), and
+  /// it leaves the schema and the applied migrations as they were.
+  /// Rust: `a_durable_checkpoint_restarts_the_wal`, and
+  /// `the_wal_restart_write_commits_under_full` in `store/mod.rs`.
   @Test func aDurableCheckpointRestartsTheWAL() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -793,11 +802,15 @@ import Testing
     let store = try MeetingStore.onDisk(at: url)
     try await store.save(SampleData.meeting())
     let salt = try Self.walSalt(url)
+    let length = try Self.walFile(url).count
     let schema = try await store.writer.read(Self.schema)
+    let log = try await CommitLog.install(on: store)
 
     try await store.checkpointDurably()
 
     #expect(try Self.walSalt(url) != salt, "the WAL restarted")
+    #expect(try Self.walFile(url).count < length, "the WAL file was truncated before the write")
+    #expect(log.commits == [CommitLog.Commit(synchronous: 2, tables: [])])
     #expect(try await store.writer.read(Self.schema) == schema)
     #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
   }
