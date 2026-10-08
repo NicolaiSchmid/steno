@@ -2,16 +2,16 @@
 //! runs HTTP/1.1 over each connection ([`connection`]) and, when
 //! advertising, publishes `_steno._tcp` with the TXT record (`v=1`,
 //! `id=<macID>`) through Bonjour, and again when the network changes
-//! ([`advertise`]). Loopback only when
-//! `advertise` is false; otherwise every IPv4 address is bound, and a
-//! connection whose local address is neither loopback nor a LAN address
-//! (a VPN tunnel) is closed before the handshake, as the Swift listener's
-//! prohibited interface types refuse it. One socket on every address
-//! serves an address the computer gains after start on the same port.
-//! The check runs once per connection, at accept, so the listener closes
-//! no connection when the network changes; one on an address that leaves
-//! breaks with it, and the phone resumes from the partial. Swift:
-//! `Network/HandoverServer.swift`, `Network/ServerMetrics.swift`.
+//! ([`advertise`]). Loopback only when `advertise` is false; otherwise
+//! every IPv4 address is bound, and a connection whose local address is
+//! neither loopback nor a LAN address (a VPN tunnel) is closed before the
+//! handshake, as the Swift listener's prohibited interface types refuse
+//! it. One socket on every address serves an address the computer gains
+//! after start on the same port. The check runs once per connection, at
+//! accept, so the listener closes no connection when the network changes;
+//! one on an address that leaves breaks with it, and the phone resumes
+//! from the partial. Swift: `Network/HandoverServer.swift`,
+//! `Network/ServerMetrics.swift`.
 
 pub mod advertise;
 pub mod connection;
@@ -645,7 +645,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_address_gained_after_start_is_served_and_a_change_cuts_no_connection() {
+    async fn an_address_gained_after_start_is_served_and_the_listener_keeps_an_open_connection_when_it_leaves()
+     {
         let Some(address) = host_address() else {
             return skip("this host has no non-loopback IPv4 address");
         };

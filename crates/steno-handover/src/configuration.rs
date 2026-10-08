@@ -153,9 +153,8 @@ impl Default for HandoverConfiguration {
 mod tests {
     use super::*;
 
-    /// The Mac's sources; Linux and Windows use the host name ones after
-    /// the first.
-    const MAC: [NameSource; 4] = [
+    /// The Mac's sources; Linux and Windows use all but the first.
+    const MAC_SOURCES: [NameSource; 4] = [
         NameSource::ComputerName,
         NameSource::HostnameVariable,
         NameSource::EtcHostname,
@@ -165,41 +164,47 @@ mod tests {
     #[test]
     fn the_mac_asks_for_the_computer_name_first_and_linux_and_windows_for_the_host_name() {
         if cfg!(target_os = "macos") {
-            assert_eq!(NAME_SOURCES, &MAC[..]);
+            assert_eq!(NAME_SOURCES, &MAC_SOURCES[..]);
         } else {
-            assert_eq!(NAME_SOURCES, &MAC[1..]);
+            assert_eq!(NAME_SOURCES, &MAC_SOURCES[1..]);
             assert_eq!(
                 NameSource::ComputerName.read(),
                 None,
                 "no computer name here"
             );
         }
+        assert!(
+            NameSource::SystemHostname.read().is_some(),
+            "every platform has a host name"
+        );
     }
 
     #[test]
     fn the_default_is_the_first_name_a_source_gives_in_order() {
         let reader = |names: [Option<&'static str>; 4]| {
             move |source: NameSource| {
-                let index = MAC.iter().position(|&known| known == source).unwrap();
+                let index = MAC_SOURCES
+                    .iter()
+                    .position(|&known| known == source)
+                    .unwrap();
                 names[index].map(str::to_owned)
             }
         };
         let all = reader([Some("Studio"), Some("env"), Some("etc"), Some("host")]);
-        assert_eq!(first_name(&MAC, all), "Studio");
-        assert_eq!(first_name(&MAC[1..], all), "env");
+        assert_eq!(first_name(&MAC_SOURCES, all), "Studio");
+        assert_eq!(first_name(&MAC_SOURCES[1..], all), "env");
         assert_eq!(
-            first_name(&MAC, reader([None, None, Some("etc"), Some("host")])),
+            first_name(
+                &MAC_SOURCES,
+                reader([None, None, Some("etc"), Some("host")])
+            ),
             "etc"
         );
         assert_eq!(
-            first_name(&MAC, reader([None, None, None, Some("host")])),
+            first_name(&MAC_SOURCES, reader([None, None, None, Some("host")])),
             "host"
         );
-        assert_eq!(first_name(&MAC, reader([None; 4])), "Steno");
-        assert!(
-            NameSource::SystemHostname.read().is_some(),
-            "every platform has a host name"
-        );
+        assert_eq!(first_name(&MAC_SOURCES, reader([None; 4])), "Steno");
     }
 
     /// The name Swift published: `scutil --get ComputerName` reads the
