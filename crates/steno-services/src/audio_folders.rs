@@ -227,26 +227,34 @@ mod tests {
         );
     }
 
+    /// An absolute folder under `dir` on every platform, and how JSON
+    /// writes it.
+    fn folder(dir: &Path, name: &str) -> (PathBuf, String) {
+        let folder = dir.join(name);
+        let json = serde_json::to_string(&folder).unwrap();
+        (folder, json)
+    }
+
     /// A list that does not parse is an error to its reader. The next
     /// folder sets it aside and keeps every folder it still names whole,
     /// here the two before the cut.
     #[test]
     fn a_list_that_does_not_parse_is_set_aside_and_its_folders_kept() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(KNOWN_FILE), b"[\"/a\", \"/b\", \"/c").unwrap();
+        let [(a, a_json), (b, b_json), (_, c_json), (d, _)] =
+            ["a", "b", "c", "d"].map(|name| folder(dir.path(), name));
+        let cut = &c_json[..c_json.len() - 1];
+        std::fs::write(
+            dir.path().join(KNOWN_FILE),
+            format!("[{a_json}, {b_json}, {cut}"),
+        )
+        .unwrap();
         assert_eq!(
             known(dir.path()).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
-        remember(dir.path(), Path::new("/d")).unwrap();
-        assert_eq!(
-            known(dir.path()).unwrap(),
-            [
-                PathBuf::from("/a"),
-                PathBuf::from("/b"),
-                PathBuf::from("/d")
-            ]
-        );
+        remember(dir.path(), &d).unwrap();
+        assert_eq!(known(dir.path()).unwrap(), [a, b, d]);
         assert_eq!(set_aside_count(dir.path()), 1);
     }
 
@@ -272,19 +280,22 @@ mod tests {
     fn a_record_that_does_not_parse_is_set_aside_and_its_entries_kept() {
         let dir = tempfile::tempdir().unwrap();
         let (kept, cut, new) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let [(a, a_json), (_, b_json), (c, _)] =
+            ["a", "b", "c"].map(|name| folder(dir.path(), name));
+        let b_cut = &b_json[..b_json.len() - 1];
         std::fs::write(
             dir.path().join(RECORDED_FILE),
-            format!("{{\"{kept}\": \"/a\", \"{cut}\": \"/b"),
+            format!("{{\"{kept}\": {a_json}, \"{cut}\": {b_cut}"),
         )
         .unwrap();
         assert_eq!(
             recorded(dir.path()).unwrap_err().kind(),
             std::io::ErrorKind::InvalidData
         );
-        record(dir.path(), new, Path::new("/c")).unwrap();
+        record(dir.path(), new, &c).unwrap();
         assert_eq!(
             recorded(dir.path()).unwrap(),
-            BTreeMap::from([(kept, PathBuf::from("/a")), (new, PathBuf::from("/c"))])
+            BTreeMap::from([(kept, a), (new, c)])
         );
         assert_eq!(set_aside_count(dir.path()), 1);
     }
