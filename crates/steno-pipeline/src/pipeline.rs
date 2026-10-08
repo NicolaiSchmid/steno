@@ -37,8 +37,7 @@ use steno_core::{
     MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
     Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
     SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
-    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, busy_file,
-    derived_uuid,
+    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
 };
@@ -991,9 +990,7 @@ impl ProcessingPipeline {
     /// [`TOO_MANY_CRASHED_RUNS`]; its audio is kept, and a retention
     /// stamp an earlier run left is cleared so the sweep keeps it too. A
     /// meeting with any such run waits, then runs alone, so its crashes
-    /// are charged to it, not to the meetings waiting behind it. Before
-    /// any of that, the speaker clips a run that ended with the app left
-    /// beside their paths are put back (`restore_sample_clips`). Returns
+    /// are charged to it, not to the meetings waiting behind it. Returns
     /// the meetings whose processing was started, those that wait last:
     /// none once the pipeline [quits](Self::quit).
     pub fn resume_unfinished(&self) -> Result<Vec<Uuid>> {
@@ -1032,11 +1029,6 @@ impl ProcessingPipeline {
             let Some(claim) = self.claim_start(meeting.id, asset.id) else {
                 continue;
             };
-            // Before the run, which may never write these clips again (a
-            // diarizer that fails, other clusters, a meeting failed below).
-            if let Some(layout) = RecordingLayout::from_asset(&asset) {
-                restore_sample_clips(&layout.speakers_directory());
-            }
             let count = RunCount::of(&asset);
             let crashed = count.read();
             if crashed >= MAX_CRASHED_RUNS {
@@ -2598,171 +2590,24 @@ pub fn ensure_me_participant(
     Ok(me)
 }
 
-/// Writes every speaker's sample clip, or on a failure none. Each is
-/// written beside its path first (`.wav.partial`); once all are, an
-/// earlier clip at each path is copied beside it (`.wav.previous`) and the
-/// new clip replaces it in one rename ([`busy_file::rename`]), so the path
-/// always holds a clip. A replace that fails, also after Windows held a
-/// file busy past its retries, puts every earlier clip back the same way,
-/// with one rename of its copy, and removes the new clips where there was
-/// none; a restore that fails leaves the new clip at its path and the
-/// earlier one beside it. So a failed write never removes a kept
-/// speaker's clip, and short of a failed restore never leaves it holding
-/// another voice: "Process again" writes the same paths (the speaker ids
-/// derive from the cluster labels). An earlier clip left beside a path
-/// that holds none is put back at the start of the next write, and at
-/// launch ([`restore_sample_clips`]). The copies are removed once every
-/// new clip is in place. Rust only: Swift writes each clip in place.
+/// Writes every speaker's sample clip, or on a failure none: each is
+/// written beside its path first and moved into place once all are, so a
+/// failed write never leaves a kept speaker's clip holding another voice.
+/// Rust only: Swift writes each clip in place.
 fn write_sample_clips(clips: &[(PathBuf, AudioBuffer16k)]) -> std::io::Result<()> {
-    write_sample_clips_with(clips, busy_file::rename)
-}
-
-/// [`write_sample_clips`] with its rename given, so a test fails one.
-fn write_sample_clips_with(
-    clips: &[(PathBuf, AudioBuffer16k)],
-    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    for (path, _) in clips {
-        put_back(path, &rename)?;
-    }
-    let remove_staged = || {
-        for (path, _) in clips {
-            let _ = std::fs::remove_file(staged_clip(path));
-        }
-    };
+    let staged = |path: &Path| path.with_extension("wav.partial");
     if let Err(error) = clips
         .iter()
-        .try_for_each(|(path, clip)| write_wav_16k(&staged_clip(path), clip))
+        .try_for_each(|(path, clip)| write_wav_16k(&staged(path), clip))
     {
-        remove_staged();
+        for (path, _) in clips {
+            let _ = std::fs::remove_file(staged(path));
+        }
         return Err(error);
     }
-    let undo = |path: &Path, undone: std::io::Result<()>| {
-        if let Err(error) = undone {
-            tracing::warn!(
-                clip = %path.display(),
-                %error,
-                "a speaker clip could not be put back after a failed write"
-            );
-        }
-    };
-    // Every path that holds its new clip, and whether its earlier clip was
-    // copied beside it.
-    let mut replaced: Vec<(&Path, bool)> = Vec::new();
-    let placed = clips.iter().try_for_each(|(path, _)| {
-        let kept = copy_aside(path)?;
-        rename(&staged_clip(path), path).inspect_err(|_| {
-            // A refused rename never lands: the path still holds the
-            // earlier clip, so its copy goes.
-            if kept {
-                undo(path, remove_if_present(&previous_clip(path)));
-            }
-        })?;
-        replaced.push((path, kept));
-        Ok(())
-    });
-    if let Err(error) = placed {
-        for &(path, kept) in replaced.iter().rev() {
-            if kept {
-                undo(path, rename(&previous_clip(path), path));
-            } else {
-                undo(path, remove_if_present(path));
-            }
-        }
-        remove_staged();
-        return Err(error);
-    }
-    for (path, kept) in replaced {
-        if kept {
-            let _ = busy_file::retried(|| std::fs::remove_file(previous_clip(path)));
-        }
-    }
-    Ok(())
-}
-
-/// Where a write stages the new clip for `path`.
-fn staged_clip(path: &Path) -> PathBuf {
-    path.with_extension("wav.partial")
-}
-
-/// Where a write keeps the earlier clip at `path` until the new one is in
-/// place.
-fn previous_clip(path: &Path) -> PathBuf {
-    path.with_extension("wav.previous")
-}
-
-/// Puts the earlier clip waiting beside `path` back with `rename` when the
-/// path holds none.
-fn put_back(
-    path: &Path,
-    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
-) -> std::io::Result<()> {
-    if matches!(path.try_exists(), Ok(false)) && previous_clip(path).exists() {
-        rename(&previous_clip(path), path)
-    } else {
-        Ok(())
-    }
-}
-
-/// Copies the earlier clip at `path` beside it, over a copy an earlier
-/// write left there; `false` when the path holds none.
-fn copy_aside(path: &Path) -> std::io::Result<bool> {
-    match busy_file::retried(|| std::fs::copy(path, previous_clip(path))) {
-        Ok(_) => Ok(true),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-/// `std::fs::remove_file`, where a file already gone is fine.
-fn remove_if_present(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        removed => removed,
-    }
-}
-
-/// Launch recovery for the sample clips in one meeting's `speakers/`
-/// folder, which no write holds then. An earlier clip a crash or a failed
-/// write left beside its path ([`write_sample_clips`]) is put back when
-/// the path holds none, and removed when the path holds the same bytes; one
-/// beside a different clip stays, since either may be the voice a kept
-/// speaker had. A clip a write left staged is removed: it is never a
-/// speaker's only clip. Best effort; a failure is logged. Rust only.
-fn restore_sample_clips(directory: &Path) {
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let beside = entry.path();
-        let Some(name) = beside.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let restored = if name.ends_with(".wav.partial") {
-            remove_if_present(&beside)
-        } else if let Some(stem) = name.strip_suffix(".wav.previous") {
-            let path = directory.join(format!("{stem}.wav"));
-            if same_bytes(&beside, &path) {
-                busy_file::retried(|| remove_if_present(&beside))
-            } else {
-                put_back(&path, busy_file::rename)
-            }
-        } else {
-            Ok(())
-        };
-        if let Err(error) = restored {
-            tracing::warn!(
-                clip = %beside.display(),
-                %error,
-                "a speaker clip left beside its path could not be put back"
-            );
-        }
-    }
-}
-
-/// Whether the files `a` and `b` both read, with the same bytes.
-fn same_bytes(a: &Path, b: &Path) -> bool {
-    matches!((std::fs::read(a), std::fs::read(b)), (Ok(a), Ok(b)) if a == b)
+    clips
+        .iter()
+        .try_for_each(|(path, _)| std::fs::rename(staged(path), path))
 }
 
 /// Clamps to `-1...1`, scales to Int16 and writes a 16 kHz mono WAV, the
@@ -2796,227 +2641,5 @@ mod tests {
             PipelineFailure::wrapping(&other, PipelineStage::Decode),
             PipelineFailure::new(PipelineStage::Decode, "no such file")
         );
-    }
-
-    /// The names in `directory`, sorted.
-    fn names(directory: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(directory)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        names
-    }
-
-    /// Three speakers' clips, `a` and `c` with an earlier clip at their
-    /// path, `b` without.
-    fn three_clips(directory: &Path) -> Vec<(PathBuf, AudioBuffer16k)> {
-        let clip = || AudioBuffer16k::new(vec![0.25; 160]);
-        std::fs::write(directory.join("a.wav"), b"a's earlier voice").unwrap();
-        std::fs::write(directory.join("c.wav"), b"c's earlier voice").unwrap();
-        ["a", "b", "c"]
-            .into_iter()
-            .map(|name| (directory.join(format!("{name}.wav")), clip()))
-            .collect()
-    }
-
-    /// `directory` holds `three_clips`' earlier clips as they were and
-    /// nothing else; `case` names the failure in a mismatch.
-    fn assert_only_the_earlier_clips(directory: &Path, case: &str) {
-        assert_eq!(names(directory), ["a.wav", "c.wav"], "{case}");
-        for name in ["a", "c"] {
-            assert_eq!(
-                std::fs::read(directory.join(format!("{name}.wav"))).unwrap(),
-                format!("{name}'s earlier voice").as_bytes(),
-                "{case}"
-            );
-        }
-    }
-
-    /// The new clips replace the earlier ones, and nothing staged or
-    /// copied aside is left beside them.
-    #[test]
-    fn sample_clips_replace_the_earlier_ones_and_leave_nothing_beside_them() {
-        let dir = tempfile::tempdir().unwrap();
-        let clips = three_clips(dir.path());
-        write_sample_clips(&clips).unwrap();
-        assert_eq!(names(dir.path()), ["a.wav", "b.wav", "c.wav"]);
-        for (path, _) in &clips {
-            assert!(std::fs::read(path).unwrap().starts_with(b"RIFF"));
-        }
-    }
-
-    /// `write_sample_clips_with` over `clips` with every rename from one of
-    /// the names in `refused` to the other failing as Windows fails a file
-    /// held busy past its retries.
-    fn write_refusing(
-        directory: &Path,
-        clips: &[(PathBuf, AudioBuffer16k)],
-        refused: &[(&str, &str)],
-    ) -> std::io::Result<()> {
-        let refused: Vec<(PathBuf, PathBuf)> = refused
-            .iter()
-            .map(|(from, to)| (directory.join(from), directory.join(to)))
-            .collect();
-        write_sample_clips_with(clips, |from, to| {
-            if refused
-                .iter()
-                .any(|(f, t)| (f.as_path(), t.as_path()) == (from, to))
-            {
-                Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy))
-            } else {
-                std::fs::rename(from, to)
-            }
-        })
-    }
-
-    /// A replace that fails, at any clip, puts every earlier clip back:
-    /// the earlier clips at their paths, no clip where there was none,
-    /// nothing staged or copied aside left behind.
-    #[test]
-    fn a_failed_replace_puts_every_earlier_clip_back_and_writes_none() {
-        for refused in ["a", "b", "c"] {
-            let dir = tempfile::tempdir().unwrap();
-            let clips = three_clips(dir.path());
-            let (from, to) = (format!("{refused}.wav.partial"), format!("{refused}.wav"));
-            let error = write_refusing(dir.path(), &clips, &[(&from, &to)]).unwrap_err();
-            assert_eq!(error.kind(), std::io::ErrorKind::ResourceBusy);
-            assert_only_the_earlier_clips(dir.path(), refused);
-        }
-    }
-
-    /// A restore that fails as well leaves a clip at every path that had
-    /// one: the new clip where it was, and the earlier voice beside it.
-    #[test]
-    fn a_failed_restore_leaves_a_clip_at_its_path_and_the_earlier_beside_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let clips = three_clips(dir.path());
-        write_refusing(
-            dir.path(),
-            &clips,
-            &[("c.wav.partial", "c.wav"), ("a.wav.previous", "a.wav")],
-        )
-        .unwrap_err();
-        assert_eq!(names(dir.path()), ["a.wav", "a.wav.previous", "c.wav"]);
-        assert!(
-            std::fs::read(dir.path().join("a.wav"))
-                .unwrap()
-                .starts_with(b"RIFF")
-        );
-        assert_eq!(
-            std::fs::read(dir.path().join("a.wav.previous")).unwrap(),
-            b"a's earlier voice"
-        );
-        assert_eq!(
-            std::fs::read(dir.path().join("c.wav")).unwrap(),
-            b"c's earlier voice"
-        );
-    }
-
-    /// A crash between the copy of an earlier clip and its replace (here a
-    /// panic in the replace of `c`, after `a` and `b` landed) leaves a clip
-    /// at every path that had one. The launch then removes the staged
-    /// clips and the copy beside the same bytes, and keeps the earlier
-    /// voice beside `a`'s new clip.
-    #[test]
-    fn a_crash_between_the_copy_and_the_replace_leaves_every_clip_playable() {
-        let dir = tempfile::tempdir().unwrap();
-        let clips = three_clips(dir.path());
-        let crash = (dir.path().join("c.wav.partial"), dir.path().join("c.wav"));
-        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            write_sample_clips_with(&clips, |from, to| {
-                assert!(
-                    (from, to) != (crash.0.as_path(), crash.1.as_path()),
-                    "the app ends"
-                );
-                std::fs::rename(from, to)
-            })
-        }));
-        assert!(crashed.is_err());
-        let earlier = |name: &str| std::fs::read(dir.path().join(name)).unwrap();
-        assert!(earlier("a.wav").starts_with(b"RIFF"));
-        assert_eq!(earlier("a.wav.previous"), b"a's earlier voice");
-        assert_eq!(earlier("c.wav"), b"c's earlier voice");
-
-        restore_sample_clips(dir.path());
-        assert_eq!(
-            names(dir.path()),
-            ["a.wav", "a.wav.previous", "b.wav", "c.wav"]
-        );
-        assert_eq!(earlier("a.wav.previous"), b"a's earlier voice");
-        assert_eq!(earlier("c.wav"), b"c's earlier voice");
-    }
-
-    /// `three_clips` with `a`'s earlier clip left beside its path and none
-    /// at it, as a crash in an older build's write could leave it.
-    fn three_clips_with_a_left_aside(directory: &Path) -> Vec<(PathBuf, AudioBuffer16k)> {
-        let clips = three_clips(directory);
-        std::fs::rename(directory.join("a.wav"), directory.join("a.wav.previous")).unwrap();
-        clips
-    }
-
-    /// An earlier clip left beside a path that holds none is put back by
-    /// the next write: a write that fails keeps it at its path, and one
-    /// that succeeds replaces it and leaves nothing beside the clips.
-    #[test]
-    fn an_earlier_clip_left_aside_is_put_back_by_the_next_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let clips = three_clips_with_a_left_aside(dir.path());
-        write_refusing(dir.path(), &clips, &[("c.wav.partial", "c.wav")]).unwrap_err();
-        assert_only_the_earlier_clips(dir.path(), "a failed write");
-
-        let dir = tempfile::tempdir().unwrap();
-        let clips = three_clips_with_a_left_aside(dir.path());
-        write_sample_clips(&clips).unwrap();
-        assert_eq!(names(dir.path()), ["a.wav", "b.wav", "c.wav"]);
-    }
-
-    /// At launch an earlier clip beside a path that holds none is put back,
-    /// a copy beside the same bytes and a staged clip are removed, and a
-    /// copy beside another clip stays.
-    #[test]
-    fn an_earlier_clip_left_aside_is_put_back_at_launch() {
-        let dir = tempfile::tempdir().unwrap();
-        let write =
-            |name: &str, bytes: &[u8]| std::fs::write(dir.path().join(name), bytes).unwrap();
-        write("a.wav.previous", b"a's voice");
-        write("b.wav", b"b's new voice");
-        write("b.wav.previous", b"b's earlier voice");
-        write("c.wav", b"c's voice");
-        write("c.wav.previous", b"c's voice");
-        write("d.wav.partial", b"d's staged voice");
-        restore_sample_clips(dir.path());
-        assert_eq!(
-            names(dir.path()),
-            ["a.wav", "b.wav", "b.wav.previous", "c.wav"]
-        );
-        let read = |name: &str| std::fs::read(dir.path().join(name)).unwrap();
-        assert_eq!(read("a.wav"), b"a's voice");
-        assert_eq!(read("b.wav"), b"b's new voice");
-        assert_eq!(read("b.wav.previous"), b"b's earlier voice");
-        assert_eq!(read("c.wav"), b"c's voice");
-    }
-
-    /// On Windows an earlier clip another handle holds without sharing its
-    /// deletion (a player that opened it) refuses the replace past the
-    /// retries; the write fails and every earlier clip stays as it was,
-    /// with no copy left beside it.
-    #[cfg(windows)]
-    #[test]
-    fn a_held_earlier_clip_fails_the_write_and_keeps_every_clip() {
-        use std::os::windows::fs::OpenOptionsExt as _;
-        /// `FILE_SHARE_READ | FILE_SHARE_WRITE`, without `FILE_SHARE_DELETE`.
-        const SHARE_READ_WRITE: u32 = 0x1 | 0x2;
-        let dir = tempfile::tempdir().unwrap();
-        let clips = three_clips(dir.path());
-        let holder = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(SHARE_READ_WRITE)
-            .open(dir.path().join("c.wav"))
-            .unwrap();
-        let error = write_sample_clips(&clips).unwrap_err();
-        assert!(busy_file::is_busy(&error), "{error:?}");
-        drop(holder);
-        assert_only_the_earlier_clips(dir.path(), "c.wav");
     }
 }
