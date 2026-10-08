@@ -80,6 +80,10 @@ pub enum StoreError {
     /// `recording`: nothing was written. Rust only.
     #[error("meeting {0} is {1}, not recording")]
     NotRecording(Uuid, MeetingStateKind),
+    /// [`Store::insert_meeting_with_asset`] on a meeting id that already
+    /// has a row: nothing was written. Rust only.
+    #[error("meeting {0} already exists")]
+    MeetingExists(Uuid),
     /// The phone intake's admission of a recording whose receipt is another
     /// upload's, raised at the intake's own read and by
     /// `save_admission_durably`: it belongs to another device (the admitting

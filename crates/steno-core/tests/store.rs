@@ -230,6 +230,31 @@ fn deleting_a_meeting_cascades_and_keeps_persons() {
     ));
 }
 
+/// The adoption's insert writes a meeting and its asset only while no row
+/// has the id: a row written meanwhile is neither overwritten nor given a
+/// second asset. `meeting_ids` lists every row's id.
+#[test]
+fn an_insert_never_overwrites_a_meeting() {
+    let store = Store::in_memory().unwrap();
+    assert_eq!(store.meeting_ids().unwrap(), Vec::<uuid::Uuid>::new());
+    let meeting = common::meeting();
+    store
+        .insert_meeting_with_asset(&meeting, &common::asset(meeting.id))
+        .unwrap();
+    assert_eq!(store.meeting_ids().unwrap(), [meeting.id]);
+
+    let mut other = meeting.clone();
+    other.title = "Written meanwhile".to_owned();
+    let mut asset = common::asset(meeting.id);
+    asset.id = uuid::Uuid::new_v4();
+    assert!(matches!(
+        store.insert_meeting_with_asset(&other, &asset),
+        Err(StoreError::MeetingExists(id)) if id == meeting.id
+    ));
+    assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), meeting);
+    assert_eq!(count(&store, "audioAsset"), 1);
+}
+
 #[test]
 fn a_busy_meeting_cannot_be_deleted() {
     let store = Store::in_memory().unwrap();
