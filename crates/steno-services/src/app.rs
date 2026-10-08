@@ -445,12 +445,16 @@ fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
 /// The secret store the graph reads through: the import's gate over
 /// `secrets` while an import is pending, else `secrets` behind the gate of
 /// a refused key read, if any ([`crate::swift_import::key_denied_secrets`]).
+/// That gate is the keychain's only: over the secrets file (`file`, the
+/// CLI's on the Mac, which never asks the keychain) the key stays
+/// readable, so a run with `STENO_LLM_API_KEY` set still gets its key.
 /// `secrets` is the app's [`KeepsApiKey`], so a write a gate swallows
 /// never reaches it.
 fn gated_secrets(
     pending: Option<crate::swift_import::PendingImport>,
     preferences: &Arc<FilePreferences>,
     secrets: Arc<dyn SecretStore>,
+    file: bool,
 ) -> (Option<GraphImport>, Arc<dyn SecretStore>) {
     match pending {
         Some(pending) => {
@@ -458,6 +462,7 @@ fn gated_secrets(
             let gated = import.secrets.clone();
             (Some(import), gated)
         }
+        None if file => (None, secrets),
         None => (
             None,
             crate::swift_import::key_denied_secrets(preferences, secrets),
@@ -575,7 +580,6 @@ fn import_step(
 /// granted), clip player, the updater when the shell passes no source;
 /// the audio device list is empty off the Mac until the `PipeWire` and
 /// WASAPI backends enumerate devices.
-#[allow(clippy::too_many_lines)]
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
     build_with_import(options, |_| None)
 }
@@ -590,6 +594,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 /// handover listener is built until the onboarding step ran, and the step
 /// is the host's `SwiftImport`. The shell's entry point on every platform;
 /// off the Mac the launch half finds nothing.
+#[allow(clippy::too_many_lines)]
 pub fn build_with_import(
     options: AppOptions,
     import: impl FnOnce(Arc<FilePreferences>) -> Option<crate::swift_import::PendingImport>,
@@ -607,7 +612,7 @@ pub fn build_with_import(
     let store = open_store(&database_path)?;
     let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
     let kept = Arc::new(KeepsApiKey::new(secrets));
-    let (import, secrets) = gated_secrets(pending, &preferences, kept.clone());
+    let (import, secrets) = gated_secrets(pending, &preferences, kept.clone(), !options.keyring);
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -2281,6 +2286,30 @@ mod tests {
             version: "0.0.0".to_owned(),
             make_capture_session: Arc::new(|_| Err("no capture in this test".to_owned())),
             lock_patience: std::time::Duration::ZERO,
+        }
+    }
+
+    /// After a refused keychain read (`KEY_DENIED_KEY`) the graph's store
+    /// answers no key over the keychain, but the secrets file's key, which
+    /// no keychain prompt guards, still answers.
+    #[tokio::test]
+    async fn a_refused_key_read_gates_the_keychain_and_not_the_secrets_file() {
+        use steno_host::services::Preferences as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let preferences = Arc::new(FilePreferences::in_support_directory(dir.path()));
+        preferences.set_flag(crate::swift_import::KEY_DENIED_KEY, true);
+        let secrets = Arc::new(steno_core::testing::InMemorySecretStore::new());
+        let key = SecretKey::llm_api_key();
+        secrets.set_secret(&key, Some("sk-stored")).await.unwrap();
+        for (file, expected) in [(false, None), (true, Some("sk-stored"))] {
+            let (import, gated) = gated_secrets(None, &preferences, secrets.clone(), file);
+            assert!(import.is_none());
+            assert_eq!(
+                gated.secret(&key).await.unwrap().as_deref(),
+                expected,
+                "file: {file}"
+            );
         }
     }
 

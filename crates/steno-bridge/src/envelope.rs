@@ -120,8 +120,8 @@ string_enum! {
         /// behind one keychain prompt. Also the step's Try again, which
         /// repeats the export. Rust only: the Swift app never imports.
         OnboardingImport = "onboarding.import",
-        /// The import step's Not now: counts as both reads denied, so phone
-        /// handover waits and the step returns at the next launch.
+        /// The import step's Not now: no prompt comes up, phone handover
+        /// waits, and the step returns at the next launch.
         OnboardingSkipImport = "onboarding.skipImport",
 
         UpdatesCheck = "updates.check",

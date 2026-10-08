@@ -582,7 +582,8 @@ pub enum SwiftImportStage {
     /// The onboarding step has not run at this launch.
     Pending,
     /// The handover identity did not come over (denied, failed or
-    /// skipped): phone handover waits until the step runs again.
+    /// skipped): phone handover waits until the step runs again, with
+    /// Try again or at the next launch.
     Waiting,
     /// The identity is in place, the key read or left empty.
     Done,
@@ -592,9 +593,10 @@ pub enum SwiftImportStage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SwiftImportStatus {
     pub stage: SwiftImportStage,
-    /// The keychain prompts a run may bring up: one per item it reads (the
-    /// API key until it was read, the handover identity until its export
-    /// got through, and the stored identity it replaces).
+    /// The keychain prompts a run may bring up, at most three: one per item
+    /// it reads (the API key until it was read, whether the Swift app or a
+    /// beta stored it, the handover identity until its export got through,
+    /// and a beta's stored identity it replaces).
     pub prompts: u8,
     /// Why the last run left the identity behind, for the step's line.
     pub error: Option<String>,
@@ -611,10 +613,14 @@ pub trait SwiftImport: Send + Sync {
     fn status(&self) -> SwiftImportStatus;
     /// Reads the key (once) and exports the identity. Blocks on the
     /// keychain prompts, so the host calls it with its lock released, as
-    /// it does the permission prompts.
+    /// it does the permission prompts. While another run is under way it
+    /// answers the status at once and reads nothing.
     fn run(&self) -> SwiftImportStatus;
-    /// The user went past the step without it: both reads count as
-    /// denied, and phone handover waits.
+    /// Not now, or the window closed over the step: no prompt comes up,
+    /// what the step has not read yet stays unread for this launch, and
+    /// phone handover waits until the step comes back at the next launch.
+    /// Never waits: while a run is under way it answers the status at once
+    /// and leaves the stage to that run.
     fn skip(&self) -> SwiftImportStatus;
 }
 

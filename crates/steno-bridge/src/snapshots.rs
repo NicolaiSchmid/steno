@@ -508,7 +508,7 @@ string_enum! {
         /// The keychain prompts are up.
         Importing = "importing",
         /// The export was denied, failed or skipped: phone handover waits
-        /// for Try again.
+        /// until the step runs again, with Try again or at the next launch.
         Waiting = "waiting",
         /// The identity is in place; the step is over.
         Done = "done",

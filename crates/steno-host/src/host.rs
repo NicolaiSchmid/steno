@@ -942,7 +942,9 @@ impl Host {
     pub fn onboarding_window_closed(&self) {
         OnboardingViewModel::mark_completed(&self.shared.services);
         // Closing the window over the import step skips it: phone
-        // handover waits, and the step returns at the next launch.
+        // handover waits, and the step returns at the next launch. This
+        // runs on the main thread, so the skip never waits: a run whose
+        // prompt is up is left to end by itself.
         if let Some(import) = &self.shared.services.swift_import
             && import.status().stage == crate::services::SwiftImportStage::Pending
         {
@@ -2314,12 +2316,18 @@ impl BridgeHost for Host {
 
     /// Three steps, as [`Self::onboarding_request`]: the page sees
     /// `importing` while the keychain prompts are up, the import runs with
-    /// the lock released, then the outcome.
+    /// the lock released, then the outcome. A second Continue or Try again
+    /// while a run is under way does nothing: that run publishes the
+    /// outcome.
     fn onboarding_import(&self) -> Outcome<()> {
         let Some(import) = self.shared.services.swift_import.clone() else {
             return Ok(());
         };
-        self.onboarding_command(|inner| inner.onboarding.begin_import());
+        let mut began = false;
+        self.onboarding_command(|inner| began = inner.onboarding.begin_import());
+        if !began {
+            return Ok(());
+        }
         let status = import.run();
         self.finish_swift_import(status, false);
         Ok(())

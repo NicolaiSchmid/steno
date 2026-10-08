@@ -225,9 +225,10 @@ impl OnboardingViewModel {
 
     /// The keychain prompts are about to come up; the host publishes, runs
     /// [`SwiftImport::run`](crate::services::SwiftImport::run) with its
-    /// lock released, then calls [`Self::finish_import`].
-    pub fn begin_import(&mut self) {
-        self.importing = true;
+    /// lock released, then calls [`Self::finish_import`]. `false` while a
+    /// run is already under way, which the host then leaves to itself.
+    pub fn begin_import(&mut self) -> bool {
+        !std::mem::replace(&mut self.importing, true)
     }
 
     /// The run's or the skip's outcome. A finished import, or a skip,

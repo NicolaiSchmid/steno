@@ -263,8 +263,8 @@ pub const WAITING_FOR_IMPORT: &str = "Phones can upload again once Steno has bro
 
 /// The host's `Handover` while the Swift import is pending
 /// (`crate::swift_import`): no listener and no identity read until the
-/// gate opens, then the listener the graph builds then, which this hands
-/// every call to. Until then the paired phones come from the store, the
+/// gate opens, then the listener built once the gate opens, which every
+/// call goes to. Until then the paired phones come from the store, the
 /// listener reads as stopped, and starting it or revoking a phone says
 /// that it waits.
 pub struct GatedHandover {

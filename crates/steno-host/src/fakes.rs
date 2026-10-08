@@ -1084,13 +1084,24 @@ impl Preferences for FakePreferences {
 /// The import step: `Pending` until a run or a skip, then the outcome a
 /// test set for runs (`Done` by default) or `Waiting` for a skip; counts
 /// the runs and the skips.
-#[derive(Debug)]
 pub struct FakeSwiftImport {
     pub status: Mutex<SwiftImportStatus>,
     /// What [`SwiftImport::run`] moves to.
     pub run_outcome: Mutex<SwiftImportStatus>,
     pub runs: Mutex<usize>,
     pub skips: Mutex<usize>,
+    /// Called once inside the next run, as if while its prompts are up.
+    pub during_run: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl std::fmt::Debug for FakeSwiftImport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FakeSwiftImport")
+            .field("status", &self.status)
+            .field("runs", &self.runs)
+            .field("skips", &self.skips)
+            .finish_non_exhaustive()
+    }
 }
 
 impl FakeSwiftImport {
@@ -1107,6 +1118,7 @@ impl FakeSwiftImport {
             run_outcome: Mutex::new(status(SwiftImportStage::Done)),
             runs: Mutex::new(0),
             skips: Mutex::new(0),
+            during_run: Mutex::new(None),
         }
     }
 
@@ -1125,6 +1137,10 @@ impl SwiftImport for FakeSwiftImport {
 
     fn run(&self) -> SwiftImportStatus {
         *lock(&self.runs) += 1;
+        let during = lock(&self.during_run).take();
+        if let Some(during) = during {
+            during();
+        }
         let outcome = lock(&self.run_outcome).clone();
         lock(&self.status).clone_from(&outcome);
         outcome

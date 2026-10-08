@@ -849,3 +849,31 @@ fn closing_the_window_over_the_step_skips_it() {
     assert_eq!(*import.skips.lock().unwrap(), 1);
     assert_eq!(*import.runs.lock().unwrap(), 0);
 }
+
+/// A second Continue or Try again while the first run's prompts are up
+/// runs nothing: no second prompt comes up, and the page keeps showing
+/// the prompts until the first run's outcome.
+#[test]
+fn a_second_import_while_one_runs_does_nothing() {
+    let harness = Harness::builder().with_swift_import(2).build();
+    let import = harness.fakes.swift_import.clone().unwrap();
+    let host = harness.host.clone();
+    let state = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen = state.clone();
+    *import.during_run.lock().unwrap() = Some(Box::new(move || {
+        host.onboarding_import().unwrap();
+        *seen.lock().unwrap() =
+            Some(host.snapshot(BridgeTopic::Onboarding).unwrap()["swiftImport"]["state"].clone());
+    }));
+    harness.host.onboarding_import().unwrap();
+    assert_eq!(*import.runs.lock().unwrap(), 1, "a second run");
+    assert_eq!(
+        state.lock().unwrap().take(),
+        Some(json!("importing")),
+        "the second click ended the prompts' state"
+    );
+    assert_eq!(
+        harness.snapshot(BridgeTopic::Onboarding)["swiftImport"]["state"],
+        "done"
+    );
+}

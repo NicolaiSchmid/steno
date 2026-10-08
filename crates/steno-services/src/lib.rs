@@ -2,8 +2,9 @@
 //! the stored settings into the real object graph and the
 //! [`steno_host::Services`] the host runs on. The `steno` CLI calls it,
 //! the Tauri shell calls [`build_with_import`], which is [`build`] with the
-//! Mac's import of the Swift app ([`swift_import`]); nothing here contains
-//! logic the other would not also need. Swift: `apps/macos/Steno/AppEnvironment.swift` and
+//! Mac's import of the Swift app ([`swift_import`]); apart from the
+//! import, nothing here contains logic the other would not also need.
+//! Swift: `apps/macos/Steno/AppEnvironment.swift` and
 //! `Sources/steno/Wiring.swift`.
 //! Plan: `.plans/2026-10-02-rust-core-and-tauri-shell.md` (`WP6b`).
 //!
