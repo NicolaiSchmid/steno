@@ -2272,10 +2272,15 @@ mod tests {
         })
     }
 
+    /// The busy timeout the quit tests give the store: one commit try waits
+    /// this long, so a test that allows `2 * QUIT_BUSY` tells one try (plus
+    /// a slow runner's overhead, over a second on Windows CI) from two.
+    const QUIT_BUSY: std::time::Duration = std::time::Duration::from_secs(2);
+
     /// A stop for the app's exit tries its commit once: with the database
-    /// held past the busy timeout (here 1 s), quitting returns after one
-    /// wait, where three tries would take 3 s (15 s at the product's 5 s
-    /// timeout, past the exit's 10 s patience), and the meeting stays
+    /// held past the busy timeout ([`QUIT_BUSY`]), quitting returns after
+    /// one wait, where three tries would take three (15 s at the product's
+    /// 5 s timeout, past the exit's 10 s patience), and the meeting stays
     /// `recording` for the next launch, its folder still recorded.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_for_the_exit_tries_its_commit_once() {
@@ -2286,7 +2291,7 @@ mod tests {
         );
         harness
             .store
-            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_secs(1))?))
+            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
             .unwrap();
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
@@ -2296,7 +2301,7 @@ mod tests {
         quit(&harness.recorder);
         let took = started.elapsed();
         drop(hold);
-        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        assert!(took < 2 * QUIT_BUSY, "{took:?}");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
@@ -2319,16 +2324,16 @@ mod tests {
     }
 
     /// A stop under way when the app quits tries its commit no more once
-    /// the quit came: with the database held past the busy timeout (1 s),
-    /// quitting returns after the try in progress, where the stop's three
-    /// tries would take 3 s more, and the meeting is kept for the next
-    /// launch.
+    /// the quit came: with the database held past the busy timeout
+    /// ([`QUIT_BUSY`]), quitting returns after the try in progress, where a
+    /// second try would take one busy timeout more, and the meeting is kept
+    /// for the next launch.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_under_way_when_the_app_quits_tries_its_commit_no_more() {
         let harness = harness(&[]);
         harness
             .store
-            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_secs(1))?))
+            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
             .unwrap();
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
@@ -2344,20 +2349,20 @@ mod tests {
         drop(hold);
         manual.join().unwrap();
         // The stop's notice holds it 0.3 s ([`held_in`]), then one try.
-        assert!(took < std::time::Duration::from_millis(2_500), "{took:?}");
+        assert!(took < 2 * QUIT_BUSY, "{took:?}");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
     /// A quit that comes while the stop's first try waits on the busy
     /// database (past the notice's 0.3 s hold, [`held_in`]) is seen before
-    /// the next try: quitting returns once that try ends, where the
-    /// stop's three tries would take 3 s, and the meeting is kept.
+    /// the next try: quitting returns once that try ends, where a second
+    /// try would take one busy timeout more, and the meeting is kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_quit_during_the_stop_s_first_try_tries_no_more() {
         let harness = harness(&[]);
         harness
             .store
-            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_secs(1))?))
+            .read(|connection| Ok(connection.busy_timeout(QUIT_BUSY)?))
             .unwrap();
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
@@ -2373,7 +2378,7 @@ mod tests {
         let took = started.elapsed();
         drop(hold);
         manual.join().unwrap();
-        assert!(took < std::time::Duration::from_millis(2_600), "{took:?}");
+        assert!(took < 2 * QUIT_BUSY, "{took:?}");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
