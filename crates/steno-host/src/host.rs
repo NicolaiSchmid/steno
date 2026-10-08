@@ -924,8 +924,8 @@ impl Host {
     /// keyring asked the user (it opened, or the choice fell to the file):
     /// the Summaries section and onboarding's summaries step read the API
     /// key again, unless their key field holds an unsaved edit or a save
-    /// wrote the key while it was read, and keep
-    /// everything else they show ([`LlmSettingsViewModel::reload_key`]).
+    /// wrote the key while it was read, and keep everything else they show
+    /// ([`LlmSettingsViewModel::reload_key`]).
     pub fn secrets_changed(&self) {
         let read_at = {
             let inner = self.lock();

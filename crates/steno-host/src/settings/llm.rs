@@ -4,6 +4,8 @@
 //! sign-in and the model picked from the backend's list.
 //! Swift: `Settings/LLMSettingsViewModel.swift`.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use chrono::{DateTime, Utc};
 use steno_bridge::Platform;
 use steno_core::protocols::{BoundaryResult, SecretKey, SecretPlace};
@@ -200,8 +202,8 @@ impl<E: std::fmt::Display> From<Result<Option<String>, E>> for KeyRead {
 
 /// The next [`LlmSettingsViewModel::key_version`], unique in the process.
 fn next_key_version() -> u64 {
-    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    LAST.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    LAST.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Swift: `LLMSettingsViewModel.TestResult`.
