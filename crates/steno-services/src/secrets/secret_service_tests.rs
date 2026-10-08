@@ -5,13 +5,7 @@ use super::super::fake_service::{Daemon, Shared, State, answer_held, serve};
 use super::*;
 
 fn file_at(path: &Path, environment: &[(&str, &str)]) -> FileSecretStore {
-    FileSecretStore::new(
-        path,
-        environment
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-            .collect(),
-    )
+    FileSecretStore::new(path, entries(environment))
 }
 
 fn write_file(path: &Path, entries: &[(&str, &str)]) {
@@ -79,7 +73,7 @@ impl Setup {
     }
 
     fn values(&self, key: &str) -> Vec<String> {
-        self.state.lock().unwrap().values(key)
+        self.state().values(key)
     }
 
     fn contents(&self) -> Contents {

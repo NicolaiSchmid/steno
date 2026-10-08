@@ -910,23 +910,20 @@ fn update(
 /// it once the store answers again (`Host::secrets_changed`).
 #[test]
 fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
-    let block_on = |future| {
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap()
             .block_on(future)
-    };
+    }
     let harness = Harness::builder()
-        .seed(move |_, fakes| {
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap()
-                .block_on(
-                    fakes
-                        .secrets
-                        .set_secret(&SecretKey::llm_api_key(), Some("sk-stored")),
-                )
-                .unwrap();
+        .seed(|_, fakes| {
+            block_on(
+                fakes
+                    .secrets
+                    .set_secret(&SecretKey::llm_api_key(), Some("sk-stored")),
+            )
+            .unwrap();
             fakes.secrets.fail_reads(Some("the keyring is locked"));
         })
         .build();
