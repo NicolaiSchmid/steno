@@ -730,7 +730,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [ ] Meeting detection (`DetectionController`: one prompt at a time, suppressed while
   recording or when the setting is off): WP5.
 - [x] Retention sweep at launch and after `retentionApplied`, interrupted recordings
-  marked failed at launch, unfinished processing resumed at launch
+  recovered from their master at launch or, with none on disk, marked failed
+  (`steno_services::recovery`), unfinished processing resumed at launch
   (`steno_services::App::launch`).
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
   the host republishes `progress`; the tray (WP8) shows no badge for it; it follows the
@@ -1040,8 +1041,24 @@ still has to draw the window side. `[ ]` is not ported yet.
   (`CodexCredentialStore::stored`), as Swift's `refreshCodexStatus` read it. The
   calls still block the bridge call that made them, as Swift's awaited calls held the
   window's task.
-- A meeting a previous process left recording fails at launch with Swift's "Recording
-  was interrupted before it finished." (`Store::INTERRUPTED_RECORDING_REASON`).
+- A meeting a previous process left recording is recovered at launch from its master
+  on disk and queued with the end reason `failed` (`steno_services::recovery`; Rust
+  only). Only when no audio folder it may be in holds its master, and the folder it
+  was recorded into and the settings' folder can both be read, does it fail, with
+  Swift's "Recording was interrupted before it finished."
+  (`Store::INTERRUPTED_RECORDING_REASON`). Around it, also Rust only (P3 and P17 of
+  `.plans/2026-10-07-stable-promotion.md`):
+  - a stop's commit that finds the database busy is tried again, three tries in all
+    and none more once the app quits, and a commit that still fails leaves the meeting
+    `recording` for the next launch's recovery, where Swift marked it failed without
+    its asset;
+  - a stop whose capture failed recovers what the writer wrote from the master, where
+    Swift failed the meeting;
+  - a meeting left `recording` can be deleted while the recorder is idle and its
+    master has not been written for ten seconds, where Swift refused every recording
+    row;
+  - the host reloads the meeting list when the recorder's state or meeting changes,
+    where Swift's list observed the meeting table.
 - A recording start warms the pipeline up only when the models of the current
   pipeline's engine and the diarizer's are installed (`SpeechModels::engine_installed`),
   so it never downloads, as Swift's `warmUpPipelineIfModelsInstalled`.

@@ -3,12 +3,13 @@
 //! count). Swift: `Sources/StenoAudio/Writer/WAVStreamWriter.swift` and
 //! `WAVFile.swift`.
 
-use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::bytes::{ReadAt, WindowedFile};
-use super::{durable, io_error};
+use super::durable::{self, FullSyncs};
+use super::io_error;
 use crate::capture::CaptureError;
 
 /// Streams 16 kHz mono Int16 PCM into a RIFF/WAVE file: header with zero
@@ -21,6 +22,7 @@ pub struct WavStreamWriter {
     samples_written: usize,
     file: Option<File>,
     scratch: Vec<u8>,
+    syncs: FullSyncs,
 }
 
 impl std::fmt::Debug for WavStreamWriter {
@@ -41,6 +43,9 @@ impl WavStreamWriter {
     pub const RIFF_SIZE_BEFORE_DATA: usize = Self::HEADER_SIZE - 8;
     /// Int16.
     pub const BYTES_PER_SAMPLE: usize = 2;
+    /// Every sidecar's rate in hertz, which [`WavFile::read_16k_mono`]
+    /// demands and [`Self::recover`] checks.
+    pub const SIDECAR_SAMPLE_RATE: u32 = 16_000;
 
     /// Writes a header with zero sizes; `sample_rate` in hertz.
     pub fn create(path: &Path, sample_rate: u32) -> Result<Self, CaptureError> {
@@ -53,7 +58,15 @@ impl WavStreamWriter {
             samples_written: 0,
             file: Some(file),
             scratch: Vec::new(),
+            syncs: FullSyncs::DISK,
         })
+    }
+
+    /// The writer, its syncs made through `syncs`.
+    #[cfg(test)]
+    fn syncing_through(mut self, syncs: FullSyncs) -> Self {
+        self.syncs = syncs;
+        self
     }
 
     /// Where it writes.
@@ -101,7 +114,7 @@ impl WavStreamWriter {
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file
             .as_ref()
-            .map_or(Ok(()), |file| durable::sync(file, File::sync_data))
+            .map_or(Ok(()), |file| durable::sync(file, self.syncs.periodic))
     }
 
     /// Patches the sizes, syncs and closes; once.
@@ -113,7 +126,7 @@ impl WavStreamWriter {
             .map_err(|e| io_error(&self.path, &e))?;
         file.write_all(&Self::header(self.sample_rate, self.samples_written))
             .map_err(|e| io_error(&self.path, &e))?;
-        durable::sync(&file, File::sync_all).map_err(|e| io_error(&self.path, &e))?;
+        durable::sync(&file, self.syncs.close).map_err(|e| io_error(&self.path, &e))?;
         Ok(())
     }
 
@@ -122,6 +135,51 @@ impl WavStreamWriter {
     pub fn duration(&self) -> f64 {
         let samples = self.samples_written as f64;
         samples / f64::from(self.sample_rate)
+    }
+
+    /// Finishes a sidecar whose writer died before [`Self::finish`]: the
+    /// sizes come from the file's length, whole samples only (a sample cut
+    /// short at the end is cut off), and the file is synced. Only a file
+    /// whose header is this writer's at [`Self::SIDECAR_SAMPLE_RATE`],
+    /// sizes aside, is touched; a finished one is written back as it was.
+    /// Returns the samples it holds. Crash recovery calls it, so the lane
+    /// reads from its sidecar rather than being rebuilt from the master.
+    /// Rust only: Swift had no recovery.
+    pub fn recover(path: &Path) -> Result<usize, WavReadError> {
+        let io = |e: std::io::Error| WavReadError::Io(format!("{}: {e}", path.display()));
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(io)?;
+        let length = file.metadata().map_err(io)?.len();
+        if length < Self::HEADER_SIZE as u64 {
+            return Err(WavReadError::Malformed("shorter than its header".into()));
+        }
+        let mut header = [0u8; Self::HEADER_SIZE];
+        file.read_exact(&mut header).map_err(io)?;
+        let sample_rate = Self::SIDECAR_SAMPLE_RATE;
+        let expected = Self::header(sample_rate, 0);
+        // Everything but the two sizes: RIFF size at 4, data size at 40.
+        if header[..4] != expected[..4] || header[8..40] != expected[8..40] {
+            return Err(WavReadError::Malformed(
+                "not a 16 kHz 16-bit mono sidecar header".into(),
+            ));
+        }
+        let bytes = length - Self::HEADER_SIZE as u64;
+        let samples = usize::try_from(bytes / Self::BYTES_PER_SAMPLE as u64)
+            .map_err(|_| WavReadError::Malformed("too long for a WAV file".into()))?;
+        let data_size = samples * Self::BYTES_PER_SAMPLE;
+        if u32::try_from(Self::RIFF_SIZE_BEFORE_DATA + data_size).is_err() {
+            return Err(WavReadError::Malformed("too long for a WAV file".into()));
+        }
+        file.set_len((Self::HEADER_SIZE + data_size) as u64)
+            .map_err(io)?;
+        file.seek(SeekFrom::Start(0)).map_err(io)?;
+        file.write_all(&Self::header(sample_rate, samples))
+            .map_err(io)?;
+        durable::sync(&file, FullSyncs::DISK.close).map_err(io)?;
+        Ok(samples)
     }
 
     /// The 44-byte RIFF, `fmt ` and `data` headers for a 16-bit mono file.
@@ -222,7 +280,7 @@ impl WavFile {
         let io = |e: std::io::Error| WavReadError::Io(e.to_string());
         let mut file = WindowedFile::open(path).map_err(io)?;
         let layout = WavLayout::read(&mut file)?;
-        if layout.sample_rate != 16_000 || layout.channels != 1 {
+        if layout.sample_rate != WavStreamWriter::SIDECAR_SAMPLE_RATE || layout.channels != 1 {
             return Err(WavReadError::UnsupportedFormat(format!(
                 "{} Hz, {} channel(s); need 16000 Hz mono",
                 layout.sample_rate, layout.channels
@@ -380,4 +438,50 @@ fn le_u16(data: &[u8], offset: usize) -> u16 {
 
 fn le_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap_or([0; 4]))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// As the master's: every `sync` is one full sync of the data, through
+    /// `durable`'s fallback, and `finish` one of everything; nothing syncs
+    /// after `finish`.
+    #[test]
+    fn each_sync_is_one_full_sync_and_the_finish_one_more() {
+        static PERIODIC: AtomicUsize = AtomicUsize::new(0);
+        static CLOSE: AtomicUsize = AtomicUsize::new(0);
+        let syncs = FullSyncs {
+            periodic: |file| {
+                PERIODIC.fetch_add(1, Ordering::SeqCst);
+                file.sync_data()
+            },
+            close: |file| {
+                CLOSE.fetch_add(1, Ordering::SeqCst);
+                file.sync_all()
+            },
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mic.wav");
+        let mut writer = WavStreamWriter::create(&path, WavStreamWriter::SIDECAR_SAMPLE_RATE)
+            .unwrap()
+            .syncing_through(syncs);
+        for synced in 1..=3 {
+            writer.write(&[1_000; 160]).unwrap();
+            writer.sync().unwrap();
+            assert_eq!(PERIODIC.load(Ordering::SeqCst), synced);
+        }
+        assert_eq!(CLOSE.load(Ordering::SeqCst), 0);
+        writer.finish().unwrap();
+        writer.sync().unwrap();
+        assert_eq!(
+            (
+                PERIODIC.load(Ordering::SeqCst),
+                CLOSE.load(Ordering::SeqCst)
+            ),
+            (3, 1)
+        );
+    }
 }

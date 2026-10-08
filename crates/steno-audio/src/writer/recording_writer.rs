@@ -116,7 +116,12 @@ impl RecordingWriter {
         )?;
         let sidecars = lanes
             .iter()
-            .map(|lane| WavStreamWriter::create(&layout.sidecar(*lane), 16_000))
+            .map(|lane| {
+                WavStreamWriter::create(
+                    &layout.sidecar(*lane),
+                    WavStreamWriter::SIDECAR_SAMPLE_RATE,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let raw_mic = if keep_raw_mic && lanes.contains(&AudioLane::Mic) {
             Some(CafStreamWriter::create(

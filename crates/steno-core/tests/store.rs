@@ -129,33 +129,42 @@ fn state_updates_touch_only_their_columns() {
     ));
 }
 
+/// Only the rows named, and only while they still record: a recording
+/// left alone, or one started since, keeps recording.
 #[test]
-fn interrupted_recordings_fail_at_launch() {
+fn only_the_named_recordings_fail() {
     let store = Store::in_memory().unwrap();
-    let mut meeting = common::meeting();
-    meeting.state = MeetingState::Recording;
-    store.save_meeting(&meeting).unwrap();
     let now = date("2026-09-30T09:00:00.000Z");
+    let recording = |id: &str| {
+        let mut meeting = common::meeting();
+        meeting.id = uuid(id);
+        meeting.state = MeetingState::Recording;
+        store.save_meeting(&meeting).unwrap();
+        meeting.id
+    };
+    let failed = recording("00000000-0000-4000-8000-0000000000a1");
+    let left_alone = recording("00000000-0000-4000-8000-0000000000a2");
+    let mut queued = common::meeting();
+    queued.id = uuid("00000000-0000-4000-8000-0000000000a3");
+    queued.state = MeetingState::Queued;
+    store.save_meeting(&queued).unwrap();
+    let missing = uuid("00000000-0000-4000-8000-0000000000a4");
+
     assert_eq!(
         store
-            .fail_interrupted_recordings("interrupted", now)
+            .fail_recordings(&[failed, queued.id, missing], "interrupted", now)
             .unwrap(),
-        vec![meeting.id]
+        vec![failed]
     );
-    let read = store.meeting(meeting.id).unwrap().unwrap();
+    let state = |id| store.meeting(id).unwrap().unwrap().state;
     assert_eq!(
-        read.state,
+        state(failed),
         MeetingState::Failed {
             reason: "interrupted".to_owned()
         }
     );
-    assert_eq!(read.updated_at, now);
-    assert_eq!(
-        store
-            .fail_interrupted_recordings("interrupted", now)
-            .unwrap(),
-        Vec::<uuid::Uuid>::new()
-    );
+    assert_eq!(state(left_alone), MeetingState::Recording);
+    assert_eq!(state(queued.id), MeetingState::Queued);
 }
 
 /// The reason is Swift's default, read from the Swift source so the two
@@ -231,7 +240,23 @@ fn a_busy_meeting_cannot_be_deleted() {
         store.delete_meeting(meeting.id),
         Err(StoreError::MeetingBusy(_, MeetingStateKind::Processing))
     ));
+    assert!(matches!(
+        store.delete_meeting_left_recording(meeting.id),
+        Err(StoreError::MeetingBusy(_, MeetingStateKind::Processing))
+    ));
     assert_eq!(count(&store, "meeting"), 1);
+
+    // A recording row: refused by the plain delete, removed by the one for
+    // a meeting left `recording` (Rust only).
+    meeting.state = MeetingState::Recording;
+    store.save_meeting(&meeting).unwrap();
+    assert!(matches!(
+        store.delete_meeting(meeting.id),
+        Err(StoreError::MeetingBusy(_, MeetingStateKind::Recording))
+    ));
+    assert_eq!(count(&store, "meeting"), 1);
+    store.delete_meeting_left_recording(meeting.id).unwrap();
+    assert_eq!(count(&store, "meeting"), 0);
 }
 
 #[test]

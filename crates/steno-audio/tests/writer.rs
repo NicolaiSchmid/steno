@@ -23,8 +23,8 @@ use steno_audio::capture::{CaptureError, LaneLevel, LaneLevels};
 use steno_audio::realtime::{LevelMeter, LevelSlot};
 use steno_audio::testing::AudioFixtures;
 use steno_audio::writer::{
-    CafFile, CafReadError, CafStreamWriter, LaneFrames, RecordingWriter, RecordingWriting,
-    Resampler48kTo16k, WavFile, WavReadError, WavStreamWriter,
+    CafFile, CafHeader, CafReadError, CafStreamWriter, LaneFrames, RecordingWriter,
+    RecordingWriting, Resampler48kTo16k, WavFile, WavReadError, WavStreamWriter,
 };
 use steno_core::{AudioFormat, AudioLane, RecordingLayout};
 use uuid::Uuid;
@@ -316,6 +316,141 @@ fn caf_reader_rejects_garbage() {
     assert!(matches!(
         CafFile::read(Path::new("/nonexistent/x.caf")),
         Err(CafReadError::Io(_))
+    ));
+}
+
+/// The header reader sees what the writer wrote without the samples: an
+/// unfinished master (size -1) counts every whole frame to the end of the
+/// file, a finished one the frames its size names, even with bytes after.
+#[test]
+fn the_caf_header_counts_the_frames_of_an_unfinished_and_a_finished_master() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("recording.caf");
+    let mut writer = CafStreamWriter::create(&path, 48_000.0, 2).unwrap();
+    let frame = [0.25f32; 960];
+    writer.write(&frame, 480).unwrap();
+    writer.write(&frame, 480).unwrap();
+    let unfinished = CafHeader::read(&path).unwrap();
+    assert_eq!(
+        unfinished,
+        CafHeader {
+            sample_rate: 48_000.0,
+            channel_count: 2,
+            frame_count: 960,
+        }
+    );
+    assert_eq!(unfinished.duration(), 0.02);
+
+    writer.finish().unwrap();
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, &[0u8; 64]).unwrap();
+    drop(file);
+    let finished = CafHeader::read(&path).unwrap();
+    assert_eq!(finished.frame_count, 960, "the patched size, not the file");
+}
+
+/// A kill inside a write leaves part of a frame: the header reader counts
+/// whole frames, as `CafFile` reads them; a header alone is no frame.
+#[test]
+fn the_caf_header_counts_whole_frames_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("killed.caf");
+    let mut writer = CafStreamWriter::create(&path, 48_000.0, 2).unwrap();
+    writer.write(&[0.5f32; 960], 480).unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_len((CafStreamWriter::HEADER_SIZE + 479 * 8 + 5) as u64)
+        .unwrap();
+    drop(file);
+    assert_eq!(CafHeader::read(&path).unwrap().frame_count, 479);
+    assert_eq!(CafFile::read(&path).unwrap().frame_count(), 479);
+
+    let empty = directory.path().join("empty.caf");
+    drop(CafStreamWriter::create(&empty, 48_000.0, 1).unwrap());
+    assert_eq!(CafHeader::read(&empty).unwrap().frame_count, 0);
+}
+
+#[test]
+fn the_caf_header_rejects_garbage_and_a_truncated_header() {
+    let header = CafStreamWriter::header(48_000.0, 2);
+    let read = |bytes: &[u8]| CafHeader::read_bytes(bytes);
+    assert!(matches!(read(&[0x41; 64]), Err(CafReadError::Malformed(_))));
+    assert!(matches!(read(b"caff"), Err(CafReadError::Malformed(_))));
+    for cut in [8, 30, 40, 60, CafStreamWriter::HEADER_SIZE - 1] {
+        assert!(
+            matches!(read(&header[..cut]), Err(CafReadError::Malformed(_))),
+            "cut at {cut}"
+        );
+    }
+    assert_eq!(read(&header).unwrap().frame_count, 0);
+    let mut integer = header.clone();
+    integer[32..36].copy_from_slice(&0u32.to_be_bytes()); // flags: integer, big-endian
+    assert!(matches!(
+        read(&integer),
+        Err(CafReadError::UnsupportedFormat(_))
+    ));
+    let mut silent = header;
+    silent[44..48].copy_from_slice(&0u32.to_be_bytes()); // no channels
+    assert!(matches!(read(&silent), Err(CafReadError::Malformed(_))));
+    assert!(matches!(
+        CafHeader::read(Path::new("/nonexistent/x.caf")),
+        Err(CafReadError::Io(_))
+    ));
+}
+
+/// A sidecar left unfinished by a kill is finished from its length, whole
+/// samples only, and then reads back; a finished one is left as it was,
+/// and a file that is not a sidecar is not touched.
+#[test]
+fn an_unfinished_sidecar_is_recovered_from_its_length() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("mic.wav");
+    let mut writer = WavStreamWriter::create(&path, 16_000).unwrap();
+    writer.write(&[1_000i16; 160]).unwrap();
+    drop(writer);
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    std::io::Write::write_all(&mut file, &[0x7f]).unwrap();
+    drop(file);
+    assert!(WavFile::read_16k_mono(&path).is_err());
+
+    assert_eq!(WavStreamWriter::recover(&path).unwrap(), 160);
+    let samples = WavFile::read_16k_mono(&path).unwrap();
+    assert_eq!(samples.len(), 160);
+    assert!(
+        samples
+            .iter()
+            .all(|s| (*s - 1_000.0 / 32_768.0).abs() < 1e-6)
+    );
+    let recovered = std::fs::read(&path).unwrap();
+    assert_eq!(recovered.len(), WavStreamWriter::HEADER_SIZE + 320);
+    assert_eq!(WavStreamWriter::recover(&path).unwrap(), 160);
+    assert_eq!(std::fs::read(&path).unwrap(), recovered, "idempotent");
+
+    let finished = directory.path().join("system.wav");
+    let mut writer = WavStreamWriter::create(&finished, 16_000).unwrap();
+    writer.write(&[-1_000i16; 100]).unwrap();
+    writer.finish().unwrap();
+    let before = std::fs::read(&finished).unwrap();
+    assert_eq!(WavStreamWriter::recover(&finished).unwrap(), 100);
+    assert_eq!(std::fs::read(&finished).unwrap(), before);
+
+    let garbage = directory.path().join("garbage.wav");
+    std::fs::write(&garbage, [0x41; 64]).unwrap();
+    assert!(matches!(
+        WavStreamWriter::recover(&garbage),
+        Err(WavReadError::Malformed(_))
+    ));
+    assert_eq!(std::fs::read(&garbage).unwrap(), [0x41; 64]);
+    let short = directory.path().join("short.wav");
+    std::fs::write(&short, &WavStreamWriter::header(16_000, 0)[..20]).unwrap();
+    assert!(matches!(
+        WavStreamWriter::recover(&short),
+        Err(WavReadError::Malformed(_))
     ));
 }
 

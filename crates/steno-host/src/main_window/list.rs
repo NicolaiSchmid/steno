@@ -11,11 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::FixedOffset;
 use steno_bridge::ListFilter;
-use steno_core::{Meeting, MeetingStateKind, Person, Speaker, Store};
+use steno_core::{Meeting, MeetingStateKind, Person, RecordingLayout, Speaker, Store};
 use uuid::Uuid;
 
 use crate::labels::day_string;
-use crate::services::FileSystem;
+use crate::services::{FileSystem, LeftRecording};
 
 /// Whether `filter` shows `meeting`. Swift: `StateFilter.matches`.
 #[must_use]
@@ -231,13 +231,19 @@ impl MeetingListViewModel {
     }
 
     /// The store refuses while the capture writer or the pipeline holds
-    /// the meeting's files; the controls say so before the attempt.
+    /// the meeting's files; the controls say so before the attempt. A
+    /// meeting left `recording` can go while the recorder is idle
+    /// (`recorder_idle`): no capture here writes it then. The host still
+    /// refuses one whose master another process may be writing
+    /// ([`Recorder::left_recording`](crate::services::Recorder::left_recording)).
+    /// Rust only: Swift refused every recording row.
     #[must_use]
-    pub fn can_delete(meeting: &Meeting) -> bool {
-        !matches!(
-            meeting.state.kind(),
-            MeetingStateKind::Recording | MeetingStateKind::Processing
-        )
+    pub fn can_delete(meeting: &Meeting, recorder_idle: bool) -> bool {
+        match meeting.state.kind() {
+            MeetingStateKind::Recording => recorder_idle,
+            MeetingStateKind::Processing => false,
+            MeetingStateKind::Queued | MeetingStateKind::Ready | MeetingStateKind::Failed => true,
+        }
     }
 
     /// The store's delete: rows, receipt and the meeting's files go (the
@@ -246,18 +252,39 @@ impl MeetingListViewModel {
     /// refused and the reason shown. A file that resists does not stop the
     /// rest; the first failure is shown, since the rows are gone and no
     /// sweep finds that audio again. A deleted selection clears itself when
-    /// the list reloads. Returns whether the rows went. Swift:
-    /// `MeetingStore.delete`.
-    pub fn delete(&mut self, id: Uuid, store: &Store, files: &dyn FileSystem) -> bool {
-        let deleted = match store.delete_meeting(id) {
+    /// the list reloads. With `left`, the meeting is one left `recording`
+    /// ([`Self::can_delete`]): it goes too, and its folder in each of
+    /// `left`'s audio folders with it, since no asset row names it. Returns
+    /// whether the rows went. Swift: `MeetingStore.delete`.
+    pub fn delete(
+        &mut self,
+        id: Uuid,
+        store: &Store,
+        files: &dyn FileSystem,
+        left: Option<&LeftRecording>,
+    ) -> bool {
+        let outcome = if left.is_some() {
+            store.delete_meeting_left_recording(id)
+        } else {
+            store.delete_meeting(id)
+        };
+        let deleted = match outcome {
             Ok(deleted) => deleted,
             Err(error) => {
                 self.error = Some(format!("Meeting could not be deleted: {error}"));
                 return false;
             }
         };
+        let mut paths = deleted.files_to_remove(id);
+        if let Some(left) = left {
+            paths.extend(
+                left.folders
+                    .iter()
+                    .map(|folder| RecordingLayout::new(folder, id).directory),
+            );
+        }
         let mut first_error = None;
-        for path in deleted.files_to_remove(id) {
+        for path in paths {
             if let Err(error) = files.remove(&path) {
                 first_error.get_or_insert(error);
             }

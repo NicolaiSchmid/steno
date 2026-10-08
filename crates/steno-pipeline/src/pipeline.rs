@@ -62,6 +62,10 @@ use crate::run::ProcessingRun;
 pub struct PipelineFailure {
     pub stage: PipelineStage,
     pub reason: String,
+    /// Wraps a store error that another connection's lock caused
+    /// ([`StoreError::is_busy`]). Rust only: Swift's failure kept no such
+    /// mark, and its intake did not retry.
+    busy: bool,
 }
 
 impl PipelineFailure {
@@ -70,7 +74,15 @@ impl PipelineFailure {
         PipelineFailure {
             stage,
             reason: reason.into(),
+            busy: false,
         }
+    }
+
+    /// The failure wraps a busy store error: nothing is wrong with the
+    /// call, and a caller that can wait may try it again.
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        self.busy
     }
 
     /// `error` itself when it already is a `PipelineFailure`, bare or
@@ -85,7 +97,12 @@ impl PipelineFailure {
         });
         match carried {
             Some(failure) => failure.clone(),
-            None => PipelineFailure::new(stage, error.to_string()),
+            None => PipelineFailure {
+                busy: any
+                    .downcast_ref::<StoreError>()
+                    .is_some_and(StoreError::is_busy),
+                ..PipelineFailure::new(stage, error.to_string())
+            },
         }
     }
 }
@@ -851,7 +868,17 @@ impl ProcessingPipeline {
     /// `queued` for the next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
         let claim = self.claim_or_refuse(meeting, asset)?;
-        self.enqueue_claimed(meeting, asset, claim)
+        self.enqueue_claimed(meeting, asset, claim, Store::save_meeting_with_asset)
+    }
+
+    /// [`ProcessingPipeline::enqueue`] of a Mac recording that stopped, the
+    /// local intake's: the rows are written through
+    /// [`Store::save_stopped_recording`], so only while the meeting is
+    /// still `recording`, checked in the commit's own transaction. Rust
+    /// only.
+    pub fn enqueue_stopped_recording(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
+        let claim = self.claim_or_refuse(meeting, asset)?;
+        self.enqueue_claimed(meeting, asset, claim, Store::save_stopped_recording)
     }
 
     /// [`ProcessingPipeline::enqueue`] of a meeting the caller saved
@@ -879,24 +906,22 @@ impl ProcessingPipeline {
         })
     }
 
-    /// `enqueue` once the asset is claimed: the claim is held from the
-    /// check to the run's end, so a second call cannot start a second
-    /// run.
+    /// `enqueue` once the asset is claimed, its rows written through
+    /// `save`: the claim is held from the check to the run's end, so a
+    /// second call cannot start a second run.
     fn enqueue_claimed(
         &self,
         meeting: &Meeting,
         asset: &AudioAsset,
         claim: AssetClaim,
+        save: fn(&Store, &Meeting, &AudioAsset) -> std::result::Result<(), StoreError>,
     ) -> Result<()> {
         let mut queued = meeting.clone();
         queued.state = MeetingState::Queued;
         queued.updated_at = self.now();
         let mut asset = asset.clone();
         asset.meeting_id = meeting.id;
-        attributing(
-            PipelineStage::Decode,
-            self.store().save_meeting_with_asset(&queued, &asset),
-        )?;
+        attributing(PipelineStage::Decode, save(self.store(), &queued, &asset))?;
         // Processed afresh: earlier runs that ended with the app no longer
         // count against it.
         RunCount::of(&asset).clear();
@@ -938,7 +963,7 @@ impl ProcessingPipeline {
             .claim_start(meeting_id, asset.id)
             .ok_or(ReprocessError::Busy(meeting_id))?;
         asset.expires_at = None;
-        Ok(self.enqueue_claimed(&meeting, &asset, claim)?)
+        Ok(self.enqueue_claimed(&meeting, &asset, claim, Store::save_meeting_with_asset)?)
     }
 
     /// Claims `asset_id` for a background run of `meeting_id` in the

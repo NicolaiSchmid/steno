@@ -107,6 +107,21 @@ impl Store {
             )
         })
     }
+
+    /// Every asset's `url`, each once and in order, without the rest of
+    /// the row: the launch's recovery looks for an interrupted recording
+    /// in every folder a master was written to. Rust only: Swift had no
+    /// recovery.
+    pub fn asset_urls(&self) -> Result<Vec<String>> {
+        self.read(|connection| {
+            query_all(
+                connection,
+                "SELECT DISTINCT url FROM audioAsset ORDER BY url",
+                [],
+                |row| row.get(0),
+            )
+        })
+    }
 }
 
 impl Store {

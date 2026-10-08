@@ -1,6 +1,7 @@
 //! What the unit tests share: a store in a temp directory, the
-//! pipeline's dependencies over core's fakes, and the waits that fail a
-//! test instead of hanging it.
+//! pipeline's dependencies over core's fakes, the app's graph over them,
+//! frames for a recording writer, a live check that counts every master
+//! old, and the waits that fail a test instead of hanging it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,14 +73,40 @@ pub fn current_pipeline(dependencies: PipelineDependencies) -> Arc<CurrentPipeli
 /// Capture sessions over a synthetic backend that plays a tone on the
 /// microphone lane in real time, for up to ten minutes.
 pub fn synthetic_capture() -> MakeCaptureSession {
-    Arc::new(|configuration: steno_audio::CaptureConfiguration| {
+    synthetic_capture_through(|writer| Box::new(writer))
+}
+
+/// [`synthetic_capture`], each session's files written through what
+/// `wrap` makes of the production writer: a writer that dies, or one held
+/// at a gate.
+pub fn synthetic_capture_through(
+    wrap: impl Fn(steno_audio::RecordingWriter) -> Box<dyn steno_audio::writer::RecordingWriting>
+    + Send
+    + Sync
+    + 'static,
+) -> MakeCaptureSession {
+    synthetic_capture_writing(Arc::new(move |layout, lanes, keep_raw| {
+        Ok(wrap(steno_audio::RecordingWriter::new(
+            layout, lanes, keep_raw,
+        )?))
+    }))
+}
+
+/// [`synthetic_capture`] whose sessions make their writer with
+/// `make_writer` when they start: a writer that cannot be created fails
+/// the start.
+pub fn synthetic_capture_writing(
+    make_writer: steno_audio::capture::RecordingWriterFactory,
+) -> MakeCaptureSession {
+    Arc::new(move |configuration: steno_audio::CaptureConfiguration| {
         let options = synthetic_tone(&configuration);
-        steno_audio::CaptureSession::with_backend(
+        steno_audio::CaptureSession::with_writer_factory(
             configuration,
             Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
             None,
             steno_audio::CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
             Arc::new(steno_audio::SystemClock::new()),
+            make_writer.clone(),
         )
         .map_err(|error| error.to_string())
     })
@@ -97,6 +124,64 @@ pub fn synthetic_tone(
     );
     options.real_time = true;
     options
+}
+
+/// The graph `build` assembles, over fakes, with a recorder over
+/// `make_session` that records into `root/audio`: what `App::shutdown`
+/// drives, the host's recorder, and the launch. On the current runtime.
+pub fn app_over_fakes(
+    root: &std::path::Path,
+    store: &Arc<Store>,
+    make_session: MakeCaptureSession,
+) -> crate::App {
+    let mut settings = store.settings().unwrap();
+    settings.audio_folder = steno_core::paths::file_url(&root.join("audio"), true);
+    store.save_settings(&settings).unwrap();
+    let pipeline = current_pipeline(fake_dependencies(store, "fake-engine"));
+    let zone = chrono::FixedOffset::east_opt(0).unwrap();
+    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
+    let recorder = crate::recorder::CaptureRecorder::new(
+        store.clone(),
+        pipeline.clone(),
+        make_session,
+        fakes.permissions.clone(),
+        fakes.speech_models.clone(),
+        zone,
+        tokio::runtime::Handle::current(),
+        root.join("support"),
+    );
+    let mut services = fakes.services();
+    services.recorder = recorder.clone();
+    crate::App {
+        paths: steno_core::StenoPaths::new(root.join("support")),
+        store: store.clone(),
+        secrets: Arc::new(steno_core::testing::InMemorySecretStore::new()),
+        events: MeetingEventBus::new(),
+        pipeline,
+        sweep: steno_pipeline::RetentionSweep::new(store.clone()),
+        export_retries: Arc::new(steno_pipeline::ExportRetries::in_memory()),
+        services,
+        handover: None,
+        recorder,
+        models_directory: root.join("models"),
+        zone,
+        runtime: tokio::runtime::Handle::current(),
+        version: "0.0.0".to_owned(),
+        startup_warnings: Vec::new(),
+        live_recording_check: crate::recovery::LiveRecordingCheck::default(),
+        launch_work: std::sync::Mutex::default(),
+        database_lock: None,
+    }
+}
+
+/// A live check whose clock reads an hour after now: every master is a
+/// crash's, and none is waited for.
+pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
+    crate::recovery::LiveRecordingCheck {
+        now: Arc::new(|| std::time::SystemTime::now() + Duration::from_secs(3_600)),
+        wait: Arc::new(|_| panic!("an old master is not waited for")),
+        ..crate::recovery::LiveRecordingCheck::default()
+    }
 }
 
 /// Waits until `done` holds, failing the test with `what` after
@@ -129,5 +214,25 @@ pub fn on_own_thread<T: Send + 'static>(
         Ok(value) => value,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!("{what}"),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => panic!("the call panicked"),
+    }
+}
+
+/// `frames` frames of a tone on every lane of `writer`, as a capture
+/// hands them over.
+pub fn write_frames(writer: &mut steno_audio::RecordingWriter, frames: usize) {
+    use steno_audio::FRAME_SIZE;
+    use steno_audio::writer::{LaneFrames, RecordingWriting as _};
+
+    let lanes = writer.lanes().len();
+    let tone = steno_audio::testing::AudioFixtures::tone(440.0, 0.01, 0.5);
+    let slices: Vec<&[f32]> = (0..lanes).map(|_| &tone[..FRAME_SIZE]).collect();
+    for _ in 0..frames {
+        writer
+            .write(&LaneFrames {
+                frame_count: FRAME_SIZE,
+                lanes: &slices,
+                raw_mic: None,
+            })
+            .unwrap();
     }
 }

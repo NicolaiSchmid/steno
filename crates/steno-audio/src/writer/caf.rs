@@ -14,7 +14,8 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::bytes::{ReadAt, WindowedFile};
-use super::{durable, io_error};
+use super::durable::{self, FullSyncs};
+use super::io_error;
 use crate::capture::CaptureError;
 
 /// Streams Float32 PCM into a CAF whose data size stays -1 until `finish`;
@@ -27,6 +28,7 @@ pub struct CafStreamWriter {
     file: Option<File>,
     /// Interleaved frames as little-endian bytes, reused per write.
     scratch: Vec<u8>,
+    syncs: FullSyncs,
 }
 
 impl std::fmt::Debug for CafStreamWriter {
@@ -77,7 +79,15 @@ impl CafStreamWriter {
             frames_written: 0,
             file: Some(file),
             scratch: Vec::new(),
+            syncs: FullSyncs::DISK,
         })
+    }
+
+    /// The writer, its syncs made through `syncs`.
+    #[cfg(test)]
+    fn syncing_through(mut self, syncs: FullSyncs) -> Self {
+        self.syncs = syncs;
+        self
     }
 
     /// Where it writes.
@@ -130,7 +140,7 @@ impl CafStreamWriter {
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file
             .as_ref()
-            .map_or(Ok(()), |file| durable::sync(file, File::sync_data))
+            .map_or(Ok(()), |file| durable::sync(file, self.syncs.periodic))
     }
 
     /// Patches the data chunk size (edit count plus samples), flushes and
@@ -146,7 +156,7 @@ impl CafStreamWriter {
             .map_err(|e| io_error(&self.path, &e))?;
         file.write_all(&size.to_be_bytes())
             .map_err(|e| io_error(&self.path, &e))?;
-        durable::sync(&file, File::sync_all).map_err(|e| io_error(&self.path, &e))?;
+        durable::sync(&file, self.syncs.close).map_err(|e| io_error(&self.path, &e))?;
         Ok(())
     }
 
@@ -201,7 +211,8 @@ pub enum CafReadError {
 /// channel count, data size -1 accepted) into de-interleaved channels, the
 /// whole file at once: for the tests and the bench tools. The pipeline's
 /// decoder, [`SymphoniaAudioCodec`](crate::codec::SymphoniaAudioCodec),
-/// reads a master through the same chunk walk a block at a time.
+/// reads a master through the same chunk walk a block at a time, and crash
+/// recovery reads the headers alone ([`CafHeader`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CafFile {
     /// Hertz.
@@ -254,11 +265,13 @@ impl CafFile {
 #[derive(Debug, Clone, Copy)]
 struct CafLayout {
     sample_rate: f64,
-    /// At least one.
+    /// At least one: a CAF that names none is malformed.
     channels: usize,
     /// The file offset of the first sample.
     start: usize,
-    /// Whole frames from `start`.
+    /// Whole frames from `start`: up to the `data` chunk's size, or to the
+    /// end of the file while that size is -1. A frame cut short by a kill
+    /// or a full disk does not count.
     frames: usize,
 }
 
@@ -342,12 +355,14 @@ impl CafLayout {
                 String::from_utf8_lossy(&format_id)
             )));
         }
-        let channels = channel_count.max(1);
+        if channel_count == 0 {
+            return Err(CafReadError::Malformed("no channels".into()));
+        }
         Ok(Self {
             sample_rate,
-            channels,
+            channels: channel_count,
             start,
-            frames: count / (CafStreamWriter::BYTES_PER_SAMPLE * channels),
+            frames: count / (CafStreamWriter::BYTES_PER_SAMPLE * channel_count),
         })
     }
 }
@@ -418,10 +433,121 @@ impl CafReader {
     }
 }
 
+/// What a CAF's chunk headers say, read without its samples: the format
+/// and how many whole frames the file holds. Crash recovery rebuilds a
+/// recording from it, and reading the master itself would mean 1.4 GB an
+/// hour. The same chunk walk as [`CafFile`] and the decoder; only the
+/// chunk headers and the `desc` body are read. Rust only: Swift had no
+/// recovery.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CafHeader {
+    /// Hertz.
+    pub sample_rate: f64,
+    /// Interleaved channels, at least one.
+    pub channel_count: usize,
+    /// Whole frames on disk: up to the `data` chunk's size, or to the end
+    /// of the file while that size is -1. A frame cut short by a kill or a
+    /// full disk does not count.
+    pub frame_count: u64,
+}
+
+impl CafHeader {
+    /// Reads the header of the file at `path`.
+    ///
+    /// ```
+    /// use steno_audio::writer::{CafHeader, CafStreamWriter};
+    ///
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("recording.caf");
+    /// let mut writer = CafStreamWriter::create(&path, 48_000.0, 2).unwrap();
+    /// writer.write(&[0.0; 2 * 480], 480).unwrap();
+    /// // Not finished, as a kill leaves it: the data size is still -1.
+    /// drop(writer);
+    /// let header = CafHeader::read(&path).unwrap();
+    /// assert_eq!((header.channel_count, header.frame_count), (2, 480));
+    /// assert_eq!(header.duration(), 0.01);
+    /// ```
+    pub fn read(path: &Path) -> Result<Self, CafReadError> {
+        let mut file = WindowedFile::open(path).map_err(|e| CafReadError::Io(e.to_string()))?;
+        CafLayout::read(&mut file).map(Self::from)
+    }
+
+    /// Reads the header from `data`, a whole CAF or its start.
+    pub fn read_bytes(mut data: &[u8]) -> Result<Self, CafReadError> {
+        CafLayout::read(&mut data).map(Self::from)
+    }
+
+    /// Seconds in the whole frames.
+    #[must_use]
+    pub fn duration(&self) -> f64 {
+        // Exact in f64 for any recording.
+        let frames = self.frame_count as f64;
+        frames / self.sample_rate
+    }
+}
+
+impl From<CafLayout> for CafHeader {
+    fn from(layout: CafLayout) -> Self {
+        Self {
+            sample_rate: layout.sample_rate,
+            channel_count: layout.channels,
+            frame_count: layout.frames as u64,
+        }
+    }
+}
+
 fn be_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap_or([0; 4]))
 }
 
 fn be_u64(data: &[u8], offset: usize) -> u64 {
     u64::from_be_bytes(data[offset..offset + 8].try_into().unwrap_or([0; 8]))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// Every `sync` is one full sync of the data, through `durable`'s
+    /// fallback, and `finish` one of everything (P21 of
+    /// `.plans/2026-10-07-stable-promotion.md`: a frame synced is on the
+    /// disk, not in the page cache a kill keeps); nothing syncs after
+    /// `finish`.
+    #[test]
+    fn each_sync_is_one_full_sync_and_the_finish_one_more() {
+        static PERIODIC: AtomicUsize = AtomicUsize::new(0);
+        static CLOSE: AtomicUsize = AtomicUsize::new(0);
+        let syncs = FullSyncs {
+            periodic: |file| {
+                PERIODIC.fetch_add(1, Ordering::SeqCst);
+                file.sync_data()
+            },
+            close: |file| {
+                CLOSE.fetch_add(1, Ordering::SeqCst);
+                file.sync_all()
+            },
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recording.caf");
+        let mut writer = CafStreamWriter::create(&path, 48_000.0, 2)
+            .unwrap()
+            .syncing_through(syncs);
+        for synced in 1..=3 {
+            writer.write(&[0.25; 960], 480).unwrap();
+            writer.sync().unwrap();
+            assert_eq!(PERIODIC.load(Ordering::SeqCst), synced);
+        }
+        assert_eq!(CLOSE.load(Ordering::SeqCst), 0);
+        writer.finish().unwrap();
+        writer.sync().unwrap();
+        assert_eq!(
+            (
+                PERIODIC.load(Ordering::SeqCst),
+                CLOSE.load(Ordering::SeqCst)
+            ),
+            (3, 1)
+        );
+    }
 }

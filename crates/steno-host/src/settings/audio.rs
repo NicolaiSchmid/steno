@@ -150,7 +150,21 @@ impl AudioSettingsViewModel {
         self.save(store, move |settings| settings.input_device_uid = uid);
     }
 
+    /// Saves `folder` as the audio folder. The folder it leaves, as the
+    /// stored settings name it, is remembered first
+    /// ([`Recorder::remember_audio_folder`](crate::services::Recorder::remember_audio_folder)):
+    /// a recording started there goes on there, and crash recovery must
+    /// look for it there (Rust only: Swift had no recovery). Nothing is
+    /// moved. Swift: `AudioSettingsViewModel.setAudioFolder`.
     pub fn set_audio_folder(&mut self, folder: &Path, store: &Store, services: &Services) {
+        let leaving = store
+            .settings()
+            .ok()
+            .and_then(|settings| file_url_path(&settings.audio_folder))
+            .unwrap_or_else(|| self.audio_folder.clone());
+        if leaving != folder {
+            services.recorder.remember_audio_folder(&leaving);
+        }
         self.audio_folder = folder.to_path_buf();
         let url = file_url(folder, true);
         self.save(store, move |settings| settings.audio_folder = url);

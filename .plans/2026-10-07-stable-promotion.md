@@ -150,8 +150,9 @@ Forge and atlas.
   and is off without a transcript. The pipeline can process a meeting again
   (`ProcessingPipeline::reprocess`), but neither the bridge nor the CLI calls it
   yet, and the CLI reads WAV only. P9 adds them.
-- **A recording ended by a kill is marked failed at the next launch**
-  (`fail_interrupted_recordings`), and nothing salvages its CAF yet (P3).
+- **A recording ended by a kill is recovered at the next launch** from its CAF
+  on disk and queued with the end reason `failed`; one with no audio on disk is
+  marked failed as before (P3, #233).
 - **Omarchy 4** (Arch with Hyprland, Wayland):
   - it is a `uwsm` session: logout is `uwsm stop`, which stops the app's unit
     with SIGTERM while Hyprland still runs, so the app's signal handler saves;
@@ -398,9 +399,9 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
 | P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard, #228) |
 | P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | pipeline, store and export (`wp-pse-*`) |
-| P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run without migrating, and refuse beside an older app. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); a Swift app started after the Rust app is not kept out | capture and recovery (`wp-cap-*`, #225) |
+| P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run without migrating, and refuse beside an older app. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); a Swift app started after the Rust app is not kept out, and its launch fails every `recording` row, the one the Rust app is still recording among them, so that recording's stop cannot save it and its folder stays on disk unlisted (a known limit, accepted because the handoff runs one app at a time) | capture and recovery (`wp-cap-*`, #225) |
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
-| P17 | A local recording's folder: a failed enqueue saves the asset row, so the folder is not orphaned; a panic in the session's rebuild ends the recording saved, as a lost device | capture and recovery (`wp-cap-*`) |
+| P17 | A local recording's folder: a save that fails leaves the meeting `recording` with its folder on disk, and the next launch's recovery (P3) rebuilds the asset row from the master and queues the meeting, so the folder is not orphaned (#233); a panic in the session's rebuild ends the recording saved, as a lost device (#230) | capture and recovery (`wp-cap-*`) |
 | P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
 | P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform (Core Audio, PipeWire and WASAPI in #222), also when the chosen device is connected but does not open, and the recording returns to it once it is back and opens; one that does not open (at the start, or while it settles on its way back) is asked for again only at the next rebuild, when a default device moves or a device in use goes | audio (#222) |
 | P20 | A recording that fills the disk: a free-space check before and during recording, with a warning. Linux and Windows refuse a start and stop the recording, saved, above a floor; the Mac half stays open until #236: `statvfs` leaves out APFS's purgeable space, so there a low reading only warns, and a disk that is truly full can fail the save, which P3 (#233) and P17 recover; the floor follows once `steno-macos` reads `NSURLVolumeAvailableCapacityForImportantUsageKey` | capture and recovery (`wp-cap-*`, #230; the Mac half #236) |
@@ -724,8 +725,12 @@ The table above names each package and its owner. Their tests:
   After a kill past the first flush, the next launch lists the meeting `queued`
   with `endReason` `failed` and no failure reason, with audio up to the last
   flush, and processes it. A kill before the first flush leaves state `failed`,
-  not a missing meeting. Each flush is followed by
-  `sync_data` (P21), asserted through a counting file.
+  not a missing meeting. Each flush is followed by `sync_data` (P21): the CAF and
+  WAV writers' tests count the full syncs they run in place of the disk's, one
+  per writer sync and one at the finish, and a test pins the product's
+  `FullSyncs::DISK` to `File::sync_data` and `File::sync_all`, so the syncs
+  counted are the ones the product runs (a kill keeps the page cache, so the
+  kill test cannot show it).
 - **P4.** The interleaving forced with a gate.
 - **P5.** The save of a two-hour recording is measured on Nicolai's slowest
   Linux machine, and on Windows in the Windows gate; it passes under 10 s. The

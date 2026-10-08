@@ -75,6 +75,10 @@ pub enum StoreError {
     /// the meeting's files.
     #[error("meeting {0} is {1} and cannot be deleted")]
     MeetingBusy(Uuid, MeetingStateKind),
+    /// [`Store::save_stopped_recording`] on a meeting no longer
+    /// `recording`: nothing was written. Rust only.
+    #[error("meeting {0} is {1}, not recording")]
+    NotRecording(Uuid, MeetingStateKind),
     /// The phone intake's admission of a recording whose receipt is another
     /// upload's, raised at the intake's own read and by
     /// `save_admission_durably`: it belongs to another device (the admitting

@@ -208,6 +208,9 @@ struct Inner {
     subtitles: BTreeMap<SettingsSection, String>,
     onboarding: OnboardingViewModel,
     publisher: TopicPublisher,
+    /// The recorder's state and meeting at its last change, so the list is
+    /// reloaded when they move and not with every level update.
+    recorder_seen: Option<(RecordingState, Option<Uuid>)>,
 }
 
 /// What every clone of a [`Host`] shares: the store, the services, the
@@ -336,6 +339,10 @@ const SECTION_TOPICS: [BridgeTopic; 6] = [
     BridgeTopic::SettingsPhone,
 ];
 
+/// What a delete of a meeting that may still be recorded says, as the
+/// Swift host said for a recording row.
+const STILL_RECORDING: &str = "This meeting is still recording.";
+
 /// Swift: `MainWindowBridge.deleteMeetingMessage`.
 pub const DELETE_MEETING_MESSAGE: &str = "The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay.";
 
@@ -430,6 +437,7 @@ impl Host {
                 subtitles,
                 onboarding,
                 publisher,
+                recorder_seen: None,
             }),
             sink: Mutex::new(None),
             publishing: Mutex::new(()),
@@ -767,10 +775,26 @@ impl Host {
         self.publish();
     }
 
-    /// The recorder's state, levels or messages changed.
+    /// The recorder's state, levels or messages changed. When its state or
+    /// its meeting moved, the list is reloaded as for
+    /// [`Self::store_changed`]: a start wrote the meeting `recording`, a
+    /// stop queued it, and the list must not wait for the next change to
+    /// show it, since the web app tells a live row from one left
+    /// `recording` by the recorder's state. Rust only: the Swift app's list
+    /// observes the meeting table (`observeMeetings`).
     pub fn recorder_changed(&self) {
-        self.lock().publisher.schedule(BridgeTopic::Recording);
-        self.publish();
+        let status = self.shared.services.recorder.status();
+        let seen = Some((status.state, status.meeting_id));
+        let moved = {
+            let mut inner = self.lock();
+            inner.publisher.schedule(BridgeTopic::Recording);
+            std::mem::replace(&mut inner.recorder_seen, seen) != seen
+        };
+        if moved {
+            self.store_changed();
+        } else {
+            self.publish();
+        }
     }
 
     /// One event from the pipeline's bus.
@@ -1389,7 +1413,8 @@ impl BridgeHost for Host {
     }
 
     fn meetings_delete(&self, params: MeetingIdParams) -> Outcome<ConfirmReply> {
-        let prompt = {
+        let recorder_idle = self.shared.services.recorder.status().state == RecordingState::Idle;
+        let (prompt, recording) = {
             let inner = self.lock();
             let meeting = inner
                 .list
@@ -1397,15 +1422,16 @@ impl BridgeHost for Host {
                 .iter()
                 .find(|meeting| meeting.id == params.meeting_id)
                 .ok_or_else(no_such_meeting)?;
-            if !MeetingListViewModel::can_delete(meeting) {
-                let message = if meeting.state.kind() == steno_core::MeetingStateKind::Recording {
-                    "This meeting is still recording."
+            let recording = meeting.state.kind() == steno_core::MeetingStateKind::Recording;
+            if !MeetingListViewModel::can_delete(meeting, recorder_idle) {
+                let message = if recording {
+                    STILL_RECORDING
                 } else {
                     "This meeting is still being processed."
                 };
                 return Err(BridgeError::failed(message));
             }
-            ConfirmDestructiveParams {
+            let prompt = ConfirmDestructiveParams {
                 title: format!(
                     "Delete “{}”?",
                     crate::labels::display_title(meeting, self.now(), self.shared.config.zone)
@@ -1417,18 +1443,37 @@ impl BridgeHost for Host {
                     .mac_or(DELETE_MEETING_MESSAGE, DELETE_MEETING_MESSAGE_ELSEWHERE)
                     .to_owned(),
                 confirm_title: "Delete".to_owned(),
+            };
+            (prompt, recording)
+        };
+        // A row left `recording` may be one another process still records
+        // (the Swift app started after this one): its master on disk says
+        // so. Read with the lock released.
+        let left = if recording {
+            let left = self
+                .shared
+                .services
+                .recorder
+                .left_recording(params.meeting_id);
+            if left.still_written {
+                return Err(BridgeError::failed(STILL_RECORDING));
             }
+            Some(left)
+        } else {
+            None
         };
         let confirmed = self.confirm(&prompt);
         if confirmed {
             let now = self.now();
+            let mut deleted = false;
             self.command(
                 &[BridgeTopic::MeetingsList, BridgeTopic::Progress],
                 |inner| {
-                    let deleted = inner.list.delete(
+                    deleted = inner.list.delete(
                         params.meeting_id,
                         &self.shared.store,
                         &*self.shared.services.file_system,
+                        left.as_ref(),
                     );
                     inner.list.reload(&self.shared.store);
                     // The store's `deleted` event, posted only when the rows
@@ -1443,6 +1488,12 @@ impl BridgeHost for Host {
                     }
                 },
             );
+            if deleted && left.is_some() {
+                self.shared
+                    .services
+                    .recorder
+                    .forget_recording(params.meeting_id);
+            }
         }
         Ok(ConfirmReply { confirmed })
     }

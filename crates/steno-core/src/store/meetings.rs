@@ -95,6 +95,20 @@ pub(super) fn current(connection: &Connection, id: Uuid) -> Result<Meeting> {
     fetch(connection, id)?.ok_or(StoreError::MeetingNotFound(id))
 }
 
+/// Writes `meeting` back `failed(reason)` with `updatedAt = now`.
+fn save_failed(
+    connection: &Connection,
+    meeting: &mut Meeting,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    meeting.state = MeetingState::Failed {
+        reason: reason.to_owned(),
+    };
+    meeting.updated_at = now;
+    save(connection, meeting)
+}
+
 /// Reads the row and overlays `results`' processing columns, so a stage
 /// that started minutes ago never writes back the scratchpad or tags it
 /// read then.
@@ -157,6 +171,31 @@ impl Store {
     pub fn save_meeting_with_asset(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
         self.write(|transaction| {
             save(transaction, meeting)?;
+            assets::save(transaction, asset)
+        })
+    }
+
+    /// A stopped recording's commit (`LocalRecordingIntake::complete`,
+    /// through `ProcessingPipeline::enqueue_stopped_recording`), in one
+    /// transaction and only while the stored row is still `recording`: the
+    /// row takes `meeting`'s duration, end reason, state and `updatedAt`
+    /// and keeps the rest as stored (a title or notes saved since the
+    /// caller read it), and `asset` is saved. A row that moved on fails with
+    /// [`StoreError::NotRecording`] and one that is gone with
+    /// [`StoreError::MeetingNotFound`], and nothing is written, so a
+    /// recording deleted or failed meanwhile is not brought back. Rust
+    /// only: Swift's `complete` saved the row it had read.
+    pub fn save_stopped_recording(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
+        self.write(|transaction| {
+            let mut stored = current(transaction, meeting.id)?;
+            if stored.state != MeetingState::Recording {
+                return Err(StoreError::NotRecording(meeting.id, stored.state.kind()));
+            }
+            stored.duration = meeting.duration;
+            stored.end_reason.clone_from(&meeting.end_reason);
+            stored.state = meeting.state.clone();
+            stored.updated_at = meeting.updated_at;
+            save(transaction, &stored)?;
             assets::save(transaction, asset)
         })
     }
@@ -237,30 +276,36 @@ impl Store {
     pub const INTERRUPTED_RECORDING_REASON: &'static str =
         "Recording was interrupted before it finished.";
 
-    /// Launch reconciliation: every meeting still `recording` belongs to a
-    /// process that died mid-meeting. One transaction marks them
-    /// `failed(reason)` with `updatedAt = now` and returns their ids,
-    /// oldest first. The app passes [`Self::INTERRUPTED_RECORDING_REASON`].
-    pub fn fail_interrupted_recordings(
+    /// Launch reconciliation's failing half: marks the meetings in `ids`
+    /// `failed(reason)` with `updatedAt = now`, each only while it is still
+    /// `recording`, in one transaction, and returns the ones it marked, in
+    /// `ids` order. The launch recovers what it can first and passes the
+    /// rows it could not salvage, with
+    /// [`Self::INTERRUPTED_RECORDING_REASON`], so a row it left alone (a
+    /// recording another process is still writing) and a recording started
+    /// since it listed them stay `recording`. Swift:
+    /// `MeetingStore.failInterruptedRecordings` in
+    /// `Sources/StenoCore/Storage/MeetingStore.swift`, which failed every
+    /// `recording` row.
+    pub fn fail_recordings(
         &self,
+        ids: &[Uuid],
         reason: &str,
         now: DateTime<Utc>,
     ) -> Result<Vec<Uuid>> {
         self.write(|transaction| {
-            let mut meetings = query_all(
-                transaction,
-                &format!("SELECT {COLUMNS} FROM meeting WHERE state = ?1 ORDER BY startedAt, id"),
-                [MeetingStateKind::Recording.as_str()],
-                from_row,
-            )?;
-            for meeting in &mut meetings {
-                meeting.state = MeetingState::Failed {
-                    reason: reason.to_owned(),
+            let mut failed = Vec::new();
+            for &id in ids {
+                let Some(mut meeting) = fetch(transaction, id)? else {
+                    continue;
                 };
-                meeting.updated_at = now;
-                save(transaction, meeting)?;
+                if meeting.state != MeetingState::Recording {
+                    continue;
+                }
+                save_failed(transaction, &mut meeting, reason, now)?;
+                failed.push(id);
             }
-            Ok(meetings.into_iter().map(|meeting| meeting.id).collect())
+            Ok(failed)
         })
     }
 
@@ -449,9 +494,26 @@ impl Store {
     /// app. A delete that must be on the disk first would commit through
     /// [`Store::write_durably`].
     pub fn delete_meeting(&self, id: Uuid) -> Result<DeletedMeeting> {
+        self.delete(id, false)
+    }
+
+    /// [`Self::delete_meeting`] that also removes a meeting left
+    /// `recording`, for a caller that knows no capture of its own writes it
+    /// (the host, while its recorder is idle): a recording whose save
+    /// failed, or one the launch's recovery keeps for a folder that is gone
+    /// for good, so the user can remove the row. Still refuses a meeting
+    /// that is `processing`. The rows name no master for such a meeting;
+    /// the caller removes its folder. Rust only: Swift's list refused a
+    /// recording row.
+    pub fn delete_meeting_left_recording(&self, id: Uuid) -> Result<DeletedMeeting> {
+        self.delete(id, true)
+    }
+
+    fn delete(&self, id: Uuid, left_recording: bool) -> Result<DeletedMeeting> {
         self.write(|transaction| {
             let meeting = current(transaction, id)?;
             match meeting.state.kind() {
+                MeetingStateKind::Recording if left_recording => {}
                 kind @ (MeetingStateKind::Recording | MeetingStateKind::Processing) => {
                     return Err(StoreError::MeetingBusy(id, kind));
                 }
