@@ -1856,6 +1856,46 @@ async fn a_rerun_whose_diarizer_fails_keeps_the_confirmed_speakers() {
     }
 }
 
+/// A confirmed speaker's clip that a run ending with the app left beside
+/// its path is back at its path after the next launch, also when that
+/// launch's run writes no clip (its diarizer fails): the speaker stays
+/// confirmed and its clip plays.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_confirmed_clip_left_aside_by_a_crash_is_back_after_the_next_launch() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(&world.audio, meeting.id, AudioRetention::KeepForever);
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    let first = world.store.export(meeting.id).unwrap();
+    let confirmed = speaker(&first.speakers, "Speaker 1");
+    let anna = sample_data::person(0, "Anna");
+    world.store.confirm_speaker(confirmed.id, &anna).unwrap();
+    let clip = file_url_path(confirmed.sample_clip_url.as_ref().unwrap()).unwrap();
+    let voice = std::fs::read(&clip).unwrap();
+    let beside = clip.with_extension("wav.previous");
+    std::fs::rename(&clip, &beside).unwrap();
+    world
+        .store
+        .set_state(meeting.id, MeetingState::Processing, world.now)
+        .unwrap();
+
+    let next_launch = with_failing_diarizer(&world, "no model");
+    assert_eq!(next_launch.resume_unfinished().unwrap(), [meeting.id]);
+    next_launch.wait_until_idle().await;
+
+    assert_eq!(std::fs::read(&clip).unwrap(), voice);
+    assert!(!beside.exists());
+    let again = world.store.export(meeting.id).unwrap();
+    assert_eq!(again.meeting.state, MeetingState::Ready);
+    let kept = speaker(&again.speakers, "Speaker 1");
+    assert_eq!(
+        kept.assignment,
+        steno_core::SpeakerAssignment::Confirmed { person_id: anna.id }
+    );
+    assert_eq!(kept.sample_clip_url, confirmed.sample_clip_url);
+}
+
 /// A call whose tap carried no conversation diarizes its mic lane, which
 /// is the room. When that diarizer fails, the mic lane becomes the one
 /// room speaker, not "me", so the other party's words are never the
