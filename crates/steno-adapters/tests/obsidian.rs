@@ -1057,22 +1057,19 @@ fn a_phone_meeting_whose_recording_was_swept_warns() {
 }
 
 /// The meeting folder, with its audio copy, is deleted, the sweep removes
-/// the mixdown, and a redelivery creates the pinned folder again.
-fn gone_pin_with_the_mixdown_swept(vault: &Vault) -> (DeliveryReceipt, DeliveryReceipt) {
-    let destination = vault.destination();
-    let ours = vault.export_with_audio();
-    let first = deliver(&destination, &ours, None);
-    assert!(paths(&first).contains(&format!("{FOLDER}/audio.m4a")));
-    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
-    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
-    let again = deliver(&destination, &ours, Some(&first));
-    (first, again)
-}
-
+/// the mixdown, and a redelivery creates the pinned folder again: it warns,
+/// and the receipt drops the audio copy and lists every other file again.
 #[test]
 fn a_gone_pinned_folder_with_the_mixdown_swept_warns() {
     let vault = Vault::new();
-    let (_, again) = gone_pin_with_the_mixdown_swept(&vault);
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    let audio = format!("{FOLDER}/audio.m4a");
+    assert!(paths(&first).contains(&audio));
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let again = deliver(&destination, &ours, Some(&first));
     assert_eq!(again.folder, FOLDER);
     assert_eq!(
         vault.list(FOLDER),
@@ -1081,6 +1078,14 @@ fn a_gone_pinned_folder_with_the_mixdown_swept_warns() {
     assert_eq!(
         again.warnings,
         [ObsidianFolderDestination::NO_AUDIO_WARNING]
+    );
+    assert_eq!(
+        paths(&again),
+        paths(&first)
+            .into_iter()
+            .filter(|path| *path != audio)
+            .collect::<Vec<_>>(),
+        "every other file is listed again"
     );
 }
 
@@ -1099,21 +1104,6 @@ fn a_deleted_audio_copy_with_the_mixdown_swept_warns() {
         [ObsidianFolderDestination::NO_AUDIO_WARNING]
     );
     assert!(!paths(&again).contains(&format!("{FOLDER}/audio.m4a")));
-}
-
-#[test]
-fn the_receipt_drops_an_audio_copy_that_is_gone() {
-    let vault = Vault::new();
-    let (first, again) = gone_pin_with_the_mixdown_swept(&vault);
-    let audio = format!("{FOLDER}/audio.m4a");
-    assert_eq!(
-        paths(&again),
-        paths(&first)
-            .into_iter()
-            .filter(|path| *path != audio)
-            .collect::<Vec<_>>(),
-        "every other file is listed again"
-    );
 }
 
 #[cfg(unix)]
