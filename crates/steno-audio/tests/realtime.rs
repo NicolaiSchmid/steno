@@ -469,9 +469,10 @@ fn the_two_stream_bodies_allocate_nothing() {
     );
 }
 
-/// The body of the call capture's silent output IOProc zeroes the HAL's
-/// output buffers (a null `mData` and a size of 0 skipped) without
-/// allocating.
+/// The body of the call capture's silent output IOProc zeroes every output
+/// buffer it is handed, the last one included, goes on past a buffer
+/// without data and one of size 0, writes nothing past a buffer's size,
+/// and allocates nothing.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_silent_output_allocates_nothing() {
@@ -480,43 +481,49 @@ fn the_silent_output_allocates_nothing() {
     use objc2_core_audio_types::AudioBuffer;
     use steno_audio::realtime::silence_output;
 
+    /// An `AudioBufferList` of four buffers, laid out as the HAL's.
     #[repr(C)]
     struct List {
         count: u32,
-        buffers: [AudioBuffer; 3],
+        buffers: [AudioBuffer; 4],
     }
-    let mut stereo = vec![1.0f32; 2 * CALLBACK_FRAMES];
-    let mut untouched = vec![0.5f32; 8];
+    let mut stereo = vec![0.75f32; 2 * CALLBACK_FRAMES];
+    let mut sized_zero = vec![0.5f32; 16];
+    let mut mono = vec![-0.25f32; CALLBACK_FRAMES];
+    let buffer = |channels: u32, data: *mut f32, floats: usize| AudioBuffer {
+        mNumberChannels: channels,
+        mDataByteSize: (4 * floats) as u32,
+        mData: data.cast(),
+    };
     let mut list = List {
-        count: 3,
+        count: 4,
         buffers: [
-            AudioBuffer {
-                mNumberChannels: 2,
-                mDataByteSize: 4 * 512,
-                mData: std::ptr::null_mut(),
-            },
-            AudioBuffer {
-                mNumberChannels: 1,
-                mDataByteSize: 0,
-                mData: untouched.as_mut_ptr().cast(),
-            },
-            AudioBuffer {
-                mNumberChannels: 2,
-                mDataByteSize: (4 * stereo.len()) as u32,
-                mData: stereo.as_mut_ptr().cast(),
-            },
+            buffer(2, stereo.as_mut_ptr(), stereo.len()),
+            buffer(2, std::ptr::null_mut(), stereo.len()),
+            buffer(1, sized_zero.as_mut_ptr(), 0),
+            buffer(1, mono.as_mut_ptr(), CALLBACK_FRAMES / 2),
         ],
     };
     let output = NonNull::from(&mut list).cast();
     let allocations = CountingAllocator::allocations_during(|| {
-        // SAFETY: the non-null buffers are vectors of their stated size that
-        // outlive the call, laid out as an `AudioBufferList` of three.
+        // SAFETY: every non-null `mData` points at a vector of at least
+        // `mDataByteSize` bytes that outlives the call, and `List` has the
+        // layout of an `AudioBufferList` of four buffers.
         unsafe { silence_output(output) };
     });
     assert_eq!(
         allocations, 0,
         "{allocations} allocations in the silent output"
     );
-    assert!(stereo.iter().all(|s| s.to_bits() == 0));
-    assert!(untouched.iter().all(|s| *s == 0.5));
+    assert!(stereo.iter().all(|s| s.to_bits() == 0), "zeroed in full");
+    assert!(
+        sized_zero.iter().all(|s| *s == 0.5),
+        "a size of 0 is left alone"
+    );
+    let (written, past) = mono.split_at(CALLBACK_FRAMES / 2);
+    assert!(
+        written.iter().all(|s| s.to_bits() == 0),
+        "the last buffer, past the null and the empty one"
+    );
+    assert!(past.iter().all(|s| *s == -0.25), "nothing past the size");
 }

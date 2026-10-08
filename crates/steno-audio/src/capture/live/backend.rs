@@ -831,71 +831,42 @@ mod tests {
         );
     }
 
-    /// The silent output IOProc zeroes every output buffer it is handed,
-    /// the last one included, goes on past a buffer without data and one of
-    /// size 0, and writes nothing past a buffer's size.
+    /// The silent output IOProc zeroes the output list it is handed and
+    /// returns 0. The buffer cases (a null `mData`, a size of 0, the last
+    /// buffer) are `tests/realtime.rs`' `the_silent_output_allocates_nothing`.
     #[test]
     fn the_silent_output_writes_only_zeros() {
         use objc2_core_audio_types::AudioBuffer;
 
-        /// An `AudioBufferList` of four buffers, laid out as the HAL's.
-        #[repr(C)]
-        struct List {
-            count: u32,
-            buffers: [AudioBuffer; 4],
-        }
-        let mut stereo = vec![0.75f32; 1_024];
-        let mut sized_zero = vec![0.5f32; 16];
-        let mut mono = vec![-0.25f32; 512];
-        let buffer = |channels: u32, data: *mut f32, floats: u32| AudioBuffer {
-            mNumberChannels: channels,
-            mDataByteSize: floats * 4,
-            mData: data.cast(),
+        let mut samples = vec![0.75f32; 1_024];
+        let list = |data: *mut f32, floats: u32| AudioBufferList {
+            mNumberBuffers: 1,
+            mBuffers: [AudioBuffer {
+                mNumberChannels: 2,
+                mDataByteSize: floats * 4,
+                mData: data.cast(),
+            }],
         };
-        let mut output = List {
-            count: 4,
-            buffers: [
-                buffer(2, stereo.as_mut_ptr(), 1_024),
-                buffer(2, std::ptr::null_mut(), 1_024),
-                buffer(1, sized_zero.as_mut_ptr(), 0),
-                buffer(1, mono.as_mut_ptr(), 256),
-            ],
-        };
-        let mut input = List {
-            count: 0,
-            buffers: output.buffers,
-        };
+        let mut output = list(samples.as_mut_ptr(), 1_024);
+        let mut input = list(std::ptr::null_mut(), 0);
         // SAFETY: an all-zero `AudioTimeStamp` is a valid, unset stamp.
         let mut time: AudioTimeStamp = unsafe { std::mem::zeroed() };
         let time = NonNull::from(&mut time);
-        // SAFETY: every non-null `mData` points at a vector of at least
-        // `mDataByteSize` bytes that outlives the call, and `List` has the
-        // layout of an `AudioBufferList` of four buffers.
+        // SAFETY: the output's one buffer points at a vector of
+        // `mDataByteSize` bytes that outlives the call; the input has none.
         let status = unsafe {
             silent_io_proc(
                 0,
                 time,
-                NonNull::from(&mut input).cast(),
+                NonNull::from(&mut input),
                 time,
-                NonNull::from(&mut output).cast(),
+                NonNull::from(&mut output),
                 time,
                 std::ptr::null_mut(),
             )
         };
         assert_eq!(status, 0);
-        assert!(stereo.iter().all(|s| s.to_bits() == 0), "zeroed in full");
-        assert!(
-            sized_zero.iter().all(|s| *s == 0.5),
-            "a size of 0 is left alone"
-        );
-        assert!(
-            mono[..256].iter().all(|s| s.to_bits() == 0),
-            "the last buffer, past the null and the empty one"
-        );
-        assert!(
-            mono[256..].iter().all(|s| *s == -0.25),
-            "nothing past the size"
-        );
+        assert!(samples.iter().all(|s| s.to_bits() == 0), "zeroed in full");
     }
 
     /// Only a capture on the fallback is re-checked.
