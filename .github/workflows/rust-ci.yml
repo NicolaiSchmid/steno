@@ -247,47 +247,55 @@ jobs:
       # and macOS rebuild nothing here, Linux part of the tree (about 30 s).
       # The Windows-only test exists only there. A rename would leave
       # `--exact` matching nothing, which passes, so the step greps the log
-      # for each test's `ok` line; the two interface tests print one on
-      # macOS too, after their SKIPPED line. Bash runs with `pipefail`, so `tee`
-      # keeps the test's exit code.
+      # for each test's start line, `test <path> ... `, which proves it ran,
+      # and fails on `... ignored`. The pass is cargo's exit code: Bash runs
+      # with `pipefail`, so `tee` keeps it. The step does not grep for
+      # `... ok`: with `--nocapture` another test's output can land between
+      # a start line and its `ok`. The two interface tests print SKIPPED on
+      # macOS and then pass.
       - name: Handover network tests, with output
         shell: bash
         run: |
           log="$RUNNER_TEMP/handover-network.log"
+          interfaces=(
+            server::tests::the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte
+            server::tests::an_address_gained_after_start_is_served_and_the_listener_keeps_an_open_connection_when_it_leaves
+          )
+          windows=server::advertise::tests::on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
           cargo test --workspace --lib --locked -- --exact --nocapture \
-            server::tests::the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte \
-            server::tests::an_address_gained_after_start_is_served_and_the_listener_keeps_an_open_connection_when_it_leaves \
+            "${interfaces[@]}" \
             server::advertise::tests::the_system_lan_addresses_can_be_read \
-            server::advertise::tests::on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface \
+            "$windows" \
             | tee "$log"
           ran() {
-            grep -qF "$1 ... ok" "$log" || { echo "::error::$1 did not run"; exit 1; }
+            grep -qF "test $1 ... " "$log" || { echo "::error::$1 did not run"; exit 1; }
+            if grep -qF "test $1 ... ignored" "$log"; then echo "::error::$1 is ignored"; exit 1; fi
           }
-          ran the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte
-          ran an_address_gained_after_start_is_served_and_the_listener_keeps_an_open_connection_when_it_leaves
-          if [ "$RUNNER_OS" = Windows ]; then
-            ran on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
-          fi
+          for test in "${interfaces[@]}"; do ran "$test"; done
+          if [ "$RUNNER_OS" = Windows ]; then ran "$windows"; fi
 
       # The FAT32 and exFAT tests again with their output, and the folder
       # usage test that reads the FAT32 drive. A renamed test or a skip
-      # would pass unseen, so the step greps for each `ok` line and fails
-      # on `SKIPPED`.
+      # would pass unseen, so the step greps for each test's start line,
+      # `test <path> ... `, which proves it ran, and fails on `... ignored`
+      # and on `SKIPPED`. The pass is cargo's exit code, kept by `pipefail`
+      # through `tee`; `--nocapture` output can land between a start line
+      # and its `ok`, so the step does not grep for `... ok`.
       - name: FAT32 and exFAT durable writes tests, with output (Windows)
         if: matrix.name == 'windows'
         shell: bash
         run: |
           log="$RUNNER_TEMP/fat.log"
           tests=(
-            on_a_fat32_drive_the_intake_writes_succeed_and_settings_warn
-            on_an_exfat_drive_the_intake_writes_succeed_and_settings_warn
+            files::tests::on_a_fat32_drive_the_intake_writes_succeed_and_settings_warn
+            files::tests::on_an_exfat_drive_the_intake_writes_succeed_and_settings_warn
+            platform::tests::the_disk_folder_usage_reports_a_drive_that_may_lose_recent_writes
           )
-          usage=the_disk_folder_usage_reports_a_drive_that_may_lose_recent_writes
           cargo test --workspace --lib --locked -- --exact --nocapture \
-            "files::tests::${tests[0]}" "files::tests::${tests[1]}" \
-            "platform::tests::$usage" 2>&1 | tee "$log"
-          for test in "${tests[@]}" "$usage"; do
-            grep -qF "$test ... ok" "$log" || { echo "::error::$test did not run"; exit 1; }
+            "${tests[@]}" 2>&1 | tee "$log"
+          for test in "${tests[@]}"; do
+            grep -qF "test $test ... " "$log" || { echo "::error::$test did not run"; exit 1; }
+            if grep -qF "test $test ... ignored" "$log"; then echo "::error::$test is ignored"; exit 1; fi
           done
           if grep -qF "SKIPPED" "$log"; then echo "::error::a durable writes test skipped"; exit 1; fi
 
