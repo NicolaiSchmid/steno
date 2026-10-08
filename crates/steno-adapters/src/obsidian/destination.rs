@@ -87,13 +87,6 @@ fn is_audio(name: &str) -> bool {
     name == "audio" || name.starts_with("audio.")
 }
 
-/// Whether `path` is an audio copy directly in `folder`.
-fn is_audio_in(path: &str, folder: &str) -> bool {
-    path.strip_prefix(folder)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .is_some_and(|name| !name.contains('/') && is_audio(name))
-}
-
 /// The lock every delivery into the vault at `vault_path` holds from start
 /// to end, one per vault in the process, so two deliveries merge a shared
 /// person page, claim meeting folders and sweep temp files one after the
@@ -427,7 +420,10 @@ impl ObsidianFolderDestination {
                 let gone: Vec<String> = ledger
                     .files()
                     .keys()
-                    .filter(|path| is_audio_in(path, folder) && !self.sink.exists(path))
+                    .filter(|path| {
+                        DeliveryLedger::name_in(path, folder).is_some_and(is_audio)
+                            && !self.sink.entry_exists(path)
+                    })
                     .cloned()
                     .collect();
                 for path in &gone {

@@ -155,7 +155,7 @@ impl DeliveryLedger {
     }
 
     /// The file name of `path` when it sits directly in `folder`.
-    fn name_in<'a>(path: &'a str, folder: &str) -> Option<&'a str> {
+    pub(crate) fn name_in<'a>(path: &'a str, folder: &str) -> Option<&'a str> {
         path.strip_prefix(folder)?
             .strip_prefix('/')
             .filter(|name| !name.contains('/'))

@@ -1106,6 +1106,25 @@ fn a_deleted_audio_copy_with_the_mixdown_swept_warns() {
     assert!(!paths(&again).contains(&format!("{FOLDER}/audio.m4a")));
 }
 
+/// A link left where the audio copy was is still an entry in the folder:
+/// the receipt keeps it, so the copy is never taken for the user's file.
+#[cfg(unix)]
+#[test]
+fn an_audio_copy_left_as_a_dangling_link_stays_on_the_receipt() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    let copy = vault.path(&format!("{FOLDER}/audio.m4a"));
+    fs::remove_file(&copy).unwrap();
+    std::os::unix::fs::symlink(vault.directory.path().join("nowhere.m4a"), &copy).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let again = deliver(&destination, &ours, Some(&first));
+    assert_eq!(again.folder, FOLDER);
+    assert!(paths(&again).contains(&format!("{FOLDER}/audio.m4a")));
+    assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_mixdown_that_cannot_be_checked_is_a_read_failure_not_missing_audio() {

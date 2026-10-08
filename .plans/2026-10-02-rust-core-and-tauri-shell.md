@@ -1272,8 +1272,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   pages on.
 - When the audio copy is on, a phone recording (`M4aAac`) without a mixdown is copied
   from its own AAC file; Swift fails it with `audioUnavailable`. When the audio copy
-  is on, the mixdown is gone and the meeting folder holds no audio file on disk (a
-  receipt entry for one that is gone is dropped), the Rust destination writes the
+  is on, the file it copies (the mixdown, or a phone recording's AAC file) is gone
+  and the meeting folder holds no audio file on disk (a receipt entry for one that
+  is gone is dropped), the Rust destination writes the
   notes and returns a warning in the receipt ("The audio was already removed, so the
   export has no audio file"), which the meeting's export line and `steno deliver`
   show. Swift fails the delivery with `audioUnavailable` after writing every other
