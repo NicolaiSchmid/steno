@@ -4453,6 +4453,8 @@ async fn a_row_failed_without_an_attempt_waits_a_day() {
     }
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(export_retries(&world).count(id), 1);
+}
+
 /// Where [`Uninstalled`] refuses while its models are missing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Refusal {

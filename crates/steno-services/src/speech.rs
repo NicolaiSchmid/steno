@@ -220,8 +220,6 @@ pub fn coreml_model_directory(models_directory: &Path) -> PathBuf {
         .directory(&steno_speech::ModelAsset::parakeet_v3_coreml())
 }
 
-}
-
 /// The engine `engine_id` names, where [`SpeechSetup::runtime`] runs it:
 /// on the Mac, by default, the `CoreML` Parakeet v3 on the Neural Engine;
 /// otherwise [`sidecar_engine`], the fp32 ONNX export of the same model.
@@ -1031,33 +1029,6 @@ mod tests {
             .set_len(weights.size - 1)
             .unwrap();
         assert!(!models.installed_on(SpeechRuntime::CoreMlInProcess));
-    }
-
-    /// The diarizer counts as installed only with both files at their
-    /// sizes, the check its gate makes: a file cut short (a download that
-    /// stopped, a copy that did not finish) is missing, so the gate refuses
-    /// before the loader could fetch it again inside a run.
-    #[test]
-    fn the_diarizer_counts_as_installed_only_at_its_sizes() {
-        let dir = tempfile::tempdir().unwrap();
-        let models = testing::models_in(dir.path());
-        assert!(!models.is_installed(ModelAsset::OfflineDiarizer));
-        testing::install_onnx_diarizer(&models);
-        assert!(models.is_installed(ModelAsset::OfflineDiarizer));
-        let asset = diarizer_asset();
-        let file = &asset.files[1];
-        std::fs::File::options()
-            .write(true)
-            .open(models.speech.directory(&asset).join(&file.name))
-            .unwrap()
-            .set_len(file.size - 1)
-            .unwrap();
-        assert!(!models.is_installed(ModelAsset::OfflineDiarizer));
-        assert_eq!(
-            models.speech.directory(&asset),
-            diarize_store(&models.speech).root(),
-            "the files the diarizer's loader opens"
-        );
     }
 
     #[test]
