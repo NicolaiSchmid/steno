@@ -230,12 +230,18 @@ pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
 /// the 0600 secrets file in the support directory. After the Linux app
 /// moved the file's secrets into the Secret Service, which the command line
-/// does not read, the file holds no key: the run goes on without one,
-/// saying so on stderr, as on the Mac, whose app keeps the key in the
-/// Keychain.
+/// does not read, the file keeps a copy of the key only until the app's
+/// next launch removes it; a key it no longer holds is read as none and
+/// the run goes on without one, saying so on stderr, as on the Mac, whose
+/// app keeps the key in the Keychain.
 pub async fn api_key() -> Result<Option<String>, Failure> {
+    api_key_under(&paths()?).await
+}
+
+/// [`api_key`] under `paths`.
+async fn api_key_under(paths: &StenoPaths) -> Result<Option<String>, Failure> {
     let key = SecretKey::llm_api_key();
-    let read = steno_services::secret_store(false, &paths()?)
+    let read = steno_services::secret_store(false, paths)
         .secret(&key)
         .await;
     key_or_none(read, &key)
@@ -254,8 +260,8 @@ fn key_or_none(
             ) =>
         {
             eprintln!(
-                "The API key is in the keyring, which the command line does not read; \
-                 set {} to use it.",
+                "No API key in the secrets file (the app keeps it in the keyring, which the \
+                 command line does not read); set {} to use it.",
                 steno_services::FileSecretStore::environment_variable(key)
             );
             Ok(None)
@@ -264,13 +270,17 @@ fn key_or_none(
     }
 }
 
-/// The LLM passes from the settings, `None` without an endpoint.
+/// The LLM passes from the settings, `None` without an endpoint. The API
+/// key is read only for a server endpoint, the one kind that sends it.
 pub async fn llm_passes(
     settings: &Settings,
 ) -> Result<Option<steno_services::llm::Passes>, Failure> {
+    let sends_key = settings.llm_provider == steno_core::LlmProvider::Endpoint
+        && steno_llm::LlmEndpoint::from_settings(settings).is_some();
+    let key = if sends_key { api_key().await? } else { None };
     Ok(steno_services::llm::passes(
         settings,
-        api_key().await?.as_deref(),
+        key.as_deref(),
         &steno_services::llm::codex_store(),
         steno_adapters::runtime::local_time_zone(),
     ))
@@ -369,6 +379,31 @@ mod tests {
             Some("sk")
         );
         assert!(key_or_none(Err("the file is damaged".into()), &key).is_err());
+    }
+
+    /// The command's own read over a file the app marked: a copy the move
+    /// left is used, and none once the app's next launch removed it.
+    #[tokio::test]
+    async fn the_key_is_read_from_a_marked_file_and_none_once_it_left() {
+        if std::env::var_os("STENO_LLM_API_KEY").is_some() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StenoPaths::new(dir.path().to_path_buf());
+        let file = dir.path().join("secrets.json");
+        std::fs::write(
+            &file,
+            br#"{"movedToSecretService": true, "llm-api-key": "sk-left"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            api_key_under(&paths).await.unwrap().as_deref(),
+            Some("sk-left")
+        );
+        std::fs::write(&file, br#"{"movedToSecretService": true}"#).unwrap();
+        assert_eq!(api_key_under(&paths).await.unwrap(), None);
+        std::fs::write(&file, b"{").unwrap();
+        assert!(api_key_under(&paths).await.is_err(), "a damaged file fails");
     }
 
     #[test]
