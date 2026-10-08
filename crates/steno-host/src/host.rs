@@ -339,6 +339,10 @@ const SECTION_TOPICS: [BridgeTopic; 6] = [
     BridgeTopic::SettingsPhone,
 ];
 
+/// What a delete of a meeting that may still be recorded says, as the
+/// Swift host said for a recording row.
+const STILL_RECORDING: &str = "This meeting is still recording.";
+
 /// Swift: `MainWindowBridge.deleteMeetingMessage`.
 pub const DELETE_MEETING_MESSAGE: &str = "The transcript, summary, tasks and the recording on this Mac are removed. Files already exported to Obsidian stay. People stay.";
 
@@ -1410,7 +1414,7 @@ impl BridgeHost for Host {
 
     fn meetings_delete(&self, params: MeetingIdParams) -> Outcome<ConfirmReply> {
         let recorder_idle = self.shared.services.recorder.status().state == RecordingState::Idle;
-        let prompt = {
+        let (prompt, recording) = {
             let inner = self.lock();
             let meeting = inner
                 .list
@@ -1418,15 +1422,16 @@ impl BridgeHost for Host {
                 .iter()
                 .find(|meeting| meeting.id == params.meeting_id)
                 .ok_or_else(no_such_meeting)?;
+            let recording = meeting.state.kind() == steno_core::MeetingStateKind::Recording;
             if !MeetingListViewModel::can_delete(meeting, recorder_idle) {
-                let message = if meeting.state.kind() == steno_core::MeetingStateKind::Recording {
-                    "This meeting is still recording."
+                let message = if recording {
+                    STILL_RECORDING
                 } else {
                     "This meeting is still being processed."
                 };
                 return Err(BridgeError::failed(message));
             }
-            ConfirmDestructiveParams {
+            let prompt = ConfirmDestructiveParams {
                 title: format!(
                     "Delete “{}”?",
                     crate::labels::display_title(meeting, self.now(), self.shared.config.zone)
@@ -1438,19 +1443,37 @@ impl BridgeHost for Host {
                     .mac_or(DELETE_MEETING_MESSAGE, DELETE_MEETING_MESSAGE_ELSEWHERE)
                     .to_owned(),
                 confirm_title: "Delete".to_owned(),
+            };
+            (prompt, recording)
+        };
+        // A row left `recording` may be one another process still records
+        // (the Swift app started after this one): its master on disk says
+        // so. Read with the lock released.
+        let left = if recording {
+            let left = self
+                .shared
+                .services
+                .recorder
+                .left_recording(params.meeting_id);
+            if left.still_written {
+                return Err(BridgeError::failed(STILL_RECORDING));
             }
+            Some(left)
+        } else {
+            None
         };
         let confirmed = self.confirm(&prompt);
         if confirmed {
             let now = self.now();
+            let mut deleted = false;
             self.command(
                 &[BridgeTopic::MeetingsList, BridgeTopic::Progress],
                 |inner| {
-                    let deleted = inner.list.delete(
+                    deleted = inner.list.delete(
                         params.meeting_id,
                         &self.shared.store,
                         &*self.shared.services.file_system,
-                        recorder_idle,
+                        left.as_ref(),
                     );
                     inner.list.reload(&self.shared.store);
                     // The store's `deleted` event, posted only when the rows
@@ -1465,6 +1488,12 @@ impl BridgeHost for Host {
                     }
                 },
             );
+            if deleted && left.is_some() {
+                self.shared
+                    .services
+                    .recorder
+                    .forget_recording(params.meeting_id);
+            }
         }
         Ok(ConfirmReply { confirmed })
     }

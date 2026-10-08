@@ -222,6 +222,27 @@ pub trait Recorder: Send + Sync {
     /// its end. A failure is logged, never refused. Rust only: Swift had no
     /// recovery.
     fn remember_audio_folder(&self, folder: &Path);
+    /// What deleting meeting `meeting_id`, left `recording`, needs to know
+    /// ([`LeftRecording`]). Rust only: Swift refused every recording row.
+    fn left_recording(&self, meeting_id: Uuid) -> LeftRecording;
+    /// The rows of meeting `meeting_id`, left `recording`, are gone: what
+    /// the recorder kept for its recovery goes too. Rust only.
+    fn forget_recording(&self, meeting_id: Uuid);
+}
+
+/// A meeting left `recording`, as [`Recorder::left_recording`] finds it
+/// on disk.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LeftRecording {
+    /// The audio folders its files may be in, each once: the one it was
+    /// recorded into and the settings' one. A delete removes the meeting's
+    /// folder in each.
+    pub folders: Vec<PathBuf>,
+    /// Its master in one of them was written within the last seconds, or
+    /// at a time ahead of the clock: another process (the Swift app
+    /// started after this one) may still be recording it, so the delete is
+    /// refused.
+    pub still_written: bool,
 }
 
 /// What the view models ask the processing pipeline and the retention

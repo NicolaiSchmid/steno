@@ -18,9 +18,10 @@ use uuid::Uuid;
 
 use crate::services::{
     AudioDevices, AutoStopStatus, ClipPlayer, Clock, CodexModel, CodexModelsError, ExportValidator,
-    FileSystem, FolderUsage, Handover, InputDevice, ListenerState, LlmService, LoginItem,
-    LoginItemStatus, Opener, PairingCode, Permissions, Pipeline, Preferences, QrEncoder, Recorder,
-    RecorderStatus, Services, SpeechModels, UpdateOutcome, Updater, permission_is_required,
+    FileSystem, FolderUsage, Handover, InputDevice, LeftRecording, ListenerState, LlmService,
+    LoginItem, LoginItemStatus, Opener, PairingCode, Permissions, Pipeline, Preferences, QrEncoder,
+    Recorder, RecorderStatus, Services, SpeechModels, UpdateOutcome, Updater,
+    permission_is_required,
 };
 use crate::speech::ModelAsset;
 
@@ -284,6 +285,10 @@ pub struct FakeRecorder {
     pub kept: Mutex<usize>,
     /// Every folder `remember_audio_folder` was given, in order.
     pub remembered: Mutex<Vec<PathBuf>>,
+    /// What `left_recording` answers per meeting; the default otherwise.
+    pub left: Mutex<BTreeMap<Uuid, LeftRecording>>,
+    /// Every meeting `forget_recording` was given, in order.
+    pub forgotten: Mutex<Vec<Uuid>>,
 }
 
 impl FakeRecorder {
@@ -297,6 +302,8 @@ impl FakeRecorder {
             stops: Mutex::new(0),
             kept: Mutex::new(0),
             remembered: Mutex::new(Vec::new()),
+            left: Mutex::new(BTreeMap::new()),
+            forgotten: Mutex::new(Vec::new()),
         }
     }
 
@@ -383,6 +390,17 @@ impl Recorder for FakeRecorder {
 
     fn remember_audio_folder(&self, folder: &Path) {
         lock(&self.remembered).push(folder.to_path_buf());
+    }
+
+    fn left_recording(&self, meeting_id: Uuid) -> LeftRecording {
+        lock(&self.left)
+            .get(&meeting_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn forget_recording(&self, meeting_id: Uuid) {
+        lock(&self.forgotten).push(meeting_id);
     }
 }
 

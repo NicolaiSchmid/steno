@@ -11,12 +11,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::FixedOffset;
 use steno_bridge::ListFilter;
-use steno_core::paths::file_url_path;
 use steno_core::{Meeting, MeetingStateKind, Person, RecordingLayout, Speaker, Store};
 use uuid::Uuid;
 
 use crate::labels::day_string;
-use crate::services::FileSystem;
+use crate::services::{FileSystem, LeftRecording};
 
 /// Whether `filter` shows `meeting`. Swift: `StateFilter.matches`.
 #[must_use]
@@ -234,8 +233,10 @@ impl MeetingListViewModel {
     /// The store refuses while the capture writer or the pipeline holds
     /// the meeting's files; the controls say so before the attempt. A
     /// meeting left `recording` can go while the recorder is idle
-    /// (`recorder_idle`): no capture here writes it then. Rust only: Swift
-    /// refused every recording row.
+    /// (`recorder_idle`): no capture here writes it then. The host still
+    /// refuses one whose master another process may be writing
+    /// ([`Recorder::left_recording`](crate::services::Recorder::left_recording)).
+    /// Rust only: Swift refused every recording row.
     #[must_use]
     pub fn can_delete(meeting: &Meeting, recorder_idle: bool) -> bool {
         match meeting.state.kind() {
@@ -251,22 +252,18 @@ impl MeetingListViewModel {
     /// refused and the reason shown. A file that resists does not stop the
     /// rest; the first failure is shown, since the rows are gone and no
     /// sweep finds that audio again. A deleted selection clears itself when
-    /// the list reloads. With `recorder_idle`, a meeting left `recording`
-    /// goes too ([`Self::can_delete`]), and its folder in the settings'
-    /// audio folder with it, since no asset row names it. Returns whether
-    /// the rows went. Swift: `MeetingStore.delete`.
+    /// the list reloads. With `left`, the meeting is one left `recording`
+    /// ([`Self::can_delete`]): it goes too, and its folder in each of
+    /// `left`'s audio folders with it, since no asset row names it. Returns
+    /// whether the rows went. Swift: `MeetingStore.delete`.
     pub fn delete(
         &mut self,
         id: Uuid,
         store: &Store,
         files: &dyn FileSystem,
-        recorder_idle: bool,
+        left: Option<&LeftRecording>,
     ) -> bool {
-        let left_recording = recorder_idle
-            && self.all.iter().any(|meeting| {
-                meeting.id == id && meeting.state.kind() == MeetingStateKind::Recording
-            });
-        let outcome = if left_recording {
+        let outcome = if left.is_some() {
             store.delete_meeting_left_recording(id)
         } else {
             store.delete_meeting(id)
@@ -279,14 +276,12 @@ impl MeetingListViewModel {
             }
         };
         let mut paths = deleted.files_to_remove(id);
-        if left_recording
-            && deleted.assets.is_empty()
-            && let Some(folder) = store
-                .settings()
-                .ok()
-                .and_then(|settings| file_url_path(&settings.audio_folder))
-        {
-            paths.push(RecordingLayout::new(&folder, id).directory);
+        if let Some(left) = left {
+            paths.extend(
+                left.folders
+                    .iter()
+                    .map(|folder| RecordingLayout::new(folder, id).directory),
+            );
         }
         let mut first_error = None;
         for path in paths {

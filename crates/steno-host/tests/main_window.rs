@@ -1503,9 +1503,11 @@ fn the_list_follows_the_recorders_state_and_meeting() {
 }
 
 /// A meeting left `recording` (a save that failed, a folder gone for
-/// good) can be deleted while the recorder is idle, with its folder, which
-/// no asset row names; while the recorder records, every recording row is
-/// refused, the live one among them. Rust only.
+/// good) can be deleted while the recorder is idle and its master is not
+/// being written, with its folder in each audio folder the recorder names
+/// (no asset row names them), and the recorder forgets it. While the
+/// recorder records, every recording row is refused, the live one among
+/// them; so is one whose master another process still writes. Rust only.
 #[test]
 fn a_recording_row_can_be_deleted_while_the_recorder_is_idle() {
     let mut left = sample_meeting();
@@ -1517,6 +1519,11 @@ fn a_recording_row_can_be_deleted_while_the_recorder_is_idle() {
         .seed(move |store, _| store.save_meeting(&seeded).unwrap())
         .build();
     let _ = harness.snapshot(BridgeTopic::MeetingsList);
+    let delete = || {
+        harness.host.meetings_delete(MeetingIdParams {
+            meeting_id: left.id,
+        })
+    };
     harness
         .fakes
         .recorder
@@ -1525,33 +1532,46 @@ fn a_recording_row_can_be_deleted_while_the_recorder_is_idle() {
             meeting_id: Some(uuid(0x79)),
             ..steno_host::services::RecorderStatus::idle()
         });
-    let refused = harness
-        .host
-        .meetings_delete(MeetingIdParams {
-            meeting_id: left.id,
-        })
-        .unwrap_err();
-    assert_eq!(refused.message, "This meeting is still recording.");
+    assert_eq!(
+        delete().unwrap_err().message,
+        "This meeting is still recording."
+    );
     assert!(harness.store.meeting(left.id).unwrap().is_some());
 
     harness
         .fakes
         .recorder
         .set_status(steno_host::services::RecorderStatus::idle());
-    let reply = harness
-        .host
-        .meetings_delete(MeetingIdParams {
-            meeting_id: left.id,
-        })
-        .unwrap();
-    assert!(reply.confirmed);
+    let recorded = std::path::PathBuf::from("/Volumes/Old/Steno");
+    let folders = vec![recorded.clone(), harness.audio_folder()];
+    harness.fakes.recorder.left.lock().unwrap().insert(
+        left.id,
+        steno_host::services::LeftRecording {
+            folders: folders.clone(),
+            still_written: true,
+        },
+    );
+    assert_eq!(
+        delete().unwrap_err().message,
+        "This meeting is still recording."
+    );
+    assert!(harness.store.meeting(left.id).unwrap().is_some());
+
+    harness.fakes.recorder.left.lock().unwrap().insert(
+        left.id,
+        steno_host::services::LeftRecording {
+            folders,
+            still_written: false,
+        },
+    );
+    assert!(delete().unwrap().confirmed);
     assert!(harness.store.meeting(left.id).unwrap().is_none());
+    let id = steno_core::json::uuid_string(left.id);
     assert_eq!(
         *harness.fakes.file_system.removed.lock().unwrap(),
-        [harness
-            .audio_folder()
-            .join(steno_core::json::uuid_string(left.id))]
+        [recorded.join(&id), harness.audio_folder().join(&id)]
     );
+    assert_eq!(*harness.fakes.recorder.forgotten.lock().unwrap(), [left.id]);
 }
 
 /// Swift: `DisplayTitleTests`.
