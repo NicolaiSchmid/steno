@@ -140,9 +140,13 @@ pub enum CaptureError {
     /// audio before the start's deadline (its description). On Linux,
     /// PipeWire ran no first cycle, as for a source whose owner stalls, a
     /// Bluetooth headset still switching profile, or a sink whose monitor
-    /// does not run yet; which node held the graph up is not known. The
-    /// session answers it on a chosen microphone by trying the default
-    /// input at once. Rust only; reads as [`Self::BackendFailed`].
+    /// does not run yet; which node held the graph up is not known. Also
+    /// a daemon that stopped answering the start, or a start thread that
+    /// did not answer, while the connection held (a node whose owner
+    /// stopped before the session manager configured it holds both up).
+    /// The session answers it on a chosen microphone by trying the default
+    /// input at once, and a rebuild's restarts that keep failing with it go
+    /// on until one runs. Rust only; reads as [`Self::BackendFailed`].
     #[error("capture backend failed: {0}")]
     DidNotRun(String),
     /// `start` while not idle, `stop` while not recording.
@@ -289,19 +293,31 @@ pub enum DeviceChangeReason {
     /// The audio service restarted (`coreaudiod` on macOS), taking the
     /// capture's aggregate device with it. macOS only. Rust only.
     AudioServiceRestarted,
-    /// The session asks again for the chosen microphone it replaced with
-    /// the default input because the chosen one did not open
-    /// (`CaptureSession::CHOSEN_INPUT_RECHECK`). Rust only.
+    /// The chosen microphone, which did not open and which the session
+    /// replaced with the default input, delivered to a probe on a stream
+    /// of its own (`CaptureSession::CHOSEN_INPUT_RECHECK`), so the rebuild
+    /// returns to it. Linux only (`CaptureBackend::probes_inputs`). Rust
+    /// only.
     ChosenInputRecheck,
 }
 
 /// What `CaptureSession::notices` carries while the state stays
-/// `Recording`: the rebuild beginning and the new backend running. Device
+/// `Recording`: the rebuild beginning, its restarts going on past
+/// `CaptureSession::RESTART_ATTEMPTS`, and the new backend running. Device
 /// loss is not a notice; `states` carries `Failed(DeviceLost)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CaptureNotice {
     /// A change was reported; the rebuild begins.
     DeviceChanged(DeviceChangeReason),
+    /// The rebuild's first `attempt` restarts (`RESTART_ATTEMPTS`) failed
+    /// in a way that may pass (a graph that does not run, the audio service
+    /// coming back), so it goes on restarting until one runs or the stop;
+    /// nothing is recorded meanwhile. Sent once per rebuild; the stream is
+    /// still the one that stopped. Rust only.
+    StillRestarting {
+        /// The restarts so far.
+        attempt: usize,
+    },
     /// `attempt` is the restart that succeeded (1 when the first did);
     /// `gap_seconds` the silence written for this gap.
     DeviceResumed {

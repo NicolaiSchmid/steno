@@ -30,11 +30,14 @@
 //! Stalls, for the session's watchdog (Rust only): `stall_after` makes the
 //! first start's producer deliver that many seconds and then nothing, as a
 //! device whose driver hangs, until [`SyntheticCaptureBackend::resume_delivery`]
-//! or the stop; `restarts_do_not_run` makes the failing restarts fail with
-//! [`CaptureError::DidNotRun`], as a graph that stays stalled. The session
-//! watches the backend only with `delivers_continuously` (which
-//! `stall_after` sets): by default a producer whose `seconds` ran out is
-//! the end of a test's audio, not a stall.
+//! or the stop, and `restarts_stall_after` every restart's;
+//! `restarts_do_not_run` makes the failing restarts fail with
+//! [`CaptureError::DidNotRun`], as a graph that stays stalled;
+//! `waits_for_playback` answers [`CaptureBackend::waits_for_playback`] as a
+//! Mac call capture does. The session watches the backend only with
+//! `delivers_continuously` (which `stall_after` sets): by default a
+//! producer whose `seconds` ran out is the end of a test's audio, not a
+//! stall.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -140,6 +143,11 @@ pub struct SyntheticOptions {
     /// The failing restarts fail with `DidNotRun`, not
     /// `InputDeviceUnavailable`.
     pub restarts_do_not_run: bool,
+    /// Seconds into every restart after which its producer delivers
+    /// nothing until `resume_delivery` or the stop.
+    pub restarts_stall_after: Option<f64>,
+    /// What [`CaptureBackend::waits_for_playback`] answers.
+    pub waits_for_playback: bool,
 }
 
 impl SyntheticOptions {
@@ -179,6 +187,8 @@ impl SyntheticOptions {
             delivers_continuously: false,
             stall_after: None,
             restarts_do_not_run: false,
+            restarts_stall_after: None,
+            waits_for_playback: false,
         }
     }
 
@@ -264,6 +274,20 @@ impl SyntheticOptions {
     #[must_use]
     pub fn restarts_do_not_run(mut self) -> Self {
         self.restarts_do_not_run = true;
+        self
+    }
+
+    /// Stall every restart this many seconds in.
+    #[must_use]
+    pub fn restarts_stall_after(mut self, seconds: f64) -> Self {
+        self.restarts_stall_after = Some(seconds);
+        self
+    }
+
+    /// Say a stream may deliver nothing until something plays.
+    #[must_use]
+    pub fn waits_for_playback(mut self, waits: bool) -> Self {
+        self.waits_for_playback = waits;
         self
     }
 }
@@ -423,11 +447,12 @@ impl CaptureBackend for SyntheticCaptureBackend {
             None
         };
         self.resumed.store(false, Ordering::Release);
-        let mut stall_frame = self
-            .options
-            .stall_after
-            .filter(|_| !is_restart)
-            .map(|s| (s * SAMPLE_RATE) as usize);
+        let mut stall_frame = if is_restart {
+            self.options.restarts_stall_after
+        } else {
+            self.options.stall_after
+        }
+        .map(|s| (s * rate) as usize);
         let resumed = Arc::clone(&self.resumed);
         let changes_remaining = Arc::clone(&self.changes_remaining);
         let real_time = self.options.real_time;
@@ -517,6 +542,10 @@ impl CaptureBackend for SyntheticCaptureBackend {
 
     fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
         self.options.delivers_continuously
+    }
+
+    fn waits_for_playback(&self, _lanes: &[AudioLane]) -> bool {
+        self.options.waits_for_playback
     }
 }
 

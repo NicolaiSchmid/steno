@@ -802,6 +802,12 @@ impl CaptureBackend for LiveCaptureBackend {
     fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
         true
     }
+
+    /// A call capture, whose aggregate runs on the output's clock: without
+    /// the capture permission its IOProc runs only while something plays.
+    fn waits_for_playback(&self, lanes: &[AudioLane]) -> bool {
+        lanes.contains(&AudioLane::System)
+    }
 }
 
 impl Drop for LiveCaptureBackend {

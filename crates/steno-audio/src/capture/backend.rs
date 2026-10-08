@@ -47,16 +47,53 @@ pub trait CaptureBackend: Send + Sync {
     /// Whether a capture of `lanes` delivers callbacks on the device's
     /// clock whatever it hears, silence included, so that one that stops
     /// for longer than [`CaptureSession::STALL_TIMEOUT`] has stalled. The
-    /// session watches only such a backend (the stall watchdog and the
-    /// re-ask of a chosen microphone; see `CaptureSession`). `true` for
-    /// the live backends, except a Windows capture of the system lane
-    /// alone (endpoint loopback delivers nothing while nothing plays);
-    /// `false` by default, so a test backend whose audio simply ends is
-    /// not taken for a stalled one. Rust only.
+    /// session watches only such a backend (the stall watchdog and, with
+    /// [`Self::probes_inputs`], the timed ask for a chosen microphone; see
+    /// `CaptureSession`). `true` for the live backends, except a Windows
+    /// capture of the system lane alone (endpoint loopback delivers nothing
+    /// while nothing plays); `false` by default, so a test backend whose
+    /// audio simply ends is not taken for a stalled one. Rust only.
     ///
     /// [`CaptureSession::STALL_TIMEOUT`]: super::CaptureSession::STALL_TIMEOUT
     fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
         let _ = lanes;
+        false
+    }
+
+    /// Whether a capture of `lanes` that delivers continuously may still
+    /// deliver nothing at all until something plays: a Mac call capture
+    /// without the capture permission, whose IOProc runs only while
+    /// another client has the output open. Until the recording's first
+    /// frame the watchdog then takes no stream for stalled; after it, every
+    /// stream that stops is one. `false` by default and on Linux and
+    /// Windows. Rust only.
+    fn waits_for_playback(&self, lanes: &[AudioLane]) -> bool {
+        let _ = lanes;
+        false
+    }
+
+    /// Whether [`Self::probe_input`] can ask a microphone without
+    /// touching the capture that records. The session asks for a chosen
+    /// microphone it replaced with the default input again on a timer
+    /// only over such a backend, and otherwise only when a device change
+    /// rebuilds the capture. `true` on Linux (a second PipeWire stream on
+    /// a connection of its own); `false` by default, and on macOS and
+    /// Windows: there the chosen device's own I/O would have to run beside
+    /// the capture's (outside the Mac's aggregate, beside the WASAPI
+    /// streams), which on a Bluetooth headset switches its profile under
+    /// the output the system lane records, and neither is run on hardware
+    /// here. Rust only.
+    fn probes_inputs(&self) -> bool {
+        false
+    }
+
+    /// Whether the input `uid` names delivers audio now, asked on a stream
+    /// of its own and never through the capture that records: a capture
+    /// keeps every frame while this runs. Blocks for as long as the
+    /// backend's start deadline at most; never called with the session's
+    /// lock held. `false` by default. Rust only.
+    fn probe_input(&self, uid: &str) -> bool {
+        let _ = uid;
         false
     }
 }
