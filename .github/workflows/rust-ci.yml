@@ -247,8 +247,8 @@ jobs:
       # and macOS rebuild nothing here, Linux part of the tree (about 30 s).
       # The Windows-only test exists only there. A rename would leave
       # `--exact` matching nothing, which passes, so the step greps the log
-      # for each test's `ok` line; the interface test prints one on macOS
-      # too, after its SKIPPED line. Bash runs with `pipefail`, so `tee`
+      # for each test's `ok` line; the two interface tests print one on
+      # macOS too, after their SKIPPED line. Bash runs with `pipefail`, so `tee`
       # keeps the test's exit code.
       - name: Handover network tests, with output
         shell: bash
@@ -256,6 +256,7 @@ jobs:
           log="$RUNNER_TEMP/handover-network.log"
           cargo test --workspace --lib --locked -- --exact --nocapture \
             server::tests::the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte \
+            server::tests::an_address_gained_after_start_is_served_and_the_listener_keeps_an_open_connection_when_it_leaves \
             server::advertise::tests::the_system_lan_addresses_can_be_read \
             server::advertise::tests::on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface \
             | tee "$log"
@@ -263,6 +264,7 @@ jobs:
             grep -qF "$1 ... ok" "$log" || { echo "::error::$1 did not run"; exit 1; }
           }
           ran the_lan_is_served_and_a_connection_outside_it_is_closed_before_any_tls_byte
+          ran an_address_gained_after_start_is_served_and_the_listener_keeps_an_open_connection_when_it_leaves
           if [ "$RUNNER_OS" = Windows ]; then
             ran on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
           fi

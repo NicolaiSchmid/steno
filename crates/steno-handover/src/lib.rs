@@ -15,9 +15,9 @@
 //!   stream. Nothing else constructs the listener. The host and the CLI
 //!   run [`HandoverService::checkpoint_store`] before they build it
 //!   ([`StoreNotSynced`] when it fails).
-//! - [`HandoverConfiguration`]: how the listener binds, where partial
-//!   uploads live, the pairing window and the read timeout; [`Clock`] is
-//!   the one time source.
+//! - [`HandoverConfiguration`]: the name the phone shows, how the listener
+//!   binds, where partial uploads live, the pairing window and the read
+//!   timeout; [`Clock`] is the one time source.
 //! - [`HandoverIdentity`]: the TLS identity, minted once and kept in the
 //!   [`SecretStore`](steno_core::SecretStore).
 //! - [`PairingPayload`]: what the QR code shows; [`base64url`] is its

@@ -2047,17 +2047,38 @@ touch and admission lines; each fix is ported to Swift before cutover.
   point-to-point interface, which most tunnels there are (`wg0`, `tun0`, `utun3`); on
   Windows every adapter but hardware Ethernet and Wi-Fi that is up
   (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters.
-- Network, Rust differs (still open; see "Open after the port"): the record is not
-  re-published after a network change (restart on network change, or re-register).
-  Layer-2 tunnels (a TAP device, `feth`) and bridges (`docker0`, `bridge100`) are not
-  point-to-point, and are served; Swift classes bridges `.other`. A LAN numbered in
-  `100.64.0.0/10` is refused, on every platform. Rust judges a connection by its local
-  address where Swift judges the interface it arrives on, so on Linux and macOS (weak
-  host model) a packet addressed to the LAN address that arrives over a tunnel is
-  served: the computer is a subnet router or exit node, or a peer's allowed IPs cover
-  the LAN. On Windows the hardware rule refuses a LAN address on a Hyper-V external
-  switch's or a Network Bridge's vEthernet adapter, so a computer whose LAN address
-  moved there is unreachable.
+- Network change, both apps: the record follows the computer's addresses. Swift's
+  `NWListener` does it in mDNSResponder. Rust's advertiser
+  (`crates/steno-handover/src/server/advertise.rs`) registers the record again under
+  the same name, TXT record and port. A report from the `mdns-sd` daemon that it
+  added an IPv4 address the record carries (its interface check, every 5 s, sent
+  after it joined the new network's multicast group) always registers it, because
+  only a registration made after the report is announced on a network the daemon has
+  just joined. Any other wake registers it only when the LAN addresses moved: a quiet
+  recheck a minute after the last wake, whatever else the daemon sends, catches a
+  dropped report, a removed address or a change the daemon does not report. A failed
+  registration is tried again at the next change, and a record with no address waits
+  for the next network. The listener binds every IPv4 address on one port, so an
+  address gained after start is served on the same port. Its LAN check runs once per
+  connection at accept, so the listener closes no connection; one on an address that
+  leaves breaks with it, and the phone resumes from the partial.
+- Network change, Rust differs: the record's host is `steno-<name>-<id>.local.`, with
+  the first 8 hex digits of the `macID` (`Advertiser::host_name`), a name only Steno
+  answers for, where Swift's record uses mDNSResponder's own host; the computer's
+  host name stays with mDNSResponder, Avahi or Windows, and two computers of one name
+  get two hosts without `mdns-sd`'s probe. A withdraw within one interface check of a
+  switch sends its goodbye only on the old network, which is gone, so a phone that
+  kept browsing can show the record until its TTL runs out, and its connection fails
+  and is retried; a limit of `mdns-sd`.
+- Network, Rust differs: layer-2 tunnels (a TAP device, `feth`) and bridges
+  (`docker0`, `bridge100`) are not point-to-point, and are served; Swift classes
+  bridges `.other`. A LAN numbered in `100.64.0.0/10` is refused, on every platform.
+  Rust judges a connection by its local address where Swift judges the interface it
+  arrives on, so on Linux and macOS (weak host model) a packet addressed to the LAN
+  address that arrives over a tunnel is served: the computer is a subnet router or
+  exit node, or a peer's allowed IPs cover the LAN. On Windows the hardware rule
+  refuses a LAN address on a Hyper-V external switch's or a Network Bridge's
+  vEthernet adapter, so a computer whose LAN address moved there is unreachable.
 - Write order: both apps commit every store write of the engine (receipt saves, the
   revoke's delete, the pairing's save, the touch) in the order it was asked for: each
   waits until the one asked for before it has returned, also when the request that
@@ -2304,9 +2325,20 @@ touch and admission lines; each fix is ported to Swift before cutover.
   discards them.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
-  `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
-  `/etc/hostname` and falls back to `Steno`; the shell passes the OS computer name on
-  the Mac (WP9) and on Windows (WP10).
+  `ProcessInfo.processInfo.hostName`. Rust's `HandoverConfiguration::default_service_name`
+  takes the first of `NAME_SOURCES`: on the Mac the computer name
+  (`whoami::devicename`, which reads the same `SCDynamicStoreCopyComputerName` as
+  Swift), so a phone shows the same name after the handoff; then, and on Linux and
+  Windows first, `HOSTNAME`, `/etc/hostname` and the system's host name
+  (`whoami::hostname`). Rust differs: its last fallback is `Steno` when none gives
+  one, where Swift's is the host name. The name is shown, never pinned: the phone
+  finds the computer by the TXT record's `id`, resolves the instance it browsed, and
+  pins the certificate's fingerprint; the identity's `CN` takes the name only when
+  an identity is minted. A phone keeps the name it paired under (`Steno` from an
+  earlier Rust build) until it pairs again. While the Swift and the Rust app run at
+  once during the handoff, both claim the same instance name and one is renamed
+  "(2)"; the name and the rename are display only, since the phone finds the
+  computer by its `id`.
 - Phone queue (`mobile/src/features/`):
   - Adoption. Every load lists `Documents/queue/` and adds a row for each recording
     file of 1 KiB or more (`MIN_RECORDING_BYTES`; smaller holds no meaningful audio)
@@ -2586,14 +2618,6 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   them, the parity notes' other "before cutover" ports to Swift included, apart from call
   mode, which its A9 checks; its S7 deletes this item, and A9 the call-mode part.
   Found: #155, #165, #166, #167, #169, #190.
-- **WP9b.** The Bonjour record is not published again after a network change, on
-  every platform, where Swift's `NWListener` follows it; and the shell passes no
-  computer name on any platform, so the Mac and Windows advertise `HOSTNAME`,
-  `/etc/hostname` or "Steno". The first Linux and Windows releases need the re-publish
-  too. Where: `crates/steno-handover/src/server/advertise.rs`,
-  `HandoverConfiguration::default_service_name` in
-  `crates/steno-handover/src/configuration.rs`; the "Network" and "Service name"
-  lines under "Handover". Found: #169.
 - **WP9b.** No concurrency group spans the two release workflows, so two macOS signing
   jobs can run at once; only both READMEs state the one-at-a-time rule, until
   `release.yml` retires at the cutover. Where: `.github/workflows/release.yml`,
@@ -2778,6 +2802,7 @@ PR off `main`.
 | Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
 | A device that will not run at 48 kHz (a headset in the hands-free profile) is recorded at its own rate and converted to 48 kHz on the processing thread, at start and after a switch mid-call, instead of failing (`steno-audio`, Swift core) | `t3code/check-rust-audio-sample-rate` | #198 | open |
 | Settings warns under an audio folder on a network mount on Linux and macOS too (`statfs`: NFS, SMB, VM host shares and remote FUSE mounts on Linux; a mount without `MNT_LOCAL`, SMB, NFS, AFP, WebDAV and macFUSE on macOS; `steno-pipeline`) | `fix/network-folder-warning` | #245 | open |
+| The Bonjour record follows a network change on every platform, and the Mac advertises its computer name (`steno-handover`, `whoami` 2) | `fix/handover-republish` | #247 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
