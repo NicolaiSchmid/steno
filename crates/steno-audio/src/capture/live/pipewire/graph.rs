@@ -95,9 +95,6 @@ pub(crate) struct PortEntry {
     pub index: u32,
     /// `object.serial`, unique for the daemon's lifetime.
     pub serial: Option<u64>,
-    /// A Bluetooth node (`device.api` `bluez5`): linking a stream to its
-    /// input switches the headset's profile, under the output too.
-    pub bluetooth: bool,
 }
 
 /// One end the capture stream is linked to: the node and the ports taken
@@ -261,7 +258,6 @@ impl Graph {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(u32::MAX),
                 serial: serial(&props),
-                bluetooth: props("device.api") == Some("bluez5"),
             },
         );
         chosen
