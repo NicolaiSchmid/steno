@@ -69,11 +69,14 @@ use crate::handover::FingerprintFile;
 /// the newer value; a removal there leaves an empty value, which removes
 /// the item). The handover identity keeps the service's: an identity is
 /// never replaced, as the phones pinned one of them, and the file's stays
-/// in the file for the user to recover. As this computer's phones paired
+/// in the file until an identity is stored (Pair again), or for the user
+/// to take by hand. As this computer's phones paired
 /// with the file's identity, its fingerprint is recorded first when none
 /// is ([`FingerprintFile`]), so the handover reports the service's as
 /// replaced instead of adopting it. After the marker the service wins for
-/// every key.
+/// every key, and a write through the store drops that key's copy from the
+/// file at once, so a removal or a change in the launch that moved the
+/// entries is never undone by the copy.
 ///
 /// Items are filed under the attributes `service` ([`KEYRING_SERVICE`])
 /// and `username` (the key's raw value), the names the `keyring` crate
@@ -363,9 +366,24 @@ impl SecretStore for SecretServiceStore {
     /// `None` and an empty value remove the item, as the keyring store
     /// does; the file keeps an empty value, so the next move removes the
     /// item too. May ask the user to unlock.
+    ///
+    /// A write to the service drops the key's copy the move left in the
+    /// file: the service holds the newer value, and a later launch would
+    /// otherwise write the old one back over a removal, or read it in a run
+    /// that cannot open the keyring.
     async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
         match self.backend().await? {
-            Backend::Service(keyring) => Ok(keyring.set_secret(key, value, self.ask()).await?),
+            Backend::Service(keyring) => {
+                keyring.set_secret(key, value, self.ask()).await?;
+                let file = &self.shared.file;
+                if file.read()?.entries.contains_key(key.as_str()) {
+                    file.change(|contents| {
+                        contents.entries.remove(key.as_str());
+                        Ok(())
+                    })?;
+                }
+                Ok(())
+            }
             Backend::File => {
                 self.shared
                     .file

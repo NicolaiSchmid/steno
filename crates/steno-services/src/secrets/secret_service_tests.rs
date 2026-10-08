@@ -387,6 +387,61 @@ async fn after_the_move_the_service_wins_and_an_older_file_key_goes() {
     assert_eq!(setup.contents(), moved(&[]));
 }
 
+/// A key removed or changed in the launch that did the move, and an
+/// identity stored over the moved one: the next launch that opens the
+/// keyring keeps what the user did, and one that cannot open it never reads
+/// the file's old copy.
+#[tokio::test]
+async fn a_key_removed_or_changed_in_the_move_launch_stays_so() {
+    let key = SecretKey::llm_api_key();
+    for (value, expected) in [(None, Vec::<&str>::new()), (Some("sk-2"), vec!["sk-2"])] {
+        let Some(setup) = Setup::new(true, State::default()).await else {
+            return;
+        };
+        let (moved_identity, stored) = (minted("moved"), minted("stored"));
+        write_file(
+            &setup.path(),
+            &[
+                ("llm-api-key", "sk-file"),
+                ("handover-identity", &moved_identity.to_pem().unwrap()),
+            ],
+        );
+        let first = setup.launch().await;
+        assert_eq!(setup.values("llm-api-key"), ["sk-file"]);
+        first.set_secret(&key, value).await.unwrap();
+        stored.store(&first, &setup.record()).await.unwrap();
+        assert_eq!(
+            setup.contents(),
+            moved(&[]),
+            "the writes dropped the copies"
+        );
+        drop(first);
+
+        let second = setup.launch().await;
+        assert_eq!(second.secret(&key).await.unwrap().as_deref(), value);
+        assert_eq!(setup.values("llm-api-key"), expected);
+        assert_eq!(
+            load(&second, &setup.record()).await.unwrap().fingerprint(),
+            stored.fingerprint()
+        );
+        drop(second);
+
+        {
+            let mut state = setup.state();
+            state.locked = true;
+            state.dismiss = true;
+        }
+        let without = setup.launch().await;
+        assert!(chose_file(&without));
+        let read = without.secret(&key).await.unwrap_err().to_string();
+        assert_eq!(
+            read,
+            KeyringUnavailable::NotOpened(key.0.clone()).to_string()
+        );
+        assert!(without.secret(&identity()).await.is_err());
+    }
+}
+
 /// The loss this guards against: a launch that cannot open the keyring
 /// read the identity as missing, minted a new one into the file, and the
 /// next launch moved it over the phones' pinned one.
