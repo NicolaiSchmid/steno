@@ -1357,10 +1357,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   folder already there and replaces a file at the master's path, reachable only by a
   UUID collision; it removes the copy whose sync fails and leaves the empty folder.
   Linux and macOS sync the folder after std's rename, best effort, and Settings shows the
-  same warning under an audio folder on a network mount, read with `statfs` (NFS, SMB
-  and the remote FUSE mounts sshfs, rclone and GNOME's `gvfsd-fuse` on Linux; SMB, NFS,
-  AFP, WebDAV and every macFUSE mount on macOS). The Swift app runs only on macOS and
-  has no such warning. The adapters' `AtomicFileWriter` flushes the
+  same warning under an audio folder on a network mount, read with `statfs` (NFS, SMB,
+  remote FUSE and macFUSE; `files/mount.rs` names them). The Swift app has no such
+  warning; it ships no further release. The adapters' `AtomicFileWriter` flushes the
   renamed file on Windows as well, and a failed flush fails the export: with "delete
   after processing" the vault's copy of the mixdown is the only audio left once the
   sweep has run.
@@ -2716,7 +2715,7 @@ PR off `main`.
 | On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
 | Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
 | A device that will not run at 48 kHz (a headset in the hands-free profile) is recorded at its own rate and converted to 48 kHz on the processing thread, at start and after a switch mid-call, instead of failing (`steno-audio`, Swift core) | `t3code/check-rust-audio-sample-rate` | #198 | open |
-| Settings warns under an audio folder on a network mount on Linux and macOS too (`statfs`: NFS, SMB and remote FUSE mounts on Linux, SMB, NFS, AFP, WebDAV and macFUSE on macOS) (`steno-pipeline`) | `fix/network-folder-warning` | #245 | open |
+| Settings warns under an audio folder on a network mount on Linux and macOS too (`statfs`: NFS, SMB and remote FUSE mounts on Linux; a mount without `MNT_LOCAL`, SMB, NFS, AFP, WebDAV and macFUSE on macOS) (`steno-pipeline`) | `fix/network-folder-warning` | #245 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
