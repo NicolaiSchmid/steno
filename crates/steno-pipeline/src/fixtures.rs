@@ -253,29 +253,6 @@ impl SplitMix64 {
 }
 
 /// What only tests need: behind the `testing` feature.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A WAV that cannot be moved over its path (a folder holds the name)
-    /// fails the write and leaves the folder as it was and no temporary
-    /// behind. On Windows the refused move is tried again first.
-    #[test]
-    fn a_failed_write_leaves_no_temporary_behind() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("speaker.wav");
-        std::fs::create_dir(&path).unwrap();
-        std::fs::write(path.join("kept"), b"kept").unwrap();
-        write_wav(&path, &[0, 1, -1]).unwrap_err();
-        let names: Vec<_> = std::fs::read_dir(directory.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(names, ["speaker.wav"]);
-        assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"kept");
-    }
-}
-
 #[cfg(feature = "testing")]
 mod testing {
     use std::collections::BTreeMap;
@@ -379,5 +356,28 @@ mod testing {
         fn make_writer(&'a self) -> Self::Writer {
             self.clone()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A WAV that cannot be moved over its path (a folder holds the name)
+    /// fails the write and leaves the folder as it was and no temporary
+    /// behind. On Windows the refused move is tried again first.
+    #[test]
+    fn a_failed_write_leaves_no_temporary_behind() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("speaker.wav");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("kept"), b"kept").unwrap();
+        write_wav(&path, &[0, 1, -1]).unwrap_err();
+        let names: Vec<_> = std::fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["speaker.wav"]);
+        assert_eq!(std::fs::read(path.join("kept")).unwrap(), b"kept");
     }
 }
