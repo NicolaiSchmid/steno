@@ -767,16 +767,22 @@ mod tests {
         );
     }
 
-    /// A sync that fails once the new folder is made removes that folder,
-    /// so the call leaves nothing it made.
+    /// A sync that fails once the new folder is made removes that folder
+    /// alone, so the call leaves nothing it made and keeps the recordings
+    /// beside it.
     #[test]
     fn a_new_folder_whose_sync_fails_is_removed() {
         let dir = tempfile::tempdir().unwrap();
-        let meeting = dir.path().join("0B6F4B1E");
+        let audio = dir.path().join("audio");
+        let earlier = audio.join("5C2D9A70").join("recording.m4a");
+        std::fs::create_dir_all(earlier.parent().unwrap()).unwrap();
+        std::fs::write(&earlier, b"an earlier recording").unwrap();
+        let meeting = audio.join("0B6F4B1E");
         let mut syncs = Recorded::new(&meeting);
         syncs.fail_directory_sync = true;
         assert!(create_new_dir_durably_with(&syncs, &meeting).is_err());
         assert!(!meeting.exists());
+        assert_eq!(std::fs::read(&earlier).unwrap(), b"an earlier recording");
     }
 
     /// An error `busy` accepts is retried 49 times on Windows and not at
