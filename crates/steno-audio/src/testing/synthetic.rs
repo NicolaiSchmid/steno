@@ -17,7 +17,7 @@
 //! `start` calls after the first fail with `InputDeviceUnavailable`, the
 //! device still absent; `stream` is what the first start reports and
 //! `stream_after_restart` what every restart reports (new latencies, a
-//! microphone standing in), `SYNTHETIC` when `None`. `seconds` counts per
+//! the fallback microphone), `SYNTHETIC` when `None`. `seconds` counts per
 //! `start`, so a restarted backend delivers again, and `frames_delivered`
 //! sums over starts.
 

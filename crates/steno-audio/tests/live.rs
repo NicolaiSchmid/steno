@@ -144,7 +144,7 @@ fn an_unknown_microphone_records_the_default_input() {
                 Some("alsa_input.pci-0000_00_1f.3.analog-stereo"),
                 Arc::clone(&sink),
             )
-            .expect("the default input stands in");
+            .expect("the default input as the fallback");
         println!("{stream:?}");
         assert_eq!(
             stream.input,
@@ -163,7 +163,7 @@ fn an_unknown_microphone_records_the_default_input() {
         assert_eq!(
             stream.input.map(|input| input.is_fallback),
             Some(false),
-            "chosen, not standing in"
+            "chosen, not the fallback"
         );
         backend.stop();
     });

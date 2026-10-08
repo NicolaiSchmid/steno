@@ -921,9 +921,9 @@ mod tests {
         assert!(processes[0].is_running_input);
     }
 
-    /// A browser call (A8): Firefox's input stream reaches PipeWire
-    /// through the compatibility layer, so the node names the browser and
-    /// its pid, and the process holds the microphone while it runs linked.
+    /// A browser call: Firefox's input stream reaches PipeWire through the
+    /// compatibility layer, so the node names the browser and its pid, and
+    /// the process holds the microphone while it runs linked.
     #[test]
     fn a_browser_s_compatibility_stream_names_the_browser() {
         let mut graph = desktop();

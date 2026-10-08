@@ -79,18 +79,17 @@
 //!
 //! # Platforms
 //!
-//! The live backend, the input device list and the process-activity
-//! source are Core Audio on macOS, PipeWire on Linux and WASAPI on Windows.
-//! **The Windows backend
-//! has not run on hardware:** no Windows machine with audio devices has
-//! run it. It is written against Microsoft's documentation, built, linted
-//! and tested on the `windows-latest` CI runner, which has no audio
-//! endpoint (only process loopback runs there); its per-packet
-//! bodies (`realtime::streams`), the stream plan (`capture::split_streams`)
-//! and the session mapping (`detection::sessions`) are
-//! platform-independent and tested on every OS, the zero-allocation proof
-//! included. The hardware checks in `tests/live_windows.rs` are `--ignored`
-//! until a Windows machine runs them.
+//! The live backend, the input device list and the process-activity source
+//! are Core Audio on macOS, PipeWire on Linux and WASAPI on Windows. **The
+//! Windows backend has not run on hardware:** no Windows machine with audio
+//! devices has run it. It is written against Microsoft's documentation,
+//! built, linted and tested on the `windows-latest` CI runner, which has no
+//! audio endpoint (only process loopback runs there); its per-packet bodies
+//! (`realtime::streams`), the stream plan (`capture::split_streams`) and
+//! the session mapping (`detection::sessions`) are platform-independent and
+//! tested on every OS, the zero-allocation proof included. The hardware
+//! checks in `tests/live_windows.rs` are `--ignored` until a Windows
+//! machine runs them.
 //!
 //! Swift: `Sources/StenoAudio/StenoAudio.swift`.
 

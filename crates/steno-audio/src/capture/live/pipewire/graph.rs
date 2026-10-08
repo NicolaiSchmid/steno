@@ -8,18 +8,18 @@
 //!
 //! Identities: a device's UID (what `Settings.input_device_uid` stores) is
 //! its `node.name`, stable across reboots for the same hardware, as the
-//! `default.audio.*` metadata names devices too. A UID that names no
-//! source the capture can record ([`Graph::known_source`]) records the
-//! default source instead, as the input picker ([`Graph::inputs`]) would
-//! not list it, and the snapshot then follows the default until the chosen
-//! source is announced again ([`Graph::followed_source`]). The microphone
-//! is the first non-monitor output port (lowest `port.id`) of the input
-//! node, as the macOS backend takes the input device's first channel; a
-//! virtual source (a null sink with `media.class = Audio/Source/Virtual`)
-//! has only a monitor output, and that is taken then. The system lane is the
-//! default sink's monitor: its `FL` and `FR` monitor ports (folded to mono
-//! by the rings), or its only one for a mono sink, or the two
-//! lowest-numbered for a sink without front channels.
+//! `default.audio.*` metadata names devices too. A UID that names no source
+//! the capture can record ([`Graph::known_source`]), a UID the input picker
+//! ([`Graph::inputs`]) would not list, records the default source instead,
+//! and the snapshot then follows the default until the chosen source is
+//! announced again ([`Graph::followed_source`]). The microphone is the
+//! first non-monitor output port (lowest `port.id`) of the input node, as
+//! the macOS backend takes the input device's first channel; a virtual
+//! source (a null sink with `media.class = Audio/Source/Virtual`) has only
+//! a monitor output, and that is taken then. The system lane is the default
+//! sink's monitor: its `FL` and `FR` monitor ports (folded to mono by the
+//! rings), or its only one for a mono sink, or the two lowest-numbered for
+//! a sink without front channels.
 //!
 //! PipeWire reuses the ids of removed globals, never their
 //! `object.serial`: a linked node or port is alive while its id still
@@ -267,8 +267,8 @@ impl Graph {
     }
 
     /// From now on a removal counts as a change only when the snapshot for
-    /// `targets` with `uid` (the UID asked for, not the source that stands
-    /// in for it) reads what went; see [`Self::remove`].
+    /// `targets` with `uid` (the UID asked for, not the fallback source)
+    /// reads what went; see [`Self::remove`].
     pub fn track(&mut self, targets: &Targets, uid: Option<&str>) {
         self.tracked = Some((targets.clone(), uid.map(str::to_owned)));
     }

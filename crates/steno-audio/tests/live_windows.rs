@@ -266,7 +266,7 @@ fn an_unknown_microphone_records_the_default_input() {
         let sink = Arc::new(LaneFrameSink::new(&lanes));
         let stream = backend
             .start(&lanes, Some("BuiltInMicrophoneDevice"), Arc::clone(&sink))
-            .expect("the default input stands in");
+            .expect("the default input as the fallback");
         println!("{stream:?}");
         let input = stream.input.expect("the microphone in use");
         assert!(input.is_fallback);
