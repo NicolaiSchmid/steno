@@ -389,14 +389,13 @@ impl ModelWaits {
     }
 
     /// Records `meeting_id` as waiting and returns true, unless a resume
-    /// ran since `seen`: then `seen` moves to now and nothing is recorded.
-    /// The check and the record are one step, and the caller holds the
-    /// meeting no more, so a resume either comes after the record and
-    /// starts the meeting, or before it and the caller starts it again.
-    fn wait_unless_resumed(&self, meeting_id: Uuid, seen: &mut u64) -> bool {
+    /// ran since the count was `seen`: then nothing is recorded. The check
+    /// and the record are one step, and the caller holds the meeting no
+    /// more, so a resume either comes after the record and starts the
+    /// meeting, or before it and the caller starts it again.
+    fn wait_unless_resumed(&self, meeting_id: Uuid, seen: u64) -> bool {
         let mut waits = self.lock();
-        if waits.resumes != *seen {
-            *seen = waits.resumes;
+        if waits.resumes != seen {
             return false;
         }
         waits.waiting.insert(meeting_id);
@@ -1231,18 +1230,25 @@ impl ProcessingPipeline {
         if self.quitting() {
             return Ok(Vec::new());
         }
-        let waits = &self.inner.dependencies.model_waits;
-        let waiting = waits.resume();
+        let waiting = self.inner.dependencies.model_waits.resume();
         if waiting.is_empty() {
             return Ok(Vec::new());
         }
-        match self.resume_among(Some(&waiting)) {
+        self.start_waiting(waiting)
+    }
+
+    /// Starts `meetings`, taken from the waiting ones, as
+    /// [`resume_waiting`](Self::resume_waiting) does: a meeting a run holds
+    /// goes back to waiting, and all of them do when the store fails.
+    fn start_waiting(&self, meetings: BTreeSet<Uuid>) -> Result<Vec<Uuid>> {
+        let waits = &self.inner.dependencies.model_waits;
+        match self.resume_among(Some(&meetings)) {
             Ok((resumed, busy)) => {
                 waits.put_back(busy);
                 Ok(resumed)
             }
             Err(failure) => {
-                waits.put_back(waiting);
+                waits.put_back(meetings);
                 Err(failure)
             }
         }
@@ -1783,10 +1789,10 @@ impl ProcessingPipeline {
     fn wait_for_models(&self, refused: Refused) {
         let Refused {
             meeting_id,
-            mut resumes_seen,
+            resumes_seen,
         } = refused;
         let waits = &self.inner.dependencies.model_waits;
-        if waits.wait_unless_resumed(meeting_id, &mut resumes_seen) || self.quitting() {
+        if waits.wait_unless_resumed(meeting_id, resumes_seen) || self.quitting() {
             return;
         }
         tracing::info!(
@@ -1794,18 +1800,13 @@ impl ProcessingPipeline {
             %meeting_id,
             "a resume ran during the refused run; processing again"
         );
-        let only = BTreeSet::from([meeting_id]);
-        match self.resume_among(Some(&only)) {
-            Ok((_, busy)) => waits.put_back(busy),
-            Err(failure) => {
-                waits.put_back(only);
-                tracing::warn!(
-                    target: BACKGROUND_RUN_LOG,
-                    %meeting_id,
-                    stage = failure.stage.as_str(),
-                    "the refused meeting could not be started again"
-                );
-            }
+        if let Err(failure) = self.start_waiting(BTreeSet::from([meeting_id])) {
+            tracing::warn!(
+                target: BACKGROUND_RUN_LOG,
+                %meeting_id,
+                stage = failure.stage.as_str(),
+                "the refused meeting could not be started again"
+            );
         }
     }
 
