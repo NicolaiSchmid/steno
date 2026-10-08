@@ -521,7 +521,8 @@ impl SpeechEngine for LanguageTaggingEngine {
 /// whether a missing file is downloaded first (`Install::Allowed`) or
 /// fails the call with `DiarizeError::NotInstalled` and no request
 /// (`Install::Never`, the app's pipelines through [`SpeechEngines`];
-/// `steno_diarize::models::installed` is the same check without a load). A load that fails fails that call only; the next call tries again,
+/// `steno_diarize::models::installed` is the same check without a load).
+/// A load that fails fails that call only; the next call tries again,
 /// resuming a cut-off download where downloads are allowed.
 #[must_use]
 pub fn diarizer(setup: &SpeechSetup, install: Install) -> Arc<dyn Diarizer> {
@@ -873,6 +874,16 @@ pub(crate) mod testing {
     /// size.
     pub fn install_onnx_diarizer(models: &ModelStoreSpeechModels) {
         install_speech_asset(models, &steno_diarize::models::asset());
+    }
+
+    /// Every model the app's engines load: the `CoreML` Parakeet, the
+    /// speech sidecar's ONNX models and the diarizer's.
+    pub fn install_every_model(models: &ModelStoreSpeechModels) {
+        install_coreml_parakeet(models);
+        for asset in steno_speech::ModelAsset::onnx() {
+            install_speech_asset(models, &asset);
+        }
+        install_onnx_diarizer(models);
     }
 
     /// `asset`'s files in the speech store, each a sparse file of its

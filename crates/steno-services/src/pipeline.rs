@@ -1163,6 +1163,15 @@ mod tests {
     }
 
     impl FakeSidecar {
+        /// A sidecar engine with no child yet, counted in `children`.
+        fn new(children: &Arc<Children>) -> Self {
+            FakeSidecar {
+                inner: FakeSpeechEngine::default(),
+                children: children.clone(),
+                child: AtomicBool::new(false),
+            }
+        }
+
         fn start_child(&self) {
             if !self.child.swap(true, Ordering::SeqCst) {
                 let live = self.children.live.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1229,11 +1238,7 @@ mod tests {
                 move |runtime| -> Arc<dyn SpeechEngine> {
                     builds.lock().unwrap().push(runtime);
                     match runtime {
-                        SpeechRuntime::OnnxSidecar => Arc::new(FakeSidecar {
-                            inner: FakeSpeechEngine::default(),
-                            children: children.clone(),
-                            child: AtomicBool::new(false),
-                        }),
+                        SpeechRuntime::OnnxSidecar => Arc::new(FakeSidecar::new(&children)),
                         SpeechRuntime::CoreMlInProcess => Arc::new(FakeSpeechEngine::default()),
                     }
                 }
@@ -1312,6 +1317,17 @@ mod tests {
         assert_eq!(children.counts(), [0, 1, 1, 1]);
     }
 
+    /// A build of `dependencies` with `parakeet-v3` in the speech sidecar.
+    fn on_the_sidecar(dependencies: PipelineDependencies) -> BuiltPipeline {
+        BuiltPipeline {
+            dependencies,
+            engine: BuiltEngine {
+                engine_id: "parakeet-v3".to_owned(),
+                runtime: SpeechRuntime::OnnxSidecar,
+            },
+        }
+    }
+
     /// Enqueues a two-lane call in `audio` on `pipeline` as a meeting of
     /// its own; its id.
     fn enqueue_call(audio: &std::path::Path, pipeline: &ProcessingPipeline) -> Uuid {
@@ -1371,11 +1387,7 @@ mod tests {
             Box::new({
                 let (children, sidecar) = (children.clone(), sidecar.clone());
                 move |_runtime| -> Arc<dyn SpeechEngine> {
-                    let engine = Arc::new(FakeSidecar {
-                        inner: FakeSpeechEngine::default(),
-                        children: children.clone(),
-                        child: AtomicBool::new(false),
-                    });
+                    let engine = Arc::new(FakeSidecar::new(&children));
                     *sidecar.lock().unwrap() = Some(engine.clone());
                     engine
                 }
@@ -1384,14 +1396,10 @@ mod tests {
         let make: MakeDependencies = {
             let (store, engines) = (store.clone(), engines.clone());
             Arc::new(move || {
-                Ok(BuiltPipeline {
-                    dependencies: fake_dependencies(&store, "fake-engine")
+                Ok(on_the_sidecar(
+                    fake_dependencies(&store, "fake-engine")
                         .with_speech_engine(engines.engine(SpeechRuntime::OnnxSidecar)),
-                    engine: BuiltEngine {
-                        engine_id: "parakeet-v3".to_owned(),
-                        runtime: SpeechRuntime::OnnxSidecar,
-                    },
-                })
+                ))
             })
         };
         let current =
@@ -1433,29 +1441,17 @@ mod tests {
     async fn a_resume_after_a_reload_skips_a_waiting_meeting_the_retired_pipeline_holds() {
         let (dir, store) = temp_store();
         let children = Arc::new(Children::default());
-        let installed = Arc::new(AtomicBool::new(false));
-        let engine = Arc::new(FakeSidecar {
-            inner: FakeSpeechEngine::default(),
-            children: children.clone(),
-            child: AtomicBool::new(false),
-        });
+        let (installed, check) = crate::model_gate::testing::flag(false);
+        let engine = Arc::new(FakeSidecar::new(&children));
         let shared = steno_pipeline::SharedSpeechEngine::new(Arc::new(
-            crate::model_gate::GatedSpeechEngine::new(engine.clone(), {
-                let installed = installed.clone();
-                Arc::new(move || installed.load(Ordering::SeqCst))
-            }),
+            crate::model_gate::GatedSpeechEngine::new(engine.clone(), check),
         ));
         let make: MakeDependencies = {
             let store = store.clone();
             Arc::new(move || {
-                Ok(BuiltPipeline {
-                    dependencies: fake_dependencies(&store, "fake-engine")
-                        .with_speech_engine(shared.clone()),
-                    engine: BuiltEngine {
-                        engine_id: "parakeet-v3".to_owned(),
-                        runtime: SpeechRuntime::OnnxSidecar,
-                    },
-                })
+                Ok(on_the_sidecar(
+                    fake_dependencies(&store, "fake-engine").with_speech_engine(shared.clone()),
+                ))
             })
         };
         let current =
@@ -1626,13 +1622,7 @@ mod tests {
                     ));
                 }
             }
-            Ok(BuiltPipeline {
-                dependencies,
-                engine: BuiltEngine {
-                    engine_id: "parakeet-v3".to_owned(),
-                    runtime: SpeechRuntime::OnnxSidecar,
-                },
-            })
+            Ok(on_the_sidecar(dependencies))
         })
     }
 
@@ -1648,14 +1638,7 @@ mod tests {
         let (dir, store) = temp_store();
         let models_directory = dir.path().join("models");
         let models = Arc::new(crate::speech::testing::models_in(&models_directory));
-        let install = |models: &crate::speech::ModelStoreSpeechModels| {
-            crate::speech::testing::install_coreml_parakeet(models);
-            for asset in steno_speech::ModelAsset::onnx() {
-                crate::speech::testing::install_speech_asset(models, &asset);
-            }
-            crate::speech::testing::install_onnx_diarizer(models);
-        };
-        install(&models);
+        crate::speech::testing::install_every_model(&models);
         let (asset, installed): (ModelAsset, crate::model_gate::InstalledCheck) = match removed {
             Removed::Speech => (ModelAsset::ParakeetV3, {
                 let models = models.clone();
@@ -1709,7 +1692,7 @@ mod tests {
         assert!(swept.is_empty(), "{swept:?}");
         assert!(master.is_file(), "the recording is kept");
 
-        install(&models);
+        crate::speech::testing::install_every_model(&models);
         current.resume_unfinished();
         current.current().wait_until_idle().await;
         assert_eq!(meeting_state(&store, meeting.id), MeetingState::Ready);
@@ -1733,24 +1716,19 @@ mod tests {
     async fn an_install_after_a_reload_resumes_the_meeting_the_retired_pipeline_left_waiting() {
         use steno_host::services::SpeechModels as _;
         let (dir, store) = temp_store();
-        let installed = Arc::new(AtomicBool::new(false));
+        let (installed, check) = crate::model_gate::testing::flag(false);
         let make: MakeDependencies = {
-            let (store, installed) = (store.clone(), installed.clone());
+            let store = store.clone();
             Arc::new(move || {
-                let installed = installed.clone();
                 let gated = crate::model_gate::GatedSpeechEngine::new(
                     Arc::new(FakeSpeechEngine::default()),
-                    Arc::new(move || installed.load(Ordering::SeqCst)),
+                    check.clone(),
                 );
-                Ok(BuiltPipeline {
-                    dependencies: fake_dependencies(&store, "fake-engine").with_speech_engine(
+                Ok(on_the_sidecar(
+                    fake_dependencies(&store, "fake-engine").with_speech_engine(
                         steno_pipeline::SharedSpeechEngine::new(Arc::new(gated)),
                     ),
-                    engine: BuiltEngine {
-                        engine_id: "parakeet-v3".to_owned(),
-                        runtime: SpeechRuntime::OnnxSidecar,
-                    },
-                })
+                ))
             })
         };
         let current = Arc::new(CurrentPipeline::new(

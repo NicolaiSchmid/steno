@@ -225,18 +225,28 @@ impl<M: SpeechModels> SpeechModels for ResumingSpeechModels<M> {
 }
 
 #[cfg(test)]
+pub(crate) mod testing {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::InstalledCheck;
+
+    /// A flag starting at `value` and the check that reads it.
+    pub fn flag(value: bool) -> (Arc<AtomicBool>, InstalledCheck) {
+        let flag = Arc::new(AtomicBool::new(value));
+        let read = flag.clone();
+        (flag, Arc::new(move || read.load(Ordering::SeqCst)))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use steno_core::testing::{FakeDiarizer, FakeSpeechEngine};
 
+    use super::testing::flag;
     use super::*;
-
-    fn flag(value: bool) -> (Arc<AtomicBool>, InstalledCheck) {
-        let flag = Arc::new(AtomicBool::new(value));
-        let read = flag.clone();
-        (flag, Arc::new(move || read.load(Ordering::SeqCst)))
-    }
 
     fn refusal(error: &BoxError) -> Option<PipelineStage> {
         error
