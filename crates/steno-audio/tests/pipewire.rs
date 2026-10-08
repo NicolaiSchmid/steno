@@ -633,21 +633,27 @@ fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// A source whose owner stopped answering (SIGSTOP right after it is
-/// listed): connected, so it is chosen, but its link never runs. The child
-/// is resumed and killed when dropped, by the PID recorded here.
+/// A source whose owner stopped answering (SIGSTOP once it is listed and
+/// both its halves have their ports): connected, so it is chosen, but its
+/// link never runs. The child is resumed and killed when dropped, by the
+/// PID recorded here.
 struct StalledSource {
     child: Child,
 }
 
 impl StalledSource {
     const NAME: &str = "steno-test-mic-stalled";
+    /// The loopback's other half, a sink.
+    const SINK: &str = "steno-test-stalled-in";
 
     fn create() -> Self {
         let child = Command::new("pw-loopback")
             .args([
                 "--capture-props",
-                "node.name=steno-test-stalled-in media.class=Audio/Sink audio.position=[MONO]",
+                &format!(
+                    "node.name={} media.class=Audio/Sink audio.position=[MONO]",
+                    Self::SINK
+                ),
                 "--playback-props",
                 &format!(
                     "node.name={} media.class=Audio/Source audio.position=[MONO]",
@@ -661,6 +667,26 @@ impl StalledSource {
         let source = Self { child };
         let listed = || inputs().iter().any(|device| device.uid == Self::NAME);
         assert!(eventually(SETTLE, listed), "the stalled source is listed");
+        // The session manager configures the ports through the owner: one
+        // stopped before they exist holds the session manager up, and with
+        // it every start, which is not what these tests are about.
+        let configured = || {
+            let objects = dump();
+            let ports = |name: &str, direction: &str| {
+                objects.iter().any(|object| {
+                    object
+                        .pointer("/info/props/node.name")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(name)
+                        && object
+                            .pointer(&format!("/info/n-{direction}-ports"))
+                            .and_then(serde_json::Value::as_u64)
+                            .is_some_and(|count| count > 0)
+                })
+            };
+            ports(Self::NAME, "output") && ports(Self::SINK, "input")
+        };
+        assert!(eventually(SETTLE, configured), "the stalled source's ports");
         assert!(tool("kill", &["-STOP", &source.child.id().to_string()]));
         source
     }
