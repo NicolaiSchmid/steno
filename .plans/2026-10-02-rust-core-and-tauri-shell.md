@@ -937,7 +937,8 @@ still has to draw the window side. `[ ]` is not ported yet.
     instead of leaving it `processing` (`a_run_that_panics_fails_its_meeting`); a
     meeting `persist` marked ready stays ready, and is delivered, whatever fails or
     panics after that write (`a_panic_after_the_ready_write_leaves_the_meeting_ready`).
-    Swift has no counterpart. The resume guard of P13 is not part of this change.
+    Swift has no counterpart. P13's resume guard is the crash-loop bullet under the
+    services list (#228).
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file
@@ -1079,8 +1080,34 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The audio device list is empty off the Mac, so Settings > Recording offers only the
   default input: WASAPI enumerates (WP10a) but the services do not read it yet, and
   PipeWire has no list.
-- The pipeline's `decode` reads a whole lane through symphonia (see Audio); the one
-  buffer alive at a time rule holds, the buffer is the full lane.
+- The pipeline's `decode` streams a lane (see "Streamed decode and mixdown" under
+  Audio); the one buffer alive at a time rule holds, and the buffer is the 16 kHz lane
+  (460 MB for two hours) plus a working set under a megabyte, as in Swift.
+- Launch recovery stops resuming a meeting whose processing keeps ending the app
+  (`crates/steno-pipeline/src/crash_loop.rs`); Swift resumed every unfinished
+  meeting at every launch. What is counted: each background run adds one to
+  `.processing-runs` in the meeting's folder before it starts. A run that ends while
+  the app lives (ready, failed or panicked) clears the count, earlier crashes
+  included; the exit takes each open run back off, one each, on the current pipeline
+  and the retired ones, so earlier crashes still count. What is left is the runs that
+  ended with the app: an abort, an out-of-memory kill, a power loss. Who is charged:
+  every run alive at a crash, so launch recovery runs a meeting with a count alone,
+  after the others and oldest first, and counts it only when its turn comes (a run
+  started at once that never ends holds them back, uncounted, for the session, and
+  the next launch resumes them). When it gives up: after three such runs,
+  `resume_unfinished` marks the meeting failed and clears any retention stamp, so
+  the sweep keeps the audio. What the user sees: "Steno closed unexpectedly 3 times
+  while processing this recording and stopped trying; the recording is kept." How
+  to start over: `enqueue` or `reprocess` clears the count. A file, not a column, so
+  no migration; it is kept only in a folder named after the meeting's id, so two
+  meetings never share one.
+- "Process again": its pipeline entry point, `ProcessingPipeline::reprocess`, has
+  landed (refused with a typed `ReprocessError` when the meeting is unfinished or
+  busy, its master is gone, or the app is quitting; it drops the retention stamp an
+  earlier run left, so a retry that fails keeps the audio, and the retention sweep
+  checks each asset again in the write that removes its files, so a meeting queued
+  after the sweep read its list keeps its audio); the bridge method, its button and
+  `steno process --meeting` are P9 in `.plans/2026-10-07-stable-promotion.md`.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
   under 5 % of the mic lane's speech and under ten seconds is diarized on the mic lane
   (`pipeline::diarized_lane_after_transcription`, `tap_carried_no_conversation`); the
@@ -1148,10 +1175,22 @@ parity item until a plan says otherwise:
   small AAC encoder (`fdk-aac` is non-free; `ffmpeg` is too large), accept
   WAV for the optional export, or encode through the platform (AudioToolbox
   on the Mac, Media Foundation on Windows) behind a `cfg`.
-- **Whole-file decode.** The decoder reads a lane to one `Vec<f32>` at the
-  source rate before resampling; the AVFoundation codec converted in 32 768
-  frame chunks. A two-hour 48 kHz lane is 1.4 GB transiently. Chunk the
-  symphonia path before the Linux release.
+- **Streamed decode and mixdown: parity.** A CAF master is read 32 768 frames
+  at a time, as the AVFoundation codec converted, other files a packet at a
+  time, and each block is resampled as it arrives (`LaneResampler`); a rate or
+  channel count that changes mid-file keeps all of the file, as Swift's one
+  `AVAudioFile` decode did. The whole-file decoder before it dropped the
+  samples before a channel-count change and resampled all of a rate-only
+  change at the last rate. Bounds and measurements: A1 in
+  `.plans/2026-10-07-stable-promotion.md`, and #228.
+- **A sidecar is taken only when it is the master's length at 16 kHz.**
+  Swift's codec took any non-empty sidecar. The Rust `decode` reads the
+  master CAF's frame count from its header and decodes the master when the
+  sidecar disagrees with it: the sidecar's 32-bit size fields wrap after
+  37.3 hours (a wrapped header can still parse and claim a short lane), and
+  a sidecar that missed the master's last frame on a full disk would lose
+  it. A master that then fails to decode falls back to that sidecar, and a
+  master that is not the writer's CAF leaves the sidecar trusted.
 - **Resampling.** 48 kHz masters go through the writer's exact 3:1 FIR
   with its group delay dropped, so the decode is zero-phase on the master's
   time; other rates (the phone's 44.1 kHz) through a 64-tap, 128-phase
@@ -2073,8 +2112,7 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   system lane is the whole default sink (Steno's own output included; leaving it out
   was weighed and not done, see the note), a Mac device
   UID names no Linux node, `start` waits for the first cycle, there is no input device
-  list and no meeting detection, the latencies are unmeasured on real hardware, and
-  the decoder reads a whole lane into memory (1.4 GB for a two-hour 48 kHz lane).
+  list and no meeting detection, and the latencies are unmeasured on real hardware.
   Where: the Linux items under "Audio". Found: #166, #176.
 - **First Linux release.** A default move can go unreported on PipeWire before 1.6.9
   (pipewire#5445, fixed upstream by 06de0ed2 on `master` and b784720b on `1.6`; seen
@@ -2248,6 +2286,7 @@ PR off `main`.
 | The phone rebuilds its queue index from the recording files on disk and the recorder's directory, gives every recording its own file, saves nothing after a failed load, and fails a row after repeated announce 409s (`mobile/`) | `fix/mobile-queue-index-rebuild` | #223 | open |
 | A re-announce of a `complete` recording with another size or hash is answered 409, so the phone keeps its file, and the same bytes in other chunks are answered `complete` (`steno-handover`, Swift core) | `fix/handover-reannounce-hash-check` | #224 | open |
 | A first announce, one that finds no receipt in memory or the store, discards every inbox file of the recording id before it opens its own, so an old verified file is never admitted unhashed; Swift's announce answers a failed receipt read with 500 (`steno-handover`, Swift core) | `fix/handover-first-announce-discard` | #239 | open |
+| The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

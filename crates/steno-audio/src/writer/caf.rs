@@ -13,6 +13,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use super::bytes::{ReadAt, WindowedFile};
 use super::{durable, io_error};
 use crate::capture::CaptureError;
 
@@ -197,9 +198,10 @@ pub enum CafReadError {
 }
 
 /// Reads the CAF files the writer produces (Float32 little-endian PCM, any
-/// channel count, data size -1 accepted) into de-interleaved channels. For
-/// tests, the bench tools and crash recovery; the pipeline's decoder is
-/// [`SymphoniaAudioCodec`](crate::codec::SymphoniaAudioCodec).
+/// channel count, data size -1 accepted) into de-interleaved channels, the
+/// whole file at once: for the tests and the bench tools. The pipeline's
+/// decoder, [`SymphoniaAudioCodec`](crate::codec::SymphoniaAudioCodec),
+/// reads a master through the same chunk walk a block at a time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CafFile {
     /// Hertz.
@@ -230,38 +232,83 @@ impl CafFile {
     }
 
     /// Parses `data` as a CAF.
-    pub fn read_bytes(data: &[u8]) -> Result<Self, CafReadError> {
-        if data.len() < 8 || &data[..4] != b"caff" {
+    pub fn read_bytes(mut data: &[u8]) -> Result<Self, CafReadError> {
+        let layout = CafLayout::read(&mut data)?;
+        let channel_count = layout.channels;
+        let bytes_per_sample = CafStreamWriter::BYTES_PER_SAMPLE;
+        let mut channels = vec![vec![0.0f32; layout.frames]; channel_count];
+        for frame in 0..layout.frames {
+            for (channel, lane) in channels.iter_mut().enumerate() {
+                let at = layout.start + (frame * channel_count + channel) * bytes_per_sample;
+                lane[frame] = f32::from_le_bytes(data[at..at + 4].try_into().unwrap_or([0; 4]));
+            }
+        }
+        Ok(Self {
+            sample_rate: layout.sample_rate,
+            channels,
+        })
+    }
+}
+
+/// Where a CAF's samples sit, from its chunk headers.
+#[derive(Debug, Clone, Copy)]
+struct CafLayout {
+    sample_rate: f64,
+    /// At least one.
+    channels: usize,
+    /// The file offset of the first sample.
+    start: usize,
+    /// Whole frames from `start`.
+    frames: usize,
+}
+
+impl CafLayout {
+    /// Walks the chunks of `source`.
+    fn read(source: &mut impl ReadAt) -> Result<Self, CafReadError> {
+        let len = source.len();
+        let mut read = |offset: usize, buffer: &mut [u8]| {
+            source
+                .read_at(offset, buffer)
+                .map_err(|e| CafReadError::Io(e.to_string()))
+        };
+        let mut magic = [0u8; 4];
+        if len >= 8 {
+            read(0, &mut magic)?;
+        }
+        if &magic != b"caff" {
             return Err(CafReadError::Malformed("missing caff header".into()));
         }
         let mut offset = 8;
         let mut format: Option<(f64, u32, usize, usize, [u8; 4])> = None;
         let mut samples: Option<(usize, usize)> = None;
-        while offset + 12 <= data.len() {
-            let kind: [u8; 4] = data[offset..offset + 4].try_into().unwrap_or(*b"????");
-            let size =
-                i64::from_be_bytes(data[offset + 4..offset + 12].try_into().unwrap_or([0; 8]));
+        while offset + 12 <= len {
+            let mut header = [0u8; 12];
+            read(offset, &mut header)?;
+            let kind: [u8; 4] = header[..4].try_into().unwrap_or(*b"????");
+            let size = i64::from_be_bytes(header[4..].try_into().unwrap_or([0; 8]));
             let body = offset + 12;
             match &kind {
                 b"desc" => {
                     let desc = CafStreamWriter::DESC_CHUNK_SIZE;
-                    if size < 0 || (size as u64) < desc as u64 || body + desc > data.len() {
+                    if size < 0 || (size as u64) < desc as u64 || body + desc > len {
                         return Err(CafReadError::Malformed("desc chunk too short".into()));
                     }
+                    let mut data = [0u8; CafStreamWriter::DESC_CHUNK_SIZE];
+                    read(body, &mut data)?;
                     format = Some((
-                        f64::from_bits(be_u64(data, body)),
-                        be_u32(data, body + 12),
-                        be_u32(data, body + 24) as usize,
-                        be_u32(data, body + 28) as usize,
-                        data[body + 8..body + 12].try_into().unwrap_or(*b"????"),
+                        f64::from_bits(be_u64(&data, 0)),
+                        be_u32(&data, 12),
+                        be_u32(&data, 24) as usize,
+                        be_u32(&data, 28) as usize,
+                        data[8..12].try_into().unwrap_or(*b"????"),
                     ));
                 }
                 b"data" => {
                     let edit = CafStreamWriter::EDIT_COUNT_SIZE;
-                    if body + edit > data.len() {
+                    if body + edit > len {
                         return Err(CafReadError::Malformed("data chunk too short".into()));
                     }
-                    let available = data.len() - body - edit;
+                    let available = len - body - edit;
                     let count = if size < 0 {
                         available
                     } else {
@@ -279,7 +326,7 @@ impl CafFile {
             }
             offset = body.saturating_add(usize::try_from(size).unwrap_or(usize::MAX));
         }
-        let Some((rate, flags, channel_count, bits, format_id)) = format else {
+        let Some((sample_rate, flags, channel_count, bits, format_id)) = format else {
             return Err(CafReadError::Malformed("no desc chunk".into()));
         };
         let Some((start, count)) = samples else {
@@ -295,20 +342,79 @@ impl CafFile {
                 String::from_utf8_lossy(&format_id)
             )));
         }
-        let channel_count = channel_count.max(1);
-        let bytes_per_sample = CafStreamWriter::BYTES_PER_SAMPLE;
-        let frames = count / (bytes_per_sample * channel_count);
-        let mut channels = vec![vec![0.0f32; frames]; channel_count];
-        for frame in 0..frames {
-            for (channel, lane) in channels.iter_mut().enumerate() {
-                let at = start + (frame * channel_count + channel) * bytes_per_sample;
-                lane[frame] = f32::from_le_bytes(data[at..at + 4].try_into().unwrap_or([0; 4]));
-            }
-        }
+        let channels = channel_count.max(1);
         Ok(Self {
-            sample_rate: rate,
+            sample_rate,
             channels,
+            start,
+            frames: count / (CafStreamWriter::BYTES_PER_SAMPLE * channels),
         })
+    }
+}
+
+/// Reads a CAF like [`CafFile`] does, a block of frames at a time, so a
+/// two-hour master never sits in memory whole. The decoder reads masters
+/// through it.
+pub(crate) struct CafReader {
+    file: WindowedFile,
+    layout: CafLayout,
+    /// Frames read so far.
+    position: usize,
+    bytes: Vec<u8>,
+}
+
+impl CafReader {
+    /// Reads the chunk headers; the samples wait for `read_frames`.
+    pub(crate) fn open(path: &Path) -> Result<Self, CafReadError> {
+        let mut file = WindowedFile::open(path).map_err(|e| CafReadError::Io(e.to_string()))?;
+        let layout = CafLayout::read(&mut file)?;
+        Ok(Self {
+            file,
+            layout,
+            position: 0,
+            bytes: Vec::new(),
+        })
+    }
+
+    /// Hertz.
+    pub(crate) fn sample_rate(&self) -> f64 {
+        self.layout.sample_rate
+    }
+
+    /// Interleaved channels, at least one.
+    pub(crate) fn channel_count(&self) -> usize {
+        self.layout.channels
+    }
+
+    /// Whole frames in the file.
+    pub(crate) fn frame_count(&self) -> usize {
+        self.layout.frames
+    }
+
+    /// Replaces `samples` with the next frames, at most `max_frames`,
+    /// interleaved; returns how many frames, zero at the end.
+    pub(crate) fn read_frames(
+        &mut self,
+        max_frames: usize,
+        samples: &mut Vec<f32>,
+    ) -> Result<usize, CafReadError> {
+        let frames = max_frames.min(self.layout.frames - self.position);
+        let bytes_per_frame = CafStreamWriter::BYTES_PER_SAMPLE * self.layout.channels;
+        let offset = self.layout.start + self.position * bytes_per_frame;
+        self.bytes.resize(frames * bytes_per_frame, 0);
+        self.file
+            .read_at(offset, &mut self.bytes)
+            .map_err(|e| CafReadError::Io(e.to_string()))?;
+        samples.clear();
+        samples.extend(
+            self.bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|bytes| f32::from_le_bytes(*bytes)),
+        );
+        self.position += frames;
+        Ok(frames)
     }
 }
 

@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use super::bytes::{ReadAt, WindowedFile};
 use super::{durable, io_error};
 use crate::capture::CaptureError;
 
@@ -195,18 +196,110 @@ impl WavFile {
     }
 
     /// Parses `data` as RIFF/WAVE.
-    pub fn read_bytes(data: &[u8]) -> Result<Self, WavReadError> {
-        if data.len() < 12 || &data[..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+    pub fn read_bytes(mut data: &[u8]) -> Result<Self, WavReadError> {
+        let layout = WavLayout::read(&mut data)?;
+        let bytes_per_sample = layout.bytes_per_sample();
+        let bytes_per_frame = layout.bytes_per_frame();
+        let mut channels = vec![vec![0.0f32; layout.frames]; layout.channels];
+        for frame in 0..layout.frames {
+            for (channel, lane) in channels.iter_mut().enumerate() {
+                let at = layout.start + frame * bytes_per_frame + channel * bytes_per_sample;
+                lane[frame] = layout.sample(&data[at..at + bytes_per_sample]);
+            }
+        }
+        Ok(Self {
+            sample_rate: layout.sample_rate,
+            bits_per_sample: layout.bits_per_sample,
+            is_float: layout.is_float,
+            channels,
+        })
+    }
+
+    /// The strict sidecar reader: 16 kHz mono, as core's `WAVAudioDecoder`.
+    /// Reads a block at a time into a buffer of the lane's length, so
+    /// nothing but the lane is held.
+    pub fn read_16k_mono(path: &Path) -> Result<Vec<f32>, WavReadError> {
+        let io = |e: std::io::Error| WavReadError::Io(e.to_string());
+        let mut file = WindowedFile::open(path).map_err(io)?;
+        let layout = WavLayout::read(&mut file)?;
+        if layout.sample_rate != 16_000 || layout.channels != 1 {
+            return Err(WavReadError::UnsupportedFormat(format!(
+                "{} Hz, {} channel(s); need 16000 Hz mono",
+                layout.sample_rate, layout.channels
+            )));
+        }
+        let bytes_per_sample = layout.bytes_per_sample();
+        let mut samples = Vec::with_capacity(layout.frames);
+        let mut block = vec![0u8; Self::BLOCK_FRAMES * bytes_per_sample];
+        let mut read = 0;
+        while read < layout.frames {
+            let frames = Self::BLOCK_FRAMES.min(layout.frames - read);
+            let bytes = &mut block[..frames * bytes_per_sample];
+            file.read_at(layout.start + read * bytes_per_sample, bytes)
+                .map_err(io)?;
+            samples.extend(
+                bytes
+                    .chunks_exact(bytes_per_sample)
+                    .map(|b| layout.sample(b)),
+            );
+            read += frames;
+        }
+        Ok(samples)
+    }
+
+    /// Seconds, from the headers alone, so a long file is not read: the
+    /// data chunk's whole frames over the sample rate.
+    pub fn read_duration(path: &Path) -> Result<f64, WavReadError> {
+        let mut file = WindowedFile::open(path).map_err(|e| WavReadError::Io(e.to_string()))?;
+        let layout = WavLayout::read(&mut file)?;
+        Ok(layout.frames as f64 / f64::from(layout.sample_rate.max(1)))
+    }
+
+    /// Frames per read in `read_16k_mono`.
+    const BLOCK_FRAMES: usize = 32_768;
+}
+
+/// Where a WAV's samples sit and how they are coded, from its chunk
+/// headers.
+#[derive(Debug, Clone, Copy)]
+struct WavLayout {
+    sample_rate: u32,
+    bits_per_sample: u16,
+    is_float: bool,
+    /// At least one.
+    channels: usize,
+    /// The file offset of the first sample.
+    start: usize,
+    /// Whole frames from `start`.
+    frames: usize,
+}
+
+impl WavLayout {
+    /// Walks the chunks of `source`.
+    fn read(source: &mut impl ReadAt) -> Result<Self, WavReadError> {
+        let len = source.len();
+        let mut read = |offset: usize, buffer: &mut [u8]| {
+            source
+                .read_at(offset, buffer)
+                .map_err(|e| WavReadError::Io(e.to_string()))
+        };
+        let mut tags = [0u8; 12];
+        if len >= 12 {
+            read(0, &mut tags)?;
+        }
+        if &tags[..4] != b"RIFF" || &tags[8..12] != b"WAVE" {
             return Err(WavReadError::Malformed("missing RIFF/WAVE tags".into()));
         }
         let mut offset = 12;
         let mut format: Option<(u16, usize, u32, u16)> = None;
         let mut samples: Option<std::ops::Range<usize>> = None;
-        while offset + 8 <= data.len() {
-            let id = &data[offset..offset + 4];
-            let size = le_u32(data, offset + 4) as usize;
+        while offset + 8 <= len {
+            let mut header = [0u8; 8];
+            read(offset, &mut header)?;
+            let id = &header[..4];
+            let size = le_u32(&header, 4) as usize;
             let body = offset + 8;
-            if body + size > data.len() {
+            if body + size > len {
                 return Err(WavReadError::Malformed(format!(
                     "chunk {} runs past the end of the file",
                     String::from_utf8_lossy(id)
@@ -217,15 +310,18 @@ impl WavFile {
                     if size < 16 {
                         return Err(WavReadError::Malformed("fmt chunk too short".into()));
                     }
-                    let mut tag = le_u16(data, body);
+                    let mut data = [0u8; 26];
+                    let data = &mut data[..size.min(26)];
+                    read(body, data)?;
+                    let mut tag = le_u16(data, 0);
                     if tag == 0xFFFE && size >= 26 {
-                        tag = le_u16(data, body + 24);
+                        tag = le_u16(data, 24);
                     }
                     format = Some((
                         tag,
-                        le_u16(data, body + 2) as usize,
-                        le_u32(data, body + 4),
-                        le_u16(data, body + 14),
+                        le_u16(data, 2) as usize,
+                        le_u32(data, 4),
+                        le_u16(data, 14),
                     ));
                 }
                 b"data" => samples = Some(body..body + size),
@@ -233,57 +329,48 @@ impl WavFile {
             }
             offset = body + size + (size % 2);
         }
-        let Some((tag, channel_count, rate, bits)) = format else {
+        let Some((tag, channel_count, sample_rate, bits_per_sample)) = format else {
             return Err(WavReadError::Malformed("no fmt chunk".into()));
         };
         let Some(range) = samples else {
             return Err(WavReadError::Malformed("no data chunk".into()));
         };
-        let is_float = match (tag, bits) {
+        let is_float = match (tag, bits_per_sample) {
             (1, 16) => false,
             (3, 32) => true,
             _ => {
                 return Err(WavReadError::UnsupportedFormat(format!(
-                    "format tag {tag} at {bits} bits; need 16-bit integer or 32-bit float"
+                    "format tag {tag} at {bits_per_sample} bits; need 16-bit integer or 32-bit float"
                 )));
             }
         };
-        let channel_count = channel_count.max(1);
-        let bytes_per_sample = usize::from(bits / 8);
-        let bytes_per_frame = bytes_per_sample * channel_count;
-        let frames = range.len() / bytes_per_frame;
-        let mut channels = vec![vec![0.0f32; frames]; channel_count];
-        for frame in 0..frames {
-            for (channel, lane) in channels.iter_mut().enumerate() {
-                let at = range.start + frame * bytes_per_frame + channel * bytes_per_sample;
-                lane[frame] = if is_float {
-                    f32::from_le_bytes(data[at..at + 4].try_into().unwrap_or([0; 4]))
-                } else {
-                    f32::from(i16::from_le_bytes(
-                        data[at..at + 2].try_into().unwrap_or([0; 2]),
-                    )) / 32768.0
-                };
-            }
-        }
+        let channels = channel_count.max(1);
+        let bytes_per_frame = usize::from(bits_per_sample / 8) * channels;
         Ok(Self {
-            sample_rate: rate,
-            bits_per_sample: bits,
+            sample_rate,
+            bits_per_sample,
             is_float,
             channels,
+            start: range.start,
+            frames: range.len() / bytes_per_frame,
         })
     }
 
-    /// The strict sidecar reader: 16 kHz mono, as core's `WAVAudioDecoder`.
-    pub fn read_16k_mono(path: &Path) -> Result<Vec<f32>, WavReadError> {
-        let file = Self::read(path)?;
-        if file.sample_rate != 16_000 || file.channels.len() != 1 {
-            return Err(WavReadError::UnsupportedFormat(format!(
-                "{} Hz, {} channel(s); need 16000 Hz mono",
-                file.sample_rate,
-                file.channels.len()
-            )));
+    fn bytes_per_sample(&self) -> usize {
+        usize::from(self.bits_per_sample / 8)
+    }
+
+    fn bytes_per_frame(&self) -> usize {
+        self.bytes_per_sample() * self.channels
+    }
+
+    /// One sample's bytes as `f32` in -1..1.
+    fn sample(&self, bytes: &[u8]) -> f32 {
+        if self.is_float {
+            f32::from_le_bytes(bytes.try_into().unwrap_or([0; 4]))
+        } else {
+            f32::from(i16::from_le_bytes(bytes.try_into().unwrap_or([0; 2]))) / 32768.0
         }
-        Ok(file.channels.into_iter().next().unwrap_or_default())
     }
 }
 

@@ -118,10 +118,9 @@ impl Process {
         let meeting_id = Uuid::new_v4();
         let layout = RecordingLayout::new(&root, meeting_id);
         layout.create_directories(false).map_err(Failure::runtime)?;
-        let wav = steno_audio::WavFile::read(&self.input)
+        // The header alone: a two-hour lane is not read whole for its length.
+        let duration = steno_audio::WavFile::read_duration(&self.input)
             .map_err(|e| Failure::runtime(format!("{}: {e}", self.input.display())))?;
-        #[allow(clippy::cast_precision_loss)]
-        let duration = wav.frame_count() as f64 / f64::from(wav.sample_rate.max(1));
 
         let asset = if let (Source::MacCall, Some(system_lane)) = (self.source, &self.system_lane) {
             let mic = layout.sidecar(AudioLane::Mic);

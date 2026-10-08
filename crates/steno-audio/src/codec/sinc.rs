@@ -11,6 +11,9 @@
 //! `tests/codec.rs`: within 0.3 dB to 6 kHz, -1.3 dB at 6.5 kHz, 12 kHz
 //! aliases below -50 dB (the design stopband is about -69 dB); plenty for
 //! speech. The exact 3:1 FIR the 48 kHz path uses is the flat one.
+//!
+//! [`SincStream`] runs the same filter over a signal that arrives in
+//! pieces; [`SincResampler::resample`] is one piece.
 
 use crate::writer::Resampler48kTo16k;
 
@@ -71,38 +74,125 @@ impl SincResampler {
     }
 
     /// The whole signal; the output has `ceil(len / ratio)` samples, which
-    /// the caller trims to the exact expected length.
+    /// the caller trims to the exact expected length. The same samples as
+    /// [`SincStream`] fed `input` in any number of pieces.
     #[must_use]
     pub fn resample(&self, input: &[f32]) -> Vec<f32> {
-        if input.is_empty() {
-            return Vec::new();
-        }
-        let half = self.taps / 2;
-        let count = (input.len() as f64 / self.ratio).ceil() as usize;
-        let mut output = Vec::with_capacity(count);
-        for n in 0..count {
-            let position = n as f64 * self.ratio;
-            let index = position.floor();
-            let fraction = position - index;
-            let index = index as usize;
-            let phase = (fraction * Self::PHASES as f64) as usize;
-            let blend = (fraction * Self::PHASES as f64 - phase as f64) as f32;
-            let low = &self.table[phase * self.taps..(phase + 1) * self.taps];
-            let high = &self.table[(phase + 1) * self.taps..(phase + 2) * self.taps];
-            let mut accumulator = 0.0f32;
-            for k in 0..self.taps {
-                // Tap k reads the input sample at index - half + 1 + k.
-                let Some(at) = (index + 1 + k).checked_sub(half) else {
-                    continue;
-                };
-                if at >= input.len() {
-                    continue;
-                }
-                let coefficient = low[k] + (high[k] - low[k]) * blend;
-                accumulator += coefficient * input[at];
-            }
-            output.push(accumulator);
-        }
+        let mut stream = SincStream::new(self.clone());
+        let mut output = Vec::with_capacity((input.len() as f64 / self.ratio).ceil() as usize);
+        stream.push(input.iter().copied(), &mut output);
+        stream.finish(&mut output);
         output
+    }
+
+    /// Output sample `n` from the input samples `input`, the first of which
+    /// is input sample `base`; taps at or past `end`, the input's length,
+    /// read nothing, as do taps before the start.
+    fn output_at(&self, n: usize, input: &[f32], base: usize, end: usize) -> f32 {
+        let half = self.taps / 2;
+        let position = n as f64 * self.ratio;
+        let index = position.floor();
+        let fraction = position - index;
+        let index = index as usize;
+        let phase = (fraction * Self::PHASES as f64) as usize;
+        let blend = (fraction * Self::PHASES as f64 - phase as f64) as f32;
+        let low = &self.table[phase * self.taps..(phase + 1) * self.taps];
+        let high = &self.table[(phase + 1) * self.taps..(phase + 2) * self.taps];
+        let mut accumulator = 0.0f32;
+        for k in 0..self.taps {
+            // Tap k reads the input sample at index - half + 1 + k.
+            let Some(at) = (index + 1 + k).checked_sub(half) else {
+                continue;
+            };
+            if at >= end {
+                continue;
+            }
+            let coefficient = low[k] + (high[k] - low[k]) * blend;
+            accumulator += coefficient * input[at - base];
+        }
+        accumulator
+    }
+
+    /// The input sample output `n`'s window is centred on.
+    fn centre(&self, n: usize) -> usize {
+        (n as f64 * self.ratio).floor() as usize
+    }
+}
+
+/// [`SincResampler`] over a signal that arrives in pieces: an output
+/// sample is computed once every input sample its taps read has arrived,
+/// and the input before the earliest tap still needed is let go, so the
+/// state is the taps' span plus one piece. The output is the whole-signal
+/// [`SincResampler::resample`]'s, sample for sample, however the input is
+/// cut.
+#[derive(Debug, Clone)]
+pub struct SincStream {
+    resampler: SincResampler,
+    /// Input samples from input sample `base` on.
+    window: Vec<f32>,
+    base: usize,
+    /// Input samples pushed so far.
+    received: usize,
+    /// The next output sample.
+    next: usize,
+}
+
+impl SincStream {
+    /// Input samples taken into the window between computing outputs.
+    const PIECE: usize = 4_096;
+
+    /// A stream through `resampler`.
+    #[must_use]
+    pub fn new(resampler: SincResampler) -> Self {
+        Self {
+            resampler,
+            window: Vec::new(),
+            base: 0,
+            received: 0,
+            next: 0,
+        }
+    }
+
+    /// Takes `input` and appends every output sample it completes.
+    pub fn push(&mut self, input: impl IntoIterator<Item = f32>, output: &mut Vec<f32>) {
+        let mut input = input.into_iter();
+        let half = self.resampler.taps / 2;
+        loop {
+            let before = self.window.len();
+            self.window.extend(input.by_ref().take(Self::PIECE));
+            let taken = self.window.len() - before;
+            if taken == 0 {
+                return;
+            }
+            self.received += taken;
+            // The last tap of output n reads input sample centre + half.
+            while self.resampler.centre(self.next) + half < self.received {
+                self.emit(output);
+            }
+            // The first tap of the next output reads centre + 1 - half.
+            let keep = (self.resampler.centre(self.next) + 1).saturating_sub(half);
+            if keep > self.base {
+                self.window.drain(..keep - self.base);
+                self.base = keep;
+            }
+        }
+    }
+
+    /// Appends the outputs the end of the input completes: the whole
+    /// signal's `ceil(len / ratio)` in all.
+    pub fn finish(&mut self, output: &mut Vec<f32>) {
+        let count = (self.received as f64 / self.resampler.ratio).ceil() as usize;
+        while self.next < count {
+            self.emit(output);
+        }
+    }
+
+    /// Appends the next output sample from the input received so far.
+    fn emit(&mut self, output: &mut Vec<f32>) {
+        output.push(
+            self.resampler
+                .output_at(self.next, &self.window, self.base, self.received),
+        );
+        self.next += 1;
     }
 }

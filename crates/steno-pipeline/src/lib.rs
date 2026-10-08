@@ -7,9 +7,10 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue`, `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, `apply_retention`, the stages |
+//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, `apply_retention`, the stages |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
+//! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |
 //! | [`events`] | [`MeetingEventBus`], the broadcast of `MeetingEvent` |
 //! | [`intake`] | The phone intake ([`RecordingIntake`]) and the Mac one ([`LocalRecordingIntake`]) |
 //! | [`lane_merger`] | The lanes into one ordered transcript |
@@ -61,6 +62,7 @@
 //! # }
 //! ```
 
+pub mod crash_loop;
 pub mod estimator;
 pub mod events;
 pub mod files;
@@ -80,8 +82,8 @@ pub use intake::{
 pub use lane_merger::LaneMerger;
 pub use pipeline::{
     BACKGROUND_RUN_LOG, MonotonicClock, Now, OPERATION_PANICKED, Operation, PipelineDependencies,
-    PipelineFailure, ProcessingPipeline, QuitLatch, SharedSpeechEngine, SystemClock,
-    WeakSpeechEngine,
+    PipelineFailure, ProcessingPipeline, QuitLatch, ReprocessError, SharedSpeechEngine,
+    SystemClock, WeakSpeechEngine,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use speaker_memory::StoreSpeakerMemory;

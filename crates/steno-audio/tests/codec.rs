@@ -468,3 +468,120 @@ fn the_sinc_resampler_keeps_level_and_period_at_44100() {
     let rejection = level_against_sine(&rejected[1_000..31_000], 0.5);
     assert!(rejection < -50.0, "12 kHz aliases at {rejection} dB");
 }
+
+/// A sidecar is taken only when it is exactly as long as the master's
+/// 16 kHz lane. Its 32-bit size fields wrap after 37.3 hours, so the
+/// header of a long sidecar can claim a short lane and still parse; here
+/// a three-second sidecar's header claims 1 000 samples and a chunk after
+/// them covers the rest, as a wrapped size can land. That, a sidecar a
+/// frame longer and one a frame shorter (a full disk stopped it after
+/// the master's frame), and one a sample off either way all decode from
+/// the master, sample for sample; the writer's own sidecar is still taken.
+#[tokio::test]
+async fn a_sidecar_whose_length_disagrees_with_the_master_is_not_taken() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = RecordingLayout::new(directory.path(), Uuid::new_v4());
+    let asset = call_asset(&write_call(&layout, 3.0, true).files());
+    let codec = SymphoniaAudioCodec::new();
+    let master = steno_core::paths::file_url_path(&asset.url).unwrap();
+    let from_master = SymphoniaAudioCodec::decode_path(&master, 0, AudioLane::Mic).unwrap();
+    assert_eq!(from_master.len(), 48_000);
+    let own = codec.decode(&asset, AudioLane::Mic).await.unwrap();
+    assert_eq!(
+        own.samples,
+        WavFile::read_16k_mono(&layout.sidecar(AudioLane::Mic)).unwrap(),
+        "the writer's sidecar is taken"
+    );
+
+    let samples: Vec<i16> = (0..48_000).map(|i| ((i % 200) as i16 - 100) * 50).collect();
+    let mut wrapped = WavStreamWriter::header(16_000, 1_000);
+    for sample in &samples {
+        wrapped.extend_from_slice(&sample.to_le_bytes());
+    }
+    let after = WavStreamWriter::HEADER_SIZE + 2_000;
+    let rest = (wrapped.len() - after - 8) as u32;
+    wrapped[after..after + 4].copy_from_slice(b"junk");
+    wrapped[after + 4..after + 8].copy_from_slice(&rest.to_le_bytes());
+    let wrapped_path = directory.path().join("wrapped.wav");
+    std::fs::write(&wrapped_path, wrapped).unwrap();
+    assert_eq!(
+        WavFile::read_16k_mono(&wrapped_path).unwrap().len(),
+        1_000,
+        "the header parses and claims 1 000 samples"
+    );
+    let write_sidecar = |name: &str, count: usize| {
+        let path = directory.path().join(name);
+        let mut writer = WavStreamWriter::create(&path, 16_000).unwrap();
+        writer.write(&samples[..count.min(48_000)]).unwrap();
+        writer
+            .write(&vec![0i16; count.saturating_sub(48_000)])
+            .unwrap();
+        writer.finish().unwrap();
+        path
+    };
+    let longer = write_sidecar("longer.wav", 48_160);
+    let shorter = write_sidecar("shorter.wav", 47_840);
+    let one_longer = write_sidecar("one-longer.wav", 48_001);
+    let one_shorter = write_sidecar("one-shorter.wav", 47_999);
+    for (name, path) in [
+        ("wrapped", &wrapped_path),
+        ("longer", &longer),
+        ("shorter", &shorter),
+        ("a sample longer", &one_longer),
+        ("a sample shorter", &one_shorter),
+    ] {
+        let mut with = asset.clone();
+        with.sidecars_16k
+            .insert(AudioLane::Mic, file_url(path, false));
+        let decoded = codec.decode(&with, AudioLane::Mic).await.unwrap();
+        assert!(
+            decoded.samples.len() == from_master.len()
+                && decoded
+                    .samples
+                    .iter()
+                    .zip(&from_master.samples)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "{name} sidecar: decoded from the master"
+        );
+    }
+}
+
+/// A master that fails after its sidecar was set aside for disagreeing
+/// with it (here the asset lists a lane the master has no channel for,
+/// which fails the same way an I/O error mid-file does) falls back to
+/// that sidecar: a transcript from a sidecar beats none.
+#[tokio::test]
+async fn a_master_that_fails_falls_back_to_the_sidecar_that_disagreed() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = RecordingLayout::new(directory.path(), Uuid::new_v4());
+    let mut asset = call_asset(&write_call(&layout, 1.0, true).files());
+    let samples: Vec<i16> = (0..16_160).map(|i| ((i % 100) as i16 - 50) * 100).collect();
+    let mixed = directory.path().join("mixed.wav");
+    let mut writer = WavStreamWriter::create(&mixed, 16_000).unwrap();
+    writer.write(&samples).unwrap();
+    writer.finish().unwrap();
+    asset.lanes.push(AudioLane::Mixed);
+    asset
+        .sidecars_16k
+        .insert(AudioLane::Mixed, file_url(&mixed, false));
+    let master = steno_core::paths::file_url_path(&asset.url).unwrap();
+    assert!(matches!(
+        SymphoniaAudioCodec::decode_path(&master, 2, AudioLane::Mixed),
+        Err(CodecError::ChannelMissing { .. })
+    ));
+
+    let decoded = SymphoniaAudioCodec::new()
+        .decode(&asset, AudioLane::Mixed)
+        .await
+        .unwrap();
+    assert_eq!(decoded.samples, WavFile::read_16k_mono(&mixed).unwrap());
+
+    std::fs::remove_file(&mixed).unwrap();
+    assert!(
+        SymphoniaAudioCodec::new()
+            .decode(&asset, AudioLane::Mixed)
+            .await
+            .is_err(),
+        "without the sidecar the master's failure stands"
+    );
+}

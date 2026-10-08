@@ -147,8 +147,9 @@ Forge and atlas.
   through its own mDNS responder (`mdns-sd`). A firewall that blocks incoming TCP
   hides it from the phone; `ufw` admits mDNS by default.
 - **The Rust app has no "Process again".** "Try again" re-runs only the summary
-  and is off without a transcript; neither the pipeline, the bridge nor the CLI
-  can process a meeting again, and the CLI reads WAV only. P9 adds it.
+  and is off without a transcript. The pipeline can process a meeting again
+  (`ProcessingPipeline::reprocess`), but neither the bridge nor the CLI calls it
+  yet, and the CLI reads WAV only. P9 adds them.
 - **A recording ended by a kill is marked failed at the next launch**
   (`fail_interrupted_recordings`), and nothing salvages its CAF yet (P3).
 - **Omarchy 4** (Arch with Hyprland, Wayland):
@@ -391,11 +392,11 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P6 | The recording in progress: systemd-oomd kills the app's cgroup with its sidecar. The sidecar moves into its own transient scope on Linux | Linux desktop |
 | P7 | Every note: a people folder typed as `./People` or `.` in the Swift Settings makes each Rust delivery fail. `./People` becomes `People`; `.` becomes no people folder, as Swift wrote it | pipeline, store and export (`wp-pse-*`) |
 | P8 | Every stored secret and the pairing on Omarchy: a multi-line secret corrupts its keyring. Every secret written to the Secret Service is one line (the PEM bundle base64-encoded, read back either way), with #221. At #221's first move, a key only `secrets.json` holds is copied; where both hold one, the file's API key wins and the Secret Service keeps its own `handover-identity`; after the move's mark, the Secret Service wins for every key | audio (with #221) |
-| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess`, a `meeting.processAgain` bridge method and its button, and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`); a meeting refused for missing models stays queued and resumes once they install | pipeline, store and export (`wp-pse-*`) |
+| P9 | A failed meeting whose master exists: there is no "Process again". `ProcessingPipeline::reprocess` (landed, #228), a `meeting.processAgain` bridge method and its button, and `steno process --meeting <id>` (with `input` optional and exclusive of `--meeting`); a meeting refused for missing models stays queued and resumes once they install | pipeline, store and export (`wp-pse-*`) |
 | P10 | A meeting's whole result: a diarizer or speaker-match failure fails the meeting. It merges without diarization instead | pipeline, store and export (`wp-pse-*`) |
 | P11 | Speaker names confirmed while the meeting processes: the cleanup updates text by id, and `replace_transcript` keeps Confirmed assignments (calibration WP4) | pipeline, store and export (`wp-pse-*`) |
 | P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
-| P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard) |
+| P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard, #228) |
 | P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | pipeline, store and export (`wp-pse-*`) |
 | P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run without migrating, and refuse beside an older app. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); a Swift app started after the Rust app is not kept out | capture and recovery (`wp-cap-*`, #225) |
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
@@ -406,7 +407,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P21 | The unsynced tail of a recording: periodic `sync_data` on the master | capture and recovery (`wp-cap-*`) |
 | P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`) | capture and recovery (`wp-cap-*`) |
 | P23 | Audio the relay dropped: a warning at stop and a log line; no stored count, since a column would need a migration | capture and recovery (`wp-cap-*`) |
-| P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio |
+| P24 | A transcript cut short by a sidecar shorter than its master: the sidecar's duration is checked against the master's | audio (#228) |
 | P25 | A recording or a processing run stopped by an update: updates wait while either runs | Linux desktop |
 | P26 | A person page: a case-only rename of a person loses the page on a case-insensitive disk | pipeline, store and export (`wp-pse-*`) |
 | P27 | Notes written at once to one vault: deliveries are serialised per vault | pipeline, store and export (`wp-pse-*`) |
@@ -426,7 +427,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 
 | ID | Package | Owner |
 |---|---|---|
-| A1 | A streamed decoder and mixdown: CAF and WAV decoded and mixed in bounded chunks, so a two-hour two-channel master never sits in memory whole | audio |
+| A1 | A streamed decoder and mixdown: CAF and WAV decoded and mixed in bounded chunks, so a two-hour two-channel master never sits in memory whole | audio (#228) |
 | A2 | The CoreML backend on the shared chunker, merge and decoder settings | audio |
 | A3 | The diarizer on `ModelStore`, and its inference in the speech sidecar, so a crash in ONNX Runtime ends the child, not the app (invariant 4) | audio |
 | A4 | PipeWire: `stop()` bounded, the own output and the default move settled (#214); `start`'s first cycle and the latencies measured on Nicolai's hardware | audio (#214) |
@@ -666,7 +667,9 @@ Each lands before `0.11.0-rc.1`.
 - **A1 A streamed decoder and mixdown.** Decode and mix every lane in bounded
   chunks, CAF and WAV included. The PR names two memory bounds: the decoder's,
   for its own test, and the soak's, for each of R5's commands (the app and its
-  sidecar together). Decoded samples equal today's.
+  sidecar together). Decoded samples equal today's. The soak's bound is 6 GiB
+  (#228); on atlas, `steno process` with the diarizer peaked at 4.26 GiB on a
+  two-hour two-lane recording.
 - **A2 CoreML on the shared chunker.** The CoreML backend moves onto the shared
   chunker, merge and decoder settings, settling the unticked WP4 integration
   notes. Parity: FLEURS and the Swift fixtures hold within today's tolerance.
