@@ -852,9 +852,10 @@ impl App {
     ///    and the retention sweep runs.
     /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
     ///    10 s for a master that is still written): those recordings are
-    ///    recovered, left alone or failed; a master in an audio folder with
-    ///    no meeting at all is adopted as one, and the main window says
-    ///    "Recovered a recording." under the Record control
+    ///    recovered, left alone or failed; a master this install wrote
+    ///    that has no meeting at all is adopted as one, and the main window
+    ///    says "Recovered a recording that was missing from your list. It
+    ///    is being processed." under the Record control
     ///    (`CaptureRecorder::note_adopted`); the list is refreshed.
     /// 5. Meanwhile the login item is registered the first time, the
     ///    handover listener starts when a phone is already paired, and the
@@ -1412,9 +1413,10 @@ mod tests {
     }
 
     /// `App::launch` itself: a call master in the audio folder with no
-    /// meeting (a row lost with the database) is adopted on the launch's
-    /// blocking task and processed, and the main window says "Recovered a
-    /// recording." under the Record control until the user dismisses it.
+    /// meeting (a row lost with the database), whose folder the recorder
+    /// recorded before its row, is adopted on the launch's blocking task
+    /// and processed, and the main window says so under the Record control
+    /// until the user dismisses it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_adopts_a_recording_with_no_meeting_and_says_so() {
         use steno_host::services::Recorder as _;
@@ -1423,7 +1425,9 @@ mod tests {
         let mut app = recording_app(&dir, &store);
         app.live_recording_check = crate::testing::an_hour_later();
         let meeting_id = uuid::Uuid::new_v4();
-        let layout = steno_core::RecordingLayout::new(&dir.path().join("audio"), meeting_id);
+        let audio = dir.path().join("audio");
+        crate::audio_folders::record(&app.paths.support_directory, meeting_id, &audio).unwrap();
+        let layout = steno_core::RecordingLayout::new(&audio, meeting_id);
         let lanes = [steno_core::AudioLane::Mic, steno_core::AudioLane::System];
         let mut writer = steno_audio::RecordingWriter::new(&layout, &lanes, false).unwrap();
         crate::testing::write_frames(&mut writer, 100);
@@ -1439,7 +1443,12 @@ mod tests {
         assert_eq!(adopted.duration, 1.0);
         assert_eq!(
             app.recorder.status().warning.as_deref(),
-            Some("Recovered a recording.")
+            Some("Recovered a recording that was missing from your list. It is being processed.")
+        );
+        assert!(
+            crate::audio_folders::recorded(&app.paths.support_directory)
+                .unwrap()
+                .is_empty()
         );
         app.recorder.clear_messages();
         assert_eq!(app.recorder.status().warning, None);

@@ -193,7 +193,7 @@ impl SymphoniaAudioCodec {
     /// m4a's track header, a WAV's data chunk), read without decoding it;
     /// `None` when the container does not say. For a recording that has no
     /// stored duration, such as one the launch adopts from the audio
-    /// folder.
+    /// folder. Rust only.
     pub fn declared_duration(path: &Path) -> Result<Option<f64>, CodecError> {
         let frames = SymphoniaFrames::open(path)?;
         Ok(frames

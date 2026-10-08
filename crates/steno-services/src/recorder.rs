@@ -697,18 +697,22 @@ impl CaptureRecorder {
 
     /// Tells the user under the Record control that the launch adopted
     /// `count` recordings it found in the audio folder with no meeting
-    /// ([`crate::recovery::adopt_orphans`]): "Recovered a recording.", or
-    /// the count. Shown while the recorder is idle until the user
-    /// dismisses the messages; a recording started meanwhile hides it
-    /// until it stops. Rust only.
+    /// ([`crate::recovery::adopt_orphans`]): "Recovered a recording that
+    /// was missing from your list. It is being processed.", or the count.
+    /// Shown while the recorder is idle until the user dismisses the
+    /// messages; a recording started meanwhile hides it until it stops.
+    /// Rust only.
     pub(crate) fn note_adopted(&self, count: usize) {
         if count == 0 {
             return;
         }
         let note = if count == 1 {
-            "Recovered a recording.".to_owned()
+            "Recovered a recording that was missing from your list. It is being processed."
+                .to_owned()
         } else {
-            format!("Recovered {count} recordings.")
+            format!(
+                "Recovered {count} recordings that were missing from your list. They are being processed."
+            )
         };
         self.inner().launch_note = Some(note);
         self.notify();
