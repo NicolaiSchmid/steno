@@ -261,4 +261,18 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"seen\": tr");
         assert_eq!(names(&folder), vec!["preferences.json"]);
     }
+
+    /// The disk's folder usage asks the durable writes about the folder's
+    /// drive: a test folder does not warn, and on Windows the FAT32 drive
+    /// CI mounts (`STENO_FAT32_VOLUME`) does.
+    #[test]
+    fn the_disk_folder_usage_warns_only_on_a_drive_that_may_lose_recent_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(!DiskFolderUsage.may_lose_recent_writes(directory.path()));
+        if cfg!(windows)
+            && let Some(volume) = std::env::var_os("STENO_FAT32_VOLUME")
+        {
+            assert!(DiskFolderUsage.may_lose_recent_writes(Path::new(&volume)));
+        }
+    }
 }
