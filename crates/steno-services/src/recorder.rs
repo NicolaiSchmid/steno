@@ -974,15 +974,15 @@ impl CaptureRecorder {
     /// Quitting: once a start or a stop in progress has settled, a
     /// recording is stopped with the `quit` end reason and saved (the
     /// asset written and the meeting enqueued) before this returns; a
-    /// stop already under way is waited for instead, so its reason stands.
-    /// No recording starts afterwards. Swift: `awaitSettled()` and then
-    /// `stop(reason: .quit)` in `AppController.shutdown`.
+    /// stop already under way is waited for instead, so its reason stands,
+    /// and neither tries a busy commit again (Rust only, as the retry is).
+    /// No recording starts once this is called. Swift: `awaitSettled()` and
+    /// then `stop(reason: .quit)` in `AppController.shutdown`.
     pub fn stop_for_quit(&self) {
-        let active = {
-            let mut inner = self.settle();
-            inner.quitting = true;
-            Self::begin_stop(&mut inner)
-        };
+        // Before the wait, so a stop under way tries its commit no more
+        // ([`Self::finish_stop`]) and nothing starts meanwhile.
+        self.inner().quitting = true;
+        let active = Self::begin_stop(&mut self.settle());
         if let Some(active) = active {
             self.finish_stop(active, RecordingEndReason::Quit, None);
         }
@@ -1009,13 +1009,15 @@ impl CaptureRecorder {
     fn finish_stop(&self, active: Active, reason: RecordingEndReason, error: Option<String>) {
         let unwinding = Unwinding::of(self, RecordingState::Stopping, SAVE_PANICKED);
         self.notify();
-        // An exit's stop tries its commit once, so it ends within the
-        // exit's patience; a busy database leaves the meeting `recording`
-        // for the next launch.
-        let intake = if reason == RecordingEndReason::Quit {
-            self.intake().with_commit_attempts(1)
-        } else {
-            self.intake()
+        // Once the app quits, a busy commit is tried no more, so the stop
+        // ends within the exit's patience; a busy database leaves the
+        // meeting `recording` for the next launch.
+        let intake = {
+            let this = self.this.clone();
+            self.intake().retrying_while(move || {
+                this.upgrade()
+                    .is_some_and(|recorder| !recorder.inner().quitting)
+            })
         };
         let meeting_id = active.meeting_id;
         let outcome = match active.session.stop() {
@@ -2251,6 +2253,54 @@ mod tests {
             harness.store.meeting(meeting_id).unwrap().unwrap().state,
             steno_core::MeetingState::Recording
         );
+    }
+
+    /// The meeting of `meeting_id` was kept for the next launch: its row
+    /// `recording`, its `folder` still recorded, and the status says so.
+    fn assert_kept(harness: &Harness, meeting_id: Uuid, folder: &Path) {
+        assert_eq!(
+            harness.store.meeting(meeting_id).unwrap().unwrap().state,
+            steno_core::MeetingState::Recording
+        );
+        let recorded = crate::audio_folders::recorded(&harness.dir.path().join("support")).unwrap();
+        assert_eq!(
+            recorded.get(&meeting_id).map(PathBuf::as_path),
+            Some(folder)
+        );
+        assert_eq!(
+            harness.recorder.status().error.as_deref(),
+            Some(KEPT_FOR_THE_NEXT_LAUNCH)
+        );
+    }
+
+    /// A stop under way when the app quits tries its commit no more once
+    /// the quit came: with the database held past the busy timeout (1 s),
+    /// quitting returns after the try in progress, where the stop's three
+    /// tries would take 3 s more, and the meeting is kept for the next
+    /// launch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_under_way_when_the_app_quits_tries_its_commit_no_more() {
+        let harness = harness(&[]);
+        harness
+            .store
+            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_secs(1))?))
+            .unwrap();
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let hold =
+            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
+        let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
+        let stopper = harness.recorder.clone();
+        let manual = std::thread::spawn(move || stopper.stop());
+        stop_seen.recv_timeout(PATIENCE).expect("the stop began");
+        let started = std::time::Instant::now();
+        quit(&harness.recorder);
+        let took = started.elapsed();
+        drop(hold);
+        manual.join().unwrap();
+        // The stop's notice holds it 0.3 s ([`held_in`]), then one try.
+        assert!(took < std::time::Duration::from_millis(2_500), "{took:?}");
+        assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
     /// A stop whose capture failed (the writer died and took the asset)

@@ -327,7 +327,7 @@ pub struct LocalRecordingIntake {
     enqueue: Enqueue,
     now: Now,
     zone: FixedOffset,
-    commit_attempts: usize,
+    keep_trying: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl LocalRecordingIntake {
@@ -338,17 +338,21 @@ impl LocalRecordingIntake {
             enqueue,
             now,
             zone,
-            commit_attempts: Self::COMMIT_ATTEMPTS,
+            keep_trying: Arc::new(|| true),
         }
     }
 
-    /// This intake with [`Self::complete`] trying its commit `attempts`
-    /// times in all (at least once) instead of [`Self::COMMIT_ATTEMPTS`]:
-    /// a stop for the app's exit tries once, so it ends within the exit's
-    /// patience.
+    /// This intake with [`Self::complete`] asking `keep_trying` before each
+    /// further try of a busy commit, and trying no more once it says no:
+    /// the recorder's stop asks whether the app is quitting, so a stop for
+    /// the exit, or one under way when the exit came, ends within the
+    /// exit's patience. Rust only, as the retry is.
     #[must_use]
-    pub fn with_commit_attempts(mut self, attempts: usize) -> Self {
-        self.commit_attempts = attempts.max(1);
+    pub fn retrying_while(
+        mut self,
+        keep_trying: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.keep_trying = Arc::new(keep_trying);
         self
     }
 
@@ -430,7 +434,7 @@ impl LocalRecordingIntake {
     /// row is still `recording` and keeps what else was saved on it since
     /// ([`Store::save_stopped_recording`]). A commit that finds the
     /// database busy is tried again, up to [`Self::COMMIT_ATTEMPTS`] in
-    /// all ([`Self::with_commit_attempts`]). A meeting that is not
+    /// all, while [`Self::retrying_while`]'s check allows. A meeting that is not
     /// `recording`, when `complete` reads it or when it commits, is left
     /// alone, its row untouched, and one deleted meanwhile is not brought
     /// back. Any other failure
@@ -451,7 +455,11 @@ impl LocalRecordingIntake {
                 .complete_inner(meeting_id, result.clone(), retention)
                 .await
             {
-                Err(error) if error.is_busy() && attempt < self.commit_attempts => {
+                Err(error)
+                    if error.is_busy()
+                        && attempt < Self::COMMIT_ATTEMPTS
+                        && (self.keep_trying)() =>
+                {
                     tracing::debug!(%meeting_id, attempt, "the recording's commit found the database busy");
                     attempt += 1;
                 }
@@ -854,8 +862,9 @@ mod tests {
     }
 
     /// A commit that fails for another reason (a full disk) is not tried
-    /// again and leaves the meeting `recording`, as `begin` wrote it; an
-    /// intake set to one try does not retry a busy commit either.
+    /// again and leaves the meeting `recording`, as `begin` wrote it; a
+    /// busy commit is tried again only while the intake's check allows,
+    /// asked before each further try.
     #[tokio::test]
     async fn a_failed_commit_leaves_the_recording_and_only_a_busy_one_is_tried_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -893,17 +902,27 @@ mod tests {
         let (meeting, result) = a_recording(&store, dir.path());
         let hold = WriteLockHold::new(&path);
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let intake = LocalRecordingIntake::new(
             store.clone(),
             committing_enqueue(store.clone(), calls.clone(), |_| {}),
             Arc::new(Utc::now),
             FixedOffset::east_opt(0).unwrap(),
         )
-        .with_commit_attempts(1);
+        .retrying_while({
+            let asked = asked.clone();
+            // Yes once, then no, as a quit that comes during the second try.
+            move || asked.fetch_add(1, Ordering::SeqCst) == 0
+        });
         let error = intake.complete(meeting.id, result, None).await.unwrap_err();
         drop(hold);
         assert!(error.is_busy(), "{error}");
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "one try");
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "two tries");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "asked before each further try"
+        );
         assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), meeting);
     }
 
