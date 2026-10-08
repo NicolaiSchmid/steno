@@ -18,7 +18,9 @@ use steno_host::fakes::{
 use steno_host::services::{LoginItem, LoginItemStatus, Opener, Services};
 use steno_host::{Host, HostConfig};
 use steno_llm::CodexCredentialStore;
-use steno_pipeline::{MeetingEventBus, PipelineDependencies, RecordingIntake, RetentionSweep};
+use steno_pipeline::{
+    ExportRetries, MeetingEventBus, PipelineDependencies, RecordingIntake, RetentionSweep,
+};
 
 use crate::block_on;
 use crate::handover::ListenerHandover;
@@ -108,6 +110,10 @@ pub struct App {
     pub events: MeetingEventBus,
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
+    /// The launch re-exports in a row per meeting that did not deliver
+    /// every row, which the launch counts and any re-export the user causes
+    /// resets.
+    pub export_retries: Arc<ExportRetries>,
     pub services: Services,
     pub handover: Option<Arc<HandoverService>>,
     pub recorder: Arc<CaptureRecorder>,
@@ -342,6 +348,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let make = make_dependencies(&store, &engines, &secrets, &codex, &events, &runtime);
     let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
     let sweep = RetentionSweep::new(store.clone());
+    let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
 
     let permissions = Arc::new(FakePermissions::all_granted());
     let speech_models = Arc::new(ModelStoreSpeechModels::new(speech));
@@ -374,6 +381,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         pipeline: Arc::new(HostPipeline {
             pipeline: pipeline.clone(),
             sweep: sweep.clone(),
+            export_retries: export_retries.clone(),
         }),
         speech_models,
         llm: Arc::new(ClientLlmService { codex }),
@@ -404,6 +412,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         events,
         pipeline,
         sweep,
+        export_retries,
         services,
         handover: handover.map(|(service, _)| service),
         recorder,
@@ -636,9 +645,11 @@ impl App {
     /// Everything that happens once at launch, in order: the pipeline's
     /// events are subscribed and routed into the host, interrupted
     /// recordings become failed, meetings left queued or processing are
-    /// processed again, the retention sweep runs, the login item is
-    /// registered the first time, and the handover listener starts when a
-    /// phone is already paired. Swift: `AppController.launch`.
+    /// processed again, exports left unfinished are re-exported
+    /// ([`ProcessingPipeline::redeliver_unfinished`](steno_pipeline::ProcessingPipeline::redeliver_unfinished)),
+    /// the retention sweep runs, the login item is registered the first
+    /// time, and the handover listener starts when a phone is already
+    /// paired. Swift: `AppController.launch`, which re-exported nothing.
     pub fn launch(&self, host: &Arc<Host>) {
         let recorder_host = host.clone();
         self.recorder
@@ -696,12 +707,22 @@ impl App {
         {
             tracing::warn!(%error, "interrupted recordings could not be marked");
         }
-        match self.pipeline.current().resume_unfinished() {
+        let pipeline = self.pipeline.current();
+        match pipeline.resume_unfinished() {
             Ok(resumed) if !resumed.is_empty() => {
                 tracing::info!(count = resumed.len(), "resumed unfinished meetings");
             }
             Ok(_) => {}
             Err(error) => tracing::warn!(%error, "unfinished meetings could not be resumed"),
+        }
+        // After `resume_unfinished`, so a meeting it resumed is skipped:
+        // its run exports it.
+        match pipeline.redeliver_unfinished(&self.export_retries) {
+            Ok(owed) if !owed.is_empty() => {
+                tracing::info!(count = owed.len(), "re-exporting unfinished exports");
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "unfinished exports could not be re-exported"),
         }
         run_sweep(&self.sweep);
         host.register_login_item_on_first_launch();
@@ -877,6 +898,46 @@ mod tests {
         );
     }
 
+    /// What `App::launch` does to a ready meeting whose export a previous
+    /// process left `pending`: it re-exports it into the vault.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn launch_re_exports_a_meeting_whose_export_was_left_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = build(options_under(&dir.path().join("support"))).unwrap();
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        let mut settings = app.store.settings().unwrap();
+        settings.obsidian = Some(steno_core::ObsidianSettings {
+            vault_path: vault.to_string_lossy().into_owned(),
+            people_folder: None,
+            include_audio: false,
+            task_tag: None,
+            extra: serde_json::Map::new(),
+        });
+        app.store.save_settings(&settings).unwrap();
+        let mut meeting = steno_core::testing::sample_data::meeting();
+        meeting.state = steno_core::MeetingState::Ready;
+        app.store.save_meeting(&meeting).unwrap();
+        let destination = DeliveryCoordinator::destinations_for(&settings).remove(0);
+        app.store
+            .save_delivery(&steno_core::Delivery {
+                id: steno_core::Delivery::id_for(meeting.id, destination.id()),
+                meeting_id: meeting.id,
+                destination_id: destination.id().to_owned(),
+                status: steno_core::DeliveryStatus::Pending,
+                last_attempt_at: None,
+                receipt: None,
+            })
+            .unwrap();
+
+        let host = Arc::new(app.host().unwrap());
+        app.launch(&host);
+        app.pipeline.current().wait_until_idle().await;
+        let delivery = app.store.deliveries(meeting.id).unwrap().remove(0);
+        assert_eq!(delivery.status, steno_core::DeliveryStatus::Delivered);
+        assert!(delivery.receipt.is_some());
+    }
+
     /// The models directory is decided once, when the app is built: a
     /// reload after the settings name another directory keeps the first,
     /// so the pipeline and the model service agree. Both directories are
@@ -1021,6 +1082,7 @@ mod tests {
             events: MeetingEventBus::new(),
             pipeline,
             sweep: RetentionSweep::new(store.clone()),
+            export_retries: Arc::new(ExportRetries::in_memory()),
             services,
             handover: None,
             recorder,

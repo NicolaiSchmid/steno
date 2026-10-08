@@ -322,6 +322,17 @@ pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
     format!("{} · {status}", destination_display_name(delivery))
 }
 
+/// A failed delivery once the launch stopped retrying it: "Export to
+/// Obsidian (Work) keeps failing: reason". Rust only: Swift never retried
+/// at launch.
+#[must_use]
+pub fn keeps_failing_line(delivery: &Delivery, reason: &str) -> String {
+    format!(
+        "Export to {} keeps failing: {reason}",
+        destination_display_name(delivery)
+    )
+}
+
 fn export_snapshot(detail: &MeetingDetailViewModel, zone: FixedOffset) -> DetailExport {
     match detail.export_status() {
         ExportStatus::NoVault => DetailExport {
@@ -353,7 +364,12 @@ fn export_snapshot(detail: &MeetingDetailViewModel, zone: FixedOffset) -> Detail
                 },
                 message: deliveries
                     .iter()
-                    .map(|delivery| delivery_line(delivery, zone))
+                    .map(|delivery| match delivery.status.failure_message() {
+                        Some(reason) if detail.export_keeps_failing => {
+                            keeps_failing_line(delivery, reason)
+                        }
+                        _ => delivery_line(delivery, zone),
+                    })
                     .collect::<Vec<_>>()
                     .join("; "),
                 can_reexport: detail.can_reexport(),

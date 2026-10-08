@@ -45,6 +45,9 @@ pub struct MeetingDetailViewModel {
     pub default_retention: AudioRetention,
     pub llm_configured: bool,
     pub vault_configured: bool,
+    /// The launch stopped re-exporting the meeting
+    /// ([`Pipeline::export_keeps_failing`]), read with the deliveries.
+    pub export_keeps_failing: bool,
     pub error: Option<String>,
     pub is_busy: bool,
     pub tab: DetailTab,
@@ -71,6 +74,7 @@ impl MeetingDetailViewModel {
             }),
             llm_configured: settings.is_some_and(llm_configured),
             vault_configured: settings.is_some_and(vault_configured),
+            export_keeps_failing: false,
             error: None,
             is_busy: false,
             tab: DetailTab::Summary,
@@ -122,6 +126,7 @@ impl MeetingDetailViewModel {
             Ok(deliveries) => self.deliveries = deliveries,
             Err(error) => self.error = Some(format!("Deliveries could not be loaded: {error}")),
         }
+        self.export_keeps_failing = pipeline.export_keeps_failing(self.id);
     }
 
     /// The settings as stored now: the keep toggle appears and disappears

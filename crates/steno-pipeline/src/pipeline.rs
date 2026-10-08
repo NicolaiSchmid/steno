@@ -6,9 +6,11 @@
 //! Lanes are decoded one at a time inside the stage that needs them, so at
 //! most one `AudioBuffer16k` is alive. One operation runs per meeting at a
 //! time: a second `process`, `rerun_summary` or `redeliver` on a meeting
-//! in flight fails instead of interleaving writes with the first. Stage
-//! durations feed the `stageRate` table when the meeting was alone in
-//! flight for the whole stage, so overlapping runs never pollute the rates.
+//! in flight fails instead of interleaving writes with the first, also
+//! across a reload, whose pipelines share one in-flight set
+//! ([`InFlight`]). Stage durations feed the `stageRate` table when the
+//! meeting was alone in flight for the whole stage, so overlapping runs
+//! never pollute the rates.
 //! Once a job's lanes are transcribed and no other job is between its
 //! warm-up and its last lane, the speech engine is released
 //! ([`SpeechEngine::release`]): the speech sidecar's child exits and its
@@ -30,7 +32,7 @@ use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use steno_core::{
-    AudioAsset, AudioBuffer16k, AudioDecoder, AudioLane, AudioRetention, CleanupInput,
+    AudioAsset, AudioBuffer16k, AudioDecoder, AudioLane, AudioRetention, CleanupInput, Delivery,
     DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting, MeetingEvent,
     MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
     Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
@@ -49,6 +51,7 @@ use uuid::Uuid;
 use crate::crash_loop::{CountedRun, MAX_CRASHED_RUNS, OpenRuns, RunCount, TOO_MANY_CRASHED_RUNS};
 use crate::estimator::{ProcessingEstimator, StageRates, StageSample, absorbing};
 use crate::events::MeetingEventBus;
+use crate::export_retries::ExportRetries;
 use crate::lane_merger::{ClusterSpeaker, LaneMerger};
 use crate::run::ProcessingRun;
 
@@ -121,7 +124,8 @@ pub enum ReprocessError {
     #[error("meeting {0}'s audio is no longer on disk")]
     AudioGone(Uuid),
     /// Another operation holds the meeting (a run, a summary rerun or a
-    /// redelivery), or a run of its asset is starting.
+    /// redelivery), or a background run holds its recording, on any
+    /// pipeline sharing the in-flight set.
     #[error("meeting {0} is busy")]
     Busy(Uuid),
     /// The app is exiting: nothing was saved, and the meeting can be
@@ -230,6 +234,39 @@ impl QuitLatch {
     fn open(&self) -> MutexGuard<'_, OpenRuns> {
         self.0
             .open
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// The meetings with an operation in progress and the recordings being
+/// processed, shared by every pipeline whose dependencies carry it, so a
+/// reload's new pipeline refuses a meeting the retired one still holds.
+/// Clones share one set. Its lock is never held while a pipeline's own
+/// state lock is taken.
+/// Swift: `inFlight`, `admissions` and `running` of `ProcessingPipeline`
+/// in `Sources/StenoCore/Pipeline/ProcessingPipeline.swift`, which each
+/// pipeline kept for itself, so after `reloadPipeline()` the new one could
+/// run beside a retired one. Rust only: the sharing.
+#[derive(Debug, Clone, Default)]
+pub struct InFlight(Arc<Mutex<InFlightSet>>);
+
+#[derive(Debug, Default)]
+struct InFlightSet {
+    /// Meetings with an operation in progress.
+    meetings: BTreeSet<Uuid>,
+    /// Counts every admission to `meetings`; a stage whose count moved
+    /// was not alone for its whole span.
+    admissions: u64,
+    /// The assets claimed for a background run
+    /// ([`ProcessingPipeline::claim_start`], for `enqueue`, `reprocess` and
+    /// `resume_unfinished`), from the claim to the run's end.
+    assets: BTreeSet<Uuid>,
+}
+
+impl InFlight {
+    fn lock(&self) -> MutexGuard<'_, InFlightSet> {
+        self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -400,6 +437,9 @@ pub struct PipelineDependencies {
     /// A fresh latch from [`new`](Self::new); clones share theirs, and
     /// [`with_quit_latch`](Self::with_quit_latch) shares the caller's.
     pub quit_latch: QuitLatch,
+    /// A fresh in-flight set from [`new`](Self::new); clones share theirs,
+    /// and [`with_in_flight`](Self::with_in_flight) shares the caller's.
+    pub in_flight: InFlight,
 }
 
 impl PipelineDependencies {
@@ -427,6 +467,7 @@ impl PipelineDependencies {
             now: Arc::new(Utc::now),
             clock: Arc::new(SystemClock::default()),
             quit_latch: QuitLatch::default(),
+            in_flight: InFlight::default(),
         }
     }
 
@@ -469,23 +510,24 @@ impl PipelineDependencies {
         self.quit_latch = latch;
         self
     }
+
+    /// Carries `in_flight` instead of the fresh set from [`new`](Self::new),
+    /// as [`with_quit_latch`](Self::with_quit_latch) carries a latch.
+    #[must_use]
+    pub fn with_in_flight(mut self, in_flight: InFlight) -> Self {
+        self.in_flight = in_flight;
+        self
+    }
 }
 
-/// The bookkeeping behind the pipeline's one mutex.
+/// The pipeline's own runs and background tasks; the meetings in flight
+/// are in [`InFlight`].
 #[derive(Default)]
 struct State {
-    /// Meetings with an operation in progress.
-    in_flight: BTreeSet<Uuid>,
-    /// Counts every admission to `in_flight`; a stage whose count moved
-    /// was not alone for its whole span.
-    admissions: u64,
     runs: HashMap<Uuid, ProcessingRun>,
     /// The background runs started by `enqueue` and `resume_unfinished`,
-    /// by asset id.
+    /// by asset id, and by `redeliver_unfinished`, by a key of their own.
     running: HashMap<Uuid, JoinHandle<()>>,
-    /// Assets claimed for a background run that has not started yet
-    /// ([`Starting`]).
-    starting: BTreeSet<Uuid>,
 }
 
 struct Inner {
@@ -717,6 +759,19 @@ async fn unless_it_panics<T>(
         .unwrap_or_else(|_| Err(PipelineFailure::new(stage(), OPERATION_PANICKED)))
 }
 
+/// Whether every row of `deliveries` went through (none for a deleted
+/// meeting).
+fn all_delivered(deliveries: &[Delivery]) -> bool {
+    deliveries
+        .iter()
+        .all(|delivery| delivery.status == DeliveryStatus::Delivered)
+}
+
+/// The failure saved on a delivery an export left `pending` when no
+/// failure names a reason: the process ended mid-export, or the
+/// dispatcher returned without finishing the row.
+const EXPORT_INTERRUPTED: &str = "the export stopped before it finished";
+
 /// The row an operation needs, or a failure for `stage` that says what
 /// is `missing`.
 fn required<T, E: fmt::Display + 'static>(
@@ -756,6 +811,11 @@ impl ProcessingPipeline {
         (self.inner.dependencies.now)()
     }
 
+    /// The in-flight set every pipeline sharing it sees.
+    fn in_flight_set(&self) -> MutexGuard<'_, InFlightSet> {
+        self.inner.dependencies.in_flight.lock()
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.inner
             .state
@@ -763,11 +823,12 @@ impl ProcessingPipeline {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Meetings with an operation in progress, so a test can tell that a
-    /// run has been admitted.
+    /// Meetings with an operation in progress on any pipeline sharing this
+    /// one's in-flight set (a reload's too), so a test can tell that a run
+    /// has been admitted.
     #[must_use]
     pub fn in_flight(&self) -> Vec<Uuid> {
-        self.state().in_flight.iter().copied().collect()
+        self.in_flight_set().meetings.iter().copied().collect()
     }
 
     /// Sets the pipeline's [`QuitLatch`] for the app's exit, which quits
@@ -789,8 +850,8 @@ impl ProcessingPipeline {
     /// pipeline [quits](Self::quit), the meeting is saved and stays
     /// `queued` for the next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let starting = self.claim_or_refuse(meeting, asset)?;
-        self.enqueue_claimed(meeting, asset, &starting)
+        let claim = self.claim_or_refuse(meeting, asset)?;
+        self.enqueue_claimed(meeting, asset, claim)
     }
 
     /// [`ProcessingPipeline::enqueue`] of a meeting the caller saved
@@ -802,14 +863,14 @@ impl ProcessingPipeline {
     /// nothing starts and the meeting waits `queued` for the next launch.
     /// Swift: `ProcessingPipeline.enqueueSaved`.
     pub fn enqueue_saved(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let _starting = self.claim_or_refuse(meeting, asset)?;
-        self.start(asset, Turn::Now(None));
+        let claim = self.claim_or_refuse(meeting, asset)?;
+        self.start(asset, Turn::Now(None), claim);
         Ok(())
     }
 
     /// [`ProcessingPipeline::claim_start`] for `enqueue` and
     /// `enqueue_saved`, refused as a failed `decode`.
-    fn claim_or_refuse(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<Starting> {
+    fn claim_or_refuse(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<AssetClaim> {
         self.claim_start(meeting.id, asset.id).ok_or_else(|| {
             PipelineFailure::new(
                 PipelineStage::Decode,
@@ -819,13 +880,13 @@ impl ProcessingPipeline {
     }
 
     /// `enqueue` once the asset is claimed: the claim is held from the
-    /// check to the run's start, so a second call cannot start a second
+    /// check to the run's end, so a second call cannot start a second
     /// run.
     fn enqueue_claimed(
         &self,
         meeting: &Meeting,
         asset: &AudioAsset,
-        _starting: &Starting,
+        claim: AssetClaim,
     ) -> Result<()> {
         let mut queued = meeting.clone();
         queued.state = MeetingState::Queued;
@@ -839,7 +900,7 @@ impl ProcessingPipeline {
         // Processed afresh: earlier runs that ended with the app no longer
         // count against it.
         RunCount::of(&asset).clear();
-        self.start(&asset, Turn::Now(None));
+        self.start(&asset, Turn::Now(None), claim);
         Ok(())
     }
 
@@ -873,26 +934,24 @@ impl ProcessingPipeline {
         if !file_url_path(&asset.url).is_some_and(|master| master.exists()) {
             return Err(ReprocessError::AudioGone(meeting_id));
         }
-        let starting = self
+        let claim = self
             .claim_start(meeting_id, asset.id)
             .ok_or(ReprocessError::Busy(meeting_id))?;
         asset.expires_at = None;
-        Ok(self.enqueue_claimed(&meeting, &asset, &starting)?)
+        Ok(self.enqueue_claimed(&meeting, &asset, claim)?)
     }
 
-    /// Claims `asset_id` for a background run of `meeting_id`, until the
-    /// claim drops; `None` while the asset runs or is claimed, or the
-    /// meeting is in flight. The check and the claim are one step under
-    /// the state lock.
-    fn claim_start(&self, meeting_id: Uuid, asset_id: Uuid) -> Option<Starting> {
-        let mut state = self.state();
-        if state.running.contains_key(&asset_id)
-            || state.in_flight.contains(&meeting_id)
-            || !state.starting.insert(asset_id)
-        {
+    /// Claims `asset_id` for a background run of `meeting_id` in the
+    /// in-flight set. The run holds the claim until it ends, and a run that
+    /// never starts drops it. `None` while the asset runs or is claimed, or
+    /// the meeting is in flight, on any pipeline sharing the set. The check and the
+    /// claim are one step under the set's lock.
+    fn claim_start(&self, meeting_id: Uuid, asset_id: Uuid) -> Option<AssetClaim> {
+        let mut in_flight = self.in_flight_set();
+        if in_flight.meetings.contains(&meeting_id) || !in_flight.assets.insert(asset_id) {
             return None;
         }
-        Some(Starting {
+        Some(AssetClaim {
             pipeline: self.clone(),
             asset_id,
         })
@@ -922,7 +981,7 @@ impl ProcessingPipeline {
         let mut resumed = Vec::new();
         let mut alone = Vec::new();
         for meeting in meetings {
-            if self.state().in_flight.contains(&meeting.id) {
+            if self.in_flight_set().meetings.contains(&meeting.id) {
                 continue;
             }
             let Some(mut asset) =
@@ -942,7 +1001,7 @@ impl ProcessingPipeline {
                 )?;
                 continue;
             };
-            let Some(starting) = self.claim_start(meeting.id, asset.id) else {
+            let Some(claim) = self.claim_start(meeting.id, asset.id) else {
                 continue;
             };
             let count = RunCount::of(&asset);
@@ -972,19 +1031,19 @@ impl ProcessingPipeline {
                 continue;
             }
             if crashed > 0 {
-                alone.push((meeting.id, asset, starting));
+                alone.push((meeting.id, asset, claim));
                 continue;
             }
             // Never refused: no run asks to go alone before the loop ends.
             let shared = turns.clone().try_read_owned().ok();
-            self.start(&asset, Turn::Now(shared));
+            self.start(&asset, Turn::Now(shared), claim);
             resumed.push(meeting.id);
         }
         let mut turns_alone = Vec::new();
-        for (meeting_id, asset, _starting) in alone {
+        for (meeting_id, asset, claim) in alone {
             let (turn, waiting) = oneshot::channel();
             turns_alone.push(turn);
-            self.start(&asset, Turn::Alone(waiting));
+            self.start(&asset, Turn::Alone(waiting), claim);
             resumed.push(meeting_id);
         }
         if !turns_alone.is_empty() {
@@ -999,15 +1058,179 @@ impl ProcessingPipeline {
         Ok(resumed)
     }
 
-    /// The state lock is held from the spawn to the insert, so the task
-    /// cannot finish and remove its entry before the entry exists; the
-    /// task's [`Running`] mark removes the entry however the task ends, a
-    /// panic included. Once the pipeline quits, nothing starts. The run is
+    /// Launch recovery for the exports (P28 of
+    /// `.plans/2026-10-07-stable-promotion.md`): re-exports every ready
+    /// meeting with a delivery a previous process left `pending`, or one
+    /// that `failed` more than a day ([`ExportRetries::INTERVAL`]) before
+    /// the pipeline's clock, after it, or was never attempted.
+    ///
+    /// A launch retries a failed export at most once, and once a day at
+    /// most. Each launch re-export is counted in `retries` before it runs,
+    /// so an exit mid-export counts too, and the count is reset once every
+    /// row is delivered. After [`ExportRetries::LIMIT`] launch re-exports in a row
+    /// that did not deliver every row, the meeting is left for the user,
+    /// whose re-export resets the count. A launch re-export that leaves a
+    /// row `pending` saves it failed, and so does the launch for a meeting
+    /// it stopped retrying, so the detail says the export keeps failing.
+    ///
+    /// The meetings run one at a time in one background task, each claimed
+    /// when its turn comes, so the others stay free for the user meanwhile;
+    /// a meeting another operation holds is skipped, since its own run
+    /// exports it, and so is one that, once claimed, is no longer ready
+    /// with a row `pending` or failed (the user exported it meanwhile).
+    /// The claim takes the meeting and not its asset, so a background run
+    /// that holds the asset and has not admitted the meeting yet would then
+    /// fail as already being processed; no such run starts on a ready
+    /// meeting until Process again does, and this claim must then refuse
+    /// the asset too.
+    ///
+    /// A failure is logged, not posted as `OperationFailed`: the user did
+    /// not ask for this export, so the detail must not say "Export again
+    /// failed". Returns the meetings to re-export, none once the
+    /// pipeline [quits](Self::quit). Needs a `tokio` runtime. Rust only.
+    pub fn redeliver_unfinished(&self, retries: &Arc<ExportRetries>) -> Result<Vec<Uuid>> {
+        if self.quitting() {
+            return Ok(Vec::new());
+        }
+        let store = self.store();
+        // A meeting whose deliveries all went through since (or that was
+        // deleted) starts again from 0.
+        retries.retain(|meeting_id| {
+            store
+                .deliveries(meeting_id)
+                .map_or(true, |rows| !all_delivered(&rows))
+        });
+        let found = attributing(
+            PipelineStage::Deliver,
+            store.meetings_with_unfinished_deliveries(self.now(), ExportRetries::INTERVAL),
+        )?;
+        let (stopped, owed): (Vec<Uuid>, Vec<Uuid>) = found
+            .into_iter()
+            .partition(|meeting_id| retries.stopped(*meeting_id));
+        for meeting_id in stopped {
+            // Refused: the operation holding it saves its own rows.
+            if let Ok(_admitted) = self.admit(meeting_id, PipelineStage::Deliver) {
+                self.fail_pending_deliveries(meeting_id, EXPORT_INTERRUPTED);
+            }
+        }
+        if !owed.is_empty() {
+            let pipeline = self.clone();
+            let (meetings, retries) = (owed.clone(), retries.clone());
+            self.spawn_tracked(Uuid::new_v4(), None, async move {
+                for meeting_id in meetings {
+                    if pipeline.quitting() {
+                        return;
+                    }
+                    pipeline.redeliver_at_launch(meeting_id, &retries).await;
+                }
+            });
+        }
+        Ok(owed)
+    }
+
+    /// One meeting of [`redeliver_unfinished`](Self::redeliver_unfinished):
+    /// claimed now, then counted in `retries` before the re-export runs
+    /// and reset once every row is delivered. A refused claim, or a
+    /// meeting no longer owed once claimed, is not counted. The file is
+    /// written on a blocking thread.
+    async fn redeliver_at_launch(&self, meeting_id: Uuid, retries: &Arc<ExportRetries>) {
+        // Refused: a meeting in flight exports at the end of its run.
+        let Ok(admitted) = self.admit(meeting_id, PipelineStage::Deliver) else {
+            return;
+        };
+        // Read under the claim: since the launch found it, the user may
+        // have exported it, or a run may have left it not ready.
+        let Some(meeting) = self.still_owed(meeting_id) else {
+            return;
+        };
+        let operation = self.deliver_again_claimed(meeting, admitted);
+        // Counted before the export writes its rows, so the detail those
+        // writes reload already reads the count: the last failure before
+        // the stop shows "keeps failing" at once.
+        let counted = retries.clone();
+        let _ = tokio::task::spawn_blocking(move || counted.attempted(meeting_id)).await;
+        if let Err(failure) = operation.await {
+            tracing::warn!(
+                target: BACKGROUND_RUN_LOG,
+                %meeting_id,
+                stage = failure.stage.as_str(),
+                "launch re-export failed"
+            );
+            tracing::debug!(target: BACKGROUND_RUN_LOG, %meeting_id, %failure, "launch re-export failure");
+        }
+        // Read once the claim is released. A re-export the user causes
+        // meanwhile resets the count as well, so whichever reset comes
+        // first, the count ends at 0; a refused one leaves it alone.
+        if self
+            .store()
+            .deliveries(meeting_id)
+            .is_ok_and(|rows| all_delivered(&rows))
+        {
+            let retries = retries.clone();
+            let _ = tokio::task::spawn_blocking(move || retries.reset(meeting_id)).await;
+        }
+    }
+
+    /// Saves the meeting's deliveries still `pending` as failed with
+    /// `reason`, keeping their receipt and their last attempt, stamped now
+    /// when there is none so the row waits a day like any failure. The
+    /// caller holds the meeting's claim. A store error is logged and leaves
+    /// the rows.
+    fn fail_pending_deliveries(&self, meeting_id: Uuid, reason: &str) {
+        let store = self.store();
+        let rows = match store.deliveries(meeting_id) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "deliveries could not be read");
+                return;
+            }
+        };
+        for mut row in rows {
+            if row.status != DeliveryStatus::Pending {
+                continue;
+            }
+            row.status = DeliveryStatus::Failed(reason.to_owned());
+            row.last_attempt_at.get_or_insert(self.now());
+            if let Err(error) = store.save_delivery(&row) {
+                tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "a delivery could not be saved failed");
+            }
+        }
+    }
+
+    /// Spawns `work` among the background runs
+    /// [`wait_until_idle`](Self::wait_until_idle) waits for, under `key`,
+    /// holding `claim` until it ends. The state lock is held from the spawn
+    /// to the insert, so the task cannot finish and remove its entry before
+    /// the entry exists; the task's [`Running`] mark removes the entry and
+    /// then releases the claim however the task ends, a panic included.
+    fn spawn_tracked(
+        &self,
+        key: Uuid,
+        claim: Option<AssetClaim>,
+        work: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let pipeline = self.clone();
+        let mut state = self.state();
+        let handle = tokio::spawn(async move {
+            let _running = Running {
+                pipeline,
+                key,
+                _claim: claim,
+            };
+            work.await;
+        });
+        state.running.insert(key, handle);
+    }
+
+    /// Processes `asset` in the background
+    /// ([`spawn_tracked`](Self::spawn_tracked)) under its [`AssetClaim`],
+    /// which the run holds until it ends; a run that does not start
+    /// releases it. Once the pipeline quits, nothing starts. The run is
     /// counted in the meeting's folder before it starts (on this thread,
     /// unless it waits for its [`Turn`]), and the count is cleared when it
     /// ends or the run taken back when the app exits first
-    /// ([`CountedRun`]). The caller holds the asset's [`Starting`] claim.
-    fn start(&self, asset: &AudioAsset, turn: Turn) {
+    /// ([`CountedRun`]).
+    fn start(&self, asset: &AudioAsset, turn: Turn, claim: AssetClaim) {
         let asset_id = asset.id;
         let latch = self.inner.dependencies.quit_latch.clone();
         let count = RunCount::of(asset);
@@ -1020,12 +1243,7 @@ impl ProcessingPipeline {
             Turn::Alone(_) => None,
         };
         let pipeline = self.clone();
-        let mut state = self.state();
-        let handle = tokio::spawn(async move {
-            let _running = Running {
-                pipeline: pipeline.clone(),
-                asset_id,
-            };
+        self.spawn_tracked(asset_id, Some(claim), async move {
             let (_shared, _alone) = match turn {
                 Turn::Now(shared) => (shared, None),
                 Turn::Alone(waiting) => match waiting.await {
@@ -1064,12 +1282,12 @@ impl ProcessingPipeline {
                 tracing::debug!(target: BACKGROUND_RUN_LOG, %asset_id, %failure, "processing failure");
             }
         });
-        state.running.insert(asset_id, handle);
     }
 
-    /// Waits for every processing task started by `enqueue` or
-    /// `resume_unfinished`; the CLI and the tests call it before reading
-    /// results.
+    /// Waits for every background task: the processing `enqueue` and
+    /// `resume_unfinished` started and the re-exports of
+    /// `redeliver_unfinished`; the CLI and the tests call it before
+    /// reading results.
     pub async fn wait_until_idle(&self) {
         loop {
             let handle = {
@@ -1463,6 +1681,9 @@ impl ProcessingPipeline {
         current.state = MeetingState::Ready;
         self.summarize(current, &export.segments, &export.speakers)
             .await?;
+        // The new summary is owed to the vault, so an exit before
+        // `deliver` leaves `pending` rows for the next launch.
+        self.inner.dependencies.dispatcher.mark_pending(meeting_id);
         self.deliver(meeting_id).await;
         self.stamp_deferred_retention(meeting_id).await
     }
@@ -1477,19 +1698,65 @@ impl ProcessingPipeline {
     /// The synchronous half of [`redeliver`](Self::redeliver), as
     /// [`claim_rerun_summary`](Self::claim_rerun_summary) is of the re-run.
     pub fn claim_redeliver(&self, meeting_id: Uuid) -> Result<Operation> {
+        let operation = self.claim_deliver_again(meeting_id)?;
+        let pipeline = self.clone();
+        Ok(Box::pin(async move {
+            let result = operation.await;
+            pipeline.reporting(meeting_id, MeetingOperation::Reexport, result)
+        }))
+    }
+
+    /// The re-export [`claim_redeliver`](Self::claim_redeliver) reports,
+    /// without the `OperationFailed` event, which the launch's re-exports
+    /// use directly. A row the re-export leaves `pending` is saved failed
+    /// before the claim is released.
+    fn claim_deliver_again(&self, meeting_id: Uuid) -> Result<Operation> {
         let meeting = required(
             PipelineStage::Deliver,
             self.store().meeting(meeting_id),
             || format!("meeting {meeting_id} not found"),
         )?;
         let admitted = self.admit(meeting_id, PipelineStage::Deliver)?;
+        Ok(self.deliver_again_claimed(meeting, admitted))
+    }
+
+    /// The meeting, when it is still `ready` with a delivery `pending` or
+    /// failed: what the launch re-exports once it holds the claim. A store
+    /// error reads as not owed, and the next launch looks again.
+    fn still_owed(&self, meeting_id: Uuid) -> Option<Meeting> {
+        let store = self.store();
+        let meeting = store.meeting(meeting_id).ok().flatten()?;
+        let owed = meeting.state == MeetingState::Ready
+            && store.deliveries(meeting_id).is_ok_and(|rows| {
+                rows.iter().any(|row| {
+                    matches!(
+                        row.status,
+                        DeliveryStatus::Pending | DeliveryStatus::Failed(_)
+                    )
+                })
+            });
+        owed.then_some(meeting)
+    }
+
+    /// [`claim_deliver_again`](Self::claim_deliver_again) once `admitted`
+    /// holds the meeting.
+    fn deliver_again_claimed(&self, meeting: Meeting, admitted: Admitted) -> Operation {
+        let meeting_id = meeting.id;
         let pipeline = self.clone();
-        Ok(Box::pin(async move {
+        Box::pin(async move {
             let result =
                 unless_it_panics(|| PipelineStage::Deliver, pipeline.deliver_again(&meeting)).await;
+            // A row still `pending` here was left by a panic or a
+            // dispatcher that stopped mid-export: saved failed while the
+            // claim is held, so the count and the detail see a failure.
+            let reason = result
+                .as_ref()
+                .err()
+                .map_or(EXPORT_INTERRUPTED, |failure| failure.reason.as_str());
+            pipeline.fail_pending_deliveries(meeting_id, reason);
             drop(admitted);
-            pipeline.reporting(meeting_id, MeetingOperation::Reexport, result)
-        }))
+            result
+        })
     }
 
     async fn deliver_again(&self, meeting: &Meeting) -> Result<()> {
@@ -1592,14 +1859,14 @@ impl ProcessingPipeline {
     /// cleared however the operation ends: completed, failed, panicked or
     /// dropped mid-way (a cancelled task).
     fn admit(&self, meeting_id: Uuid, stage: PipelineStage) -> Result<Admitted> {
-        let mut guard = self.state();
-        if !guard.in_flight.insert(meeting_id) {
+        let mut in_flight = self.in_flight_set();
+        if !in_flight.meetings.insert(meeting_id) {
             return Err(PipelineFailure::new(
                 stage,
                 format!("meeting {meeting_id} is already being processed"),
             ));
         }
-        guard.admissions += 1;
+        in_flight.admissions += 1;
         Ok(Admitted {
             pipeline: self.clone(),
             meeting_id,
@@ -1668,16 +1935,16 @@ impl ProcessingPipeline {
     ) -> Result<T> {
         self.post(stage, lane, meeting_id);
         let (alone, admissions_before) = {
-            let guard = self.state();
-            (guard.in_flight.len() == 1, guard.admissions)
+            let in_flight = self.in_flight_set();
+            (in_flight.meetings.len() == 1, in_flight.admissions)
         };
         let clock = &self.inner.dependencies.clock;
         let started = clock.seconds();
         let value = attributing(stage, body.await)?;
         let seconds = clock.seconds() - started;
         let sample = {
+            let alone = alone && self.in_flight_set().admissions == admissions_before;
             let mut guard = self.state();
-            let alone = alone && guard.admissions == admissions_before;
             let now = self.now();
             guard
                 .runs
@@ -2108,6 +2375,13 @@ impl ProcessingPipeline {
                     .filter(|speaker| !speaker.assignment.is_confirmed())
                     .map(|speaker| speaker.id)
                     .collect();
+            // The export is owed before the meeting is ready, so an exit
+            // in between leaves a `pending` row for the next launch. Marked
+            // after the ready write instead, an exit between the two would
+            // leave a ready meeting nothing exports; marked before, a
+            // failed ready write leaves `pending` rows on a failed meeting,
+            // which keep its audio and which Process again exports.
+            self.inner.dependencies.dispatcher.mark_pending(meeting.id);
             attributing(
                 PipelineStage::Persist,
                 store.set_state(meeting.id, MeetingState::Ready, now),
@@ -2193,9 +2467,11 @@ struct Admitted {
 
 impl Drop for Admitted {
     fn drop(&mut self) {
-        let mut guard = self.pipeline.state();
-        guard.in_flight.remove(&self.meeting_id);
-        guard.runs.remove(&self.meeting_id);
+        self.pipeline
+            .in_flight_set()
+            .meetings
+            .remove(&self.meeting_id);
+        self.pipeline.state().runs.remove(&self.meeting_id);
     }
 }
 
@@ -2233,29 +2509,34 @@ fn not_started(asset_id: Uuid) {
     );
 }
 
-/// An asset claimed for a background run ([`ProcessingPipeline::claim_start`]);
-/// dropping it releases the claim, by which time the run is in `running`
-/// or was not started.
-struct Starting {
+/// An asset claimed in the in-flight set for a background run
+/// ([`ProcessingPipeline::claim_start`]); dropping it releases the claim,
+/// before the run starts or, held by the run's [`Running`] mark, when the
+/// run ends.
+struct AssetClaim {
     pipeline: ProcessingPipeline,
     asset_id: Uuid,
 }
 
-impl Drop for Starting {
+impl Drop for AssetClaim {
     fn drop(&mut self) {
-        self.pipeline.state().starting.remove(&self.asset_id);
+        self.pipeline.in_flight_set().assets.remove(&self.asset_id);
     }
 }
 
-/// A background run's entry in `running`; dropping it removes the entry.
+/// A background run's entry in `running` (by asset id, or a key of its
+/// own for a re-export); dropping it removes the entry and then releases
+/// the processing run's claim, so a new claim of the asset never finds the
+/// old run's entry.
 struct Running {
     pipeline: ProcessingPipeline,
-    asset_id: Uuid,
+    key: Uuid,
+    _claim: Option<AssetClaim>,
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        self.pipeline.state().running.remove(&self.asset_id);
+        self.pipeline.state().running.remove(&self.key);
     }
 }
 

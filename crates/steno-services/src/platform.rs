@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::files::{Access, create_dir_all_durably, replace_file, set_aside};
+use crate::files::{read_json, write_json};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use steno_core::protocols::BoundaryResult;
@@ -65,13 +65,13 @@ impl AudioDevices for PlatformAudioDevices {
 
 /// Boolean flags in `preferences.json` under the support directory
 /// (Swift: `UserDefaults`), for the first-launch markers. A write replaces
-/// the file in one durable step ([`replace_file`]). A value that is not a
-/// flag (a newer build's) is kept as it is. A file that does not parse is
-/// moved aside ([`set_aside`]) and logged before the flags start empty; a
-/// file that cannot be read for another reason, or that cannot be moved
-/// aside, is left alone and never written, and the flags of this run live
-/// in memory only: a first-launch marker shown again is better than a file
-/// replaced unread.
+/// the file in one durable step ([`write_json`]). A value that is not a
+/// flag (a newer build's) is kept as it is. The file is read with
+/// [`read_json`]: a file that does not parse is moved aside and logged
+/// before the flags start empty; a file that cannot be read for another
+/// reason, or that cannot be moved aside, is left alone and never written,
+/// and the flags of this run live in memory only: a first-launch marker
+/// shown again is better than a file replaced unread.
 #[derive(Debug)]
 pub struct FilePreferences {
     path: PathBuf,
@@ -84,59 +84,11 @@ impl FilePreferences {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let (values, writable) = load(&path);
+        let (values, writable) = read_json(&path);
         FilePreferences {
             path,
             values: Mutex::new(values),
             writable,
-        }
-    }
-
-    /// Replaces the file with `values`.
-    fn write(&self, values: &BTreeMap<String, Value>) -> std::io::Result<()> {
-        let data = serde_json::to_vec_pretty(values)?;
-        if let Some(parent) = self.path.parent() {
-            create_dir_all_durably(parent)?;
-        }
-        replace_file(&self.path, &data, Access::Default)
-    }
-}
-
-/// The values in `path` and whether it may be written.
-fn load(path: &Path) -> (BTreeMap<String, Value>, bool) {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return (BTreeMap::new(), true);
-        }
-        Err(error) => {
-            tracing::warn!(
-                "{} could not be read ({error}); it stays and is not written",
-                path.display()
-            );
-            return (BTreeMap::new(), false);
-        }
-    };
-    let error = match serde_json::from_slice(&bytes) {
-        Ok(values) => return (values, true),
-        Err(error) => error,
-    };
-    match set_aside(path) {
-        Ok(aside) => {
-            tracing::warn!(
-                "{} did not parse ({error}); moved it to {} and started empty",
-                path.display(),
-                aside.display()
-            );
-            (BTreeMap::new(), true)
-        }
-        Err(move_error) => {
-            tracing::warn!(
-                "{} did not parse ({error}) and could not be moved aside \
-                 ({move_error}); it stays and is not written",
-                path.display()
-            );
-            (BTreeMap::new(), false)
         }
     }
 }
@@ -160,7 +112,7 @@ impl Preferences for FilePreferences {
         if !self.writable {
             return;
         }
-        if let Err(error) = self.write(&values) {
+        if let Err(error) = write_json(&self.path, &*values) {
             tracing::warn!("{} could not be written: {error}", self.path.display());
         }
     }

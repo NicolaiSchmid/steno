@@ -4958,6 +4958,8 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "serde",
+ "serde_json",
  "steno-core",
  "steno-pipeline",
  "tempfile",

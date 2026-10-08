@@ -397,3 +397,66 @@ async fn the_stored_receipt_round_trips_into_the_real_destination() {
     assert_eq!(std::fs::read(&notes).unwrap(), b"mine\n");
     assert_eq!(store.deliveries(meeting_id()).unwrap().len(), 1);
 }
+
+/// Marking the export pending writes a `Pending` row per configured
+/// destination before the meeting is ready, keeping a stored receipt, so
+/// the launch finds the export owed if the app ends before `deliver_all`;
+/// with no destination configured it writes none.
+#[tokio::test]
+async fn marking_an_export_pending_leaves_a_row_per_destination_and_keeps_the_receipt() {
+    let store = store();
+    coordinator(&store, Vec::new(), now()).mark_pending(meeting_id());
+    assert_eq!(store.deliveries(meeting_id()).unwrap(), []);
+    let first = RecordingDestination::new("a-first", None);
+    let second = RecordingDestination::new("b-second", None);
+    let delivered = coordinator(&store, vec![as_destination(&first)], now())
+        .deliver_all(meeting_id())
+        .await;
+    let both = coordinator(
+        &store,
+        vec![as_destination(&first), as_destination(&second)],
+        now() + Duration::seconds(60),
+    );
+
+    both.mark_pending(meeting_id());
+
+    let rows = store.deliveries(meeting_id()).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.status == DeliveryStatus::Pending));
+    assert_eq!(rows[0].receipt, delivered[0].receipt);
+    assert_eq!(rows[0].last_attempt_at, Some(now()));
+    assert_eq!(rows[1].receipt, None);
+    assert_eq!(rows[1].last_attempt_at, None);
+    assert_eq!(
+        store
+            .meetings_with_unfinished_deliveries(now() + Duration::days(1), Duration::days(1))
+            .unwrap(),
+        [meeting_id()],
+        "the launch finds the export owed"
+    );
+}
+
+/// A stored row that does not read back (a receipt that is not JSON) is
+/// left as it is: marking the export pending writes no row without the
+/// receipt, which would make `deliver_all` write a new note.
+#[tokio::test]
+async fn marking_an_export_pending_writes_nothing_when_the_rows_do_not_load() {
+    let store = store();
+    let first = RecordingDestination::new("a-first", None);
+    let marking = coordinator(&store, vec![as_destination(&first)], now());
+    marking.deliver_all(meeting_id()).await;
+    store
+        .write(|transaction| {
+            transaction.execute("UPDATE delivery SET receipt = '{not json'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(store.deliveries(meeting_id()).is_err());
+
+    marking.mark_pending(meeting_id());
+
+    assert!(
+        store.deliveries(meeting_id()).is_err(),
+        "the unreadable row was replaced"
+    );
+}

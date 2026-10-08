@@ -229,6 +229,13 @@ pub trait Recorder: Send + Sync {
 pub trait Pipeline: Send + Sync {
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()>;
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()>;
+    /// Whether the launch stopped re-exporting the meeting after its export
+    /// failed at the pipeline's limit of launches in a row. The user's next
+    /// export starts it again, and until then the detail says the export
+    /// keeps failing. The default says no. Rust only.
+    fn export_keeps_failing(&self, _meeting_id: Uuid) -> bool {
+        false
+    }
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()>;
     /// Rebuilds the pipeline from the stored settings and the API key.
     fn reload(&self) -> BoundaryResult<()>;

@@ -7,7 +7,8 @@
 //!
 //! | Module | What it holds |
 //! |--------|---------------|
-//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, `apply_retention`, the stages |
+//! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `resume_unfinished` and `redeliver_unfinished` for the launch, the in-flight set ([`InFlight`]) a reload shares, `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, `apply_retention`, the stages |
+//! | [`export_retries`] | [`ExportRetries`], the launch re-exports in a row per meeting that did not deliver every row, in `export-retries.json` |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |
@@ -17,7 +18,7 @@
 //! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
 //! | [`retention`] | [`RetentionSweep`] over expired assets |
 //! | [`fixtures`] | The synthetic audio fixtures and the WAV writer |
-//! | [`files`] | Durable writes: a file replaced in one step, a recording copied, new folders, a corrupt file set aside |
+//! | [`files`] | Durable writes: a file replaced in one step, a recording copied, new folders, a JSON file read and written, set aside when corrupt |
 //!
 //! The crate sits above `steno-core` and below the services assembly: it
 //! knows the boundaries (`steno_core::protocols`) and the store, never an
@@ -65,6 +66,7 @@
 pub mod crash_loop;
 pub mod estimator;
 pub mod events;
+pub mod export_retries;
 pub mod files;
 pub mod fixtures;
 pub mod intake;
@@ -76,14 +78,15 @@ pub mod speaker_memory;
 
 pub use estimator::{ProcessingEstimator, StageRates, StageSample};
 pub use events::{EventReceiver, MeetingEventBus};
+pub use export_retries::ExportRetries;
 pub use intake::{
     Attendee, LocalRecordingIntake, LocalRecordingIntakeError, RecordingIntake, RecordingResult,
 };
 pub use lane_merger::LaneMerger;
 pub use pipeline::{
-    BACKGROUND_RUN_LOG, MonotonicClock, Now, OPERATION_PANICKED, Operation, PipelineDependencies,
-    PipelineFailure, ProcessingPipeline, QuitLatch, ReprocessError, SharedSpeechEngine,
-    SystemClock, WeakSpeechEngine,
+    BACKGROUND_RUN_LOG, InFlight, MonotonicClock, Now, OPERATION_PANICKED, Operation,
+    PipelineDependencies, PipelineFailure, ProcessingPipeline, QuitLatch, ReprocessError,
+    SharedSpeechEngine, SystemClock, WeakSpeechEngine,
 };
 pub use retention::{RetentionSweep, SweepIncomplete};
 pub use speaker_memory::StoreSpeakerMemory;

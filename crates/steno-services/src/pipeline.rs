@@ -10,8 +10,8 @@ use steno_core::AudioRetention;
 use steno_core::protocols::BoundaryResult;
 use steno_host::services::Pipeline;
 use steno_pipeline::{
-    Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline, QuitLatch,
-    RetentionSweep, SweepIncomplete,
+    ExportRetries, InFlight, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
+    QuitLatch, RetentionSweep, SweepIncomplete,
 };
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
@@ -53,10 +53,15 @@ struct Current {
 }
 
 impl Current {
-    /// The pipeline over `built`, sharing `latch`.
-    fn new(built: BuiltPipeline, latch: &QuitLatch) -> Self {
+    /// The pipeline over `built`, sharing `latch` and `in_flight`.
+    fn new(built: BuiltPipeline, latch: &QuitLatch, in_flight: &InFlight) -> Self {
         Current {
-            pipeline: ProcessingPipeline::new(built.dependencies.with_quit_latch(latch.clone())),
+            pipeline: ProcessingPipeline::new(
+                built
+                    .dependencies
+                    .with_quit_latch(latch.clone())
+                    .with_in_flight(in_flight.clone()),
+            ),
             engine: built.engine,
         }
     }
@@ -68,13 +73,16 @@ impl Current {
 /// started with. Everything that enqueues resolves `current()` per call,
 /// so a recording that ends after a reload goes through the new one.
 /// Every pipeline it builds shares one [`QuitLatch`], so
-/// [`quit`](Self::quit) reaches the retired ones too. Held by `App`, the
-/// recorder, the phone intake and [`HostPipeline`].
+/// [`quit`](Self::quit) reaches the retired ones too, and one in-flight
+/// set ([`InFlight`]), so the new one refuses a meeting a retired one
+/// still holds. Held by `App`, the recorder, the phone intake and
+/// [`HostPipeline`].
 pub struct CurrentPipeline {
     current: Mutex<Current>,
     make: MakeDependencies,
     runtime: tokio::runtime::Handle,
     quit_latch: QuitLatch,
+    in_flight: InFlight,
 }
 
 impl CurrentPipeline {
@@ -86,11 +94,13 @@ impl CurrentPipeline {
         runtime: tokio::runtime::Handle,
     ) -> Self {
         let quit_latch = QuitLatch::default();
+        let in_flight = InFlight::default();
         CurrentPipeline {
-            current: Mutex::new(Current::new(built, &quit_latch)),
+            current: Mutex::new(Current::new(built, &quit_latch, &in_flight)),
             make,
             runtime,
             quit_latch,
+            in_flight,
         }
     }
 
@@ -130,7 +140,7 @@ impl CurrentPipeline {
     /// the retired pipeline's jobs and the new one's share them and the
     /// one sidecar child.
     pub fn reload(&self) -> Result<(), BuildError> {
-        let replacement = Current::new((self.make)()?, &self.quit_latch);
+        let replacement = Current::new((self.make)()?, &self.quit_latch, &self.in_flight);
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });
@@ -167,19 +177,34 @@ impl CurrentPipeline {
 pub struct HostPipeline {
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
+    /// Reset by any re-export the user causes, and read for the detail's
+    /// "keeps failing" line.
+    pub export_retries: Arc<ExportRetries>,
 }
 
 impl Pipeline for HostPipeline {
+    /// A summary re-run exports the new summary, so, once the meeting is
+    /// claimed, it resets the count of launch re-exports as `redeliver`
+    /// does.
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()> {
-        Ok(self
-            .pipeline
-            .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?)
+        self.pipeline
+            .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?;
+        self.export_retries.reset(meeting_id);
+        Ok(())
     }
 
+    /// Export again, or the re-export after a speaker change. Once the
+    /// meeting is claimed, its count of launch re-exports starts again from
+    /// 0; a refused one leaves the count.
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
-        Ok(self
-            .pipeline
-            .claim_and_spawn(|pipeline| pipeline.claim_redeliver(meeting_id))?)
+        self.pipeline
+            .claim_and_spawn(|pipeline| pipeline.claim_redeliver(meeting_id))?;
+        self.export_retries.reset(meeting_id);
+        Ok(())
+    }
+
+    fn export_keeps_failing(&self, meeting_id: Uuid) -> bool {
+        self.export_retries.stopped(meeting_id)
     }
 
     fn apply_retention(&self, meeting_id: Uuid, rule: AudioRetention) -> BoundaryResult<()> {
@@ -298,6 +323,7 @@ mod tests {
         HostPipeline {
             pipeline: current_pipeline(dependencies),
             sweep: RetentionSweep::new(store.clone()),
+            export_retries: Arc::new(ExportRetries::in_memory()),
         }
     }
 
@@ -467,6 +493,30 @@ mod tests {
         );
     }
 
+    /// A summary re-run exports the new summary, so it starts the count of
+    /// launch re-exports from 0 as Export again does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_re_run_resets_the_launch_re_export_count() {
+        let (dir, store) = temp_store();
+        let id = ready_meeting(&store).id;
+        let path = dir.path().join(ExportRetries::FILE_NAME);
+        std::fs::write(&path, format!("{{\"{id}\": {}}}", ExportRetries::LIMIT)).unwrap();
+        let (summarizer, release, asked) = held();
+        let mut service = pipeline(&store, Some(Arc::new(summarizer)));
+        service.export_retries = Arc::new(ExportRetries::new(&path));
+        let service = Arc::new(service);
+        let first = service.clone();
+        assert_eq!(call(move || first.rerun_summary(id, "default")), Ok(()));
+        assert!(!service.export_keeps_failing(id));
+        assert_eq!(ExportRetries::new(&path).count(id), 0);
+        reached(&asked).await;
+        release.notify_one();
+        eventually("the re-run released its meeting", || {
+            service.pipeline.current().in_flight().is_empty()
+        })
+        .await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_re_run_that_fails_later_posts_the_failure_on_the_bus() {
         let (_dir, store) = temp_store();
@@ -521,6 +571,90 @@ mod tests {
             call(move || second.redeliver(id)),
             Err(format!("deliver: {busy}"))
         );
+        release.notify_one();
+        eventually("the re-export released its meeting", || {
+            service.pipeline.current().in_flight().is_empty()
+        })
+        .await;
+    }
+
+    /// A reload builds its pipeline from fresh dependencies, yet a re-export
+    /// the retired pipeline is still running holds its meeting on the new
+    /// one too: a second re-export is refused instead of running alongside.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn after_a_reload_a_meeting_the_retired_pipeline_re_exports_is_refused() {
+        let (_dir, store) = temp_store();
+        let id = ready_meeting(&store).id;
+        let release = Arc::new(tokio::sync::Notify::new());
+        let asked = Arc::new(tokio::sync::Notify::new());
+        let make: MakeDependencies = {
+            let (store, release, asked) = (store.clone(), release.clone(), asked.clone());
+            Arc::new(move || {
+                let mut dependencies = fake_dependencies(&store, "fake-engine");
+                dependencies.dispatcher = Arc::new(HeldDispatcher {
+                    release: release.clone(),
+                    asked: asked.clone(),
+                    panics: false,
+                });
+                Ok(crate::testing::built(dependencies))
+            })
+        };
+        let service = Arc::new(HostPipeline {
+            pipeline: Arc::new(CurrentPipeline::new(
+                make().unwrap(),
+                make,
+                tokio::runtime::Handle::current(),
+            )),
+            sweep: RetentionSweep::new(store.clone()),
+            export_retries: Arc::new(ExportRetries::in_memory()),
+        });
+        let first = service.clone();
+        assert_eq!(call(move || first.redeliver(id)), Ok(()));
+        reached(&asked).await;
+        service.pipeline.reload().unwrap();
+        assert_eq!(service.pipeline.current().in_flight(), vec![id]);
+        let second = service.clone();
+        assert_eq!(
+            call(move || second.redeliver(id)),
+            Err(format!("deliver: meeting {id} is already being processed"))
+        );
+        release.notify_one();
+        eventually("the retired re-export released its meeting", || {
+            service.pipeline.current().in_flight().is_empty()
+        })
+        .await;
+    }
+
+    /// The user's Export again starts the meeting's count of launch
+    /// re-exports from 0, on disk too, so the detail no longer says the
+    /// export keeps failing and the next launch retries it. One refused
+    /// because the meeting is busy leaves the count.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn export_again_resets_the_launch_re_export_count() {
+        let (dir, store) = temp_store();
+        let id = ready_meeting(&store).id;
+        let path = dir.path().join(ExportRetries::FILE_NAME);
+        std::fs::write(&path, format!("{{\"{id}\": {}}}", ExportRetries::LIMIT)).unwrap();
+        let (mut service, release, asked) = held_re_exports(&store, false);
+        service.export_retries = Arc::new(ExportRetries::new(&path));
+        let service = Arc::new(service);
+        assert!(service.export_keeps_failing(id));
+
+        let busy = service.pipeline.current().claim_redeliver(id).unwrap();
+        let refused = service.clone();
+        assert!(call(move || refused.redeliver(id)).is_err());
+        assert!(
+            service.export_keeps_failing(id),
+            "a refused one resets nothing"
+        );
+        assert_eq!(ExportRetries::new(&path).count(id), ExportRetries::LIMIT);
+        drop(busy);
+
+        let first = service.clone();
+        assert_eq!(call(move || first.redeliver(id)), Ok(()));
+        assert!(!service.export_keeps_failing(id));
+        assert_eq!(ExportRetries::new(&path).count(id), 0);
+        reached(&asked).await;
         release.notify_one();
         eventually("the re-export released its meeting", || {
             service.pipeline.current().in_flight().is_empty()

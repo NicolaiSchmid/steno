@@ -1258,6 +1258,22 @@ fn the_detail_footer_and_summary_rows_follow_the_store() {
         "Obsidian · Failed: vault missing"
     );
     assert_eq!(detail["export"]["canReveal"], false);
+    // Once the launch stopped retrying it, the line says it keeps failing.
+    harness
+        .fakes
+        .pipeline
+        .keeps_failing
+        .lock()
+        .unwrap()
+        .push(uuid(MEETING));
+    harness.host.store_changed();
+    let detail = harness.snapshot(BridgeTopic::MeetingDetail);
+    assert_eq!(detail["export"]["status"], "failed");
+    assert_eq!(
+        detail["export"]["message"],
+        "Export to Obsidian keeps failing: vault missing"
+    );
+    harness.fakes.pipeline.keeps_failing.lock().unwrap().clear();
     assert_eq!(
         harness.host.meeting_reveal_export().unwrap_err().code,
         BridgeErrorCode::NotFound
