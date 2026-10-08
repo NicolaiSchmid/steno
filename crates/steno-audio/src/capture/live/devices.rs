@@ -97,7 +97,7 @@ impl AudioDevices {
     /// The device a default-device `selector` names; an error when none is
     /// set.
     fn default_device(selector: AudioObjectPropertySelector) -> Result<Id, CoreAudioError> {
-        let id: Id = hal::read_pod(SYSTEM, selector, kAudioObjectPropertyScopeGlobal, None)?;
+        let id: Id = hal::read_pod(SYSTEM, selector, kAudioObjectPropertyScopeGlobal)?;
         if id == UNKNOWN {
             return Err(CoreAudioError {
                 operation: "default device".into(),

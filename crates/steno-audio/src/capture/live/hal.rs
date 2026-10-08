@@ -102,12 +102,11 @@ fn failed(operation: &str, object: Id, status: OSStatus) -> CoreAudioError {
     }
 }
 
-/// One plain-old-data property, optionally with a qualifier (a PID).
+/// One plain-old-data property.
 pub fn read_pod<T: Copy>(
     id: Id,
     selector: AudioObjectPropertySelector,
     scope: AudioObjectPropertyScope,
-    qualifier: Option<&[u8]>,
 ) -> Result<T, CoreAudioError> {
     let mut addr = address(selector, scope);
     // SAFETY: `T` is a plain-old-data HAL value (integer, float, object id,
@@ -116,20 +115,14 @@ pub fn read_pod<T: Copy>(
     // full on success.
     let mut value: T = unsafe { std::mem::zeroed() };
     let mut size = u32::try_from(std::mem::size_of::<T>()).unwrap_or(u32::MAX);
-    let (qsize, qptr) = match qualifier {
-        Some(q) => (
-            u32::try_from(q.len()).unwrap_or(0),
-            q.as_ptr().cast::<c_void>(),
-        ),
-        None => (0, std::ptr::null()),
-    };
-    // SAFETY: every pointer refers to a live local of the size passed.
+    // SAFETY: every pointer refers to a live local of the size passed; no
+    // qualifier (size 0, null).
     let status = unsafe {
         AudioObjectGetPropertyData(
             id,
             NonNull::from(&mut addr),
-            qsize,
-            qptr,
+            0,
+            std::ptr::null(),
             NonNull::from(&mut size),
             NonNull::from(&mut value).cast::<c_void>(),
         )
@@ -150,7 +143,7 @@ pub fn read_string(
     selector: AudioObjectPropertySelector,
     scope: AudioObjectPropertyScope,
 ) -> Result<String, CoreAudioError> {
-    let ptr: *mut CFString = read_pod(id, selector, scope, None)?;
+    let ptr: *mut CFString = read_pod(id, selector, scope)?;
     let ptr = NonNull::new(ptr).ok_or_else(|| failed("read string", id, -1))?;
     // SAFETY: the HAL returns a +1 retained CFString for string properties;
     // `from_raw` takes that reference and releases it on drop.
@@ -163,7 +156,7 @@ pub fn read_u32(
     selector: AudioObjectPropertySelector,
     scope: AudioObjectPropertyScope,
 ) -> Result<u32, CoreAudioError> {
-    read_pod(id, selector, scope, None)
+    read_pod(id, selector, scope)
 }
 
 /// `false` when the property reads zero and when it cannot be read at all.
@@ -173,7 +166,7 @@ pub fn read_bool(id: Id, selector: AudioObjectPropertySelector) -> bool {
 }
 
 pub fn read_f64(id: Id, selector: AudioObjectPropertySelector) -> Result<f64, CoreAudioError> {
-    read_pod(id, selector, kAudioObjectPropertyScopeGlobal, None)
+    read_pod(id, selector, kAudioObjectPropertyScopeGlobal)
 }
 
 /// An array of plain-old-data values (`[AudioObjectID]`).
@@ -400,14 +393,10 @@ impl ProcessTap {
         }
         // SAFETY: the description's UUID is set by the initialiser.
         let uid = unsafe { description.UUID().UUIDString() }.to_string();
-        let format: AudioStreamBasicDescription = read_pod(
-            id,
-            kAudioTapPropertyFormat,
-            kAudioObjectPropertyScopeGlobal,
-            None,
-        )
-        // SAFETY: an all-zero ASBD is the "unknown format" value.
-        .unwrap_or(unsafe { std::mem::zeroed() });
+        let format: AudioStreamBasicDescription =
+            read_pod(id, kAudioTapPropertyFormat, kAudioObjectPropertyScopeGlobal)
+                // SAFETY: an all-zero ASBD is the "unknown format" value.
+                .unwrap_or(unsafe { std::mem::zeroed() });
         Ok(Self { id, uid, format })
     }
 

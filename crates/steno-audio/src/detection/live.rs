@@ -312,7 +312,6 @@ mod macos {
                 object,
                 kAudioProcessPropertyPID,
                 kAudioObjectPropertyScopeGlobal,
-                None,
             )
             .ok()?;
             let bundle = hal::read_string(
