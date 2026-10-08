@@ -1562,6 +1562,94 @@ fn a_writer_thread_that_died_ends_failed_and_the_session_starts_again() {
     assert_eq!(session.state(), CaptureState::Idle);
 }
 
+/// A write fails and no thread can be spawned to end the recording on
+/// (refused here, as when the system has none to give): the state stays
+/// `Recording` over a writer that drops every frame, `write_failed` says
+/// so for a watcher to stop it, and `stop()` returns the recording with
+/// the write's failure in it.
+#[test]
+fn a_failed_write_with_no_thread_to_end_it_shows_through_write_failed() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.5,
+    )));
+    let session = faulty_session(
+        directory.path(),
+        backend.clone(),
+        Some(5),
+        false,
+        Arc::new(SystemClock::new()),
+    );
+    session.refuse_the_writer_failure_thread();
+    assert!(!session.write_failed());
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !session.write_failed() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(session.write_failed(), "the failed write shows");
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    let result = session.stop().unwrap();
+    assert!(
+        matches!(&result.failure, Some(CaptureError::WriterFailed(detail)) if detail.contains("DiskFull")),
+        "{:?}",
+        result.failure
+    );
+    assert_eq!(master_of(&result).frame_count(), 5 * FRAME_SIZE);
+    assert!(!session.write_failed());
+}
+
+/// A start that panics part way (here its writer factory; in the product a
+/// writer or a processing thread the system cannot spawn) leaves `Failed`
+/// with no recording rather than `Starting` for good, and the next start
+/// records.
+#[test]
+fn a_start_that_panics_ends_failed_and_the_session_starts_again() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(
+        &[AudioLane::Mixed],
+        0.5,
+    )));
+    let first = Arc::new(AtomicBool::new(true));
+    let session = CaptureSession::with_writer_factory(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        1_000,
+        Arc::new(SystemClock::new()),
+        Arc::new(move |layout, lanes, keep_raw| {
+            assert!(
+                !first.swap(false, Ordering::SeqCst),
+                "the first start panics on purpose"
+            );
+            Ok(Box::new(RecordingWriter::new(layout, lanes, keep_raw)?)
+                as Box<dyn RecordingWriting>)
+        }),
+    )
+    .unwrap();
+    let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.start(Uuid::new_v4())
+    }));
+    assert!(started.is_err(), "the start panicked");
+    assert!(
+        matches!(
+            session.state(),
+            CaptureState::Failed {
+                error: CaptureError::BackendFailed(_),
+                recording: None
+            }
+        ),
+        "{:?}",
+        session.state()
+    );
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    assert_eq!(master_of(&session.stop().unwrap()).frame_count(), 24_000);
+    assert_eq!(session.state(), CaptureState::Idle);
+}
+
 /// The meeting's folder is deleted while recording. On Unix the open files
 /// keep writing and close without an error, so only the missing master
 /// tells: `stop()` fails with `WriterFailed` rather than returning an asset
