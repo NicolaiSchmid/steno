@@ -235,17 +235,15 @@ fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Ren
 /// the rename is tried once.
 fn rename_with_std(from: &Path, to: &Path) -> std::io::Result<()> {
     let retries = if cfg!(windows) { 49 } else { 0 };
-    let mut renamed = std::fs::rename(from, to);
     for _ in 0..retries {
-        match &renamed {
+        match std::fs::rename(from, to) {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 std::thread::sleep(Duration::from_millis(10));
-                renamed = std::fs::rename(from, to);
             }
-            _ => break,
+            outcome => return outcome,
         }
     }
-    renamed
+    std::fs::rename(from, to)
 }
 
 /// Removes this file's temporaries in `directory` that are older than
