@@ -949,10 +949,17 @@ still has to draw the window side. `[ ]` is not ported yet.
   `launch_re_exports_a_meeting_whose_export_was_left_pending`). After three failed
   launch re-exports in a row it leaves the failed export alone, and the meeting's
   export line says "Export to <destination> keeps failing: <reason>" until the
-  user's Export again resets the count (`ExportRetries`, `export-retries.json` in
-  the support directory;
+  user's Export again, a speaker change's re-export or a summary re-run resets the
+  count (`ExportRetries`, `export-retries.json` in the support directory;
   `a_failed_export_is_retried_once_a_day_and_left_after_three_failed_launches`,
-  `export_again_resets_the_failed_launch_re_exports`). A launch re-export's failure
+  `export_again_resets_the_failed_launch_re_exports`,
+  `a_re_run_resets_the_failed_launch_re_exports`). A launch counts each re-export
+  before it starts and marks rows a failed one left `pending` as failed, so an exit
+  or a panic mid-export also stops after three launches
+  (`launches_stop_an_export_whose_destination_panics`,
+  `launches_stop_an_export_the_process_was_killed_in`); a meeting it stopped
+  retrying gets the same for a row an exit left `pending`. A failed row whose last
+  attempt lies after the launch's clock counts as due. A launch re-export's failure
   is logged, not shown as "Export again failed". `persist` marks the export pending
   (`DeliveryDispatcher::mark_pending`, a `pending` row per configured destination)
   before it marks the meeting ready, and a summary re-run once its summary is saved,
