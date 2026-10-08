@@ -162,10 +162,12 @@ pub enum CodexStatus {
 /// The stored API key as a read of the secret store found it. A read that
 /// failed (a locked keyring) is not an absent key: the form starts empty,
 /// says why, and a save leaves the stored key alone unless the user typed
-/// one.
+/// one. No Swift counterpart (`LLMSettingsViewModel.load` failed whole).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyRead {
+    /// The stored key.
     Present(String),
+    /// No key is stored.
     Absent,
     /// Why the read failed.
     Unreadable(String),
@@ -175,6 +177,15 @@ impl KeyRead {
     /// The message the section shows over [`KeyRead::Unreadable`]'s reason.
     pub const UNREADABLE: &'static str =
         "The saved API key could not be read. Saving other changes keeps it.";
+
+    /// The key, and why it could not be read.
+    fn split(self) -> (Option<String>, Option<String>) {
+        match self {
+            KeyRead::Present(key) => (Some(key), None),
+            KeyRead::Absent => (None, None),
+            KeyRead::Unreadable(reason) => (None, Some(reason)),
+        }
+    }
 }
 
 impl<E: std::fmt::Display> From<Result<Option<String>, E>> for KeyRead {
@@ -283,11 +294,7 @@ impl LlmSettingsViewModel {
     }
 
     pub fn load(&mut self, store: &Store, services: &Services, key: KeyRead) {
-        let (secret, unreadable) = match key {
-            KeyRead::Present(key) => (Some(key), None),
-            KeyRead::Absent => (None, None),
-            KeyRead::Unreadable(reason) => (None, Some(reason)),
-        };
+        let (secret, unreadable) = key.split();
         self.key_unreadable = unreadable;
         self.key_store = services.secrets.place();
         let settings = match store.settings() {
@@ -330,6 +337,26 @@ impl LlmSettingsViewModel {
         if self.preset == LlmPreset::Codex {
             self.refresh_codex_status(services);
         }
+    }
+
+    /// The key read again after the secret store could not be read: the
+    /// field, the stored key and the read error follow `key` unless the
+    /// field holds an unsaved edit, and the rest of the form stays as it
+    /// is, typed or not. Nothing changes before the first load.
+    pub fn reload_key(&mut self, services: &Services, key: KeyRead) {
+        let typed = self.draft().api_key;
+        let Some(stored) = self.stored.as_mut() else {
+            return;
+        };
+        self.key_store = services.secrets.place();
+        if typed != stored.api_key {
+            return;
+        }
+        let (secret, unreadable) = key.split();
+        self.api_key = secret.clone().unwrap_or_default();
+        stored.api_key = secret;
+        self.key_unreadable = unreadable;
+        self.show_unreadable_key();
     }
 
     /// The read failure, as the section's error, while the key is unread;

@@ -920,18 +920,18 @@ impl Host {
         self.publish();
     }
 
-    /// The secret store answers again after it could not be read (the
-    /// keyring opened once the user typed its password): the Summaries
-    /// section and onboarding's summaries step load the key again, and
-    /// keep what else they show.
+    /// The secret store answers again after a read failed while the
+    /// keyring asked the user (it opened, or the choice fell to the file):
+    /// the Summaries section and onboarding's summaries step read the API
+    /// key again, unless their key field holds an unsaved edit, and keep
+    /// everything else they show ([`LlmSettingsViewModel::reload_key`]).
     pub fn secrets_changed(&self) {
         let key = self.read_key();
         {
             let mut inner = self.lock();
-            let store = &self.shared.store;
             let services = &self.shared.services;
-            inner.llm.load(store, services, key.clone());
-            inner.onboarding.llm.load(store, services, key);
+            inner.llm.reload_key(services, key.clone());
+            inner.onboarding.llm.reload_key(services, key);
             inner.publisher.schedule(BridgeTopic::SettingsSummaries);
             inner.publisher.schedule(BridgeTopic::Onboarding);
         }
@@ -1059,10 +1059,13 @@ impl Host {
     /// when the window opened. A download in flight keeps its state. The
     /// API key is read from the secret store here with the lock held: this
     /// runs only when the stored settings changed (an outside write, an
-    /// onboarding save), a read never asks the user (the `SecretStore`s
-    /// prompt only on a write or at their own start), and moving it out
-    /// would split one reload into two publishes. A `SecretStore` must not
-    /// call back into the host.
+    /// onboarding save), and moving it out would split one reload into two
+    /// publishes. On Linux and Windows the read never asks the user (the
+    /// Secret Service store asks only on a write or at its own start); on
+    /// the Mac the Keychain may show its access dialog for an item another
+    /// app wrote (the Swift app's key, once at the cutover), and every
+    /// window waits until the user answers it. A `SecretStore` must not call
+    /// back into the host.
     fn reload_sections(&self, inner: &mut Inner) {
         let store = &self.shared.store;
         let services = &self.shared.services;

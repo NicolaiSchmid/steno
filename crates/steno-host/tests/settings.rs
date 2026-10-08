@@ -975,9 +975,9 @@ fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
 }
 
 /// Over a key that could not be read, a field typed into and emptied
-/// again, or typed into before the section loaded again, saves nothing
-/// over the key; a key typed and saved replaces it and the unreadable
-/// message goes.
+/// again saves nothing over the key; a key typed before the store answered
+/// again stays in the field and is saved; a key typed and saved replaces
+/// it and the unreadable message goes.
 #[test]
 fn only_a_typed_key_replaces_one_that_could_not_be_read() {
     let harness = a_harness_whose_key_cannot_be_read();
@@ -1009,21 +1009,18 @@ fn only_a_typed_key_replaces_one_that_could_not_be_read() {
     harness.host.settings_summaries_save().unwrap();
     assert_eq!(stored().as_deref(), Some("sk-stored"), "typed and erased");
 
-    // Typed, then the section loads again before a save.
+    // Typed, then the store answers again before a save.
     harness
         .host
         .settings_summaries_update(update(None, None, Some("sk-half"), None))
         .unwrap();
+    harness.fakes.secrets.fail_reads(None);
     harness.host.secrets_changed();
-    harness
-        .host
-        .settings_summaries_update(update(Some("gpt-4.1"), None, None, None))
-        .unwrap();
     harness.host.settings_summaries_save().unwrap();
     assert_eq!(
         stored().as_deref(),
-        Some("sk-stored"),
-        "a reload drops the edit"
+        Some("sk-half"),
+        "the reread kept the edit"
     );
 
     harness
@@ -1034,6 +1031,84 @@ fn only_a_typed_key_replaces_one_that_could_not_be_read() {
     assert_eq!(stored().as_deref(), Some("sk-typed"));
     let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
     assert!(summaries.get("error").is_none(), "{summaries}");
+}
+
+/// The store answering again while the form holds unsaved edits: the key
+/// shows, and every edit stays as typed for the save.
+#[test]
+fn a_reread_key_keeps_the_forms_unsaved_edits() {
+    let harness = a_harness_whose_key_cannot_be_read();
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-typed"), None, None, None))
+        .unwrap();
+    harness.fakes.secrets.fail_reads(None);
+    harness.host.secrets_changed();
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert_eq!(summaries["hasAPIKey"], true);
+    assert_eq!(summaries["model"], "gpt-typed");
+    assert!(summaries.get("error").is_none(), "{summaries}");
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        harness.store.settings().unwrap().llm_model.as_deref(),
+        Some("gpt-typed")
+    );
+    assert_eq!(
+        block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
+            .unwrap()
+            .as_deref(),
+        Some("sk-stored")
+    );
+}
+
+/// A stored key whose field is emptied is removed by the save, and a save
+/// that leaves the field alone keeps it.
+#[test]
+fn emptying_the_key_field_removes_the_stored_key() {
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            block_on(
+                fakes
+                    .secrets
+                    .set_secret(&SecretKey::llm_api_key(), Some("sk-stored")),
+            )
+            .unwrap();
+        })
+        .build();
+    let stored = || block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key())).unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
+        true
+    );
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(stored().as_deref(), Some("sk-stored"));
+
+    harness
+        .host
+        .settings_summaries_update(update(None, None, Some(""), None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(stored(), None);
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
+        false
+    );
 }
 
 /// Swift: `testLLMValidatesAndSavesSettingsAndKey`, `testLLMInvalidInputSavesNothing`,
