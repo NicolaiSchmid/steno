@@ -849,10 +849,11 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
 
 /// The chosen source records, then its owner stops mid-recording (no
 /// notification of any kind): the session's watchdog reports the stall
-/// within about a second, the rebuild's restarts fail while the stopped
+/// `STALL_TIMEOUT` later, the rebuild's restarts fail while the stopped
 /// owner holds the graph up (`DidNotRun`, the default's try included) and
-/// go on instead of ending the recording, and once the owner resumes a
-/// restart runs and the recording goes on, its gap filled.
+/// go on past `RESTART_ATTEMPTS`, saying so, instead of ending the
+/// recording, and once the owner resumes a later restart runs and the
+/// recording goes on, its gap filled.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
 fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
@@ -884,9 +885,20 @@ fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
         "stall reported {:.2} s after the stop",
         stopped.elapsed().as_secs_f64()
     );
-    // Long enough for the restarts to pass `RESTART_ATTEMPTS` while the
-    // graph does not run; before the fix the recording ended there.
-    std::thread::sleep(Duration::from_secs(12));
+    // The restarts pass `RESTART_ATTEMPTS` while the graph does not run
+    // (each waits out the 3 s start deadline on the source and on the
+    // default); before the fix the recording ended there.
+    assert_eq!(
+        notices.recv_timeout(Duration::from_secs(40)),
+        Ok(CaptureNotice::StillRestarting {
+            attempt: CaptureSession::RESTART_ATTEMPTS
+        }),
+        "past the attempts"
+    );
+    println!(
+        "still restarting {:.2} s after the stop",
+        stopped.elapsed().as_secs_f64()
+    );
     assert!(
         matches!(session.state(), CaptureState::Recording { .. }),
         "{:?}",
@@ -895,7 +907,14 @@ fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
     source.resume_owner();
     let resumed = notices.recv_timeout(Duration::from_secs(20));
     println!("after the owner resumed: {resumed:?}");
-    assert!(matches!(resumed, Ok(CaptureNotice::DeviceResumed { .. })));
+    assert!(
+        matches!(
+            resumed,
+            Ok(CaptureNotice::DeviceResumed { attempt, .. })
+                if attempt > CaptureSession::RESTART_ATTEMPTS
+        ),
+        "a restart past the attempts ran"
+    );
     let input = session
         .stream()
         .and_then(|stream| stream.input)
@@ -916,6 +935,70 @@ fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
         result.statistics.duration > 2.0 + CaptureSession::MAXIMUM_GAP.as_secs_f64(),
         "what came before the stall, the gap and after: {:.2} s",
         result.statistics.duration
+    );
+}
+
+/// Asking whether a chosen source runs costs the recording nothing,
+/// whether it runs or not: while a recording on the default source goes
+/// on, probes of a source whose owner is stopped answer `false`, one once
+/// the owner resumed `true`, and the recording got no report, no gap and
+/// no dropped frame, its master within 0.1 s of wall time. The probe's own
+/// stream is not the recording's, so a stopped owner that wedges what it
+/// is linked to wedges the probe alone.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn probing_a_chosen_source_costs_the_recording_nothing() {
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let backend = Arc::new(LiveCaptureBackend::new());
+    assert!(backend.probes_inputs());
+    let session = CaptureSession::with_backend(
+        CaptureConfiguration::new(CaptureMode::InPerson, directory.path()),
+        backend.clone(),
+        None,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        Arc::new(SystemClock::new()),
+    )
+    .expect("the session");
+    let stalled = StalledSource::create();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).expect("the start");
+    let started = Instant::now();
+    for ask in 1..=3 {
+        let asked = Instant::now();
+        assert!(
+            !backend.probe_input(StalledSource::NAME),
+            "ask {ask}: its owner is stopped"
+        );
+        println!(
+            "ask {ask} answered after {:.2} s",
+            asked.elapsed().as_secs_f64()
+        );
+    }
+    assert!(!backend.probe_input("steno-test-no-such-source"));
+    stalled.resume_owner();
+    assert!(
+        eventually(Duration::from_secs(10), || backend
+            .probe_input(StalledSource::NAME)),
+        "once its owner runs"
+    );
+    std::thread::sleep(Duration::from_millis(500));
+    let wall = started.elapsed().as_secs_f64();
+    let result = session.stop().expect("the recording");
+    assert_eq!(notices.try_recv().ok(), None, "no device change, no stall");
+    let statistics = &result.statistics;
+    assert_eq!(statistics.device_changes, 0);
+    assert_eq!(statistics.gap_seconds, 0.0);
+    assert!(
+        statistics.dropped_frames.is_empty(),
+        "{:?}",
+        statistics.dropped_frames
+    );
+    let master = statistics.duration;
+    println!("the master: {master:.3} s against {wall:.3} s of wall time");
+    assert!(
+        (wall - master).abs() < 0.1,
+        "every frame while the probes ran: {master:.3} s against {wall:.3} s"
     );
 }
 

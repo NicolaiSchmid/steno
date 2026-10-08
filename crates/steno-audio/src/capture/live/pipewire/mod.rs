@@ -591,6 +591,16 @@ impl Connection {
         })
     }
 
+    /// A connection that binds the `default` metadata, once the daemon
+    /// has answered with the globals (the first roundtrip, which binds the
+    /// metadata) and the metadata's properties (the second).
+    fn read(deadline: Instant) -> Result<Self, CaptureError> {
+        let connection = Self::open(true)?;
+        connection.roundtrip(deadline)?;
+        connection.roundtrip(deadline)?;
+        Ok(connection)
+    }
+
     /// Runs the loop until `ready` holds, the deadline passes or the
     /// connection is lost; whether `ready` held.
     fn pump_until(&self, deadline: Instant, mut ready: impl FnMut() -> bool) -> bool {
@@ -608,13 +618,17 @@ impl Connection {
         }
     }
 
-    /// Waits until the daemon has answered everything sent before.
+    /// Waits until the daemon has answered everything sent before. No
+    /// answer by the deadline, the connection intact, is
+    /// [`CaptureError::DidNotRun`]: the daemon waits on something in the
+    /// graph, as on a node whose owner stopped before the session manager
+    /// configured it.
     fn roundtrip(&self, deadline: Instant) -> Result<(), CaptureError> {
         let pending = self.core.sync(0).map_err(failed("a PipeWire roundtrip"))?;
         if self.pump_until(deadline, || self.shared.done.get() == Some(pending)) {
             Ok(())
         } else {
-            Err(self.stalled("answer"))
+            Err(self.stalled_as("answer", CaptureError::DidNotRun))
         }
     }
 
@@ -624,9 +638,9 @@ impl Connection {
         self.stalled_as(step, CaptureError::BackendFailed)
     }
 
-    /// [`Self::stalled`] with the deadline's error made by `timed_out`: the
-    /// first cycle's, with the connection and the links intact, is
-    /// [`CaptureError::DidNotRun`].
+    /// [`Self::stalled`] with the deadline's error made by `timed_out`: a
+    /// roundtrip's, the stream's ports' and the first cycle's, with the
+    /// connection and the links intact, are [`CaptureError::DidNotRun`].
     fn stalled_as(&self, step: &str, timed_out: fn(String) -> CaptureError) -> CaptureError {
         if self.shared.lost.get().any() {
             CaptureError::BackendFailed(
@@ -749,19 +763,99 @@ impl Drop for Capture {
 impl Capture {
     /// Everything `start` does, on the PipeWire thread; see the module doc.
     /// Once `new` returned, an early return tears down through `Drop`.
+    /// `answered` is raised once the daemon has answered the first
+    /// roundtrips, so a `start` that hears nothing after that knows the
+    /// connection held ([`await_answer`]).
     fn open(
         lanes: &[AudioLane],
         input_device_uid: Option<&str>,
         sink: Arc<LaneFrameSink>,
         gate: Arc<Gate>,
+        answered: &AtomicBool,
     ) -> Result<Self, CaptureError> {
         let started = Instant::now();
         let deadline = started + START_TIMEOUT;
-        let connection = Connection::open(true)?;
-        // The first roundtrip brings the globals and binds the `default`
-        // metadata, the second its properties.
-        connection.roundtrip(deadline)?;
-        connection.roundtrip(deadline)?;
+        let connection = Connection::read(deadline)?;
+        answered.store(true, Ordering::Release);
+        let mut capture =
+            Self::linked_on(connection, lanes, input_device_uid, sink, gate, deadline)?;
+        capture.measure(deadline)?;
+        tracing::info!(
+            "the PipeWire capture runs {} ms after start: input latency {} frames, output \
+             latency {} frames",
+            started.elapsed().as_millis(),
+            capture.info.input_latency_frames,
+            capture.info.output_latency_frames
+        );
+        Ok(capture)
+    }
+
+    /// Whether the source `uid` names runs now, asked on a connection and
+    /// a stream of its own, so the capture that records is not touched: the
+    /// microphone lane alone linked to that source into a sink nobody
+    /// reads, until its first cycle or `START_TIMEOUT`, then torn down.
+    /// `false` when `uid` names no source the capture can record (the
+    /// default would stand in), when anything on the way fails, or when no
+    /// cycle came. A Bluetooth source is not linked and answers `false`:
+    /// WirePlumber switches a headset whose input a stream links from its
+    /// A2DP profile to the hands-free one, which moves the output the
+    /// system lane records. Runs on the calling thread, which owns every
+    /// PipeWire object it makes; not the real-time path. Rust only.
+    fn probe(uid: &str) -> bool {
+        let lanes = [AudioLane::Mixed];
+        let deadline = Instant::now() + START_TIMEOUT;
+        let sink = Arc::new(LaneFrameSink::new(&lanes));
+        let probed = Connection::read(deadline)
+            .and_then(|connection| {
+                let graph = connection.shared.graph.borrow();
+                if graph.known_source(Some(uid)).is_none() {
+                    return Err(CaptureError::InputDeviceUnavailable);
+                }
+                if graph.is_bluetooth_source(uid) {
+                    tracing::info!("the input device {uid} is a Bluetooth source; not probed");
+                    return Err(CaptureError::InputDeviceUnavailable);
+                }
+                drop(graph);
+                Self::linked_on(
+                    connection,
+                    &lanes,
+                    Some(uid),
+                    sink,
+                    Arc::new(Gate::new()),
+                    deadline,
+                )
+            })
+            .map(|capture| {
+                let chosen = capture
+                    .info
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| !input.is_fallback);
+                chosen
+                    && capture.connection.pump_until(deadline, || {
+                        capture.cycle_frames.load(Ordering::Acquire) > 0
+                    })
+            });
+        match probed {
+            Ok(runs) => runs,
+            Err(error) => {
+                tracing::info!("the input device {uid} did not answer the probe: {error}");
+                false
+            }
+        }
+    }
+
+    /// [`Self::open`] up to the links, on a connection that has read the
+    /// graph: the targets for `lanes` and `input_device_uid`, the stream
+    /// and its links, before any cycle ran.
+    fn linked_on(
+        connection: Connection,
+        lanes: &[AudioLane],
+        input_device_uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+        gate: Arc<Gate>,
+        deadline: Instant,
+    ) -> Result<Self, CaptureError> {
         let (targets, input) = {
             let graph = connection.shared.graph.borrow();
             let targets = graph.resolve(lanes, graph.known_source(input_device_uid))?;
@@ -779,14 +873,6 @@ impl Capture {
         };
         let mut capture = Self::new(connection, targets, input_device_uid, input, sink, gate)?;
         capture.link(deadline)?;
-        capture.measure(deadline)?;
-        tracing::info!(
-            "the PipeWire capture runs {} ms after start: input latency {} frames, output \
-             latency {} frames",
-            started.elapsed().as_millis(),
-            capture.info.input_latency_frames,
-            capture.info.output_latency_frames
-        );
         Ok(capture)
     }
 
@@ -893,7 +979,9 @@ impl Capture {
                 .flatten();
             stream_ports.is_some()
         }) {
-            return Err(connection.stalled("create the capture stream's ports"));
+            return Err(
+                connection.stalled_as("create the capture stream's ports", CaptureError::DidNotRun)
+            );
         }
         let stream_node = stream.node_id();
         let mut links = Vec::with_capacity(channels);
@@ -1133,14 +1221,22 @@ fn answer_channel() -> (SyncSender<Answer>, Receiver<Answer>) {
 
 /// `start`'s wait for the thread's answer, at most `limit`. The receiver
 /// drops on return, so a thread that answers later fails its send and
-/// tears down without watching ([`hand_over`]).
-fn await_answer(answered: Receiver<Answer>, limit: Duration) -> Answer {
+/// tears down without watching ([`hand_over`]). A thread that does not
+/// answer although the daemon answered its roundtrips (`connected`) is
+/// held up by the graph, as when a node's owner stopped before the session
+/// manager set up its ports: [`CaptureError::DidNotRun`], which the
+/// session retries until the graph runs. Otherwise the connection itself
+/// did not come up: `BackendFailed`.
+fn await_answer(answered: Receiver<Answer>, limit: Duration, connected: &AtomicBool) -> Answer {
     let answer = answered.recv_timeout(limit);
     drop(answered);
     answer.unwrap_or_else(|_| {
-        Err(CaptureError::BackendFailed(
-            "the PipeWire thread did not answer".into(),
-        ))
+        let silent = format!("the PipeWire thread did not answer within {limit:?}");
+        Err(if connected.load(Ordering::Acquire) {
+            CaptureError::DidNotRun(silent)
+        } else {
+            CaptureError::BackendFailed(silent)
+        })
     })
 }
 
@@ -1178,8 +1274,9 @@ fn run(
     gate: Arc<Gate>,
     answer: &SyncSender<Answer>,
     quit: pw::channel::Receiver<()>,
+    connected: &AtomicBool,
 ) {
-    let opened = Capture::open(lanes, input_device_uid, sink, gate);
+    let opened = Capture::open(lanes, input_device_uid, sink, gate, connected);
     let Some(capture) = hand_over(answer, opened, |capture| capture.info.clone()) else {
         return;
     };
@@ -1338,6 +1435,8 @@ impl CaptureBackend for LiveCaptureBackend {
         let thread_gate = Arc::clone(&gate);
         let thread_id = Arc::new(AtomicU32::new(0));
         let id_slot = Arc::clone(&thread_id);
+        let connected = Arc::new(AtomicBool::new(false));
+        let thread_connected = Arc::clone(&connected);
         let thread = std::thread::Builder::new()
             .name("steno-pipewire".into())
             .spawn(move || {
@@ -1351,6 +1450,7 @@ impl CaptureBackend for LiveCaptureBackend {
                     thread_gate,
                     &answer,
                     quit_receiver,
+                    &thread_connected,
                 );
             })
             .map_err(|e| CaptureError::BackendFailed(format!("the PipeWire thread: {e}")))?;
@@ -1359,6 +1459,7 @@ impl CaptureBackend for LiveCaptureBackend {
         let outcome = await_answer(
             answered,
             START_TIMEOUT + LATENCY_TIMEOUT + Duration::from_secs(2),
+            &connected,
         );
         let started = Active {
             quit,
@@ -1389,6 +1490,20 @@ impl CaptureBackend for LiveCaptureBackend {
     /// source whose owner stalls) is the session's watchdog to catch.
     fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
         true
+    }
+
+    /// A second stream on a connection of its own can ask a source
+    /// without touching the capture that records.
+    fn probes_inputs(&self) -> bool {
+        true
+    }
+
+    /// The chosen source's first cycle on a stream of its own, within
+    /// `START_TIMEOUT` (3 s); see `Capture::probe`.
+    fn probe_input(&self, uid: &str) -> bool {
+        let runs = Capture::probe(uid);
+        tracing::info!("the input device {uid} runs on its own: {runs}");
+        runs
     }
 }
 
@@ -1863,13 +1978,24 @@ mod tests {
         );
     }
 
+    /// A thread that does not answer in time is given up on, its receiver
+    /// dropped: as a graph that does not run when the daemon had answered
+    /// it, else as a backend failure.
     #[test]
     fn a_start_that_gave_up_drops_its_receiver() {
         let (answer, answered) = answer_channel();
-        assert!(await_answer(answered, Duration::ZERO).is_err());
+        assert!(matches!(
+            await_answer(answered, Duration::ZERO, &AtomicBool::new(true)),
+            Err(CaptureError::DidNotRun(_))
+        ));
         assert!(matches!(
             answer.try_send(Ok(stream())),
             Err(TrySendError::Disconnected(_))
+        ));
+        let (_answer, answered) = answer_channel();
+        assert!(matches!(
+            await_answer(answered, Duration::ZERO, &AtomicBool::new(false)),
+            Err(CaptureError::BackendFailed(_))
         ));
     }
 
@@ -1878,7 +2004,7 @@ mod tests {
         let (answer, answered) = answer_channel();
         let thread = std::thread::spawn(move || answer.send(Ok(stream())));
         assert_eq!(
-            await_answer(answered, Duration::from_secs(10)),
+            await_answer(answered, Duration::from_secs(10), &AtomicBool::new(true)),
             Ok(stream())
         );
         assert!(thread.join().unwrap().is_ok());
@@ -1907,7 +2033,9 @@ mod tests {
     fn a_capture_start_took_is_handed_back_to_watch() {
         let drops = Arc::new(AtomicUsize::new(0));
         let (answer, answered) = answer_channel();
-        let start = std::thread::spawn(move || await_answer(answered, Duration::from_secs(10)));
+        let start = std::thread::spawn(move || {
+            await_answer(answered, Duration::from_secs(10), &AtomicBool::new(true))
+        });
         let watched = hand_over(&answer, Ok(Dropped(Arc::clone(&drops))), |_| stream());
         assert_eq!(start.join().unwrap(), Ok(stream()));
         assert!(watched.is_some());
@@ -1917,7 +2045,9 @@ mod tests {
     #[test]
     fn a_failed_open_is_answered_and_not_watched() {
         let (answer, answered) = answer_channel();
-        let start = std::thread::spawn(move || await_answer(answered, Duration::from_secs(10)));
+        let start = std::thread::spawn(move || {
+            await_answer(answered, Duration::from_secs(10), &AtomicBool::new(true))
+        });
         let opened: Result<Dropped, _> = Err(CaptureError::InputDeviceUnavailable);
         assert!(hand_over(&answer, opened, |_| stream()).is_none());
         assert_eq!(
