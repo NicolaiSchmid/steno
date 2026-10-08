@@ -45,7 +45,10 @@
 //! microphone announced later is a change, and the restart records it. A
 //! chosen source that is listed but never runs (its owner stopped) leaves
 //! the recording on the default source, at the start and after the
-//! rebuild its arrival causes.
+//! rebuild its arrival causes. A chosen source whose owner stops
+//! mid-recording is reported by the session's stall watchdog, retried
+//! while the stopped owner holds the graph up, and recorded again once it
+//! resumes.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -646,7 +649,15 @@ impl StalledSource {
     /// The loopback's other half, a sink.
     const SINK: &str = "steno-test-stalled-in";
 
+    /// Listed, configured and stopped.
     fn create() -> Self {
+        let source = Self::running();
+        source.stop_owner();
+        source
+    }
+
+    /// Listed and configured, its owner still running.
+    fn running() -> Self {
         let child = Command::new("pw-loopback")
             .args([
                 "--capture-props",
@@ -687,8 +698,15 @@ impl StalledSource {
             ports(Self::NAME, "output") && ports(Self::SINK, "input")
         };
         assert!(eventually(SETTLE, configured), "the stalled source's ports");
-        assert!(tool("kill", &["-STOP", &source.child.id().to_string()]));
         source
+    }
+
+    fn stop_owner(&self) {
+        assert!(tool("kill", &["-STOP", &self.child.id().to_string()]));
+    }
+
+    fn resume_owner(&self) {
+        assert!(tool("kill", &["-CONT", &self.child.id().to_string()]));
     }
 }
 
@@ -826,6 +844,78 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
     assert!(
         (wall - master).abs() < 1.0,
         "the master stays on wall time: {master:.2} s against {wall:.2} s"
+    );
+}
+
+/// The chosen source records, then its owner stops mid-recording (no
+/// notification of any kind): the session's watchdog reports the stall
+/// within about a second, the rebuild's restarts fail while the stopped
+/// owner holds the graph up (`DidNotRun`, the default's try included) and
+/// go on instead of ending the recording, and once the owner resumes a
+/// restart runs and the recording goes on, its gap filled.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let session = session_choosing_the_stalled_source(directory.path());
+    let notices = session.notices();
+    let source = StalledSource::running();
+    session.start(Uuid::new_v4()).expect("the start");
+    assert_eq!(
+        session
+            .stream()
+            .and_then(|stream| stream.input)
+            .map(|input| input.uid),
+        Some(StalledSource::NAME.to_owned()),
+        "on the chosen source"
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    source.stop_owner();
+    let stopped = Instant::now();
+    assert_eq!(
+        notices.recv_timeout(Duration::from_secs(5)),
+        Ok(CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DeliveryStalled
+        )),
+        "the watchdog"
+    );
+    println!(
+        "stall reported {:.2} s after the stop",
+        stopped.elapsed().as_secs_f64()
+    );
+    // Long enough for the restarts to pass `RESTART_ATTEMPTS` while the
+    // graph does not run; before the fix the recording ended there.
+    std::thread::sleep(Duration::from_secs(12));
+    assert!(
+        matches!(session.state(), CaptureState::Recording { .. }),
+        "{:?}",
+        session.state()
+    );
+    source.resume_owner();
+    let resumed = notices.recv_timeout(Duration::from_secs(20));
+    println!("after the owner resumed: {resumed:?}");
+    assert!(matches!(resumed, Ok(CaptureNotice::DeviceResumed { .. })));
+    let input = session
+        .stream()
+        .and_then(|stream| stream.input)
+        .map(|input| input.uid);
+    assert!(
+        input.as_deref() == Some(StalledSource::NAME) || input.as_deref() == Some(MIC),
+        "{input:?}"
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    let result = session.stop().expect("the recording");
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 1);
+    println!(
+        "the master: {:.2} s, gap {:.2} s",
+        result.statistics.duration, result.statistics.gap_seconds
+    );
+    assert!(
+        result.statistics.duration > 2.0 + CaptureSession::MAXIMUM_GAP.as_secs_f64(),
+        "what came before the stall, the gap and after: {:.2} s",
+        result.statistics.duration
     );
 }
 
