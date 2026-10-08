@@ -18,7 +18,7 @@
 //! | [`speaker_memory`] | The store-backed cosine `SpeakerMemory` |
 //! | [`retention`] | [`RetentionSweep`] over expired assets |
 //! | [`fixtures`] | The synthetic audio fixtures and the WAV writer |
-//! | [`files`] | Durable writes: a file replaced in one step, a recording copied, new folders, a JSON file read and written, set aside when corrupt |
+//! | [`files`] | Durable writes: a file replaced in one step, a recording copied, new folders, a JSON file read and written, set aside when corrupt; its Windows module is the one place in the crate allowed `unsafe` |
 //!
 //! The crate sits above `steno-core` and below the services assembly: it
 //! knows the boundaries (`steno_core::protocols`) and the store, never an
@@ -62,6 +62,8 @@
 //! # Ok(())
 //! # }
 //! ```
+
+#![deny(unsafe_code)]
 
 pub mod crash_loop;
 pub mod estimator;
