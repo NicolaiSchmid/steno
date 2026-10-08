@@ -94,8 +94,12 @@ pub enum KeyringUnavailable {
          once it is answered"
     )]
     Unlocking,
-    /// The keyring was locked again while the app ran.
-    #[error("the keyring is locked; unlock it and try again")]
+    /// The keyring was locked again while the app ran, or refused Steno
+    /// access (`KeePassXC`'s access dialog denied).
+    #[error(
+        "the keyring is locked or did not let Steno in; unlock it or allow Steno, then start \
+         Steno again"
+    )]
     Locked,
     /// The secrets moved into the keyring, which could not be opened at
     /// start: locked, its prompt dismissed, or no provider running. Holds
@@ -177,10 +181,9 @@ impl SecretStore for KeyringSecretStore {
 /// a run that cannot open the keyring never mints a fresh handover
 /// identity or drops the API key. The entries the move left behind are
 /// still read until a later launch deletes them, or the app saves that
-/// key. A build from before the
-/// marker cannot parse the file (the marker is a boolean, and that build
-/// reads only text values), so it fails every secret read and write
-/// instead of minting.
+/// key. A build from before the marker cannot parse the file (the marker
+/// is a boolean, and that build reads only text values), so it fails every
+/// secret read and write instead of minting.
 pub struct FileSecretStore {
     path: PathBuf,
     environment: BTreeMap<String, String>,

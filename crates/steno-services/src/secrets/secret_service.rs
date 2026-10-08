@@ -72,13 +72,13 @@ use crate::handover::FingerprintFile;
 /// the item). The handover identity keeps the service's: an identity is
 /// never replaced, as the phones pinned one of them, and the file's stays
 /// in the file until an identity is stored, or for the user to take by
-/// hand. As this computer's phones paired
-/// with the file's identity, its fingerprint is recorded first when none
-/// is ([`FingerprintFile`]), so the handover reports the service's as
-/// replaced instead of adopting it. After the marker the service wins for
-/// every key, and a write through the store drops that key's copy from the
-/// file at once, so a removal or a change in the launch that moved the
-/// entries is never undone by the copy.
+/// hand. As this computer's phones paired with the file's identity, its
+/// fingerprint is recorded first when none is ([`FingerprintFile`]), so the
+/// handover reports the service's as replaced instead of adopting it.
+/// After the marker the service wins for every key, and a write through
+/// the store drops that key's copy from the file at once, so a removal or
+/// a change in the launch that moved the entries is never undone by the
+/// copy.
 ///
 /// Items are filed under the attributes `service` ([`KEYRING_SERVICE`])
 /// and `username` (the key's raw value), the names the `keyring` crate

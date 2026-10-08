@@ -135,7 +135,8 @@ Platform backends behind traits, two implementations before generalising: `Captu
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
 `SecretStore` (Keychain and the Windows credential store via `keyring`; the Secret
 Service over `zbus` on Linux, a 0600 file where no provider runs or the keyring stays
-locked before the first move), `Updater` (Tauri updater on every platform; Sparkle retires at cutover).
+locked before the first move), `Updater` (Tauri updater on every platform; Sparkle
+retires at cutover).
 
 ## Transition
 
@@ -931,11 +932,16 @@ still has to draw the window side. `[ ]` is not ported yet.
   - The choice is made once per process, on a thread of the store's own. A read never
     asks the user; one made while a prompt is up fails, and once the choice is made
     `App::launch` builds the pipeline again, the host reads the key again (into a
-    Settings form whose key field holds no unsaved edit) and a handover that waited
-    reads its identity again and starts. The crash recovery (meetings left queued or
-    processing, unfinished exports) waits for the choice, so it runs on the pipeline
-    with the key; a quit before the answer hands no listener over. A write may wait on
-    the user, under the host's lock for Settings' save.
+    Settings form whose key field holds no unsaved edit and whose key no load or save
+    wrote while it was read) and a handover that waited reads its identity again and
+    starts. The crash recovery (meetings left queued or processing, unfinished exports,
+    interrupted recordings) waits for the choice, so it runs on the pipeline with the
+    key; a quit before the answer hands no listener over. A write may wait on the user,
+    under the host's lock for Settings' save, and the first launch's mint of the
+    identity on the main thread may too.
+  - A keyring locked again while the app runs fails a pipeline rebuild's read; the
+    pipeline then keeps the key it last read or saved (`KeepsApiKey`), never one the
+    user removed or changed since.
   - The move: the first launch with a provider copies the file's entries into the
     service, reads them back and marks the file (`"movedToSecretService": true`); a
     later launch whose own connection reads every value back deletes the entries, and
@@ -956,9 +962,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   - A value with a line break (the identity's PEM) is stored base64 behind
     `steno-base64:`, as GNOME Keyring's unencrypted file (Omarchy's default) rejects a
     whole keyring over one.
-  - Fallback and downgrade: with no provider, no default collection, or a keyring the
-    user leaves locked before the first move, the app keeps every secret in the file for
-    that run, shared with the CLI under the lock. A build from before the mark cannot
+  - Fallback and downgrade: with no provider, no default collection, a session bus that
+    is not a `unix:` socket, or a keyring the user leaves locked before the first move,
+    the app keeps every secret in the file for that run, shared with the CLI under the
+    lock. A build from before the mark cannot
     parse the marked file and fails every secret read and write (no summaries key, no
     handover) rather than minting.
   - Tested against a fake Secret Service on a private `dbus-daemon`, and against GNOME
@@ -3061,8 +3068,8 @@ in the app's process until #183 moved it into the speech sidecar; the
 `CoreML` engine leaves `language` unset (#163), and
 `LanguageTaggingEngine` in the services crate runs `steno_speech`'s tagger after it,
 as `ParakeetMapping` did in Swift. Secrets: the platform keyring on macOS and
-Windows, the Secret Service on Linux when a provider runs on the session bus, else the
-0600 `secrets.json` (the kernel keyring does not survive a reboot).
+Windows, the Secret Service on Linux, or the 0600 `secrets.json` where no keyring
+answers before the first move into it (the kernel keyring does not survive a reboot).
 Parity items: the Pipeline and services list above.
 
 WP10a is the Windows half of `crates/steno-audio`: the WASAPI live backend
