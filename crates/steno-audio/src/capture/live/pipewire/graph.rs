@@ -8,14 +8,18 @@
 //!
 //! Identities: a device's UID (what `Settings.input_device_uid` stores) is
 //! its `node.name`, stable across reboots for the same hardware, as the
-//! `default.audio.*` metadata names devices too. The microphone is the
+//! `default.audio.*` metadata names devices too. A UID that names no source
+//! the capture can record ([`Graph::known_source`]), a UID the input picker
+//! ([`Graph::inputs`]) would not list, records the default source instead,
+//! and the snapshot then follows the default until the chosen source is
+//! announced again ([`Graph::followed_source`]). The microphone is the
 //! first non-monitor output port (lowest `port.id`) of the input node, as
 //! the macOS backend takes the input device's first channel; a virtual
 //! source (a null sink with `media.class = Audio/Source/Virtual`) has only
-//! a monitor output, and that is taken then. The system lane is the
-//! default sink's monitor: its `FL` and `FR` monitor ports (folded to mono
-//! by the rings), or its only one for a mono sink, or the two
-//! lowest-numbered for a sink without front channels.
+//! a monitor output, and that is taken then. The system lane is the default
+//! sink's monitor: its `FL` and `FR` monitor ports (folded to mono by the
+//! rings), or its only one for a mono sink, or the two lowest-numbered for
+//! a sink without front channels.
 //!
 //! PipeWire reuses the ids of removed globals, never their
 //! `object.serial`: a linked node or port is alive while its id still
@@ -32,7 +36,10 @@ use std::collections::BTreeMap;
 use steno_core::AudioLane;
 
 use crate::SAMPLE_RATE;
-use crate::capture::{CaptureError, ChannelRef, DeviceSnapshot, LaneSource, StreamLayout};
+use crate::capture::live::AudioDeviceInfo;
+use crate::capture::{
+    CaptureError, CaptureInput, ChannelRef, DeviceSnapshot, LaneSource, StreamLayout,
+};
 
 /// The metadata key WirePlumber keeps the default sink's name in.
 pub(crate) const DEFAULT_SINK_KEY: &str = "default.audio.sink";
@@ -46,14 +53,22 @@ pub(crate) struct NodeEntry {
     pub name: String,
     /// `media.class`, `Audio/Sink`, `Audio/Source` and so on.
     pub media_class: String,
+    /// `node.description`, else `node.nick`: the name a person reads.
+    pub description: Option<String>,
     /// `object.serial`, unique for the daemon's lifetime.
     pub serial: Option<u64>,
+}
+
+/// Whether a node of `media_class` is something a microphone lane can
+/// record from: a source (a virtual one included) or a duplex device.
+pub(crate) fn is_source_class(media_class: &str) -> bool {
+    media_class.starts_with("Audio/Source") || media_class == "Audio/Duplex"
 }
 
 impl NodeEntry {
     /// Something a microphone lane can record from.
     fn is_source(&self) -> bool {
-        self.media_class.starts_with("Audio/Source") || self.media_class == "Audio/Duplex"
+        is_source_class(&self.media_class)
     }
 
     /// Something whose monitor the system lane can record.
@@ -181,39 +196,53 @@ pub(crate) struct Graph {
     ports: BTreeMap<u32, PortEntry>,
     default_sink: Option<String>,
     default_source: Option<String>,
-    /// The targets and the UID of the capture whose snapshot the graph
-    /// serves, once [`Graph::track`] set them.
+    /// The targets and the UID asked for by the capture whose snapshot the
+    /// graph serves, once [`Graph::track`] set them.
     tracked: Option<(Targets, Option<String>)>,
 }
 
 impl Graph {
     /// A node global, its properties read through `props`. Nodes without a
-    /// `node.name` are not kept: nothing can name them.
-    pub fn add_node<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
+    /// `node.name` are not kept: nothing can name them. True when it is the
+    /// node the tracked capture asked for, which may bring a chosen source
+    /// back (see [`Self::followed_source`]).
+    pub fn add_node<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) -> bool {
         let Some(name) = props("node.name") else {
-            return;
+            return false;
         };
+        let chosen = self.is_chosen(name);
         self.nodes.insert(
             id,
             NodeEntry {
                 name: name.to_owned(),
                 media_class: props("media.class").unwrap_or_default().to_owned(),
+                description: props("node.description")
+                    .or_else(|| props("node.nick"))
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
                 serial: serial(&props),
             },
         );
+        chosen
     }
 
     /// A port global, its properties read through `props`. Ports without
-    /// an owning node or a direction are not kept.
-    pub fn add_port<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
+    /// an owning node or a direction are not kept. True when it is a port of
+    /// the node the tracked capture asked for: a node's ports follow it,
+    /// and the capture needs one.
+    pub fn add_port<'a>(&mut self, id: u32, props: impl Fn(&str) -> Option<&'a str>) -> bool {
         let Some(node) = props("node.id").and_then(|v| v.parse().ok()) else {
-            return;
+            return false;
         };
         let output = match props("port.direction") {
             Some("out") => true,
             Some("in") => false,
-            _ => return,
+            _ => return false,
         };
+        let chosen = self
+            .nodes
+            .get(&node)
+            .is_some_and(|entry| self.is_chosen(&entry.name));
         self.ports.insert(
             id,
             PortEntry {
@@ -227,10 +256,19 @@ impl Graph {
                 serial: serial(&props),
             },
         );
+        chosen
+    }
+
+    /// Whether `name` is the UID the tracked capture asked for.
+    fn is_chosen(&self, name: &str) -> bool {
+        self.tracked
+            .as_ref()
+            .is_some_and(|(_, uid)| uid.as_deref() == Some(name))
     }
 
     /// From now on a removal counts as a change only when the snapshot for
-    /// `targets` with `uid` reads what went; see [`Self::remove`].
+    /// `targets` with `uid` (the UID asked for, not the fallback source)
+    /// reads what went; see [`Self::remove`].
     pub fn track(&mut self, targets: &Targets, uid: Option<&str>) {
         self.tracked = Some((targets.clone(), uid.map(str::to_owned)));
     }
@@ -267,7 +305,7 @@ impl Graph {
             .flatten()
             .any(|endpoint| endpoint.node == node)
             || targets.output.is_some() && is(self.default_sink_node())
-            || targets.mic.is_some() && is(self.source_named(uid))
+            || targets.mic.is_some() && is(self.followed_source(uid))
     }
 
     /// A property of the `default` metadata on subject 0. `key` `None`
@@ -358,6 +396,74 @@ impl Graph {
             .map(|(id, _)| *id)
             .ok_or(CaptureError::InputDeviceUnavailable)?;
         Ok(self.endpoint(node, entry, vec![port], Some(port)))
+    }
+
+    /// `uid` when it names a source the microphone lane can record
+    /// ([`Self::inputs`] lists it), else `None`, the default source: a UID
+    /// saved on another computer (a Core Audio UID from a Mac) or a device
+    /// unplugged since it was chosen does not fail the capture.
+    pub fn known_source<'a>(&self, uid: Option<&'a str>) -> Option<&'a str> {
+        uid.filter(|&uid| self.mic(Some(uid)).is_ok())
+    }
+
+    /// The source a capture asked for `uid` would record now: the chosen
+    /// one while it can be recorded, else the default. The snapshot reads
+    /// it, so a capture on the fallback follows default moves,
+    /// and the chosen source coming back reads as `DefaultInputChanged`,
+    /// whose rebuild records it again.
+    fn followed_source(&self, uid: Option<&str>) -> Option<(u32, &NodeEntry)> {
+        self.source_named(self.known_source(uid))
+    }
+
+    /// The microphone a capture that resolved `targets` asked for `uid`
+    /// records, named by its `node.description`, else `node.nick`, and
+    /// `None` without either ([`Self::inputs`] then lists it by its
+    /// `node.name`); a fallback when `uid` names no source the lane can
+    /// record.
+    pub fn input(&self, targets: &Targets, uid: Option<&str>) -> Option<CaptureInput> {
+        let mic = targets.mic.as_ref()?;
+        Some(CaptureInput {
+            uid: mic.name.clone(),
+            name: self
+                .nodes
+                .get(&mic.node)
+                .and_then(|node| node.description.clone()),
+            is_fallback: uid.is_some() && self.known_source(uid).is_none(),
+        })
+    }
+
+    /// The input picker's devices, as `AudioDevices::inputs` describes
+    /// them (`super::devices`); channels are the ports the capture could
+    /// take.
+    pub fn inputs(&self) -> Vec<AudioDeviceInfo> {
+        self.nodes
+            .iter()
+            .filter(|(_, node)| self.known_source(Some(&node.name)).is_some())
+            .map(|(&id, node)| {
+                let outputs = self.ports_of(id, |p| p.output);
+                let captures = outputs.iter().filter(|(_, p)| !p.monitor).count();
+                AudioDeviceInfo {
+                    id,
+                    uid: node.name.clone(),
+                    name: node
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| node.name.clone()),
+                    input_channels: if captures > 0 {
+                        captures
+                    } else {
+                        outputs.len()
+                    },
+                    output_channels: 0,
+                    nominal_sample_rate: 0.0,
+                    transport_type: node.media_class.clone(),
+                    is_running_somewhere: false,
+                    is_default_input: self.default_source.as_deref() == Some(node.name.as_str()),
+                    is_default_output: false,
+                    is_default_system_output: false,
+                }
+            })
+            .collect()
     }
 
     /// An endpoint on node `node` linking `ports`, its serials as now.
@@ -471,7 +577,8 @@ impl Graph {
     }
 
     /// The devices as they are now, for a capture that resolved `targets`
-    /// with `uid`; a lane in `lost` reads as its device gone. The default
+    /// asked for `uid`; a lane in `lost` reads as its device gone. The
+    /// microphone is [`Self::followed_source`]. The default
     /// sink stands for both of the snapshot's outputs (PipeWire has no
     /// separate clock master: its adapter resamples to the stream's
     /// 48 kHz), so `default_output_uid` stays `None` and `sample_rate`
@@ -490,7 +597,7 @@ impl Graph {
             input_uid: targets
                 .mic
                 .as_ref()
-                .and_then(|_| self.source_named(uid))
+                .and_then(|_| self.followed_source(uid))
                 .map(|(_, node)| node.name.clone()),
             output_alive: alive(&targets.output, lost.output),
             input_alive: alive(&targets.mic, lost.mic),
@@ -690,6 +797,153 @@ mod tests {
         let targets = graph.resolve(&[AudioLane::System], None).unwrap();
         assert_eq!(targets.feeds, vec![(40, 53), (40, 52)]);
         assert_eq!(targets.mic, None);
+    }
+
+    #[test]
+    fn the_picker_lists_the_sources_a_microphone_can_record() {
+        let mut graph = laptop();
+        node(&mut graph, 60, 1060, "virtual-mic", "Audio/Source/Virtual");
+        port(&mut graph, 61, 1061, 60, "in", "MONO");
+        port(&mut graph, 62, 1062, 60, "out", "monitor_MONO");
+        // A source without ports yet: nothing to record.
+        node(&mut graph, 63, 1063, "portless-mic", "Audio/Source");
+        node(&mut graph, 64, 1064, "an-app", "Stream/Input/Audio");
+        port(&mut graph, 65, 1065, 64, "in", "MONO");
+        graph.add_node(
+            66,
+            props(&[
+                ("node.name", "usb-mic"),
+                ("node.description", "USB Microphone"),
+                ("node.nick", "Mic"),
+                ("media.class", "Audio/Source"),
+            ]),
+        );
+        port(&mut graph, 67, 1067, 66, "out", "MONO");
+        graph.add_node(
+            68,
+            props(&[
+                ("node.name", "nick-mic"),
+                ("node.nick", "Nick"),
+                ("media.class", "Audio/Source"),
+            ]),
+        );
+        port(&mut graph, 69, 1069, 68, "out", "MONO");
+        let inputs = graph.inputs();
+        let listed: Vec<_> = inputs
+            .iter()
+            .map(|d| (d.id, d.uid.as_str(), d.name.as_str(), d.input_channels))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (41, BUILT_IN_MIC, BUILT_IN_MIC, 2),
+                (
+                    42,
+                    "alsa_input.usb-headset.mono",
+                    "alsa_input.usb-headset.mono",
+                    1
+                ),
+                (60, "virtual-mic", "virtual-mic", 1),
+                (66, "usb-mic", "USB Microphone", 1),
+                (68, "nick-mic", "Nick", 1),
+            ],
+            "sources only, by id, named by description, else nick, else UID"
+        );
+        let defaults: Vec<_> = inputs.iter().map(|d| d.is_default_input).collect();
+        assert_eq!(defaults, vec![true, false, false, false, false]);
+        assert!(inputs.iter().all(|d| d.is_input() && !d.is_output()));
+        assert_eq!(inputs[2].transport_type, "Audio/Source/Virtual");
+    }
+
+    #[test]
+    fn a_uid_that_names_no_recordable_source_falls_back_to_the_default() {
+        let mut graph = laptop();
+        node(&mut graph, 63, 1063, "portless-mic", "Audio/Source");
+        let headset = Some("alsa_input.usb-headset.mono");
+        assert_eq!(graph.known_source(headset), headset);
+        assert_eq!(graph.known_source(None), None);
+        for unknown in [
+            "BuiltInMicrophoneDevice",
+            "alsa_output.pci.analog-stereo",
+            "portless-mic",
+        ] {
+            assert_eq!(graph.known_source(Some(unknown)), None, "{unknown}");
+        }
+        let asked = Some("BuiltInMicrophoneDevice");
+        let targets = graph
+            .resolve(&[AudioLane::Mixed], graph.known_source(asked))
+            .unwrap();
+        assert_eq!(targets.feeds, vec![(41, 55)], "the default source");
+        assert_eq!(
+            graph.input(&targets, asked),
+            Some(CaptureInput {
+                uid: BUILT_IN_MIC.to_owned(),
+                name: None,
+                is_fallback: true,
+            })
+        );
+        let baseline = graph.snapshot(&targets, asked, Lost::NONE);
+        assert_eq!(baseline.input_uid.as_deref(), Some(BUILT_IN_MIC));
+        graph.set_default(
+            Some(DEFAULT_SOURCE_KEY),
+            Some(r#"{"name":"alsa_input.usb-headset.mono"}"#),
+        );
+        assert_eq!(
+            graph
+                .snapshot(&targets, asked, Lost::NONE)
+                .difference(&baseline),
+            Some(crate::capture::DeviceChangeReason::DefaultInputChanged),
+            "a capture that fell back follows the default, as one with no UID"
+        );
+    }
+
+    #[test]
+    fn a_chosen_source_that_comes_back_is_a_change_once_it_can_be_recorded() {
+        let mut graph = laptop();
+        let asked = Some("usb-mic-later");
+        let targets = graph
+            .resolve(&[AudioLane::Mixed], graph.known_source(asked))
+            .unwrap();
+        graph.track(&targets, asked);
+        let baseline = graph.snapshot(&targets, asked, Lost::NONE);
+        assert_eq!(baseline.input_uid.as_deref(), Some(BUILT_IN_MIC));
+        let judged = |graph: &Graph| {
+            graph
+                .snapshot(&targets, asked, Lost::NONE)
+                .difference(&baseline)
+        };
+        assert!(
+            !graph.add_node(
+                90,
+                props(&[("node.name", "other-mic"), ("media.class", "Audio/Source")])
+            ),
+            "another source is no change"
+        );
+        assert!(graph.add_node(
+            91,
+            props(&[
+                ("node.name", "usb-mic-later"),
+                ("media.class", "Audio/Source"),
+                ("object.serial", "1091"),
+            ])
+        ));
+        assert_eq!(judged(&graph), None, "no port to record yet");
+        assert!(graph.add_port(
+            92,
+            props(&[
+                ("node.id", "91"),
+                ("port.direction", "out"),
+                ("audio.channel", "MONO"),
+                ("port.id", "0"),
+                ("object.serial", "1092"),
+            ])
+        ));
+        assert_eq!(
+            judged(&graph),
+            Some(crate::capture::DeviceChangeReason::DefaultInputChanged),
+            "the rebuild records it again"
+        );
+        assert!(graph.remove(92), "the followed source's port");
     }
 
     #[test]

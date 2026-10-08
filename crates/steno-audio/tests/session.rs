@@ -27,8 +27,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use steno_audio::capture::{
-    CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult,
-    CaptureSession, CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
+    CaptureBackend, CaptureConfiguration, CaptureError, CaptureInput, CaptureMode, CaptureNotice,
+    CaptureResult, CaptureSession, CaptureState, CaptureStream, DeviceChangeReason, LaneLevel,
 };
 use steno_audio::realtime::{FrameRelay, LaneFrameSink};
 use steno_audio::testing::synthetic::SyntheticOptions;
@@ -79,6 +79,7 @@ fn restarted_stream() -> CaptureStream {
         input_latency_frames: 480,
         output_latency_frames: 9_600,
         layout: None,
+        input: None,
     }
 }
 
@@ -699,6 +700,399 @@ impl CaptureBackend for OnceThenFailing {
     fn stop(&self) {
         self.inner.stop();
     }
+}
+
+/// A backend that keeps the live backends' promise for a chosen
+/// microphone (`CaptureBackend::start`): while `connected` it records the
+/// one asked for, otherwise the default input in its place, saying so in
+/// the stream. A chosen one that is connected but not `opens` fails the
+/// start, as a device still settling or held elsewhere does, with
+/// [`Self::chosen_failure`] (or, when it `stalls`, as one linked that never
+/// runs); the default fails while not `default_opens`, with
+/// [`Self::default_failure`]. With `default_is_chosen` the default input is
+/// the chosen microphone itself. Every UID it was asked for is kept.
+struct ChosenOrDefault {
+    inner: SyntheticCaptureBackend,
+    connected: AtomicBool,
+    opens: AtomicBool,
+    stalls: AtomicBool,
+    default_opens: AtomicBool,
+    default_is_chosen: AtomicBool,
+    asked: Mutex<Vec<Option<String>>>,
+}
+
+impl ChosenOrDefault {
+    const CHOSEN: &str = "usb-microphone";
+
+    fn new(seconds: f64) -> Self {
+        Self {
+            inner: SyntheticCaptureBackend::new(tones(&[AudioLane::Mixed], seconds)),
+            connected: AtomicBool::new(true),
+            opens: AtomicBool::new(true),
+            stalls: AtomicBool::new(false),
+            default_opens: AtomicBool::new(true),
+            default_is_chosen: AtomicBool::new(false),
+            asked: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn chosen_failure() -> CaptureError {
+        CaptureError::BackendFailed("the chosen microphone did not open".into())
+    }
+
+    fn default_failure() -> CaptureError {
+        CaptureError::BackendFailed("the default input did not open".into())
+    }
+
+    /// The chosen microphone and, after the first start on it, every UID
+    /// asked for: `restarts` more for it, then the default.
+    fn chosen_then_default(restarts: usize) -> Vec<Option<String>> {
+        let mut asked = vec![Some(Self::CHOSEN.to_owned()); 1 + restarts];
+        asked.push(None);
+        asked
+    }
+
+    /// A session asking this backend for [`Self::CHOSEN`]. The relay holds
+    /// 10 s, so a gap written on a manual clock leaves room for what the
+    /// restarted backend delivered at once.
+    fn session(self: &Arc<Self>, directory: &Path, clock: Arc<dyn Clock>) -> CaptureSession {
+        let mut configuration = configuration(CaptureMode::InPerson, directory, false);
+        configuration.input_device_uid = Some(Self::CHOSEN.to_owned());
+        CaptureSession::with_backend(configuration, self.clone(), None, 1_000, clock).unwrap()
+    }
+
+    fn asked(&self) -> Vec<Option<String>> {
+        self.asked.lock().unwrap().clone()
+    }
+
+    fn input(uid: &str, name: &str, is_fallback: bool) -> Option<CaptureInput> {
+        Some(CaptureInput {
+            uid: uid.to_owned(),
+            name: Some(name.to_owned()),
+            is_fallback,
+        })
+    }
+
+    /// The stream's input on the chosen microphone.
+    fn chosen() -> Option<CaptureInput> {
+        Self::input(Self::CHOSEN, "USB Microphone", false)
+    }
+
+    /// The stream's input on the default input, recorded as the fallback.
+    fn fallback() -> Option<CaptureInput> {
+        Self::input("built-in", "Built-in Microphone", true)
+    }
+}
+
+impl CaptureBackend for ChosenOrDefault {
+    fn start(
+        &self,
+        lanes: &[AudioLane],
+        uid: Option<&str>,
+        sink: Arc<LaneFrameSink>,
+    ) -> Result<CaptureStream, CaptureError> {
+        self.asked.lock().unwrap().push(uid.map(str::to_owned));
+        let on_chosen = uid.is_some() && self.connected.load(Ordering::Relaxed);
+        if on_chosen && !self.opens.load(Ordering::Relaxed) {
+            return Err(if self.stalls.load(Ordering::Relaxed) {
+                CaptureError::DidNotRun("the graph did not run".into())
+            } else {
+                Self::chosen_failure()
+            });
+        }
+        if !on_chosen && !self.default_opens.load(Ordering::Relaxed) {
+            return Err(Self::default_failure());
+        }
+        let stream = self.inner.start(lanes, uid, sink)?;
+        let input = match uid {
+            Some(uid) if on_chosen => Self::input(uid, "USB Microphone", false),
+            None if self.default_is_chosen.load(Ordering::Relaxed) => Self::chosen(),
+            _ => Self::input("built-in", "Built-in Microphone", uid.is_some()),
+        };
+        Ok(CaptureStream { input, ..stream })
+    }
+
+    fn stop(&self) {
+        self.inner.stop();
+    }
+}
+
+/// A chosen microphone that goes during a recording: the rebuild asks for
+/// it again, the backend records the default input in its place, and the
+/// recording goes on, without `DeviceLost`, its stream naming the fallback;
+/// once the microphone is back, the next change returns to it.
+#[test]
+fn a_chosen_microphone_that_goes_and_comes_back_keeps_the_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(ChosenOrDefault::new(0.5));
+    let session = backend.session(directory.path(), Arc::new(SystemClock::new()));
+    let notices = session.notices();
+    let next_notice = || notices.recv_timeout(Duration::from_secs(5)).unwrap();
+    let input = || session.stream().and_then(|stream| stream.input);
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(input(), ChosenOrDefault::chosen());
+
+    backend.connected.store(false, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::InputDeviceGone);
+    assert_eq!(
+        next_notice(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::InputDeviceGone)
+    );
+    assert!(matches!(
+        next_notice(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    assert_eq!(
+        input(),
+        ChosenOrDefault::fallback(),
+        "the default input as the fallback"
+    );
+
+    backend.connected.store(true, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    assert_eq!(
+        next_notice(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(matches!(
+        next_notice(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    assert_eq!(
+        input(),
+        ChosenOrDefault::chosen(),
+        "back on the chosen microphone"
+    );
+
+    let result = session.stop().unwrap();
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 2);
+    assert_eq!(
+        backend.asked(),
+        vec![Some(ChosenOrDefault::CHOSEN.to_owned()); 3],
+        "every start asks for the chosen microphone"
+    );
+}
+
+/// The chosen microphone comes back (a change) while the recording is on
+/// the fallback, but does not open: the default worked a moment ago, so it
+/// is tried right after the first failed restart, not after the last, and
+/// the recording goes on there, marked as the fallback, after a gap of one
+/// restart rather than four.
+#[test]
+fn a_chosen_microphone_that_comes_back_but_does_not_open_keeps_the_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(ChosenOrDefault::new(0.5));
+    backend.connected.store(false, Ordering::Relaxed);
+    let session = backend.session(directory.path(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    let on_the_fallback = ChosenOrDefault::fallback();
+    assert_eq!(session.stream().and_then(|s| s.input), on_the_fallback);
+
+    backend.connected.store(true, Ordering::Relaxed);
+    backend.opens.store(false, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    assert_eq!(
+        session.stream().and_then(|stream| stream.input),
+        on_the_fallback,
+        "the default input, marked as the fallback"
+    );
+    assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(1));
+
+    let result = session.stop().unwrap();
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 1);
+}
+
+/// The chosen microphone records, then stops opening at a rebuild: it is
+/// asked for through every restart, since a device back within the backoff
+/// keeps its place, and only after the last is the default started.
+#[test]
+fn a_chosen_microphone_that_stops_opening_is_retried_before_the_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(ChosenOrDefault::new(0.5));
+    let session = backend.session(directory.path(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+
+    backend.opens.store(false, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, CaptureSession::RESTART_ATTEMPTS - 1);
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt, .. } if attempt == CaptureSession::RESTART_ATTEMPTS
+    ));
+    assert_eq!(
+        session.stream().and_then(|stream| stream.input),
+        ChosenOrDefault::fallback(),
+        "the default input, marked as the fallback"
+    );
+    assert_eq!(
+        backend.asked(),
+        ChosenOrDefault::chosen_then_default(CaptureSession::RESTART_ATTEMPTS)
+    );
+    let result = session.stop().unwrap();
+    assert!(!result.statistics.ended_on_device_loss);
+}
+
+/// A chosen microphone that is linked but does not run
+/// ([`CaptureError::DidNotRun`]) at a rebuild: each such restart waits out
+/// the backend's start deadline, so the default is tried after the first.
+/// When the default does not open either, the restarts go on, and the last
+/// one tries the default again.
+#[test]
+fn a_chosen_microphone_that_does_not_run_is_replaced_after_one_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(ChosenOrDefault::new(0.5));
+    let session = backend.session(directory.path(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+
+    backend.opens.store(false, Ordering::Relaxed);
+    backend.stalls.store(true, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(1));
+
+    backend.default_opens.store(false, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    advance_through_sleeps(&clock, 1);
+    backend.default_opens.store(true, Ordering::Relaxed);
+    for step in &CaptureSession::RESTART_BACKOFF[1..] {
+        assert!(clock.wait_for_sleepers(1), "the next backoff");
+        clock.advance(*step);
+    }
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt, .. } if attempt == CaptureSession::RESTART_ATTEMPTS
+    ));
+    let mut asked = ChosenOrDefault::chosen_then_default(1);
+    asked.extend([Some(ChosenOrDefault::CHOSEN.to_owned()), None]);
+    asked.extend(ChosenOrDefault::chosen_then_default(
+        CaptureSession::RESTART_ATTEMPTS - 2,
+    ));
+    assert_eq!(backend.asked(), asked);
+    let result = session.stop().unwrap();
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.device_changes, 2);
+}
+
+/// A chosen microphone whose first restart fails to open and whose second
+/// does not run ([`CaptureError::DidNotRun`]): the default is tried right
+/// after the second, not only after a first.
+#[test]
+fn a_chosen_microphone_that_does_not_run_at_a_later_restart_is_replaced_there() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(ChosenOrDefault::new(0.5));
+    let session = backend.session(directory.path(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+
+    backend.opens.store(false, Ordering::Relaxed);
+    session.device_changed(DeviceChangeReason::DefaultInputChanged);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert!(clock.wait_for_sleepers(1), "the first restart failed");
+    backend.stalls.store(true, Ordering::Relaxed);
+    clock.advance(CaptureSession::RESTART_BACKOFF[0]);
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt: 2, .. }
+    ));
+    assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(2));
+    assert_eq!(
+        session.stream().and_then(|stream| stream.input),
+        ChosenOrDefault::fallback(),
+        "the default input, marked as the fallback"
+    );
+    let result = session.stop().unwrap();
+    assert!(!result.statistics.ended_on_device_loss);
+}
+
+/// A chosen microphone that is connected but does not open at the start:
+/// the recording starts on the default input, marked as the fallback. Only
+/// when the default does not open either does the start fail, with the
+/// chosen one's error.
+#[test]
+fn a_chosen_microphone_that_does_not_open_at_the_start_records_the_default() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(ChosenOrDefault::new(0.2));
+    backend.opens.store(false, Ordering::Relaxed);
+    let session = backend.session(directory.path(), Arc::new(SystemClock::new()));
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        session.stream().and_then(|stream| stream.input),
+        ChosenOrDefault::fallback()
+    );
+    assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(0));
+    backend.inner.wait_until_finished();
+    assert!(!session.stop().unwrap().statistics.ended_on_device_loss);
+
+    backend.default_opens.store(false, Ordering::Relaxed);
+    assert_eq!(
+        session.start(Uuid::new_v4()),
+        Err(ChosenOrDefault::chosen_failure()),
+        "the chosen microphone's error, not the default's"
+    );
+    assert!(matches!(
+        session.state(),
+        CaptureState::Failed {
+            recording: None,
+            ..
+        }
+    ));
+}
+
+/// A chosen microphone that is also the default input, whose start by its
+/// UID failed: the start without a UID records it, and it is not marked as
+/// the fallback, so no warning says it is missing.
+#[test]
+fn a_chosen_microphone_that_is_the_default_is_not_its_own_fallback() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(ChosenOrDefault::new(0.2));
+    backend.opens.store(false, Ordering::Relaxed);
+    backend.default_is_chosen.store(true, Ordering::Relaxed);
+    let session = backend.session(directory.path(), Arc::new(SystemClock::new()));
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        session.stream().and_then(|stream| stream.input),
+        ChosenOrDefault::chosen()
+    );
+    assert_eq!(backend.asked(), ChosenOrDefault::chosen_then_default(0));
+    backend.inner.wait_until_finished();
+    assert!(!session.stop().unwrap().statistics.ended_on_device_loss);
 }
 
 /// Meeting A records and stops; meeting B's start fails in the backend.

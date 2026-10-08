@@ -21,7 +21,21 @@
 //! relay, the writer thread, the writer and the files. The state stays
 //! `Recording`; `notices` carries `DeviceChanged` and `DeviceResumed`.
 //! Only when every restart fails does the recording end in
-//! `Failed(DeviceLost)`.
+//! `Failed(DeviceLost)`. A chosen microphone that is gone fails no restart:
+//! the live backends then record the default input and say so in
+//! [`CaptureStream::input`], which [`CaptureSession::stream`] hands out
+//! (see [`CaptureBackend::start`]). One that is connected but does not open
+//! is the session's to replace: when the start, or a rebuild's last
+//! restart, fails on it, the session starts the backend once more without
+//! a UID and marks that input as the fallback, so the recording ends only
+//! when the default input cannot be opened either (Rust only: Swift fails
+//! the start, and ends the recording after its restarts). A rebuild tries
+//! the default already after its first failed restart when the stream it
+//! replaces was on the fallback, or after the first restart on which the
+//! graph did not run on the chosen microphone
+//! ([`CaptureError::DidNotRun`]), not after the last: the gap then stays
+//! under [`CaptureSession::MAXIMUM_GAP`] when that is the first restart,
+//! so the restarts take nothing from the master.
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole
@@ -570,11 +584,15 @@ impl Core {
                 }
             }),
         ));
-        let stream = match self.backend.start(
-            &lanes,
-            self.configuration.input_device_uid.as_deref(),
-            Arc::clone(&sink),
-        ) {
+        let started = self
+            .backend
+            .start(
+                &lanes,
+                self.configuration.input_device_uid.as_deref(),
+                Arc::clone(&sink),
+            )
+            .or_else(|error| self.start_on_the_default(&sink).ok_or(error));
+        let stream = match started {
             Ok(stream) => stream,
             Err(error) => {
                 let mut writer = writer;
@@ -902,7 +920,7 @@ impl Core {
         // `stop()` take tens to hundreds of milliseconds during a device
         // transition, and that is dead time in the master too.
         let started = self.clock.now();
-        let (sink, relay, processing) = {
+        let (sink, relay, processing, on_the_fallback) = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
                 return (0, 0.0);
@@ -914,6 +932,11 @@ impl Core {
                 Arc::clone(&active.sink),
                 Arc::clone(&active.relay),
                 active.processing.take(),
+                active
+                    .stream
+                    .input
+                    .as_ref()
+                    .is_some_and(|input| input.is_fallback),
             )
         };
         // Whatever whole frames the rings hold are the old device's last
@@ -946,7 +969,7 @@ impl Core {
         // `device_changed` late and costs one more rebuild (see the
         // PipeWire backend's module doc).
         sink.rearm_device_change();
-        let unaccounted = match self.restart_backend(&sink, generation, cancel) {
+        let unaccounted = match self.restart_backend(&sink, on_the_fallback, generation, cancel) {
             Restart::Started(stream, attempt) => {
                 // The gap grows through every failed attempt and is written
                 // once, in full, when a start succeeds.
@@ -972,27 +995,46 @@ impl Core {
         (unaccounted, peak)
     }
 
-    /// `start` again, `RESTART_BACKOFF` apart on the clock: `Started` with
-    /// the attempt that succeeded, `Exhausted` after `RESTART_ATTEMPTS`
-    /// failures, `Abandoned` when `stop()` cancelled a sleep or the
-    /// recording is gone.
+    /// `start` again, `RESTART_BACKOFF` apart on the clock, and once more on
+    /// the default input (`start_on_the_default`) after the last failure,
+    /// or already after an earlier one when waiting buys nothing: the
+    /// stream replaced was on the fallback (`on_the_fallback`), so the
+    /// default worked a moment ago, or the graph did not run on the chosen
+    /// microphone ([`CaptureError::DidNotRun`]: on Linux each such attempt
+    /// waits out the 3 s start deadline). That early try comes once, after
+    /// the first failure that calls for it; when it fails, the restarts go
+    /// on. `Started` with the attempt that succeeded,
+    /// `Exhausted` when the last one and the default failed, `Abandoned`
+    /// when `stop()` cancelled a sleep or the recording is gone.
     fn restart_backend(
         &self,
         sink: &Arc<LaneFrameSink>,
+        on_the_fallback: bool,
         generation: usize,
         cancel: &Cancel,
     ) -> Restart {
+        let mut default_tried = false;
         for attempt in 1..=CaptureSession::RESTART_ATTEMPTS {
             let result = {
                 let inner = self.lock();
                 if !Self::still_rebuilding(&inner, generation) {
                     return Restart::Abandoned;
                 }
-                self.backend.start(
-                    &self.configuration.lanes(),
-                    self.configuration.input_device_uid.as_deref(),
-                    Arc::clone(sink),
-                )
+                self.backend
+                    .start(
+                        &self.configuration.lanes(),
+                        self.configuration.input_device_uid.as_deref(),
+                        Arc::clone(sink),
+                    )
+                    .or_else(|error| {
+                        let early = !default_tried
+                            && (on_the_fallback || matches!(error, CaptureError::DidNotRun(_)));
+                        if !early && attempt < CaptureSession::RESTART_ATTEMPTS {
+                            return Err(error);
+                        }
+                        default_tried = true;
+                        self.start_on_the_default(sink).ok_or(error)
+                    })
             };
             if let Ok(stream) = result {
                 return Restart::Started(stream, attempt);
@@ -1011,6 +1053,36 @@ impl Core {
             }
         }
         Restart::Exhausted
+    }
+
+    /// The default input in place of a chosen microphone whose `start`
+    /// failed although it may be connected (a device still settling after
+    /// it was plugged in, one another app holds, a link that stalls):
+    /// `start` with no UID, its input marked as the fallback unless it is
+    /// the chosen one after all; `None` without a chosen microphone or when
+    /// this start fails too (the caller keeps the chosen one's error). A
+    /// backend started without a UID watches for no chosen device, so this
+    /// cannot loop; the next rebuild asks for the chosen one again, and that
+    /// comes when a default device moves or one in use goes, not when the
+    /// chosen one is plugged in again. Called with the mutex held, as every
+    /// `backend.start`.
+    fn start_on_the_default(&self, sink: &Arc<LaneFrameSink>) -> Option<CaptureStream> {
+        let chosen = self.configuration.input_device_uid.as_deref()?;
+        let mut stream = self
+            .backend
+            .start(&self.configuration.lanes(), None, Arc::clone(sink))
+            .inspect_err(|error| tracing::warn!("the default input did not start either: {error}"))
+            .ok()?;
+        if let Some(input) = stream.input.as_mut()
+            && input.uid != chosen
+        {
+            tracing::warn!(
+                "the input device {chosen} did not start; recording from the default input {}",
+                input.uid
+            );
+            input.is_fallback = true;
+        }
+        Some(stream)
     }
 
     /// The new processing thread on the kept sink and relay, built for

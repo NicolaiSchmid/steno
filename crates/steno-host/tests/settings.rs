@@ -612,6 +612,65 @@ fn refresh_devices_rereads_the_inputs() {
     );
 }
 
+/// A chosen microphone the list lacks (unplugged, or a UID from another
+/// computer) stays selected and is listed as not connected, unless the list
+/// itself failed; once it is back, its own name replaces that.
+#[test]
+fn a_chosen_microphone_that_is_not_connected_is_listed_as_not_connected() {
+    let harness = Harness::builder().build();
+    harness
+        .host
+        .settings_recording_set_input_device(SetStringParams {
+            value: "BuiltInMicrophoneDevice".to_owned(),
+        })
+        .unwrap();
+    let recording = harness.sink.last(BridgeTopic::SettingsRecording).unwrap();
+    assert_eq!(recording["inputDeviceUID"], "BuiltInMicrophoneDevice");
+    assert_eq!(
+        recording["devices"],
+        json!([{"name": "Microphone not connected", "uid": "BuiltInMicrophoneDevice"}])
+    );
+    harness
+        .fakes
+        .audio_devices
+        .fail_listing(Some("PipeWire did not list the devices"));
+    harness.host.settings_recording_refresh_devices().unwrap();
+    let recording = harness.sink.last(BridgeTopic::SettingsRecording).unwrap();
+    assert_eq!(
+        recording["devices"],
+        json!([]),
+        "nothing is known to be connected"
+    );
+    assert_eq!(recording["error"], "Microphones could not be listed.");
+    harness.fakes.audio_devices.fail_listing(None);
+    harness
+        .fakes
+        .audio_devices
+        .set_devices(vec![steno_host::services::InputDevice {
+            uid: "BuiltInMicrophoneDevice".to_owned(),
+            name: "MacBook Pro Microphone".to_owned(),
+        }]);
+    harness.host.settings_recording_refresh_devices().unwrap();
+    let recording = harness.sink.last(BridgeTopic::SettingsRecording).unwrap();
+    assert_eq!(
+        recording["devices"],
+        json!([{"name": "MacBook Pro Microphone", "uid": "BuiltInMicrophoneDevice"}])
+    );
+    harness
+        .host
+        .settings_recording_set_input_device(SetStringParams {
+            value: String::new(),
+        })
+        .unwrap();
+    harness.fakes.audio_devices.set_devices(Vec::new());
+    harness.host.settings_recording_refresh_devices().unwrap();
+    assert_eq!(
+        harness.sink.last(BridgeTopic::SettingsRecording).unwrap()["devices"],
+        json!([]),
+        "the system default needs no entry"
+    );
+}
+
 /// The page sees `isTesting` while the probe is out and `isRequesting`
 /// while the prompt is up: the host publishes before it calls the service,
 /// with its lock released. Swift: the awaited `test()` and `request`.

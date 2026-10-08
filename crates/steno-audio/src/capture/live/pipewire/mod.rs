@@ -42,18 +42,24 @@
 //! Two roundtrips bring the registry's nodes and ports and the `default`
 //! metadata (`graph` keeps them). The targets resolve from it: the input
 //! node (by UID, its `node.name`, or the default source) and the default
-//! sink. The stream asks for 48 kHz `f32` with one `AUXn` channel per
-//! linked port; PipeWire's adapter resamples whatever the graph runs at,
-//! so the rate is always [`SAMPLE_RATE`] and never a mismatch. The stream
-//! is connected without `AUTOCONNECT`, so the session manager leaves it
-//! alone, and once its ports exist Steno creates one link per channel
-//! through the server's `link-factory` (not lingering: the links die with
-//! the connection). `start` returns once the first cycle arrived; a graph
-//! that does not run within `START_TIMEOUT` (3 s) is an error rather than a
-//! silent recording, and so is a link that failed. The latencies come
-//! from the `SPA_PARAM_Latency` of the microphone port (capture side) and
-//! of the sink's first playback port (playback side), in frames of the
-//! first cycle's length.
+//! sink. A UID that names no source the capture can record (one saved on
+//! a Mac, a microphone unplugged since it was chosen) records the default
+//! source (the fallback), with a warning, and the capture then follows the
+//! default as one without a UID does, until the chosen source, or one of
+//! its ports, is announced again: that is a change too, so the rebuild's
+//! restart records the chosen source again. The stream asks for 48 kHz
+//! `f32` with one `AUXn` channel per linked port; PipeWire's adapter
+//! resamples whatever the graph runs at, so the rate is always
+//! [`SAMPLE_RATE`] and never a mismatch. The stream is connected without
+//! `AUTOCONNECT`, so the session manager leaves it alone, and once its
+//! ports exist Steno creates one link per channel through the server's
+//! `link-factory` (not lingering: the links die with the connection).
+//! `start` returns once the first cycle arrived; a graph that does not run
+//! within `START_TIMEOUT` (3 s) is an error rather than a silent recording
+//! ([`CaptureError::DidNotRun`]), and so is a link that failed. The
+//! latencies come from the `SPA_PARAM_Latency` of the microphone port
+//! (capture side) and of the sink's first playback port (playback side),
+//! in frames of the first cycle's length.
 //!
 //! # Device changes
 //!
@@ -87,6 +93,7 @@
 //! monitor keeps the sink running, so, unlike the Mac's call mode, cycles
 //! arrive with nothing playing.
 
+mod devices;
 mod graph;
 
 use std::cell::{Cell, RefCell};
@@ -103,10 +110,13 @@ use pw::spa;
 use pw::types::ObjectType;
 use steno_core::AudioLane;
 
+pub use self::devices::AudioDevices;
+pub(crate) use self::graph::is_source_class;
 use self::graph::{Graph, Latency, Lost, Targets};
 use crate::SAMPLE_RATE;
 use crate::capture::{
-    CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot, LaneSource,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
+    LaneSource,
 };
 use crate::realtime::{LaneFrameSink, deliver_slices, interleaved_view};
 
@@ -117,7 +127,7 @@ const START_TIMEOUT: Duration = Duration::from_secs(3);
 const LATENCY_TIMEOUT: Duration = Duration::from_millis(500);
 /// The longest single wait on the loop while starting, so the deadline is
 /// checked often.
-const PUMP_SLICE: Duration = Duration::from_millis(20);
+pub(crate) const PUMP_SLICE: Duration = Duration::from_millis(20);
 /// The wait on the loop while nothing is pending.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
@@ -133,7 +143,7 @@ const COALESCE_LIMIT: Duration = Duration::from_secs(2);
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The capture stream's `node.name`.
-const STREAM_NODE_NAME: &str = "steno-capture";
+pub(crate) const STREAM_NODE_NAME: &str = "steno-capture";
 
 /// The capture's way into the sink, closed for good by `stop()`, or by a
 /// `start` that failed, before it waits for the thread. Two kinds of pass
@@ -318,15 +328,49 @@ fn latency_frames(
     (input.frames(cycle, rate), output.frames(cycle, rate))
 }
 
+/// A `pipewire` error as text naming what failed.
+pub(crate) fn failure(what: &'static str) -> impl FnOnce(pw::Error) -> String {
+    move |error| format!("{what}: {error}")
+}
+
 /// A `pipewire` error as a backend failure naming what failed.
 fn failed(what: &'static str) -> impl FnOnce(pw::Error) -> CaptureError {
-    move |error| CaptureError::BackendFailed(format!("{what}: {error}"))
+    move |error| CaptureError::BackendFailed(failure(what)(error))
+}
+
+/// A new connection to the daemon: its loop, context, core and registry,
+/// for the caller's listeners; the error names the step that failed. The
+/// capture, the device list and the meeting detection open theirs here.
+pub(crate) fn connect() -> Result<
+    (
+        pw::main_loop::MainLoopRc,
+        pw::context::ContextRc,
+        pw::core::CoreRc,
+        pw::registry::RegistryRc,
+    ),
+    String,
+> {
+    pw::init();
+    let main_loop =
+        pw::main_loop::MainLoopRc::new(None).map_err(failure("the PipeWire main loop"))?;
+    let context =
+        pw::context::ContextRc::new(&main_loop, None).map_err(failure("the PipeWire context"))?;
+    let core = context
+        .connect_rc(None)
+        .map_err(failure("connecting to PipeWire (is it running?)"))?;
+    let registry = core
+        .get_registry_rc()
+        .map_err(failure("the PipeWire registry"))?;
+    Ok((main_loop, context, core, registry))
 }
 
 /// What the PipeWire callbacks share on the PipeWire thread.
 #[derive(Default)]
 struct Shared {
     graph: RefCell<Graph>,
+    /// Whether the connection binds the `default` metadata: a capture does,
+    /// the device list does not (see `AudioDevices::inputs`).
+    reads_defaults: bool,
     /// The `default` metadata once bound: its global id, its listener,
     /// then the proxy, so the listener drops first.
     metadata: RefCell<Option<(u32, pw::metadata::MetadataListener, pw::metadata::Metadata)>>,
@@ -380,16 +424,12 @@ impl Shared {
             return;
         };
         match global.type_ {
-            ObjectType::Node => self
-                .graph
-                .borrow_mut()
-                .add_node(global.id, |k| props.get(k)),
-            ObjectType::Port => self
-                .graph
-                .borrow_mut()
-                .add_port(global.id, |k| props.get(k)),
+            ObjectType::Node | ObjectType::Port => {
+                self.add_object(&global.type_, global.id, |k| props.get(k));
+            }
             ObjectType::Metadata
-                if props.get("metadata.name") == Some("default")
+                if self.reads_defaults
+                    && props.get("metadata.name") == Some("default")
                     && self.metadata.borrow().is_none() =>
             {
                 let Some(registry) = registry.upgrade() else {
@@ -422,6 +462,32 @@ impl Shared {
             }
             _ => {}
         }
+    }
+
+    /// A node or a port global into the graph, its properties read
+    /// through `props`. The chosen source, or one of its ports, announced
+    /// again is a change: a capture recording the fallback then returns to
+    /// it. Other types are not kept.
+    fn add_object<'a>(&self, kind: &ObjectType, id: u32, props: impl Fn(&str) -> Option<&'a str>) {
+        let chosen = match kind {
+            ObjectType::Node => self.graph.borrow_mut().add_node(id, props),
+            ObjectType::Port => self.graph.borrow_mut().add_port(id, props),
+            _ => false,
+        };
+        if chosen {
+            tracing::info!("the chosen source's {kind:?} {id} was announced");
+            self.changed();
+        }
+    }
+
+    /// From now on the graph serves the capture that resolved `targets`
+    /// for `uid`, the UID asked for (not the source recorded in its
+    /// place, so that source's return is a change): returns the baseline
+    /// its later snapshots are compared with ([`Graph::track`]).
+    fn track(&self, targets: &Targets, uid: Option<&str>) -> DeviceSnapshot {
+        let mut graph = self.graph.borrow_mut();
+        graph.track(targets, uid);
+        graph.snapshot(targets, uid, Lost::NONE)
     }
 
     /// A registry global went away: a node or a port out of the graph, or
@@ -470,19 +536,15 @@ impl Drop for Connection {
 }
 
 impl Connection {
-    fn open() -> Result<Self, CaptureError> {
-        pw::init();
-        let main_loop =
-            pw::main_loop::MainLoopRc::new(None).map_err(failed("the PipeWire main loop"))?;
-        let context = pw::context::ContextRc::new(&main_loop, None)
-            .map_err(failed("the PipeWire context"))?;
-        let core = context
-            .connect_rc(None)
-            .map_err(failed("connecting to PipeWire (is it running?)"))?;
-        let registry = core
-            .get_registry_rc()
-            .map_err(failed("the PipeWire registry"))?;
-        let shared = Rc::new(Shared::default());
+    /// A connection and its registry view; `reads_defaults` binds the
+    /// `default` metadata too.
+    fn open(reads_defaults: bool) -> Result<Self, CaptureError> {
+        let (main_loop, context, core, registry) =
+            connect().map_err(CaptureError::BackendFailed)?;
+        let shared = Rc::new(Shared {
+            reads_defaults,
+            ..Shared::default()
+        });
         let core_listener = core
             .add_listener_local()
             .done({
@@ -557,12 +619,19 @@ impl Connection {
     /// The error for a start step that did not finish: the connection's
     /// loss, or the deadline.
     fn stalled(&self, step: &str) -> CaptureError {
+        self.stalled_as(step, CaptureError::BackendFailed)
+    }
+
+    /// [`Self::stalled`] with the deadline's error made by `timed_out`: the
+    /// first cycle's, with the connection and the links intact, is
+    /// [`CaptureError::DidNotRun`].
+    fn stalled_as(&self, step: &str, timed_out: fn(String) -> CaptureError) -> CaptureError {
         if self.shared.lost.get().any() {
             CaptureError::BackendFailed(
                 "the connection to PipeWire, the capture stream or a link failed".into(),
             )
         } else {
-            CaptureError::BackendFailed(format!(
+            timed_out(format!(
                 "PipeWire did not {step} within {} s",
                 START_TIMEOUT.as_secs()
             ))
@@ -684,29 +753,50 @@ impl Capture {
         sink: Arc<LaneFrameSink>,
         gate: Arc<Gate>,
     ) -> Result<Self, CaptureError> {
-        let deadline = Instant::now() + START_TIMEOUT;
-        let connection = Connection::open()?;
+        let started = Instant::now();
+        let deadline = started + START_TIMEOUT;
+        let connection = Connection::open(true)?;
         // The first roundtrip brings the globals and binds the `default`
         // metadata, the second its properties.
         connection.roundtrip(deadline)?;
         connection.roundtrip(deadline)?;
-        let targets = connection
-            .shared
-            .graph
-            .borrow()
-            .resolve(lanes, input_device_uid)?;
-        let mut capture = Self::new(connection, targets, input_device_uid, sink, gate)?;
+        let (targets, input) = {
+            let graph = connection.shared.graph.borrow();
+            let targets = graph.resolve(lanes, graph.known_source(input_device_uid))?;
+            let input = graph.input(&targets, input_device_uid);
+            if let (Some(uid), Some(input)) = (input_device_uid, &input)
+                && input.is_fallback
+            {
+                tracing::warn!(
+                    "the input device {uid} is not connected; recording from the default \
+                     source {}",
+                    input.uid
+                );
+            }
+            (targets, input)
+        };
+        let mut capture = Self::new(connection, targets, input_device_uid, input, sink, gate)?;
         capture.link(deadline)?;
         capture.measure(deadline)?;
+        tracing::info!(
+            "the PipeWire capture runs {} ms after start: input latency {} frames, output \
+             latency {} frames",
+            started.elapsed().as_millis(),
+            capture.info.input_latency_frames,
+            capture.info.output_latency_frames
+        );
         Ok(capture)
     }
 
     /// The capture stream for `targets` with its two listeners, not yet
-    /// connected.
+    /// connected. `input_device_uid` is the UID asked for, which the
+    /// snapshot keeps following ([`Graph::snapshot`]), and `input` the
+    /// microphone it resolved to.
     fn new(
         connection: Connection,
         targets: Targets,
         input_device_uid: Option<&str>,
+        input: Option<CaptureInput>,
         sink: Arc<LaneFrameSink>,
         gate: Arc<Gate>,
     ) -> Result<Self, CaptureError> {
@@ -745,11 +835,7 @@ impl Capture {
             })
             .register()
             .map_err(failed("the capture stream's state callback"))?;
-        let baseline = {
-            let mut graph = connection.shared.graph.borrow_mut();
-            graph.track(&targets, input_device_uid);
-            graph.snapshot(&targets, input_device_uid, Lost::NONE)
-        };
+        let baseline = connection.shared.track(&targets, input_device_uid);
         Ok(Capture {
             _rt_listener: rt_listener,
             _state_listener: state_listener,
@@ -762,6 +848,7 @@ impl Capture {
                 input_latency_frames: 0,
                 output_latency_frames: 0,
                 layout: Some(targets.layout.clone()),
+                input,
             },
             targets,
             input_device_uid: input_device_uid.map(str::to_owned),
@@ -878,10 +965,15 @@ impl Capture {
     /// links run.
     fn measure(&mut self, deadline: Instant) -> Result<(), CaptureError> {
         let connection = &self.connection;
+        let linked = Instant::now();
         if !connection.pump_until(deadline, || self.cycle_frames.load(Ordering::Acquire) > 0) {
-            return Err(connection.stalled("run the capture"));
+            return Err(connection.stalled_as("run the capture", CaptureError::DidNotRun));
         }
         let cycle = self.cycle_frames.load(Ordering::Relaxed);
+        tracing::debug!(
+            "the first cycle, {cycle} frames, came {} ms after linking",
+            linked.elapsed().as_millis()
+        );
         let clock = self.stream.time().ok().map(|time| time.rate());
         // Its own deadline: a first cycle late in the start's must not cut
         // the read short and leave the far-end delay at zero.
@@ -1362,7 +1454,46 @@ mod tests {
             input_latency_frames: 0,
             output_latency_frames: 0,
             layout: None,
+            input: None,
         }
+    }
+
+    /// A capture that records the default source in place of a missing
+    /// chosen one: the chosen node announced, or one of its ports, is a
+    /// pending change (so the rebuild returns to it); another app's node
+    /// or the default source's ports are not.
+    #[test]
+    fn the_chosen_source_announced_again_is_a_change() {
+        fn props<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<&'a str> {
+            move |key| pairs.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
+        }
+        let source = |name| [("node.name", name), ("media.class", "Audio/Source")];
+        let port = |node| [("node.id", node), ("port.direction", "out")];
+        let shared = Shared::default();
+        shared.add_object(&ObjectType::Node, 41, props(&source("built-in")));
+        shared.add_object(&ObjectType::Port, 55, props(&port("41")));
+        shared.graph.borrow_mut().set_default(
+            Some(graph::DEFAULT_SOURCE_KEY),
+            Some(r#"{"name":"built-in"}"#),
+        );
+        let asked = Some("usb-mic");
+        let targets = {
+            let graph = shared.graph.borrow();
+            graph
+                .resolve(&[AudioLane::Mixed], graph.known_source(asked))
+                .unwrap()
+        };
+        let baseline = shared.track(&targets, asked);
+        assert_eq!(baseline.input_uid.as_deref(), Some("built-in"));
+        shared.add_object(&ObjectType::Node, 90, props(&source("an-app")));
+        shared.add_object(&ObjectType::Port, 56, props(&port("41")));
+        assert_eq!(shared.due(), None, "nothing the capture asked for");
+
+        shared.add_object(&ObjectType::Node, 42, props(&source("usb-mic")));
+        assert!(shared.due().is_some(), "the chosen node is back");
+        shared.pending.set(None);
+        shared.add_object(&ObjectType::Port, 57, props(&port("42")));
+        assert!(shared.due().is_some(), "and its port");
     }
 
     #[test]

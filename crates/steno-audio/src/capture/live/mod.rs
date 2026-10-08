@@ -7,7 +7,12 @@
 //! on Windows WASAPI process loopback and the capture endpoint as two
 //! streams on their own threads (`wasapi`, WP10a, not run on hardware;
 //! see its module doc). All three coalesce device changes and report them for
-//! the session's rebuild. Other targets get the stub, failing at `start`.
+//! the session's rebuild, and record the default input in place of a chosen
+//! one that is missing until it is back. Other targets get the stub, failing
+//! at `start`. Beside each backend, `AudioDevices` lists the platform's
+//! inputs for the picker: the HAL's devices (`devices`), the PipeWire
+//! sources (`pipewire::AudioDevices`), the active WASAPI endpoints
+//! (`wasapi::AudioDevices`).
 //! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
 
 #[cfg(target_os = "macos")]
@@ -29,7 +34,7 @@ pub use hal::CoreAudioError;
 #[cfg(target_os = "linux")]
 pub mod pipewire;
 #[cfg(target_os = "linux")]
-pub use pipewire::LiveCaptureBackend;
+pub use pipewire::{AudioDevices, LiveCaptureBackend};
 
 #[cfg(windows)]
 pub mod wasapi;
@@ -39,14 +44,15 @@ pub use wasapi::{AudioDevices, LiveCaptureBackend};
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 pub use stub::LiveCaptureBackend;
 
-/// One device as the app's input picker (and, on the Mac,
-/// `steno dev audio-devices`) sees it. `uid` is the stable identifier
-/// `Settings.input_device_uid` stores. Filled in by Core Audio on macOS and
-/// by WASAPI on Windows; Linux has no device list yet.
+/// One device as the app's input picker (and `steno dev audio-devices`)
+/// sees it. `uid` is the stable identifier
+/// `Settings.input_device_uid` stores. Filled in by Core Audio on macOS, by
+/// WASAPI on Windows and from the PipeWire registry on Linux (inputs only).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioDeviceInfo {
     /// The `AudioObjectID`, valid until the device goes away; on Windows
-    /// the index in the enumeration (WASAPI has no numeric ids).
+    /// the index in the enumeration (WASAPI has no numeric ids), on Linux
+    /// the node's global id.
     pub id: u32,
     /// The stable UID `Settings` stores.
     pub uid: String,
@@ -86,6 +92,31 @@ impl AudioDeviceInfo {
     }
 }
 
+/// The microphone a capture asked for `uid` records now: what `chosen`
+/// finds for `uid` while it is `usable`, else what `default` finds while
+/// it is `usable`, with `true` beside it when it is the default recorded
+/// in place of a chosen one (the fallback, [`CaptureInput::is_fallback`]);
+/// `None` when neither is usable. The Mac and Windows backends pick with
+/// it at `start` and in every snapshot, so a chosen device coming back
+/// reads as a change; PipeWire picks in its graph
+/// (`Graph::followed_source`).
+///
+/// [`CaptureInput::is_fallback`]: crate::capture::CaptureInput::is_fallback
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) fn chosen_or_default<D>(
+    uid: Option<&str>,
+    chosen: impl FnOnce(&str) -> Option<D>,
+    default: impl FnOnce() -> Option<D>,
+    usable: impl Fn(&D) -> bool,
+) -> Option<(D, bool)> {
+    match uid.map(|uid| chosen(uid).filter(&usable)) {
+        Some(Some(device)) => Some((device, false)),
+        asked => default()
+            .filter(&usable)
+            .map(|device| (device, asked.is_some())),
+    }
+}
+
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod stub {
     use std::sync::Arc;
@@ -121,5 +152,33 @@ mod stub {
         }
 
         fn stop(&self) {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chosen_or_default;
+
+    #[test]
+    fn the_default_stands_in_for_a_missing_chosen_device() {
+        let connected = ["usb", "built-in", "speakers"];
+        let pick = |uid, default| {
+            chosen_or_default(
+                uid,
+                |uid| connected.iter().copied().find(|&d| d == uid),
+                || Some(default),
+                |&device| device != "speakers",
+            )
+        };
+        assert_eq!(pick(Some("usb"), "built-in"), Some(("usb", false)));
+        assert_eq!(pick(Some("gone"), "built-in"), Some(("built-in", true)));
+        assert_eq!(
+            pick(Some("speakers"), "built-in"),
+            Some(("built-in", true)),
+            "a chosen device it cannot record counts as missing"
+        );
+        assert_eq!(pick(None, "built-in"), Some(("built-in", false)));
+        assert_eq!(pick(Some("gone"), "speakers"), None);
+        assert_eq!(pick(None, "speakers"), None);
     }
 }

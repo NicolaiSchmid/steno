@@ -17,7 +17,7 @@ use objc2_core_audio::{
 };
 
 use super::AudioDeviceInfo;
-use super::hal::{self, CoreAudioError, Id, SYSTEM, UNKNOWN};
+use super::hal::{self, AGGREGATE_UID_PREFIX, CoreAudioError, Id, SYSTEM, UNKNOWN};
 
 /// The HAL's device list and default devices, read fresh on every call
 /// (nothing is cached; a device can come and go between two calls).
@@ -48,11 +48,14 @@ impl AudioDevices {
             .collect())
     }
 
-    /// The app's input picker.
+    /// The app's input picker: every device with input channels but the
+    /// private aggregates Steno's own captures create, which a recording
+    /// would otherwise list as a choice while it runs. Rust only: Swift
+    /// lists them.
     pub fn inputs() -> Result<Vec<AudioDeviceInfo>, CoreAudioError> {
         Ok(Self::all()?
             .into_iter()
-            .filter(AudioDeviceInfo::is_input)
+            .filter(|device| device.is_input() && !device.uid.starts_with(AGGREGATE_UID_PREFIX))
             .collect())
     }
 

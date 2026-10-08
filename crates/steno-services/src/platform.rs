@@ -51,14 +51,29 @@ impl FolderUsage for DiskFolderUsage {
     }
 }
 
-/// The input devices. Core Audio enumerates them on the Mac through the
-/// audio crate's live backend; elsewhere the list is empty until the
-/// `PipeWire` and WASAPI backends land, and the default input is used.
+/// The input devices, from the audio crate's live backend: Core Audio on
+/// the Mac, the `PipeWire` registry on Linux, WASAPI on Windows; an empty
+/// list on other targets. A failed enumeration is logged and returned, so
+/// Settings shows Swift's "Microphones could not be listed." over an empty
+/// list and keeps working.
 #[derive(Debug, Default)]
 pub struct PlatformAudioDevices;
 
 impl AudioDevices for PlatformAudioDevices {
     fn inputs(&self) -> BoundaryResult<Vec<InputDevice>> {
+        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
+        {
+            let devices = steno_audio::capture::live::AudioDevices::inputs()
+                .inspect_err(|error| tracing::warn!("listing the input devices failed: {error}"))?;
+            Ok(devices
+                .into_iter()
+                .map(|device| InputDevice {
+                    uid: device.uid,
+                    name: device.name,
+                })
+                .collect())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
         Ok(Vec::new())
     }
 }

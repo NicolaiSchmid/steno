@@ -5,6 +5,8 @@
 pub mod activity;
 pub mod detector;
 pub mod live;
+#[cfg(target_os = "linux")]
+mod pipewire;
 pub mod sessions;
 
 pub use activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};

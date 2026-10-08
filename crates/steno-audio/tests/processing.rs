@@ -450,6 +450,7 @@ fn a_change_fires_once_per_instance_and_every_start_delivers_its_seconds() {
         input_latency_frames: 480,
         output_latency_frames: 9_600,
         layout: None,
+        input: None,
     };
     let backend = SyntheticCaptureBackend::new(
         SyntheticOptions::tones(&[AudioLane::Mixed], &[(AudioLane::Mixed, 440.0)], 0.2)

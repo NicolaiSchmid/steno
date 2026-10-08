@@ -132,6 +132,15 @@ pub enum CaptureError {
     /// A backend error that is none of the above (its description).
     #[error("capture backend failed: {0}")]
     BackendFailed(String),
+    /// The graph did not run: the devices were linked but delivered no
+    /// audio before the start's deadline (its description). On Linux,
+    /// PipeWire ran no first cycle, as for a source whose owner stalls, a
+    /// Bluetooth headset still switching profile, or a sink whose monitor
+    /// does not run yet; which node held the graph up is not known. The
+    /// session answers it on a chosen microphone by trying the default
+    /// input at once. Rust only; reads as [`Self::BackendFailed`].
+    #[error("capture backend failed: {0}")]
+    DidNotRun(String),
     /// `start` while not idle, `stop` while not recording.
     #[error("{0}")]
     InvalidState(String),
@@ -249,7 +258,9 @@ pub enum DeviceChangeReason {
     /// The default output device moved; the system lane follows it once
     /// the session rebuilt the capture.
     DefaultOutputChanged,
-    /// The default input device moved.
+    /// The input the capture would record now moved: the default input,
+    /// or a chosen microphone that came back while the default was
+    /// recorded in its place.
     DefaultInputChanged,
     /// The output device the capture started on is gone.
     OutputDeviceGone,

@@ -11,8 +11,9 @@
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
 //!   files to 16 kHz mono a block at a time, and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
-//!   microphone, debounced into a call starting and ending, and the WASAPI
-//!   session mapping.
+//!   microphone, debounced into a call starting and ending, the WASAPI
+//!   session mapping, and the live process-activity source on each
+//!   platform.
 //! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
 //!   bodies, the processing thread and the relay; everything on the
 //!   real-time path.
@@ -78,18 +79,17 @@
 //!
 //! # Platforms
 //!
-//! The live backend and the process-activity source are Core Audio on
-//! macOS and WASAPI on Windows; on Linux the live backend is PipeWire and
-//! the process-activity source a stub. **The Windows backend
-//! has not run on hardware:** no Windows machine with audio devices has
-//! run it. It is written against Microsoft's documentation, built, linted
-//! and tested on the `windows-latest` CI runner, which has no audio
-//! endpoint (only process loopback runs there); its per-packet
-//! bodies (`realtime::streams`), the stream plan (`capture::split_streams`)
-//! and the session mapping (`detection::sessions`) are
-//! platform-independent and tested on every OS, the zero-allocation proof
-//! included. The hardware checks in `tests/live_windows.rs` are `--ignored`
-//! until a Windows machine runs them.
+//! The live backend, the input device list and the process-activity source
+//! are Core Audio on macOS, PipeWire on Linux and WASAPI on Windows. **The
+//! Windows backend has not run on hardware:** no Windows machine with audio
+//! devices has run it. It is written against Microsoft's documentation,
+//! built, linted and tested on the `windows-latest` CI runner, which has no
+//! audio endpoint (only process loopback runs there); its per-packet bodies
+//! (`realtime::streams`), the stream plan (`capture::split_streams`) and
+//! the session mapping (`detection::sessions`) are platform-independent and
+//! tested on every OS, the zero-allocation proof included. The hardware
+//! checks in `tests/live_windows.rs` are `--ignored` until a Windows
+//! machine runs them.
 //!
 //! Swift: `Sources/StenoAudio/StenoAudio.swift`.
 
@@ -131,9 +131,9 @@ pub const ECHO_TAIL_LENGTH: usize = 9_600;
 
 pub use aec::{EchoMetrics, PassthroughEchoCanceller, SpeexEchoCanceller};
 pub use capture::{
-    CaptureBackend, CaptureConfiguration, CaptureError, CaptureMode, CaptureNotice, CaptureResult,
-    CaptureSession, CaptureState, CaptureStatistics, CaptureStream, DeviceChangeReason, LaneLevel,
-    LaneLevels, LiveCaptureBackend, StreamLayout,
+    CaptureBackend, CaptureConfiguration, CaptureError, CaptureInput, CaptureMode, CaptureNotice,
+    CaptureResult, CaptureSession, CaptureState, CaptureStatistics, CaptureStream,
+    DeviceChangeReason, LaneLevel, LaneLevels, LiveCaptureBackend, StreamLayout,
 };
 pub use clock::{Clock, SystemClock};
 pub use codec::{CodecError, SymphoniaAudioCodec};

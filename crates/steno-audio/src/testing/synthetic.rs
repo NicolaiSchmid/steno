@@ -15,8 +15,9 @@
 //! instance (one by default), not once per `start`, or the rebuilt backend
 //! would report again and loop. `restarts_that_fail` makes that many
 //! `start` calls after the first fail with `InputDeviceUnavailable`, the
-//! device still absent; `stream_after_restart` is what every restart
-//! reports (new latencies), `SYNTHETIC` when `None`. `seconds` counts per
+//! device still absent; `stream` is what the first start reports and
+//! `stream_after_restart` what every restart reports (new latencies, the
+//! fallback microphone), `SYNTHETIC` when `None`. `seconds` counts per
 //! `start`, so a restarted backend delivers again, and `frames_delivered`
 //! sums over starts.
 
@@ -109,6 +110,8 @@ pub struct SyntheticOptions {
     pub changes: usize,
     /// How many restarts after a change fail before one succeeds.
     pub restarts_that_fail: usize,
+    /// The stream the first start reports, when it should differ.
+    pub stream: Option<CaptureStream>,
     /// The stream the restarted backend reports, when it should differ.
     pub stream_after_restart: Option<CaptureStream>,
 }
@@ -143,6 +146,7 @@ impl SyntheticOptions {
             change_device_after: None,
             changes: 1,
             restarts_that_fail: 0,
+            stream: None,
             stream_after_restart: None,
         }
     }
@@ -172,6 +176,13 @@ impl SyntheticOptions {
     #[must_use]
     pub fn restarts_that_fail(mut self, count: usize) -> Self {
         self.restarts_that_fail = count;
+        self
+    }
+
+    /// What the first start reports.
+    #[must_use]
+    pub fn stream(mut self, stream: CaptureStream) -> Self {
+        self.stream = Some(stream);
         self
     }
 
@@ -365,14 +376,12 @@ impl CaptureBackend for SyntheticCaptureBackend {
             })
             .expect("spawn synthetic producer");
         state.thread = Some(thread);
-        Ok(if is_restart {
-            self.options
-                .stream_after_restart
-                .clone()
-                .unwrap_or(CaptureStream::SYNTHETIC)
+        let stream = if is_restart {
+            &self.options.stream_after_restart
         } else {
-            CaptureStream::SYNTHETIC
-        })
+            &self.options.stream
+        };
+        Ok(stream.clone().unwrap_or(CaptureStream::SYNTHETIC))
     }
 
     fn stop(&self) {

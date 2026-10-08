@@ -8,27 +8,31 @@
 //! On Windows the audio sessions of every active endpoint, mapped by
 //! [`processes_from_sessions`](super::processes_from_sessions), with
 //! endpoint and session notifications (WP10a, not run on hardware; see
-//! `capture::live::wasapi`). No Swift counterpart. On Linux the type exists
-//! so callers compile and reports no processes until the PipeWire backend
-//! fills it in.
+//! `capture::live::wasapi`). No Swift counterpart.
+//!
+//! On Linux the PipeWire registry's stream nodes, their links and clients,
+//! watched by one PipeWire thread per source (`super::pipewire`). On other
+//! targets the type exists so callers compile and reports no processes.
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 use std::sync::mpsc::Receiver;
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 use super::activity::{ActivityError, ProcessAudioActivity, ProcessAudioActivitySource};
 
+#[cfg(target_os = "linux")]
+pub use super::pipewire::LiveProcessAudioActivity;
 #[cfg(target_os = "macos")]
 pub use macos::LiveProcessAudioActivity;
 #[cfg(windows)]
 pub use wasapi::LiveProcessAudioActivity;
 
-/// The Linux stub: lists no processes until PipeWire fills it in.
-#[cfg(not(any(target_os = "macos", windows)))]
+/// The stub on other targets: lists no processes.
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 #[derive(Debug, Default)]
 pub struct LiveProcessAudioActivity;
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 impl LiveProcessAudioActivity {
     /// The stub.
     #[must_use]
@@ -37,7 +41,7 @@ impl LiveProcessAudioActivity {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 impl ProcessAudioActivitySource for LiveProcessAudioActivity {
     fn snapshot(&self) -> Result<Vec<ProcessAudioActivity>, ActivityError> {
         Ok(Vec::new())

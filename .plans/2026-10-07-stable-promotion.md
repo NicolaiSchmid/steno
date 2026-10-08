@@ -402,7 +402,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
 | P17 | A local recording's folder: a failed enqueue saves the asset row, so the folder is not orphaned; the recorder's rebuild thread survives a panic | capture and recovery (`wp-cap-*`) |
 | P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
-| P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform, on Linux in #222 and on the Mac and Windows in a pull request of its own; today a restart with the chosen device there fails with `InputDeviceUnavailable` and the recording ends in `DeviceLost` | audio (#222 and its own pull request) |
+| P19 | The mic lane when the input device goes away: the mic falls back to the default input mid-recording on every platform (Core Audio, PipeWire and WASAPI in #222), also when the chosen device is connected but does not open, and the recording returns to it once it is back and opens; one that does not open (at the start, or while it settles on its way back) is asked for again only at the next rebuild, when a default device moves or a device in use goes | audio (#222) |
 | P20 | A recording that fills the disk: a free-space check before and during recording, with a warning | capture and recovery (`wp-cap-*`) |
 | P21 | The unsynced tail of a recording: periodic `sync_data` on the master | capture and recovery (`wp-cap-*`) |
 | P22 | A lane that stopped delivering: a stall watchdog, and a recovery when the audio service restarts (`ServiceRestarted`) | capture and recovery (`wp-cap-*`) |
@@ -473,7 +473,7 @@ after the port".
 ## Work packages
 
 Each package lands in one or more pull requests off `main`, reviewed and merged
-by merge commit; a pull request may close several rows (#220: P5, P37 and X1; #222: A7, A8 and P19's Linux half).
+by merge commit; a pull request may close several rows (#220: P5, P37 and X1; #222: A7, A8 and P19).
 Steps marked **Nicolai** need him: secrets, settings on GitHub, his machines
 and the phone. The letters: S for the Mac and the release,
 A for the audio path, P for the other data-loss fixes, X for the Linux targets.

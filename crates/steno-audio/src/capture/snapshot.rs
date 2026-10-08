@@ -23,9 +23,11 @@ pub struct DeviceSnapshot {
     /// (the default sink stands for both outputs) and on Windows (no
     /// stream opens the `eCommunications` default).
     pub default_output_uid: Option<String>,
-    /// The microphone; `None` without a microphone lane. On Linux the
-    /// source node's name; on Windows the selected capture endpoint, or
-    /// the `eConsole` default.
+    /// The microphone the capture would record now, the chosen one or
+    /// else the default (`chosen_or_default` on the Mac and Windows,
+    /// `Graph::followed_source` on Linux); `None` without a microphone
+    /// lane. On Linux the source node's name; on Windows the capture
+    /// endpoint's id.
     pub input_uid: Option<String>,
     /// The output device the capture started on still answers
     /// `DeviceIsAlive`. On Linux, its node and linked ports still carry
@@ -71,5 +73,17 @@ impl DeviceSnapshot {
             return Some(DeviceChangeReason::SampleRateChanged);
         }
         None
+    }
+
+    /// [`Self::difference`] in the microphone alone: what the Mac's and
+    /// WASAPI's re-check on the fallback reports. The other fields have
+    /// notifications of their own, and one bad read of them (an empty
+    /// default output, a rate of 0) would cost a rebuild every re-check;
+    /// so would a microphone that did not resolve, which is no difference
+    /// here. Rust only: Swift has no fallback.
+    #[must_use]
+    pub fn input_difference(&self, baseline: &DeviceSnapshot) -> Option<DeviceChangeReason> {
+        (self.input_uid.is_some() && self.input_uid != baseline.input_uid)
+            .then_some(DeviceChangeReason::DefaultInputChanged)
     }
 }

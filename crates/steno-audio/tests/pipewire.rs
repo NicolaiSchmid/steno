@@ -35,6 +35,18 @@
 //! capture missed the move. The backend's logs go to the test output, at
 //! `info` unless a non-empty `RUST_LOG` says otherwise.
 //!
+//! The input list and the meeting detection's source run here too: the
+//! list names the test microphone and follows a source coming and going,
+//! and a list while the session manager is stopped leaves a capture's
+//! default moves reported; a `pw-record` of the microphone shows up holding
+//! it with its pid and goes when it ends, with a change for both, while
+//! Steno's own capture is never listed. An unknown microphone UID records the default
+//! source, says so in the stream and follows default moves; a chosen
+//! microphone announced later is a change, and the restart records it. A
+//! chosen source that is listed but never runs (its owner stopped) leaves
+//! the recording on the default source, at the start and after the
+//! rebuild its arrival causes.
+//!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
 //! finds in `/proc/self/task` and counts with
@@ -58,13 +70,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use steno_audio::capture::{ChannelRef, DeviceChangeReason};
+use steno_audio::capture::{
+    CaptureConfiguration, CaptureMode, CaptureNotice, CaptureSession, CaptureState, ChannelRef,
+    DeviceChangeReason,
+};
 use steno_audio::testing::rt::CountingAllocator;
 use steno_audio::writer::WavStreamWriter;
 use steno_audio::{
-    CaptureBackend, CaptureError, CaptureStream, LaneFrameSink, LiveCaptureBackend, SAMPLE_RATE,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, LaneFrameSink, LiveCaptureBackend,
+    SAMPLE_RATE, SystemClock,
 };
 use steno_core::AudioLane;
+use uuid::Uuid;
 
 #[global_allocator]
 static ALLOCATOR: CountingAllocator = CountingAllocator;
@@ -103,8 +120,31 @@ fn show_logs() {
         .unwrap_or_else(|| "steno_audio=info".into());
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
-        .with_test_writer()
+        .with_ansi(false)
+        .with_writer(|| LogTee)
         .try_init();
+}
+
+/// Every log line since a test last cleared it, for a test that checks
+/// which path in the backend reported a change when the report alone looks
+/// the same.
+static LOGS: Mutex<String> = Mutex::new(String::new());
+
+/// Writes the logs into the test output (through `print!`, as the test
+/// writer does, so the harness captures them) and into [`LOGS`].
+struct LogTee;
+
+impl std::io::Write for LogTee {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let text = String::from_utf8_lossy(bytes);
+        print!("{text}");
+        LOGS.lock().unwrap().push_str(&text);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Runs `work` on a thread and waits at most `limit` for its result.
@@ -147,9 +187,13 @@ fn stop(backend: &Arc<LiveCaptureBackend>) {
     within(Duration::from_secs(5), "stop", move || backend.stop());
 }
 
-/// Runs a PipeWire tool to completion; whether it succeeded.
+/// Runs a PipeWire tool to completion, for at most 10 s, so a daemon that
+/// stopped answering fails the test instead of hanging the suite; whether
+/// it succeeded.
 fn tool(program: &str, args: &[&str]) -> bool {
-    Command::new(program)
+    Command::new("timeout")
+        .arg("10")
+        .arg(program)
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -521,18 +565,286 @@ fn in_person_records_only_the_microphone_by_its_uid() {
     stop_and_check_teardown(&backend, &sink);
 }
 
+/// The test microphone, as the fallback for a chosen one that is missing.
+fn test_mic_as_the_fallback() -> CaptureInput {
+    CaptureInput {
+        uid: MIC.to_owned(),
+        name: Some("Steno test microphone".to_owned()),
+        is_fallback: true,
+    }
+}
+
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn an_unknown_microphone_fails_and_the_backend_starts_again() {
+fn an_unknown_microphone_records_the_default_source_and_follows_it() {
+    let _mic_tone = Tone::into_source(MIC, MIC_TONE);
+    let lanes = [AudioLane::Mixed];
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    // A Core Audio UID, as a settings file synced from a Mac holds.
+    let stream = start(&backend, &lanes, Some("BuiltInMicrophoneDevice"), &sink).expect("start");
+    assert_eq!(stream.input, Some(test_mic_as_the_fallback()));
+    let audio = collect(&sink, 24_000);
+    assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
+    // On the fallback, the capture follows the default as one without a UID.
+    let other = TemporaryMic::create("steno-test-mic-default");
+    let _restore = DefaultSource;
+    DefaultSource::set(other.name);
+    assert_eq!(
+        next_report(&reasons),
+        DeviceChangeReason::DefaultInputChanged,
+        "{}",
+        default_metadata()
+    );
+    stop_and_check_teardown(&backend, &sink);
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
+    const LATER: &str = "steno-test-mic-later";
+    let lanes = [AudioLane::Mixed];
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    let stream = start(&backend, &lanes, Some(LATER), &sink).expect("start");
+    assert_eq!(stream.input, Some(test_mic_as_the_fallback()));
+    LOGS.lock().unwrap().clear();
+    let later = TemporaryMic::create(LATER);
+    assert_eq!(
+        next_report(&reasons),
+        DeviceChangeReason::DefaultInputChanged,
+        "its arrival"
+    );
+    assert!(
+        LOGS.lock().unwrap().contains("the chosen source's"),
+        "the announce of the chosen source marked the change, not other churn"
+    );
+    // The session's rebuild: stop, re-arm, start again.
+    stop(&backend);
+    sink.rearm_device_change();
+    let stream = start(&backend, &lanes, Some(LATER), &sink).expect("the restart");
+    assert_eq!(
+        stream.input.map(|input| (input.uid, input.is_fallback)),
+        Some((LATER.to_owned(), false)),
+        "the chosen microphone again"
+    );
+    later.destroy();
+    assert_eq!(next_report(&reasons), DeviceChangeReason::InputDeviceGone);
+    stop_and_check_teardown(&backend, &sink);
+}
+
+/// A source whose owner stopped answering (SIGSTOP once it is listed and
+/// both its halves have their ports): connected, so it is chosen, but its
+/// link never runs. The child is resumed and killed when dropped, by the
+/// PID recorded here.
+struct StalledSource {
+    child: Child,
+}
+
+impl StalledSource {
+    const NAME: &str = "steno-test-mic-stalled";
+    /// The loopback's other half, a sink.
+    const SINK: &str = "steno-test-stalled-in";
+
+    fn create() -> Self {
+        let child = Command::new("pw-loopback")
+            .args([
+                "--capture-props",
+                &format!(
+                    "node.name={} media.class=Audio/Sink audio.position=[MONO]",
+                    Self::SINK
+                ),
+                "--playback-props",
+                &format!(
+                    "node.name={} media.class=Audio/Source audio.position=[MONO]",
+                    Self::NAME
+                ),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("pw-loopback");
+        let source = Self { child };
+        let listed = || inputs().iter().any(|device| device.uid == Self::NAME);
+        assert!(eventually(SETTLE, listed), "the stalled source is listed");
+        // The session manager configures the ports through the owner: one
+        // stopped before they exist holds the session manager up, and with
+        // it every start, which is not what these tests are about.
+        let configured = || {
+            let objects = dump();
+            let ports = |name: &str, direction: &str| {
+                objects.iter().any(|object| {
+                    object
+                        .pointer("/info/props/node.name")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(name)
+                        && object
+                            .pointer(&format!("/info/n-{direction}-ports"))
+                            .and_then(serde_json::Value::as_u64)
+                            .is_some_and(|count| count > 0)
+                })
+            };
+            ports(Self::NAME, "output") && ports(Self::SINK, "input")
+        };
+        assert!(eventually(SETTLE, configured), "the stalled source's ports");
+        assert!(tool("kill", &["-STOP", &source.child.id().to_string()]));
+        source
+    }
+}
+
+impl Drop for StalledSource {
+    fn drop(&mut self) {
+        let _ = tool("kill", &["-CONT", &self.child.id().to_string()]);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let gone = || !inputs().iter().any(|device| device.uid == Self::NAME);
+        let _ = eventually(SETTLE, gone);
+    }
+}
+
+/// A session asking for [`StalledSource::NAME`] on the live backend.
+fn session_choosing_the_stalled_source(directory: &Path) -> CaptureSession {
+    let mut configuration = CaptureConfiguration::new(CaptureMode::InPerson, directory);
+    configuration.input_device_uid = Some(StalledSource::NAME.to_owned());
+    CaptureSession::with_backend(
+        configuration,
+        Arc::new(LiveCaptureBackend::new()),
+        None,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        Arc::new(SystemClock::new()),
+    )
+    .expect("the session")
+}
+
+/// A chosen source that is linked but whose graph never runs fails the
+/// start with [`CaptureError::DidNotRun`], the error the session answers by
+/// trying the default at once, and leaves the backend ready to start again.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_chosen_source_that_does_not_run_fails_the_start_as_did_not_run() {
     let lanes = [AudioLane::Mixed];
     let sink = Arc::new(LaneFrameSink::new(&lanes));
     let backend = Arc::new(LiveCaptureBackend::new());
+    {
+        let _stalled = StalledSource::create();
+        let started = start(&backend, &lanes, Some(StalledSource::NAME), &sink);
+        assert!(
+            matches!(started, Err(CaptureError::DidNotRun(_))),
+            "the first cycle's deadline: {started:?}"
+        );
+    }
+    start(&backend, &lanes, None, &sink).expect("the default after the failure");
+    stop(&backend);
+}
+
+/// A chosen source that is connected but does not run never costs the
+/// recording while the default source works. At the start, its failed
+/// start is followed by one on the default. During a recording on the
+/// fallback, its arrival is a change whose first restart fails on it after
+/// the 3 s start deadline and is followed by one on the default, so the
+/// recording goes on after a gap of about that long, which the silence
+/// fills: the master stays on wall time.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let session = session_choosing_the_stalled_source(directory.path());
+    let input = |session: &CaptureSession| {
+        session
+            .stream()
+            .and_then(|stream| stream.input)
+            .map(|input| (input.uid, input.is_fallback))
+    };
+    let on_the_fallback = Some((MIC.to_owned(), true));
+    {
+        let _stalled = StalledSource::create();
+        session
+            .start(Uuid::new_v4())
+            .expect("the start on the default");
+        assert_eq!(input(&session), on_the_fallback, "at the start");
+        let result = session.stop().expect("the first recording");
+        assert!(!result.statistics.ended_on_device_loss);
+    }
+
+    // The arrival races the stop: a rebuild that starts on the source
+    // before `kill -STOP` lands records it, running. That try proves
+    // nothing, so it is stopped and the arrival is redone, up to 3 times.
+    let mut tries = 0;
+    let (seen, started, _stalled) = loop {
+        tries += 1;
+        let notices = session.notices();
+        session.start(Uuid::new_v4()).expect("the start");
+        let started = Instant::now();
+        assert_eq!(input(&session), on_the_fallback, "missing at the start");
+        let stalled = StalledSource::create();
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let mut seen = Vec::new();
+        while !matches!(seen.last(), Some(CaptureNotice::DeviceResumed { .. })) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Ok(notice) = notices.recv_timeout(left) else {
+                panic!("no resume within 40 s: {seen:?}, {:?}", session.state());
+            };
+            seen.push(notice);
+        }
+        println!("notices: {seen:?}");
+        let raced = input(&session) == Some((StalledSource::NAME.to_owned(), false));
+        if !raced || tries == 3 {
+            break (seen, started, stalled);
+        }
+        println!("try {tries}: the rebuild ran on the source before it stopped; again");
+        drop(stalled);
+        session.stop().expect("the raced recording");
+    };
     assert_eq!(
-        start(&backend, &lanes, Some("no-such-device"), &sink),
-        Err(CaptureError::InputDeviceUnavailable)
+        seen.first(),
+        Some(&CaptureNotice::DeviceChanged(
+            DeviceChangeReason::DefaultInputChanged
+        )),
+        "its arrival"
     );
+    assert!(matches!(session.state(), CaptureState::Recording { .. }));
+    assert_eq!(input(&session), on_the_fallback, "after the rebuild");
+    let Some(&CaptureNotice::DeviceResumed {
+        attempt,
+        gap_seconds,
+    }) = seen.last()
+    else {
+        unreachable!("the loop ends on a resume");
+    };
+    assert_eq!(attempt, 1, "the default right after the first restart");
     assert!(
-        thread_named("steno-pipewire").is_none(),
+        gap_seconds < 4.5,
+        "a gap of one start deadline, not four: {gap_seconds} s"
+    );
+    std::thread::sleep(Duration::from_secs(1));
+    let wall = started.elapsed().as_secs_f64();
+    let result = session.stop().expect("the second recording");
+    assert!(!result.statistics.ended_on_device_loss);
+    let master = result.statistics.duration;
+    println!("the master: {master:.2} s against {wall:.2} s of wall time");
+    assert!(
+        (wall - master).abs() < 1.0,
+        "the master stays on wall time: {master:.2} s against {wall:.2} s"
+    );
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_failed_start_leaves_the_backend_ready_to_start_again() {
+    let lanes = [AudioLane::Mixed];
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let backend = Arc::new(LiveCaptureBackend::new());
+    assert!(
+        matches!(
+            start(&backend, &[], None, &sink),
+            Err(CaptureError::UnexpectedStreamLayout(_))
+        ),
+        "no lanes fails once the graph is read"
+    );
+    // Joined, but the kernel may list an exiting thread a moment longer.
+    assert!(
+        eventually(SETTLE, || thread_named("steno-pipewire").is_none()),
         "the failed start joined its thread: {:?}",
         threads()
     );
@@ -574,6 +886,32 @@ impl Drop for DefaultSink {
     fn drop(&mut self) {
         Self::set(SINK);
         // Let WirePlumber move the default back before the next test.
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Puts the configured default source back when dropped.
+struct DefaultSource;
+
+impl DefaultSource {
+    fn set(name: &str) {
+        assert!(tool(
+            "pw-metadata",
+            &[
+                "-n",
+                "default",
+                "0",
+                "default.configured.audio.source",
+                &format!("{{ \"name\": \"{name}\" }}"),
+                "Spa:String:JSON",
+            ]
+        ));
+    }
+}
+
+impl Drop for DefaultSource {
+    fn drop(&mut self) {
+        Self::set(MIC);
         std::thread::sleep(Duration::from_millis(500));
     }
 }
@@ -1043,10 +1381,16 @@ fn a_report_stuck_in_its_handler_holds_neither_stop_nor_the_rebuild() {
     // started on the same sink beside the old capture.
     sink.rearm_device_change();
     start(&backend, &lanes, None, &sink).expect("a start beside the stuck capture");
-    assert_eq!(threads_named("steno-pipewire"), 2, "{:?}", threads());
-    assert_eq!(
-        capture_nodes(),
-        2,
+    // Waited for: one CI run counted one thread here and listed both right
+    // after. The old capture cannot go before the release, so a count that
+    // never reaches two still fails.
+    assert!(
+        eventually(SETTLE, || threads_named("steno-pipewire") == 2),
+        "the old capture's thread stays while stuck: {:?}",
+        threads()
+    );
+    assert!(
+        eventually(SETTLE, || capture_nodes() == 2),
         "the old capture's node stays while stuck"
     );
     let audio = collect(&sink, 12_000);
@@ -1154,11 +1498,12 @@ fn a_microphone_that_goes_away_in_person_is_reported_as_the_input_gone() {
     let reason = next_report(&reasons);
     assert_eq!(reason, DeviceChangeReason::InputDeviceGone);
     stop(&backend);
-    assert_eq!(
-        start(&backend, &lanes, Some(mic.name), &sink),
-        Err(CaptureError::InputDeviceUnavailable),
-        "the rebuild's restart finds it gone"
-    );
+    let _mic_tone = Tone::into_source(MIC, MIC_TONE);
+    start(&backend, &lanes, Some(mic.name), &sink)
+        .expect("the rebuild's restart records the default source");
+    let audio = collect(&sink, 24_000);
+    assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
+    stop(&backend);
 }
 
 #[test]
@@ -1178,4 +1523,255 @@ fn a_microphone_that_goes_away_during_a_call_is_reported_as_the_input_gone() {
         "not the output gone"
     );
     stop_and_check_teardown(&backend, &sink);
+}
+
+/// The live input list, on its own thread with a deadline.
+fn inputs() -> Vec<steno_audio::capture::live::AudioDeviceInfo> {
+    within(Duration::from_secs(10), "the input list", || {
+        steno_audio::capture::live::AudioDevices::inputs()
+    })
+    .expect("the input list")
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn the_input_list_names_the_sources() {
+    let listed = inputs();
+    println!("{listed:#?}");
+    let mic = listed
+        .iter()
+        .find(|device| device.uid == MIC)
+        .expect("the test microphone");
+    assert_eq!(mic.name, "Steno test microphone", "its description");
+    assert_eq!(mic.input_channels, 1);
+    assert!(
+        listed
+            .iter()
+            .all(|device| device.uid != SINK && device.uid != SECOND_SINK),
+        "a sink is no input"
+    );
+    assert!(
+        listed.iter().all(|d| !d.is_default_input),
+        "the list reads no default"
+    );
+    let extra = TemporaryMic::create("steno-test-mic-listed");
+    assert!(
+        inputs().iter().any(|device| device.uid == extra.name),
+        "a new source is listed"
+    );
+    extra.destroy();
+    assert!(
+        inputs().iter().all(|device| device.uid != extra.name),
+        "a source that went is not"
+    );
+    assert!(
+        eventually(SETTLE, || thread_named("steno-pw-devs").is_none()),
+        "each list's thread ends with it: {:?}",
+        threads()
+    );
+}
+
+/// WirePlumber, stopped with `SIGSTOP` until dropped, so it answers no
+/// ping. Its pid is the private daemon's own WirePlumber client's.
+struct StoppedSessionManager {
+    pid: String,
+}
+
+impl StoppedSessionManager {
+    fn stop() -> Self {
+        let pid = dump()
+            .iter()
+            .find_map(|object| {
+                let props = object.pointer("/info/props")?;
+                if props.get("application.name")?.as_str()? != "WirePlumber" {
+                    return None;
+                }
+                // `pw-dump` prints a number-like value as a number.
+                let pid = props.get("application.process.id")?;
+                pid.as_u64()
+                    .map(|pid| pid.to_string())
+                    .or_else(|| pid.as_str().map(str::to_owned))
+            })
+            .expect("WirePlumber's client and its pid");
+        assert!(tool("kill", &["-STOP", &pid]));
+        Self { pid }
+    }
+}
+
+impl Drop for StoppedSessionManager {
+    fn drop(&mut self) {
+        assert!(tool("kill", &["-CONT", &self.pid]));
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// A list while WirePlumber answers no ping binds nothing that waits for
+/// it, so a capture bound before still hears the next default move. A list
+/// that bound the `default` metadata and closed before the pong stopped
+/// those events for every client on PipeWire before 1.6.9.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_list_while_the_session_manager_stalls_leaves_default_moves_reported() {
+    let lanes = CALL;
+    let (sink, reasons) = reporting_sink(&lanes);
+    let backend = Arc::new(LiveCaptureBackend::new());
+    let _restore = DefaultSink;
+    start(&backend, &lanes, None, &sink).expect("start");
+    {
+        // No `pw-dump` or `pw-metadata` in here: each binds the metadata.
+        let _stopped = StoppedSessionManager::stop();
+        let started = Instant::now();
+        let listed = inputs();
+        println!("listed in {:?} with WirePlumber stopped", started.elapsed());
+        assert!(listed.iter().any(|device| device.uid == MIC));
+    }
+    let since = Instant::now();
+    DefaultSink::set(SECOND_SINK);
+    assert_output_moved_once(
+        &reasons,
+        SECOND_SINK,
+        since,
+        false,
+        "after the stalled list: ",
+    );
+    stop(&backend);
+}
+
+/// A `pw-record` of the test microphone into a temporary file, killed
+/// when dropped.
+struct Recorder {
+    child: Child,
+    _dir: tempfile::TempDir,
+}
+
+impl Recorder {
+    fn start() -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let child = Command::new("pw-record")
+            .args(["--target", MIC])
+            .arg(dir.path().join("recorded.wav"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("pw-record");
+        Self { child, _dir: dir }
+    }
+
+    fn pid(&self) -> i32 {
+        i32::try_from(self.child.id()).expect("a pid")
+    }
+
+    fn end(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for Recorder {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// The source's view of `pid`, read afresh.
+fn activity_of(
+    source: &steno_audio::detection::LiveProcessAudioActivity,
+    pid: i32,
+) -> Option<steno_audio::ProcessAudioActivity> {
+    use steno_audio::ProcessAudioActivitySource as _;
+    source
+        .snapshot()
+        .expect("a snapshot")
+        .into_iter()
+        .find(|process| process.pid == pid)
+}
+
+/// Waits up to `limit` for a change message, dropping any others queued.
+fn changed_within(changes: &Receiver<()>, limit: Duration) -> bool {
+    let arrived = changes.recv_timeout(limit).is_ok();
+    while changes.try_recv().is_ok() {}
+    arrived
+}
+
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_recorder_holds_the_microphone_until_it_ends_and_steno_is_not_listed() {
+    use steno_audio::ProcessAudioActivitySource as _;
+    show_logs();
+    let source = steno_audio::detection::LiveProcessAudioActivity::new();
+    let changes = source.changes();
+    assert!(
+        changed_within(&changes, Duration::from_secs(5)),
+        "one message right away"
+    );
+    let more: Vec<_> = (0..5).map(|_| source.changes()).collect();
+    source.snapshot().expect("a first view");
+    let watching = || {
+        threads()
+            .iter()
+            .filter(|(_, name)| name.contains("steno-pw-detect"))
+            .count()
+    };
+    assert_eq!(
+        watching(),
+        1,
+        "one thread for every receiver: {:?}",
+        threads()
+    );
+    drop(more);
+
+    let mut recorder = Recorder::start();
+    let pid = recorder.pid();
+    assert!(
+        eventually(Duration::from_secs(10), || activity_of(&source, pid)
+            .is_some_and(|p| p.is_running_input)),
+        "pw-record ({pid}) holds the microphone: {:?}",
+        source.snapshot()
+    );
+    let holder = activity_of(&source, pid).expect("listed");
+    println!("{holder:?}");
+    assert_eq!(holder.bundle_id.as_deref(), Some("pw-cat"), "its binary");
+    assert!(!holder.is_running_output);
+    assert!(
+        changed_within(&changes, Duration::ZERO),
+        "the recorder's arrival was a change"
+    );
+
+    // Steno's own capture of the same microphone is left out.
+    let lanes = [AudioLane::Mixed];
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let backend = Arc::new(LiveCaptureBackend::new());
+    start(&backend, &lanes, None, &sink).expect("start");
+    let own = i32::try_from(std::process::id()).expect("a pid");
+    assert!(
+        eventually(Duration::from_secs(2), || node_id(CAPTURE_NODE).is_some()),
+        "the capture runs"
+    );
+    std::thread::sleep(SETTLE);
+    assert_eq!(
+        activity_of(&source, own),
+        None,
+        "Steno's capture is not listed"
+    );
+    stop(&backend);
+
+    while changes.try_recv().is_ok() {}
+    recorder.end();
+    assert!(
+        eventually(Duration::from_secs(10), || activity_of(&source, pid)
+            .is_none()),
+        "pw-record's stream went with it"
+    );
+    assert!(
+        changed_within(&changes, Duration::ZERO),
+        "the recorder's end was a change"
+    );
+    drop(changes);
+    drop(source);
+    // Joined, but the kernel may list an exiting thread a moment longer.
+    assert!(
+        eventually(SETTLE, || thread_named("steno-pw-detect").is_none()),
+        "the source's thread ends with it: {:?}",
+        threads()
+    );
 }

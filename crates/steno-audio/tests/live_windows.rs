@@ -254,6 +254,33 @@ fn in_person_capture_records_the_microphone() {
     assert_eq!(run.after_stop, 0, "nothing arrives after stop()");
 }
 
+/// A UID that names no endpoint (a Core Audio UID from a settings file
+/// synced from a Mac) records the default capture endpoint and says so.
+#[test]
+#[ignore = "needs a Windows machine with a microphone; run with -- --ignored --nocapture"]
+fn an_unknown_microphone_records_the_default_input() {
+    show_logs();
+    within(Duration::from_secs(30), "start, capture, stop", || {
+        let lanes = [AudioLane::Mixed];
+        let backend = LiveCaptureBackend::new();
+        let sink = Arc::new(LaneFrameSink::new(&lanes));
+        let stream = backend
+            .start(&lanes, Some("BuiltInMicrophoneDevice"), Arc::clone(&sink))
+            .expect("the default input as the fallback");
+        println!("{stream:?}");
+        let input = stream.input.expect("the microphone in use");
+        assert!(input.is_fallback);
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(sink.available_to_read() > 0, "the default input runs");
+        backend.stop();
+        let stream = backend
+            .start(&lanes, Some(&input.uid), sink)
+            .expect("the default by its id");
+        assert_eq!(stream.input.map(|input| input.is_fallback), Some(false));
+        backend.stop();
+    });
+}
+
 #[test]
 #[ignore = "needs a Windows machine with a microphone and speakers, audio playing; run with -- --ignored --nocapture"]
 fn call_capture_records_both_lanes() {

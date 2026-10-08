@@ -22,8 +22,12 @@
 //!   Where that activation fails for any reason, its timeout included,
 //!   loopback of the default render endpoint, which records Steno's own
 //!   output too; the switch is only logged.
-//! - **Microphone:** the selected capture endpoint by id, or the default
-//!   (`eCapture`, `eConsole`), shared mode, event-driven.
+//! - **Microphone:** the chosen capture endpoint by id, or the default
+//!   (`eCapture`, `eConsole`), shared mode, event-driven. A chosen
+//!   endpoint that is not active records the default instead, and the
+//!   watcher reports the chosen one coming back, so the rebuild returns
+//!   to it (the macOS backend does the same; Swift, macOS-only, fails the
+//!   start there).
 //!
 //! Both are asked for 48 kHz 32-bit float (`AUTOCONVERTPCM`, so the engine
 //! resamples from the device's mix format): mono for the microphone,
@@ -43,13 +47,15 @@
 //! An `IMMNotificationClient` (default-device changes, devices added,
 //! removed or changing state) wakes a watcher thread, which coalesces a
 //! burst for [`LiveCaptureBackend::COALESCE_DELAY`] as the macOS backend
-//! does, resolves the devices again and compares them with what the
-//! capture started on ([`DeviceSnapshot::difference`]). A capture thread
-//! whose stream fails (`AUDCLNT_E_DEVICE_INVALIDATED` after a format change
-//! or an unplug) stops and tells the watcher, which reports the lost
-//! device when nothing else differs. The sink gets one
-//! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
-//! `start` again.
+//! does, resolves the devices again and compares them with what the capture
+//! started on ([`DeviceSnapshot::difference`]); a capture on the fallback
+//! also resolves them every [`LiveCaptureBackend::FALLBACK_RECHECK`]
+//! without a notification and looks only for another microphone
+//! ([`DeviceSnapshot::input_difference`]). A capture thread whose stream
+//! fails (`AUDCLNT_E_DEVICE_INVALIDATED` after a format change or an
+//! unplug) stops and tells the watcher, which reports the lost device when
+//! nothing else differs. The sink gets one [`DeviceChangeReason`] and the
+//! session rebuilds by calling `stop()` and `start` again.
 //!
 //! # Threads and COM
 //!
@@ -84,11 +90,11 @@ use std::time::{Duration, Instant};
 use steno_core::AudioLane;
 
 use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThread};
-use super::AudioDeviceInfo;
+use super::{AudioDeviceInfo, chosen_or_default};
 use crate::SAMPLE_RATE;
 use crate::capture::split_streams::{StreamSizes, far_end_latencies};
 use crate::capture::{
-    CaptureBackend, CaptureError, CaptureStream, DeviceChangeReason, DeviceSnapshot,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     SplitStreamPlan, StreamSource,
 };
 use crate::detection::EndpointFlow;
@@ -114,6 +120,9 @@ struct StreamInfo {
     /// system stream the default render endpoint at start.
     endpoint_id: Option<String>,
     loopback: Option<LoopbackKind>,
+    /// The microphone stream's endpoint, as [`CaptureStream::input`] names
+    /// it; `None` for the system stream.
+    input: Option<CaptureInput>,
 }
 
 /// A stream thread's reports to `start`.
@@ -147,6 +156,15 @@ struct WatchState {
     /// The watcher thread is past its start-up COM calls and in its loop,
     /// so `stop()` may join it.
     ready: bool,
+}
+
+/// What the watcher judges: a settled burst of notifications, with the
+/// stream that failed meanwhile, if any, or the re-check while the
+/// microphone records the fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Judged {
+    Notification { failed: Option<StreamSource> },
+    Recheck,
 }
 
 #[derive(Default)]
@@ -196,9 +214,15 @@ impl Watcher {
 
     /// The watcher thread's loop once registered: marks it ready, answers
     /// `start` through `ready`, then hands every settled burst to `judge`
-    /// with the stream that failed meanwhile, if any, outside the lock,
-    /// until stopped.
-    fn watch(&self, ready: &SyncSender<()>, mut judge: impl FnMut(Option<StreamSource>)) {
+    /// as a [`Judged::Notification`], outside the lock, until stopped. With
+    /// `recheck`, `judge` also gets a [`Judged::Recheck`] each time that
+    /// long passes without a notification.
+    fn watch(
+        &self,
+        ready: &SyncSender<()>,
+        recheck: Option<Duration>,
+        mut judge: impl FnMut(Judged),
+    ) {
         let mut state = self.lock();
         state.ready = true;
         let _ = ready.send(());
@@ -207,10 +231,23 @@ impl Watcher {
                 break;
             }
             let Some(last) = state.pending else {
-                state = self
+                let Some(recheck) = recheck else {
+                    state = self
+                        .condvar
+                        .wait(state)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    continue;
+                };
+                let (next, waited) = self
                     .condvar
-                    .wait(state)
+                    .wait_timeout(state, recheck)
                     .unwrap_or_else(PoisonError::into_inner);
+                state = next;
+                if waited.timed_out() && state.pending.is_none() && !state.stop {
+                    drop(state);
+                    judge(Judged::Recheck);
+                    state = self.lock();
+                }
                 continue;
             };
             let due = last + LiveCaptureBackend::COALESCE_DELAY;
@@ -226,7 +263,7 @@ impl Watcher {
             state.pending = None;
             let failed = state.failed.take();
             drop(state);
-            judge(failed);
+            judge(Judged::Notification { failed });
             state = self.lock();
         }
     }
@@ -239,6 +276,8 @@ struct DeviceProbe {
     needs_system: bool,
     /// `None`: the default capture endpoint.
     input_device_uid: Option<String>,
+    /// The microphone records the fallback, so the watcher re-checks.
+    is_fallback: bool,
     mic_endpoint_id: Option<String>,
     render_endpoint_id: Option<String>,
 }
@@ -261,25 +300,19 @@ impl DeviceProbe {
 
     /// The devices as they are now, in [`DeviceSnapshot`]'s terms: the
     /// default render endpoint (`eConsole`, the one both loopbacks follow),
-    /// the microphone (the explicit one while it is active, `None` once it
-    /// is not, as on the Mac; without an explicit one, the `eConsole`
-    /// default), whether the endpoints the capture started on
-    /// are still active. `default_output_uid` stays empty: no stream opens
-    /// the `eCommunications` default, so its changes cost no rebuild. Fields
+    /// the microphone as [`chosen_or_default_input`] picks it (so the chosen
+    /// one coming back reads as a change, as on the Mac), whether the
+    /// endpoints the capture started on are still active.
+    /// `default_output_uid` stays empty: no stream opens the
+    /// `eCommunications` default, so its changes cost no rebuild. Fields
     /// for a stream the capture does not open stay empty too, so they never
     /// differ. The engine converts to 48 kHz, so the rate is always
     /// [`SAMPLE_RATE`]; a device format change invalidates the stream
     /// instead, which the capture thread reports as the device gone.
     fn resolve(&self, enumerator: &Enumerator) -> DeviceSnapshot {
         let input_uid = if self.needs_mic {
-            match &self.input_device_uid {
-                Some(uid) => enumerator
-                    .endpoint(uid)
-                    .ok()
-                    .filter(com::Endpoint::is_active)
-                    .and_then(|endpoint| endpoint.id().ok()),
-                None => Self::endpoint_id(enumerator, EndpointFlow::Capture),
-            }
+            chosen_or_default_input(enumerator, self.input_device_uid.as_deref())
+                .and_then(|(endpoint, _)| endpoint.id().ok())
         } else {
             None
         };
@@ -348,6 +381,44 @@ impl LiveCaptureBackend {
     /// resolved once; the macOS backend's value.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
+    /// How often a capture that records the fallback resolves the devices
+    /// without a notification, so a chosen endpoint that becomes active
+    /// unannounced (or before the watcher registered) is found; the macOS
+    /// backend's value. Rust only: Swift has no fallback.
+    pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
+
+    /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
+    /// capture on the fallback, none otherwise.
+    fn recheck_for(is_fallback: bool) -> Option<Duration> {
+        is_fallback.then_some(Self::FALLBACK_RECHECK)
+    }
+
+    /// What a judgement reports of the endpoints `resolved` now against
+    /// `baseline` (`None` for either when the enumerator could not be
+    /// read): after a notification their first difference, else the
+    /// failed stream's device gone; on a re-check only another microphone
+    /// ([`DeviceSnapshot::input_difference`]).
+    fn judgement(
+        judged: Judged,
+        resolved: Option<&DeviceSnapshot>,
+        baseline: Option<&DeviceSnapshot>,
+    ) -> Option<DeviceChangeReason> {
+        let compared = resolved.zip(baseline);
+        match judged {
+            Judged::Notification { failed } => compared
+                .and_then(|(resolved, baseline)| resolved.difference(baseline))
+                .or_else(|| {
+                    failed.map(|source| match source {
+                        StreamSource::Microphone => DeviceChangeReason::InputDeviceGone,
+                        StreamSource::System => DeviceChangeReason::OutputDeviceGone,
+                    })
+                }),
+            Judged::Recheck => {
+                compared.and_then(|(resolved, baseline)| resolved.input_difference(baseline))
+            }
+        }
+    }
+
     /// No capture running.
     #[must_use]
     pub fn new() -> Self {
@@ -361,6 +432,21 @@ impl LiveCaptureBackend {
     }
 }
 
+/// The capture endpoint a capture asked for `uid` records now
+/// ([`chosen_or_default`]): the chosen one while it is active, else the
+/// active default.
+fn chosen_or_default_input(
+    enumerator: &Enumerator,
+    uid: Option<&str>,
+) -> Option<(com::Endpoint, bool)> {
+    chosen_or_default(
+        uid,
+        |uid| enumerator.endpoint(uid).ok(),
+        || enumerator.default_endpoint(EndpointFlow::Capture).ok(),
+        com::Endpoint::is_active,
+    )
+}
+
 /// Joins COM and opens the stream `source` needs on this thread. The
 /// apartment comes first so it is dropped last.
 fn open(
@@ -370,16 +456,26 @@ fn open(
     let apartment = Apartment::enter()?;
     let enumerator = Enumerator::new()?;
     let channels = source.channels();
+    let mut input = None;
     let (client, endpoint_id, loopback) = match source {
         StreamSource::Microphone => {
-            let endpoint = match input_device_uid {
-                Some(uid) => enumerator.endpoint(uid).ok(),
-                None => enumerator.default_endpoint(EndpointFlow::Capture).ok(),
+            let (endpoint, is_fallback) = chosen_or_default_input(&enumerator, input_device_uid)
+                .ok_or(CaptureError::InputDeviceUnavailable)?;
+            let id = endpoint.id().ok();
+            if is_fallback {
+                tracing::warn!(
+                    "the input device {} is not active; recording from the default input {}",
+                    input_device_uid.unwrap_or_default(),
+                    id.as_deref().unwrap_or_default()
+                );
             }
-            .filter(com::Endpoint::is_active)
-            .ok_or(CaptureError::InputDeviceUnavailable)?;
+            input = id.clone().map(|uid| CaptureInput {
+                name: endpoint.friendly_name(),
+                uid,
+                is_fallback,
+            });
             let client = CaptureClient::microphone(&endpoint, channels)?;
-            (client, endpoint.id().ok(), None)
+            (client, id, None)
         }
         StreamSource::System => {
             let render = enumerator.default_endpoint(EndpointFlow::Render);
@@ -403,6 +499,7 @@ fn open(
         sizes: client.sizes(),
         endpoint_id,
         loopback,
+        input,
     };
     Ok((apartment, enumerator, client, info))
 }
@@ -487,22 +584,15 @@ fn run_watcher(
             .ok()
     });
     let baseline = enumerator.as_ref().map(|e| probe.baseline(e));
-    watcher.watch(ready, |failed| {
+    let recheck = LiveCaptureBackend::recheck_for(probe.is_fallback);
+    watcher.watch(ready, recheck, |judged| {
         // The WASAPI reads run outside the lock.
-        let difference = match (&enumerator, &baseline) {
-            (Some(enumerator), Some(baseline)) => probe.resolve(enumerator).difference(baseline),
-            _ => None,
-        };
-        let reason = difference.or_else(|| {
-            failed.map(|source| match source {
-                StreamSource::Microphone => DeviceChangeReason::InputDeviceGone,
-                StreamSource::System => DeviceChangeReason::OutputDeviceGone,
-            })
-        });
+        let resolved = enumerator.as_ref().map(|e| probe.resolve(e));
+        let reason = LiveCaptureBackend::judgement(judged, resolved.as_ref(), baseline.as_ref());
         if let Some(reason) = reason {
             tracing::info!("device change reported: {reason:?}");
             sink.report_device_change(reason);
-        } else {
+        } else if judged != Judged::Recheck {
             tracing::info!("ignored device notification");
         }
     });
@@ -752,6 +842,10 @@ impl CaptureBackend for LiveCaptureBackend {
             needs_mic: mic.is_some(),
             needs_system: system.is_some(),
             input_device_uid: input_device_uid.map(str::to_owned),
+            is_fallback: mic
+                .as_ref()
+                .and_then(|m| m.input.as_ref())
+                .is_some_and(|input| input.is_fallback),
             mic_endpoint_id: mic.as_ref().and_then(|m| m.endpoint_id.clone()),
             render_endpoint_id: system.as_ref().and_then(|s| s.endpoint_id.clone()),
         };
@@ -787,6 +881,7 @@ impl CaptureBackend for LiveCaptureBackend {
             input_latency_frames,
             output_latency_frames,
             layout: Some(plan.layout),
+            input: mic.and_then(|m| m.input),
         })
     }
 
@@ -923,7 +1018,7 @@ mod tests {
             let watcher = Arc::clone(&watcher);
             let stopped = Arc::clone(&stopped);
             std::thread::spawn(move || {
-                watcher.watch(&ready, |_| {
+                watcher.watch(&ready, None, |_| {
                     let _ = entered.send(());
                     let _ = gate.recv_timeout(WAIT);
                     let _ = judged.send(stopped.load(Ordering::SeqCst));
@@ -953,6 +1048,41 @@ mod tests {
         );
     }
 
+    /// A capture on the fallback judges the endpoints again with no
+    /// notification, as a re-check; one on the endpoint it asked for waits
+    /// for a notification.
+    #[test]
+    fn only_a_capture_on_the_fallback_rechecks_without_a_notification() {
+        for recheck in [Some(Duration::from_millis(50)), None] {
+            let watcher = Arc::new(Watcher::default());
+            let (ready, answered) = sync_channel(1);
+            let (judged, judgements) = channel();
+            let thread = {
+                let watcher = Arc::clone(&watcher);
+                std::thread::spawn(move || {
+                    watcher.watch(&ready, recheck, |judgement| {
+                        let _ = judged.send(judgement);
+                    });
+                })
+            };
+            answered
+                .recv_timeout(WAIT)
+                .expect("the watcher reached its loop");
+            if recheck.is_some() {
+                assert_eq!(judgements.recv_timeout(WAIT), Ok(Judged::Recheck));
+                assert_eq!(judgements.recv_timeout(WAIT), Ok(Judged::Recheck));
+            } else {
+                assert!(judgements.recv_timeout(Duration::from_millis(300)).is_err());
+                watcher.note();
+                assert_eq!(
+                    judgements.recv_timeout(WAIT),
+                    Ok(Judged::Notification { failed: None })
+                );
+            }
+            watcher.stop_and_join(thread);
+        }
+    }
+
     /// A watcher still in its start-up calls when `stop()` comes is not
     /// waited for; once they return it exits without judging the burst
     /// that is pending.
@@ -970,7 +1100,7 @@ mod tests {
                 // baseline.
                 let opened = gate.recv_timeout(WAIT).is_ok();
                 let mut judged = false;
-                watcher.watch(&ready, |_| judged = true);
+                watcher.watch(&ready, None, |_| judged = true);
                 let _ = done.send((opened, judged));
             })
         };
@@ -981,5 +1111,84 @@ mod tests {
             Ok((true, false)),
             "stop did not wait for the start-up, and nothing was judged"
         );
+    }
+
+    /// Only a capture on the fallback is re-checked.
+    #[test]
+    fn the_recheck_runs_on_the_fallback_alone() {
+        assert_eq!(
+            LiveCaptureBackend::recheck_for(true),
+            Some(LiveCaptureBackend::FALLBACK_RECHECK)
+        );
+        assert_eq!(LiveCaptureBackend::recheck_for(false), None);
+    }
+
+    /// A notification reports the first difference, else the failed
+    /// stream's device gone; a re-check only another microphone, so a bad
+    /// read of the outputs or a microphone that did not resolve costs no
+    /// rebuild, and an unreadable enumerator reports nothing but a failed
+    /// stream.
+    #[test]
+    fn a_recheck_reports_another_microphone_alone() {
+        let baseline = DeviceSnapshot {
+            output_uid: Some("speakers".into()),
+            default_output_uid: None,
+            input_uid: Some("built-in".into()),
+            output_alive: true,
+            input_alive: true,
+            sample_rate: SAMPLE_RATE,
+        };
+        let back = DeviceSnapshot {
+            input_uid: Some("usb-microphone".into()),
+            ..baseline.clone()
+        };
+        let misread = DeviceSnapshot {
+            output_uid: None,
+            ..baseline.clone()
+        };
+        let unresolved = DeviceSnapshot {
+            input_uid: None,
+            ..baseline.clone()
+        };
+        let quiet = Judged::Notification { failed: None };
+        let failed = Judged::Notification {
+            failed: Some(StreamSource::Microphone),
+        };
+        let table = [
+            (quiet, Some(&baseline), None),
+            (
+                quiet,
+                Some(&back),
+                Some(DeviceChangeReason::DefaultInputChanged),
+            ),
+            (
+                quiet,
+                Some(&misread),
+                Some(DeviceChangeReason::DefaultOutputChanged),
+            ),
+            (
+                failed,
+                Some(&baseline),
+                Some(DeviceChangeReason::InputDeviceGone),
+            ),
+            (failed, None, Some(DeviceChangeReason::InputDeviceGone)),
+            (quiet, None, None),
+            (Judged::Recheck, Some(&baseline), None),
+            (
+                Judged::Recheck,
+                Some(&back),
+                Some(DeviceChangeReason::DefaultInputChanged),
+            ),
+            (Judged::Recheck, Some(&misread), None),
+            (Judged::Recheck, Some(&unresolved), None),
+            (Judged::Recheck, None, None),
+        ];
+        for (judged, resolved, reported) in table {
+            assert_eq!(
+                LiveCaptureBackend::judgement(judged, resolved, Some(&baseline)),
+                reported,
+                "{judged:?} of {resolved:?}"
+            );
+        }
     }
 }

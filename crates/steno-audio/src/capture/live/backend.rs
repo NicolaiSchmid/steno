@@ -4,18 +4,26 @@
 //! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
 //!
 //! `System` comes from the tap, `Mic` and `Mixed` from the first channel of
-//! the selected input device, which the aggregate resamples to the output
-//! device's 48 kHz clock.
+//! the chosen input device, which the aggregate resamples to the output
+//! device's 48 kHz clock. A chosen device that is not connected records
+//! the default input instead ([`chosen_or_default_input`]), and the device
+//! list is watched so the rebuild returns to it once it is back; Swift
+//! fails the start with `InputDeviceUnavailable` there (a deliberate parity
+//! change: no recording is lost to a missing microphone).
 //!
 //! Device notifications (a default device moving, a sub-device dying, the
 //! aggregate leaving 48 kHz) arrive on the HAL's notification thread and
 //! are coalesced for [`LiveCaptureBackend::COALESCE_DELAY`] on a watcher
 //! thread, then the devices are resolved again and compared with what the
-//! capture started on ([`DeviceSnapshot::difference`]). Nothing changed
-//! means the burst is logged and ignored; otherwise the sink gets one
+//! capture started on ([`DeviceSnapshot::difference`]); a capture on the
+//! fallback also resolves them every
+//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification and
+//! looks only for another microphone
+//! ([`DeviceSnapshot::input_difference`]). Nothing changed means the burst
+//! is logged and ignored; otherwise the sink gets one
 //! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
-//! `start` again. Nothing here runs on the IO thread except
-//! [`io_proc`], which only calls [`deliver`].
+//! `start` again. Nothing here runs on the IO thread except [`io_proc`],
+//! which only calls [`deliver`].
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
 //! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
@@ -41,7 +49,7 @@ use objc2_core_audio::{
     AudioObjectPropertySelector, kAudioDevicePropertyDeviceIsAlive,
     kAudioDevicePropertyNominalSampleRate, kAudioHardwarePropertyDefaultInputDevice,
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice,
-    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
+    kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
     kAudioObjectPropertyScopeOutput,
 };
 use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
@@ -50,11 +58,11 @@ use steno_core::AudioLane;
 use super::hal::{
     self, AggregateDevice, Id, IoProc, OSStatus, ProcessTap, PropertyListener, SYSTEM,
 };
-use super::{AudioDeviceInfo, AudioDevices};
+use super::{AudioDeviceInfo, AudioDevices, chosen_or_default};
 use crate::SAMPLE_RATE;
 use crate::capture::{
-    CaptureBackend, CaptureError, CaptureStream, DeviceSnapshot, LaneSource, NominalSampleRate,
-    StreamLayout,
+    CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
+    LaneSource, NominalSampleRate, StreamLayout,
 };
 use crate::realtime::{BufferView, LaneFrameSink, deliver};
 
@@ -111,6 +119,19 @@ unsafe extern "C-unwind" fn io_proc(
     0
 }
 
+/// The input a capture asked for `uid` records now ([`chosen_or_default`]):
+/// the chosen device while it is connected and has input channels, else
+/// the default input, with `true` beside it. `None` when no input resolves
+/// at all.
+fn chosen_or_default_input(uid: Option<&str>) -> Option<(AudioDeviceInfo, bool)> {
+    chosen_or_default(
+        uid,
+        |uid| AudioDevices::device(uid).ok().flatten(),
+        || AudioDevices::default_input().ok(),
+        AudioDeviceInfo::is_input,
+    )
+}
+
 /// The HAL reads behind one [`DeviceSnapshot`], fixed at `start` so every
 /// look after a notification asks about the objects the capture began on.
 #[derive(Debug, Clone)]
@@ -122,19 +143,16 @@ struct DeviceProbe {
 }
 
 impl DeviceProbe {
-    /// The devices as they are now: the defaults resolved again (or the
-    /// explicit input by UID), the started devices' `DeviceIsAlive`, the
+    /// The devices as they are now: the defaults resolved again (the input
+    /// as [`chosen_or_default_input`] picks it, so a chosen device coming
+    /// back reads as a change), the started devices' `DeviceIsAlive`, the
     /// aggregate's rate (0 once it is gone).
     fn resolve(&self) -> DeviceSnapshot {
         let output = AudioDevices::default_system_output().ok();
-        let input: Option<AudioDeviceInfo> = if self.mic_id.is_some() {
-            match &self.input_device_uid {
-                Some(uid) => AudioDevices::device(uid).ok().flatten(),
-                None => AudioDevices::default_input().ok(),
-            }
-        } else {
-            None
-        };
+        let input = self
+            .mic_id
+            .and_then(|_| chosen_or_default_input(self.input_device_uid.as_deref()))
+            .map(|(device, _)| device);
         DeviceSnapshot {
             output_uid: output.map(|d| d.uid),
             default_output_uid: AudioDevices::default_output_uid(),
@@ -153,6 +171,14 @@ struct WatchState {
     /// The last notification's selector and arrival, `None` once judged.
     pending: Option<(AudioObjectPropertySelector, Instant)>,
     stop: bool,
+}
+
+/// What the watcher judges: a settled burst of notifications, or the
+/// re-check while the capture records the fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Judged {
+    Notification(AudioObjectPropertySelector),
+    Recheck,
 }
 
 struct Watcher {
@@ -202,6 +228,14 @@ impl LiveCaptureBackend {
     /// resolved once. A Bluetooth profile switch fires several within it.
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
+    /// How often a capture that records the fallback resolves the devices
+    /// without a notification. A chosen device can come back with no
+    /// notification of its own: one that read no input channels for a
+    /// moment while the device list changed, one that settled after its
+    /// `Devices` notification, or one that came back before the
+    /// listeners were registered. Rust only: Swift has no fallback.
+    pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
+
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -216,28 +250,36 @@ impl LiveCaptureBackend {
     }
 
     /// The watcher thread: waits for a notification, lets the burst settle
-    /// for `COALESCE_DELAY` after the last one, then resolves the devices
-    /// and reports the first difference. It belongs to one `start`:
-    /// `stop()` raises `WatchState::stop` and joins it before the backend
-    /// can start again, so a report never reaches a later capture (Swift
-    /// compared a generation counter instead; the join makes that
-    /// unnecessary here).
-    fn watch(
-        watcher: &Watcher,
-        probe: &DeviceProbe,
-        baseline: &DeviceSnapshot,
-        sink: &LaneFrameSink,
-    ) {
+    /// for `COALESCE_DELAY` after the last one, then hands it to `judge`,
+    /// outside the lock; with `recheck`, also each time that long passes
+    /// without a notification. It belongs to one `start`: `stop()` raises
+    /// `WatchState::stop` and joins it before the backend can start again,
+    /// so a report never reaches a later capture (Swift compared a
+    /// generation counter instead; the join makes that unnecessary here).
+    fn watch(watcher: &Watcher, recheck: Option<Duration>, mut judge: impl FnMut(Judged)) {
         let mut state = watcher.lock();
         loop {
             if state.stop {
                 return;
             }
             let Some((selector, last)) = state.pending else {
-                state = watcher
+                let Some(recheck) = recheck else {
+                    state = watcher
+                        .condvar
+                        .wait(state)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    continue;
+                };
+                let (next, waited) = watcher
                     .condvar
-                    .wait(state)
+                    .wait_timeout(state, recheck)
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state = next;
+                if waited.timed_out() && state.pending.is_none() && !state.stop {
+                    drop(state);
+                    judge(Judged::Recheck);
+                    state = watcher.lock();
+                }
                 continue;
             };
             let due = last + Self::COALESCE_DELAY;
@@ -252,17 +294,48 @@ impl LiveCaptureBackend {
             }
             state.pending = None;
             drop(state);
-            // The HAL reads run outside the lock.
-            let snapshot = probe.resolve();
-            let name = hal::selector_name(selector);
-            match snapshot.difference(baseline) {
-                None => tracing::info!("ignored device notification {name}"),
-                Some(reason) => {
-                    tracing::info!("device notification {name} reported {reason:?}");
-                    sink.report_device_change(reason);
-                }
-            }
+            judge(Judged::Notification(selector));
             state = watcher.lock();
+        }
+    }
+
+    /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
+    /// capture on the fallback, none otherwise.
+    fn recheck_for(is_fallback: bool) -> Option<Duration> {
+        is_fallback.then_some(Self::FALLBACK_RECHECK)
+    }
+
+    /// What a judgement reports of the devices `resolved` now: after a
+    /// notification their first difference from `baseline`, on a re-check
+    /// only another microphone ([`DeviceSnapshot::input_difference`]).
+    fn judgement(
+        judged: Judged,
+        resolved: &DeviceSnapshot,
+        baseline: &DeviceSnapshot,
+    ) -> Option<DeviceChangeReason> {
+        match judged {
+            Judged::Notification(_) => resolved.difference(baseline),
+            Judged::Recheck => resolved.input_difference(baseline),
+        }
+    }
+
+    /// Resolves the devices (the HAL reads, outside the watcher's lock)
+    /// and reports what [`Self::judgement`] finds.
+    fn judge(judged: Judged, probe: &DeviceProbe, baseline: &DeviceSnapshot, sink: &LaneFrameSink) {
+        let what = match judged {
+            Judged::Notification(selector) => {
+                format!("device notification {}", hal::selector_name(selector))
+            }
+            Judged::Recheck => "fallback re-check".to_owned(),
+        };
+        match Self::judgement(judged, &probe.resolve(), baseline) {
+            // Every `FALLBACK_RECHECK`, so not logged.
+            None if judged == Judged::Recheck => {}
+            None => tracing::info!("ignored {what}"),
+            Some(reason) => {
+                tracing::info!("{what} reported {reason:?}");
+                sink.report_device_change(reason);
+            }
         }
     }
 }
@@ -289,17 +362,20 @@ impl CaptureBackend for LiveCaptureBackend {
 
         let output = AudioDevices::default_system_output()
             .map_err(|_| CaptureError::OutputDeviceUnavailable)?;
-        let mut mic: Option<AudioDeviceInfo> = None;
-        if needs_mic {
-            let resolved = match input_device_uid {
-                Some(uid) => AudioDevices::device(uid).ok().flatten(),
-                None => AudioDevices::default_input().ok(),
-            };
-            match resolved {
-                Some(device) if device.is_input() => mic = Some(device),
-                _ => return Err(CaptureError::InputDeviceUnavailable),
+        let (mic, is_fallback) = if needs_mic {
+            let (device, is_fallback) = chosen_or_default_input(input_device_uid)
+                .ok_or(CaptureError::InputDeviceUnavailable)?;
+            if is_fallback {
+                tracing::warn!(
+                    "the input device {} is not connected; recording from the default input {}",
+                    input_device_uid.unwrap_or_default(),
+                    device.uid
+                );
             }
-        }
+            (Some(device), is_fallback)
+        } else {
+            (None, false)
+        };
 
         let tap = if needs_tap {
             let own = hal::own_process_object()?;
@@ -389,10 +465,16 @@ impl CaptureBackend for LiveCaptureBackend {
             (output.id, kAudioDevicePropertyDeviceIsAlive),
             (aggregate.id, kAudioDevicePropertyNominalSampleRate),
         ];
+        // The default input matters while it is what the microphone lane
+        // records; the device list while a chosen device could come back
+        // (or go: its own `DeviceIsAlive` covers that).
         if let Some(mic) = &mic {
             selectors.push((mic.id, kAudioDevicePropertyDeviceIsAlive));
-            if input_device_uid.is_none() {
+            if input_device_uid.is_none() || is_fallback {
                 selectors.push((SYSTEM, kAudioHardwarePropertyDefaultInputDevice));
+            }
+            if input_device_uid.is_some() {
+                selectors.push((SYSTEM, kAudioHardwarePropertyDevices));
             }
         }
         let watcher = Arc::new(Watcher {
@@ -444,7 +526,10 @@ impl CaptureBackend for LiveCaptureBackend {
             std::thread::Builder::new()
                 .name("steno-devices".into())
                 .spawn(move || {
-                    LiveCaptureBackend::watch(&watcher, &probe, &baseline, &sink);
+                    let recheck = LiveCaptureBackend::recheck_for(is_fallback);
+                    LiveCaptureBackend::watch(&watcher, recheck, |judged| {
+                        LiveCaptureBackend::judge(judged, &probe, &baseline, &sink);
+                    });
                 })
                 .map_err(|e| CaptureError::BackendFailed(format!("device watcher: {e}")))?
         };
@@ -463,6 +548,11 @@ impl CaptureBackend for LiveCaptureBackend {
             input_latency_frames: input_latency,
             output_latency_frames: output_latency,
             layout: Some(layout),
+            input: mic.map(|mic| CaptureInput {
+                uid: mic.uid,
+                name: Some(mic.name).filter(|name| !name.is_empty()),
+                is_fallback,
+            }),
         })
     }
 
@@ -501,5 +591,133 @@ impl Drop for LiveCaptureBackend {
     /// in order instead of leaving it to field destruction order.
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+
+    use super::*;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// Runs the watch loop on its own thread; every judgement goes to the
+    /// returned receiver.
+    fn watching(
+        recheck: Option<Duration>,
+    ) -> (
+        Arc<Watcher>,
+        JoinHandle<()>,
+        std::sync::mpsc::Receiver<Judged>,
+    ) {
+        let watcher = Arc::new(Watcher {
+            state: Mutex::new(WatchState::default()),
+            condvar: Condvar::new(),
+        });
+        let (judged, judgements) = channel();
+        let thread = {
+            let watcher = Arc::clone(&watcher);
+            std::thread::spawn(move || {
+                LiveCaptureBackend::watch(&watcher, recheck, |judgement| {
+                    let _ = judged.send(judgement);
+                });
+            })
+        };
+        (watcher, thread, judgements)
+    }
+
+    fn stop(watcher: &Watcher, thread: JoinHandle<()>) {
+        watcher.lock().stop = true;
+        watcher.condvar.notify_all();
+        thread.join().unwrap();
+    }
+
+    /// A capture on the fallback judges the devices again with no
+    /// notification, so a chosen device that came back unannounced is
+    /// found; one on the device it asked for waits for a notification.
+    #[test]
+    fn only_a_capture_on_the_fallback_rechecks_without_a_notification() {
+        let (watcher, thread, judgements) = watching(Some(Duration::from_millis(50)));
+        assert_eq!(judgements.recv_timeout(WAIT), Ok(Judged::Recheck));
+        assert_eq!(judgements.recv_timeout(WAIT), Ok(Judged::Recheck));
+        stop(&watcher, thread);
+
+        let (watcher, thread, judgements) = watching(None);
+        assert!(judgements.recv_timeout(Duration::from_millis(300)).is_err());
+        watcher.lock().pending = Some((kAudioHardwarePropertyDevices, Instant::now()));
+        watcher.condvar.notify_all();
+        assert_eq!(
+            judgements.recv_timeout(WAIT),
+            Ok(Judged::Notification(kAudioHardwarePropertyDevices))
+        );
+        stop(&watcher, thread);
+    }
+
+    /// Only a capture on the fallback is re-checked.
+    #[test]
+    fn the_recheck_runs_on_the_fallback_alone() {
+        assert_eq!(
+            LiveCaptureBackend::recheck_for(true),
+            Some(LiveCaptureBackend::FALLBACK_RECHECK)
+        );
+        assert_eq!(LiveCaptureBackend::recheck_for(false), None);
+    }
+
+    /// A notification reports the first difference; a re-check only
+    /// another microphone, so a bad read of the outputs, or a microphone
+    /// that did not resolve, costs no rebuild.
+    #[test]
+    fn a_recheck_reports_another_microphone_alone() {
+        let baseline = DeviceSnapshot {
+            output_uid: Some("speakers".into()),
+            default_output_uid: Some("speakers".into()),
+            input_uid: Some("built-in".into()),
+            output_alive: true,
+            input_alive: true,
+            sample_rate: 48_000.0,
+        };
+        let back = DeviceSnapshot {
+            input_uid: Some("usb-microphone".into()),
+            ..baseline.clone()
+        };
+        let misread = DeviceSnapshot {
+            default_output_uid: None,
+            sample_rate: 0.0,
+            ..baseline.clone()
+        };
+        let unresolved = DeviceSnapshot {
+            input_uid: None,
+            ..baseline.clone()
+        };
+        let notified = Judged::Notification(kAudioHardwarePropertyDevices);
+        let table = [
+            (notified, &baseline, None),
+            (
+                notified,
+                &back,
+                Some(DeviceChangeReason::DefaultInputChanged),
+            ),
+            (
+                notified,
+                &misread,
+                Some(DeviceChangeReason::DefaultOutputChanged),
+            ),
+            (Judged::Recheck, &baseline, None),
+            (
+                Judged::Recheck,
+                &back,
+                Some(DeviceChangeReason::DefaultInputChanged),
+            ),
+            (Judged::Recheck, &misread, None),
+            (Judged::Recheck, &unresolved, None),
+        ];
+        for (judged, resolved, reported) in table {
+            assert_eq!(
+                LiveCaptureBackend::judgement(judged, resolved, &baseline),
+                reported,
+                "{judged:?} of {resolved:?}"
+            );
+        }
     }
 }

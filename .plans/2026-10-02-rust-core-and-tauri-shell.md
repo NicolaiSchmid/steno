@@ -1126,9 +1126,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   did.
 - On the Mac, Parakeet v3 is the `CoreML` model the Swift app installs; Settings and
   `steno dev models` report its directory, and this build cannot download it.
-- The audio device list is empty off the Mac, so Settings > Recording offers only the
-  default input: WASAPI enumerates (WP10a) but the services do not read it yet, and
-  PipeWire has no list.
+- The audio device list comes from the live backend on every platform
+  (`PlatformAudioDevices`: Core Audio, the PipeWire registry, WASAPI); a failed
+  enumeration is logged, and Settings shows Swift's "Microphones could not be listed."
+  over an empty list. Rust differs: a chosen microphone the list lacks (unplugged, or a
+  UID saved on another computer) stays selected and is listed as "Microphone not
+  connected" (`recording_devices` in `steno-host`), where the Swift picker shows no
+  entry for it.
 - The pipeline's `decode` streams a lane (see "Streamed decode and mixdown" under
   Audio); the one buffer alive at a time rule holds, and the buffer is the 16 kHz lane
   (460 MB for two hours) plus a working set under a megabyte, as in Swift.
@@ -1346,6 +1350,58 @@ parity item until a plan says otherwise:
   new recording running, and its caller does not get the failed recording.
 - **`steno dev` tooling** (`capture-spike`, `aec-bench`, `audio-devices`)
   is not ported; it arrives with the CLI in WP6.
+- **A chosen microphone that is missing or cannot be opened no longer ends
+  a recording while the default input can be opened**, a deliberate parity
+  change under the rule that no recording is lost. Swift fails the start
+  with `InputDeviceUnavailable`, and a microphone lost during a recording
+  ends it in `DeviceLost` after the rebuild's four restarts. Swift keeps its
+  behaviour until the cutover.
+  - **Missing.** Every live backend (Core Audio, PipeWire, WASAPI) records
+    the default input in its place (the fallback,
+    `CaptureInput::is_fallback`), at `start` and at a rebuild's restart
+    alike (`CaptureBackend::start`), logs one warning, and names the device
+    in `CaptureStream::input`.
+  - **Connected but does not open** (still settling after it was plugged
+    in, held by another app, a link that never runs). The backend's `start`
+    fails; the session then starts the backend once more without a UID, at
+    the start and after a rebuild's last restart, and marks that input as
+    the fallback.
+  - **The gap.** A rebuild tries the default already after its first failed
+    restart when the stream it replaces was on the fallback (the default
+    worked a moment ago), or after the first restart on which the graph did
+    not run (`CaptureError::DidNotRun`, PipeWire's 3 s first-cycle
+    deadline). The gap is then one failed start long (about 3 s of wall time
+    on PipeWire), within the 10 s a gap is filled with silence
+    (`MAXIMUM_GAP`), so the restarts take nothing from the master. Waiting
+    out all four restarts would cost about 14 s on PipeWire, 4 s of it
+    missing from the master.
+  - **The warning.** The recorder sets the recording snapshot's `warning` to
+    "Recording from <name>. The microphone chosen in Settings is not
+    available." (or "from the system default microphone" when the input has
+    no name) until a rebuild returns to the chosen one, the user dismisses
+    it or the recording stops. A recording that was on the fallback at any
+    point, unless the warning was dismissed, leaves "Steno recorded from
+    <name> while the microphone chosen in Settings was not available."
+  - **The return.** Each backend watches for the chosen device (the Mac's
+    device list, PipeWire's registry, WASAPI's endpoint notifications, and
+    on the Mac and WASAPI a re-check every 5 s while on the fallback, which
+    looks only for another microphone and ignores one that did not
+    resolve); its return reads as `DefaultInputChanged`, and the rebuild
+    records it again. A fallback the session chose watches for nothing: the
+    next rebuild asks for the chosen microphone again. That rebuild comes
+    when a default device moves or one in use goes, not when the chosen one
+    is plugged in again. A return whose first restart fails ends here too,
+    so the recording can stay on the default for the rest of the meeting.
+    A Bluetooth headset gone for a second while it changes profile is
+    recorded on the default input meanwhile, and stays there when the
+    headset does not open at once; each switch costs a short gap, where
+    Swift's four failed restarts end the recording.
+  - **Settings** lists the stored device as "Microphone not connected" until
+    the user picks again or it comes back.
+- **Steno's own aggregates are not inputs.** On the Mac,
+  `AudioDevices::inputs` leaves out the private aggregates Steno's
+  captures create (`uno.schmid.steno.aggregate.*`); Swift lists them as a
+  choice while a recording runs.
 - **Call mode waits for an output client.** Swift and Rust both clock the
   tap aggregate from the system output. Without the capture permission,
   the IOProc runs only once another client opens the output
@@ -1564,14 +1620,31 @@ item to settle before the Linux release:
 - **Latencies are the ports' `SPA_PARAM_Latency` lower bounds**: the
   microphone port's capture side plus the sink's first playback port's
   playback side, in frames of the first cycle. Null devices report zero, so
-  CI checks the parsing and the arithmetic, not real numbers. Measure the
-  far-end delay on a laptop with ALSA and with a Bluetooth headset.
-- **`start` waits for the first cycle** and fails after 3 s without one;
-  the Mac's returns before any callback. Linking the sink's monitor keeps
+  CI checks the parsing and the arithmetic, not real numbers; `start` logs
+  both at `info`. No real hardware has measured them yet: see "Measuring
+  the latencies on real hardware" below.
+- **`start` waits for the first cycle**, and that is kept: the latencies
+  are counted in frames of the cycle (the quantum, 1024 or 2048 frames on
+  the private daemon depending on what else runs, and only known once the
+  stream runs), a graph that never runs (a driver that does not start)
+  fails the start with an error instead of beginning a silent recording,
+  and a link the server refuses after creating it fails the start rather
+  than the first seconds of the meeting. It fails after `START_TIMEOUT`
+  (3 s) without a cycle; a tighter bound would fail Bluetooth sinks, which
+  take 1 to 2 s to start. The Mac's returns before any callback, WASAPI's
+  once both streams started (at most 10 s). Linking the sink's monitor keeps
   the sink running, so cycles arrive with nothing playing (the Mac's call
-  mode waits for an output client). The session holds its mutex across
-  `backend.start()`, so its callers, `state()` included, wait as long: 1
-  to 2 s for a Bluetooth sink, against the Mac's 200 ms at most.
+  mode waits for an output client). The cost, measured on the private
+  daemon over the 24 starts of one run of the live tests at a load
+  average of 9: the first cycle comes 2 to 43 ms after the links, and the
+  whole `start` (connection, two roundtrips, links, first cycle,
+  latencies) takes 6 to 47 ms, 26 ms in the median; over 72 starts at a
+  load average of 18 to 27, 5 to 474 ms, 28 ms in the median, and over 114
+  at 21 to 43, 18 to 908 ms, 90 ms in the median; `start` logs its
+  length at `info`, the first cycle's wait at `debug`. The session holds its
+  mutex across `backend.start()`, so its callers, `state()` included, wait
+  as long: expected 1 to 2 s for a Bluetooth sink, against the Mac's 200 ms
+  at most.
 - **Device changes read differently.** A lost connection or stream loses
   both lanes and reads as `OutputDeviceGone` (`InputDeviceGone` in
   person). A lost link (one removed from outside included) reads as the
@@ -1695,16 +1768,114 @@ item to settle before the Linux release:
   stalled stderr holds neither the capture thread nor `stop()`. Only log
   lines are queued: the shell's `stderr_line!` and the CLI's progress
   lines still write to stderr directly.
-- **Device UIDs are `node.name`s.** A Core Audio UID saved on the Mac
-  names no Linux node, so a synced or copied settings file shows the input
-  device as unavailable and the user picks again. A virtual source (a null
-  sink with `media.class = Audio/Source/Virtual`) records from its monitor
-  output, the only output it has.
-- **No input device list and no meeting detection on Linux yet.**
-  `AudioDevices` (the picker) and the live `ProcessAudioActivitySource`
-  (the detector) are macOS-only. The PipeWire registry holds both: the
-  `Audio/Source` nodes, and the `Stream/Input/Audio` nodes with their
-  `application.process.id`. A follow-up package adds them.
+- **Device UIDs are `node.name`s.** A Core Audio UID from a synced or
+  copied settings file names no Linux node, so it records the default
+  source, as any missing chosen microphone does on every platform (see "A
+  chosen microphone that is missing or cannot be opened no longer ends a
+  recording" in the first Audio list). On the fallback, the capture's
+  snapshot follows the default as one without a UID does, and the chosen
+  node, or one of its ports, announced again counts as a change
+  (`Graph::followed_source`). A virtual source (a null sink with
+  `media.class = Audio/Source/Virtual`) records from its monitor output,
+  the only output it has.
+- **The input device list** (`capture::live::pipewire::AudioDevices`) is
+  every source the capture's UID lookup accepts (`Audio/Source` nodes,
+  virtual sources, duplex devices), named by `node.description`, else
+  `node.nick`, else its `node.name`. One short connection per call on a
+  thread of its own, one roundtrip, bounded by `START_TIMEOUT`. It does
+  not bind the `default` metadata, so no device is marked the default
+  (Settings shows none): a bind dropped before the session manager
+  answered its ping, as a list during a WirePlumber stall would leave one,
+  stops the metadata's events for every client (see "A default move can go
+  unreported"). That includes a capture recording the default source as
+  the fallback. A live test lists with WirePlumber stopped and checks a
+  capture still hears the next move. The rate reads 0 and
+  `is_running_somewhere` is not read.
+- **Meeting detection** (`detection::pipewire`, the Linux
+  `LiveProcessAudioActivity`) reads the registry from one PipeWire thread
+  per source, which starts with the first call and ends when the source
+  drops, so every `changes()` receiver shares it (unlike Windows, no thread
+  per detector start). A process holds the microphone while one of its
+  `Stream/Input/Audio` nodes is linked from a source (a duplex device's
+  monitor ports aside) and not idle, suspended or failed: the registry
+  reports links with both ends on the global, and a stream recording a
+  sink's monitor (a screen recorder) runs too without holding a
+  microphone. Left out: Steno's own capture (by its
+  `node.name`, so a `steno record` beside the app is no call), a filter's
+  or loopback's halves (`node.link-group`: an echo canceller's capture
+  stream holds the real microphone for as long as it exists) and level
+  meters (`stream.monitor`). The pid is the node's
+  `application.process.id`, else its client's, else the client's
+  `pipewire.sec.pid`; the `bundle_id` is `application.process.binary`,
+  else `application.name`. Native clients report their binary
+  (`pw-record` reports `pw-cat`); PulseAudio clients, which most call apps
+  and browsers are, report theirs through pipewire-pulse, so a call in a
+  browser tab names the browser's binary, not the call service. Swift has
+  no list of call apps (the prompt names any holder, by the app name its
+  bundle id resolves to), so none needs Linux names (the display name is
+  an open item under "First Linux release"). The pid is not always the
+  host's: a PulseAudio client's `pipewire.sec.pid` is the pulse server's
+  (measured), and a Flatpak app's `application.process.id` is its pid
+  inside the sandbox, so two sandboxed apps can share pid 2 and merge into
+  one process, and a pid is no handle into `/proc`. A lost connection ends
+  the thread; calls within `RETRY_AFTER` (5 s) answer the error, the next
+  connects afresh. One dropped while it connects ends at once.
+
+#### Measuring the latencies on real hardware
+
+No Linux machine with real audio devices has measured the capture's
+latencies; the private daemon's null devices report zero. On a Linux
+laptop with PipeWire and WirePlumber, run these once with the built-in
+speakers and microphone and once with a Bluetooth headset in its headset
+(call) profile, in a quiet room, with no other app playing or recording,
+the speakers loud enough to hear the clicks (hold the headset's earpiece
+against its microphone):
+
+1. Build once. Install Rust with rustup (the repository pins its
+   toolchain) and clone the repository. Install the build packages:
+   Debian and Ubuntu `scripts/setup-linux.sh`; Arch and Omarchy
+   `sudo pacman -S --needed base-devel clang pipewire wireplumber python`;
+   Fedora `sudo dnf install gcc gcc-c++ clang-devel pipewire-devel python3`;
+   NixOS the nix-shell the header of `scripts/setup-linux.sh` describes.
+   Then, in the checkout, `cargo build --release -p steno-cli`. The first
+   build downloads ONNX Runtime and takes several minutes.
+2. Make the device under test the default: for the headset, pick its
+   headset profile in the desktop's sound settings (Configuration or
+   Profile: "Headset"), then check `wpctl status`. The default sink and
+   source carry a `*`; if the `*` is not on the device under test,
+   `wpctl set-default <id>` with the id `wpctl status` shows. The
+   capture's system lane and `pw-play` both use the default sink.
+3. Note the versions and devices: `pipewire --version`,
+   `wireplumber --version`, `wpctl status` and
+   `target/release/steno dev audio-devices` (the inputs with their UIDs).
+4. Write a click track, one 1 ms click a second for ten seconds:
+   `python3 -c 'import wave,struct; w=wave.open("/tmp/click.wav","wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(48000); w.writeframes(b"".join(struct.pack("<h", 20000 if i % 48000 < 48 else 0) for i in range(480000)))'`
+5. Record a call and play the clicks two seconds into it, so the first
+   click reaches both lanes, then read the log without the level lines:
+   `RUST_LOG=steno_audio=debug target/release/steno dev capture-spike --lanes call --seconds 8 --out /tmp/steno-latency > /tmp/steno-latency.log 2>&1 & sleep 2; pw-play /tmp/click.wav; wait; grep -v dBFS /tmp/steno-latency.log`
+6. Note from the log: the `info` line "the PipeWire capture runs N ms
+   after start: input latency A frames, output latency B frames", the
+   `debug` line "the first cycle, C frames, came D ms after linking", and
+   the `onset mic` and `onset system` lines. The round trip of a click
+   through the speakers and the microphone is `onset mic` minus
+   `onset system`; the reported latency is (A + B) / 48 000 s. The echo
+   canceller needs the reported one below the round trip, with the room's
+   share (a few ms) and the Speex tail (200 ms) covering the rest.
+   Check the onsets before using them: each is the first sample above
+   0.01 anywhere in its lane, so a pop when the device opens, a
+   notification or music gives a wrong or negative round trip. `onset
+   system` should read about 2.0 s and `onset mic` a little later (a few
+   ms on built-in devices, up to a few hundred ms over Bluetooth). An
+   `onset mic` of -1 means the microphone did not hear the clicks: louder,
+   or closer. Otherwise close other audio apps and run step 5 again.
+7. Repeat step 5 three times per device, noting step 6's numbers after
+   each run (every run overwrites `/tmp/steno-latency.log`), and note the
+   spread.
+
+Add the numbers, with the device names and versions, under this heading
+in a pull request, which also deletes the latency item under "First Linux
+release" in "Open after the port". They settle whether the lower bounds
+are right on ALSA and Bluetooth.
 
 ### Handover
 
@@ -2254,16 +2425,27 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   services (WP6b)". Found: #185, #203.
 - **First Linux release.** The PipeWire backend's differences from the Mac's: the
   system lane is the whole default sink (Steno's own output included; leaving it out
-  was weighed and not done, see the note), a Mac device
-  UID names no Linux node, `start` waits for the first cycle, there is no input device
-  list and no meeting detection, and the latencies are unmeasured on real hardware.
+  was weighed and not done, see the note).
   Where: the Linux items under "Audio". Found: #166, #176.
+- **First Linux release.** The capture's latencies are unmeasured on real hardware:
+  Nicolai runs "Measuring the latencies on real hardware" in the Linux list under
+  "Audio" on a laptop with ALSA and with a Bluetooth headset. Found: #176.
 - **First Linux release.** A default move can go unreported on PipeWire before 1.6.9
   (pipewire#5445, fixed upstream by 06de0ed2 on `master` and b784720b on `1.6`; seen
   with 1.6.5 and WirePlumber 0.5.14). Check the versions the release's distributions
   ship; for one on 1.4, file the backport request whose text is ready (not filed); on
   1.0 or 1.2 only the distribution's own package can carry the fix. Where: "A default move can go
   unreported" in the Linux list under "Audio". Found: #197, #201.
+- **First Linux release.** Meeting detection on PipeWire names a holder by its binary
+  (`application.process.binary`, else `application.name`), so WP9b's prompt needs a
+  display name for it, from the app's `.desktop` entry or `application.name`. A
+  Flatpak app's pid is its pid inside the sandbox, so two sandboxed apps can merge
+  into one holder; check with a Flatpak browser on a real desktop, where
+  `pipewire.access.portal.app_id` may name the app better. `MeetingDetector::start`
+  fails while PipeWire is unreachable (its first snapshot answers the error), so the
+  services (the controller of S2 in `.plans/2026-10-07-stable-promotion.md`) must
+  retry it when PipeWire comes up after Steno (autostart at login). Where: "Meeting
+  detection" in the Linux list under "Audio". Found: #222.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
@@ -2289,10 +2471,9 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   #185.
 - **First Windows release.** No Windows machine has run the WASAPI backend: the
   `--ignored` tests in `crates/steno-audio/tests/live_windows.rs`, a real call over
-  process loopback, a device switch while recording, the two-clock slip rate and
-  detection by executable name; and the services do not read the WASAPI device list
-  yet, so Settings > Recording offers only the default input. Where: the Windows list
-  under "Audio". Found: #175, #186.
+  process loopback, a device switch while recording, the two-clock slip rate,
+  detection by executable name and the device list Settings > Recording now shows.
+  Where: the Windows list under "Audio". Found: #175, #186.
 - **First Windows release.** The `.msi` and NSIS installers are not code-signed (no
   certificate), so SmartScreen asks before the first install. Where:
   `.github/workflows/desktop-release.yml`, the WP9a paragraph. Found: #184.
@@ -2445,6 +2626,7 @@ PR off `main`.
 | A first announce, one that finds no receipt in memory or the store, discards every inbox file of the recording id before it opens its own, so an old verified file is never admitted unhashed; Swift's announce answers a failed receipt read with 500 (`steno-handover`, Swift core) | `fix/handover-first-announce-discard` | #239 | open |
 | The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
+| Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
@@ -2516,7 +2698,8 @@ empty database.
 `process` runs the Swift stage order, with progress events in core
 (`MeetingEvent`, `ProcessingProgress`), learned stage rates, both intakes, the
 retention sweep and the store-backed cosine memory; `steno` has every Swift command
-(`capture-spike` and `audio-devices` need the Mac's live backend); one `build()`
+(`capture-spike` and `audio-devices` run on the Mac and on Linux, `audio-devices`
+on Windows too); one `build()`
 assembles the graph; the shell's `fixture-host` is opt-in. Parakeet's ONNX engine ran
 in the app's process until #183 moved it into the speech sidecar; the
 `CoreML` engine leaves `language` unset (#163), and
