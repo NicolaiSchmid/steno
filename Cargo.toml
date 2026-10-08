@@ -130,7 +130,7 @@ objc2-core-audio = { version = "0.3", default-features = false, features = ["std
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFBase", "CFDictionary", "CFString"] }
 # Without `unsafe`: on macOS the plain `fsync` the recording writer falls
-# back to when a filesystem refuses `F_FULLFSYNC` (a WebDAV share answers
+# back to when a file system refuses `F_FULLFSYNC` (a WebDAV share answers
 # ENOTTY), and on Linux and macOS the `statfs` the pipeline reads a folder's
 # file system with. Already in the lock (`tempfile` uses it).
 rustix = { version = "1.1", features = ["fs"] }

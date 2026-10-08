@@ -1,4 +1,4 @@
-//! The file system a folder is on, on Linux and macOS, for
+//! On Linux and macOS, the file system a folder is on, for
 //! [`super::may_lose_recent_writes`]: a server that acknowledges a flush
 //! without writing it (Samba with `strict sync = no`, some NAS firmware)
 //! can lose in a power cut a recording the durable writes synced, so
@@ -87,7 +87,7 @@ const AFS_FS_MAGIC: u32 = 0x6B41_4653;
 const V9FS_MAGIC: u32 = 0x0102_1997;
 /// `LL_SUPER_MAGIC`, Lustre.
 #[cfg(any(target_os = "linux", test))]
-const LUSTRE_SUPER_MAGIC: u32 = 0x0BD0_0BD0;
+const LL_SUPER_MAGIC: u32 = 0x0BD0_0BD0;
 /// `GPFS_SUPER_MAGIC`, IBM Storage Scale.
 #[cfg(any(target_os = "linux", test))]
 const GPFS_SUPER_MAGIC: u32 = 0x4750_4653;
@@ -119,7 +119,7 @@ const NETWORK_MAGIC_NUMBERS: [u32; 14] = [
     AFS_SUPER_MAGIC,
     AFS_FS_MAGIC,
     V9FS_MAGIC,
-    LUSTRE_SUPER_MAGIC,
+    LL_SUPER_MAGIC,
     GPFS_SUPER_MAGIC,
     CODA_SUPER_MAGIC,
     NCP_SUPER_MAGIC,
@@ -129,8 +129,8 @@ const NETWORK_MAGIC_NUMBERS: [u32; 14] = [
 
 /// The FUSE types in `/proc/self/mountinfo` that reach another machine:
 /// sshfs, rclone, GNOME's `gvfsd-fuse` and KDE's `kio-fuse`, under which
-/// the file managers mount SMB, SFTP and `WebDAV` shares. Then the Gluster
-/// and Ceph clients, the S3 and Cloud Storage mounts (s3fs, gcsfuse,
+/// the file managers mount SMB, SFTP and `WebDAV` shares. The list also
+/// holds the Gluster and Ceph clients, the S3 and Cloud Storage mounts (s3fs, gcsfuse,
 /// mountpoint-s3, `JuiceFS`), curlftpfs, smbnetfs, and `virtiofs`, a share
 /// from a VM host. A bare `fuse` mount is decided by its source instead
 /// (`is_a_linux_network_file_system`).
@@ -164,7 +164,7 @@ struct Mount {
 /// a network mount: one of [`NETWORK_MAGIC_NUMBERS`], or a FUSE mount
 /// (`fuse_mount`, read only for FUSE) whose type is one of
 /// [`REMOTE_FUSE_TYPES`], or whose type is a bare `fuse` and whose source
-/// starts `http://` or `https://`, as davfs2 mounts a `WebDAV` share.
+/// starts with `http://` or `https://`, as davfs2 mounts a `WebDAV` share.
 #[cfg(any(target_os = "linux", test))]
 fn is_a_linux_network_file_system(magic: u32, fuse_mount: impl FnOnce() -> Option<Mount>) -> bool {
     if magic == FUSE_SUPER_MAGIC {
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(nearest_existing(&deeper), Some(dir.path()));
     }
 
-    /// NFS, the three SMB clients and the other network file systems warn;
+    /// NFS, the SMB file systems and the other network file systems warn;
     /// local file systems do not.
     #[test]
     fn linux_network_file_systems_warn_and_local_ones_do_not() {
@@ -278,7 +278,7 @@ mod tests {
             AFS_SUPER_MAGIC,
             AFS_FS_MAGIC,
             V9FS_MAGIC,
-            LUSTRE_SUPER_MAGIC,
+            LL_SUPER_MAGIC,
             GPFS_SUPER_MAGIC,
             CODA_SUPER_MAGIC,
             NCP_SUPER_MAGIC,
@@ -287,8 +287,7 @@ mod tests {
         ] {
             assert!(is_a_linux_network_file_system(magic, unread), "{magic:#x}");
         }
-        // ext4, btrfs, xfs, tmpfs, overlayfs and balloon-kvm-fs
-        // (`0x13661366`), a local one.
+        // Local: ext4, btrfs, xfs, tmpfs, overlayfs and balloon-kvm-fs.
         for magic in [
             0xEF53,
             0x9123_683E,
@@ -320,8 +319,8 @@ mod tests {
     }
 
     /// A FUSE mount warns only when its type is a remote one or it is a bare
-    /// `fuse` mount of an `http(s)://` source, and not when the mount cannot
-    /// be read.
+    /// `fuse` mount of an `http://` or `https://` source, and not when the
+    /// mount cannot be read.
     #[test]
     fn a_linux_fuse_mount_warns_only_when_its_type_or_source_is_remote() {
         for name in [
@@ -412,7 +411,7 @@ mod tests {
     /// SMB, NFS, AFP, `WebDAV` and macFUSE warn on macOS even with
     /// `MNT_LOCAL` set; APFS, HFS+, exFAT, FAT and devfs with it do not.
     #[test]
-    fn macos_network_file_system_names_warn() {
+    fn macos_network_file_system_names_warn_and_local_ones_do_not() {
         for name in [
             "smbfs",
             "nfs",
@@ -439,10 +438,10 @@ mod tests {
         for name in ["apfs", "unlisted"] {
             assert!(is_a_macos_network_file_system(name, trigger), "{name}");
         }
-        // APFS volumes as read on the same host: `MNT_LOCAL` set. The data
-        // volume's flags hold neither `0x1` nor `0x4000`, so a wrong
-        // `MNT_LOCAL` fails here on every platform.
+        // APFS volumes as read on the same host: `MNT_LOCAL` set.
         assert!(!is_a_macos_network_file_system("apfs", 0x4480_D001));
+        // The data volume's flags hold neither `0x1` nor `0x4000`, so a
+        // wrong `MNT_LOCAL` fails here on every platform.
         assert!(!is_a_macos_network_file_system("apfs", 0x0490_9080));
     }
 
