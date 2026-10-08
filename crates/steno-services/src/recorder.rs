@@ -712,6 +712,21 @@ impl CaptureRecorder {
         });
     }
 
+    /// Notes `folder` as the one meeting `meeting_id` is recorded into,
+    /// before its row is written, and among the known folders
+    /// ([`crate::audio_folders`]). A failure is logged and the recording
+    /// goes on: recovery still looks in the settings' folder and every
+    /// asset's.
+    fn record_audio_folder(&self, meeting_id: Uuid, folder: &Path) {
+        self.remember_audio_folder(folder);
+        if let Err(error) =
+            crate::audio_folders::record(&self.support_directory, meeting_id, folder)
+        {
+            tracing::warn!(%meeting_id, "a recording's folder could not be recorded");
+            tracing::debug!(%meeting_id, %error, "recording folder not written");
+        }
+    }
+
     /// The capture configuration of a recording in `mode`, from the
     /// settings, and its recordings folder; the error says why not in
     /// plain words, for after [`COULD_NOT_START`].
@@ -1346,23 +1361,6 @@ impl Recorder for CaptureRecorder {
         if let Err(error) = crate::audio_folders::forget(&self.support_directory, &[meeting_id]) {
             // The next launch forgets an entry whose meeting moved on.
             tracing::debug!(%meeting_id, %error, "a recording folder not forgotten");
-        }
-    }
-}
-
-impl CaptureRecorder {
-    /// Notes `folder` as the one meeting `meeting_id` is recorded into,
-    /// before its row is written, and among the known folders
-    /// ([`crate::audio_folders`]). A failure is logged and the recording
-    /// goes on: recovery still looks in the settings' folder and every
-    /// asset's.
-    fn record_audio_folder(&self, meeting_id: Uuid, folder: &Path) {
-        self.remember_audio_folder(folder);
-        if let Err(error) =
-            crate::audio_folders::record(&self.support_directory, meeting_id, folder)
-        {
-            tracing::warn!(%meeting_id, "a recording's folder could not be recorded");
-            tracing::debug!(%meeting_id, %error, "recording folder not written");
         }
     }
 }
