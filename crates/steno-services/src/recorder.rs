@@ -44,7 +44,7 @@ use uuid::Uuid;
 
 use crate::block_on;
 use crate::pipeline::CurrentPipeline;
-use crate::recovery::RecoveryError;
+use crate::recovery::{RecoveryError, Unrecoverable};
 
 /// Builds a capture session for a configuration; the product passes
 /// `CaptureSession::new`, tests a synthetic backend.
@@ -300,21 +300,41 @@ const FILES_NOT_FINISHED: &str =
 /// The status line of a stop whose meeting could not be stored.
 const MEETING_NOT_STORED: &str = "Recording could not be saved: Steno could not store the meeting.";
 
+/// Why a stop did not save its recording.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unsaved {
+    /// The recording stays on disk and its meeting `recording`, for the
+    /// next launch to recover ([`KEPT_FOR_THE_NEXT_LAUNCH`]).
+    Kept,
+    /// The meeting failed or moved on; the status line says how.
+    Settled(&'static str),
+}
+
+impl Unsaved {
+    /// The status line.
+    fn message(self) -> &'static str {
+        match self {
+            Unsaved::Kept => KEPT_FOR_THE_NEXT_LAUNCH,
+            Unsaved::Settled(message) => message,
+        }
+    }
+}
+
 /// What a stop says when the meeting could not be stored. A meeting
 /// another process moved on is not this recorder's to keep; otherwise the
 /// recording stays on disk and the meeting `recording`, and the next
 /// launch recovers it. Rust only: Swift's `complete` marked the meeting
 /// failed without its asset.
-fn not_saved(meeting_id: Uuid, error: &LocalRecordingIntakeError) -> &'static str {
+fn not_saved(meeting_id: Uuid, error: &LocalRecordingIntakeError) -> Unsaved {
     log_not_saved(meeting_id, intake_kind(error));
     if matches!(
         error,
         LocalRecordingIntakeError::NotRecording(..)
             | LocalRecordingIntakeError::Store(steno_core::StoreError::MeetingNotFound(_))
     ) {
-        MEETING_NOT_STORED
+        Unsaved::Settled(MEETING_NOT_STORED)
     } else {
-        KEPT_FOR_THE_NEXT_LAUNCH
+        Unsaved::Kept
     }
 }
 
@@ -1052,11 +1072,11 @@ impl CaptureRecorder {
                 }
             }
             Err(failure) => self
-                .recover_failed_stop(&intake, &active, &failure)
+                .recover_failed_stop(&intake, &active, &failure, &reason)
                 .map(|()| (Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error)),
         };
         // Every outcome but a meeting kept for the next launch settles it.
-        if !matches!(outcome, Err(KEPT_FOR_THE_NEXT_LAUNCH)) {
+        if !matches!(outcome, Err(Unsaved::Kept)) {
             self.forget_recording(meeting_id);
         }
         drop(active.session);
@@ -1088,7 +1108,7 @@ impl CaptureRecorder {
                 inner.status.warning = warning;
                 inner.status.error = ended;
             }
-            Err(error) => inner.status.error = Some(error.to_owned()),
+            Err(unsaved) => inner.status.error = Some(unsaved.message().to_owned()),
         }
         drop(inner);
         std::mem::forget(unwinding);
@@ -1097,17 +1117,21 @@ impl CaptureRecorder {
 
     /// A stop whose session failed and took the asset with it
     /// ([`CaptureSession::stop`]): what the writer wrote may still be on
-    /// disk, and is recovered as an interrupted recording is at launch;
-    /// else the meeting fails. The error is the status line. Rust only:
-    /// Swift's `stop` failed the meeting.
+    /// disk, and is recovered as an interrupted recording is at launch.
+    /// The session created the master when it started, so one that cannot
+    /// be found now, or a folder that cannot be read, keeps the meeting for
+    /// the next launch: a volume unmounted under its mount point leaves an
+    /// empty folder there. Else the meeting fails. Rust only: Swift's
+    /// `stop` failed the meeting.
     fn recover_failed_stop(
         &self,
         intake: &LocalRecordingIntake,
         active: &Active,
         failure: &CaptureError,
-    ) -> Result<(), &'static str> {
+        reason: &RecordingEndReason,
+    ) -> Result<(), Unsaved> {
         let meeting_id = active.meeting_id;
-        log_not_saved(meeting_id, failure_kind(failure));
+        log_failure(meeting_id, failure, reason);
         let recovered = block_on(
             &self.runtime,
             crate::recovery::recover(
@@ -1123,13 +1147,16 @@ impl CaptureRecorder {
                 Ok(())
             }
             Err(RecoveryError::NotSaved(error)) => Err(not_saved(meeting_id, &error)),
-            Err(RecoveryError::Unreachable) => {
-                tracing::warn!(%meeting_id, "a recording whose capture failed is left for the next launch: its folder cannot be read now");
-                Err(KEPT_FOR_THE_NEXT_LAUNCH)
+            Err(
+                RecoveryError::Unreachable | RecoveryError::Unrecoverable(Unrecoverable::NoMaster),
+            ) => {
+                tracing::warn!(%meeting_id, "a recording whose capture failed is left for the next launch: its master cannot be found now");
+                Err(Unsaved::Kept)
             }
             Err(RecoveryError::Unrecoverable(_)) => {
+                log_not_saved(meeting_id, failure_kind(failure));
                 let _ = intake.fail(meeting_id, FILES_NOT_FINISHED);
-                Err(FILES_NOT_FINISHED)
+                Err(Unsaved::Settled(FILES_NOT_FINISHED))
             }
         }
     }
@@ -2347,6 +2374,41 @@ mod tests {
                 .sidecars_16k
                 .contains_key(&steno_core::AudioLane::Mixed)
         );
+    }
+
+    /// A stop whose capture failed and whose master cannot be found now
+    /// keeps the meeting for the next launch, with its folder recorded,
+    /// rather than failing it: the audio folder gone (an unmounted volume),
+    /// or only the meeting's folder in it (a volume unmounted under a
+    /// mount point that stays, empty).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_stop_whose_master_cannot_be_found_is_kept() {
+        for unmount_the_audio_folder in [true, false] {
+            let died = Arc::new(AtomicBool::new(false));
+            let harness = harness_capturing(
+                models_with(&[]),
+                "parakeet-v3",
+                platform_rule(SpeechSettings::default()),
+                dying_capture(20, died.clone()),
+            );
+            start(&harness.recorder).await;
+            let meeting_id = harness.recorder.status().meeting_id.unwrap();
+            eventually("the writer died", || died.load(Ordering::SeqCst)).await;
+            let audio = harness.dir.path().join("audio");
+            let unmounted = harness.dir.path().join("unmounted");
+            let meeting_folder = steno_core::RecordingLayout::new(&audio, meeting_id).directory;
+            // Tried until the dying writer closed its files (Windows).
+            eventually("the folder went", || {
+                if unmount_the_audio_folder {
+                    std::fs::rename(&audio, &unmounted).is_ok()
+                } else {
+                    std::fs::remove_dir_all(&meeting_folder).is_ok()
+                }
+            })
+            .await;
+            stop(&harness.recorder).await;
+            assert_kept(&harness, meeting_id, &audio);
+        }
     }
 
     /// The recorder notes a recording's folder before the master exists:
