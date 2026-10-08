@@ -373,9 +373,12 @@ pub fn dependencies(
     })
 }
 
-/// The diarizer `steno process --engine` runs over `speech`. An explicit
-/// command run in a terminal, so it may download the diarizer's models on
-/// first use (`Install::Allowed`), also once the app's pipeline may not.
+/// The diarizer `steno process --engine` runs over `speech`. It stays on
+/// `Install::Allowed`: a user who runs an explicit command in a terminal
+/// asked for the work and sees its output, so it may download the
+/// diarizer's models on first use. The app's pipelines never do
+/// (`Install::Never` in `steno_services::speech::SpeechEngines`), and
+/// this wiring is built here, not shared with them.
 fn process_diarizer(speech: &SpeechSetup) -> Arc<dyn steno_core::Diarizer> {
     steno_services::speech::diarizer(speech, steno_diarize::Install::Allowed)
 }

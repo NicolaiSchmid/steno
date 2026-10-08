@@ -27,6 +27,7 @@ use steno_core::{
     AudioBuffer16k, DiarizationResult, Diarizer, LanguageTag, PipelineStage, RawSegment,
     SpeechEngine, async_trait,
 };
+use steno_diarize::DiarizeError;
 use steno_host::services::{ModelNotice, SpeechModels};
 use steno_host::speech::ModelAsset;
 use steno_pipeline::PipelineFailure;
@@ -47,15 +48,20 @@ fn check(installed: &InstalledCheck, stage: PipelineStage) -> BoundaryResult<()>
 }
 
 /// An error of the boundary behind the gate as the refusal for `stage`
-/// when it is the speech sidecar's `NotInstalled` (its install turned
-/// off), or when `installed` no longer holds: the models went between the
-/// gate's check and the load (Remove in Settings), and the `CoreML`
-/// engine's or the diarizer's failed load says so in its own words. Any
-/// other error as it is.
+/// when it says the models are not installed: the speech sidecar's
+/// `NotInstalled` (its install turned off) or the diarizer's (it never
+/// downloads, and deletes a file that fails its checksum after a failed
+/// load), as the boundary boxes it; or when `installed` no longer holds:
+/// the models went between the gate's check and the load (Remove in
+/// Settings), and the `CoreML` engine's failed load says so in its own
+/// words. Any other error as it is.
 fn refusing(installed: &InstalledCheck, stage: PipelineStage, error: BoxError) -> BoxError {
     let not_installed = matches!(
         error.downcast_ref::<SpeechError>(),
         Some(SpeechError::NotInstalled { .. })
+    ) || matches!(
+        error.downcast_ref::<DiarizeError>(),
+        Some(DiarizeError::NotInstalled { .. })
     );
     if not_installed || !installed() {
         Box::new(PipelineFailure::models_missing(stage))
@@ -298,6 +304,30 @@ mod tests {
         let passed = refusing(&installed, PipelineStage::Transcribe, other);
         assert_eq!(refusal(&passed), None);
         assert_eq!(passed.to_string(), "the child died");
+    }
+
+    /// The diarizer's `NotInstalled` (it never downloads, or its load
+    /// deleted a file that failed its checksum), boxed as `ModelDiarizer`
+    /// returns it, is the refusal for the diarize stage while the gate's
+    /// check still holds, so the pipeline's diarizer fallback passes it
+    /// on and the meeting waits.
+    #[test]
+    fn a_not_installed_from_the_diarizer_is_the_refusal() {
+        let (_, installed) = flag(true);
+        let not_installed: BoxError = Box::new(DiarizeError::NotInstalled {
+            asset: steno_diarize::models::ASSET_ID.to_owned(),
+            directory: "/m/onnx/diarization".into(),
+            missing: vec![steno_diarize::models::EMBEDDING_FILE.to_owned()],
+        });
+        assert_eq!(
+            refusal(&refusing(&installed, PipelineStage::Diarize, not_installed)),
+            Some(PipelineStage::Diarize)
+        );
+        let other: BoxError = Box::new(DiarizeError::metadata("a shape"));
+        assert_eq!(
+            refusal(&refusing(&installed, PipelineStage::Diarize, other)),
+            None
+        );
     }
 
     /// A speech engine or diarizer whose load fails because its models

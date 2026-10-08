@@ -49,6 +49,12 @@ impl ModelAsset {
         }
     }
 
+    /// The licence of the model behind the asset. The diarizer's is that
+    /// of the two ONNX models every Rust platform runs, pyannote
+    /// segmentation 3.0 (MIT) and `WeSpeaker` ResNet34-LM (CC-BY-4.0, from
+    /// its `VoxCeleb` training data): `steno_diarize::models::LICENCE`,
+    /// which a `steno-services` test pins it to. Swift's line named the
+    /// Apache-2.0 of its `CoreML` diarizer's upstream.
     #[must_use]
     pub fn licence(self) -> &'static str {
         match self {
@@ -56,7 +62,7 @@ impl ModelAsset {
                 "CC-BY-4.0"
             }
             ModelAsset::WhisperLargeV3Turbo => "MIT (WhisperKit), OpenAI weights",
-            ModelAsset::OfflineDiarizer => "Apache-2.0 (pyannote and WeSpeaker upstream)",
+            ModelAsset::OfflineDiarizer => "MIT AND CC-BY-4.0",
         }
     }
 

@@ -311,12 +311,12 @@ impl SpeechEngines {
     /// pipeline run downloads a model ([`crate::model_gate`]).
     #[must_use]
     pub fn new(setup: SpeechSetup) -> Self {
-        let models = Arc::new(ModelStoreSpeechModels::new(&setup));
-        let speech = models.clone();
+        let speech = ModelStoreSpeechModels::new(&setup);
+        let store = setup.model_store();
         Self::gated(
             setup,
             Arc::new(move |runtime| speech.installed_on(runtime)),
-            Arc::new(move || models.is_installed(ModelAsset::OfflineDiarizer)),
+            Arc::new(move || steno_diarize::models::installed(&store).is_ok()),
         )
     }
 
@@ -346,9 +346,11 @@ impl SpeechEngines {
     /// Engines from `build` instead, for the tests.
     pub(crate) fn with_builder(setup: SpeechSetup, build: BuildEngine) -> Self {
         SpeechEngines {
-            // S1 (`.plans/2026-10-07-stable-promotion.md`) flips this to
-            // `Install::Never` together with the pipeline's models-missing gate.
-            diarizer: diarizer(&setup, Install::Allowed),
+            // Never downloads: a missing file is `NotInstalled`, which the
+            // gate takes as the models-missing refusal, so the meeting waits
+            // with its audio instead of ending with one room speaker (S1 of
+            // `.plans/2026-10-07-stable-promotion.md`).
+            diarizer: diarizer(&setup, Install::Never),
             setup,
             build,
             kept: std::sync::Mutex::default(),
@@ -518,9 +520,8 @@ impl SpeechEngine for LanguageTaggingEngine {
 /// `<models directory>/onnx/diarization/` on first use. `install` says
 /// whether a missing file is downloaded first (`Install::Allowed`) or
 /// fails the call with `DiarizeError::NotInstalled` and no request
-/// (`Install::Never`, for a pipeline once it checks for missing models
-/// itself; `steno_diarize::models::installed` is the same check without a
-/// load). A load that fails fails that call only; the next call tries again,
+/// (`Install::Never`, the app's pipelines through [`SpeechEngines`];
+/// `steno_diarize::models::installed` is the same check without a load). A load that fails fails that call only; the next call tries again,
 /// resuming a cut-off download where downloads are allowed.
 #[must_use]
 pub fn diarizer(setup: &SpeechSetup, install: Install) -> Arc<dyn Diarizer> {
@@ -692,7 +693,7 @@ impl SpeechModels for ModelStoreSpeechModels {
     fn display_name(&self, asset: ModelAsset) -> &'static str {
         match asset {
             ModelAsset::ParakeetV3 if !self.parakeet_on_coreml() => "Parakeet TDT 0.6B v3 (fp32)",
-            ModelAsset::OfflineDiarizer => ONNX_DIARIZER_NAME,
+            ModelAsset::OfflineDiarizer => steno_diarize::models::DISPLAY_NAME,
             other => other.display_name(),
         }
     }
@@ -728,8 +729,9 @@ impl SpeechModels for ModelStoreSpeechModels {
         }
     }
 
-    /// Where the speech sidecar runs Parakeet v3, the fp32 export's size
-    /// from its manifest, not the `CoreML` build's.
+    /// The manifest size of the model behind the row: the `CoreML`
+    /// Parakeet's or, where the speech sidecar runs it, the fp32 export's,
+    /// and the diarizer's two ONNX files.
     fn expected_bytes(&self, asset: ModelAsset) -> i64 {
         let bytes = match asset {
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => {
@@ -743,16 +745,10 @@ impl SpeechModels for ModelStoreSpeechModels {
     }
 }
 
-/// The name of the diarizer every platform runs, the two ONNX models
-/// rather than the Swift app's `CoreML` one, as `steno models` lists it
-/// and the acknowledgements give it; Settings keeps the row's title
-/// "Speaker recognition".
-const ONNX_DIARIZER_NAME: &str =
-    "Speaker diarization (pyannote segmentation 3.0, WeSpeaker ResNet34-LM)";
-
 /// The diarizer's two acknowledgement lines, `(name with attribution,
 /// licence, source)`: the models `steno_diarize::models` fetches,
-/// converted to ONNX from their originals.
+/// converted to ONNX from their originals, whose licences
+/// `steno_diarize::models::LICENCE` joins (a test pins it).
 const ONNX_DIARIZER_NOTICES: [(&str, &str, &str); 2] = [
     (
         "pyannote segmentation 3.0 by pyannote.audio, converted to ONNX",
@@ -1154,23 +1150,51 @@ mod tests {
         assert!(!old_part.exists(), "the earlier store's partial is deleted");
     }
 
-    /// Until the pipeline checks for missing models itself, the diarizer
-    /// every pipeline runs may download them: over an empty models
-    /// directory its `prepare` asks the mirror. S1 inverts this together
-    /// with its models-missing gate.
+    /// The diarizer every pipeline runs never downloads its models: past
+    /// a gate that lets everything through, over an empty models directory
+    /// and a mirror, its `prepare` is the models-missing refusal for the
+    /// diarize stage (`DiarizeError::NotInstalled` from `Install::Never`)
+    /// and the mirror gets no request.
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_apps_diarizer_may_download_its_models_until_the_gate() {
+    async fn the_apps_diarizer_never_downloads_its_models() {
         let dir = tempfile::tempdir().unwrap();
         let (mirror, requests) = counting_junk_mirror(0);
-        let engines = SpeechEngines::new(testing::setup(
-            dir.path(),
-            SpeechSettings {
-                models_mirror: Some(mirror),
-                ..SpeechSettings::default()
-            },
-        ));
-        assert!(engines.diarizer().prepare().await.is_err());
-        assert!(requests.load(std::sync::atomic::Ordering::SeqCst) > 0);
+        let engines = SpeechEngines::gated(
+            testing::setup(
+                dir.path(),
+                SpeechSettings {
+                    models_mirror: Some(mirror),
+                    ..SpeechSettings::default()
+                },
+            ),
+            Arc::new(|_| true),
+            Arc::new(|| true),
+        );
+        let error = engines.diarizer().prepare().await.unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<steno_pipeline::PipelineFailure>(),
+            Some(&steno_pipeline::PipelineFailure::models_missing(
+                steno_core::PipelineStage::Diarize
+            )),
+            "{error}"
+        );
+        assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// The diarizer's acknowledgement lines carry the licences
+    /// `steno_diarize::models::LICENCE` joins, and the host's default line
+    /// gives that licence too.
+    #[test]
+    fn the_diarizer_notices_carry_the_models_licences() {
+        let licences: Vec<&str> = ONNX_DIARIZER_NOTICES
+            .iter()
+            .map(|(_, licence, _)| *licence)
+            .collect();
+        assert_eq!(licences.join(" AND "), steno_diarize::models::LICENCE);
+        assert_eq!(
+            ModelAsset::OfflineDiarizer.licence(),
+            steno_diarize::models::LICENCE
+        );
     }
 
     /// A mirror on 127.0.0.1 that answers every request with `len` bytes
