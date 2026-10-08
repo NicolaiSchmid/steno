@@ -308,7 +308,10 @@ pub fn turns(
 }
 
 /// One delivery as the footer words it: the destination, then "Exported
-/// 10:02", "Pending" or "Failed: reason". Swift: `MainWindowSnapshots.deliveryLine`.
+/// 10:02", "Pending" or "Failed: reason", and after an export each warning
+/// its receipt carries ("The audio was already removed, so the export has
+/// no audio file"). Swift: `MainWindowSnapshots.deliveryLine`; the
+/// warnings are Rust only.
 #[must_use]
 pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
     let status = match &delivery.status {
@@ -319,7 +322,16 @@ pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
         ),
         DeliveryStatus::Failed(message) => format!("Failed: {message}"),
     };
-    format!("{} · {status}", destination_display_name(delivery))
+    let warnings = match (&delivery.status, &delivery.receipt) {
+        (DeliveryStatus::Delivered, Some(receipt)) => receipt.warnings.as_slice(),
+        _ => &[],
+    };
+    let mut line = format!("{} · {status}", destination_display_name(delivery));
+    for warning in warnings {
+        line.push_str(" · ");
+        line.push_str(warning);
+    }
+    line
 }
 
 fn export_snapshot(detail: &MeetingDetailViewModel, zone: FixedOffset) -> DetailExport {
