@@ -10,7 +10,7 @@
 //! and the stream then reports that rate for the processing thread to
 //! convert.
 //! A chosen device that is not connected records the default input
-//! instead ([`chosen_or_default_input`]), and the device list is watched so
+//! instead (`chosen_or_default_input`), and the device list is watched so
 //! the rebuild returns to it once it is back; Swift fails the start with
 //! `InputDeviceUnavailable` there (a deliberate parity change: no recording
 //! is lost to a missing microphone).
@@ -26,8 +26,10 @@
 //! ([`DeviceSnapshot::input_difference`]). Nothing changed means the burst
 //! is logged and ignored; otherwise the sink gets one
 //! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
-//! `start` again. Nothing here runs on the IO thread except [`io_proc`],
-//! which only calls [`deliver`].
+//! `start` again. Nothing here runs on the IO thread except `io_proc`,
+//! which only calls [`deliver`] and marks the first callback's host time
+//! ([`FirstCallback`]); `stop()` logs that callback's offset from the start
+//! at `info`, so a call recording shows whether the IOProc ran at once.
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
 //! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
@@ -84,7 +86,8 @@ use crate::capture::{
     LaneSource, NominalSampleRate, StreamLayout,
 };
 use crate::realtime::{
-    BufferView, LaneFrameSink, MAX_BUFFERS, RateConverter, deliver, silence_output,
+    BufferView, FirstCallback, LaneFrameSink, MAX_BUFFERS, RateConverter, deliver,
+    first_callback_line, silence_output,
 };
 
 /// Shared with the IOProc through a raw pointer; boxed so it never moves,
@@ -92,14 +95,16 @@ use crate::realtime::{
 struct CallbackContext {
     sink: Arc<LaneFrameSink>,
     sources: Vec<LaneSource>,
+    first_callback: FirstCallback,
 }
 
 /// The IOProc. Builds a stack array of [`BufferView`]s from the HAL's
-/// buffer list and hands it to [`deliver`]: no allocation, no lock, no
-/// syscall; behind [`hal::abort_on_panic`].
+/// buffer list and hands it to [`deliver`], after marking the first
+/// callback's host time: no allocation, no lock, no syscall; behind
+/// [`hal::abort_on_panic`].
 unsafe extern "C-unwind" fn io_proc(
     _device: Id,
-    _now: NonNull<AudioTimeStamp>,
+    now: NonNull<AudioTimeStamp>,
     input: NonNull<AudioBufferList>,
     _input_time: NonNull<AudioTimeStamp>,
     _output: NonNull<AudioBufferList>,
@@ -109,9 +114,11 @@ unsafe extern "C-unwind" fn io_proc(
     hal::abort_on_panic(|| {
         // SAFETY: `client` is the boxed `CallbackContext` registered in
         // `start`, alive until the IOProc is destroyed (which happens before
-        // the box is dropped); `input` is the HAL's list, valid for the call.
+        // the box is dropped); `input` and `now` are the HAL's, valid for
+        // the call.
         unsafe {
             let ctx = &*client.cast::<CallbackContext>();
+            ctx.first_callback.mark(now.as_ref().mHostTime);
             let list = input.as_ref();
             let count = (list.mNumberBuffers as usize).min(MAX_BUFFERS);
             let mut views = [BufferView {
@@ -283,6 +290,9 @@ struct Active {
     _silent_output: Option<IoProc>,
     watcher: Arc<Watcher>,
     watcher_thread: Option<JoinHandle<()>>,
+    /// The host time just before the device started, and the same moment
+    /// on the monotonic clock: where the first callback is measured from.
+    started: (u64, Instant),
 }
 
 /// The macOS capture backend; see the module doc.
@@ -573,8 +583,10 @@ impl CaptureBackend for LiveCaptureBackend {
         let context = Box::new(CallbackContext {
             sink: Arc::clone(&sink),
             sources: layout.sources.clone(),
+            first_callback: FirstCallback::new(),
         });
         let context_ptr: *const CallbackContext = &raw const *context;
+        let started = (hal::host_time_now(), Instant::now());
         // SAFETY: `context` is boxed and stored in `Active` beside the
         // `IoProc`, whose drop (stop + destroy) runs before the box is
         // freed: `Active` declares the IoProc first and `stop()` drops it
@@ -697,6 +709,7 @@ impl CaptureBackend for LiveCaptureBackend {
             _listeners: listeners,
             watcher,
             watcher_thread: Some(watcher_thread),
+            started,
         });
         Ok(CaptureStream {
             sample_rate,
@@ -732,9 +745,21 @@ impl CaptureBackend for LiveCaptureBackend {
             _aggregate: aggregate,
             _tap: tap,
             _silent_output: silent_output,
+            started: (host_started, started_at),
             ..
         } = active;
         drop(io_proc);
+        // The IOProc is stopped: nothing writes the mark any more.
+        tracing::info!(
+            "{}",
+            first_callback_line(
+                context
+                    .first_callback
+                    .offset(host_started, hal::host_time_to_nanos),
+                started_at.elapsed(),
+                tap.is_some(),
+            )
+        );
         drop(context);
         drop(listeners);
         drop(aggregate);

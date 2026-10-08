@@ -18,8 +18,8 @@
 //! - [`playback`]: the [`Playback`] gate: no in-app playback while
 //!   recording.
 //! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
-//!   bodies, the processing thread, the rate converter and the relay;
-//!   everything on the real-time path.
+//!   bodies, the processing thread, the rate converter, the relay and the
+//!   first callback's mark; everything on the real-time path.
 //! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars);
 //!   its thread, which syncs every file every 5 s; `durable`, the one sync
 //!   every file goes through; the 3:1 resampler; and what crash recovery
