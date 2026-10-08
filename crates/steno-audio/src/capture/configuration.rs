@@ -294,8 +294,12 @@ pub enum DeviceChangeReason {
     /// its rebuild's restarts go on until one runs, whatever they fail
     /// with. Rust only.
     DeliveryStalled,
-    /// The audio service restarted (`coreaudiod` on macOS), taking the
-    /// capture's aggregate device with it. macOS only. Rust only.
+    /// The audio service restarted or went away: `coreaudiod` on macOS,
+    /// taking the capture's aggregate device with it, or on Linux the
+    /// connection to the PipeWire daemon lost (a daemon killed or
+    /// restarted). The rebuild's restarts go on until one runs, so the
+    /// recording resumes once the service is back. Not on Windows. Rust
+    /// only.
     AudioServiceRestarted,
     /// The chosen microphone, which did not open and which the session
     /// replaced with the default input, delivered to a probe on a stream

@@ -77,8 +77,13 @@
 //! rebuilds through `stop()` and `start`, as on the Mac. The capture never
 //! follows a default on its own.
 //!
-//! A lost connection or stream reads as the output gone (the input for an
-//! in-person capture). A lost link reads as the device of the lane it
+//! A lost connection to the daemon (a daemon killed or restarted, or the
+//! capture's client closed from outside) reads as
+//! [`DeviceChangeReason::AudioServiceRestarted`], whatever the graph
+//! reads, so the session restarts until a start runs and the recording
+//! resumes there (Rust only, as the Mac's `coreaudiod` restart).
+//! A lost stream reads as the output gone (the input for an in-person
+//! capture). A lost link reads as the device of the lane it
 //! serves gone: a monitor link as the output gone, the microphone's link
 //! as the input gone, so a microphone that vanishes during a call (the
 //! server removes Steno's link to it) reads as the input gone. The sample
@@ -380,6 +385,10 @@ struct Shared {
     done: Cell<Option<spa::utils::result::AsyncSeq>>,
     /// What the failures so far lost.
     lost: Cell<Lost>,
+    /// The connection to the daemon itself failed (a daemon killed or
+    /// restarted): judged as [`DeviceChangeReason::AudioServiceRestarted`]
+    /// whatever the graph reads.
+    disconnected: Cell<bool>,
     /// The first and the last change since the graph was last judged.
     pending: Cell<Option<(Instant, Instant)>>,
 }
@@ -405,6 +414,30 @@ impl Shared {
         tracing::warn!("{what} failed: {message}");
         self.lost.set(self.lost.get().union(lost));
         self.changed();
+    }
+
+    /// The connection to the daemon failed for good (PipeWire's
+    /// `message`): the capture loses both lanes, and the change is the
+    /// daemon's, not a device's.
+    fn lost_the_connection(&self, message: &str) {
+        self.disconnected.set(true);
+        self.fail("the connection to PipeWire", message, Lost::ALL);
+    }
+
+    /// What a judgement of the pending changes reports: the audio service
+    /// restarting once the connection to the daemon failed (the session
+    /// then restarts until the daemon is back), else the first difference
+    /// of the graph's `snapshot` from `baseline`.
+    fn judgement(
+        &self,
+        snapshot: impl FnOnce() -> DeviceSnapshot,
+        baseline: &DeviceSnapshot,
+    ) -> Option<DeviceChangeReason> {
+        if self.disconnected.get() {
+            Some(DeviceChangeReason::AudioServiceRestarted)
+        } else {
+            snapshot().difference(baseline)
+        }
     }
 
     /// The capture stream's new state: in its error state it loses both
@@ -561,7 +594,7 @@ impl Connection {
                 let shared = Rc::clone(&shared);
                 move |id, _seq, res, message| {
                     if id == pw::core::PW_ID_CORE {
-                        shared.fail("the connection to PipeWire", message, Lost::ALL);
+                        shared.lost_the_connection(message);
                     } else {
                         tracing::warn!("PipeWire error on object {id}: {message} ({res})");
                     }
@@ -1187,15 +1220,22 @@ impl Capture {
     }
 
     /// Compares the graph with the baseline and reports the first
-    /// difference to the sink while the gate is open.
+    /// difference to the sink while the gate is open; a lost connection to
+    /// the daemon is reported as the audio service restarting, whatever the
+    /// graph reads.
     fn judge(&self) {
         let shared = &self.connection.shared;
-        let snapshot = shared.graph.borrow().snapshot(
-            &self.targets,
-            self.input_device_uid.as_deref(),
-            shared.lost.get(),
+        let reason = shared.judgement(
+            || {
+                shared.graph.borrow().snapshot(
+                    &self.targets,
+                    self.input_device_uid.as_deref(),
+                    shared.lost.get(),
+                )
+            },
+            &self.baseline,
         );
-        match snapshot.difference(&self.baseline) {
+        match reason {
             None => tracing::info!("ignored a PipeWire graph change"),
             Some(reason) => report(&self.gate, &self.sink, reason),
         }
@@ -1631,6 +1671,43 @@ mod tests {
         shared.pending.set(None);
         shared.add_object(&ObjectType::Port, 57, props(&port("42")));
         assert!(shared.due().is_some(), "and its port");
+    }
+
+    /// A lost connection to the daemon is the audio service restarting,
+    /// whatever the graph reads, so the session restarts until the daemon
+    /// is back; other failures are judged from the graph.
+    #[test]
+    fn a_lost_connection_is_the_audio_service_restarting() {
+        let baseline = DeviceSnapshot {
+            output_uid: Some("steno-test-sink".into()),
+            default_output_uid: None,
+            input_uid: Some("steno-test-mic".into()),
+            output_alive: true,
+            input_alive: true,
+            sample_rate: SAMPLE_RATE,
+        };
+        let lost = DeviceSnapshot {
+            output_alive: false,
+            input_alive: false,
+            ..baseline.clone()
+        };
+        let shared = Shared::default();
+        shared.stream_state(&pw::stream::StreamState::Error("gone".into()));
+        assert_eq!(
+            shared.judgement(|| lost.clone(), &baseline),
+            Some(DeviceChangeReason::OutputDeviceGone),
+            "a failed stream is a lost device"
+        );
+        let shared = Shared::default();
+        shared.lost_the_connection("connection error");
+        assert_eq!(shared.lost.get(), Lost::ALL);
+        assert!(shared.due().is_some(), "a change to judge");
+        for snapshot in [lost, baseline.clone()] {
+            assert_eq!(
+                shared.judgement(|| snapshot, &baseline),
+                Some(DeviceChangeReason::AudioServiceRestarted)
+            );
+        }
     }
 
     #[test]

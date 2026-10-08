@@ -24,7 +24,7 @@
 //! its link reported as the input gone (in person or during a call), a lost
 //! monitor link as the output gone, both links lost (the monitor's first)
 //! as the output gone, and the capture's connection closed from outside as
-//! the output gone (the input in person); a report stuck in its handler
+//! the audio service restarting; a report stuck in its handler
 //! not holding `stop()` past its 2 s bound, with no frame after it and the
 //! capture torn down once the handler returns.
 //!
@@ -48,7 +48,10 @@
 //! rebuild its arrival causes. A chosen source whose owner stops
 //! mid-recording is reported by the session's stall watchdog, retried
 //! while the stopped owner holds the graph up, and recorded again once it
-//! resumes.
+//! resumes. A daemon killed mid-recording and started again (the harness's
+//! `--kill-daemons` and `--start-daemons`) is reported as the audio service
+//! restarting, and the recording resumes on the new daemon with its gap
+//! covering the outage.
 //!
 //! The real-time promise is counted on the real thread here: libpipewire
 //! runs the stream's `process` on its data-loop thread, which this file
@@ -938,6 +941,103 @@ fn a_chosen_source_that_stalls_mid_recording_is_restarted_once_it_runs() {
     );
 }
 
+/// Runs the harness script with `call` (`--kill-daemons`,
+/// `--start-daemons`) on the daemon and WirePlumber this test runs under,
+/// for at most 60 s.
+fn harness(call: &str) {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/pipewire-headless.sh");
+    let status = Command::new("timeout")
+        .arg("60")
+        .arg("bash")
+        .arg(&script)
+        .arg(call)
+        .stdin(Stdio::null())
+        .status()
+        .expect("the harness script");
+    assert!(status.success(), "{call}: {status}");
+}
+
+/// The PipeWire daemon killed mid-recording, as a crash or an update of
+/// it does, and started again a few seconds later: the capture's lost
+/// connection is reported as the audio service restarting, the restarts go
+/// on while the daemon is gone, and once it is back the recording resumes
+/// on it, never `DeviceLost`, its gap covering the outage so the master
+/// stays on wall time. The daemons this test starts are the ones the
+/// tests after it run on.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_daemon_killed_and_started_again_resumes_the_recording() {
+    const OUTAGE: Duration = Duration::from_secs(3);
+    show_logs();
+    let directory = tempfile::tempdir().expect("tempdir");
+    let session = CaptureSession::with_backend(
+        CaptureConfiguration::new(CaptureMode::InPerson, directory.path()),
+        Arc::new(LiveCaptureBackend::new()),
+        None,
+        CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+        Arc::new(SystemClock::new()),
+    )
+    .expect("the session");
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).expect("the start");
+    let began = Instant::now();
+    std::thread::sleep(Duration::from_secs(2));
+    harness("--kill-daemons");
+    let killed = Instant::now();
+    assert_eq!(
+        notices.recv_timeout(Duration::from_secs(5)),
+        Ok(CaptureNotice::DeviceChanged(
+            DeviceChangeReason::AudioServiceRestarted
+        )),
+        "the lost connection"
+    );
+    std::thread::sleep(OUTAGE.saturating_sub(killed.elapsed()));
+    assert!(
+        matches!(session.state(), CaptureState::Recording { .. }),
+        "{:?}",
+        session.state()
+    );
+    harness("--start-daemons");
+    let back = killed.elapsed();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let gap = loop {
+        match notices.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(CaptureNotice::DeviceResumed { gap_seconds, .. }) => break gap_seconds,
+            Ok(notice) => println!(
+                "{notice:?} {:.2} s after the kill",
+                killed.elapsed().as_secs_f64()
+            ),
+            Err(error) => panic!("no resume once the daemon is back: {error:?}"),
+        }
+    };
+    println!(
+        "daemon back {:.2} s after the kill, resumed {:.2} s after it with a {gap:.2} s gap",
+        back.as_secs_f64(),
+        killed.elapsed().as_secs_f64()
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    let result = session.stop().expect("the recording");
+    let wall = began.elapsed().as_secs_f64();
+    let statistics = &result.statistics;
+    println!(
+        "the master: {:.3} s against {wall:.3} s of wall time, gap {:.3} s",
+        statistics.duration, statistics.gap_seconds
+    );
+    assert!(!statistics.ended_on_device_loss);
+    assert_eq!(statistics.device_changes, 1);
+    assert!(
+        statistics.gap_seconds >= OUTAGE.as_secs_f64()
+            && statistics.gap_seconds <= CaptureSession::MAXIMUM_GAP.as_secs_f64(),
+        "the gap covers the outage: {:.3} s",
+        statistics.gap_seconds
+    );
+    assert!(
+        (wall - statistics.duration).abs() < 0.5,
+        "the master on wall time: {:.3} s against {wall:.3} s",
+        statistics.duration
+    );
+}
+
 /// Asking whether a chosen source runs costs the recording nothing,
 /// whether it runs or not: while a recording on the default source goes
 /// on, probes of a source whose owner is stopped answer `false`, one once
@@ -1434,24 +1534,19 @@ fn a_monitor_then_a_microphone_link_removed_are_reported_as_the_output_gone() {
     );
 }
 
+/// The capture's connection closed from outside, in a call and in
+/// person, is the daemon's change, not a device's: the session restarts
+/// until a start runs, as after a daemon that went away.
 #[test]
 #[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_connection_closed_from_outside_during_a_call_is_reported_as_the_output_gone() {
-    assert_reported_after(
-        &CALL,
-        destroy_own_client,
-        DeviceChangeReason::OutputDeviceGone,
-    );
-}
-
-#[test]
-#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
-fn a_connection_closed_from_outside_in_person_is_reported_as_the_input_gone() {
-    assert_reported_after(
-        &[AudioLane::Mixed],
-        destroy_own_client,
-        DeviceChangeReason::InputDeviceGone,
-    );
+fn a_connection_closed_from_outside_is_reported_as_the_audio_service_restarting() {
+    for lanes in [&CALL[..], &[AudioLane::Mixed]] {
+        assert_reported_after(
+            lanes,
+            destroy_own_client,
+            DeviceChangeReason::AudioServiceRestarted,
+        );
+    }
 }
 
 /// The `steno-capture` nodes in the graph.
