@@ -38,8 +38,8 @@ use std::os::windows::io::AsRawHandle as _;
 use std::path::{Component, Path, Prefix};
 
 use windows_sys::Win32::Foundation::{
-    ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
-    ERROR_SHARING_VIOLATION, MAX_PATH,
+    ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_HANDLE, ERROR_INVALID_PARAMETER,
+    ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION, MAX_PATH,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_APPEND_DATA, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_DATA, GetDriveTypeW,
@@ -105,8 +105,9 @@ pub(super) fn flush_directory(directory: &Path) -> io::Result<()> {
 /// Whether `error`, from the flush of a folder that opened, is the drive
 /// declining the call rather than failing to write: "incorrect function"
 /// and "not supported" from a file system or redirector without a folder
-/// flush, "access denied" and "invalid parameter" from servers that answer
-/// a folder flush that way (older Samba among them).
+/// flush, "access denied", "invalid parameter" and "invalid handle" from
+/// servers that answer a folder flush that way (older Samba among them).
+/// None of them is a failed write on a handle that has just opened.
 fn refuses_folder_flush(error: &io::Error) -> bool {
     win32_code(error).is_some_and(|code| {
         matches!(
@@ -115,6 +116,7 @@ fn refuses_folder_flush(error: &io::Error) -> bool {
                 | ERROR_NOT_SUPPORTED
                 | ERROR_ACCESS_DENIED
                 | ERROR_INVALID_PARAMETER
+                | ERROR_INVALID_HANDLE
         )
     })
 }
@@ -346,6 +348,7 @@ mod tests {
             ERROR_NOT_SUPPORTED,
             ERROR_ACCESS_DENIED,
             ERROR_INVALID_PARAMETER,
+            ERROR_INVALID_HANDLE,
         ] {
             assert!(refuses_folder_flush(&error(refused)), "{refused}");
         }
