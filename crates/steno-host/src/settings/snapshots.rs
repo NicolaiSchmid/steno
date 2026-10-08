@@ -170,6 +170,10 @@ fn recording_devices(audio: &AudioSettingsViewModel) -> Vec<RecordingDevice> {
     devices
 }
 
+/// The warning under an audio folder on a drive that may lose recent
+/// recordings in a power cut.
+pub const AUDIO_FOLDER_WARNING: &str = "This drive may lose recent recordings in a power cut.";
+
 #[must_use]
 pub fn recording(
     audio: &AudioSettingsViewModel,
@@ -187,6 +191,9 @@ pub fn recording(
         input_device_uid: audio.input_device_uid.clone(),
         audio_folder_path: audio.audio_folder.to_string_lossy().into_owned(),
         audio_folder_name: audio.folder_name(),
+        audio_folder_warning: audio
+            .folder_may_lose_recent_writes
+            .then(|| AUDIO_FOLDER_WARNING.to_owned()),
         folder_usage: usage,
         folder_usage_bytes: bytes,
         retention: RecordingRetention {

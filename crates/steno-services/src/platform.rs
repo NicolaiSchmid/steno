@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use crate::files::{read_json, write_json};
+use crate::files::{may_lose_recent_writes, read_json, write_json};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use steno_core::protocols::BoundaryResult;
@@ -25,7 +25,8 @@ impl Clock for WallClock {
     }
 }
 
-/// Walks the folder and sums file sizes.
+/// Walks the folder and sums file sizes; asks the durable writes whether
+/// its drive may lose recent writes ([`may_lose_recent_writes`]).
 #[derive(Debug, Default)]
 pub struct DiskFolderUsage;
 
@@ -48,6 +49,10 @@ impl FolderUsage for DiskFolderUsage {
             return Ok(0);
         }
         Ok(walk(folder).map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX))?)
+    }
+
+    fn may_lose_recent_writes(&self, folder: &Path) -> bool {
+        may_lose_recent_writes(folder)
     }
 }
 
@@ -255,5 +260,19 @@ mod tests {
         assert!(preferences.flag("onboarded"), "the run still has its flag");
         assert_eq!(std::fs::read(&path).unwrap(), b"{\"seen\": tr");
         assert_eq!(names(&folder), vec!["preferences.json"]);
+    }
+
+    /// The disk's folder usage asks the durable writes about the folder's
+    /// drive: a test folder is not reported, and on Windows the FAT32 drive
+    /// CI mounts (`STENO_FAT32_VOLUME`) is.
+    #[test]
+    fn the_disk_folder_usage_reports_a_drive_that_may_lose_recent_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(!DiskFolderUsage.may_lose_recent_writes(directory.path()));
+        if cfg!(windows)
+            && let Some(volume) = std::env::var_os("STENO_FAT32_VOLUME")
+        {
+            assert!(DiskFolderUsage.may_lose_recent_writes(Path::new(&volume)));
+        }
     }
 }

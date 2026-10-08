@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use steno_core::{
-    AudioAsset, AudioLane, AudioRetention, HandoverIntake, HandoverReceipt, HandoverState, Meeting,
-    MeetingSource, MeetingState, MeetingStateKind, PairedDevice, Participant, ParticipantRole,
-    RecordingEndReason, RecordingLayout, RecordingMetadata, Store, StoreError, TitleOrigin,
-    async_trait, derived_uuid, paths::file_url, paths::file_url_path, protocols::BoundaryResult,
+    AudioAsset, AudioFormat, AudioLane, AudioRetention, HandoverIntake, HandoverReceipt,
+    HandoverState, Meeting, MeetingSource, MeetingState, MeetingStateKind, PairedDevice,
+    Participant, ParticipantRole, RecordingEndReason, RecordingLayout, RecordingMetadata, Store,
+    StoreError, TitleOrigin, async_trait, derived_uuid, paths::file_url, paths::file_url_path,
+    protocols::BoundaryResult,
 };
 use uuid::Uuid;
 
@@ -76,7 +77,7 @@ pub fn default_title(
 /// everything the admission wrote is on the disk first. The parent of
 /// every folder it created, the copy and the meeting folder are synced
 /// before the receipt is marked complete
-/// ([`crate::files::create_dir_all_durably`],
+/// ([`crate::files::create_new_dir_durably`],
 /// [`crate::files::copy_durably`]); Swift syncs its `copyItem` copy and
 /// the folders the same way. The receipt, the meeting and its asset
 /// commit in one durable transaction ([`Store::save_admission_durably`]),
@@ -160,9 +161,7 @@ impl HandoverIntake for RecordingIntake {
         let layout = RecordingLayout::new(&audio_folder, meeting_id);
         // The copy and its folder are on the disk before the receipt says
         // complete: the phone deletes its own copy on that answer.
-        crate::files::create_dir_all_durably(&layout.directory)?;
-        let destination = layout.master(metadata.format);
-        crate::files::copy_durably(file, &destination)?;
+        let destination = copy_into_new_folder(file, &layout, metadata.format)?;
 
         let meeting = Meeting {
             id: meeting_id,
@@ -239,6 +238,25 @@ impl HandoverIntake for RecordingIntake {
         }
         Ok(meeting_id)
     }
+}
+
+/// Copies the verified upload `file` durably into the new meeting folder of
+/// `layout` and returns the copy's path. A folder already at the layout's
+/// path fails the attempt before the copy and is left as it is
+/// ([`crate::files::create_new_dir_durably`]). A failed copy removes the
+/// meeting folder, which only this call made; the upload and the phone's
+/// copy remain, and the phone's retry copies into a new folder.
+fn copy_into_new_folder(
+    file: &Path,
+    layout: &RecordingLayout,
+    format: AudioFormat,
+) -> std::io::Result<std::path::PathBuf> {
+    crate::files::create_new_dir_durably(&layout.directory)?;
+    let destination = layout.master(format);
+    crate::files::copy_durably(file, &destination).inspect_err(|_| {
+        let _ = std::fs::remove_dir_all(&layout.directory);
+    })?;
+    Ok(destination)
 }
 
 /// What a finished capture hands to [`LocalRecordingIntake::complete`].
@@ -472,7 +490,7 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use steno_core::{AudioFormat, PipelineStage};
+    use steno_core::PipelineStage;
 
     use super::*;
 
@@ -887,8 +905,9 @@ mod tests {
         assert!(!upload.exists());
     }
 
-    /// A copy that fails leaves the receipt short of complete and admits
-    /// nothing: the phone, told nothing landed, keeps its recording.
+    /// A copy that fails leaves the receipt short of complete, admits
+    /// nothing and leaves no meeting folder behind: the phone, told nothing
+    /// landed, keeps its recording.
     #[tokio::test]
     async fn an_upload_that_cannot_be_copied_is_not_marked_complete() {
         let dir = tempfile::tempdir().unwrap();
@@ -916,6 +935,29 @@ mod tests {
         );
         assert_eq!(store.all_meetings().unwrap(), []);
         assert!(!enqueued.load(Ordering::SeqCst));
+        let folders: Vec<_> = std::fs::read_dir(dir.path().join("audio"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(folders, Vec::<std::path::PathBuf>::new());
+    }
+
+    /// A folder already at the new meeting's path (an id that collided)
+    /// fails the copy before any write and keeps the recording it holds.
+    #[test]
+    fn a_folder_already_at_the_meeting_path_is_never_written_or_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let upload = upload_in(dir.path());
+        let layout = RecordingLayout::new(&dir.path().join("audio"), Uuid::new_v4());
+        let earlier = layout.master(AudioFormat::M4aAac);
+        std::fs::create_dir_all(&layout.directory).unwrap();
+        std::fs::write(&earlier, b"an earlier recording").unwrap();
+        let error = copy_into_new_folder(&upload, &layout, AudioFormat::M4aAac).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&earlier).unwrap(), b"an earlier recording");
+        assert_eq!(files_under(&layout.directory), [earlier]);
+        assert!(upload.exists());
     }
 
     /// A decoder and a dispatcher nothing reaches: the pipeline quits before

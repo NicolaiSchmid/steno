@@ -31,6 +31,13 @@ tracing.workspace = true
 tracing-subscriber = { workspace = true, optional = true }
 uuid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Additive on the workspace line: `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`
+# for the durable renames in `files`, the folder flush's access flags,
+# `GetVolumeInformationByHandleW` for the drive's file system and
+# `GetDriveTypeW` for a network drive.
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32_System_WindowsProgramming"] }
+
 [dev-dependencies]
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-pipeline = { path = ".", features = ["testing"] }

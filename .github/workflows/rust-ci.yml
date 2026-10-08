@@ -186,6 +186,36 @@ jobs:
         shell: bash
         run: echo "STENO_REQUIRE_LAN_TEST=1" >> "$GITHUB_ENV"
 
+      # A FAT32 and an exFAT drive for the durable writes tests: a VHD
+      # each in the runner's temporary folder, attached and formatted by
+      # diskpart and named in `STENO_FAT32_VOLUME` and `STENO_EXFAT_VOLUME`.
+      # The Test step runs the tests with them, and the step after Test
+      # again with their output.
+      - name: Mount a FAT32 and an exFAT drive (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          foreach ($drive in @(
+            @{ fs = 'fat32'; letter = 'S'; variable = 'STENO_FAT32_VOLUME' },
+            @{ fs = 'exfat'; letter = 'X'; variable = 'STENO_EXFAT_VOLUME' }
+          )) {
+            $vhd = Join-Path $env:RUNNER_TEMP "$($drive.fs).vhd"
+            $script = Join-Path $env:RUNNER_TEMP "$($drive.fs).diskpart"
+            @(
+              "create vdisk file=`"$vhd`" maximum=256 type=expandable",
+              "select vdisk file=`"$vhd`"",
+              "attach vdisk",
+              "create partition primary",
+              "format fs=$($drive.fs) quick label=STENO$($drive.fs.ToUpper())",
+              "assign letter=$($drive.letter)"
+            ) | Set-Content -Path $script -Encoding ascii
+            diskpart /s $script
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            fsutil fsinfo volumeinfo "$($drive.letter):"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "$($drive.variable)=$($drive.letter):\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+
       # The shell's logout and shutdown tests run their fakes on a private
       # `dbus-daemon` (scripts/setup-linux.sh installs it); on Linux a
       # missing daemon fails them instead of skipping them.
@@ -236,6 +266,28 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             ran on_windows_the_adapter_table_has_a_row_for_every_ipv4_interface
           fi
+
+      # The FAT32 and exFAT tests again with their output, and the folder
+      # usage test that reads the FAT32 drive. A renamed test or a skip
+      # would pass unseen, so the step greps for each `ok` line and fails
+      # on `SKIPPED`.
+      - name: FAT32 and exFAT durable writes tests, with output (Windows)
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/fat.log"
+          tests=(
+            on_a_fat32_drive_the_intake_writes_succeed_and_settings_warn
+            on_an_exfat_drive_the_intake_writes_succeed_and_settings_warn
+          )
+          usage=the_disk_folder_usage_reports_a_drive_that_may_lose_recent_writes
+          cargo test --workspace --lib --locked -- --exact --nocapture \
+            "files::tests::${tests[0]}" "files::tests::${tests[1]}" \
+            "platform::tests::$usage" 2>&1 | tee "$log"
+          for test in "${tests[@]}" "$usage"; do
+            grep -qF "$test ... ok" "$log" || { echo "::error::$test did not run"; exit 1; }
+          done
+          if grep -qF "SKIPPED" "$log"; then echo "::error::a durable writes test skipped"; exit 1; fi
 
       # The step fails unless as many tests passed as the file has live
       # tests: a `cfg` or a filter that left none to run would pass with
