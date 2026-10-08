@@ -530,12 +530,9 @@ fn follow_session(
         let Some(member) = header.member() else {
             continue;
         };
-        let state = if member.as_str() == "StateChanged" {
-            let states = signal.body().deserialize::<(u32, u32)>();
-            states.ok().map(|(_, new)| new)
-        } else {
-            None
-        };
+        // Only a `StateChanged` carries two states.
+        let states = signal.body().deserialize::<(u32, u32)>();
+        let state = states.ok().map(|(_, new)| new);
         let (step, next) = client_step(saves_at_query, phase, member.as_str(), state);
         phase = next;
         match step {
