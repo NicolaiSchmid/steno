@@ -430,13 +430,20 @@ impl HandoverIntake for ScriptedIntake {
 /// durable transaction, which writes the ledger row
 /// (`Store::save_admission_durably`), and it refuses another upload's
 /// receipt the same way. [`StoreIntake::hold_next`] holds the next
-/// admission before its commit until [`StoreIntake::release`].
+/// admission before or after its commit until [`StoreIntake::release`].
 pub struct StoreIntake {
     store: Arc<Store>,
     meetings: Mutex<Vec<Uuid>>,
-    hold: Mutex<bool>,
+    hold: Mutex<Option<Hold>>,
     entered: Notify,
     released: Notify,
+}
+
+/// Where [`StoreIntake::hold_next`] holds the admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    BeforeTheCommit,
+    AfterTheCommit,
 }
 
 impl StoreIntake {
@@ -444,15 +451,23 @@ impl StoreIntake {
         Arc::new(StoreIntake {
             store: store.clone(),
             meetings: Mutex::new(Vec::new()),
-            hold: Mutex::new(false),
+            hold: Mutex::new(None),
             entered: Notify::new(),
             released: Notify::new(),
         })
     }
 
-    /// Holds the next admission before its commit.
-    pub fn hold_next(&self) {
-        *self.hold.lock().unwrap() = true;
+    /// Holds the next admission at `hold`.
+    pub fn hold_next(&self, hold: Hold) {
+        *self.hold.lock().unwrap() = Some(hold);
+    }
+
+    /// Waits at `point` when the admission is held there.
+    async fn held_at(&self, hold: Option<Hold>, point: Hold) {
+        if hold == Some(point) {
+            self.entered.notify_one();
+            self.released.notified().await;
+        }
     }
 
     /// Returns once a held admission is in flight.
@@ -479,11 +494,8 @@ impl HandoverIntake for StoreIntake {
         metadata: &RecordingMetadata,
         device: &PairedDevice,
     ) -> BoundaryResult<Uuid> {
-        let held = std::mem::take(&mut *self.hold.lock().unwrap());
-        if held {
-            self.entered.notify_one();
-            self.released.notified().await;
-        }
+        let hold = self.hold.lock().unwrap().take();
+        self.held_at(hold, Hold::BeforeTheCommit).await;
         let recording_id = metadata.recording_id;
         let mut receipt = self
             .store
@@ -515,6 +527,7 @@ impl HandoverIntake for StoreIntake {
         self.store
             .save_admission_durably(&receipt, &meeting, &asset)?;
         self.meetings.lock().unwrap().push(meeting.id);
+        self.held_at(hold, Hold::AfterTheCommit).await;
         Ok(meeting.id)
     }
 }

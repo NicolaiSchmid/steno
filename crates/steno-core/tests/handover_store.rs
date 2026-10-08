@@ -252,13 +252,33 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
         "the receipt's ids, size and time, as GRDB writes them"
     );
 
+    // Over the stored receipt of other bytes the admission is refused and
+    // writes nothing: built from that receipt, it would say those bytes
+    // were admitted.
     let (other_bytes, second, second_asset) =
         admission("516EADE8-40E5-4434-8AAF-000000000002", vec![8; 32]);
+    assert!(matches!(
+        store.save_admission_durably(&other_bytes, &second, &second_asset),
+        Err(StoreError::ReceiptOfAnotherUpload(id)) if id == recording_id
+    ));
+    assert_eq!(store.meeting(second.id).unwrap(), None);
+    assert_eq!(ledger_rows(&store).len(), 1);
+    // The announce of the other bytes saved their receipt first.
+    let unfinished = |admitted: &HandoverReceipt| HandoverReceipt {
+        state: HandoverState::Receiving,
+        ..admitted.clone()
+    };
+    store
+        .save_handover_receipt(&unfinished(&other_bytes))
+        .unwrap();
     store
         .save_admission_durably(&other_bytes, &second, &second_asset)
         .unwrap();
     let (same_bytes, third, third_asset) =
         admission("516EADE8-40E5-4434-8AAF-000000000003", vec![7; 32]);
+    store
+        .save_handover_receipt(&unfinished(&same_bytes))
+        .unwrap();
     store
         .save_admission_durably(&same_bytes, &third, &third_asset)
         .unwrap();

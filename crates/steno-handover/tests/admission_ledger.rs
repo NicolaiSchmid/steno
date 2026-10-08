@@ -16,7 +16,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{Options, Phone, StoreIntake, TestService, chunks, seeded_bytes};
+use common::{Hold, Options, Phone, StoreIntake, TestService, chunks, seeded_bytes};
 use steno_core::{HandoverState, HandoverStateKind, RecordingMetadata, Store};
 use steno_handover::wire;
 use uuid::Uuid;
@@ -254,7 +254,7 @@ async fn other_bytes_under_an_admitted_id_are_taken_in_as_a_new_recording() {
             assert_eq!(phone.upload(id, index as i64, chunk).await.status, 204);
         }
 
-        intake.hold_next();
+        intake.hold_next(Hold::BeforeTheCommit);
         let (answer, ()) = tokio::join!(phone.complete(id), async {
             intake.admitting().await;
             assert_eq!(
@@ -397,65 +397,84 @@ async fn another_device_takes_over_an_unfinished_upload_of_the_same_bytes() {
 #[tokio::test]
 async fn a_late_complete_of_replaced_bytes_leaves_the_new_upload_unfinished() {
     // The phone's `complete` of the first file is in the intake when it
-    // announces another file under the id (a new recording). The intake
-    // then refuses the first file, whose receipt is gone, and the
-    // `complete` write finds the new upload's receipt in memory and leaves
-    // it alone: written into it, the new receipt would read `complete` with
-    // the first file's meeting, and the phone would delete a file the
-    // computer does not have. The first file's verified copy goes too, so
-    // the new upload's `complete` cannot admit it unhashed. The new upload
-    // then completes as a meeting of its own.
-    let (store, intake) = store_and_intake();
-    let test = service(&store, &intake).await;
-    let phone = Phone::pair(&test).await;
-    let first = seeded_bytes(2 * CHUNK_SIZE as usize, 39);
-    let metadata = phone.metadata(&first, CHUNK_SIZE);
-    let id = metadata.recording_id;
-    phone.upload_all(&metadata, &first).await;
-    let other = seeded_bytes(2 * CHUNK_SIZE as usize, 40);
-    let replaced = under(&phone, id, &other, CHUNK_SIZE);
+    // announces another file under the id (a new recording). Either the
+    // intake refuses the first file, whose receipt is gone, or it committed
+    // the first file before the announce. Either way the `complete` write
+    // then finds the new upload's receipt in memory and leaves it alone:
+    // written into it, the new receipt would read `complete` with the first
+    // file's meeting, and the phone would delete a file the computer does
+    // not have. A refused first file's verified copy goes too, so the new
+    // upload's `complete` cannot admit it unhashed. The new upload then
+    // completes as a meeting of its own.
+    for hold in [Hold::BeforeTheCommit, Hold::AfterTheCommit] {
+        let (store, intake) = store_and_intake();
+        let test = service(&store, &intake).await;
+        let phone = Phone::pair(&test).await;
+        let first = seeded_bytes(2 * CHUNK_SIZE as usize, 39);
+        let metadata = phone.metadata(&first, CHUNK_SIZE);
+        let id = metadata.recording_id;
+        phone.upload_all(&metadata, &first).await;
+        let other = seeded_bytes(2 * CHUNK_SIZE as usize, 40);
+        let replaced = under(&phone, id, &other, CHUNK_SIZE);
 
-    intake.hold_next();
-    let (late, ()) = tokio::join!(phone.complete(id), async {
-        intake.admitting().await;
-        assert_eq!(phone.announce(&replaced).await.status, 201);
-        intake.release();
-    });
-    assert_ne!(late.status, 200, "the first file's commit is refused");
-    let receipt = test
-        .service
-        .engine
-        .receipts_snapshot()
-        .into_iter()
-        .find(|receipt| receipt.recording_id == id)
-        .unwrap();
-    assert_eq!(
-        (receipt.state, receipt.sha256.clone()),
-        (HandoverState::Receiving, replaced.sha256.clone()),
-        "the new upload is unfinished"
-    );
-    let stored = store.handover_receipt(id).unwrap().unwrap();
-    assert_eq!(
-        (stored.state.kind(), stored.sha256),
-        (HandoverStateKind::Receiving, replaced.sha256.clone())
-    );
-    assert_eq!(
-        store
-            .admitted_meeting(id, replaced.byte_count, &replaced.sha256)
-            .unwrap(),
-        None
-    );
-    assert_ne!(phone.complete(id).await.status, 200, "nothing to admit yet");
+        intake.hold_next(hold);
+        let (late, ()) = tokio::join!(phone.complete(id), async {
+            intake.admitting().await;
+            assert_eq!(phone.announce(&replaced).await.status, 201, "{hold:?}");
+            intake.release();
+        });
+        let first_admitted = store
+            .admitted_meeting(id, metadata.byte_count, &metadata.sha256)
+            .unwrap();
+        match hold {
+            Hold::BeforeTheCommit => {
+                assert_ne!(late.status, 200, "the first file's commit is refused");
+                assert_eq!(first_admitted, None);
+            }
+            Hold::AfterTheCommit => {
+                assert_eq!(late.status, 200, "the first file was admitted");
+                assert_eq!(
+                    first_admitted,
+                    Some(late.json::<wire::CompleteResponse>().meeting_id)
+                );
+            }
+        }
+        let receipt = test
+            .service
+            .engine
+            .receipts_snapshot()
+            .into_iter()
+            .find(|receipt| receipt.recording_id == id)
+            .unwrap();
+        assert_eq!(
+            (receipt.state, receipt.sha256.clone()),
+            (HandoverState::Receiving, replaced.sha256.clone()),
+            "the new upload is unfinished ({hold:?})"
+        );
+        assert_eq!(
+            store
+                .admitted_meeting(id, replaced.byte_count, &replaced.sha256)
+                .unwrap(),
+            None
+        );
+        let status = phone.status(id).await.json::<wire::RecordingStatus>();
+        assert_eq!(status.state, HandoverStateKind::Receiving, "{hold:?}");
+        assert_ne!(
+            phone.complete(id).await.status,
+            200,
+            "nothing to admit yet ({hold:?})"
+        );
 
-    phone.upload_all(&replaced, &other).await;
-    let meeting_id = completed(&phone, id).await;
-    assert_eq!(
-        store
-            .admitted_meeting(id, replaced.byte_count, &replaced.sha256)
-            .unwrap(),
-        Some(meeting_id)
-    );
-    test.stop().await;
+        phone.upload_all(&replaced, &other).await;
+        let meeting_id = completed(&phone, id).await;
+        assert_eq!(
+            store
+                .admitted_meeting(id, replaced.byte_count, &replaced.sha256)
+                .unwrap(),
+            Some(meeting_id)
+        );
+        test.stop().await;
+    }
 }
 
 #[tokio::test]

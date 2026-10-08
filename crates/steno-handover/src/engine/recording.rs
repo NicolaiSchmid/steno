@@ -126,7 +126,11 @@ impl Engine {
     /// holds these bytes (200, every chunk listed, nothing opened: the
     /// phone posts `complete`, takes the meeting id and deletes its copy),
     /// else a new recording (201).
-    async fn first_announce(&self, device: &PairedDevice, metadata: &RecordingMetadata) -> Announced {
+    async fn first_announce(
+        &self,
+        device: &PairedDevice,
+        metadata: &RecordingMetadata,
+    ) -> Announced {
         let admitted = match self.admitted(metadata).await {
             Ok(admitted) => admitted,
             Err(failed) => return failed,
@@ -929,6 +933,61 @@ mod tests {
             Some(metadata),
             "and so does its sidecar"
         );
+    }
+
+    #[tokio::test]
+    async fn a_chunk_of_a_replaced_upload_leaves_the_new_receipt_alone() {
+        // A chunk request read the receipt and wrote its bytes at an offset
+        // of that receipt's split. Before it folds its chunk in, the phone
+        // announced the same bytes in another split (the partial restarts)
+        // or another file under the id (a new recording). The chunk is not
+        // the new upload's: the fold leaves its receipt alone, so the phone
+        // sends that chunk again.
+        for resplit in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::in_memory().unwrap());
+            let y = device("Y");
+            store.save_paired_device(&y, &[2; 32]).unwrap();
+            let engine = engine(
+                directory.path(),
+                store,
+                Utc.timestamp_opt(1_790_000_000, 0).unwrap(),
+            );
+            let recording_id = Uuid::new_v4();
+            let first = metadata(recording_id, 300_000, "Y");
+            let announced = engine
+                .announce(recording_id, &y, &serde_json::to_vec(&first).unwrap())
+                .await;
+            assert_eq!(announced.status, http::StatusCode::CREATED);
+            let read = engine.state().active_receipts[&recording_id].clone();
+
+            let next = if resplit {
+                RecordingMetadata {
+                    chunk_size: 2 * first.chunk_size,
+                    ..first.clone()
+                }
+            } else {
+                RecordingMetadata {
+                    sha256: vec![8; 32],
+                    ..first.clone()
+                }
+            };
+            let replaced = engine
+                .announce(recording_id, &y, &serde_json::to_vec(&next).unwrap())
+                .await;
+            assert!(replaced.status.is_success(), "{replaced:?}");
+
+            assert!(
+                engine.add_chunk(&read, 0).await.is_none(),
+                "the chunk of the earlier upload is refused (resplit: {resplit})"
+            );
+            let held = engine.state().active_receipts[&recording_id].clone();
+            assert_eq!(
+                (held.chunk_size, held.sha256, held.received_chunks),
+                (next.chunk_size, next.sha256, vec![]),
+                "resplit: {resplit}"
+            );
+        }
     }
 
     /// An edit of the receipt memory holds, as a request on another thread
