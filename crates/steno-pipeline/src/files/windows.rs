@@ -143,13 +143,14 @@ pub(super) fn is_busy(error: &io::Error) -> bool {
     })
 }
 
-/// The locks [`lock_path`] hands out, one per hash of a path; two paths
-/// that share one only wait for each other, at most through the holder's
-/// retries of a busy file (about 1.8 s).
+/// The locks [`lock_path`] hands out, 64 shared out by a path's hash; two
+/// paths that share one only wait for each other while the holder renames
+/// and flushes (its retries of a busy file alone can take about 1.8 s).
 static PATH_LOCKS: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
 
 /// A writer's hold on the lock of a path ([`lock_path`]), let go when
 /// dropped.
+#[must_use = "the lock is let go when this is dropped"]
 pub(super) struct PathLock {
     _guard: MutexGuard<'static, ()>,
 }

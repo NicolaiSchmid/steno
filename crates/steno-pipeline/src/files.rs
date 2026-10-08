@@ -532,7 +532,7 @@ mod tests {
     /// Writers into one folder, two files, all at once: every write lands,
     /// each file holds one writer's whole payload, and no temporary is
     /// left. With one shared temporary name this lost writes and tore a
-    /// file. On Windows, before the path lock, a writer's reopen of the
+    /// file. On Windows, without the path lock, a writer's reopen of the
     /// file for its flush could land on the file another writer was
     /// replacing that instant and fail with "access denied" after its
     /// rename had landed (about one write in 8,000 on CI's runner).
