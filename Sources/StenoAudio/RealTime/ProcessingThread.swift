@@ -177,9 +177,9 @@ final class ProcessingThread: @unchecked Sendable {
       var written = 0
       var index = 0
       while index < laneBuffers.count {
-        sink.ring(index).read(into: conversion.input[index], count: count)
+        sink.ring(index).read(into: conversion.input, count: count)
         written = conversion.converters[index].process(
-          conversion.input[index], count: count,
+          conversion.input, count: count,
           into: conversion.output[index] + conversion.pending)
         index += 1
       }
@@ -263,9 +263,10 @@ final class ProcessingThread: @unchecked Sendable {
 /// The rate conversion in front of the frames, one converter per lane.
 private final class Conversion: @unchecked Sendable {
   let converters: [RateConverter]
-  /// One read of device samples per lane: a frame's worth.
+  /// One read of device samples: a frame's worth.
   let read: Int
-  let input: [UnsafeMutablePointer<Float>]
+  /// One read's samples, reused lane after lane.
+  let input: UnsafeMutablePointer<Float>
   /// Converted samples per lane; the first `pending` are not yet framed.
   let output: [UnsafeMutablePointer<Float>]
   var pending = 0
@@ -277,11 +278,8 @@ private final class Conversion: @unchecked Sendable {
       RateConverter(inputRate: deviceRate, outputRate: StenoAudio.sampleRate, maximumInput: read)
     }
     let outputCapacity = frameSize + converters[0].maximumOutput
-    input = (0..<laneCount).map { _ in
-      let pointer = UnsafeMutablePointer<Float>.allocate(capacity: read)
-      pointer.initialize(repeating: 0, count: read)
-      return pointer
-    }
+    input = .allocate(capacity: read)
+    input.initialize(repeating: 0, count: read)
     output = (0..<laneCount).map { _ in
       let pointer = UnsafeMutablePointer<Float>.allocate(capacity: outputCapacity)
       pointer.initialize(repeating: 0, count: outputCapacity)
@@ -290,7 +288,7 @@ private final class Conversion: @unchecked Sendable {
   }
 
   deinit {
-    for buffer in input { buffer.deallocate() }
+    input.deallocate()
     for buffer in output { buffer.deallocate() }
   }
 }

@@ -11,9 +11,9 @@ import StenoCore
 public protocol CaptureBackend: Sendable {
   /// Starts delivering `lanes` (in this order) and describes the stream it
   /// opened, at `StenoAudio.sampleRate` or, where the device will not run at
-  /// it, at the device's own rate, which the processing thread converts. `inputDeviceUID` nil selects the
-  /// default input device. Throws a `CaptureError` when a device or the tap
-  /// cannot be set up.
+  /// it, at the device's own rate, which the processing thread converts.
+  /// `inputDeviceUID` nil selects the default input device. Throws a
+  /// `CaptureError` when a device or the tap cannot be set up.
   func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
     -> CaptureStream
   /// Stops delivering; idempotent. No frame arrives after it returns.

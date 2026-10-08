@@ -674,18 +674,6 @@ import Testing
     #expect(clock.pendingSleepers == 0)
   }
 
-  /// A tone's frequency from its upward zero crossings at 48 kHz.
-  func frequency(_ samples: ArraySlice<Float>) -> Double {
-    let crossings = zip(samples, samples.dropFirst()).filter { $0 < 0 && $1 >= 0 }.count
-    return Double(crossings) / (Double(samples.count) / StenoAudio.sampleRate)
-  }
-
-  /// The level of `samples` in dB against a sine of amplitude 0.5.
-  func levelAgainstHalfScaleSine(_ samples: ArraySlice<Float>) -> Double {
-    let power = samples.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(samples.count)
-    return 20 * log10(power.squareRoot() / (0.5 / 2.0.squareRoot()))
-  }
-
   /// A headset in the hands-free profile keeps the aggregate at 24 kHz: the
   /// recording still starts, and the master and the sidecars are 48 and
   /// 16 kHz with the tones at their frequencies and levels.
@@ -712,8 +700,9 @@ import Testing
     #expect(master.channels.count == 2)
     for (channel, hertz) in [(0, 440.0), (1, 1_000.0)] {
       let steady = master.channels[channel][4_800..<140_000]
-      #expect(abs(frequency(steady) - hertz) < 2, "\(frequency(steady)) Hz")
-      #expect(abs(levelAgainstHalfScaleSine(steady)) < 0.1)
+      let measured = RateConverterTests.frequency(steady)
+      #expect(abs(measured - hertz) < 2, "\(measured) Hz")
+      #expect(abs(RateConverterTests.levelAgainstHalfScaleSine(steady)) < 0.1)
     }
     let mic = try WAVAudioDecoder.read(result.asset.sidecars16k[.mic]!)
     #expect(abs(mic.duration - 3) < 0.015)
@@ -752,7 +741,8 @@ import Testing
     #expect(abs(result.statistics.duration - 3) < 0.015, "\(result.statistics.duration) s")
     let master = try CAFFile.read(result.asset.url)
     let after = master.channels[0][52_800..<140_000]
-    #expect(abs(frequency(after) - 440) < 2, "\(frequency(after)) Hz after the change")
+    let measured = RateConverterTests.frequency(after)
+    #expect(abs(measured - 440) < 2, "\(measured) Hz after the change")
   }
 
   /// The contiguity claim. A gap longer than the two seconds the sink's

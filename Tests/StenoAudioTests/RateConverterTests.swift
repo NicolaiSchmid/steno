@@ -38,12 +38,16 @@ import Testing
     return output
   }
 
-  func levelAgainstHalfScaleSine(_ samples: ArraySlice<Float>) -> Double {
+  /// The level of `samples` in dB against a sine of amplitude 0.5. Shared
+  /// with `CaptureSessionTests`.
+  static func levelAgainstHalfScaleSine(_ samples: ArraySlice<Float>) -> Double {
     let power = samples.reduce(0.0) { $0 + Double($1) * Double($1) } / Double(samples.count)
     return 20 * log10(power.squareRoot() / (0.5 / 2.0.squareRoot()))
   }
 
-  func frequency(_ samples: ArraySlice<Float>) -> Double {
+  /// A tone's frequency from its upward zero crossings at 48 kHz. Shared
+  /// with `CaptureSessionTests`.
+  static func frequency(_ samples: ArraySlice<Float>) -> Double {
     let crossings = zip(samples, samples.dropFirst()).filter { $0 < 0 && $1 >= 0 }.count
     return Double(crossings) / (Double(samples.count) / StenoAudio.sampleRate)
   }
@@ -63,13 +67,13 @@ import Testing
     let expected = StenoAudio.sampleRate - Double(RateConverter.taps / 2) * 48_000 / rate
     #expect(abs(Double(output.count) - expected) <= 2, "\(output.count) samples")
     let steady = output[1_000..<40_000]
-    #expect(abs(levelAgainstHalfScaleSine(steady)) < 0.1)
-    #expect(abs(frequency(steady) - 1_000) < 2)
+    #expect(abs(Self.levelAgainstHalfScaleSine(steady)) < 0.1)
+    #expect(abs(Self.frequency(steady) - 1_000) < 2)
   }
 
   @Test func contentAbove48kNyquistIsRejected() {
     let output = convert(tone(30_000, at: 96_000), from: 96_000, chunks: [480])
-    #expect(levelAgainstHalfScaleSine(output[1_000..<40_000]) < -50)
+    #expect(Self.levelAgainstHalfScaleSine(output[1_000..<40_000]) < -50)
   }
 
   /// An impulse at device sample 100 lands on output sample 200 at 24 kHz
