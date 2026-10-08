@@ -146,18 +146,13 @@ impl Deliver {
 /// for each warning the receipt carries (the export line's separator), a
 /// tab and the meeting folder.
 fn delivered(receipt: Option<&DeliveryReceipt>) -> String {
-    let mut line = "delivered".to_owned();
-    let mut folder = String::new();
-    if let Some(receipt) = receipt {
-        for warning in &receipt.warnings {
-            line.push_str(" · ");
-            line.push_str(warning);
-        }
-        folder = steno_adapters::runtime::receipt_folder_path(receipt)
-            .to_string_lossy()
-            .into_owned();
-    }
-    format!("{line}\t{folder}")
+    let Some(receipt) = receipt else {
+        return "delivered\t".to_owned();
+    };
+    let mut status = vec!["delivered"];
+    status.extend(receipt.warnings.iter().map(String::as_str));
+    let folder = steno_adapters::runtime::receipt_folder_path(receipt);
+    format!("{}\t{}", status.join(" · "), folder.display())
 }
 
 #[cfg(test)]
