@@ -392,13 +392,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
 
-    let handover = match handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime) {
-        Ok(pair) => Some(pair),
-        Err(error) => {
-            warnings.push(format!("Phone handover is unavailable: {error}"));
-            None
-        }
-    };
+    let handover = handover_listener(&store, &pipeline, &secrets, &paths, zone, &runtime)
+        .inspect_err(|error| warnings.push(format!("Phone handover is unavailable: {error}")))
+        .ok();
 
     let services = Services {
         clock: Arc::new(WallClock),
