@@ -447,9 +447,8 @@ pub(crate) struct Reconciled {
 /// [`Store::fail_recordings`], which skips a row another process has moved
 /// on meanwhile. The record forgets every listed entry whose meeting is no
 /// longer left `recording`, also when no row was left `recording`. Blocks
-/// for up to
-/// [`LiveRecordingCheck::fresh_within`] when a master is fresh, so the
-/// caller runs it off the main thread. Swift:
+/// for up to [`LiveRecordingCheck::fresh_within`] when a master is fresh,
+/// so the caller runs it off the main thread. Swift:
 /// `MeetingStore.failInterruptedRecordings` in `AppController.launch`, the
 /// failing part alone.
 pub(crate) fn reconcile_interrupted(

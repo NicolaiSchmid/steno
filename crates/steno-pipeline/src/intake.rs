@@ -434,15 +434,14 @@ impl LocalRecordingIntake {
     /// row is still `recording` and keeps what else was saved on it since
     /// ([`Store::save_stopped_recording`]). A commit that finds the
     /// database busy is tried again, up to [`Self::COMMIT_ATTEMPTS`] in
-    /// all, while [`Self::retrying_while`]'s check allows. A meeting that is not
-    /// `recording`, when `complete` reads it or when it commits, is left
-    /// alone, its row untouched, and one deleted meanwhile is not brought
-    /// back. Any other failure
-    /// leaves the meeting `recording` and returns the error: the recording
-    /// stays on disk, and the next launch's recovery finds it there and
-    /// queues it. Swift marked the meeting failed without its asset, so the
-    /// recording was lost to the list; the retry and the recording kept are
-    /// Rust only.
+    /// all, while [`Self::retrying_while`]'s check allows. A meeting that
+    /// is not `recording`, when `complete` reads it or when it commits, is
+    /// left alone, its row untouched, and one deleted meanwhile is not
+    /// brought back. Any other failure leaves the meeting `recording` and
+    /// returns the error: the recording stays on disk, and the next
+    /// launch's recovery finds it there and queues it. Swift marked the
+    /// meeting failed without its asset, so the recording was lost to the
+    /// list; the retry and the recording kept are Rust only.
     pub async fn complete(
         &self,
         meeting_id: Uuid,

@@ -5,6 +5,13 @@
 //! `.plans/2026-10-02-rust-core-and-tauri-shell.md`); the status carries
 //! what the capture session reports.
 //!
+//! A stop that cannot store its meeting (the database still busy after the
+//! intake's tries, a full disk) keeps the recording on disk and the meeting
+//! `recording`, and the status says the next launch processes it; a stop
+//! whose capture failed recovers the master as the launch does
+//! ([`crate::recovery`]), and one whose meeting failed or went meanwhile
+//! says it was not stored. Rust only: Swift's stop failed the meeting.
+//!
 //! Each recording has a watcher thread. A session that fails on its own (a
 //! device that stayed lost, a write that failed on a full disk) is finished
 //! there as Stop would finish it: the recording so far is saved and queued,
