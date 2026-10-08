@@ -8,7 +8,7 @@
 //!
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
-//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written until the meeting completes, fails or is deleted | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first ([`crate::recovery`]) |
+//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written until the meeting completes, fails or is deleted: a recording's from its start, a phone upload's from before its copy until its admission commits (`AdmissionRecord`) | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first, and adopts only a recording with no meeting that this record names ([`crate::recovery`]) |
 //! | `KNOWN_FILE` | Every audio folder a recording was written to or the setting left, oldest first | `remember` | `known`: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]) |
 //!
 //! A reader returns the error of a file that cannot be read or does not
@@ -22,6 +22,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use steno_pipeline::AdmissionFolders;
 use uuid::Uuid;
 
 use crate::files;
@@ -76,6 +77,26 @@ pub(crate) fn forget(support_directory: &Path, meeting_ids: &[Uuid]) -> std::io:
             recorded.len() != before
         },
     )
+}
+
+/// The phone intake's notes of the folder each upload is copied into
+/// ([`AdmissionFolders`]), in the record under the support directory
+/// (`record`, `forget`). Rust only.
+pub(crate) struct AdmissionRecord {
+    pub(crate) support_directory: PathBuf,
+}
+
+impl AdmissionFolders for AdmissionRecord {
+    fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()> {
+        record(&self.support_directory, meeting_id, audio_folder)
+    }
+
+    fn settled(&self, meeting_id: Uuid) {
+        if let Err(error) = forget(&self.support_directory, &[meeting_id]) {
+            // The next launch forgets an entry whose meeting has a row.
+            tracing::debug!(%meeting_id, %error, "an admission's folder not forgotten");
+        }
+    }
 }
 
 /// The known folders under `support_directory`, oldest first.

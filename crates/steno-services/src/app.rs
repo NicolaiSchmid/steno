@@ -282,11 +282,15 @@ fn make_dependencies(
 /// arrives, so a reload is not bypassed. The intake commits the meeting
 /// with its receipt and the pipeline only processes it
 /// ([`steno_pipeline::ProcessingPipeline::enqueue_saved`]), as in
-/// `RecordingIntake::over`. Swift: `AppEnvironment.makeIntake`.
+/// `RecordingIntake::over`. Each copy's folder is noted in the record
+/// under `support_directory` until its admission commits
+/// ([`crate::audio_folders`]), so the launch adopts a copy left with no
+/// meeting. Swift: `AppEnvironment.makeIntake`.
 pub fn handover_intake(
     store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
     zone: FixedOffset,
+    support_directory: &std::path::Path,
 ) -> RecordingIntake {
     let now = pipeline.current().dependencies().now.clone();
     RecordingIntake::new(
@@ -298,6 +302,9 @@ pub fn handover_intake(
         now,
         zone,
     )
+    .noting_folders_in(Arc::new(crate::audio_folders::AdmissionRecord {
+        support_directory: support_directory.to_path_buf(),
+    }))
 }
 
 /// The handover over the listener on a loaded or minted identity, whose
@@ -356,7 +363,12 @@ fn listener_over_identity(
             chrono::Utc::now(),
         ),
     )?;
-    let intake = Arc::new(handover_intake(store.clone(), pipeline.clone(), zone));
+    let intake = Arc::new(handover_intake(
+        store.clone(),
+        pipeline.clone(),
+        zone,
+        &paths.support_directory,
+    ));
     let mac_id = identity.mac_id();
     let service = Arc::new(crate::handover::service(
         listener_configuration(paths),
@@ -1129,7 +1141,8 @@ mod tests {
             make,
             tokio::runtime::Handle::current(),
         ));
-        let intake = handover_intake(store.clone(), current.clone(), local_zone());
+        let support = dir.path().join("support");
+        let intake = handover_intake(store.clone(), current.clone(), local_zone(), &support);
 
         current.reload().unwrap();
         assert_eq!(
@@ -1160,11 +1173,12 @@ mod tests {
             format: AudioFormat::Wav16kInt16,
             device_name: "Phone".to_owned(),
         };
-        // The level and the meeting's state of each commit that holds a
-        // phone meeting. The intake's commit is the first, and the only one
-        // with the meeting `queued`: the enqueue writes nothing.
-        let commits: Arc<std::sync::Mutex<Vec<(i64, String)>>> = Arc::default();
-        let seen = commits.clone();
+        // The level, the meeting's state and the folders noted for the
+        // launch's adoption of each commit that holds a phone meeting. The
+        // intake's commit is the first, and the only one with the meeting
+        // `queued`: the enqueue writes nothing.
+        let commits: Arc<std::sync::Mutex<Vec<(i64, String, usize)>>> = Arc::default();
+        let (seen, noted) = (commits.clone(), support.clone());
         store.probe_commits(move |connection| {
             let state: Option<String> = connection
                 .query_row(
@@ -1177,10 +1191,15 @@ mod tests {
                 let level = connection
                     .query_row("PRAGMA synchronous", [], |row| row.get(0))
                     .unwrap();
-                seen.lock().unwrap().push((level, state));
+                let noted = crate::audio_folders::recorded(&noted).unwrap().len();
+                seen.lock().unwrap().push((level, state, noted));
             }
         });
         let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
+        assert!(
+            crate::audio_folders::recorded(&support).unwrap().is_empty(),
+            "the copy's folder is forgotten once its admission committed"
+        );
         // The retired pipeline never saw the meeting; the current one did.
         let current_pipeline = current.current();
         current_pipeline.wait_until_idle().await;
@@ -1189,12 +1208,12 @@ mod tests {
         let commits = commits.lock().unwrap().clone();
         let queued: Vec<_> = commits
             .iter()
-            .filter(|(_, state)| state == "queued")
+            .filter(|(_, state, _)| state == "queued")
             .collect();
         assert_eq!(
             queued,
-            [&(2, "queued".to_owned())],
-            "the intake's commit under FULL is the only one with the meeting queued: {commits:?}"
+            [&(2, "queued".to_owned(), 1)],
+            "the intake's commit under FULL is the only one with the meeting queued, its folder noted: {commits:?}"
         );
         assert_eq!(
             store
