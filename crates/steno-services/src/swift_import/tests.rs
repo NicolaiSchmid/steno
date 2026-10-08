@@ -115,8 +115,26 @@ impl FakeKeychain {
         }
     }
 
+    /// The Swift app's items, with the key's read refused.
+    fn denying_the_key() -> Self {
+        FakeKeychain {
+            key: Err(user_canceled()),
+            ..FakeKeychain::swift_app()
+        }
+    }
+
     fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().unwrap().clone()
+    }
+
+    /// How often `call` was made.
+    fn count(&self, call: &str) -> usize {
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|made| **made == call)
+            .count()
     }
 
     fn record(&self, call: &'static str) {
@@ -132,14 +150,19 @@ impl FakeKeychain {
     }
 
     fn deny_export(&self) {
-        *self.export_refusal.lock().unwrap() = Some(KeychainRefusal {
-            denied: true,
-            detail: "userCanceledErr".to_owned(),
-        });
+        *self.export_refusal.lock().unwrap() = Some(user_canceled());
     }
 
     fn allow_export(&self) {
         *self.export_refusal.lock().unwrap() = None;
+    }
+}
+
+/// The refusal of a prompt the user denied.
+fn user_canceled() -> KeychainRefusal {
+    KeychainRefusal {
+        denied: true,
+        detail: "userCanceledErr".to_owned(),
     }
 }
 
@@ -371,6 +394,17 @@ struct CountingSecrets {
     refuse_key: std::sync::atomic::AtomicBool,
 }
 
+impl CountingSecrets {
+    /// Whether the API key was read.
+    fn read_the_key(&self) -> bool {
+        self.reads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|read| read == SecretKey::LLM_API_KEY)
+    }
+}
+
 #[async_trait]
 impl SecretStore for CountingSecrets {
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
@@ -475,6 +509,16 @@ fn read(store: &dyn SecretStore, key: &SecretKey) -> Option<String> {
     RUNTIME.block_on(store.secret(key)).unwrap()
 }
 
+fn set(store: &dyn SecretStore, key: &SecretKey, value: Option<&str>) {
+    RUNTIME.block_on(store.set_secret(key, value)).unwrap();
+}
+
+/// The fingerprint of the `handover-identity` entry in `store`.
+fn stored_fingerprint(store: &dyn SecretStore) -> String {
+    let stored = read(store, &HandoverIdentity::secret_key()).unwrap();
+    hex(&HandoverIdentity::from_pem(&stored).unwrap().fingerprint())
+}
+
 #[test]
 fn while_pending_the_graph_reads_no_api_key() {
     let step = step(FakeKeychain::swift_app(), None);
@@ -512,9 +556,7 @@ fn the_step_reads_the_key_and_brings_the_identity_over_replacing_a_desktop_id_on
             "export"
         ]
     );
-    let stored = read(&*step.raw, &HandoverIdentity::secret_key()).unwrap();
-    let imported = HandoverIdentity::from_pem(&stored).unwrap();
-    assert_eq!(hex(&imported.fingerprint()), FIXTURE_FINGERPRINT);
+    assert_eq!(stored_fingerprint(&*step.raw), FIXTURE_FINGERPRINT);
     assert!(step.preferences.flag(IMPORT_RAN_KEY));
     assert_flags_only(step.dir.path());
     assert!(step.preferences.flag(KEY_READ_KEY));
@@ -560,14 +602,7 @@ fn a_denied_export_leaves_an_existing_identity_untouched_mints_none_and_try_agai
         assert_eq!(status.prompts, 1 + u8::from(existing.is_some()));
         step.keychain.allow_export();
         assert_eq!(step.import.run().stage, SwiftImportStage::Done);
-        assert_eq!(
-            step.keychain
-                .calls()
-                .iter()
-                .filter(|call| **call == "read key")
-                .count(),
-            1
-        );
+        assert_eq!(step.keychain.count("read key"), 1);
         assert_eq!(step.graph.gate.handover(), HandoverGate::Ready);
     }
 }
@@ -646,18 +681,8 @@ fn a_refused_replace_counts_as_denied_and_try_again_repeats_only_the_store() {
         );
         step.raw.refuse_identity.store(false, Ordering::SeqCst);
         assert_eq!(step.import.run().stage, SwiftImportStage::Done);
-        let exports = step
-            .keychain
-            .calls()
-            .iter()
-            .filter(|call| **call == "export")
-            .count();
-        assert_eq!(exports, 1, "Try again exported again");
-        let stored = read(&*step.raw, &HandoverIdentity::secret_key()).unwrap();
-        assert_eq!(
-            hex(&HandoverIdentity::from_pem(&stored).unwrap().fingerprint()),
-            FIXTURE_FINGERPRINT
-        );
+        assert_eq!(step.keychain.count("export"), 1, "Try again exported again");
+        assert_eq!(stored_fingerprint(&*step.raw), FIXTURE_FINGERPRINT);
     }
 }
 
@@ -694,27 +719,16 @@ fn an_export_of_another_certificate_is_refused() {
 
 #[test]
 fn a_denied_key_read_leaves_the_key_empty_and_the_identity_still_comes_over() {
-    let step = step(
-        FakeKeychain {
-            key: Err(KeychainRefusal {
-                denied: true,
-                detail: "userCanceledErr".to_owned(),
-            }),
-            ..FakeKeychain::swift_app()
-        },
-        None,
-    );
+    let step = step(FakeKeychain::denying_the_key(), None);
     assert_eq!(step.import.run().stage, SwiftImportStage::Done);
     assert_eq!(read(&*step.graph.secrets, &SecretKey::llm_api_key()), None);
     assert!(step.preferences.flag(KEY_READ_KEY));
     // A key the user saves in Settings is read from the store again.
-    RUNTIME
-        .block_on(
-            step.graph
-                .secrets
-                .set_secret(&SecretKey::llm_api_key(), Some("sk-new")),
-        )
-        .unwrap();
+    set(
+        &*step.graph.secrets,
+        &SecretKey::llm_api_key(),
+        Some("sk-new"),
+    );
     assert_eq!(
         read(&*step.graph.secrets, &SecretKey::llm_api_key()).as_deref(),
         Some("sk-new")
@@ -739,11 +753,7 @@ fn the_gate_s_debug_leaves_the_key_out() {
 fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
     let step = step(FakeKeychain::swift_app(), None);
     let key = SecretKey::llm_api_key();
-    let write = |value: Option<&str>| {
-        RUNTIME
-            .block_on(step.graph.secrets.set_secret(&key, value))
-            .unwrap();
-    };
+    let write = |value: Option<&str>| set(&*step.graph.secrets, &key, value);
     for skipped in [false, true] {
         if skipped {
             step.import.skip();
@@ -774,21 +784,14 @@ fn a_gated_empty_key_write_leaves_the_stored_key_in_place() {
 /// the import is over, until the user saves a key.
 #[test]
 fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
-    let denied_key = || FakeKeychain {
-        key: Err(KeychainRefusal {
-            denied: true,
-            detail: "userCanceledErr".to_owned(),
-        }),
-        ..FakeKeychain::swift_app()
-    };
-    let first = step(denied_key(), None);
+    let first = step(FakeKeychain::denying_the_key(), None);
     first.keychain.deny_export();
     let status = first.import.run();
     assert_eq!(status.stage, SwiftImportStage::Waiting);
     assert!(first.preferences.flag(KEY_DENIED_KEY));
 
     // The next launch: still pending, the key stays unread.
-    let keychain = Arc::new(denied_key());
+    let keychain = Arc::new(FakeKeychain::denying_the_key());
     let again = pending(launch(
         &at_home(),
         first.preferences.clone(),
@@ -805,13 +808,7 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
     assert_eq!(step.run().stage, SwiftImportStage::Done);
     assert_eq!(read(&*graph.secrets, &key), None);
     assert!(
-        first
-            .raw
-            .reads
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|read| read != SecretKey::LLM_API_KEY),
+        !first.raw.read_the_key(),
         "the keychain was asked for the key"
     );
     assert!(!keychain.calls().contains(&"read key"));
@@ -820,19 +817,11 @@ fn a_refused_key_read_is_never_asked_again_until_a_key_is_saved() {
     let over = key_denied_secrets(&first.preferences, first.raw.clone());
     assert_eq!(read(&*over, &key), None);
     assert!(
-        first
-            .raw
-            .reads
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|read| read != SecretKey::LLM_API_KEY),
+        !first.raw.read_the_key(),
         "the keychain was asked for the key"
     );
     // ...until the user saves one, which clears the flag for good.
-    RUNTIME
-        .block_on(over.set_secret(&key, Some("sk-new")))
-        .unwrap();
+    set(&*over, &key, Some("sk-new"));
     assert_eq!(read(&*over, &key).as_deref(), Some("sk-new"));
     assert!(!first.preferences.flag(KEY_DENIED_KEY));
     assert_flags_only(first.dir.path());
@@ -1174,12 +1163,13 @@ async fn an_app_the_database_lock_refuses_runs_no_launch_half() {
 const NO_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// `call` on another thread, from inside the fake's export (as if while
-/// its prompt is up): what it answered, or the timeout when it was still
-/// waiting after [`NO_WAIT`].
+/// its prompt is up). Once the export ran, the closure this returns gives
+/// what `call` answered, or the timeout when it was still waiting after
+/// [`NO_WAIT`].
 fn during_the_export_prompt(
     step: &Step,
     call: impl Fn(&ImportStep) -> SwiftImportStatus + Send + Sync + 'static,
-) -> Arc<Mutex<Option<Result<SwiftImportStatus, std::sync::mpsc::RecvTimeoutError>>>> {
+) -> impl FnOnce() -> Result<SwiftImportStatus, std::sync::mpsc::RecvTimeoutError> {
     let answered = Arc::new(Mutex::new(None));
     let seen = answered.clone();
     let import = Arc::downgrade(&step.import);
@@ -1198,7 +1188,7 @@ fn during_the_export_prompt(
         });
         *seen.lock().unwrap() = Some(receiver.recv_timeout(NO_WAIT));
     });
-    answered
+    move || answered.lock().unwrap().take().expect("no export ran")
 }
 
 /// Closing the onboarding window while the export's prompt is up skips the
@@ -1209,14 +1199,12 @@ fn a_skip_while_the_export_prompt_is_up_answers_at_once_and_mints_nothing() {
     let step = step(FakeKeychain::swift_app(), None);
     let skipped = during_the_export_prompt(&step, ImportStep::skip);
     let status = step.import.run();
-    let skipped = skipped.lock().unwrap().clone().unwrap();
-    let skipped = skipped.expect("the skip waited for the prompt");
+    let skipped = skipped().expect("the skip waited for the prompt");
     assert_eq!(skipped.stage, SwiftImportStage::Pending, "the run decides");
     assert_eq!(status.stage, SwiftImportStage::Done);
     assert_eq!(step.graph.gate.handover(), HandoverGate::Ready);
-    let stored = read(&*step.raw, &HandoverIdentity::secret_key()).unwrap();
     assert_eq!(
-        hex(&HandoverIdentity::from_pem(&stored).unwrap().fingerprint()),
+        stored_fingerprint(&*step.raw),
         FIXTURE_FINGERPRINT,
         "the Swift identity, nothing minted"
     );
@@ -1230,17 +1218,12 @@ fn a_second_run_while_the_export_prompt_is_up_reads_nothing() {
     step.keychain.deny_export();
     let second = during_the_export_prompt(&step, ImportStep::run);
     let status = step.import.run();
-    let second = second.lock().unwrap().clone().unwrap();
-    let second = second.expect("the second run waited for the first");
+    let second = second().expect("the second run waited for the first");
     assert_eq!(second.stage, SwiftImportStage::Pending);
     assert_eq!(status.stage, SwiftImportStage::Waiting);
     let calls = step.keychain.calls();
-    assert_eq!(
-        calls.iter().filter(|call| **call == "export").count(),
-        1,
-        "{calls:?}"
-    );
-    assert_eq!(calls.iter().filter(|call| **call == "read key").count(), 1);
+    assert_eq!(step.keychain.count("export"), 1, "{calls:?}");
+    assert_eq!(step.keychain.count("read key"), 1);
 }
 
 /// A key the user saved in Settings before the step is the key: the run
@@ -1249,20 +1232,9 @@ fn a_second_run_while_the_export_prompt_is_up_reads_nothing() {
 #[test]
 fn a_key_saved_before_the_step_is_not_read_over() {
     for skipping in [false, true] {
-        let step = step(
-            FakeKeychain {
-                key: Err(KeychainRefusal {
-                    denied: true,
-                    detail: "userCanceledErr".to_owned(),
-                }),
-                ..FakeKeychain::swift_app()
-            },
-            None,
-        );
+        let step = step(FakeKeychain::denying_the_key(), None);
         let key = SecretKey::llm_api_key();
-        RUNTIME
-            .block_on(step.graph.secrets.set_secret(&key, Some("sk-saved")))
-            .unwrap();
+        set(&*step.graph.secrets, &key, Some("sk-saved"));
         if skipping {
             step.import.skip();
         } else {
@@ -1296,9 +1268,7 @@ fn clearing_the_key_the_step_read_drops_it_for_this_launch() {
         read(&*step.graph.secrets, &key).as_deref(),
         Some("sk-swift")
     );
-    RUNTIME
-        .block_on(step.graph.secrets.set_secret(&key, None))
-        .unwrap();
+    set(&*step.graph.secrets, &key, None);
     assert_eq!(read(&*step.graph.secrets, &key), None);
     assert_eq!(read(&*step.raw, &key).as_deref(), Some("sk-swift"));
 }
@@ -1309,21 +1279,12 @@ fn clearing_the_key_the_step_read_drops_it_for_this_launch() {
 #[test]
 fn no_flag_is_written_while_the_key_prompt_is_up() {
     for denied in [false, true] {
-        let key = if denied {
-            Err(KeychainRefusal {
-                denied: true,
-                detail: "userCanceledErr".to_owned(),
-            })
+        let keychain = if denied {
+            FakeKeychain::denying_the_key()
         } else {
-            Ok(Some("sk-swift".to_owned()))
+            FakeKeychain::swift_app()
         };
-        let step = step(
-            FakeKeychain {
-                key,
-                ..FakeKeychain::swift_app()
-            },
-            None,
-        );
+        let step = step(keychain, None);
         let flags = Arc::new(Mutex::new(None));
         let seen = flags.clone();
         let support = step.dir.path().to_owned();
