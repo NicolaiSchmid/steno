@@ -19,6 +19,7 @@ use steno_core::{
     AudioAsset, AudioFormat, AudioLane, Meeting, MeetingEvent, MeetingSource, MeetingState,
     PipelineStage, ProcessingProgress, RecordingLayout, Settings, Store, SummaryTemplate,
     TitleOrigin,
+    json::uuid_string,
     paths::{file_url, file_url_path},
 };
 use steno_pipeline::{MeetingEventBus, ProcessingPipeline, ReprocessError};
@@ -276,7 +277,7 @@ impl Process {
         if skipped {
             eprintln!("summary skipped: no LLM endpoint configured");
         }
-        println!("{}", steno_core::json::uuid_string(meeting_id));
+        println!("{}", uuid_string(meeting_id));
         Ok(())
     }
 }
@@ -285,26 +286,25 @@ impl Process {
 /// no meeting has is a usage error, like an unknown template.
 fn reprocess_failure(error: ReprocessError) -> Failure {
     match error {
-        ReprocessError::MeetingNotFound(id) => Failure::usage(format!(
-            "No meeting has the id {}.",
-            steno_core::json::uuid_string(id)
-        )),
+        ReprocessError::MeetingNotFound(id) => {
+            Failure::usage(format!("No meeting has the id {}.", uuid_string(id)))
+        }
         ReprocessError::Unfinished { meeting_id, state } => Failure::runtime(format!(
             "Meeting {} is {}; only a ready or failed meeting can be processed again.",
-            steno_core::json::uuid_string(meeting_id),
+            uuid_string(meeting_id),
             state.as_str()
         )),
         ReprocessError::NoAsset(id) => Failure::runtime(format!(
             "Meeting {} has no recording on record, so it cannot be processed again.",
-            steno_core::json::uuid_string(id)
+            uuid_string(id)
         )),
         ReprocessError::AudioGone(id) => Failure::runtime(format!(
             "The recording of meeting {} is no longer on disk, so it cannot be processed again.",
-            steno_core::json::uuid_string(id)
+            uuid_string(id)
         )),
         ReprocessError::Busy(id) => Failure::runtime(format!(
             "Meeting {} is already being processed.",
-            steno_core::json::uuid_string(id)
+            uuid_string(id)
         )),
         ReprocessError::Quitting => {
             Failure::runtime("The pipeline is shutting down; nothing was started.")
