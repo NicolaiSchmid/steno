@@ -429,7 +429,7 @@ async fn marking_an_export_pending_leaves_a_row_per_destination_and_keeps_the_re
     assert_eq!(rows[1].last_attempt_at, None);
     assert_eq!(
         store
-            .meetings_with_unfinished_deliveries(now() + Duration::days(1))
+            .meetings_with_unfinished_deliveries(now() + Duration::days(1), Duration::days(1))
             .unwrap(),
         [meeting_id()],
         "the launch finds the export owed"
