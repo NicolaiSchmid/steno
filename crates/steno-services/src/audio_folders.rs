@@ -1,7 +1,10 @@
 //! Where recordings were written, in two files under the support directory,
 //! beside the database and outside its schema, which the Swift app shares.
 //! Each write replaces its file in one durable write
-//! ([`files::replace_file`]), so a crash leaves the old file or the new one.
+//! ([`files::write_json`]), so a crash leaves the old file or the new one.
+//! They are not read through [`files::read_json`], which starts afresh from
+//! a file that does not parse: recovery must tell such a file from an empty
+//! one.
 //!
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
@@ -140,9 +143,7 @@ fn change<T: Default + Serialize + DeserializeOwned>(
     if !edit(&mut value) {
         return Ok(());
     }
-    let data = serde_json::to_vec_pretty(&value)?;
-    files::create_dir_all_durably(support_directory)?;
-    files::replace_file(&path, &data, files::Access::Default)
+    files::write_json(&path, &value)
 }
 
 /// Every JSON string a file that does not parse still holds whole, in
