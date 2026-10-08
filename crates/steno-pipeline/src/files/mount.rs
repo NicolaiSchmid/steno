@@ -381,22 +381,18 @@ mod tests {
 45 22 0:41 / /home/me/NAS\\040share rw,nosuid,nodev,relatime shared:30 master:2 - fuse.sshfs me@nas:/srv rw,user_id=1000
 46 22 0:42 / /mnt/backup rw,relatime - nfs4 nas:/backup rw,vers=4.2
 47 22 0:82 / /home/me/dav rw,nosuid,nodev,relatime shared:31 - fuse http://127.0.0.1:47811/ rw,user_id=0,group_id=0";
-        assert_eq!(
-            mount_on_device(mountinfo, 259, 2),
-            Some(mount("ext4", "/dev/nvme0n1p2"))
-        );
-        assert_eq!(
-            mount_on_device(mountinfo, 0, 41),
-            Some(mount("fuse.sshfs", "me@nas:/srv"))
-        );
-        assert_eq!(
-            mount_on_device(mountinfo, 0, 42),
-            Some(mount("nfs4", "nas:/backup"))
-        );
-        assert_eq!(
-            mount_on_device(mountinfo, 0, 82),
-            Some(mount("fuse", "http://127.0.0.1:47811/"))
-        );
+        for (major, minor, file_system, source) in [
+            (259, 2, "ext4", "/dev/nvme0n1p2"),
+            (0, 41, "fuse.sshfs", "me@nas:/srv"),
+            (0, 42, "nfs4", "nas:/backup"),
+            (0, 82, "fuse", "http://127.0.0.1:47811/"),
+        ] {
+            assert_eq!(
+                mount_on_device(mountinfo, major, minor),
+                Some(mount(file_system, source)),
+                "{major}:{minor}"
+            );
+        }
         assert_eq!(mount_on_device(mountinfo, 0, 4), None);
     }
 
