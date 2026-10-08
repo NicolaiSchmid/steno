@@ -383,22 +383,24 @@ fn listener_configuration(paths: &StenoPaths) -> steno_handover::HandoverConfigu
 /// keyring's own sentence when it was not opened at start, as that one
 /// already names the pairing.
 fn identity_failure(error: &IdentityError) -> String {
-    if let IdentityError::Unavailable(Unavailability::Unreadable(source)) = error
-        && let Some(not_opened @ KeyringUnavailable::NotOpened(_)) = source.downcast_ref()
-    {
-        return not_opened.to_string();
+    match keyring_failure(error) {
+        Some(not_opened @ KeyringUnavailable::NotOpened(_)) => not_opened.to_string(),
+        _ => error.to_string(),
     }
-    error.to_string()
 }
 
 /// Whether the identity could not be read because the keyring was asking
 /// the user at that moment.
 fn waits_on_the_keyring(error: &IdentityError) -> bool {
-    matches!(
-        error,
-        IdentityError::Unavailable(Unavailability::Unreadable(source))
-            if source.downcast_ref::<KeyringUnavailable>() == Some(&KeyringUnavailable::Unlocking)
-    )
+    keyring_failure(error) == Some(&KeyringUnavailable::Unlocking)
+}
+
+/// The keyring's reason when the identity could not be read from it.
+fn keyring_failure(error: &IdentityError) -> Option<&KeyringUnavailable> {
+    match error {
+        IdentityError::Unavailable(Unavailability::Unreadable(source)) => source.downcast_ref(),
+        _ => None,
+    }
 }
 
 /// Builds the graph. First the database's lock ([`DatabaseLock`]): while
@@ -992,10 +994,12 @@ mod tests {
 
     use chrono::Utc;
 
+    use steno_bridge::BridgeTopic;
     use steno_core::{
         AudioFormat, HandoverIntake as _, PairedDevice, RecordingMetadata, SecretKey, SecretStore,
         async_trait, paths::file_url, protocols::BoundaryResult,
     };
+    use steno_host::services::ListenerState;
     use steno_pipeline::MeetingEventBus;
     use steno_speech::SpeechRuntime;
 
@@ -1109,7 +1113,7 @@ mod tests {
         let onboarding = app
             .host()
             .unwrap()
-            .snapshot(steno_bridge::BridgeTopic::Onboarding)
+            .snapshot(BridgeTopic::Onboarding)
             .unwrap();
         let listed: Vec<&str> = onboarding["permissions"]
             .as_array()
@@ -2014,14 +2018,14 @@ mod tests {
             .expect("the meetings were recovered after the answer");
         }
 
-        fn snapshot(&self, topic: steno_bridge::BridgeTopic) -> serde_json::Value {
+        fn snapshot(&self, topic: BridgeTopic) -> serde_json::Value {
             let host = self.host.clone();
             on_own_thread(PATIENCE, "the snapshot was built", move || {
                 host.snapshot(topic).unwrap()
             })
         }
 
-        fn handover_state(&self) -> steno_host::services::ListenerState {
+        fn handover_state(&self) -> ListenerState {
             steno_host::services::Handover::state(self.handover.as_ref())
         }
     }
@@ -2044,7 +2048,7 @@ mod tests {
         let mut asked = AskedAtLaunch::new(false).await;
         let handover = asked.handover.clone();
         assert!(handover.listener().is_none());
-        let steno_host::services::ListenerState::Failed(reason) = asked.handover_state() else {
+        let ListenerState::Failed(reason) = asked.handover_state() else {
             panic!("a waiting handover reads as failed");
         };
         assert!(reason.contains("waiting for an answer"), "{reason}");
@@ -2055,10 +2059,10 @@ mod tests {
             "nothing minted"
         );
         assert_eq!(*asked.keys_read.lock().unwrap(), [None]);
-        let summaries = asked.snapshot(steno_bridge::BridgeTopic::SettingsSummaries);
+        let summaries = asked.snapshot(BridgeTopic::SettingsSummaries);
         assert_eq!(summaries["hasAPIKey"], false);
         assert!(summaries.get("keyStore").is_none(), "{summaries}");
-        let onboarding = asked.snapshot(steno_bridge::BridgeTopic::Onboarding);
+        let onboarding = asked.snapshot(BridgeTopic::Onboarding);
         assert_eq!(
             onboarding["summaries"]["error"],
             steno_host::settings::KeyRead::UNREADABLE,
@@ -2091,19 +2095,16 @@ mod tests {
             [None, Some("sk-1".to_owned())],
             "the pipeline was built again, with the key"
         );
-        let summaries = asked.snapshot(steno_bridge::BridgeTopic::SettingsSummaries);
+        let summaries = asked.snapshot(BridgeTopic::SettingsSummaries);
         assert_eq!(summaries["hasAPIKey"], true);
         assert_eq!(summaries["keyStore"], "keyring", "{summaries}");
-        let onboarding = asked.snapshot(steno_bridge::BridgeTopic::Onboarding);
+        let onboarding = asked.snapshot(BridgeTopic::Onboarding);
         assert!(
             onboarding["summaries"].get("error").is_none(),
             "onboarding read the key again: {onboarding}"
         );
         assert_eq!(onboarding["summaries"]["keyStore"], "keyring");
-        assert_eq!(
-            asked.handover_state(),
-            steno_host::services::ListenerState::Stopped
-        );
+        assert_eq!(asked.handover_state(), ListenerState::Stopped);
     }
 
     /// A phone paired: its listener starts once the keyring answered, the
@@ -2121,14 +2122,11 @@ mod tests {
         asked.answer(None);
         asked.until_recovered().await;
         assert!(
-            matches!(
-                asked.handover_state(),
-                steno_host::services::ListenerState::Listening(_)
-            ),
+            matches!(asked.handover_state(), ListenerState::Listening(_)),
             "{:?}",
             asked.handover_state()
         );
-        let phone = asked.snapshot(steno_bridge::BridgeTopic::SettingsPhone);
+        let phone = asked.snapshot(BridgeTopic::SettingsPhone);
         assert_eq!(phone["listener"]["state"], "listening", "{phone}");
     }
 
@@ -2141,14 +2139,11 @@ mod tests {
         asked.until_recovered().await;
         assert!(matches!(
             asked.handover_state(),
-            steno_host::services::ListenerState::Listening(_)
+            ListenerState::Listening(_)
         ));
         let app = &asked.app;
         tokio::task::block_in_place(|| app.shutdown());
-        assert_eq!(
-            asked.handover_state(),
-            steno_host::services::ListenerState::Stopped
-        );
+        assert_eq!(asked.handover_state(), ListenerState::Stopped);
     }
 
     /// The store chose without turning a read away (the commonest Linux
@@ -2189,11 +2184,11 @@ mod tests {
         asked.answer(Some(KeyringUnavailable::Locked));
         asked.until_recovered().await;
         assert!(asked.handover.listener().is_none());
-        let steno_host::services::ListenerState::Failed(reason) = asked.handover_state() else {
+        let ListenerState::Failed(reason) = asked.handover_state() else {
             panic!("still waiting");
         };
         assert!(reason.contains("locked"), "{reason}");
-        let phone = asked.snapshot(steno_bridge::BridgeTopic::SettingsPhone);
+        let phone = asked.snapshot(BridgeTopic::SettingsPhone);
         assert!(
             phone["listener"]["failure"]
                 .as_str()
