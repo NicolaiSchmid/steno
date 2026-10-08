@@ -29,7 +29,7 @@ use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
 };
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
-use crate::recorder::{CaptureRecorder, MakeCaptureSession};
+use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
 use crate::secrets::secret_store;
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 
@@ -312,6 +312,7 @@ fn handover_listener(
 /// for each): permissions (all granted), updater, clip player, QR encoder;
 /// the audio device list is empty off the Mac until the `PipeWire` and
 /// WASAPI backends enumerate devices.
+#[allow(clippy::too_many_lines)]
 pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let mut warnings = Vec::new();
     let paths = options.paths;
@@ -361,11 +362,8 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         zone,
         runtime.clone(),
     );
-    // The database's volume counts beside the recordings folder's: the
-    // save writes there too.
-    recorder.watch_disk_with(crate::recorder::DiskWatch::system(
-        database_path.parent().map(std::path::Path::to_path_buf),
-    ));
+    // The save writes to the database's volume too.
+    recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
 
     let handover = match handover_listener(&store, &pipeline, &secrets, zone, &runtime) {
         Ok(pair) => Some(pair),

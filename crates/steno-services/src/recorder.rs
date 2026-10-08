@@ -102,7 +102,7 @@ impl DiskWatch {
     /// of `database_folder`; the floor stops recordings everywhere but on
     /// the Mac (see [`Self::STOP_BELOW_BYTES`]).
     #[must_use]
-    pub(crate) fn system(database_folder: Option<PathBuf>) -> Self {
+    pub(crate) fn system(database_folder: Option<&Path>) -> Self {
         Self {
             free_space: Arc::new(|path| {
                 fs4::statvfs(path).map(|stats| Volume {
@@ -111,7 +111,7 @@ impl DiskWatch {
                 })
             }),
             interval: Duration::from_secs(5),
-            database_folder,
+            database_folder: database_folder.map(Path::to_path_buf),
             stops: !cfg!(target_os = "macos"),
         }
     }
@@ -265,8 +265,9 @@ struct Active {
     /// `notice_thread`, cleared by `clear_messages`.
     fallback: Arc<Mutex<Fallback>>,
     /// Re-reads the microphone after each rebuild, joined once the session
-    /// is dropped.
-    notice_thread: JoinHandle<()>,
+    /// is dropped; none when it could not be spawned, and the fallback
+    /// warning stays as the start left it.
+    notice_thread: Option<JoinHandle<()>>,
     /// The disk watch's warning ([`low_space_warning`]), set at the start
     /// and by the watcher, cleared by a reading with room again and by
     /// `clear_messages`. Kept apart from the status's own warning so it
@@ -335,6 +336,72 @@ fn fallback_note(input: &str) -> String {
     format!(
         "Steno recorded from {input} while the microphone chosen in Settings was not available."
     )
+}
+
+/// The host's change hook ([`CaptureRecorder::on_change`]).
+type Hook = Option<Arc<dyn Fn() + Send + Sync>>;
+
+/// The thread that forwards the levels, which arrive on `receiver` at
+/// 10 Hz, into `shared` (`Active::levels`) and calls `hook`, so the host
+/// republishes `recording`; it ends with the session. None when it could
+/// not be spawned, and the recording runs without levels.
+fn forward_levels(
+    receiver: Receiver<AudioLevels>,
+    shared: Arc<Mutex<Option<LaneLevels>>>,
+    hook: Hook,
+) -> Option<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("steno-recording-levels".into())
+        .spawn(move || {
+            while let Ok(update) = receiver.recv() {
+                *shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(levels(&update));
+                if let Some(hook) = &hook {
+                    hook();
+                }
+            }
+        })
+        .inspect_err(|error| tracing::error!(%error, "the recording runs without its levels"))
+        .ok()
+}
+
+/// The thread that re-reads the microphone into `fallback` after each
+/// rebuild ([`CaptureNotice::DeviceResumed`] on `notices`), since a rebuild
+/// may record another one, and calls `hook`. It holds `session` weakly, so
+/// dropping the session ends the notices and the thread. None when it
+/// could not be spawned, and the fallback warning stays as the start left
+/// it.
+fn follow_the_microphone(
+    notices: Receiver<CaptureNotice>,
+    fallback: Arc<Mutex<Fallback>>,
+    session: Weak<CaptureSession>,
+    hook: Hook,
+) -> Option<JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("steno-notices".into())
+        .spawn(move || {
+            while let Ok(notice) = notices.recv() {
+                if !matches!(notice, CaptureNotice::DeviceResumed { .. }) {
+                    continue;
+                }
+                let Some(session) = session.upgrade() else {
+                    return;
+                };
+                fallback
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .set(fallback_input(session.stream().as_ref()));
+                drop(session);
+                if let Some(hook) = &hook {
+                    hook();
+                }
+            }
+        })
+        .inspect_err(|error| {
+            tracing::error!(%error, "the recording runs without its microphone notices");
+        })
+        .ok()
 }
 
 fn levels(levels: &AudioLevels) -> LaneLevels {
@@ -420,7 +487,7 @@ impl CaptureRecorder {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hook);
     }
 
-    fn hook(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+    fn hook(&self) -> Hook {
         self.changed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -540,61 +607,18 @@ impl CaptureRecorder {
         }
         let meeting_id = meeting.id;
         let shared = Arc::new(Mutex::new(None::<LaneLevels>));
-        // Levels arrive on a std channel at 10 Hz; a thread forwards them
-        // into `Active::levels` and the host republishes `recording`. It
-        // is spawned before `Recording` is visible, so the stop that takes
-        // the session always takes the thread with it.
-        let hook = self.hook();
-        let level_thread = {
-            let shared = shared.clone();
-            std::thread::Builder::new()
-                .name("steno-recording-levels".into())
-                .spawn(move || {
-                    while let Ok(update) = levels_receiver.recv() {
-                        *shared
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                            Some(levels(&update));
-                        if let Some(hook) = &hook {
-                            hook();
-                        }
-                    }
-                })
-                .inspect_err(|error| {
-                    tracing::error!(%error, "the recording runs without its levels");
-                })
-                .ok()
-        };
-        // A rebuild may record another microphone; the thread holds the
-        // session weakly, so dropping it ends the notices and the thread.
+        // Spawned before `Recording` is visible, so the stop that takes the
+        // session always takes the thread with it.
+        let level_thread = forward_levels(levels_receiver, shared.clone(), self.hook());
         let mut fallback = Fallback::default();
         fallback.set(fallback_input(session.stream().as_ref()));
         let fallback = Arc::new(Mutex::new(fallback));
-        let notice_thread = {
-            let (fallback, session, hook) =
-                (fallback.clone(), Arc::downgrade(&session), self.hook());
-            std::thread::Builder::new()
-                .name("steno-notices".into())
-                .spawn(move || {
-                    while let Ok(notice) = notices.recv() {
-                        if !matches!(notice, CaptureNotice::DeviceResumed { .. }) {
-                            continue;
-                        }
-                        let Some(session) = session.upgrade() else {
-                            return;
-                        };
-                        fallback
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .set(fallback_input(session.stream().as_ref()));
-                        drop(session);
-                        if let Some(hook) = &hook {
-                            hook();
-                        }
-                    }
-                })
-                .expect("spawn the notice thread")
-        };
+        let notice_thread = follow_the_microphone(
+            notices,
+            fallback.clone(),
+            Arc::downgrade(&session),
+            self.hook(),
+        );
         {
             let mut inner = self.inner();
             inner.status.state = RecordingState::Recording;
@@ -830,7 +854,9 @@ impl CaptureRecorder {
         if let Some(level_thread) = active.level_thread {
             let _ = level_thread.join();
         }
-        let _ = active.notice_thread.join();
+        if let Some(notice_thread) = active.notice_thread {
+            let _ = notice_thread.join();
+        }
         // Read once the notice thread is gone, so its last rebuild counts.
         let outcome = outcome.map(|(warning, ended)| {
             let note = active
