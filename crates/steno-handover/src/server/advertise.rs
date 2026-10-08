@@ -517,13 +517,13 @@ mod tests {
         assert_eq!(info.get_fullname(), format!("{fits}._steno._tcp.local."));
     }
 
-    /// A watcher that reports one change per step, runs the step, and ends
-    /// after the last one.
-    struct Steps<'a>(std::collections::VecDeque<Box<dyn FnOnce() + 'a>>);
+    /// A watcher whose closure says whether a change came; it ends the
+    /// watch by returning `false`.
+    struct Watch<F: FnMut() -> bool>(F);
 
-    impl InterfaceWatcher for Steps<'_> {
+    impl<F: FnMut() -> bool> InterfaceWatcher for Watch<F> {
         fn changed(&mut self) -> bool {
-            self.0.pop_front().map(|step| step()).is_some()
+            (self.0)()
         }
     }
 
@@ -539,20 +539,20 @@ mod tests {
         let home = Ipv4Addr::new(192, 168, 1, 20);
         let office = Ipv4Addr::new(10, 0, 0, 5);
         let lan = Mutex::new(vec![home]);
-        let set = |addresses: Vec<Ipv4Addr>| {
-            let lan = &lan;
-            Box::new(move || *lan.lock().unwrap() = addresses) as Box<dyn FnOnce()>
-        };
-        let mut watcher = Steps(
-            [
-                set(vec![home]),
-                set(vec![home, office]),
-                set(vec![office]),
-                set(vec![]),
-                set(vec![home]),
-            ]
-            .into(),
-        );
+        let mut moves = [
+            vec![home],
+            vec![home, office],
+            vec![office],
+            vec![],
+            vec![home],
+        ]
+        .into_iter();
+        let mut watcher = Watch(|| {
+            moves
+                .next()
+                .map(|next| *lan.lock().unwrap() = next)
+                .is_some()
+        });
         let record = published(&[home]);
         let mut registered = Vec::new();
         follow(
@@ -575,7 +575,8 @@ mod tests {
     #[test]
     fn a_failed_registration_is_tried_again_at_the_next_change() {
         let office = Ipv4Addr::new(10, 0, 0, 5);
-        let mut watcher = Steps([Box::new(|| ()) as Box<dyn FnOnce()>, Box::new(|| ())].into());
+        let mut changes = 0..2;
+        let mut watcher = Watch(|| changes.next().is_some());
         let record = published(&[]);
         let mut attempts = 0;
         follow(
@@ -599,14 +600,15 @@ mod tests {
     fn nothing_is_registered_once_the_record_is_withdrawn() {
         let office = Ipv4Addr::new(10, 0, 0, 5);
         let record = published(&[]);
-        let withdraw = || record.lock().unwrap().withdrawn = true;
-        let mut watcher = Steps(
-            [
-                Box::new(withdraw) as Box<dyn FnOnce()>,
-                Box::new(|| panic!("the watch goes on after a withdraw")),
-            ]
-            .into(),
-        );
+        let mut first = true;
+        let mut watcher = Watch(|| {
+            assert!(
+                std::mem::take(&mut first),
+                "the watch goes on after a withdraw"
+            );
+            record.lock().unwrap().withdrawn = true;
+            true
+        });
         follow(
             &mut watcher,
             || vec![office],

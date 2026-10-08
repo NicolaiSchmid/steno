@@ -481,17 +481,9 @@ mod tests {
         assert_eq!(may_skip(false, "no LAN address"), Ok(()));
     }
 
-    /// A listener on every IPv4 address that serves loopback and `lan`.
+    /// A listener on every IPv4 address that serves loopback and `lan`,
+    /// read again after `every`.
     async fn serve(
-        configuration: &HandoverConfiguration,
-        identity: &Arc<HandoverIdentity>,
-        lan: fn() -> Vec<Ipv4Addr>,
-    ) -> (HandoverServer, Arc<ServerMetrics>) {
-        serve_reading(configuration, identity, lan, LAN_REFRESH).await
-    }
-
-    /// [`serve`] with `lan` read again after `every`.
-    async fn serve_reading(
         configuration: &HandoverConfiguration,
         identity: &Arc<HandoverIdentity>,
         lan: fn() -> Vec<Ipv4Addr>,
@@ -538,7 +530,7 @@ mod tests {
 
         // Only loopback is served: the host's own address stands in for a
         // tunnel's.
-        let (outside, metrics) = serve(&configuration, &identity, no_lan).await;
+        let (outside, metrics) = serve(&configuration, &identity, no_lan, LAN_REFRESH).await;
         let mut refused = TcpStream::connect((address, outside.port)).await.unwrap();
         let mut received = Vec::new();
         let read = tokio::time::timeout(Duration::from_secs(5), refused.read_to_end(&mut received))
@@ -566,22 +558,17 @@ mod tests {
 
         // The host's address is the LAN: the handshake completes and a
         // request is answered.
-        let (lan, metrics) = serve(&configuration, &identity, the_host).await;
-        let connector = TlsConnector::from(pinned_client_config(&identity.fingerprint()).unwrap());
+        let (lan, metrics) = serve(&configuration, &identity, the_host, LAN_REFRESH).await;
         let exchange = async {
-            let tcp = TcpStream::connect((address, lan.port)).await?;
-            let mut tls = connector
-                .connect(ServerName::from(IpAddr::V4(address)), tcp)
-                .await?;
+            let mut tls = connect(&identity, address, lan.port).await?;
             tls.write_all(b"GET /v1/hello HTTP/1.1\r\nHost: steno\r\nConnection: close\r\n\r\n")
                 .await?;
             let mut response = Vec::new();
             tls.read_to_end(&mut response).await?;
             std::io::Result::Ok(response)
         };
-        let response = tokio::time::timeout(Duration::from_secs(5), exchange)
+        let response = within(exchange)
             .await
-            .expect("answered long before the read timeout")
             .expect("a TLS exchange on the LAN address");
         let response = String::from_utf8_lossy(&response);
         assert!(response.starts_with("HTTP/1.1 200"), "{response}");
@@ -673,7 +660,7 @@ mod tests {
             ..HandoverConfiguration::default()
         };
         let identity = Arc::new(HandoverIdentity::mint("Steno test", Utc::now()).unwrap());
-        let (server, metrics) = serve_reading(
+        let (server, metrics) = serve(
             &configuration,
             &identity,
             the_host_once_joined,
