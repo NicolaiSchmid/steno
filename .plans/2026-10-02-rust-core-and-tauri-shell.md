@@ -953,11 +953,11 @@ still has to draw the window side. `[ ]` is not ported yet.
     `a_diarizer_failure_warns_with_its_stage_not_its_reason`). `diarize` moves its
     sample clips into place only once every one is written, so a failure while writing
     moves none. Each move is one rename that replaces the earlier clip, so a clip's path
-    always holds a whole clip, and on Windows it is tried again while a file is busy
-    (`steno_core::busy_file`). A move that fails after earlier ones landed leaves those
-    speakers with the new clips, so a kept speaker can then play another run's voice;
-    per-run clip names committed with the merge are a follow-up. Rust only: Swift writes
-    each clip in place. Once the app quits,
+    always holds a whole clip, and on Windows each staged write and each move is tried
+    again while a file is busy (`steno_core::busy_file`). A move that fails after earlier
+    ones landed leaves those speakers with the new clips, so a kept speaker can then play
+    another run's voice; per-run clip names committed with the merge are a follow-up (see
+    "Open after the port"). Rust only: Swift writes each clip in place. Once the app quits,
     such a failure ends the run unpersisted, so the meeting is processed again at the
     next launch (`a_diarizer_failure_during_the_exit_leaves_the_meeting_for_the_next_launch`).
     Swift fails the meeting.
@@ -2748,6 +2748,12 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `crates/steno-pipeline/src/files.rs`,
   `Sources/StenoCore/Storage/RecordingIntake.swift`, `crates/steno-llm`. Found: #167,
   #185, #213.
+- **`fix/per-run-speaker-clips`.** Speaker clips written all or none: a move that fails
+  partway through `write_sample_clips` leaves a kept speaker playing another run's
+  voice, with its earlier clip replaced. Per-run clip names, written before the merge
+  and switched to in the merge's transaction, close it. Rust only: Swift writes each
+  clip in place. Where: `write_sample_clips` (`crates/steno-pipeline/src/pipeline.rs`);
+  the "Speakers" note under "Pipeline and services (WP6b)". Found: #256.
 
 ## Progress
 
@@ -2816,7 +2822,7 @@ PR off `main`.
 | The Bonjour record follows a network change on every platform, and the Mac advertises its computer name (`steno-handover`, `whoami` 2) | `fix/handover-republish` | #247 | open |
 | On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | open |
 | The phone resolves the computer again after a request fails to connect and every 30 s while uploads are queued in the foreground, keeps the address in use while it answers, also after a relaunch, and cancels the chunks still out to an address that stopped answering (`mobile/`, `use-upload-coordinator`, `adopted-origin`) | `fix/mobile-re-resolve` | #254 | open |
-| On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' moves into place; a failed clip write that keeps every earlier clip is a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
+| On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
