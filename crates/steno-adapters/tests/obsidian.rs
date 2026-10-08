@@ -1460,7 +1460,7 @@ fn a_redelivery_without_its_audio_writes_the_folder_it_claimed_and_warns() {
     assert_eq!(again.folder, two);
     assert_eq!(
         again.warnings,
-        ["The audio was already removed, so the export has no audio file"]
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
     );
     assert_eq!(
         vault.list(&two),
