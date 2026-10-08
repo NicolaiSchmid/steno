@@ -23,7 +23,7 @@ jobs:
         run: cargo clippy -p steno-pipeline --all-targets --locked -- -D warnings
       - name: Files tests
         shell: bash
-        run: cargo test -p steno-pipeline --lib --locked files:: -- --nocapture
+        run: cargo test -p steno-pipeline --lib --locked 'files::' -- --nocapture
       - name: Parallel soak
         shell: bash
         run: |
