@@ -28,12 +28,10 @@ pub(super) fn is_on_a_network_mount(path: &Path) -> bool {
     let Some(existing) = nearest_existing(path) else {
         return false;
     };
-    let stat = match rustix::fs::statfs(existing) {
-        Ok(stat) => stat,
-        Err(error) => {
-            tracing::debug!(folder = %existing.display(), %error, "the folder's file system could not be read");
-            return false;
-        }
+    let Ok(stat) = rustix::fs::statfs(existing).inspect_err(|error| {
+        tracing::debug!(folder = %existing.display(), %error, "the folder's file system could not be read");
+    }) else {
+        return false;
     };
     #[cfg(target_os = "linux")]
     {
@@ -55,7 +53,6 @@ pub(super) fn is_on_a_network_mount(path: &Path) -> bool {
 }
 
 /// `path`, or its nearest ancestor that exists.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
 fn nearest_existing(path: &Path) -> Option<&Path> {
     path.ancestors().find(|ancestor| ancestor.exists())
 }
