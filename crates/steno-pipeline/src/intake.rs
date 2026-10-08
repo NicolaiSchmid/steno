@@ -159,10 +159,17 @@ impl HandoverIntake for RecordingIntake {
             .ok_or_else(|| format!("audio folder is not a file URL: {}", settings.audio_folder))?;
         let layout = RecordingLayout::new(&audio_folder, meeting_id);
         // The copy and its folder are on the disk before the receipt says
-        // complete: the phone deletes its own copy on that answer.
-        crate::files::create_dir_all_durably(&layout.directory)?;
+        // complete: the phone deletes its own copy on that answer. A folder
+        // or copy that fails removes the meeting folder, which only this
+        // attempt wrote (its id is new); the verified upload and the phone's
+        // copy remain, and the phone's retry copies into a new folder.
         let destination = layout.master(metadata.format);
-        crate::files::copy_durably(file, &destination)?;
+        if let Err(error) = crate::files::create_dir_all_durably(&layout.directory)
+            .and_then(|()| crate::files::copy_durably(file, &destination))
+        {
+            let _ = std::fs::remove_dir_all(&layout.directory);
+            return Err(error.into());
+        }
 
         let meeting = Meeting {
             id: meeting_id,
@@ -887,8 +894,9 @@ mod tests {
         assert!(!upload.exists());
     }
 
-    /// A copy that fails leaves the receipt short of complete and admits
-    /// nothing: the phone, told nothing landed, keeps its recording.
+    /// A copy that fails leaves the receipt short of complete, admits
+    /// nothing and leaves no meeting folder behind: the phone, told nothing
+    /// landed, keeps its recording.
     #[tokio::test]
     async fn an_upload_that_cannot_be_copied_is_not_marked_complete() {
         let dir = tempfile::tempdir().unwrap();
@@ -916,6 +924,12 @@ mod tests {
         );
         assert_eq!(store.all_meetings().unwrap(), []);
         assert!(!enqueued.load(Ordering::SeqCst));
+        let folders: Vec<_> = std::fs::read_dir(dir.path().join("audio"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(folders, Vec::<std::path::PathBuf>::new());
     }
 
     /// A decoder and a dispatcher nothing reaches: the pipeline quits before
