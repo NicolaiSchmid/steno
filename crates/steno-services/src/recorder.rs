@@ -989,8 +989,7 @@ impl CaptureRecorder {
     /// too ([`Unwinding`]), so the next recording can start and a quit
     /// does not wait for good. One before or inside the save leaves the
     /// meeting's row `recording` over closed files (the session's drop
-    /// closes them), which the next launch fails as interrupted, the files
-    /// kept.
+    /// closes them), which the next launch recovers ([`crate::recovery`]).
     fn finish_stop(&self, active: Active, reason: RecordingEndReason, error: Option<String>) {
         let unwinding = Unwinding::of(self, RecordingState::Stopping, SAVE_PANICKED);
         self.notify();
@@ -1034,38 +1033,11 @@ impl CaptureRecorder {
                     Err(error) => Err(not_saved(meeting_id, &error)),
                 }
             }
-            // The writer failed and took the asset with it, but what it
-            // wrote may still be on disk: recovered as an interrupted
-            // recording is at launch, else the meeting fails as before.
-            Err(failure) => {
-                log_not_saved(meeting_id, failure_kind(&failure));
-                let recovered = block_on(
-                    &self.runtime,
-                    crate::recovery::recover(
-                        &intake,
-                        std::slice::from_ref(&active.audio_folder),
-                        meeting_id,
-                        source(active.mode),
-                    ),
-                );
-                match recovered {
-                    Ok(_) => {
-                        tracing::warn!(%meeting_id, "a recording whose capture failed was recovered");
-                        Ok((Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error))
-                    }
-                    Err(RecoveryError::NotSaved(error)) => Err(not_saved(meeting_id, &error)),
-                    Err(RecoveryError::Unreachable) => {
-                        tracing::warn!(%meeting_id, "a recording whose capture failed is left for the next launch: its folder cannot be read now");
-                        Err(KEPT_FOR_THE_NEXT_LAUNCH)
-                    }
-                    Err(RecoveryError::Unrecoverable(_)) => {
-                        let _ = intake.fail(meeting_id, FILES_NOT_FINISHED);
-                        Err(FILES_NOT_FINISHED)
-                    }
-                }
-            }
+            Err(failure) => self
+                .recover_failed_stop(&intake, &active, &failure)
+                .map(|()| (Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error)),
         };
-        // Every outcome but that one settles the meeting.
+        // Every outcome but a meeting kept for the next launch settles it.
         if !matches!(outcome, Err(KEPT_FOR_THE_NEXT_LAUNCH)) {
             self.forget_recording(meeting_id);
         }
@@ -1103,6 +1075,44 @@ impl CaptureRecorder {
         drop(inner);
         std::mem::forget(unwinding);
         self.notify();
+    }
+
+    /// A stop whose session failed and took the asset with it
+    /// ([`CaptureSession::stop`]): what the writer wrote may still be on
+    /// disk, and is recovered as an interrupted recording is at launch;
+    /// else the meeting fails. The error is the status line.
+    fn recover_failed_stop(
+        &self,
+        intake: &LocalRecordingIntake,
+        active: &Active,
+        failure: &CaptureError,
+    ) -> Result<(), &'static str> {
+        let meeting_id = active.meeting_id;
+        log_not_saved(meeting_id, failure_kind(failure));
+        let recovered = block_on(
+            &self.runtime,
+            crate::recovery::recover(
+                intake,
+                std::slice::from_ref(&active.audio_folder),
+                meeting_id,
+                source(active.mode),
+            ),
+        );
+        match recovered {
+            Ok(_) => {
+                tracing::warn!(%meeting_id, "a recording whose capture failed was recovered");
+                Ok(())
+            }
+            Err(RecoveryError::NotSaved(error)) => Err(not_saved(meeting_id, &error)),
+            Err(RecoveryError::Unreachable) => {
+                tracing::warn!(%meeting_id, "a recording whose capture failed is left for the next launch: its folder cannot be read now");
+                Err(KEPT_FOR_THE_NEXT_LAUNCH)
+            }
+            Err(RecoveryError::Unrecoverable(_)) => {
+                let _ = intake.fail(meeting_id, FILES_NOT_FINISHED);
+                Err(FILES_NOT_FINISHED)
+            }
+        }
     }
 
     /// The status of a recorder that records nothing, the messages kept.
