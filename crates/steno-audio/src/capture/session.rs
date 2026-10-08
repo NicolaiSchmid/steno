@@ -1107,10 +1107,10 @@ impl Core {
         // `device_changed` late and costs one more rebuild (see the
         // PipeWire backend's module doc).
         sink.rearm_device_change();
-        let mut restarted_rate = None;
-        let unaccounted = match self.restart_backend(&sink, on_the_fallback, generation, cancel) {
+        let restart = self.restart_backend(&sink, on_the_fallback, generation, cancel);
+        let (unaccounted, restarted_rate) = match restart {
             Restart::Started(stream, attempt) => {
-                restarted_rate = Some(stream.sample_rate);
+                let rate = stream.sample_rate;
                 // The gap grows through every failed attempt and is written
                 // once, in full, when a start succeeds.
                 let elapsed = self.clock.now().saturating_sub(started);
@@ -1121,16 +1121,15 @@ impl Core {
                     && self.relay_has_room(&sink, &relay, &stream, generation, cancel)
                     && self.resume(stream, attempt, gap_frames, &sink, &relay, generation)
                 {
-                    restarted_rate = None;
-                    0
+                    (0, None)
                 } else {
-                    written
+                    (written, Some(rate))
                 }
             }
-            Restart::Abandoned => 0,
+            Restart::Abandoned => (0, None),
             Restart::Exhausted => {
                 self.device_lost(recording, generation);
-                0
+                (0, None)
             }
         };
         (unaccounted, peak, restarted_rate)

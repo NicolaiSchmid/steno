@@ -2083,8 +2083,7 @@ fn a_change_to_24_khz_resumes_the_recording() {
         sample_rate: 24_000.0,
         input_latency_frames: 240,
         output_latency_frames: 4_800,
-        layout: None,
-        input: None,
+        ..CaptureStream::SYNTHETIC
     };
     let backend = Arc::new(SyntheticCaptureBackend::new(
         tones(&call(), 2.0)

@@ -50,6 +50,8 @@ impl RateConverter {
     /// 24 kHz aliases into the top of the band (a 28 kHz tone lands at
     /// 20 kHz, at -49 dB); below 8 kHz nothing aliases above -97 dB.
     pub const MAX_RATE: f64 = 192_000.0;
+    /// The zeros the history starts with, so output 0 centres on input 0.
+    const LEADING_ZEROS: usize = SincResampler::TAPS / 2 - 1;
 
     /// Whether a device at `rate` hertz can be converted.
     #[must_use]
@@ -63,21 +65,19 @@ impl RateConverter {
     #[must_use]
     pub fn new(input_rate: f64, output_rate: f64, max_input: usize) -> Self {
         debug_assert!(Self::supports(input_rate) && Self::supports(output_rate));
-        let taps = SincResampler::TAPS;
-        // A window never holds more than `taps - 1` samples it has not
-        // consumed, so that plus one call's input always fits.
-        let mut converter = Self {
-            input_rate: input_rate.round() as u64,
-            output_rate: output_rate.round() as u64,
+        let (input_rate, output_rate) = (input_rate.round(), output_rate.round());
+        Self {
+            input_rate: input_rate as u64,
+            output_rate: output_rate as u64,
             max_input,
-            table: SincResampler::table(input_rate.round(), output_rate.round()),
-            history: vec![0.0; taps - 1 + max_input],
-            filled: 0,
+            table: SincResampler::table(input_rate, output_rate),
+            // A window never holds more than `TAPS - 1` samples it has not
+            // consumed, so that plus one call's input always fits.
+            history: vec![0.0; SincResampler::TAPS - 1 + max_input],
+            filled: Self::LEADING_ZEROS,
             index: 0,
             remainder: 0,
-        };
-        converter.reset();
-        converter
+        }
     }
 
     /// The most input samples one `process` call takes.
@@ -95,7 +95,7 @@ impl RateConverter {
     /// Back to the start of a signal: zeros before input 0, position 0.
     pub fn reset(&mut self) {
         self.history.fill(0.0);
-        self.filled = SincResampler::TAPS / 2 - 1;
+        self.filled = Self::LEADING_ZEROS;
         self.index = 0;
         self.remainder = 0;
     }
