@@ -5,8 +5,11 @@
 # prints the commit to pin in the manifest. GitHub release assets cap at
 # 2 GB a file and encoder.weights is 2.4 GB, so this asset lives on Hugging
 # Face; Silero VAD stays on the sherpa-onnx GitHub release
-# (crates/steno-speech/src/model_store.rs) and the diarizer's two models
-# keep their own hosts (crates/steno-diarize/src/models.rs).
+# (crates/steno-speech/src/model_store.rs) and the diarizer's two models on
+# Hugging Face and a sherpa-onnx GitHub release
+# (crates/steno-diarize/src/models.rs). A mirror replaces all of these hosts,
+# so it serves a whole store root: parakeet-tdt-0.6b-v3-fp32/, silero-vad/
+# and diarization/.
 #
 # Usage: scripts/upload-models.sh [--repo <owner/name>] [--models <store root>]
 #        [--private] [--dry-run]
@@ -32,7 +35,8 @@
 #                   the changes made (ONNX conversion, longer position table)
 # The layout is <asset id>/<file name>, the same as a Steno store root, so
 # the output of `hf download <repo> --revision <commit> --local-dir <dir>`
-# can be served as a mirror unchanged.
+# is the Parakeet part of a mirror; add silero-vad/ and diarization/ from an
+# installed store root before serving it.
 #
 # Afterwards set PARAKEET_V3_FP32_REVISION in
 # crates/steno-speech/src/model_store.rs to the printed commit (and

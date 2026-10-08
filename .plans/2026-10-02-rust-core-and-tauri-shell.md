@@ -64,8 +64,8 @@ this plan starts is a parity item for the Rust side, tracked in the parity list 
      `ModelStore` (`crates/steno-speech/src/model_store.rs`) fetches the fp32 Parakeet
      export from Hugging Face at a pinned commit and Silero VAD from a GitHub release
      asset, and `steno-diarize`'s two models (`crates/steno-diarize/src/models.rs`)
-     from Hugging Face and a GitHub release asset, or all of them from the mirror the
-     speech settings name;
+     from Hugging Face at a pinned commit and a GitHub release asset, or all of them
+     from the mirror the speech settings name;
    - the Tauri updater, which fetches `latest.json` and the signed bundle from the
      repository's GitHub releases and sends nothing (the `desktop-stable` endpoint in
      `apps/desktop/src-tauri/tauri.conf.json`, the `desktop-beta` one in
@@ -434,7 +434,10 @@ bridge's copies of the macro and codecs. Packages after WP3 branch from `main`.
     `https://huggingface.co/<repo>/resolve/<revision>/<path>`, for the 2.6 GB fp32
     export (`encoder.weights` alone is 2.4 GB); the diarizer's two models are an
     asset of the same store (`crates/steno-diarize/src/models.rs`, folder
-    `onnx/diarization/`). `scripts/upload-models.sh` verifies
+    `onnx/diarization/`), the segmentation model pinned to a commit too. A mirror
+    replaces every host with no fallback, so it serves a whole store root
+    (`parakeet-tdt-0.6b-v3-fp32/`, `silero-vad/`, `diarization/`); the Hugging Face
+    repository holds the Parakeet export only. `scripts/upload-models.sh` verifies
     the export against the manifest, adds the CC-BY-4.0 `ATTRIBUTION.md` and uploads
     it to `nicolaischmid/steno-models`, pinned at commit `4a133253`
     (`STENO_MODELS_REPO`, `PARAKEET_V3_FP32_REVISION`). The files on disk and what may
@@ -681,7 +684,7 @@ still has to draw the window side. `[ ]` is not ported yet.
   the support directory (`steno_services::speech::speech_settings`), not from the
   `setting` table, which the Swift app rewrites whole on every save;
   `STENO_MODELS_MIRROR` overrides the mirror, which serves the diarizer's models
-  too. Nothing writes the file and the bridge contract has no
+  too, so it holds a whole store root. Nothing writes the file and the bridge contract has no
   field for any of them, so the Settings window shows none:
   `.plans/2026-10-07-speech-settings-ui.md` proposes their place and wording.
 - [ ] Where the speech sidecar runs Parakeet v3, processing a meeting before its models
@@ -698,11 +701,18 @@ still has to draw the window side. `[ ]` is not ported yet.
   the diarizer's own store used, so no installed file moves. They get the store's
   lock, resume, ranges, progress and the mirror (`<mirror>/diarization/<file>`); the
   services build the diarizer over `SpeechSetup::model_store`, and Settings and
-  `steno dev models` read the asset. A download cut off while a meeting processes
-  fails that job in `diarize`, keeps the recording (no expiry) and the partial, and
-  the next attempt resumes it
-  (`a_diarizer_download_cut_off_mid_job_fails_the_meeting_and_keeps_the_recording`).
-  Content is checked at download, not at every load, as for the speech models.
+  `steno dev models` read the asset. Who may download is the caller's
+  `steno_diarize::Install`: `Allowed` for the CLI's explicit commands, `Never` for
+  `steno process`, where a missing file is `DiarizeError::NotInstalled` with no
+  request (`steno_diarize::models::installed` is the same check without a load). The
+  app's `SpeechEngines` stays on `Allowed` until the pipeline's models-missing gate
+  lands, which flips it (S1 in `.plans/2026-10-07-stable-promotion.md`). Under
+  `Allowed`, a download cut off while a meeting processes ends the job `ready` with
+  the one room speaker, keeps the partial, and the next run resumes it
+  (`a_diarizer_download_cut_off_mid_job_falls_back_and_keeps_the_recording`); the
+  recording's retention after such a fallback is the pipeline's. Content is checked
+  at download; a load that fails hashes the files, and one that fails its checksum
+  is deleted and reported not installed, so Settings offers Download.
 
 ### Beyond the bridge
 
@@ -1013,7 +1023,9 @@ still has to draw the window side. `[ ]` is not ported yet.
   rows still describe the Swift app's `CoreML` diarizer (its acknowledgement and its
   size in Settings > Transcription), while every platform runs the ONNX pyannote 3.0
   and WeSpeaker ResNet34-LM models; the same hooks (`display_name`, `source_repo`,
-  `expected_bytes`) fix them.
+  `expected_bytes`) fix them, and the acknowledgement's licence and attribution
+  (`steno_host::speech::ModelAsset::licence`) take `steno_diarize::models`'
+  `LICENCE` and `ATTRIBUTION`.
 - The phone intake syncs the copy, its meeting folder and the parent of every folder
   it created to the disk before it marks the receipt complete, in both apps: Rust
   through `steno_pipeline::files::copy_durably` and `create_dir_all_durably`, Swift
