@@ -122,6 +122,7 @@ pub fn app_over_fakes(
         fakes.speech_models.clone(),
         zone,
         tokio::runtime::Handle::current(),
+        root.join("support"),
     );
     let mut services = fakes.services();
     services.recorder = recorder.clone();

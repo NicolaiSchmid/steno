@@ -30,7 +30,7 @@ use crate::pipeline::{
 };
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
-use crate::recovery::{LiveRecordingCheck, reconcile_interrupted};
+use crate::recovery::{Interrupted, LiveRecordingCheck, reconcile_interrupted};
 use crate::secrets::secret_store;
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 
@@ -367,6 +367,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         speech_models.clone(),
         zone,
         runtime.clone(),
+        paths.support_directory.clone(),
     );
     // The save writes to the database's volume too.
     recorder.watch_disk_with(DiskWatch::system(database_path.parent()));
@@ -441,20 +442,29 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 /// left alone while another process still writes them or while a folder
 /// they may be in cannot be read, or failed ([`reconcile_interrupted`]);
 /// meetings left queued or processing are processed again; the retention
-/// sweep runs. Blocks while a fresh master is watched, so [`App::launch`]
-/// runs it on a blocking task.
+/// sweep runs. A panic in the recovery is caught, so the resume and the
+/// sweep run regardless, and the rows it had not reached stay `recording`
+/// for the next launch. Blocks while a fresh master is watched, so
+/// [`App::launch`] runs it on a blocking task.
 pub(crate) fn reconcile_at_launch(
     store: &Arc<Store>,
     pipeline: &CurrentPipeline,
     sweep: &RetentionSweep,
-    interrupted: &[steno_core::Meeting],
+    interrupted: &Interrupted,
     check: &LiveRecordingCheck,
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
 ) {
     let intake =
         steno_pipeline::LocalRecordingIntake::over(store.clone(), pipeline.current(), zone);
-    reconcile_interrupted(store, &intake, interrupted, check, runtime);
+    let reconciled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reconcile_interrupted(store, &intake, interrupted, check, runtime)
+    }));
+    if reconciled.is_err() {
+        tracing::warn!(
+            "the recovery of interrupted recordings panicked; the next launch tries again"
+        );
+    }
     match pipeline.current().resume_unfinished() {
         Ok(resumed) if !resumed.is_empty() => {
             tracing::info!(count = resumed.len(), "resumed unfinished meetings");
@@ -684,8 +694,9 @@ impl App {
 
     /// Everything that happens once at launch, in order: the pipeline's
     /// events are subscribed and routed into the host; the meetings left
-    /// `recording` are listed, before anything here can start a recording;
-    /// on a blocking task, since it may wait up to 10 s for a master that
+    /// `recording` and the known audio folders ([`crate::audio_folders`])
+    /// are listed, before anything here can start a recording; on a
+    /// blocking task, since it may wait up to 10 s for a master that
     /// is still written (`reconcile_at_launch`), those recordings are
     /// recovered, left alone or failed, meetings left queued or processing are
     /// processed again, exports left unfinished are re-exported
@@ -746,13 +757,16 @@ impl App {
             }
         });
 
-        let interrupted = self
-            .store
-            .meetings_in_states(&[steno_core::MeetingStateKind::Recording])
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "interrupted recordings could not be listed");
-                Vec::new()
-            });
+        let interrupted = Interrupted {
+            meetings: self
+                .store
+                .meetings_in_states(&[steno_core::MeetingStateKind::Recording])
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "interrupted recordings could not be listed");
+                    Vec::new()
+                }),
+            known_folders: crate::audio_folders::known(&self.paths.support_directory),
+        };
         // Exports left unfinished go out again; a meeting the launch's work
         // resumes exports itself.
         match self.pipeline.current().redeliver_unfinished(&self.export_retries) {

@@ -282,6 +282,8 @@ pub struct FakeRecorder {
     pub starts: Mutex<Vec<(CaptureMode, Option<String>)>>,
     pub stops: Mutex<usize>,
     pub kept: Mutex<usize>,
+    /// Every folder `remember_audio_folder` was given, in order.
+    pub remembered: Mutex<Vec<PathBuf>>,
 }
 
 impl FakeRecorder {
@@ -294,6 +296,7 @@ impl FakeRecorder {
             starts: Mutex::new(Vec::new()),
             stops: Mutex::new(0),
             kept: Mutex::new(0),
+            remembered: Mutex::new(Vec::new()),
         }
     }
 
@@ -376,6 +379,10 @@ impl Recorder for FakeRecorder {
             .filter(|kind| self.permissions.state(*kind) == PermissionState::Denied)
             .collect();
         lock(&self.status).denied_permissions = denied;
+    }
+
+    fn remember_audio_folder(&self, folder: &Path) {
+        lock(&self.remembered).push(folder.to_path_buf());
     }
 }
 

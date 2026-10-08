@@ -242,8 +242,14 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
         AudioRetention::DeleteAfterProcessing
     );
 
+    let leaving = harness.audio_folder();
     let reply = harness.host.settings_recording_choose_folder().unwrap();
     assert_eq!(reply.path.as_deref(), Some(chosen_path.as_str()));
+    assert_eq!(
+        *harness.fakes.recorder.remembered.lock().unwrap(),
+        [leaving],
+        "the folder left is kept for crash recovery"
+    );
     assert_eq!(
         harness.store.settings().unwrap().audio_folder,
         file_url(std::path::Path::new(&chosen_path), true)
@@ -270,6 +276,15 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
     let reply = cancelling.host.settings_recording_choose_folder().unwrap();
     assert_eq!(reply.path, None);
     assert_eq!(cancelling.store.settings().unwrap().audio_folder, before);
+    assert!(
+        cancelling
+            .fakes
+            .recorder
+            .remembered
+            .lock()
+            .unwrap()
+            .is_empty()
+    );
 
     harness
         .fakes

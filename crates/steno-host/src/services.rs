@@ -216,6 +216,12 @@ pub trait Recorder: Send + Sync {
     fn clear_messages(&self);
     /// Re-reads the required permissions into `denied_permissions`.
     fn refresh_permissions(&self);
+    /// Keeps `folder` among the folders crash recovery looks in for an
+    /// interrupted recording's master: the settings' audio folder moves
+    /// away from it, and a recording started there is written there to
+    /// its end. A failure is logged, never refused. Rust only: Swift had no
+    /// recovery.
+    fn remember_audio_folder(&self, folder: &Path);
 }
 
 /// What the view models ask the processing pipeline and the retention

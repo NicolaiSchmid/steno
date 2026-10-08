@@ -555,6 +555,8 @@ pub struct CaptureRecorder {
     speech_models: Arc<dyn SpeechModels>,
     zone: FixedOffset,
     runtime: tokio::runtime::Handle,
+    /// Where the known audio folders are listed ([`crate::audio_folders`]).
+    support_directory: PathBuf,
     inner: Mutex<Inner>,
     /// Signalled with every status change, for [`Self::settle`].
     changes: Condvar,
@@ -569,7 +571,13 @@ pub struct CaptureRecorder {
 }
 
 impl CaptureRecorder {
+    /// A recorder over `store` and `pipeline` that lists the audio folders
+    /// it records into under `support_directory`.
     #[must_use]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each is a separate dependency the app's graph hands over"
+    )]
     pub fn new(
         store: Arc<Store>,
         pipeline: Arc<CurrentPipeline>,
@@ -578,6 +586,7 @@ impl CaptureRecorder {
         speech_models: Arc<dyn SpeechModels>,
         zone: FixedOffset,
         runtime: tokio::runtime::Handle,
+        support_directory: PathBuf,
     ) -> Arc<Self> {
         Arc::new_cyclic(|this| CaptureRecorder {
             store,
@@ -587,6 +596,7 @@ impl CaptureRecorder {
             speech_models,
             zone,
             runtime,
+            support_directory,
             inner: Mutex::new(Inner {
                 status: RecorderStatus::idle(),
                 active: None,
@@ -737,6 +747,10 @@ impl CaptureRecorder {
         let session = (self.make_session)(configuration)
             .map_err(|_| refused("no session", DEVICES_DID_NOT_OPEN))?;
         let session = Arc::new(session);
+        // Before the row: a kill from here on leaves a row whose master
+        // recovery must find in this folder, whatever the settings name by
+        // then.
+        self.remember_audio_folder(&audio_folder);
         let started_at = Utc::now();
         let intake = self.intake();
         let meeting = intake
@@ -1267,6 +1281,15 @@ impl Recorder for CaptureRecorder {
         self.inner().status.denied_permissions = denied;
         self.notify();
     }
+
+    fn remember_audio_folder(&self, folder: &Path) {
+        if let Err(error) = crate::audio_folders::remember(&self.support_directory, folder) {
+            // The folder can name the user; recovery still looks in the
+            // settings' folder and in every asset's.
+            tracing::warn!("an audio folder could not be added to the known folders");
+            tracing::debug!(%error, "known audio folders not written");
+        }
+    }
 }
 
 /// What a saved recording warns about, every line that applies joined
@@ -1353,7 +1376,7 @@ mod tests {
     use steno_speech::SpeechSettings;
 
     struct Harness {
-        _dir: tempfile::TempDir,
+        dir: tempfile::TempDir,
         store: Arc<Store>,
         /// The bytes the disk watch reads as free; plenty unless a test
         /// lowers it.
