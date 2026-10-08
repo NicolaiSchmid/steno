@@ -23,7 +23,11 @@
 //! fallback also resolves them every
 //! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification and
 //! looks only for another microphone
-//! ([`DeviceSnapshot::input_difference`]). Nothing changed means the burst
+//! ([`DeviceSnapshot::input_difference`]). A burst that holds
+//! `kAudioHardwarePropertyServiceRestarted` (`coreaudiod` restarted, and
+//! the aggregate with it) is reported as
+//! [`DeviceChangeReason::AudioServiceRestarted`] whatever the devices read
+//! (Rust only: Swift does not listen for it). Nothing changed means the burst
 //! is logged and ignored; otherwise the sink gets one
 //! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
 //! `start` again. Nothing here runs on the IO thread except `io_proc`,
@@ -71,7 +75,8 @@ use objc2_core_audio::{
     AudioObjectPropertySelector, kAudioDevicePropertyDeviceIsAlive,
     kAudioDevicePropertyNominalSampleRate, kAudioHardwarePropertyDefaultInputDevice,
     kAudioHardwarePropertyDefaultOutputDevice, kAudioHardwarePropertyDefaultSystemOutputDevice,
-    kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
+    kAudioHardwarePropertyDevices, kAudioHardwarePropertyServiceRestarted,
+    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyScopeInput,
     kAudioObjectPropertyScopeOutput,
 };
 use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
@@ -245,7 +250,8 @@ impl DeviceProbe {
 /// What the listeners share with the watcher thread.
 #[derive(Default)]
 struct WatchState {
-    /// The last notification's selector and arrival, `None` once judged.
+    /// The last notification's selector (a service restart's kept over
+    /// later ones) and arrival, `None` once judged.
     pending: Option<(AudioObjectPropertySelector, Instant)>,
     stop: bool,
 }
@@ -271,9 +277,15 @@ impl Watcher {
     }
 
     /// One notification for the watch loop: the latest of its burst,
-    /// judged once the burst settles.
+    /// judged once the burst settles. A service restart outranks the
+    /// notifications that follow it in the same burst.
     fn notify(&self, selector: AudioObjectPropertySelector) {
-        self.lock().pending = Some((selector, Instant::now()));
+        let mut state = self.lock();
+        let kept = match state.pending {
+            Some((pending, _)) if pending == kAudioHardwarePropertyServiceRestarted => pending,
+            _ => selector,
+        };
+        state.pending = Some((kept, Instant::now()));
         self.condvar.notify_all();
     }
 }
@@ -447,6 +459,11 @@ impl LiveCaptureBackend {
         baseline: &DeviceSnapshot,
     ) -> Option<DeviceChangeReason> {
         match judged {
+            Judged::Notification(selector)
+                if selector == kAudioHardwarePropertyServiceRestarted =>
+            {
+                Some(DeviceChangeReason::AudioServiceRestarted)
+            }
             Judged::Notification(_) => resolved.difference(baseline),
             Judged::Recheck => resolved.input_difference(baseline),
         }
@@ -608,8 +625,10 @@ impl CaptureBackend for LiveCaptureBackend {
         // output device (alerts); a change of either moves the far-end
         // alignment, so both are watched. The listener carries no value,
         // so every notification is judged by resolving the devices again
-        // after the burst settles.
+        // after the burst settles. A restart of `coreaudiod` destroys the
+        // aggregate and the tap, which no device property tells.
         let mut selectors: Vec<(Id, AudioObjectPropertySelector)> = vec![
+            (SYSTEM, kAudioHardwarePropertyServiceRestarted),
             (SYSTEM, kAudioHardwarePropertyDefaultSystemOutputDevice),
             (SYSTEM, kAudioHardwarePropertyDefaultOutputDevice),
             (output.id, kAudioDevicePropertyDeviceIsAlive),
@@ -641,6 +660,14 @@ impl CaptureBackend for LiveCaptureBackend {
                     kAudioObjectPropertyScopeGlobal,
                     Box::new(move |selector| watcher.notify(selector)),
                 )
+                // Without the listener that change goes unnoticed until the
+                // session's stall watchdog sees the capture stop.
+                .inspect_err(|_| {
+                    tracing::warn!(
+                        "could not listen for {}; that change goes unnoticed",
+                        hal::selector_name(selector)
+                    );
+                })
                 .ok()
             })
             .collect();
@@ -1052,6 +1079,11 @@ mod tests {
             ),
             (Judged::Recheck, &misread, None),
             (Judged::Recheck, &unresolved, None),
+            (
+                Judged::Notification(kAudioHardwarePropertyServiceRestarted),
+                &baseline,
+                Some(DeviceChangeReason::AudioServiceRestarted),
+            ),
         ];
         for (judged, resolved, reported) in table {
             assert_eq!(
