@@ -87,6 +87,7 @@ use super::hal::{
 };
 use super::{AudioDeviceInfo, AudioDevices, chosen_or_default};
 use crate::SAMPLE_RATE;
+use crate::capture::start_log::start_log;
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource, NominalSampleRate, StreamLayout,
@@ -516,7 +517,8 @@ impl CaptureBackend for LiveCaptureBackend {
             let (device, is_fallback) = chosen_or_default_input(input_device_uid)
                 .ok_or(CaptureError::InputDeviceUnavailable)?;
             if is_fallback {
-                tracing::warn!(
+                start_log!(
+                    warn,
                     "the input device {} is not connected; recording from the default input {}",
                     input_device_uid.unwrap_or_default(),
                     device.uid
@@ -803,8 +805,9 @@ impl CaptureBackend for LiveCaptureBackend {
         true
     }
 
-    /// A call capture, whose aggregate runs on the output's clock: without
-    /// the capture permission its IOProc runs only while something plays.
+    /// Every call capture, whose aggregate runs on the output's clock:
+    /// without the capture permission its IOProc runs only while something
+    /// plays, and the backend cannot tell whether it has the permission.
     fn waits_for_playback(&self, lanes: &[AudioLane]) -> bool {
         lanes.contains(&AudioLane::System)
     }

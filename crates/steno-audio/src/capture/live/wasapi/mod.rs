@@ -93,6 +93,7 @@ use self::com::{Apartment, CaptureClient, Enumerator, LoopbackKind, ProAudioThre
 use super::{AudioDeviceInfo, chosen_or_default};
 use crate::SAMPLE_RATE;
 use crate::capture::split_streams::{StreamSizes, far_end_latencies};
+use crate::capture::start_log::{self, start_log};
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     SplitStreamPlan, StreamSource,
@@ -463,7 +464,8 @@ fn open(
                 .ok_or(CaptureError::InputDeviceUnavailable)?;
             let id = endpoint.id().ok();
             if is_fallback {
-                tracing::warn!(
+                start_log!(
+                    warn,
                     "the input device {} is not active; recording from the default input {}",
                     input_device_uid.unwrap_or_default(),
                     id.as_deref().unwrap_or_default()
@@ -484,7 +486,8 @@ fn open(
             {
                 Ok(client) => (client, render_id, Some(LoopbackKind::Process)),
                 Err(error) => {
-                    tracing::info!(
+                    start_log!(
+                        info,
                         "process loopback unavailable ({error}); falling back to loopback of \
                          the default render endpoint, which records Steno's own output too"
                     );
@@ -506,7 +509,8 @@ fn open(
 
 /// A stream thread: opens its stream, reports, waits for its body, starts,
 /// then drains packets into the body until `stop` is set or the stream
-/// fails.
+/// fails. The open's lines are at `debug` when `starts_quietly`
+/// (`start_log`).
 fn run_stream(
     source: StreamSource,
     input_device_uid: Option<&str>,
@@ -514,8 +518,10 @@ fn run_stream(
     bodies: &Receiver<StreamBody>,
     stop: &AtomicBool,
     watcher: &Watcher,
+    starts_quietly: bool,
 ) {
-    let (apartment, enumerator, mut client, info) = match open(source, input_device_uid) {
+    let opened = start_log::quietly(starts_quietly, || open(source, input_device_uid));
+    let (apartment, enumerator, mut client, info) = match opened {
         Ok(opened) => opened,
         Err(error) => {
             let _ = events.send(StreamEvent::Opened(Err(error)));
@@ -642,6 +648,8 @@ fn spawn_streams(
     stop: &Arc<AtomicBool>,
     watcher: &Arc<Watcher>,
 ) -> Result<Vec<Launched>, CaptureError> {
+    // The threads' start lines are as loud as this one's.
+    let starts_quietly = start_log::is_quiet();
     let mut streams = Vec::new();
     for source in plan.streams() {
         let (event_sender, events) = sync_channel(2);
@@ -659,6 +667,7 @@ fn spawn_streams(
                     &bodies,
                     &thread_stop,
                     &thread_watcher,
+                    starts_quietly,
                 );
             });
         match spawned {
@@ -835,7 +844,7 @@ impl CaptureBackend for LiveCaptureBackend {
         });
         let streams = start_streams(&stop, streams, &plan, follower.as_ref(), &sink, deadline)?;
         if let Some(kind) = system.as_ref().and_then(|s| s.loopback) {
-            tracing::info!("system lane on {kind:?} loopback");
+            start_log!(info, "system lane on {kind:?} loopback");
         }
 
         let probe = DeviceProbe {

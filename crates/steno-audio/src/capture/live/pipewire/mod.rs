@@ -121,6 +121,7 @@ pub use self::devices::AudioDevices;
 pub(crate) use self::graph::is_source_class;
 use self::graph::{Graph, Latency, Lost, Targets};
 use crate::SAMPLE_RATE;
+use crate::capture::start_log::{self, start_log};
 use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource,
@@ -813,7 +814,8 @@ impl Capture {
         let mut capture =
             Self::linked_on(connection, lanes, input_device_uid, sink, gate, deadline)?;
         capture.measure(deadline)?;
-        tracing::info!(
+        start_log!(
+            info,
             "the PipeWire capture runs {} ms after start: input latency {} frames, output \
              latency {} frames",
             started.elapsed().as_millis(),
@@ -909,7 +911,8 @@ impl Capture {
             if let (Some(uid), Some(input)) = (input_device_uid, &input)
                 && input.is_fallback
             {
-                tracing::warn!(
+                start_log!(
+                    warn,
                     "the input device {uid} is not connected; recording from the default \
                      source {}",
                     input.uid
@@ -1311,7 +1314,10 @@ fn hand_over<C>(
             if answer.send(Ok(info(&capture))).is_ok() {
                 Some(capture)
             } else {
-                tracing::warn!("start gave up on the PipeWire capture; tearing it down");
+                start_log!(
+                    warn,
+                    "start gave up on the PipeWire capture; tearing it down"
+                );
                 None
             }
         }
@@ -1319,7 +1325,8 @@ fn hand_over<C>(
 }
 
 /// The `steno-pipewire` thread: start, answer, watch until the quit, tear
-/// down (by dropping the capture) before the thread ends.
+/// down (by dropping the capture) before the thread ends. Runs inside the
+/// caller's [`start_log::quietly`]; the watch logs at its own levels.
 fn run(
     lanes: &[AudioLane],
     input_device_uid: Option<&str>,
@@ -1333,7 +1340,8 @@ fn run(
     let Some(capture) = hand_over(answer, opened, |capture| capture.info.clone()) else {
         return;
     };
-    capture.watch(quit);
+    // Its lines are about changes, not about this start.
+    start_log::quietly(false, || capture.watch(quit));
     tracing::debug!("the PipeWire capture got its quit; tearing down");
     drop(capture);
     tracing::debug!("the PipeWire capture is torn down");
@@ -1490,21 +1498,25 @@ impl CaptureBackend for LiveCaptureBackend {
         let id_slot = Arc::clone(&thread_id);
         let connected = Arc::new(AtomicBool::new(false));
         let thread_connected = Arc::clone(&connected);
+        // The thread's start lines are as loud as this one's.
+        let starts_quietly = start_log::is_quiet();
         let thread = std::thread::Builder::new()
             .name("steno-pipewire".into())
             .spawn(move || {
                 id_slot.store(kernel_thread_id(), Ordering::Relaxed);
                 // Dropped last, when the teardown is done.
                 let _ending = ending;
-                run(
-                    &lanes,
-                    input_device_uid.as_deref(),
-                    sink,
-                    thread_gate,
-                    &answer,
-                    quit_receiver,
-                    &thread_connected,
-                );
+                start_log::quietly(starts_quietly, || {
+                    run(
+                        &lanes,
+                        input_device_uid.as_deref(),
+                        sink,
+                        thread_gate,
+                        &answer,
+                        quit_receiver,
+                        &thread_connected,
+                    );
+                });
             })
             .map_err(|e| CaptureError::BackendFailed(format!("the PipeWire thread: {e}")))?;
         // The thread answers by its own deadlines; the margin covers a

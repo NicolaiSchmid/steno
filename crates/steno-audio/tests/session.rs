@@ -3747,7 +3747,8 @@ fn a_change_reported_during_a_rebuild_starts_the_next_one() {
 // The stall watchdog, the retry of a graph that does not run, and the ask
 // for a chosen microphone the session replaced (Rust only)
 
-/// An in-person session over `backend` on `clock`, 10 s of relay.
+/// An in-person session over `backend` on `clock`, with 30 s of relay, so
+/// a gap of `MAXIMUM_GAP` never waits for the writer on the manual clock.
 fn in_person_session(
     directory: &Path,
     backend: Arc<dyn CaptureBackend>,
@@ -3757,7 +3758,7 @@ fn in_person_session(
         configuration(CaptureMode::InPerson, directory, false),
         backend,
         None,
-        1_000,
+        3_000,
         clock,
     )
     .unwrap()
@@ -3959,7 +3960,9 @@ fn only_a_capture_that_waits_for_playback_may_start_without_a_frame() {
 /// deliver at once (it may be waiting for something to play), so after the
 /// recording's first frame a restarted stream that delivers nothing is a
 /// stall of its own; its wait runs from the resume, not from the last
-/// frame before the rebuild. Elsewhere such a restart fails at once
+/// frame before the rebuild, and its rebuild continues the streak: the
+/// second restart, after the first backoff step. Elsewhere such a restart
+/// fails at once
 /// (`restarts_that_start_but_deliver_nothing_are_retried_until_one_does`).
 #[test]
 fn a_restarted_stream_that_never_delivers_is_a_stall() {
@@ -3989,13 +3992,215 @@ fn a_restarted_stream_that_never_delivers_is_a_stall() {
         CaptureNotice::DeviceChanged(DeviceChangeReason::DeliveryStalled),
         "the restarted stream never delivered"
     );
+    advance_the_backoff(&clock, &backend, CaptureSession::RESTART_BACKOFF[0]);
     assert!(matches!(
         notices.recv_timeout(RECV).unwrap(),
-        CaptureNotice::DeviceResumed { attempt: 1, .. }
+        CaptureNotice::DeviceResumed { attempt: 2, .. }
     ));
     let result = session.stop().unwrap();
     assert_eq!(backend.starts(), 3);
     assert_eq!(result.statistics.device_changes, 2);
+}
+
+/// Once the watch thread and a rebuild's backoff sleep, moves the clock to
+/// just short of the backoff's `wait` (no restart yet), then the rest, and
+/// waits for the restart it lets through.
+fn advance_the_backoff(clock: &ManualClock, backend: &SyntheticCaptureBackend, wait: Duration) {
+    let starts = backend.starts();
+    assert!(
+        clock.wait_for_sleepers(2),
+        "the watch thread and the backoff"
+    );
+    clock.advance(wait.saturating_sub(Duration::from_millis(1)));
+    assert!(clock.wait_for_sleepers(2));
+    settle();
+    assert_eq!(backend.starts(), starts, "no restart before {wait:?}");
+    clock.advance(Duration::from_millis(1));
+    let deadline = Instant::now() + RECV;
+    while backend.starts() == starts {
+        assert!(Instant::now() < deadline, "the restart after {wait:?}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A stream that resumes and stalls again before it delivered anything (a
+/// Mac call capture whose output has no other client, which resumes
+/// waiting for playback) is one streak of rebuilds: the restarts count on
+/// across them, back off as restarts that fail do, up to
+/// `RESTART_BACKOFF_LONGEST`, and `StillRestarting` comes once when they
+/// pass `RESTART_ATTEMPTS`. The warning stands through the resumes, and
+/// `Delivering` ends it once the stream delivers.
+#[test]
+fn a_stream_that_resumes_and_stalls_over_and_over_backs_off_and_warns() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        stalling(1.0, 0.5)
+            .restarts_stall_after(0.0)
+            .waits_for_playback(true),
+    ));
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    let last = CaptureSession::RESTART_ATTEMPTS + 3;
+    for attempt in 2..=last {
+        backend.wait_until_finished();
+        advance_until_stalled(&clock, &notices);
+        if attempt == CaptureSession::RESTART_ATTEMPTS + 1 {
+            assert_eq!(
+                notices.recv_timeout(RECV).unwrap(),
+                CaptureNotice::StillRestarting {
+                    attempt: CaptureSession::RESTART_ATTEMPTS
+                }
+            );
+        }
+        advance_the_backoff(
+            &clock,
+            &backend,
+            CaptureSession::restart_backoff(attempt - 1),
+        );
+        assert!(
+            matches!(
+                notices.recv_timeout(RECV).unwrap(),
+                CaptureNotice::DeviceResumed { attempt: resumed, .. } if resumed == attempt
+            ),
+            "attempt {attempt}"
+        );
+    }
+    assert_eq!(
+        CaptureSession::restart_backoff(last - 1),
+        CaptureSession::RESTART_BACKOFF_LONGEST,
+        "the backoff reached its longest"
+    );
+    backend.wait_until_finished();
+    assert_no_notice(&notices, "the warning stands through the resumes");
+    let before = backend.frames_delivered();
+    backend.resume_delivery();
+    let deadline = Instant::now() + RECV;
+    while backend.frames_delivered() == before {
+        assert!(Instant::now() < deadline, "the restart delivers");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    advance_watch(&clock, CaptureSession::STALL_CHECK_INTERVAL);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::Delivering,
+        "the first frames end the warning"
+    );
+    let result = session.stop().unwrap();
+    assert_eq!(backend.starts(), 1 + last);
+    assert_eq!(result.statistics.device_changes, last);
+    assert!(!result.statistics.ended_on_device_loss);
+}
+
+/// Restarts that start but never offer a frame back off between their
+/// waits for one: each try waits `STALL_TIMEOUT`, then the backoff, which
+/// doubles up to `RESTART_BACKOFF_LONGEST` and stays there.
+#[test]
+fn restarts_that_never_offer_a_frame_back_off_up_to_the_longest_wait() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        stalling(1.0, 0.5).restarts_stall_after(0.0),
+    ));
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    drive_into_a_stall(&clock, &notices);
+    // Every wait is a multiple of 50 ms, so stepping by it lands on each
+    // restart's start.
+    let step = Duration::from_millis(50);
+    assert!(clock.wait_for_sleepers(2), "the first restart's wait");
+    let mut seen = backend.starts();
+    assert_eq!(seen, 2, "the first restart starts at the stall");
+    let mut started_at = vec![clock.now()];
+    for _ in 0..2_000 {
+        assert!(
+            clock.wait_for_sleepers(2),
+            "the watch thread and the rebuild"
+        );
+        if backend.starts() != seen {
+            seen = backend.starts();
+            started_at.push(clock.now());
+            if started_at.len() == 7 {
+                break;
+            }
+        }
+        clock.advance(step);
+    }
+    let between: Vec<Duration> = started_at
+        .windows(2)
+        .map(|w| w[1].saturating_sub(w[0]))
+        .collect();
+    let expected: Vec<Duration> = (1..=6)
+        .map(|attempt| CaptureSession::STALL_TIMEOUT + CaptureSession::restart_backoff(attempt))
+        .collect();
+    assert_eq!(between, expected);
+    assert_eq!(
+        notices.try_recv().ok(),
+        Some(CaptureNotice::StillRestarting {
+            attempt: CaptureSession::RESTART_ATTEMPTS
+        })
+    );
+    assert_no_notice(&notices, "said once, nothing resumed");
+    let result = session.stop().unwrap();
+    assert!(!result.statistics.ended_on_device_loss);
+    assert_eq!(result.statistics.duration, 0.5);
+    assert!(clock.wait_for_sleepers(0));
+}
+
+/// A stop while a restart waits for its first frame, or while the rebuild
+/// waits out the backoff, cancels the wait and returns the recording at
+/// once, well within one start's deadline, leaving nothing asleep.
+#[test]
+fn a_stop_during_the_wait_for_a_first_frame_or_the_backoff_returns_at_once() {
+    for in_the_backoff in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let clock = Arc::new(ManualClock::new());
+        let backend = Arc::new(SyntheticCaptureBackend::new(
+            stalling(1.0, 0.5).restarts_stall_after(0.0),
+        ));
+        let session = Arc::new(in_person_session(
+            directory.path(),
+            backend.clone(),
+            clock.clone(),
+        ));
+        let notices = session.notices();
+        session.start(Uuid::new_v4()).unwrap();
+        backend.wait_until_finished();
+        drive_into_a_stall(&clock, &notices);
+        assert!(clock.wait_for_sleepers(2), "the first restart's wait");
+        assert_eq!(backend.starts(), 2);
+        if in_the_backoff {
+            // The wait gives up `STALL_TIMEOUT` after the start; the
+            // backoff follows.
+            for _ in 0..CaptureSession::STALL_TIMEOUT.as_millis() / 100 {
+                assert!(clock.wait_for_sleepers(2));
+                clock.advance(CaptureSession::STALL_CHECK_INTERVAL);
+            }
+            assert!(clock.wait_for_sleepers(2), "the backoff");
+        }
+        let stopping = Arc::clone(&session);
+        let began = Instant::now();
+        let result = within_deadline("the stop", move || stopping.stop()).unwrap();
+        assert!(
+            began.elapsed() < Duration::from_secs(3),
+            "within one start's deadline: {:?}",
+            began.elapsed()
+        );
+        assert!(clock.wait_for_sleepers(0), "nothing left asleep");
+        assert_eq!(session.state(), CaptureState::Idle);
+        assert_eq!(result.statistics.duration, 0.5);
+        assert!(!result.statistics.ended_on_device_loss);
+        assert_eq!(backend.starts(), 2, "in the backoff: {in_the_backoff}");
+    }
 }
 
 /// Moves the clock a sample at a time while the watch thread and the
@@ -4028,16 +4233,7 @@ fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
     let backend = Arc::new(SyntheticCaptureBackend::new(
         stalling(1.0, 0.5).restarts_stall_after(0.0),
     ));
-    // A relay of 30 s, so the 10 s gap never waits for the writer on the
-    // manual clock.
-    let session = CaptureSession::with_backend(
-        configuration(CaptureMode::InPerson, directory.path(), false),
-        backend.clone(),
-        None,
-        3_000,
-        clock.clone(),
-    )
-    .unwrap();
+    let session = in_person_session(directory.path(), backend.clone(), clock.clone());
     let notices = session.notices();
     session.start(Uuid::new_v4()).unwrap();
     backend.wait_until_finished();
@@ -4058,7 +4254,7 @@ fn restarts_that_start_but_deliver_nothing_are_retried_until_one_does() {
     assert!(matches!(session.state(), CaptureState::Recording { .. }));
     // The next restart starts after the backoff; it delivers once asked.
     let restart = 1 + CaptureSession::RESTART_ATTEMPTS + 1;
-    advance_the_rebuild_until(&clock, 20, || backend.starts() == restart);
+    advance_the_rebuild_until(&clock, 30, || backend.starts() == restart);
     assert!(clock.wait_for_sleepers(2), "its wait for a first frame");
     let before = backend.frames_delivered();
     backend.resume_delivery();
@@ -4188,20 +4384,42 @@ fn a_silent_lane_that_delivers_is_never_a_stall() {
     assert_eq!(result.statistics.device_changes, 0);
 }
 
-/// The wait after the stall: `RESTART_BACKOFF`, then its last step for
-/// every restart after `RESTART_ATTEMPTS`, `extra` of those.
+/// The waits after the first `RESTART_BACKOFF.len() + extra` failed
+/// restarts of a rebuild, from `CaptureSession::restart_backoff`.
 fn backoff_past_the_attempts(extra: usize) -> Vec<Duration> {
-    let last = *CaptureSession::RESTART_BACKOFF.last().unwrap();
-    CaptureSession::RESTART_BACKOFF
-        .iter()
-        .copied()
-        .chain(std::iter::repeat_n(last, extra))
+    (1..=CaptureSession::RESTART_BACKOFF.len() + extra)
+        .map(CaptureSession::restart_backoff)
         .collect()
 }
 
+/// The backoff between restarts: `RESTART_BACKOFF` between the first
+/// `RESTART_ATTEMPTS`, then twice its last step, then
+/// `RESTART_BACKOFF_LONGEST` every time, however long the restarts go on.
+#[test]
+fn the_backoff_doubles_up_to_four_seconds_and_stays_there() {
+    let ms = Duration::from_millis;
+    assert_eq!(
+        backoff_past_the_attempts(4),
+        [
+            ms(250),
+            ms(500),
+            ms(1_000),
+            ms(2_000),
+            ms(4_000),
+            ms(4_000),
+            ms(4_000)
+        ]
+    );
+    assert_eq!(CaptureSession::RESTART_BACKOFF_LONGEST, ms(4_000));
+    assert_eq!(
+        CaptureSession::restart_backoff(usize::MAX),
+        CaptureSession::RESTART_BACKOFF_LONGEST
+    );
+}
+
 /// A stall whose graph never runs again (every restart fails with
-/// `DidNotRun`): the restarts go on past `RESTART_ATTEMPTS`, the backoff's
-/// last step apart, `notices` says so once, the recording stays
+/// `DidNotRun`): the restarts go on past `RESTART_ATTEMPTS`, backing off
+/// up to `RESTART_BACKOFF_LONGEST`, `notices` says so once, the recording stays
 /// `Recording` instead of ending `DeviceLost`, and the stop returns it
 /// with everything delivered before the stall.
 #[test]
@@ -4361,7 +4579,15 @@ fn a_rebuild_longer_than_the_stall_timeout_is_not_taken_for_a_stall() {
         CaptureNotice::DeviceResumed { attempt, .. } if attempt == failures + 1
     ));
     backend.wait_until_finished();
-    assert_no_notice(&notices, "no stall was judged while the rebuild ran");
+    settle();
+    // The watch thread may have sampled the restarted stream's frames
+    // after the resume, which ends the warning.
+    let rest: Vec<CaptureNotice> = notices.try_iter().collect();
+    assert!(
+        rest.iter()
+            .all(|notice| *notice == CaptureNotice::Delivering),
+        "no stall was judged while the rebuild ran: {rest:?}"
+    );
     let result = session.stop().unwrap();
     assert_eq!(result.statistics.device_changes, 1);
     assert_eq!(backend.starts(), 1 + failures + 1);
@@ -4426,9 +4652,11 @@ fn a_chosen_microphone_that_stalls_again_soon_is_replaced_by_the_default() {
     assert_eq!(input(), ChosenOrDefault::chosen(), "restarted once");
     backend.inner.wait_until_finished();
     advance_until_stalled(&clock, &notices);
+    // The streak goes on: its second restart, after the first backoff step.
+    advance_the_backoff(&clock, &backend.inner, CaptureSession::RESTART_BACKOFF[0]);
     assert!(matches!(
         notices.recv_timeout(RECV).unwrap(),
-        CaptureNotice::DeviceResumed { attempt: 1, .. }
+        CaptureNotice::DeviceResumed { attempt: 2, .. }
     ));
     assert_eq!(input(), ChosenOrDefault::fallback(), "then the default");
     assert_eq!(
@@ -4464,15 +4692,16 @@ fn a_capture_that_waits_for_playback_keeps_the_chosen_microphone_through_stalls(
     backend.inner.wait_until_finished();
     drive_into_a_stall(&clock, &notices);
     for rebuild in 1..=2 {
+        if rebuild == 2 {
+            advance_until_stalled(&clock, &notices);
+            advance_the_backoff(&clock, &backend.inner, CaptureSession::RESTART_BACKOFF[0]);
+        }
         assert!(matches!(
             notices.recv_timeout(RECV).unwrap(),
-            CaptureNotice::DeviceResumed { attempt: 1, .. }
+            CaptureNotice::DeviceResumed { attempt, .. } if attempt == rebuild
         ));
         assert_eq!(input(), ChosenOrDefault::chosen(), "rebuild {rebuild}");
         backend.inner.wait_until_finished();
-        if rebuild == 1 {
-            advance_until_stalled(&clock, &notices);
-        }
     }
     assert_eq!(
         backend.asked(),

@@ -172,7 +172,7 @@ impl LaneFrameSink {
 
     /// Frames of every callback begun so far, refused ones included; only
     /// whether it moved means anything. What the session's stall watchdog
-    /// samples.
+    /// samples. Rust only.
     #[must_use]
     pub fn frames_offered(&self) -> usize {
         self.frames_offered.load(Ordering::Relaxed)

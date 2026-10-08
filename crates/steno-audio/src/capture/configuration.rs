@@ -147,9 +147,10 @@ pub enum CaptureError {
     /// The session gives it too, on every platform, for a rebuild's
     /// restart whose stream offered no frame within
     /// `CaptureSession::STALL_TIMEOUT` over a watched backend. The session
-    /// answers it on a chosen microphone by trying the default
-    /// input at once, and a rebuild's restarts that keep failing with it go
-    /// on until one runs. Rust only; reads as [`Self::BackendFailed`].
+    /// answers it on a chosen microphone by trying the default input at
+    /// once, and a rebuild's restarts that keep failing with it go on,
+    /// backing off up to `CaptureSession::RESTART_BACKOFF_LONGEST`, until
+    /// one runs. Rust only; reads as [`Self::BackendFailed`].
     #[error("capture backend failed: {0}")]
     DidNotRun(String),
     /// `start` while not idle, `stop` while not recording.
@@ -311,34 +312,43 @@ pub enum DeviceChangeReason {
 
 /// What `CaptureSession::notices` carries while the state stays
 /// `Recording`: the rebuild beginning, its restarts going on past
-/// `CaptureSession::RESTART_ATTEMPTS`, and the new backend running. Device
-/// loss is not a notice; `states` carries `Failed(DeviceLost)`.
+/// `CaptureSession::RESTART_ATTEMPTS`, the new backend running, and audio
+/// arriving again after those restarts. Device loss is not a notice;
+/// `states` carries `Failed(DeviceLost)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CaptureNotice {
     /// A change was reported; the rebuild begins.
     DeviceChanged(DeviceChangeReason),
-    /// The rebuild's first `attempt` restarts (`RESTART_ATTEMPTS`) failed
-    /// in a way that may pass (a graph that does not run, a restarted
-    /// stream that delivered nothing within `CaptureSession::STALL_TIMEOUT`,
-    /// any failure after a stall or a restart of the audio service), so it
-    /// goes on restarting until one runs or the stop; nothing is recorded
-    /// meanwhile. Sent once per rebuild; the stream is still the one that
-    /// stopped. Over a backend whose streams may wait for playback a restart
-    /// that starts counts as run, so a stream that stays silent there is
-    /// rebuilt again after each `STALL_TIMEOUT` instead, without this
-    /// notice. Rust only.
+    /// The first `attempt` restarts (`RESTART_ATTEMPTS`) failed in a way
+    /// that may pass (a graph that does not run, a restarted stream that
+    /// delivered nothing within `CaptureSession::STALL_TIMEOUT`, any
+    /// failure after a stall or a restart of the audio service), so the
+    /// session goes on restarting until one runs or the stop; nothing is
+    /// recorded meanwhile, and the warning stands until `Delivering`. The
+    /// restarts count across a streak of rebuilds, each resuming on a
+    /// stream that stalls again soon (over a backend whose streams may wait
+    /// for playback a restart that starts counts as run, so its streak is
+    /// one of rebuilds). Sent once until `Delivering`, then again when the
+    /// restarts go on once more; the stream is still the one that stopped.
+    /// Rust only.
     StillRestarting {
         /// The restarts so far.
         attempt: usize,
     },
-    /// `attempt` is the restart that succeeded (1 when the first did);
-    /// `gap_seconds` the silence written for this gap.
+    /// `attempt` is the restart that succeeded, counted from the first of
+    /// its streak (1 when the first did); `gap_seconds` the silence written
+    /// for this gap. A stream that waits for playback may resume without
+    /// a frame, so this does not say audio arrives; `Delivering` does.
     DeviceResumed {
         /// Restarts it took.
         attempt: usize,
         /// Silence written for the gap, seconds.
         gap_seconds: f64,
     },
+    /// Audio arrives again after `StillRestarting`: the first frames of the
+    /// stream a rebuild resumed on (with that `DeviceResumed` over a
+    /// backend that is not watched), so the warning ends. Rust only.
+    Delivering,
 }
 
 /// What `stop()` reports beside the asset.

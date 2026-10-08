@@ -494,9 +494,11 @@ struct Outage {
     /// change, which says nothing of which device is silent. Named by the
     /// warning and the note after the stop ([`missing_audio_note`]).
     stalled: Option<String>,
-    /// Whether the session's restarts go on past
-    /// `CaptureSession::RESTART_ATTEMPTS` ([`no_audio_warning`]); cleared
-    /// once one ran, and once dismissed.
+    /// Whether the session's restarts went on past
+    /// `CaptureSession::RESTART_ATTEMPTS` (`StillRestarting`) and no audio
+    /// arrived since ([`no_audio_warning`]); cleared by `Delivering`, not
+    /// by a resume (a stream that waits for playback may resume silent),
+    /// and once dismissed.
     still_trying: bool,
 }
 
@@ -651,9 +653,9 @@ fn forward_levels(
 /// The thread that follows the session's notices and calls `hook`: a
 /// rebuild's start notes into `outage` the device it replaces when a stall
 /// started it, and none otherwise, restarts that go on past
-/// `RESTART_ATTEMPTS` mark it there as still trying, and the resume clears
-/// that and re-reads the microphone into `fallback`, since a rebuild may
-/// record another one. It holds `session` weakly, so dropping the session
+/// `RESTART_ATTEMPTS` mark it there as still trying until audio arrives
+/// again (`Delivering`), and the resume re-reads the microphone into
+/// `fallback`, since a rebuild may record another one. It holds `session` weakly, so dropping the session
 /// ends the notices and the thread. None when it could not be spawned,
 /// and the warnings stay as the start left them.
 fn follow_the_notices(
@@ -680,8 +682,8 @@ fn follow_the_notices(
                             .then(|| device_name(session.stream().as_ref()));
                     }
                     CaptureNotice::StillRestarting { .. } => outage.still_trying = true,
+                    CaptureNotice::Delivering => outage.still_trying = false,
                     CaptureNotice::DeviceResumed { .. } => {
-                        outage.still_trying = false;
                         fallback
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)

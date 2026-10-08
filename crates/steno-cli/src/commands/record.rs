@@ -81,8 +81,11 @@ pub fn notice_line(notice: &CaptureNotice) -> String {
             format!("{}; reconnecting", reason_words(*reason))
         }
         CaptureNotice::StillRestarting { attempt } => {
-            format!("no audio after {attempt} restarts; still trying until one runs or you stop")
+            format!(
+                "no audio after {attempt} restarts; still trying until audio arrives or you stop"
+            )
         }
+        CaptureNotice::Delivering => "audio is arriving again".to_owned(),
         CaptureNotice::DeviceResumed {
             attempt,
             gap_seconds,
