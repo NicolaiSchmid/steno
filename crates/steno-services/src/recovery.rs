@@ -387,28 +387,19 @@ pub fn reconcile_interrupted(
     // to debug.
     for ((meeting, lookup), written) in meetings.iter().zip(lookups).zip(written) {
         let meeting_id = meeting.id;
-        let folder = match lookup {
+        let recovered = match lookup {
             Lookup::Found(_) if written => {
                 tracing::warn!(%meeting_id, "a recording another process is writing was left alone");
                 reconciled.live.push(meeting_id);
                 continue;
             }
-            Lookup::Found(folder) => folder,
-            Lookup::Unreachable => {
-                tracing::warn!(%meeting_id, "an interrupted recording's folder cannot be read now; the next launch tries again");
-                reconciled.unreachable.push(meeting_id);
-                continue;
-            }
-            Lookup::Absent => {
-                tracing::warn!(%meeting_id, "an interrupted recording has no audio on disk");
-                unrecovered.push(meeting_id);
-                continue;
-            }
+            Lookup::Found(folder) => crate::block_on(
+                runtime,
+                recover(intake, &[folder], meeting_id, meeting.source),
+            ),
+            Lookup::Unreachable => Err(RecoveryError::Unreachable),
+            Lookup::Absent => Err(Unrecoverable::NoMaster.into()),
         };
-        let recovered = crate::block_on(
-            runtime,
-            recover(intake, &[folder], meeting_id, meeting.source),
-        );
         match recovered {
             Ok(_) => {
                 tracing::warn!(%meeting_id, "an interrupted recording was recovered");

@@ -425,12 +425,13 @@ impl LocalRecordingIntake {
     /// `expires_at` cleared, and enqueues the meeting: the meeting, now
     /// `queued`, and its asset in one commit. A commit that finds the
     /// database busy is tried again, up to [`Self::COMMIT_ATTEMPTS`] in
-    /// all ([`Self::with_commit_attempts`]). A meeting that is not `recording` is left alone, its row
-    /// untouched. Any other failure leaves the meeting `recording` and
-    /// returns the error: the recording stays on disk, and the next
-    /// launch's recovery finds it there and queues it. Swift marked the
-    /// meeting failed without its asset, so the recording was lost to the
-    /// list; the retry and the recording kept are Rust only.
+    /// all ([`Self::with_commit_attempts`]). A meeting that is not
+    /// `recording` is left alone, its row untouched. Any other failure
+    /// leaves the meeting `recording` and returns the error: the recording
+    /// stays on disk, and the next launch's recovery finds it there and
+    /// queues it. Swift marked the meeting failed without its asset, so the
+    /// recording was lost to the list; the retry and the recording kept are
+    /// Rust only.
     pub async fn complete(
         &self,
         meeting_id: Uuid,

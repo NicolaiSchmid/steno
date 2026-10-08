@@ -131,10 +131,10 @@ impl WavStreamWriter {
     /// sizes come from the file's length, whole samples only (a sample cut
     /// short at the end is cut off), and the file is synced. Only a file
     /// whose header is this writer's at [`Self::SIDECAR_SAMPLE_RATE`],
-    /// sizes aside, is touched; a finished one is written back as it was. Returns the samples it
-    /// holds. Crash recovery calls it, so the lane reads from its sidecar
-    /// rather than being rebuilt from the master. Rust only: Swift had no
-    /// recovery.
+    /// sizes aside, is touched; a finished one is written back as it was.
+    /// Returns the samples it holds. Crash recovery calls it, so the lane
+    /// reads from its sidecar rather than being rebuilt from the master.
+    /// Rust only: Swift had no recovery.
     pub fn recover(path: &Path) -> Result<usize, WavReadError> {
         let io = |e: std::io::Error| WavReadError::Io(format!("{}: {e}", path.display()));
         let mut file = OpenOptions::new()
