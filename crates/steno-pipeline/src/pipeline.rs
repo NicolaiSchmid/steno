@@ -357,11 +357,14 @@ impl InFlight {
 /// the services' reloads share the app's). A resume
 /// ([`ProcessingPipeline::resume_unfinished`],
 /// [`ProcessingPipeline::resume_waiting`]) counts itself and takes the
-/// waiting meetings. A run refused for missing models while a resume ran
-/// is run again rather than left waiting: the install that resumed may
-/// have brought its models, and the resume skipped it because it was in
-/// flight. So [`ProcessingPipeline::resume_waiting`] starts only meetings
-/// no run holds, on any pipeline sharing the value. Rust only: the Swift
+/// waiting meetings. A run refused for missing models records its meeting
+/// only once nothing holds it any more (the run's mark and its background
+/// task's), so a resume never finds a waiting meeting held and skips it;
+/// when a resume ran since the run started, which skipped the meeting
+/// because it was in flight and may have followed the install of its
+/// models, the meeting starts again instead of waiting. So
+/// [`ProcessingPipeline::resume_waiting`] starts only meetings no run
+/// holds, on any pipeline sharing the value. Rust only: the Swift
 /// pipeline downloaded inside the run.
 #[derive(Debug, Clone, Default)]
 pub struct ModelWaits(Arc<Mutex<Waits>>);
@@ -387,9 +390,9 @@ impl ModelWaits {
 
     /// Records `meeting_id` as waiting and returns true, unless a resume
     /// ran since `seen`: then `seen` moves to now and nothing is recorded.
-    /// The check and the record are one step, so a resume either comes
-    /// after the record and takes the meeting, or before it and the run
-    /// goes again.
+    /// The check and the record are one step, and the caller holds the
+    /// meeting no more, so a resume either comes after the record and
+    /// starts the meeting, or before it and the caller starts it again.
     fn wait_unless_resumed(&self, meeting_id: Uuid, seen: &mut u64) -> bool {
         let mut waits = self.lock();
         if waits.resumes != *seen {
@@ -1221,8 +1224,8 @@ impl ProcessingPipeline {
     /// runs left `queued` for missing models since the last resume
     /// ([`ModelWaits`]) alone, which no run holds: the services call it
     /// once a model install finished, while other meetings may still run
-    /// on a pipeline a reload retired. A waiting meeting that a run on this
-    /// pipeline still holds stays waiting, and so do all of them when the
+    /// on a pipeline a reload retired. A waiting meeting another operation
+    /// holds (a reprocess) stays waiting, and so do all of them when the
     /// store fails.
     pub fn resume_waiting(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
@@ -1402,10 +1405,11 @@ impl ProcessingPipeline {
             self.spawn_tracked(Uuid::new_v4(), None, async move {
                 for meeting_id in meetings {
                     if pipeline.quitting() {
-                        return;
+                        break;
                     }
                     pipeline.redeliver_at_launch(meeting_id, &retries).await;
                 }
+                None
             });
         }
         Ok(owed)
@@ -1486,21 +1490,29 @@ impl ProcessingPipeline {
     /// to the insert, so the task cannot finish and remove its entry before
     /// the entry exists; the task's [`Running`] mark removes the entry and
     /// then releases the claim however the task ends, a panic included.
+    /// A run `work` hands a refusal for missing models is recorded as
+    /// waiting only after that ([`wait_for_models`](Self::wait_for_models)).
     fn spawn_tracked(
         &self,
         key: Uuid,
         claim: Option<AssetClaim>,
-        work: impl Future<Output = ()> + Send + 'static,
+        work: impl Future<Output = Option<Refused>> + Send + 'static,
     ) {
         let pipeline = self.clone();
         let mut state = self.state();
         let handle = tokio::spawn(async move {
-            let _running = Running {
-                pipeline,
+            let running = Running {
+                pipeline: pipeline.clone(),
                 key,
                 _claim: claim,
             };
-            work.await;
+            let refused = work.await;
+            // The mark and the claim go before a refused meeting is
+            // recorded as waiting, so a resume from then on can start it.
+            drop(running);
+            if let Some(refused) = refused {
+                pipeline.wait_for_models(refused);
+            }
         });
         state.running.insert(key, handle);
     }
@@ -1521,7 +1533,10 @@ impl ProcessingPipeline {
         let counted = match &turn {
             Turn::Now(_) => match CountedRun::start(&latch, count.clone()) {
                 Some(counted) => Some(counted),
-                None => return not_started(asset_id),
+                None => {
+                    not_started(asset_id);
+                    return;
+                }
             },
             Turn::Alone(_) => None,
         };
@@ -1537,43 +1552,50 @@ impl ProcessingPipeline {
             let Some(mut counted) = counted.or_else(|| CountedRun::start(&latch, count)) else {
                 return not_started(asset_id);
             };
-            let result = pipeline.process(asset_id).await;
+            let (result, refused) = pipeline.process_held(asset_id).await;
             if result.is_ok() {
                 counted.succeeded();
             }
             drop(counted);
             if let Err(failure) = result {
-                if pipeline.quitting() {
-                    // The exit ended the job, which `process` did not persist.
-                    tracing::debug!(
-                        target: BACKGROUND_RUN_LOG,
-                        %asset_id,
-                        %failure,
-                        "processing stopped by the exit"
-                    );
-                    return;
-                }
-                if failure.is_models_missing() {
-                    tracing::info!(
-                        target: BACKGROUND_RUN_LOG,
-                        %asset_id,
-                        stage = failure.stage.as_str(),
-                        "processing waits for the models to be installed"
-                    );
-                    return;
-                }
-                // The reason can name the audio file (a decode error) or
-                // quote the model, so warn carries the stage only; the
-                // meeting row has the whole reason.
-                tracing::warn!(
-                    target: BACKGROUND_RUN_LOG,
-                    %asset_id,
-                    stage = failure.stage.as_str(),
-                    "processing failed"
-                );
-                tracing::debug!(target: BACKGROUND_RUN_LOG, %asset_id, %failure, "processing failure");
+                pipeline.log_run_failure(asset_id, &failure);
             }
+            refused
         });
+    }
+
+    /// The background run's log line for `failure`: debug for one the exit
+    /// ended, info for a refusal for missing models, warn otherwise.
+    fn log_run_failure(&self, asset_id: Uuid, failure: &PipelineFailure) {
+        if self.quitting() {
+            // The exit ended the job, which `process` did not persist.
+            tracing::debug!(
+                target: BACKGROUND_RUN_LOG,
+                %asset_id,
+                %failure,
+                "processing stopped by the exit"
+            );
+            return;
+        }
+        if failure.is_models_missing() {
+            tracing::info!(
+                target: BACKGROUND_RUN_LOG,
+                %asset_id,
+                stage = failure.stage.as_str(),
+                "processing waits for the models to be installed"
+            );
+            return;
+        }
+        // The reason can name the audio file (a decode error) or quote the
+        // model, so warn carries the stage only; the meeting row has the
+        // whole reason.
+        tracing::warn!(
+            target: BACKGROUND_RUN_LOG,
+            %asset_id,
+            stage = failure.stage.as_str(),
+            "processing failed"
+        );
+        tracing::debug!(target: BACKGROUND_RUN_LOG, %asset_id, %failure, "processing failure");
     }
 
     /// Waits for every background task: the processing `enqueue` and
@@ -1647,7 +1669,8 @@ impl ProcessingPipeline {
     /// run refused because a model is not installed
     /// ([`PipelineFailure::is_models_missing`]) leaves the meeting `queued`
     /// instead, waiting for a resume ([`ModelWaits`]), and the call returns
-    /// the refusal; when a resume ran during the run, it runs again first.
+    /// the refusal; when a resume ran during the run, the meeting starts
+    /// again in the background.
     /// A failing `diarize` or
     /// `match_speakers` does not fail it: the transcript is kept with the
     /// speakers stored for the meeting, or, when none are stored, one
@@ -1661,85 +1684,129 @@ impl ProcessingPipeline {
     /// stays `queued` or `processing`, which the next launch's
     /// `resume_unfinished` processes again.
     pub async fn process(&self, asset_id: Uuid) -> Result<()> {
-        if self.quitting() {
-            return Err(PipelineFailure::new(
-                PipelineStage::Decode,
-                "the app is quitting",
-            ));
+        let (result, refused) = self.process_held(asset_id).await;
+        if let Some(refused) = refused {
+            self.wait_for_models(refused);
         }
-        let asset = required(
+        result
+    }
+
+    /// [`process`](Self::process) up to the release of the meeting: a run
+    /// refused for missing models also returns what
+    /// [`wait_for_models`](Self::wait_for_models) needs once nothing holds
+    /// the meeting any more.
+    async fn process_held(&self, asset_id: Uuid) -> (Result<()>, Option<Refused>) {
+        if self.quitting() {
+            let quitting = PipelineFailure::new(PipelineStage::Decode, "the app is quitting");
+            return (Err(quitting), None);
+        }
+        let found = required(
             PipelineStage::Decode,
             self.store().asset_by_id(asset_id),
             || format!("audio asset {asset_id} not found"),
-        )?;
-        let meeting = required(
-            PipelineStage::Decode,
-            self.store().meeting(asset.meeting_id),
-            || format!("meeting {} not found", asset.meeting_id),
-        )?;
+        )
+        .and_then(|asset| {
+            let meeting = required(
+                PipelineStage::Decode,
+                self.store().meeting(asset.meeting_id),
+                || format!("meeting {} not found", asset.meeting_id),
+            )?;
+            Ok((asset, meeting))
+        });
+        let (asset, meeting) = match found {
+            Ok(found) => found,
+            Err(failure) => return (Err(failure), None),
+        };
         let meeting_id = meeting.id;
-        self.exclusively(meeting_id, PipelineStage::Decode, async {
-            let waits = &self.inner.dependencies.model_waits;
-            let mut resumes_seen = waits.resumes();
-            let until_persist = loop {
+        let mut refused = None;
+        let result = self
+            .exclusively(meeting_id, PipelineStage::Decode, async {
+                let resumes_seen = self.inner.dependencies.model_waits.resumes();
                 // A panic fails the meeting like any stage failure, so it
                 // never stays `processing` (undeletable, and run again at
                 // every launch). Boxed: the stages' future is too large to
                 // move into the helper by value.
                 let until_persist = unless_it_panics(
                     || self.stage_in_progress(meeting_id),
-                    Box::pin(self.process_until_persist(&asset, meeting.clone())),
+                    Box::pin(self.process_until_persist(&asset, meeting)),
                 )
                 .await;
-                match until_persist {
-                    Err(failure) if failure.is_models_missing() && !self.quitting() => {
+                let persisted = match until_persist {
+                    Ok(asset) => asset,
+                    Err(failure) if self.quitting() => return Err(failure),
+                    Err(failure) if failure.is_models_missing() => {
                         self.park(meeting_id);
-                        if waits.wait_unless_resumed(meeting_id, &mut resumes_seen) {
-                            return Err(failure);
-                        }
-                        // An install finished during the run and its
-                        // resume skipped this meeting, which was in flight.
-                        tracing::info!(
-                            target: BACKGROUND_RUN_LOG,
-                            %meeting_id,
-                            "a resume ran during the refused run; processing again"
-                        );
-                    }
-                    until_persist => break until_persist,
-                }
-            };
-            let persisted = match until_persist {
-                Ok(asset) => asset,
-                Err(failure) if self.quitting() => return Err(failure),
-                Err(failure) => {
-                    // A failure after `persist` marked the meeting ready
-                    // leaves it ready, and a ready meeting is delivered:
-                    // nothing resumes it to deliver it later.
-                    let ready = self
-                        .store()
-                        .meeting(meeting_id)
-                        .ok()
-                        .flatten()
-                        .is_some_and(|stored| stored.state == MeetingState::Ready);
-                    if ready {
-                        self.deliver(meeting_id).await;
-                        let _ = self.stamp_deferred_retention(meeting_id).await;
+                        refused = Some(Refused {
+                            meeting_id,
+                            resumes_seen,
+                        });
                         return Err(failure);
                     }
-                    let _ = self.store().set_state(
-                        meeting_id,
-                        MeetingState::Failed {
-                            reason: failure.to_string(),
-                        },
-                        self.now(),
-                    );
-                    return Err(failure);
-                }
-            };
-            self.deliver(meeting_id).await;
-            self.retention(&persisted).await
-        })
-        .await
+                    Err(failure) => {
+                        // A failure after `persist` marked the meeting ready
+                        // leaves it ready, and a ready meeting is delivered:
+                        // nothing resumes it to deliver it later.
+                        let ready = self
+                            .store()
+                            .meeting(meeting_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|stored| stored.state == MeetingState::Ready);
+                        if ready {
+                            self.deliver(meeting_id).await;
+                            let _ = self.stamp_deferred_retention(meeting_id).await;
+                            return Err(failure);
+                        }
+                        let _ = self.store().set_state(
+                            meeting_id,
+                            MeetingState::Failed {
+                                reason: failure.to_string(),
+                            },
+                            self.now(),
+                        );
+                        return Err(failure);
+                    }
+                };
+                self.deliver(meeting_id).await;
+                self.retention(&persisted).await
+            })
+            .await;
+        (result, refused)
+    }
+
+    /// Once nothing holds a refused run's meeting, records it as waiting
+    /// for its models ([`ModelWaits`]), unless a resume ran since the run
+    /// started: that resume skipped the meeting, which was in flight, and
+    /// may have followed the install of its models, so the meeting starts
+    /// again now, in the background. Once the pipeline quits, the next
+    /// launch's resume processes it.
+    fn wait_for_models(&self, refused: Refused) {
+        let Refused {
+            meeting_id,
+            mut resumes_seen,
+        } = refused;
+        let waits = &self.inner.dependencies.model_waits;
+        if waits.wait_unless_resumed(meeting_id, &mut resumes_seen) || self.quitting() {
+            return;
+        }
+        tracing::info!(
+            target: BACKGROUND_RUN_LOG,
+            %meeting_id,
+            "a resume ran during the refused run; processing again"
+        );
+        let only = BTreeSet::from([meeting_id]);
+        match self.resume_among(Some(&only)) {
+            Ok((_, busy)) => waits.put_back(busy),
+            Err(failure) => {
+                waits.put_back(only);
+                tracing::warn!(
+                    target: BACKGROUND_RUN_LOG,
+                    %meeting_id,
+                    stage = failure.stage.as_str(),
+                    "the refused meeting could not be started again"
+                );
+            }
+        }
     }
 
     /// A run refused for missing models leaves its meeting `queued`, as it
@@ -2934,12 +3001,13 @@ enum Turn {
 }
 
 /// The debug line of a run the exit kept from starting.
-fn not_started(asset_id: Uuid) {
+fn not_started(asset_id: Uuid) -> Option<Refused> {
     tracing::debug!(
         target: BACKGROUND_RUN_LOG,
         %asset_id,
         "not started: the app is quitting"
     );
+    None
 }
 
 /// An asset claimed in the in-flight set for a background run
@@ -2965,6 +3033,15 @@ struct Running {
     pipeline: ProcessingPipeline,
     key: Uuid,
     _claim: Option<AssetClaim>,
+}
+
+/// A run refused for missing models, for
+/// [`ProcessingPipeline::wait_for_models`]: its meeting and the resume
+/// count when it started.
+#[derive(Clone, Copy)]
+struct Refused {
+    meeting_id: Uuid,
+    resumes_seen: u64,
 }
 
 impl Drop for Running {
