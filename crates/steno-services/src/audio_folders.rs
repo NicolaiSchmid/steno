@@ -88,7 +88,12 @@ pub(crate) struct AdmissionRecord {
 
 impl AdmissionFolders for AdmissionRecord {
     fn copying(&self, meeting_id: Uuid, audio_folder: &Path) -> std::io::Result<()> {
-        record(&self.support_directory, meeting_id, audio_folder)
+        record(&self.support_directory, meeting_id, audio_folder).inspect_err(|error| {
+            // The admission is refused; the error can name the user's
+            // folder: debug alone.
+            tracing::warn!(%meeting_id, "a phone upload's folder could not be noted; the upload is refused for now");
+            tracing::debug!(%meeting_id, %error, "an admission's folder not noted");
+        })
     }
 
     fn settled(&self, meeting_id: Uuid) {
@@ -292,6 +297,25 @@ mod tests {
         assert_eq!(
             recorded(dir.path()).unwrap(),
             BTreeMap::from([(second, PathBuf::from("/b"))])
+        );
+    }
+
+    /// Writers on many threads at once (phone admissions on several
+    /// connections, the recorder) each keep their entry: every change
+    /// holds one lock from its read to its write.
+    #[test]
+    fn entries_recorded_at_once_are_all_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let ids: Vec<Uuid> = (0..16).map(|_| Uuid::new_v4()).collect();
+        std::thread::scope(|scope| {
+            for id in &ids {
+                scope.spawn(|| record(dir.path(), *id, Path::new("/a")).unwrap());
+            }
+        });
+        let recorded = recorded(dir.path()).unwrap();
+        assert!(
+            ids.iter().all(|id| recorded.contains_key(id)),
+            "{recorded:?}"
         );
     }
 
