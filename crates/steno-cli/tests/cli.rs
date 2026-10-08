@@ -678,7 +678,6 @@ fn dev_models_list_shows_the_size_of_the_parakeet_the_platform_runs() {
     assert!(line.ends_with(fp32.as_str()), "the sidecar chosen: {line}");
 }
 
-// Every usage error of the Swift test in one place.
 /// `steno process --meeting <id>` processes a stored failed meeting again
 /// from its recording: refused while the master is gone, and once the
 /// broken lane is replaced the run ends ready and prints the id.
@@ -818,6 +817,7 @@ fn process_meeting_is_exclusive_of_the_input_and_names_an_unknown_id() {
     assert_eq!(unknown.stdout, "");
 }
 
+// Every usage error of the Swift test in one place.
 #[allow(clippy::too_many_lines)]
 #[test]
 fn usage_errors_exit_one_and_name_the_known_values() {
