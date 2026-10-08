@@ -32,7 +32,8 @@ pub struct ProcessingConfiguration {
     /// Samples per processing frame.
     pub frame_size: usize,
     /// The rate the rings carry, the device's; anything but
-    /// [`SAMPLE_RATE`] is converted to it.
+    /// [`SAMPLE_RATE`] is converted to it, so it must be a rate
+    /// [`RateConverter::supports`].
     pub device_rate: f64,
     /// Applied to the microphone with the system lane as far end; `None`
     /// passes the microphone through.
@@ -88,7 +89,7 @@ struct Worker {
 /// The rate conversion in front of the frames, one converter per lane.
 struct Conversion {
     converters: Vec<RateConverter>,
-    /// One read of device samples, reused lane after lane.
+    /// One read of device samples, a frame's worth, reused lane after lane.
     input: Vec<f32>,
     /// Converted samples per lane; the first `pending` are not yet framed.
     output: Vec<Vec<f32>>,
@@ -128,10 +129,7 @@ impl Worker {
     fn drain_converted(&mut self, conversion: &mut Conversion) {
         let frame_size = self.frame_size;
         loop {
-            let count = self
-                .sink
-                .available_to_read()
-                .min(conversion.converters[0].max_input());
+            let count = self.sink.available_to_read().min(conversion.input.len());
             if count == 0 {
                 return;
             }
@@ -321,7 +319,8 @@ impl ProcessingThread {
                 .iter()
                 .map(|_| RateConverter::new(configuration.device_rate, SAMPLE_RATE, read))
                 .collect();
-            let output = frame_size + converters[0].max_output();
+            // No lanes, no converters: nothing is ever read.
+            let output = frame_size + converters.first().map_or(0, RateConverter::max_output);
             Conversion {
                 input: vec![0.0; read],
                 output: converters.iter().map(|_| vec![0.0; output]).collect(),

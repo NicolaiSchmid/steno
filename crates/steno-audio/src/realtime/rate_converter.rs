@@ -1,7 +1,8 @@
 //! One lane from the device's rate to 48 kHz, converted as it streams on
 //! the processing thread. On the Mac the aggregate runs at whatever its
 //! clock master accepts, and a Bluetooth headset in the hands-free profile
-//! accepts only 24 or 16 kHz (`.plans/2026-10-05-device-sample-rate.md`).
+//! accepts only 24, 16 or 8 kHz
+//! (`.plans/2026-10-05-device-sample-rate.md`).
 //! Swift: `Sources/StenoAudio/RealTime/RateConverter.swift`.
 //!
 //! The filter is [`SincResampler`]'s polyphase table. Output `n` sits at
@@ -27,6 +28,18 @@
 use crate::codec::sinc::SincResampler;
 
 /// A streaming converter for one lane; see the module doc.
+///
+/// ```
+/// use steno_audio::realtime::RateConverter;
+///
+/// let mut converter = RateConverter::new(24_000.0, 48_000.0, 240);
+/// let mut output = vec![0.0f32; converter.max_output()];
+/// let mut written = 0;
+/// for _ in 0..100 {
+///     written += converter.process(&[0.25; 240], &mut output);
+/// }
+/// assert_eq!(written, 2 * (24_000 - 32), "one second less half a window");
+/// ```
 #[derive(Debug, Clone)]
 pub struct RateConverter {
     input_rate: u64,

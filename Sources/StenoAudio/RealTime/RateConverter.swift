@@ -3,7 +3,7 @@ import Foundation
 /// One lane from the device's rate to 48 kHz, converted as it streams on the
 /// processing thread. The aggregate runs at whatever its clock master
 /// accepts, and a Bluetooth headset in the hands-free profile accepts only
-/// 24 or 16 kHz (`.plans/2026-10-05-device-sample-rate.md`).
+/// 24, 16 or 8 kHz (`.plans/2026-10-05-device-sample-rate.md`).
 ///
 /// A polyphase Kaiser-windowed sinc: 128 phases of 64 taps, cutoff 0.45 of
 /// the lower rate, beta 9, adjacent phases interpolated linearly; the table

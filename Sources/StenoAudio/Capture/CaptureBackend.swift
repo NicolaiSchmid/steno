@@ -27,7 +27,7 @@ public protocol CaptureBackend: Sendable {
 public struct CaptureStream: Sendable, Equatable {
   /// The confirmed rate the lanes arrive at: `StenoAudio.sampleRate`, except
   /// when the clock master will not run at it (a Bluetooth headset in the
-  /// hands-free profile runs at 24 or 16 kHz).
+  /// hands-free profile runs at 24, 16 or 8 kHz).
   public var sampleRate: Double
   /// Latency plus safety offset of the microphone's input path, in frames at
   /// `sampleRate` (a microphone on its own clock has its latency rescaled

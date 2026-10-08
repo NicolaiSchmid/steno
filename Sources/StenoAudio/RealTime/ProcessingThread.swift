@@ -18,7 +18,8 @@ final class ProcessingThread: @unchecked Sendable {
     var lanes: [AudioLane]
     var frameSize: Int = StenoAudio.frameSize
     /// The rate the rings carry, the device's; anything but
-    /// `StenoAudio.sampleRate` is converted to it.
+    /// `StenoAudio.sampleRate` is converted to it, so it must be a rate
+    /// `RateConverter.supports`.
     var deviceRate: Double = StenoAudio.sampleRate
     var echoCanceller: (any EchoCanceller)?
     /// Frames the far-end is delayed by before cancellation (0: none).
@@ -277,7 +278,8 @@ private final class Conversion: @unchecked Sendable {
     converters = (0..<laneCount).map { _ in
       RateConverter(inputRate: deviceRate, outputRate: StenoAudio.sampleRate, maximumInput: read)
     }
-    let outputCapacity = frameSize + converters[0].maximumOutput
+    // No lanes, no converters: nothing is ever read.
+    let outputCapacity = frameSize + (converters.first?.maximumOutput ?? 0)
     input = .allocate(capacity: read)
     input.initialize(repeating: 0, count: read)
     output = (0..<laneCount).map { _ in

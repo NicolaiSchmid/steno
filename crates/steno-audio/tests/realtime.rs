@@ -235,6 +235,20 @@ fn the_converting_processing_loop_allocates_nothing_after_warm_up() {
     }
 }
 
+/// A converting thread with no lanes builds and drains nothing instead of
+/// indexing a converter that is not there.
+#[test]
+fn a_converting_processing_thread_without_lanes_does_nothing() {
+    let sink = Arc::new(LaneFrameSink::new(&[]));
+    let relay = Arc::new(FrameRelay::new(1, FRAME_SIZE, 4));
+    let mut configuration = ProcessingConfiguration::new(&[], None);
+    configuration.device_rate = 24_000.0;
+    let mut thread = ProcessingThread::new(sink, Arc::clone(&relay), configuration, None);
+    thread.drain_on_caller();
+    assert_eq!(thread.frames_processed(), 0);
+    assert_eq!(relay.available_frames(), 0);
+}
+
 /// `work` through the PipeWire capture's gate, as `process` delivers a
 /// cycle; the backend and its gate are Linux only.
 fn through_the_gate(work: impl FnOnce()) {

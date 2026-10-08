@@ -52,7 +52,7 @@ pub trait CaptureBackend: Send + Sync {
 pub struct CaptureStream {
     /// The confirmed rate the lanes arrive at: [`SAMPLE_RATE`], except on
     /// the Mac when the clock master will not run at it (a Bluetooth
-    /// headset in the hands-free profile runs at 24 or 16 kHz).
+    /// headset in the hands-free profile runs at 24, 16 or 8 kHz).
     pub sample_rate: f64,
     /// Latency plus safety offset of the microphone's input path, in frames
     /// at `sample_rate` (a microphone on its own clock has its latency
