@@ -278,6 +278,54 @@ fn device_lost_stops_cleanly_with_a_readable_master() {
     assert_eq!(second.statistics.device_changes, 0);
 }
 
+/// A rebuild that panics (here the restarted backend's `start`) ends the
+/// recording as a device that stayed lost does: `Failed(DeviceLost)` with
+/// the recording up to the change, rather than `Recording` over a session
+/// that writes nothing any more.
+#[test]
+fn a_rebuild_that_panics_ends_in_device_lost_with_the_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 10.0)
+            .change_device_after(1.0)
+            .restart_panics(),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        200,
+        Arc::new(ManualClock::new()),
+    )
+    .unwrap();
+    let states = session.states();
+    session.start(Uuid::new_v4()).unwrap();
+    let seen = collect_states(&states, until_failed);
+    assert!(seen.contains(&CaptureState::Stopping));
+    let result = session.stop().unwrap();
+    assert_eq!(
+        *seen.last().unwrap(),
+        CaptureState::Failed {
+            error: CaptureError::DeviceLost,
+            recording: Some(Box::new(result.clone()))
+        }
+    );
+    assert_eq!(result.failure, Some(CaptureError::DeviceLost));
+    assert!(result.statistics.ended_on_device_loss);
+    assert_eq!(master_of(&result).frame_count(), 48_000);
+    assert_eq!(
+        backend.starts(),
+        2,
+        "the start and the restart that panicked"
+    );
+
+    // The session starts again after it.
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    session.stop().unwrap();
+    assert_eq!(session.state(), CaptureState::Idle);
+}
+
 /// A tap that never delivers anything (permission denied, a muted mix) is
 /// reported through `system_lane_silent` and the level stream's floor,
 /// while the recording itself completes.

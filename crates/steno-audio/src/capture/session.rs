@@ -20,11 +20,11 @@
 //! a processing thread built for the new latencies, and keeps the sink, the
 //! relay, the writer thread, the writer and the files. The state stays
 //! `Recording`; `notices` carries `DeviceChanged` and `DeviceResumed`.
-//! Only when every restart fails does the recording end in
-//! `Failed(DeviceLost)`. A chosen microphone that is gone fails no restart:
-//! the live backends then record the default input and say so in
-//! [`CaptureStream::input`], which [`CaptureSession::stream`] hands out
-//! (see [`CaptureBackend::start`]). One that is connected but does not open
+//! Only when every restart fails, or the rebuild panics, does the
+//! recording end in `Failed(DeviceLost)`. A chosen microphone that is gone
+//! fails no restart: the live backends then record the default input and
+//! say so in [`CaptureStream::input`], which [`CaptureSession::stream`]
+//! hands out (see [`CaptureBackend::start`]). One that is connected but does not open
 //! is the session's to replace: when the start, or a rebuild's last
 //! restart, fails on it, the session starts the backend once more without
 //! a UID and marks that input as the fallback, so the recording ends only
@@ -106,6 +106,7 @@
 //! hangs there freezes the session's callers with it.
 
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread::JoinHandle;
@@ -405,6 +406,23 @@ impl CaptureSession {
             .map(|active| active.stream.clone())
     }
 
+    /// Whether a write failed in the recording in progress, which still
+    /// shows `Recording`: every frame is dropped from that write on. The
+    /// session ends such a recording itself, in `Failed`, on a thread of its
+    /// own; when that thread could not be spawned the state stays
+    /// `Recording`, and a caller that polls this stops the recording
+    /// instead (`stop()` returns it with the write's failure in it).
+    #[must_use]
+    pub fn write_failed(&self) -> bool {
+        let inner = self.core.lock();
+        matches!(inner.state, CaptureState::Recording { .. })
+            && inner
+                .active
+                .as_ref()
+                .and_then(|active| active.writer_thread.as_ref())
+                .is_some_and(WriterThread::has_failed)
+    }
+
     /// Starts a recording for `meeting_id` in its own folder of the configured
     /// directory; `InvalidState` while one is starting, recording or stopping.
     pub fn start(&self, meeting_id: Uuid) -> Result<(), CaptureError> {
@@ -638,8 +656,10 @@ impl Core {
                         .name("steno-wfail".into())
                         .spawn(move || core.writer_failed(&error, recording));
                     // No thread to finalise on: the state stays
-                    // `Recording` with nothing written, and `stop()` still
-                    // returns the recording with the write's failure in it.
+                    // `Recording` with nothing written, which
+                    // `CaptureSession::write_failed` tells a watcher, and
+                    // `stop()` returns the recording with the write's
+                    // failure in it.
                     if let Err(spawn) = spawned {
                         tracing::error!(%spawn, "a write failed and the recording could not be ended");
                     }
@@ -910,9 +930,12 @@ impl Core {
             Ok(thread) => thread,
             // Never a panic here: this runs on the backend's thread (the
             // PipeWire loop's on Linux), which a panic would end without a
-            // word. The recording goes on with the devices it had.
+            // word. The recording goes on with the devices it had, and the
+            // latch opens again (only a rebuild opens it otherwise), so the
+            // backend's next report tries again.
             Err(spawn) => {
                 tracing::error!(%spawn, ?reason, "a device change could not be followed");
+                active.sink.rearm_device_change();
                 return;
             }
         };
@@ -927,6 +950,31 @@ impl Core {
             && inner.rebuild_generation == generation
     }
 
+    /// [`Self::rebuild_steps`], and a panic in them ends the recording as
+    /// a device that stayed lost does: saved, in `Failed(DeviceLost)`, so
+    /// the recorder hears of it rather than showing `Recording` over a
+    /// session that no longer writes anything.
+    fn rebuild(self: &Arc<Self>, generation: usize, cancel: &Cancel) -> (usize, f32) {
+        // `AssertUnwindSafe` holds: every step changes `Inner` under the
+        // lock in whole assignments (the lock is read through a poison), so
+        // a panic leaves it as the last completed step did. What a panic
+        // can leave half done is outside it: the old backend stopped, the
+        // processing thread taken out and not replaced, a new stream not
+        // handed over. `finish()` copes with each, as it does when a stop
+        // cuts a rebuild short: it stops the backend again, stops a
+        // processing thread only when there is one, and drains the rings.
+        let steps = AssertUnwindSafe(|| self.rebuild_steps(generation, cancel));
+        std::panic::catch_unwind(steps).unwrap_or_else(|_| {
+            tracing::error!("following a device change panicked; the recording ends");
+            // Only the newest rebuild's: an older one's recording, or its
+            // place, belongs to another thread now.
+            if self.lock().rebuild_generation == generation {
+                self.device_lost();
+            }
+            (0, 0.0)
+        })
+    }
+
     /// Old backend and processing thread off, then `start` again with
     /// backoff; the gap from the moment the old backend was told to stop
     /// is written as silence before the new processing thread starts. The
@@ -935,7 +983,7 @@ impl Core {
     /// `resume` did not account because a stop came first, and the old
     /// processing thread's system-lane peak for a `finish()` that took the
     /// recording before this thread could fold it in.
-    fn rebuild(self: &Arc<Self>, generation: usize, cancel: &Cancel) -> (usize, f32) {
+    fn rebuild_steps(self: &Arc<Self>, generation: usize, cancel: &Cancel) -> (usize, f32) {
         // The stopwatch runs from before the teardown: the HAL calls in
         // `stop()` take tens to hundreds of milliseconds during a device
         // transition, and that is dead time in the master too.
