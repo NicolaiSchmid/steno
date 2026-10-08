@@ -733,13 +733,13 @@ The table above names each package and its owner. Their tests:
 - **P6.** In the Omarchy gate, while a meeting processes, `cat /proc/$(pidof -s
   steno-speech-sidecar)/cgroup` names a scope of its own, not the app's.
 - **P8.** A test that no secret written to #221's fake service holds a newline.
-- **P28.** A ready meeting whose delivery is `pending`, or `failed` a day or
-  more before the launch or never attempted, is re-exported at launch, one
+- **P28.** A ready meeting whose delivery is `pending`, or `failed` more than
+  a day before the launch or never attempted, is re-exported at launch, one
   meeting at a time; one that failed within the day, one delivered and a
   meeting that is not ready are not. A failed export is retried by one launch a
-  day at most, is left with the "keeps failing" line after three failed
-  launches in a row, and the next launch retries it once Export again resets
-  the count. An `App::launch`
+  day at most, is left with the "keeps failing" line after three launches in a
+  row that did not deliver every row, and the next launch retries it once
+  Export again resets the count. An `App::launch`
   test re-exports a `pending` row into a vault.
 - **P30.** A note changed in the vault since Steno wrote it (its hash differs
   from the ledger's) gets the new version beside it as `<name> (Steno
