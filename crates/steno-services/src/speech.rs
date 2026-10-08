@@ -1269,6 +1269,21 @@ mod tests {
         }
     }
 
+    /// The sidecar leaves its crash logs beside the app's, in the support
+    /// directory.
+    #[test]
+    fn the_sidecar_writes_its_crash_logs_into_the_support_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup = SpeechSetup::in_models_directory(
+            dir.path().join("Models"),
+            &StenoPaths::new(dir.path()),
+        );
+        assert_eq!(
+            setup.sidecar.crash_log_directory.as_deref(),
+            Some(dir.path())
+        );
+    }
+
     #[test]
     fn the_sidecar_binary_sits_beside_the_executable_with_the_onnx_threads() {
         let config = sidecar_config();
