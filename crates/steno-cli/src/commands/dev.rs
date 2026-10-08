@@ -15,7 +15,7 @@ use steno_core::{
     AudioBuffer16k, AudioLane, Diarizer, EchoCanceller, MeetingExport, MeetingSummarizer,
     SpeechEngine, SummaryTemplate, TranscriptCleaner, paths::file_url_path,
 };
-use steno_diarize::{DiarizerConfig, ModelDiarizer};
+use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
 use steno_host::speech::ModelAsset;
 use steno_llm::{LlmClient, LlmEndpoint, LlmMeetingSummarizer, LlmTranscriptCleaner, RetryPolicy};
 use steno_services::speech::{ModelStoreSpeechModels, SpeechSetup};
@@ -896,8 +896,13 @@ impl DiarizeSweep {
                 refines_clusters: !self.no_refinement,
                 ..DiarizerConfig::default()
             };
-            let diarizer =
-                ModelDiarizer::onnx(config, store.clone(), steno_services::speech::ONNX_THREADS);
+            // An explicit command: it may download the diarizer's models.
+            let diarizer = ModelDiarizer::onnx(
+                config,
+                store.clone(),
+                Install::Allowed,
+                steno_services::speech::ONNX_THREADS,
+            );
             for file in &self.files {
                 let samples = WavFile::read_16k_mono(file)
                     .map_err(|e| Failure::runtime(format!("{}: {e}", file.display())))?;

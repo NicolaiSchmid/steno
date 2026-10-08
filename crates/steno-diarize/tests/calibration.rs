@@ -160,8 +160,12 @@ fn backend() -> (String, Box<dyn DiarizationBackend>) {
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(4);
             let store = steno_speech::ModelStore::from_environment();
-            let backend = steno_diarize::onnx::OnnxBackend::from_store(&store, threads)
-                .expect("ONNX backend loads");
+            let backend = steno_diarize::onnx::OnnxBackend::from_store(
+                &store,
+                steno_diarize::Install::Allowed,
+                threads,
+            )
+            .expect("ONNX backend loads");
             (
                 format!("ONNX Runtime, CPU, {threads} threads"),
                 Box::new(backend),

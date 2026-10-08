@@ -18,7 +18,7 @@ use ort::value::Tensor;
 use crate::backend::{BackendError, DiarizationBackend, SegmentationGeometry};
 use crate::error::DiarizeError;
 use crate::fbank::{Fbank, FbankConfig};
-use crate::models::ModelPaths;
+use crate::models::{Install, ModelPaths};
 use crate::to_f64;
 
 /// Fbank frames the embedding model is given at least; under that the
@@ -53,13 +53,20 @@ impl std::fmt::Debug for OnnxBackend {
 }
 
 impl OnnxBackend {
-    /// Loads both models from `store`, installing them first when a file
-    /// is missing ([`crate::models::ensure`]).
+    /// Loads both models from `store`. Under [`Install::Allowed`] a
+    /// missing file is installed first ([`crate::models::ensure`]); under
+    /// [`Install::Never`] it is [`DiarizeError::NotInstalled`], without a
+    /// request ([`crate::models::installed`]). When the load fails, the
+    /// files are hashed, and one that fails its checksum is deleted and
+    /// reported as not installed, so a download can replace it.
     pub fn from_store(
         store: &steno_speech::ModelStore,
+        install: Install,
         threads: usize,
     ) -> Result<Self, DiarizeError> {
-        OnnxBackend::load(&crate::models::ensure(store)?, threads)
+        let paths = crate::models::paths(store, install)?;
+        OnnxBackend::load(&paths, threads)
+            .map_err(|error| crate::models::after_failed_load(store, error))
     }
 
     /// Loads the two model files. `threads` is the intra-op thread count

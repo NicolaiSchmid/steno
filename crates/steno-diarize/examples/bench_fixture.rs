@@ -35,7 +35,8 @@ fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(4);
-    let backend = OnnxBackend::from_store(&store, threads).expect("backend");
+    let backend =
+        OnnxBackend::from_store(&store, steno_diarize::Install::Allowed, threads).expect("backend");
     let mut pipeline = Pipeline::new(backend, DiarizerConfig::default());
     let load = std::fs::read_to_string("/proc/loadavg").unwrap_or_default();
     let started = Instant::now();

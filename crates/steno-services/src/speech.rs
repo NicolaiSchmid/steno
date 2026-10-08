@@ -23,7 +23,7 @@ use steno_core::{
     AudioBuffer16k, Diarizer, LanguageTag, RawSegment, Settings, SpeechEngine, StenoPaths,
     async_trait, paths::file_url_path, protocols::BoundaryResult,
 };
-use steno_diarize::{DiarizerConfig, ModelDiarizer};
+use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
 use steno_host::services::SpeechModels;
 use steno_host::speech::ModelAsset;
 use steno_pipeline::{SharedSpeechEngine, WeakSpeechEngine};
@@ -343,7 +343,8 @@ impl SpeechEngines {
     /// Engines from `build` instead, for the tests.
     pub(crate) fn with_builder(setup: SpeechSetup, build: BuildEngine) -> Self {
         SpeechEngines {
-            diarizer: diarizer(&setup),
+            // #237 flips this to `Install::Never` together with its models-missing gate.
+            diarizer: diarizer(&setup, Install::Allowed),
             setup,
             build,
             kept: std::sync::Mutex::default(),
@@ -509,16 +510,21 @@ impl SpeechEngine for LanguageTaggingEngine {
 }
 
 /// The ONNX diarizer over [`SpeechSetup::model_store`], the store and
-/// mirror the speech models install through: it loads its two models on
-/// first use, installing them into `<models directory>/onnx/diarization/`
-/// first when a file is missing (`steno_diarize::models`). A load that
-/// fails, a download cut off included, fails that call only; the next
-/// call tries again and resumes the download.
+/// mirror the speech models install through: it loads its two models from
+/// `<models directory>/onnx/diarization/` on first use. `install` says
+/// whether a missing file is downloaded first (`Install::Allowed`: the
+/// CLI's explicit commands) or fails the call with
+/// `DiarizeError::NotInstalled` and no request (`Install::Never`: a
+/// pipeline, which must not download during a job;
+/// `steno_diarize::models::installed` is the same check without a load).
+/// A load that fails fails that call only; the next call tries again,
+/// resuming a cut-off download where downloads are allowed.
 #[must_use]
-pub fn diarizer(setup: &SpeechSetup) -> Arc<dyn Diarizer> {
+pub fn diarizer(setup: &SpeechSetup, install: Install) -> Arc<dyn Diarizer> {
     Arc::new(ModelDiarizer::onnx(
         DiarizerConfig::default(),
         setup.model_store(),
+        install,
         ONNX_THREADS,
     ))
 }

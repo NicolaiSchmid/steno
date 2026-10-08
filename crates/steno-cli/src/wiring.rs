@@ -274,7 +274,8 @@ pub fn dependencies(
                 // The flag names the engine for this run, as the Swift CLI's
                 // `makeSpeechEngine(engine, ...)` did; the stored id does not.
                 steno_services::speech::speech_engine(engine, &speech),
-                steno_services::speech::diarizer(&speech),
+                // A pipeline: it never downloads the diarizer's models.
+                steno_services::speech::diarizer(&speech, steno_diarize::Install::Never),
                 Arc::new(steno_pipeline::StoreSpeakerMemory::new(store.clone())),
             )
         }

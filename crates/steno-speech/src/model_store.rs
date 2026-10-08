@@ -34,10 +34,13 @@
 //!
 //! A mirror ([`ModelStore::with_mirror`], the speech setting
 //! `modelsMirror`) replaces the hosts of every asset the store installs,
-//! the speech models (Parakeet, Silero VAD) and the diarizer's. With one,
-//! a file is fetched from `<mirror>/<asset id>/<file name>`, the layout of
-//! a store root and of the Hugging Face repository, so a copy of either
-//! served over HTTP is a mirror. It should answer `Range` requests (see
+//! the speech models (Parakeet, Silero VAD) and the diarizer's, with no
+//! fallback to the hosts. With one, a file is fetched from
+//! `<mirror>/<asset id>/<file name>`, the layout of a store root, so a
+//! whole store root (`parakeet-tdt-0.6b-v3-fp32/`, `silero-vad/`,
+//! `diarization/`) served over HTTP is a mirror. The Hugging Face
+//! repository [`STENO_MODELS_REPO`] holds only the Parakeet export, so a
+//! copy of it alone is not. A mirror should answer `Range` requests (see
 //! Downloads).
 //!
 //! # On disk
@@ -466,8 +469,10 @@ impl ModelStore {
     }
 
     /// The asset's directory when [`ModelStore::is_installed`], else
-    /// [`SpeechError::NotInstalled`] naming the missing files.
-    pub(crate) fn installed_directory(&self, asset: &ModelAsset) -> Result<PathBuf, SpeechError> {
+    /// [`SpeechError::NotInstalled`] naming the missing files. It hashes
+    /// nothing and fetches nothing, so a loader that must not download
+    /// and a gate that asks whether a job can run give the same answer.
+    pub fn installed_directory(&self, asset: &ModelAsset) -> Result<PathBuf, SpeechError> {
         asset.validate()?;
         let directory = self.directory(asset);
         let missing = self.missing_files(asset);

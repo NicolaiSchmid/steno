@@ -10,7 +10,7 @@ use crate::error::DiarizeError;
 use crate::pipeline::{DiarizerConfig, Pipeline};
 
 /// Builds the backend when the diarizer is first prepared or used;
-/// downloads and model loading happen here.
+/// model loading, and downloads where they are allowed, happen here.
 pub type BackendLoader =
     Box<dyn Fn() -> Result<Box<dyn DiarizationBackend>, DiarizeError> + Send + Sync>;
 
@@ -86,26 +86,35 @@ impl ModelDiarizer {
 
     /// The ONNX Runtime backend over `store`, `steno-speech`'s model store
     /// (Steno's: the models directory's `onnx/` folder, with the speech
-    /// settings' mirror): the two model files are installed on first use
-    /// ([`crate::models::ensure`]). A load that fails, a download cut off
-    /// included, is tried again by the next call; a cut-off download
-    /// resumes there. `threads` is the intra-op thread count of each
+    /// settings' mirror), loaded on first use. `install` says whether a
+    /// missing file is downloaded then ([`crate::Install::Allowed`],
+    /// [`crate::models::ensure`]) or fails the call with
+    /// [`DiarizeError::NotInstalled`] and no request
+    /// ([`crate::Install::Never`]). A file that fails its checksum after a
+    /// failed load is deleted and reported the same way. A load that fails
+    /// is tried again by the next call, which resumes a cut-off download
+    /// under `Allowed`. `threads` is the intra-op thread count of each
     /// session; zero lets ONNX Runtime decide.
     ///
     /// ```no_run
-    /// use steno_diarize::{DiarizerConfig, ModelDiarizer};
+    /// use steno_diarize::{DiarizerConfig, Install, ModelDiarizer};
     /// use steno_speech::ModelStore;
     ///
     /// let store = ModelStore::in_models_directory("/tmp/steno-support/Models".as_ref());
-    /// let diarizer = ModelDiarizer::onnx(DiarizerConfig::default(), store, 4);
+    /// let diarizer = ModelDiarizer::onnx(DiarizerConfig::default(), store, Install::Never, 4);
     /// ```
     #[cfg(feature = "onnx")]
     #[must_use]
-    pub fn onnx(config: DiarizerConfig, store: steno_speech::ModelStore, threads: usize) -> Self {
+    pub fn onnx(
+        config: DiarizerConfig,
+        store: steno_speech::ModelStore,
+        install: crate::Install,
+        threads: usize,
+    ) -> Self {
         ModelDiarizer::new(
             config,
             Box::new(move || {
-                let backend = crate::onnx::OnnxBackend::from_store(&store, threads)?;
+                let backend = crate::onnx::OnnxBackend::from_store(&store, install, threads)?;
                 Ok(Box::new(backend) as Box<dyn DiarizationBackend>)
             }),
         )
