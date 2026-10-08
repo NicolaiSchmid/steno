@@ -2,7 +2,9 @@
 //! Windows credential store) through the `keyring` crate, the Secret
 //! Service on Linux (`secret_service::SecretServiceStore`), and the 0600
 //! JSON file the Swift CLI used where no keyring is reachable
-//! (`STENO_<KEY>` wins over the file and over the Secret Service).
+//! (`STENO_<KEY>` wins over the file and over the Secret Service); and
+//! [`KeepsApiKey`], the app's store over them, which keeps the API key for
+//! the pipeline's rebuilds.
 //! Swift: `apps/macos/Steno/Services/KeychainSecretStore.swift`,
 //! `Sources/StenoCore/Testing/FileSecretStore.swift`.
 
@@ -376,9 +378,196 @@ impl SecretStore for FileSecretStore {
     }
 }
 
+/// The app's secret store, which keeps the last API key read or written
+/// through it for the pipeline's rebuilds: a keyring locked again while
+/// the app runs (`KeePassXC` locks with the session) fails a rebuild's
+/// read, and the pipeline then keeps the key it had
+/// ([`KeepsApiKey::kept_api_key`]) instead of running without summaries
+/// until the next start. Every call passes through unchanged, so Settings
+/// still see the failure. A write of the key replaces the kept one, a
+/// removal or a failed write clears it, and a read that a write overtook
+/// keeps nothing, so the kept key never outlives a removal or a change.
+/// No Swift counterpart (the Keychain does not lock while the app runs).
+pub struct KeepsApiKey {
+    inner: Arc<dyn SecretStore>,
+    kept: std::sync::Mutex<Kept>,
+}
+
+#[derive(Default)]
+struct Kept {
+    key: Option<String>,
+    /// How many writes of the key went through, so a read that began
+    /// before one keeps nothing.
+    writes: u64,
+}
+
+impl KeepsApiKey {
+    #[must_use]
+    pub fn new(inner: Arc<dyn SecretStore>) -> Self {
+        KeepsApiKey {
+            inner,
+            kept: std::sync::Mutex::default(),
+        }
+    }
+
+    /// The API key the last successful read or write through the store
+    /// saw; `None` after a removal, a failed write, or a read of no key.
+    #[must_use]
+    pub fn kept_api_key(&self) -> Option<String> {
+        self.kept().key.clone()
+    }
+
+    fn kept(&self) -> std::sync::MutexGuard<'_, Kept> {
+        self.kept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl std::fmt::Debug for KeepsApiKey {
+    /// Never the key.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeepsApiKey").finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl SecretStore for KeepsApiKey {
+    async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+        if key.as_str() != SecretKey::LLM_API_KEY {
+            return self.inner.secret(key).await;
+        }
+        let writes = self.kept().writes;
+        let read = self.inner.secret(key).await;
+        if let Ok(value) = &read {
+            let mut kept = self.kept();
+            if kept.writes == writes {
+                kept.key.clone_from(value);
+            }
+        }
+        read
+    }
+
+    async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+        let written = self.inner.set_secret(key, value).await;
+        if key.as_str() == SecretKey::LLM_API_KEY {
+            let mut kept = self.kept();
+            kept.writes += 1;
+            kept.key = value
+                .filter(|value| written.is_ok() && !value.is_empty())
+                .map(str::to_owned);
+        }
+        written
+    }
+
+    fn place(&self) -> Option<SecretPlace> {
+        self.inner.place()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The kept key follows every read and write of the key, and a failed
+    /// read leaves it as it was.
+    #[tokio::test]
+    async fn the_kept_api_key_follows_reads_and_writes_and_survives_a_failed_read() {
+        let key = SecretKey::llm_api_key();
+        let memory = Arc::new(steno_core::testing::InMemorySecretStore::with([(
+            key.clone(),
+            "sk-1".to_owned(),
+        )]));
+        let store = KeepsApiKey::new(memory.clone());
+        assert_eq!(store.kept_api_key(), None, "nothing read yet");
+        store.secret(&key).await.unwrap();
+        assert_eq!(store.kept_api_key().as_deref(), Some("sk-1"));
+
+        memory.fail_reads(Some("the keyring is locked"));
+        assert!(store.secret(&key).await.is_err(), "the failure passes through");
+        assert_eq!(store.kept_api_key().as_deref(), Some("sk-1"));
+        store.set_secret(&key, Some("sk-2")).await.unwrap();
+        assert_eq!(store.kept_api_key().as_deref(), Some("sk-2"));
+        store.set_secret(&key, None).await.unwrap();
+        assert_eq!(store.kept_api_key(), None, "a removal clears it");
+
+        memory.fail_reads(None);
+        store.set_secret(&key, Some("sk-3")).await.unwrap();
+        store.secret(&key).await.unwrap();
+        assert_eq!(store.kept_api_key().as_deref(), Some("sk-3"));
+        memory.set_secret(&key, None).await.unwrap();
+        store.secret(&key).await.unwrap();
+        assert_eq!(store.kept_api_key(), None, "a read of no key clears it");
+
+        let identity = SecretKey::from(steno_handover::HandoverIdentity::SECRET_KEY);
+        store.set_secret(&identity, Some("pem")).await.unwrap();
+        store.secret(&identity).await.unwrap();
+        assert_eq!(store.kept_api_key(), None, "only the API key is kept");
+    }
+
+    /// A write the store refuses clears the kept key, as the stored one
+    /// may be gone; a read that began before a write keeps nothing.
+    #[tokio::test]
+    async fn a_failed_write_or_a_read_overtaken_by_a_write_keeps_no_old_key() {
+        let key = SecretKey::llm_api_key();
+        let refusing = KeepsApiKey::new(Arc::new(RefusingWrites(
+            steno_core::testing::InMemorySecretStore::with([(key.clone(), "sk-1".to_owned())]),
+        )));
+        refusing.secret(&key).await.unwrap();
+        assert!(refusing.set_secret(&key, Some("sk-2")).await.is_err());
+        assert_eq!(refusing.kept_api_key(), None);
+
+        let (reading, release) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+        let slow = Arc::new(KeepsApiKey::new(Arc::new(SlowReads {
+            inner: steno_core::testing::InMemorySecretStore::with([(key.clone(), "sk-1".to_owned())]),
+            reading: reading.clone(),
+            release: release.clone(),
+        })));
+        let read = tokio::spawn({
+            let (slow, key) = (slow.clone(), key.clone());
+            async move { slow.secret(&key).await.unwrap() }
+        });
+        reading.notified().await;
+        slow.set_secret(&key, None).await.unwrap();
+        release.notify_one();
+        assert_eq!(read.await.unwrap().as_deref(), Some("sk-1"), "read before the removal");
+        assert_eq!(slow.kept_api_key(), None, "the removal wins");
+    }
+
+    /// A store whose writes fail.
+    struct RefusingWrites(steno_core::testing::InMemorySecretStore);
+
+    #[async_trait]
+    impl SecretStore for RefusingWrites {
+        async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+            self.0.secret(key).await
+        }
+
+        async fn set_secret(&self, _key: &SecretKey, _value: Option<&str>) -> BoundaryResult<()> {
+            Err("the keyring's prompt was dismissed".into())
+        }
+    }
+
+    /// A store whose reads take the value, then wait for `release`.
+    struct SlowReads {
+        inner: steno_core::testing::InMemorySecretStore,
+        reading: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl SecretStore for SlowReads {
+        async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
+            let value = self.inner.secret(key).await;
+            self.reading.notify_one();
+            self.release.notified().await;
+            value
+        }
+
+        async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
+            self.inner.set_secret(key, value).await
+        }
+    }
 
     #[tokio::test]
     async fn the_file_store_round_trips_and_the_environment_wins_for_every_key() {

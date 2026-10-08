@@ -17,7 +17,7 @@
 //! | [`llm`] | The LLM passes from the settings and the host's `LlmService` |
 //! | [`logs`] | The shell's and the CLI's log output, which never waits for stderr: [`log_to_stderr`], [`LOG_FILTER`], [`flush_logs`] |
 //! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, and the host's `Handover` over the listener |
-//! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore` |
+//! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore`, and [`KeepsApiKey`](secrets::KeepsApiKey), the app's store that keeps the API key for the pipeline's rebuilds |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
 //! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json` and `audio-folders.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |

@@ -31,7 +31,7 @@ use crate::pipeline::{
 use crate::platform::{DiskFolderUsage, FilePreferences, PlatformAudioDevices, WallClock};
 use crate::recorder::{CaptureRecorder, DiskWatch, MakeCaptureSession};
 use crate::recovery::{Interrupted, LiveRecordingCheck, reconcile_interrupted};
-use crate::secrets::{KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
+use crate::secrets::{KeepsApiKey, KeyringUnavailable, SecretsUnlocked, secret_store_with_unlock};
 use crate::speech::{ModelStoreSpeechModels, SpeechEngines, SpeechSetup};
 
 /// What stops the graph from being built: another process holds the
@@ -180,7 +180,7 @@ fn create_database_folder(path: &std::path::Path) -> Result<(), BuildError> {
 /// not be read: the app runs without summaries rather than not at all, as
 /// `AppEnvironment.live` did when the keychain was unreachable.
 fn api_key(
-    secrets: &Arc<dyn SecretStore>,
+    secrets: &dyn SecretStore,
     runtime: &tokio::runtime::Handle,
 ) -> Result<Option<String>, String> {
     block_on(runtime, secrets.secret(&SecretKey::llm_api_key()))
@@ -194,19 +194,27 @@ fn api_key(
 /// `engines` is read once by [`build`] and also backs the model service,
 /// so the two agree on where each engine runs; the recorder's warm-up
 /// reads the engine from the pipeline. A secret store that cannot be read
-/// is logged and the passes are built without a key.
+/// is logged, and the passes are built with the key last read or written
+/// through `secrets` ([`KeepsApiKey`]), or without one: a keyring locked
+/// again while the app runs keeps the key a rebuild had, and a key the user
+/// removed or changed is never the one kept.
 pub fn pipeline_dependencies(
     store: &Arc<Store>,
     engines: &SpeechEngines,
-    secrets: &Arc<dyn SecretStore>,
+    secrets: &KeepsApiKey,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
 ) -> Result<BuiltPipeline, BuildError> {
     let settings = store.settings()?;
     let api_key = api_key(secrets, runtime).unwrap_or_else(|warning| {
-        tracing::warn!("{warning}");
-        None
+        let kept = secrets.kept_api_key();
+        if kept.is_some() {
+            tracing::warn!("{warning}; the pipeline keeps the key it last read");
+        } else {
+            tracing::warn!("{warning}");
+        }
+        kept
     });
     let zone = steno_adapters::runtime::local_time_zone();
     let passes = crate::llm::passes(&settings, api_key.as_deref(), codex, zone);
@@ -240,7 +248,7 @@ pub fn pipeline_dependencies(
 fn make_dependencies(
     store: &Arc<Store>,
     engines: &Arc<SpeechEngines>,
-    secrets: &Arc<dyn SecretStore>,
+    secrets: &Arc<KeepsApiKey>,
     codex: &Arc<CodexCredentialStore>,
     events: &MeetingEventBus,
     runtime: &tokio::runtime::Handle,
@@ -428,6 +436,8 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let database_lock = lock_or_run_without(&database_path, options.lock_patience, &mut warnings)?;
     let store = open_store(&database_path)?;
     let (secrets, secrets_unlocked) = secret_store_with_unlock(options.keyring, &paths);
+    let kept = Arc::new(KeepsApiKey::new(secrets));
+    let secrets: Arc<dyn SecretStore> = kept.clone();
     let codex = codex_store();
     let events = MeetingEventBus::new();
     let runtime = options.runtime;
@@ -443,7 +453,7 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let speech = engines.setup();
     // An unreadable API key is logged by the first build of the
     // dependencies below, once.
-    let make = make_dependencies(&store, &engines, &secrets, &codex, &events, &runtime);
+    let make = make_dependencies(&store, &engines, &kept, &codex, &events, &runtime);
     let pipeline = Arc::new(CurrentPipeline::new(make()?, make, runtime.clone()));
     let sweep = RetentionSweep::new(store.clone());
     let export_retries = Arc::new(ExportRetries::in_directory(&paths.support_directory));
@@ -1953,7 +1963,7 @@ mod tests {
                 let (store, secrets, keys_read) =
                     (store.clone(), app.secrets.clone(), keys_read.clone());
                 Arc::new(move || {
-                    let read = api_key(&secrets, &tokio::runtime::Handle::current());
+                    let read = api_key(secrets.as_ref(), &tokio::runtime::Handle::current());
                     keys_read.lock().unwrap().push(read.ok().flatten());
                     Ok(built(fake_dependencies(&store, "fake-engine")))
                 })
@@ -2250,7 +2260,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_secret_store_that_cannot_be_read_leaves_the_pipeline_without_a_key() {
         let (dir, store) = temp_store();
-        let secrets: Arc<dyn SecretStore> = Arc::new(BrokenSecrets);
+        let secrets = KeepsApiKey::new(Arc::new(BrokenSecrets));
         let paths = StenoPaths::new(dir.path().join("support"));
         let built = pipeline_dependencies(
             &store,
@@ -2266,5 +2276,88 @@ mod tests {
             api_key(&secrets, &tokio::runtime::Handle::current()).unwrap_err(),
             "Could not read the LLM API key from the secret store: no default keychain"
         );
+    }
+
+    /// The Authorization header one build of the pipeline sends: builds it
+    /// as a reload does over `secrets` and runs its cleanup once against
+    /// `server`.
+    async fn authorization_sent(
+        store: &Arc<Store>,
+        paths: &StenoPaths,
+        secrets: &KeepsApiKey,
+        server: &steno_llm::testing::StubChatServer,
+    ) -> Option<String> {
+        let built = pipeline_dependencies(
+            store,
+            &SpeechEngines::new(SpeechSetup::new(&store.settings().unwrap(), paths)),
+            secrets,
+            &codex_store(),
+            &MeetingEventBus::new(),
+            &tokio::runtime::Handle::current(),
+        )
+        .unwrap();
+        let cleaner = built.dependencies.cleaner.expect("an endpoint is set");
+        let before = server.request_count();
+        let segment = steno_core::TranscriptSegment {
+            id: uuid::Uuid::from_u128(1),
+            meeting_id: uuid::Uuid::from_u128(2),
+            start: 0.0,
+            end: 2.0,
+            speaker_id: None,
+            lane: steno_core::AudioLane::Mic,
+            text: "hello there".to_owned(),
+            raw_text: "hello there".to_owned(),
+        };
+        let input = steno_core::CleanupInput {
+            segments: vec![segment],
+            language: None,
+            participants: Vec::new(),
+            speakers: Vec::new(),
+            known_people: Vec::new(),
+        };
+        let _ = cleaner.clean(&input).await;
+        server.requests()[before]
+            .authorization()
+            .map(str::to_owned)
+    }
+
+    /// A keyring locked again while the app runs fails a rebuild's read
+    /// (a model-only save, a speech engine change): the pipeline keeps the
+    /// key it had. A key removed or changed meanwhile is never the one
+    /// kept, and a reread of no key drops it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pipeline_rebuilt_while_the_keyring_is_locked_keeps_the_key_it_had() {
+        let (dir, store) = temp_store();
+        let paths = StenoPaths::new(dir.path().join("support"));
+        let server = steno_llm::testing::StubChatServer::start().await.unwrap();
+        let mut settings = store.settings().unwrap();
+        settings.llm_provider = steno_core::LlmProvider::Endpoint;
+        settings.llm_base_url = Some(server.base_url().to_string());
+        settings.llm_model = Some("model".to_owned());
+        store.save_settings(&settings).unwrap();
+        let key = SecretKey::llm_api_key();
+        let memory = Arc::new(steno_core::testing::InMemorySecretStore::with([(
+            key.clone(),
+            "sk-1".to_owned(),
+        )]));
+        let secrets = KeepsApiKey::new(memory.clone());
+        let sent = || authorization_sent(&store, &paths, &secrets, &server);
+        assert_eq!(sent().await.as_deref(), Some("Bearer sk-1"));
+
+        memory.fail_reads(Some("the keyring is locked"));
+        assert_eq!(sent().await.as_deref(), Some("Bearer sk-1"), "kept");
+        secrets.set_secret(&key, Some("sk-2")).await.unwrap();
+        assert_eq!(sent().await.as_deref(), Some("Bearer sk-2"), "changed");
+        secrets.set_secret(&key, None).await.unwrap();
+        assert_eq!(sent().await, None, "a removal while locked keeps no key");
+
+        memory.fail_reads(None);
+        memory.set_secret(&key, Some("sk-3")).await.unwrap();
+        assert_eq!(sent().await.as_deref(), Some("Bearer sk-3"));
+        memory.set_secret(&key, None).await.unwrap();
+        assert_eq!(sent().await, None, "a read of no key drops it");
+        memory.fail_reads(Some("the keyring is locked"));
+        assert_eq!(sent().await, None);
+        server.stop();
     }
 }
