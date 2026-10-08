@@ -95,12 +95,23 @@ pub enum KeyringUnavailable {
     #[error("the keyring is locked; unlock it and try again")]
     Locked,
     /// The secrets moved into the keyring, which could not be opened at
-    /// start: locked, its prompt dismissed, or no provider running.
+    /// start: locked, its prompt dismissed, or no provider running. Holds
+    /// the key's raw value; the message names it in plain words.
     #[error(
-        "`{0}` is kept in the keyring, which Steno could not open when it started; \
-         unlock the keyring and start Steno again"
+        "{} is kept in the keyring, which Steno could not open when it started; unlock the \
+         keyring and start Steno again",
+        plain_name(.0)
     )]
     NotOpened(String),
+}
+
+/// What the user calls the secret filed under `key`.
+fn plain_name(key: &str) -> &'static str {
+    match key {
+        SecretKey::LLM_API_KEY => "the API key",
+        steno_handover::HandoverIdentity::SECRET_KEY => "this computer's phone pairing",
+        _ => "a secret",
+    }
 }
 
 /// The platform keyring.

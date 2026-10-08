@@ -19,7 +19,7 @@
 //! | [`handover`] | The identity in the secret store, the file its fingerprint is recorded in, and the host's `Handover` over the listener |
 //! | [`secrets`] | The platform keyring, the Secret Service on Linux and the 0600 secrets file behind `SecretStore` |
 //! | [`export`] | The host's `ExportValidator` over the Obsidian destination |
-//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, the CLI's `meeting.json`, `recording-folders.json` and `audio-folders.json` |
+//! | [`files`] | Durable writes, from `steno-pipeline`: the secrets file, `preferences.json`, `handover-identity.json`, the CLI's `meeting.json`, `recording-folders.json` and `audio-folders.json` |
 //! | [`platform`] | The clock, the folder usage walk, the input device list, the first-launch flags |
 //!
 //! What stays a fake here is named in [`build`]'s doc: the platform
@@ -100,7 +100,8 @@ pub use secrets::{
     FileSecretStore, KeyringSecretStore, KeyringUnavailable, secret_store, secret_store_with_unlock,
 };
 /// The durable writes live with the pipeline, whose phone intake needs
-/// them; the secrets file and the CLI's `meeting.json` use them from here.
+/// them; the secrets file, `handover-identity.json` and the CLI's
+/// `meeting.json` use them from here.
 pub use steno_pipeline::files;
 
 /// Runs `future` to completion on `runtime` from a synchronous host

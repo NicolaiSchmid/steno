@@ -273,7 +273,7 @@ fn pem_block(tag: &str, der: &[u8]) -> String {
 /// Where the identity's fingerprint (SHA-256 of the leaf DER, lowercase
 /// hex) is recorded: outside the secret store, which may be the thing that
 /// lost the identity, and outside the settings, which the Swift app's save
-/// rewrites. Not a secret.
+/// rewrites. Not a secret. No Swift counterpart.
 pub trait FingerprintRecord: Send + Sync {
     /// The recorded fingerprint, `None` when nothing is recorded.
     fn recorded(&self) -> Result<Option<String>, BoxError>;
@@ -281,21 +281,27 @@ pub trait FingerprintRecord: Send + Sync {
     fn record(&self, fingerprint: &str) -> Result<(), BoxError>;
 }
 
-/// Why the identity is unavailable rather than minted.
+/// Why the identity is unavailable rather than minted. No Swift
+/// counterpart.
 #[derive(Debug, Error)]
 pub enum Unavailability {
     /// The secret store's read failed (a locked keyring, a keyring still
     /// asking the user); the error says why.
-    #[error("the secret store could not be read ({0})")]
+    #[error("this computer's phone pairing could not be read ({0})")]
     Unreadable(BoxError),
     /// The secret store holds no identity, though a fingerprint is
-    /// recorded or a phone is paired.
-    #[error("the identity this computer's phones paired with is not in the secret store")]
+    /// recorded or a phone is paired. Not minted, as a new identity would
+    /// make every phone pair again.
+    #[error(
+        "the identity this computer's phones paired with is not in the secret store; a new \
+         identity would make every phone pair again"
+    )]
     Missing,
     /// The secret store's identity is not the one whose fingerprint is
-    /// recorded.
+    /// recorded. Not adopted, as the phones would refuse it.
     #[error(
-        "the secret store holds another identity than the one this computer's phones paired with"
+        "the secret store holds another identity than the one this computer's phones paired \
+         with; a new identity would make every phone pair again"
     )]
     Replaced,
 }
@@ -324,8 +330,8 @@ pub enum IdentityError {
     Store(#[from] StoreError),
     #[error("the identity's fingerprint record: {0}")]
     Record(BoxError),
-    /// Not minted, as a new identity would make every phone pair again.
-    #[error("{0}; a new identity would make every phone pair again")]
+    /// Not minted ([`Unavailability`] says why).
+    #[error(transparent)]
     Unavailable(#[from] Unavailability),
     #[error("the stored identity is malformed: {0}")]
     Malformed(String),
