@@ -16,10 +16,10 @@
 //! audio folder. Either one missing or unreadable (an unmounted
 //! volume, a permission not granted yet, an I/O error) keeps the row
 //! `recording` for the next launch, and so does a record that cannot be
-//! read. Then it looks in the known folders
-//! ([`crate::audio_folders::known`]) and the folder of every stored asset
-//! (`other_folders`), skipping one that is missing or unreadable, so a
-//! folder retired for good does not keep a row forever.
+//! read. Then it looks in the known folders ([`crate::audio_folders`])
+//! and the folder of every stored asset (`other_folders`), skipping one
+//! that is missing or unreadable, so a folder retired for good does not
+//! keep a row forever.
 //!
 //! The launch also leaves a recording alone while its master is still
 //! written: the Swift app and an older Rust build share the database and

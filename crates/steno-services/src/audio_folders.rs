@@ -8,8 +8,8 @@
 //!
 //! | File | What it holds | Written by | Read by |
 //! |------|---------------|------------|---------|
-//! | [`RECORDED_FILE`] | The audio folder of each recording, by meeting id, from before its row is written until the meeting completes, fails or is deleted | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first ([`crate::recovery`]) |
-//! | [`KNOWN_FILE`] | Every audio folder a recording was written to or the setting left, oldest first | [`remember`] | [`known`]: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]), public so that the launch's adoption of a master with no meeting row, still to come, reads the same list |
+//! | `RECORDED_FILE` | The audio folder of each recording, by meeting id, from before its row is written until the meeting completes, fails or is deleted | `record`, `forget` | `recorded`: crash recovery looks in a meeting's folder first ([`crate::recovery`]) |
+//! | `KNOWN_FILE` | Every audio folder a recording was written to or the setting left, oldest first | `remember` | `known`: crash recovery looks in these folders after the two that decide a meeting ([`crate::recovery`]) |
 //!
 //! A reader returns the error of a file that cannot be read or does not
 //! parse; a missing file is empty. A writer sets a file that does not parse
@@ -27,10 +27,10 @@ use uuid::Uuid;
 use crate::files;
 
 /// The name of the per-meeting record in the support directory.
-pub const RECORDED_FILE: &str = "recording-folders.json";
+pub(crate) const RECORDED_FILE: &str = "recording-folders.json";
 
 /// The name of the list of known folders in the support directory.
-pub const KNOWN_FILE: &str = "audio-folders.json";
+pub(crate) const KNOWN_FILE: &str = "audio-folders.json";
 
 /// Held from the read to the write of every change, so two threads of this
 /// process (a start, a stop, a change of the setting) cannot each drop the
@@ -79,13 +79,13 @@ pub(crate) fn forget(support_directory: &Path, meeting_ids: &[Uuid]) -> std::io:
 }
 
 /// The known folders under `support_directory`, oldest first.
-pub fn known(support_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
+pub(crate) fn known(support_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
     read(&support_directory.join(KNOWN_FILE))
 }
 
 /// Adds `folder` to the known folders under `support_directory` unless it
 /// is there. The caller logs a failure and goes on.
-pub fn remember(support_directory: &Path, folder: &Path) -> std::io::Result<()> {
+pub(crate) fn remember(support_directory: &Path, folder: &Path) -> std::io::Result<()> {
     change(
         support_directory,
         KNOWN_FILE,
