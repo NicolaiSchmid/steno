@@ -435,3 +435,28 @@ async fn marking_an_export_pending_leaves_a_row_per_destination_and_keeps_the_re
         "the launch finds the export owed"
     );
 }
+
+/// A stored row that does not read back (a receipt that is not JSON) is
+/// left as it is: marking the export pending writes no row without the
+/// receipt, which would make `deliver_all` write a new note.
+#[tokio::test]
+async fn marking_an_export_pending_writes_nothing_when_the_rows_do_not_load() {
+    let store = store();
+    let first = RecordingDestination::new("a-first", None);
+    let marking = coordinator(&store, vec![as_destination(&first)], now());
+    marking.deliver_all(meeting_id()).await;
+    store
+        .write(|transaction| {
+            transaction.execute("UPDATE delivery SET receipt = '{not json'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(store.deliveries(meeting_id()).is_err());
+
+    marking.mark_pending(meeting_id());
+
+    assert!(
+        store.deliveries(meeting_id()).is_err(),
+        "the unreadable row was replaced"
+    );
+}
