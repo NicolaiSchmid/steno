@@ -2597,8 +2597,8 @@ pub fn ensure_me_participant(
 /// file again), so a failure while writing moves none and a path always
 /// holds a whole clip. A move that fails after earlier ones landed leaves
 /// those speakers with the new clips, so a kept speaker can then play
-/// another run's voice; per-run clip names (follow-up) close that. Rust
-/// only: Swift writes each clip in place.
+/// another run's voice; per-run clip names would close that (plan, "Open
+/// after the port"). Rust only: Swift writes each clip in place.
 fn write_sample_clips(clips: &[(PathBuf, AudioBuffer16k)]) -> std::io::Result<()> {
     let staged = |path: &Path| path.with_extension("wav.partial");
     if let Err(error) = clips
