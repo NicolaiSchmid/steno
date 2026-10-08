@@ -439,6 +439,8 @@ impl LiveCaptureBackend {
     /// What a judgement reports of the devices `resolved` now: after a
     /// notification their first difference from `baseline`, on a re-check
     /// only another microphone ([`DeviceSnapshot::input_difference`]).
+    /// A restart of the audio service is a change whatever they read: the
+    /// aggregate is gone, and the devices may resolve as before.
     fn judgement(
         judged: Judged,
         resolved: &DeviceSnapshot,
@@ -767,6 +769,12 @@ impl CaptureBackend for LiveCaptureBackend {
         drop(tap);
         drop(silent_output);
     }
+
+    /// The IOProc runs on the aggregate's clock, silence included (in call
+    /// mode only with the capture permission; see the module doc).
+    fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
+        true
+    }
 }
 
 impl Drop for LiveCaptureBackend {
@@ -998,7 +1006,8 @@ mod tests {
 
     /// A notification reports the first difference; a re-check only
     /// another microphone, so a bad read of the outputs, or a microphone
-    /// that did not resolve, costs no rebuild.
+    /// that did not resolve, costs no rebuild. A restart of the audio
+    /// service is a change with the devices as they were.
     #[test]
     fn a_recheck_reports_another_microphone_alone() {
         let baseline = DeviceSnapshot {

@@ -280,6 +280,19 @@ pub enum DeviceChangeReason {
     /// macOS only: PipeWire's adapter and the WASAPI engine resample, so the
     /// Linux and Windows backends never report it.
     SampleRateChanged,
+    /// The capture stopped delivering: no frame reached the sink for
+    /// longer than `CaptureSession::STALL_TIMEOUT` after it had delivered
+    /// (a device whose driver or owner hangs, a graph that stopped
+    /// running). The session's watchdog reports it, on every platform.
+    /// Rust only.
+    DeliveryStalled,
+    /// The audio service restarted (`coreaudiod` on macOS), taking the
+    /// capture's aggregate device with it. macOS only. Rust only.
+    AudioServiceRestarted,
+    /// The session asks again for the chosen microphone it replaced with
+    /// the default input because the chosen one did not open
+    /// (`CaptureSession::FALLBACK_RECHECK`). Rust only.
+    ChosenInputRecheck,
 }
 
 /// What `CaptureSession::notices` carries while the state stays

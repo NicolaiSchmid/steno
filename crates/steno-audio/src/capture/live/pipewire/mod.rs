@@ -1383,6 +1383,13 @@ impl CaptureBackend for LiveCaptureBackend {
         };
         Self::end(active, STOP_TIMEOUT);
     }
+
+    /// Every cycle of the graph delivers, the sink's monitor included with
+    /// nothing playing (see the module doc); a graph that stops running (a
+    /// source whose owner stalls) is the session's watchdog to catch.
+    fn delivers_continuously(&self, _lanes: &[AudioLane]) -> bool {
+        true
+    }
 }
 
 impl Drop for LiveCaptureBackend {

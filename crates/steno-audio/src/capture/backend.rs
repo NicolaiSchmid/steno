@@ -43,6 +43,22 @@ pub trait CaptureBackend: Send + Sync {
 
     /// Stops delivering; idempotent. No frame arrives after it returns.
     fn stop(&self);
+
+    /// Whether a capture of `lanes` delivers callbacks on the device's
+    /// clock whatever it hears, silence included, so that one that stops
+    /// for longer than [`CaptureSession::STALL_TIMEOUT`] has stalled. The
+    /// session watches only such a backend (the stall watchdog and the
+    /// re-ask of a chosen microphone; see `CaptureSession`). `true` for
+    /// the live backends, except a Windows capture of the system lane
+    /// alone (endpoint loopback delivers nothing while nothing plays);
+    /// `false` by default, so a test backend whose audio simply ends is
+    /// not taken for a stalled one. Rust only.
+    ///
+    /// [`CaptureSession::STALL_TIMEOUT`]: super::CaptureSession::STALL_TIMEOUT
+    fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
+        let _ = lanes;
+        false
+    }
 }
 
 /// What one started capture delivers, as the backend found it: the rate

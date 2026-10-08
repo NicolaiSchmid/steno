@@ -903,6 +903,13 @@ impl CaptureBackend for LiveCaptureBackend {
         }
         active.watcher.stop_and_join(active.watcher_thread);
     }
+
+    /// The microphone, the master whenever a lane needs it, delivers
+    /// continuously; the system stream alone (a lane override) does not,
+    /// since endpoint loopback delivers no packet while nothing plays.
+    fn delivers_continuously(&self, lanes: &[AudioLane]) -> bool {
+        SplitStreamPlan::new(lanes).is_ok_and(|plan| plan.master == StreamSource::Microphone)
+    }
 }
 
 impl Drop for LiveCaptureBackend {
