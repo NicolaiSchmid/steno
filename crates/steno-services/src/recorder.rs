@@ -30,13 +30,17 @@
 //! refuses a recording. Rust only: Swift had no disk check.
 //!
 //! The session's notices are followed too: while its restarts go on past
-//! `CaptureSession::RESTART_ATTEMPTS` the status warns "No audio from
-//! `<device>`. Still trying.", naming the device only when a stall of it
-//! started the rebuild ("No audio is arriving. Still trying." otherwise),
-//! and after the stop a note says about how many seconds of the recording
-//! are missing, the gaps filled with silence and the wall time the master
-//! does not hold, once that is more than about a second, and from which
-//! device when the latest gap followed its stall. Rust only.
+//! `CaptureSession::RESTART_ATTEMPTS`, until audio arrives again, the
+//! status warns "No audio from `<device>`. Still trying.", naming the
+//! microphone only when a stall of it started the rebuild and its clock
+//! drives the capture (an in-person capture, any capture on Windows), and
+//! "No audio is arriving. Still trying." otherwise: a Mac call capture runs
+//! on the output's clock and a Linux one on the graph's driver, which may
+//! be the sink. After the stop a note says about how many seconds of the
+//! recording are missing, the gaps filled with silence and the wall time
+//! the master does not hold beyond the clocks' drift (0.1 %), once that is
+//! more than about a second, and from which device on the same terms.
+//! Rust only.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -488,11 +492,13 @@ impl Fallback {
 /// notices tell it. Rust only.
 #[derive(Default)]
 struct Outage {
-    /// The device whose stall the latest rebuild followed
-    /// ([`DeviceChangeReason::DeliveryStalled`]), the one known to have
+    /// The microphone whose stall the latest rebuild followed
+    /// ([`DeviceChangeReason::DeliveryStalled`]) when its clock drives the
+    /// capture ([`microphone_is_the_master`]), the one known to have
     /// stopped delivering; `None` when that rebuild followed another
-    /// change, which says nothing of which device is silent. Named by the
-    /// warning and the note after the stop ([`missing_audio_note`]).
+    /// change, or another clock stalled, which says nothing of which device
+    /// is silent. Named by the warning and the note after the stop
+    /// ([`missing_audio_note`]).
     stalled: Option<String>,
     /// Whether the session's restarts went on past
     /// `CaptureSession::RESTART_ATTEMPTS` (`StillRestarting`) and no audio
@@ -500,6 +506,15 @@ struct Outage {
     /// by a resume (a stream that waits for playback may resume silent),
     /// and once dismissed.
     still_trying: bool,
+}
+
+/// Whether the microphone's clock drives a capture in `mode`, so that a
+/// stall is the microphone's: an in-person capture records it alone, and
+/// the WASAPI backend makes it the master stream whenever a lane needs
+/// it. A Mac call capture runs on the output's clock (the aggregate's
+/// master) and a Linux one on the graph's driver, which may be the sink.
+fn microphone_is_the_master(mode: CaptureMode) -> bool {
+    mode == CaptureMode::InPerson || cfg!(windows)
 }
 
 struct Inner {
@@ -577,6 +592,11 @@ fn device_name(stream: Option<&CaptureStream>) -> String {
         .unwrap_or_else(|| "the microphone".to_owned())
 }
 
+/// The share of wall time a device clock may run apart from the wall
+/// clock, which the note about missing audio leaves out: 0.1 %, twice the
+/// 500 ppm a cheap device drifts.
+const CLOCK_DRIFT: f64 = 0.001;
+
 /// The warning while no audio arrives and the session keeps restarting
 /// the capture, naming the device when it is known to be the one that
 /// stopped delivering (`stalled`). Rust only.
@@ -651,15 +671,18 @@ fn forward_levels(
 }
 
 /// The thread that follows the session's notices and calls `hook`: a
-/// rebuild's start notes into `outage` the device it replaces when a stall
-/// started it, and none otherwise, restarts that go on past
+/// rebuild's start notes into `outage` the microphone it replaces when a
+/// stall of it started it, in a capture in `mode` that runs on the
+/// microphone's clock, and none otherwise; restarts that go on past
 /// `RESTART_ATTEMPTS` mark it there as still trying until audio arrives
-/// again (`Delivering`), and the resume re-reads the microphone into
-/// `fallback`, since a rebuild may record another one. It holds `session` weakly, so dropping the session
-/// ends the notices and the thread. None when it could not be spawned,
-/// and the warnings stay as the start left them.
+/// again (`Delivering`); and the resume re-reads the microphone into
+/// `fallback`, since a rebuild may record another one. It holds `session`
+/// weakly, so dropping the session ends the notices and the thread. None
+/// when it could not be spawned, and the warnings stay as the start left
+/// them.
 fn follow_the_notices(
     notices: Receiver<CaptureNotice>,
+    mode: CaptureMode,
     fallback: Arc<Mutex<Fallback>>,
     outage: Arc<Mutex<Outage>>,
     session: Weak<CaptureSession>,
@@ -678,8 +701,9 @@ fn follow_the_notices(
                 match notice {
                     // The stream is still the replaced one until the resume.
                     CaptureNotice::DeviceChanged(reason) => {
-                        outage.stalled = (reason == DeviceChangeReason::DeliveryStalled)
-                            .then(|| device_name(session.stream().as_ref()));
+                        outage.stalled = (reason == DeviceChangeReason::DeliveryStalled
+                            && microphone_is_the_master(mode))
+                        .then(|| device_name(session.stream().as_ref()));
                     }
                     CaptureNotice::StillRestarting { .. } => outage.still_trying = true,
                     CaptureNotice::Delivering => outage.still_trying = false,
@@ -1124,6 +1148,7 @@ impl CaptureRecorder {
         let recording_since = Instant::now();
         let notice_thread = follow_the_notices(
             notices,
+            mode,
             fallback.clone(),
             outage.clone(),
             Arc::downgrade(&session),
@@ -1370,8 +1395,11 @@ impl CaptureRecorder {
                     ),
                 );
                 // Gaps filled with silence, and wall time the master does
-                // not hold (a gap past `MAXIMUM_GAP`, a stop inside one).
-                let missing = statistics.gap_seconds + (wall - statistics.duration).max(0.0);
+                // not hold (a gap past `MAXIMUM_GAP`, a stop inside one)
+                // beyond what the device clocks drift from the wall clock
+                // (300 to 500 ppm: 2 to 4 s in two hours).
+                let missing = statistics.gap_seconds
+                    + (wall - statistics.duration - wall * CLOCK_DRIFT).max(0.0);
                 match completed {
                     Ok(_) => Ok((recording_warning(active.mode, &statistics), missing, ended)),
                     Err(error) => Err(not_saved(meeting_id, &error)),
@@ -2429,8 +2457,8 @@ mod tests {
     }
 
     /// Captures on "USB Microphone" over the synthetic backend at wall-clock
-    /// speed and the wall clock, set up by `options` (a stall or a change a
-    /// second in, and the restarts after it), under a recorder.
+    /// speed and the wall clock, set up by `options` (a stall or a change
+    /// `BEFORE_THE_OUTAGE` in, and the restarts after it), under a recorder.
     fn stalling_harness(options: fn(SyntheticOptions) -> SyntheticOptions) -> Harness {
         let capture: MakeCaptureSession = Arc::new(move |configuration: CaptureConfiguration| {
             let tone = SyntheticOptions::tones(
@@ -2438,11 +2466,12 @@ mod tests {
                 &[(AudioLane::Mixed, 440.0)],
                 600.0,
             )
-            .real_time(true)
-            .stream(CaptureStream {
+            .real_time(true);
+            let on_usb = CaptureStream {
                 input: Some(input(Some("USB Microphone"), false)),
                 ..CaptureStream::SYNTHETIC
-            });
+            };
+            let tone = tone.stream(on_usb.clone()).stream_after_restart(on_usb);
             CaptureSession::with_backend(
                 configuration,
                 Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options(
@@ -2463,14 +2492,15 @@ mod tests {
     }
 
     /// Records over `harness` until `warning` shows, within `patience`,
-    /// and checks the meter reads silence then; stops, checks the note
-    /// after the stop ends with `cause` and returns the seconds it says
-    /// are missing.
+    /// and checks the meter reads silence then and the warning stands for
+    /// `holds` more; stops, checks the note after the stop ends with
+    /// `cause` and returns the seconds it says are missing.
     async fn until_still_trying(
         harness: &Harness,
         warning: &str,
         cause: &str,
         patience: Duration,
+        holds: Duration,
     ) -> u64 {
         let status = || harness.recorder.status();
         start(&harness.recorder).await;
@@ -2493,6 +2523,11 @@ mod tests {
             mic.is_some_and(|mic| mic < 1e-6),
             "the meter reads silence: {mic:?}"
         );
+        let held = std::time::Instant::now() + holds;
+        while std::time::Instant::now() < held {
+            assert_eq!(status().warning.as_deref(), Some(warning), "it stands");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         stop(&harness.recorder).await;
         let note = status().warning.unwrap_or_default();
         let seconds: u64 = note
@@ -2513,6 +2548,12 @@ mod tests {
         seconds
     }
 
+    /// Seconds of tone before the device stops delivering: long enough for
+    /// the meter to show a level on a loaded host first.
+    const BEFORE_THE_OUTAGE: f64 = 3.0;
+    /// How long the warning may take to show after the start: the tone,
+    /// the stall's 2 s, and four restarts that wait 2 s each for a frame.
+    const STILL_TRYING_WITHIN: Duration = Duration::from_secs(30);
     const STILL_TRYING_ON_USB: &str = "No audio from USB Microphone. Still trying.";
     const FROM_USB: &str = ": no audio arrived from USB Microphone.";
 
@@ -2526,11 +2567,18 @@ mod tests {
     async fn a_device_that_stops_delivering_is_named_while_steno_keeps_trying() {
         let harness = stalling_harness(|options| {
             options
-                .stall_after(1.0)
+                .stall_after(BEFORE_THE_OUTAGE)
                 .restarts_that_fail(usize::MAX)
                 .restarts_do_not_run()
         });
-        let seconds = until_still_trying(&harness, STILL_TRYING_ON_USB, FROM_USB, PATIENCE).await;
+        let seconds = until_still_trying(
+            &harness,
+            STILL_TRYING_ON_USB,
+            FROM_USB,
+            STILL_TRYING_WITHIN,
+            Duration::ZERO,
+        )
+        .await;
         assert!(seconds >= 3, "{seconds} s");
     }
 
@@ -2541,13 +2589,41 @@ mod tests {
     /// comes about ten seconds after the stall.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn restarts_that_start_but_deliver_nothing_show_the_warning() {
-        let harness =
-            stalling_harness(|options| options.stall_after(1.0).restarts_stall_after(0.0));
+        let harness = stalling_harness(|options| {
+            options
+                .stall_after(BEFORE_THE_OUTAGE)
+                .restarts_stall_after(0.0)
+        });
         let seconds = until_still_trying(
             &harness,
             STILL_TRYING_ON_USB,
             FROM_USB,
-            Duration::from_secs(30),
+            STILL_TRYING_WITHIN,
+            Duration::ZERO,
+        )
+        .await;
+        assert!(seconds >= 10, "{seconds} s");
+    }
+
+    /// A stream that resumes and stalls again before it delivered anything
+    /// (a Mac call capture waiting for playback) keeps the warning through
+    /// its resumes: they back off as one streak, and only audio arriving
+    /// ends the warning.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stream_that_resumes_silent_keeps_the_warning() {
+        let harness = stalling_harness(|options| {
+            options
+                .stall_after(BEFORE_THE_OUTAGE)
+                .restarts_stall_after(0.0)
+                .waits_for_playback(true)
+        });
+        // Past the 2 s backoff after the warning, and the resume after it.
+        let seconds = until_still_trying(
+            &harness,
+            STILL_TRYING_ON_USB,
+            FROM_USB,
+            STILL_TRYING_WITHIN,
+            Duration::from_secs(3),
         )
         .await;
         assert!(seconds >= 10, "{seconds} s");
@@ -2559,7 +2635,7 @@ mod tests {
     async fn restarts_after_another_change_blame_no_device() {
         let harness = stalling_harness(|options| {
             options
-                .change_device_after(1.0)
+                .change_device_after(BEFORE_THE_OUTAGE)
                 .restarts_that_fail(usize::MAX)
                 .restarts_do_not_run()
         });
@@ -2567,10 +2643,19 @@ mod tests {
             &harness,
             "No audio is arriving. Still trying.",
             ".",
-            PATIENCE,
+            STILL_TRYING_WITHIN,
+            Duration::ZERO,
         )
         .await;
         assert!(seconds >= 1, "{seconds} s");
+    }
+
+    /// Only a microphone whose clock drives the capture is named for a
+    /// stall: an in-person capture's, and a call's on Windows alone.
+    #[test]
+    fn only_a_microphone_that_drives_the_capture_is_blamed_for_a_stall() {
+        assert!(microphone_is_the_master(CaptureMode::InPerson));
+        assert_eq!(microphone_is_the_master(CaptureMode::Call), cfg!(windows));
     }
 
     /// The note comes from about a second on, and names a device only when
