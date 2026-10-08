@@ -1240,7 +1240,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - Schema v5 adds the handover admission ledger, `handoverAdmission` (recording id,
   byte count, SHA-256, meeting id, admitted at; no foreign key), in both apps
   (`.plans/2026-10-08-handover-admission-ledger.md`). The admission transaction
-  below writes its row (`INSERT OR IGNORE`); every open backfills it from
+  below writes its row, or moves a row whose meeting was deleted to the new
+  meeting; every open backfills it from
   `complete` receipts whose meeting exists (`Store::backfill_handover_admissions`,
   run by `Store::open` and `Store::in_memory` but not `open_without_migrating`;
   `MeetingStore.init`, the same SQL), which covers admissions before v5 and those an

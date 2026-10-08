@@ -34,9 +34,11 @@ the meeting it became and when. No audio, text or device name.
 
 - **Written with the meeting.** The admission transaction of #213
   (`Store::save_admission_durably`, `MeetingStore.saveDurably(_:meeting:asset:)`)
-  inserts the row (`INSERT OR IGNORE`) with the receipt, the meeting and the
-  asset, so a row exists exactly when an admission committed. No other write
-  site.
+  inserts the row with the receipt, the meeting and the asset, so a row
+  exists exactly when an admission committed. When the bytes already have a
+  row whose meeting is gone, the insert moves it to the new meeting
+  (`ON CONFLICT ... DO UPDATE ... WHERE "meetingID" NOT IN (SELECT "id" FROM
+  "meeting")`). No other write site.
 - **Backfilled on every open.** `Store::open` and `Store::in_memory` (not
   `open_without_migrating`, which writes nothing) and `MeetingStore.init` run
   `INSERT OR IGNORE INTO "handoverAdmission" SELECT ... FROM "handoverReceipt"
@@ -145,7 +147,9 @@ second one, and the intake removes its copy and enqueues nothing
 (`Store::save_admission_durably` and `MeetingStore.saveDurably(_:meeting:asset:)`
 return the meeting the receipt was completed with). The new device's
 `complete` answers the first meeting. A row whose meeting the user deleted
-does not count: the bytes are admitted as a new meeting, and the row stays.
+does not count: the bytes are admitted as a new meeting, and the row moves to
+it, so a later takeover of the same bytes finds that meeting instead of
+writing a third.
 
 ## What remains
 
@@ -153,6 +157,15 @@ does not count: the bytes are admitted as a new meeting, and the row stays.
   admission's cleanup) can still discard the new upload's files, as files
   are discarded by recording id and device. The phone then re-announces and
   sends its chunks again; nothing is lost.
+- A late `complete` of an earlier split of the same bytes that finds a hash
+  mismatch discards the current split's partial, while its `failed` write,
+  which would empty the chunks, is dropped by the split check. The receipt in
+  memory then lists chunks whose bytes are gone until the next `complete`
+  answers 409 or 422 and empties them; the phone sends them again.
+- The backfill only inserts (`INSERT OR IGNORE`): after a rollback in which
+  the older app admitted again the bytes of a meeting the user had deleted,
+  the row stays on the deleted meeting, and a later takeover of those bytes
+  can write a duplicate meeting. Nothing is lost.
 
 ## The migrator and the launch
 
