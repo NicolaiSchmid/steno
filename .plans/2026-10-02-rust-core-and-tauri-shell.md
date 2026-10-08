@@ -1269,7 +1269,10 @@ still has to draw the window side. `[ ]` is not ported yet.
   transaction refuse another device's receipt under the same recording id, and one
   of other bytes (`StoreError::ReceiptOfAnotherUpload`,
   `MeetingStoreError.receiptOfAnotherUpload`), and leave that receipt as it is, the
-  copy removed. The intake's writes run outside
+  copy removed. When the ledger already holds the bytes and their meeting exists,
+  the transaction completes the receipt with that meeting and writes no other, and
+  the intake removes its copy and enqueues nothing: the same bytes are one
+  recording. The intake's writes run outside
   the engine's line of store writes, so between its read and its commit the admitting
   phone can be revoked and another phone announce the id; completed, that phone's
   receipt would answer its `complete` with this meeting and it would delete a
@@ -2021,7 +2024,7 @@ touch and admission lines; each fix is ported to Swift before cutover.
   recording id's files, runs `begin` and makes the receipt in one step on the actor.
   The intake's own receipt saves (`RecordingIntake::admit`, `RecordingIntake.admit`)
   run outside the line in both apps, so the intake itself checks that it completes
-  only the admitting device's receipt (the Store item on `RecordingIntake.admit`). A
+  only the admitting upload's receipt (the Store item on `RecordingIntake.admit`). A
   line save asked for before the intake's commit (a chunk or a re-announce during
   `complete`) can still land after it and put `verifying` or `receiving` back over
   `complete`; the engine's own `complete` save after the intake sets it right, and if
@@ -2061,15 +2064,19 @@ touch and admission lines; each fix is ported to Swift before cutover.
   announce decides again with that one. Every receipt write of a request is dropped
   when memory holds another upload by then (`same_upload`,
   `HandoverEngine.sameUpload`: another device, or other bytes; in `Engine::update`,
-  `Engine::add_chunk`, `HandoverEngine.transition` and the chunk fold, which also
-  drops a chunk of another split), so a late `complete` of replaced bytes never
-  marks the new upload `complete` with their meeting; when the intake refuses such
-  a `complete`, its verified file goes, so the new upload's `complete` cannot admit
-  it unhashed. Two gaps stay in both apps: a takeover while the older device's
-  `complete` is in the intake can admit the bytes twice when that admission commits
-  before the takeover's save (a duplicate meeting, never a lost recording); and a
-  late request of a replaced upload can still discard the new upload's files (the
-  phone announces again and sends its chunks again).
+  `Engine::add_chunk`, `HandoverEngine.transition` and the chunk fold), so a late
+  `complete` of replaced bytes never marks the new upload `complete` with their
+  meeting; a chunk, or any other write of a chunk set, is also dropped over a
+  receipt in another split, so a late `complete` of the earlier split leaves the
+  new split's chunks. When the intake refuses such a `complete`, its verified file
+  goes, so the new upload's `complete` cannot admit it unhashed. A takeover while
+  the older device's `complete` is in the intake can put the newer device's
+  unfinished receipt back after that admission committed; the newer device's upload
+  then reaches an admission whose transaction finds the bytes in the ledger and
+  completes the receipt with the first meeting (the Store item on
+  `RecordingIntake.admit`), so no second meeting is made. One gap stays in both
+  apps: a late request of a replaced upload can still discard the new upload's
+  files (the phone announces again and sends its chunks again).
 - Store reads: Swift's `RecordingHandler.receipt` reads with `try?`, so a failed read,
   with no receipt in memory (after a restart), counts as no receipt: status, chunk and
   complete answer 404. `HandoverEngine.authenticate` reads the device with `try?`, so
@@ -2717,7 +2724,7 @@ PR off `main`.
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
 | Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
 | On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
-| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and in another split restart it; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
+| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

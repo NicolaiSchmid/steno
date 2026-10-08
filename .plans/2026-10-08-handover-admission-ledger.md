@@ -51,7 +51,10 @@ the meeting it became and when. No audio, text or device name.
 ## Two admissions of one phone recording id
 
 `handoverReceipt` keeps `recordingID` as its primary key: a migration only
-adds. A receipt is the working state of the current upload of a phone
+adds. That replaces the planned fresh internal receipt key for other bytes
+(the removed "Other bytes" part of the Open item): a second key would change
+the table's primary key, and the ledger tells the admissions apart. A
+receipt is the working state of the current upload of a phone
 recording id; the ledger is the history of what was admitted under it. A
 re-announce with another size or SHA-256 replaces the receipt with a fresh
 one for the new bytes and empty partial files; its `complete` admits a new
@@ -85,6 +88,13 @@ the announced bytes.
 | other bytes, another device's, not `complete` | yes | 409 "another device owns this recording": that device's upload of other bytes is under way, and answering `complete` over it could delete that phone's copy |
 | other bytes, any | no | a new recording: a fresh receipt for the announcing device, files discarded and opened; 201 |
 
+The rows without an admission supersede Nicolai's first decision of
+2026-10-08 that an announce whose recording id alone the ledger holds is
+answered 409: his later decision that day makes other bytes under a
+recording id a new recording, so a ledger row of other bytes counts for
+nothing, and the announce is answered as a first announce (201) or a new
+recording.
+
 The takeover needs no check that the new device replaced the old one: equal
 size and SHA-256 prove the same bytes, so whichever device's `complete`
 admits them, the other's copy is the same recording, and its next announce
@@ -103,7 +113,9 @@ phone's retry gets the first meeting instead of a second admission. A
 Every receipt write of a request is dropped when memory holds another upload
 by then: another device's receipt, as today, or one of other bytes
 (`Engine::update`, `Engine::add_chunk`, `HandoverEngine.transition` and the
-chunk fold), and a chunk is also dropped under another chunk size. Otherwise
+chunk fold), and a chunk, or any other write of a chunk set, is also dropped
+under another chunk size (a late `complete` of the earlier split would
+otherwise empty the new split's chunks). Otherwise
 a late `complete` of the replaced bytes would mark the new upload's receipt
 `complete` with the old meeting, and the phone would delete a recording the
 computer does not have. For the same reason the intake, and the admission's
@@ -122,14 +134,21 @@ replacement and its discard and opening are one step under the files lock in
 Rust and one actor step in Swift, and a replacement declines when memory
 holds another receipt by then and decides again with that one.
 
+## The same bytes admitted twice
+
+A takeover while the older device's `complete` is in the intake can land its
+save after the intake committed: that save puts the new device's unfinished
+receipt over the `complete` one, and the new device uploads the bytes again.
+The admission's transaction then finds the ledger row of those bytes: while
+its meeting exists, it completes the receipt with that meeting and writes no
+second one, and the intake removes its copy and enqueues nothing
+(`Store::save_admission_durably` and `MeetingStore.saveDurably(_:meeting:asset:)`
+return the meeting the receipt was completed with). The new device's
+`complete` answers the first meeting. A row whose meeting the user deleted
+does not count: the bytes are admitted as a new meeting, and the row stays.
+
 ## What remains
 
-- A takeover while the older device's `complete` is in the intake can still
-  admit the bytes twice: when the intake commits before the takeover's save,
-  that save writes the new device's unfinished receipt over the `complete`
-  one, and the new device's upload admits a second meeting. A duplicate,
-  never a lost recording; it needs two devices of the same recording live at
-  once.
 - A late request of a replaced upload (a refusal, a hash mismatch, the
   admission's cleanup) can still discard the new upload's files, as files
   are discarded by recording id and device. The phone then re-announces and
@@ -145,10 +164,12 @@ holds another receipt by then and decides again with that one.
 - The desktop shell shows a dialog and logs the error when the store, or
   anything else the host needs, fails to open at launch, and exits, where it
   panicked before (`refuse_to_start` in `apps/desktop/src-tauri/src/main.rs`).
+  The dialog says the meetings are safe, not that nothing changed: v5 and the
+  backfill may have committed before a later step failed, and they only add.
 
 ## Rollback
 
-From `.tools`' research run on Forge and atlas, restated in the PR:
+Measured against the shipped tags:
 
 - Swift `v0.10.0-rc.2` (GRDB 7.11.1, `eraseDatabaseOnSchemaChange` false)
   opens a v5 database normally, ignores the v5 identifier, keeps writing, and
@@ -176,11 +197,19 @@ Both apps, each failing on the code before this change:
 - Another chunk size before `complete`: the partial restarts under the new
   split.
 - The takeover: another device's announce of the same bytes takes over a
-  receipt not yet `complete`, uploads the rest and completes.
+  receipt not yet `complete`, uploads the rest and completes; a takeover
+  whose save lands after the first admission committed completes with that
+  meeting, and the intake admits bytes the ledger holds as their meeting.
+- Admitted bytes announced over another device's unfinished upload of other
+  bytes: 409, that upload left alone and completed as its own meeting.
 - The upload guard: a late `complete` of replaced bytes, refused by the
   intake or committed before the announce, leaves the new receipt
   unfinished; a late chunk of another split or of other bytes is not folded
-  in; the intake refuses another upload's receipt.
+  in, and a late `complete` of another split leaves the new split's chunks;
+  an announce held in its ledger read decides again with the receipt made
+  meanwhile; the intake refuses another upload's receipt.
 - The migrator ignores a v6 applied to a copy, with a warning; the store
   still writes.
-- The desktop shell refuses to start, with the dialog, on a store error.
+- The desktop shell maps a host it cannot build to its refusal, and the Linux
+  smoke launches it over a database it cannot open: it logs the refusal and
+  exits with the refusal's code.
