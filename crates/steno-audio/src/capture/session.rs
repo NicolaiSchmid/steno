@@ -1317,12 +1317,11 @@ impl Core {
     /// for two seconds at 48 kHz, rounded up to 131 072 samples (2.7 s at
     /// 48 kHz, 0.68 s at 192 kHz), and nothing drains them while the
     /// processing thread is stopped, so a longer gap would silently shrink
-    /// into `dropped_samples`. A full
-    /// relay (a long gap, or a writer still behind the old producer) is
-    /// waited out in 5 ms steps on the clock; `has_room` is asked first
-    /// because a refused `begin_frame` counts as a dropped frame. Returns
-    /// the frames written, fewer than `frames` when the rebuild was
-    /// abandoned meanwhile.
+    /// into `dropped_samples`. A full relay (a long gap, or a writer still
+    /// behind the old producer) is waited out in 5 ms steps on the clock;
+    /// `has_room` is asked first because a refused `begin_frame` counts as
+    /// a dropped frame. Returns the frames written, fewer than `frames`
+    /// when the rebuild was abandoned meanwhile.
     fn write_silence(
         &self,
         frames: usize,

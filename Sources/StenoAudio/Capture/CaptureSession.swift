@@ -535,12 +535,11 @@ public actor CaptureSession {
   /// known, they ask for two seconds at 48 kHz, rounded up to 131 072
   /// samples (2.7 s at 48 kHz, 0.68 s at 192 kHz), and nothing drains them
   /// while the processing thread is stopped, so a longer gap would silently
-  /// shrink into `droppedSamples`. A
-  /// full relay (a long gap, or a writer still behind the old producer) is
-  /// waited out in 5 ms steps on the clock; `hasRoom` is asked first because
-  /// a refused `beginFrame` counts as a dropped frame. Returns false when the
-  /// rebuild was abandoned meanwhile (a stop cancelled the wait or replaced
-  /// the recording).
+  /// shrink into `droppedSamples`. A full relay (a long gap, or a writer
+  /// still behind the old producer) is waited out in 5 ms steps on the
+  /// clock; `hasRoom` is asked first because a refused `beginFrame` counts
+  /// as a dropped frame. Returns false when the rebuild was abandoned
+  /// meanwhile (a stop cancelled the wait or replaced the recording).
   private func writeSilence(frames: Int, into relay: FrameRelay, generation: Int) async -> Bool {
     guard frames > 0 else { return true }
     let zeros = [Float](repeating: 0, count: relay.frameSize)
