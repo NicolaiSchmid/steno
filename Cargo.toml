@@ -189,6 +189,11 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["loggin
 # The interfaces the listener and the Bonjour record may use (already in
 # the tree through mdns-sd).
 if-addrs = "0.15"
+# The name the phone shows: the computer name on the Mac
+# (`SCDynamicStoreCopyComputerName` through objc2-system-configuration, as
+# Swift's `Host.current().localizedName`), the host name elsewhere
+# (`gethostname`, `GetComputerNameExW`); no unsafe of ours.
+whoami = { version = "2.1", default-features = false, features = ["std"] }
 # Device names counted the way Swift's `String.count` counts them, in
 # grapheme clusters. The version already in the lock.
 unicode-segmentation = "1.13.3"
