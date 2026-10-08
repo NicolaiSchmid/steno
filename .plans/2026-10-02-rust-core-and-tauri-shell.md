@@ -1200,15 +1200,15 @@ still has to draw the window side. `[ ]` is not ported yet.
   with a startup warning (the Mac app's menu bar, the Rust shell's log) and Settings'
   unavailable callout; the rest of the app runs (`handover_listener` in
   `crates/steno-services/src/app.rs`, `AppEnvironment.makeHandover`). Tests check at
-  the file level that the WAL file shrinks and its salt changes, that the write after
-  the checkpoint commits under `FULL`, and that another connection's write lock or
-  read transaction makes the checkpoint fail, and with the write lock held expect no
-  listener and no identity read. The launch checkpoint is one helper,
-  `HandoverService::checkpoint_store` and `HandoverService.checkpointStore(_:)`, which
-  fails with `StoreNotSynced`; the CLI's `steno dev handover serve` in both apps runs
-  it before it mints the identity and exits nonzero when it fails. The CLI's store is
-  in memory, so its checkpoint has no WAL to copy and no test can make it fail; the
-  helper is tested through the apps.
+  the file level that the WAL file holds only its header and the write's frames and
+  that its salt changes, that the write after the checkpoint commits under `FULL`, and
+  that another connection's write lock or read transaction makes the checkpoint fail,
+  and with the write lock held expect no listener and no identity read. The launch
+  checkpoint is one helper, `HandoverService::checkpoint_store` and
+  `HandoverService.checkpointStore(_:)`, which fails with `StoreNotSynced`; the CLI's
+  `steno dev handover serve` in both apps runs it before it mints the identity and
+  exits nonzero when it fails. The CLI's store is in memory, so its checkpoint has no
+  WAL to copy and no test can make it fail; the helper is tested through the apps.
 
 ### Adapters
 
