@@ -18,6 +18,8 @@
     clippy::unnecessary_wraps
 )]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -43,6 +45,8 @@ use steno_audio::{
 use steno_core::paths::file_url_path;
 use steno_core::{AudioFormat, AudioLane, AudioRetention, EchoCanceller, RecordingLayout};
 use uuid::Uuid;
+
+use common::{frequency, level_against_sine};
 
 const RECV: Duration = Duration::from_secs(10);
 
@@ -1947,15 +1951,6 @@ fn a_device_change_keeps_recording_on_the_same_files() {
     assert_eq!(clock.pending_sleepers(), 0);
 }
 
-/// A tone's frequency from its upward zero crossings.
-fn frequency(samples: &[f32], sample_rate: f64) -> f64 {
-    let crossings = samples
-        .windows(2)
-        .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
-        .count();
-    crossings as f64 / (samples.len() as f64 / sample_rate)
-}
-
 /// A headset in the hands-free profile keeps the Mac's aggregate at
 /// 24 kHz: the recording still starts, and the master and the sidecars are
 /// 48 and 16 kHz with the tones at their frequencies and levels.
@@ -1997,7 +1992,7 @@ fn a_device_at_24_khz_records_the_usual_files() {
         let steady = &master.channels[channel][4_800..140_000];
         let measured = frequency(steady, SAMPLE_RATE);
         assert!((measured - hertz).abs() < 2.0, "{measured} Hz");
-        let level = EchoMetrics::decibels(EchoMetrics::rms(steady) / (0.5 / 2f32.sqrt()));
+        let level = level_against_sine(steady, 0.5);
         assert!(level.abs() < 0.1, "{level} dB");
     }
     let mic = sidecar_of(&result, AudioLane::Mic);

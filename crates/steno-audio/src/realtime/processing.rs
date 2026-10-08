@@ -88,8 +88,8 @@ struct Worker {
 /// The rate conversion in front of the frames, one converter per lane.
 struct Conversion {
     converters: Vec<RateConverter>,
-    /// One read of device samples per lane.
-    input: Vec<Vec<f32>>,
+    /// One read of device samples, reused lane after lane.
+    input: Vec<f32>,
     /// Converted samples per lane; the first `pending` are not yet framed.
     output: Vec<Vec<f32>>,
     pending: usize,
@@ -137,7 +137,7 @@ impl Worker {
             }
             let mut written = 0;
             for (index, converter) in conversion.converters.iter_mut().enumerate() {
-                let input = &mut conversion.input[index][..count];
+                let input = &mut conversion.input[..count];
                 self.sink.ring(index).read(input);
                 written =
                     converter.process(input, &mut conversion.output[index][conversion.pending..]);
@@ -323,7 +323,7 @@ impl ProcessingThread {
                 .collect();
             let output = frame_size + converters[0].max_output();
             Conversion {
-                input: converters.iter().map(|_| vec![0.0; read]).collect(),
+                input: vec![0.0; read],
                 output: converters.iter().map(|_| vec![0.0; output]).collect(),
                 converters,
                 pending: 0,
