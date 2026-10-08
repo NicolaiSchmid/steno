@@ -9,8 +9,8 @@ use steno_core::{
     DatabaseLock, DatabaseLockError, SecretKey, Settings, StenoPaths, Store, StoreError,
 };
 use steno_pipeline::{MeetingEventBus, PipelineDependencies};
-use steno_services::BuildError;
 use steno_services::speech::SpeechSetup;
+use steno_services::{BuildError, KeyringUnavailable};
 use uuid::Uuid;
 
 /// A usage error exits 1, a runtime failure 2.
@@ -228,12 +228,40 @@ pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
 }
 
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
-/// the 0600 secrets file in the support directory.
+/// the 0600 secrets file in the support directory. After the Linux app
+/// moved the file's secrets into the Secret Service, which the command line
+/// does not read, the file holds no key: the run goes on without one,
+/// saying so on stderr, as on the Mac, whose app keeps the key in the
+/// Keychain.
 pub async fn api_key() -> Result<Option<String>, Failure> {
-    steno_services::secret_store(false, &paths()?)
-        .secret(&SecretKey::llm_api_key())
-        .await
-        .map_err(Failure::runtime)
+    let key = SecretKey::llm_api_key();
+    let read = steno_services::secret_store(false, &paths()?)
+        .secret(&key)
+        .await;
+    key_or_none(read, &key)
+}
+
+/// A read of `key`, with a key kept in the keyring read as none.
+fn key_or_none(
+    read: steno_core::protocols::BoundaryResult<Option<String>>,
+    key: &SecretKey,
+) -> Result<Option<String>, Failure> {
+    match read {
+        Err(error)
+            if matches!(
+                error.downcast_ref::<KeyringUnavailable>(),
+                Some(KeyringUnavailable::NotOpened(_))
+            ) =>
+        {
+            eprintln!(
+                "The API key is in the keyring, which the command line does not read; \
+                 set {} to use it.",
+                steno_services::FileSecretStore::environment_variable(key)
+            );
+            Ok(None)
+        }
+        read => read.map_err(Failure::runtime),
+    }
 }
 
 /// The LLM passes from the settings, `None` without an endpoint.
@@ -326,6 +354,22 @@ pub fn sha256_hex(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// After the Linux app's move the file has no key: none, as on the
+    /// Mac; any other failure stays one.
+    #[test]
+    fn a_key_kept_in_the_keyring_reads_as_none() {
+        let key = SecretKey::llm_api_key();
+        let in_keyring = Box::new(KeyringUnavailable::NotOpened(key.0.clone()));
+        assert_eq!(key_or_none(Err(in_keyring), &key).unwrap(), None);
+        assert_eq!(
+            key_or_none(Ok(Some("sk".to_owned())), &key)
+                .unwrap()
+                .as_deref(),
+            Some("sk")
+        );
+        assert!(key_or_none(Err("the file is damaged".into()), &key).is_err());
+    }
 
     #[test]
     fn a_path_is_standardized_lexically() {
