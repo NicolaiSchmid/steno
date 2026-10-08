@@ -139,8 +139,8 @@ impl<'a> Boxes<'a> {
         }
         let mut header = [0u8; 8];
         read_at(self.file, self.at, &mut header)?;
-        let size = u64::from(u32::from_be_bytes(header[..4].try_into().ok()?));
-        let kind: [u8; 4] = header[4..].try_into().ok()?;
+        let size = u64::from(u32::from_be_bytes(field(&header, 0)?));
+        let kind = field(&header, 4)?;
         let (body, size) = match size {
             // To the end of the enclosing box (or file).
             0 => (self.at + 8, self.end - self.at),
@@ -194,12 +194,9 @@ fn body(file: &mut File, b: Mp4Box, limit: usize) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn be_u32(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-}
-
-fn be_u64(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_be_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
+/// The `N` bytes at `at`, `None` past the end: a big-endian field.
+fn field<const N: usize>(bytes: &[u8], at: usize) -> Option<[u8; N]> {
+    bytes.get(at..at + N)?.try_into().ok()
 }
 
 /// The track's `mdia` box when it is a sound track.
@@ -217,9 +214,10 @@ fn edit_list_priming(file: &mut File, trak: Mp4Box, mdia: Mp4Box) -> Option<Prim
     let mdhd = body(file, mdhd, 32)?;
     // Version 1 has 64-bit creation and modification times.
     let timescale = match mdhd.first()? {
-        1 => be_u32(&mdhd, 20),
-        _ => be_u32(&mdhd, 12),
-    };
+        1 => field(&mdhd, 20),
+        _ => field(&mdhd, 12),
+    }
+    .map(u32::from_be_bytes);
     let edts = child(file, trak, *b"edts")?;
     let elst = child(file, edts, *b"elst")?;
     let media_time = first_media_time(&body(file, elst, 8 + 4 * 20)?)?;
@@ -232,15 +230,15 @@ fn edit_list_priming(file: &mut File, trak: Mp4Box, mdia: Mp4Box) -> Option<Prim
 /// The media time of the first edit that is not empty (-1, a delay).
 fn first_media_time(elst: &[u8]) -> Option<u64> {
     let version = *elst.first()?;
-    let count = be_u32(elst, 4)? as usize;
+    let count = u32::from_be_bytes(field(elst, 4)?) as usize;
     // Entries from byte 8: duration, media time, rate; 64-bit in version 1.
     let (size, at) = if version == 1 { (20, 8) } else { (12, 4) };
     (0..count).find_map(|entry| {
         let offset = 8 + entry * size + at;
         let media_time = if version == 1 {
-            i64::from_be_bytes(be_u64(elst, offset)?.to_be_bytes())
+            i64::from_be_bytes(field(elst, offset)?)
         } else {
-            i64::from(i32::from_be_bytes(be_u32(elst, offset)?.to_be_bytes()))
+            i64::from(i32::from_be_bytes(field(elst, offset)?))
         };
         u64::try_from(media_time).ok()
     })

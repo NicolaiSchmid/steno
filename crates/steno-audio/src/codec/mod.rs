@@ -62,7 +62,7 @@ use steno_core::{
     paths::file_url_path,
 };
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{CODEC_TYPE_AAC, Decoder, DecoderOptions};
+use symphonia::core::codecs::{CODEC_TYPE_AAC, CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
@@ -387,7 +387,7 @@ struct Trim {
 
 impl Trim {
     /// For AAC in an MP4 file that declares its priming.
-    fn for_track(path: &Path, params: &symphonia::core::codecs::CodecParameters) -> Option<Self> {
+    fn for_track(path: &Path, params: &CodecParameters) -> Option<Self> {
         if params.codec != CODEC_TYPE_AAC {
             return None;
         }
