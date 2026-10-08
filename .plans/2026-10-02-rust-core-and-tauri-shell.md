@@ -1259,11 +1259,21 @@ still has to draw the window side. `[ ]` is not ported yet.
   Swift writes over that meeting's notes. The Rust destination claims and writes a
   folder as a first delivery would (`X-2`) and drops the old folder's files from the
   receipt. It does the same when the pinned folder's `meeting.json` names no meeting,
-  or is missing and neither `transcript.vtt` nor the folder note carries this
-  meeting's `steno_id`: a duplicate folder, never an overwrite. A `meeting.json` that
-  cannot be read fails the delivery. One that only this meeting lost is written back
-  in place, as in Swift. With person pages off, the meeting's lines on its listed
-  pages keep linking the old folder's note until a delivery with person pages on.
+  or is missing and neither the `transcript.vtt` header nor the folder note's
+  `steno_id` names this meeting: a duplicate folder, never an overwrite. A
+  `meeting.json` or note that cannot be read fails the delivery. A `meeting.json` the
+  user deleted while the notes still name this meeting is written back in place, as
+  in Swift. A pinned folder that is gone is claimed again by creating it (a dangling
+  symlink counts as there), and a folder a delivery created is removed again when it
+  is still empty after the delivery failed. With person pages off, the meeting's
+  lines on its listed pages keep linking the old folder's note until a delivery with
+  person pages on.
+- When the audio copy is on, the mixdown is gone and the meeting folder holds no
+  audio copy, the Rust destination writes the notes and returns a warning in the
+  receipt ("The audio was already removed, so the export has no audio file"), which
+  the meeting's export line shows. Swift fails the delivery with `audioUnavailable`
+  after writing every other file, so its export stays failed on every retry. The
+  Rust `ObsidianError` has no `AudioUnavailable`.
 - On Windows the Rust person pages keep off the reserved device names (`Con` becomes
   `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
   names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.
