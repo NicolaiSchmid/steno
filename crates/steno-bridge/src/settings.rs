@@ -164,9 +164,9 @@ pub struct RecordingSettingsSnapshot {
     pub audio_folder_path: String,
     pub audio_folder_name: String,
     /// The warning under the folder when a power cut may lose recent
-    /// recordings there: the Rust host sets it on Windows for a drive that
-    /// is neither NTFS nor `ReFS`, or a network drive. The Swift app has no
-    /// such field and never sends it.
+    /// recordings there: the Rust host sets it for a Windows drive that is
+    /// neither NTFS nor `ReFS`, or a network drive or mount. The Swift app
+    /// has no such field and never sends it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_folder_warning: Option<String>,
     pub folder_usage: RecordingFolderUsage,

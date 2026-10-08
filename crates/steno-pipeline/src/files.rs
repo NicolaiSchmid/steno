@@ -9,9 +9,9 @@
 //! flush alone does not make a rename durable (the FAT driver treats a
 //! flush of a folder other than the drive's root as a no-op), so the
 //! renames are written through and the renamed file is flushed as well as
-//! the folders (`windows`); [`may_lose_recent_writes`] tells Settings about
-//! a drive where that may not be enough, there and on a network mount on
-//! Linux and macOS (`mount`).
+//! the folders (`windows`). [`may_lose_recent_writes`] tells Settings about
+//! a folder whose writes may still be lost: a Windows drive where that is
+//! not enough, or a network drive or mount (`windows`, `mount`).
 
 #[cfg(any(target_os = "linux", target_os = "macos", test))]
 mod mount;
@@ -67,10 +67,10 @@ impl Syncs for Disk {
 /// Whether a power cut may lose a recording just written into `folder`, for
 /// the warning in Settings: true on Windows for a folder on a drive that is
 /// neither NTFS nor `ReFS` (FAT32, exFAT), whose folder entries the durable
-/// writes cannot be sure to flush, and on every platform for one on a
-/// network drive or mount, whose server may acknowledge a flush without
-/// writing it (`windows`, `mount`); false elsewhere, and where the drive
-/// cannot be read.
+/// writes cannot be sure to flush, and on Windows, Linux and macOS for one
+/// on a network drive or mount, whose server may acknowledge a flush
+/// without writing it (`windows`, `mount`); false elsewhere, and where its
+/// file system cannot be read.
 pub fn may_lose_recent_writes(folder: &Path) -> bool {
     #[cfg(windows)]
     {
