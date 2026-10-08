@@ -135,7 +135,7 @@ Platform backends behind traits, two implementations before generalising: `Captu
 (CoreAudio, PipeWire, WASAPI, synthetic), `SpeechBackend` (CoreML, ONNX Runtime, fake),
 `SecretStore` (Keychain and the Windows credential store via `keyring`; the Secret
 Service over `zbus` on Linux, a 0600 file where no provider runs or the keyring stays
-locked), `Updater` (Tauri updater on every platform; Sparkle retires at cutover).
+locked before the first move), `Updater` (Tauri updater on every platform; Sparkle retires at cutover).
 
 ## Transition
 
@@ -774,6 +774,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   - A retried re-export after a refusal happens on the next store change (Swift
     retried on the next `.ready` tick); a pending re-export when the detail goes away
     is attempted once (Swift retried after three seconds in a detached task).
+  - An API key the secret store cannot read: the Summaries section loads the rest of
+    the form, shows the read error, and a save writes the key only when the field
+    changed (`KeyRead`, `LlmSettingsViewModel::writes_key`), so a locked keyring's key
+    is never deleted. Swift's `LLMSettingsViewModel.load` failed whole on the read, and
+    its save wrote the key every time.
 
 ### Pipeline and services (WP6b)
 
@@ -924,10 +929,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   not. On Linux the app keeps its secrets in the Secret Service (`SecretServiceStore`:
   attributes `service` and `username`, label "Steno <key>"):
   - The choice is made once per process, on a thread of the store's own. A read never
-    asks for the keyring's password; one made while a prompt is up fails, and once the
-    choice is made `App::launch` builds the pipeline again, the host reads the key
-    again and a handover that waited reads its identity again and starts. A write may
-    wait on the user, under the host's lock for Settings' save.
+    asks the user; one made while a prompt is up fails, and once the choice is made
+    `App::launch` builds the pipeline again, the host reads the key again (into a
+    Settings form whose key field holds no unsaved edit) and a handover that waited
+    reads its identity again and starts. The crash recovery (meetings left queued or
+    processing, unfinished exports) waits for the choice, so it runs on the pipeline
+    with the key; a quit before the answer hands no listener over. A write may wait on
+    the user, under the host's lock for Settings' save.
   - The move: the first launch with a provider copies the file's entries into the
     service, reads them back and marks the file (`"movedToSecretService": true`); a
     later launch whose own connection reads every value back deletes the entries, and
@@ -938,11 +946,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   - After the mark the service wins for every key, and the file is no store: a key it
     lacks is an error (`KeyringUnavailable::NotOpened`), not `None`, and a write fails,
     so a run that cannot open the keyring neither mints an identity nor drops the API
-    key. At a later launch an API key the file still holds goes when the service holds
-    another; the file holds no key written after the mark, as writes fail.
-  - The CLI reads `STENO_<KEY>` or the file; once the file is marked its API key reads
-    as none, with a line on stderr, so `steno process` runs without summaries, as on
-    the Mac.
+    key. A write to the service drops that key's copy from the file at once, so a key
+    removed or changed in the move's own launch never comes back from the copy. At a
+    later launch an API key the file still holds goes when the service holds another;
+    the file holds no key written after the mark, as writes fail.
+  - The CLI reads `STENO_<KEY>` or the file; once the file is marked and its copy of the
+    API key gone, the key reads as none, with a line on stderr, so `steno process` runs
+    without summaries, as on the Mac. It reads the key only for a server endpoint.
   - A value with a line break (the identity's PEM) is stored base64 behind
     `steno-base64:`, as GNOME Keyring's unencrypted file (Omarchy's default) rejects a
     whole keyring over one.

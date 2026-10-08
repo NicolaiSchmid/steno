@@ -29,8 +29,8 @@ Everything the Swift app does outside its three windows, per OS:
 
 Secrets are not the shell's: the `SecretStore` lives in `steno-services`
 (the login Keychain on macOS, the Credential Manager on Windows, the Secret
-Service on Linux, or the 0600 `secrets.json` where no keyring answers),
-which the host reads the API key through.
+Service on Linux, or the 0600 `secrets.json` where no keyring answers before
+the first move into it), which the host reads the API key through.
 
 Every exit saves first: `App::shutdown` runs once, at most ten seconds.
 It quits the pipeline (no new job starts), lets a start or a stop under
