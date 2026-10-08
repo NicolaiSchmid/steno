@@ -683,8 +683,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   Rust-only: Swift has none of them. `steno-services` reads them from `speech.json` in
   the support directory (`steno_services::speech::speech_settings`), not from the
   `setting` table, which the Swift app rewrites whole on every save;
-  `STENO_MODELS_MIRROR` overrides the mirror, which serves the diarizer's models
-  too, so it holds a whole store root. Nothing writes the file and the bridge contract has no
+  `STENO_MODELS_MIRROR` overrides the mirror, which serves the diarizer's models too, so
+  it holds a whole store root. Nothing writes the file and the bridge contract has no
   field for any of them, so the Settings window shows none:
   `.plans/2026-10-07-speech-settings-ui.md` proposes their place and wording.
 - [ ] Where the speech sidecar runs Parakeet v3, processing a meeting before its models
@@ -697,25 +697,24 @@ still has to draw the window side. `[ ]` is not ported yet.
   Settings" until the engine's models are installed.
 - [x] One model store: the diarizer's two models are the `steno_speech::ModelAsset`
   `diarization` (`crates/steno-diarize/src/models.rs`), installed by
-  `steno_speech::ModelStore` into `<models directory>/onnx/diarization/`, the folder
-  the diarizer's own store used, so no installed file moves. They get the store's
-  lock, resume, ranges, progress and the mirror (`<mirror>/diarization/<file>`); the
-  services build the diarizer over `SpeechSetup::model_store`, and Settings and
+  `steno_speech::ModelStore` into `<models directory>/onnx/diarization/`, the folder the
+  diarizer's own store used, so no installed file moves. They get the store's lock,
+  resume, ranges, progress and the mirror (`<mirror>/diarization/<file>`); the services
+  build the diarizer over `SpeechSetup::model_store`, and Settings and
   `steno dev models` read the asset. Who may download is the caller's
-  `steno_diarize::Install`: under `Never` a missing file is
-  `DiarizeError::NotInstalled` with no request (`steno_diarize::models::installed` is
-  the same check without a load). Every diarizer is on `Allowed` for now. `steno
-  process` stays on it, since a command run in a terminal may download on first use;
-  the app's `SpeechEngines` moves to `Never` together with the pipeline's
-  models-missing gate (S1 in `.plans/2026-10-07-stable-promotion.md`), so a missing
-  model never ends in the fallback while "delete after processing" removes the
-  audio. Under
-  `Allowed`, a download cut off while a meeting processes ends the job `ready` with
-  the one room speaker, keeps the partial, and the next run resumes it
+  `steno_diarize::Install`: under `Never` a missing file is `DiarizeError::NotInstalled`
+  with no request (`steno_diarize::models::installed` is the same check without a load).
+  Every diarizer is on `Allowed` for now. `steno process` stays on it, since a command
+  run in a terminal may download on first use; the app's `SpeechEngines` moves to
+  `Never` together with the pipeline's models-missing gate (S1 in
+  `.plans/2026-10-07-stable-promotion.md`), so a missing model never ends in the
+  fallback while "delete after processing" removes the audio. Under `Allowed`, a
+  download cut off while a meeting processes ends the job `ready` with the one room
+  speaker, keeps the partial, and the next run resumes it
   (`a_diarizer_download_cut_off_mid_job_falls_back_and_keeps_the_recording`); the
-  recording's retention after such a fallback is the pipeline's. Content is checked
-  at download; a load that fails hashes the files, and one that fails its checksum
-  is deleted and reported not installed, so Settings offers Download.
+  recording's retention after such a fallback is the pipeline's. Content is checked at
+  download; a load that fails hashes the files, and one that fails its checksum is
+  deleted and reported not installed, so Settings offers Download.
 
 ### Beyond the bridge
 
