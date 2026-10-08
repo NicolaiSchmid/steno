@@ -194,6 +194,9 @@ if-addrs = "0.15"
 # Swift's `Host.current().localizedName`), the host name elsewhere
 # (`gethostname`, `GetComputerNameExW`); no unsafe of ours.
 whoami = { version = "2.1", default-features = false, features = ["std"] }
+# The channel mdns-sd's monitor hands out (`mdns_sd::Receiver` is flume's);
+# the handover tests feed one by hand. The version already in the lock.
+flume = { version = "0.12", default-features = false }
 # Device names counted the way Swift's `String.count` counts them, in
 # grapheme clusters. The version already in the lock.
 unicode-segmentation = "1.13.3"

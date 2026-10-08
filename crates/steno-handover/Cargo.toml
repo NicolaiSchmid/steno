@@ -47,6 +47,7 @@ windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 # The fake intake the tests admit through.
 steno-core = { path = "../steno-core", features = ["testing"] }
 
+flume.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true

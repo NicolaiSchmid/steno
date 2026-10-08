@@ -7,9 +7,10 @@
 //! connection whose local address is neither loopback nor a LAN address
 //! (a VPN tunnel) is closed before the handshake, as the Swift listener's
 //! prohibited interface types refuse it. One socket on every address
-//! serves an address the computer gains after start on the same port,
-//! and a network change closes no connection: the check runs once per
-//! connection, at accept. Swift:
+//! serves an address the computer gains after start on the same port.
+//! The check runs once per connection, at accept, so the listener closes
+//! no connection when the network changes; one on an address that leaves
+//! breaks with it, and the phone resumes from the partial. Swift:
 //! `Network/HandoverServer.swift`, `Network/ServerMetrics.swift`.
 
 pub mod advertise;
@@ -125,7 +126,8 @@ pub(crate) enum Reach {
 }
 
 /// A running listener. [`HandoverServer::stop`] closes it in order;
-/// dropping it sends the same signal without waiting.
+/// dropping it sends the same signal and withdraws the record without
+/// waiting.
 pub struct HandoverServer {
     pub port: u16,
     accept_task: JoinHandle<()>,
