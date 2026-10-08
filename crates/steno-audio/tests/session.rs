@@ -3774,15 +3774,20 @@ fn advance_watch(clock: &ManualClock, by: Duration) {
     clock.advance(by);
 }
 
-/// As [`advance_watch`], once `delivered` moved after the watch thread's
-/// last sample, so that sample's successor sees a stream that delivers.
+/// As [`advance_watch`], once `delivered` moved twice after the watch
+/// thread's last sample, so that sample's successor sees a stream that
+/// delivers. Twice: the count moves after its callback, so the first move
+/// may belong to a callback the sink counted before a rebuild's resume
+/// read it, which the watch thread would not see move.
 fn advance_while_delivering(clock: &ManualClock, delivered: impl Fn() -> usize, by: Duration) {
     assert!(clock.wait_for_sleepers(1), "the watch thread sleeps");
-    let before = delivered();
     let deadline = Instant::now() + RECV;
-    while delivered() == before {
-        assert!(Instant::now() < deadline, "the backend delivers");
-        std::thread::sleep(Duration::from_millis(1));
+    for _ in 0..2 {
+        let before = delivered();
+        while delivered() == before {
+            assert!(Instant::now() < deadline, "the backend delivers");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
     clock.advance(by);
 }
