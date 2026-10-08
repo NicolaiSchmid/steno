@@ -239,8 +239,10 @@ pub trait Recorder: Send + Sync {
     /// its end. A failure is logged, never refused. Rust only: Swift had no
     /// recovery.
     fn remember_audio_folder(&self, folder: &Path);
-    /// What deleting meeting `meeting_id`, left `recording`, needs to know
-    /// ([`LeftRecording`]). Rust only: Swift refused every recording row.
+    /// What deleting meeting `meeting_id` needs to know ([`LeftRecording`]):
+    /// the audio folders its folder may be in, and for one left
+    /// `recording` whether its master is still written. Rust only: Swift
+    /// refused every recording row and removed only what an asset named.
     fn left_recording(&self, meeting_id: Uuid) -> LeftRecording;
     /// The rows of meeting `meeting_id`, left `recording`, are gone: what
     /// the recorder kept for its recovery goes too. Rust only.
@@ -255,13 +257,16 @@ pub type StartHold = Box<dyn Send>;
 /// It promises no time: the hold can span the updater's password prompt.
 pub const INSTALLING_UPDATE: &str = "Steno is installing an update. You can record again once it relaunches, or if you cancel the install.";
 
-/// A meeting left `recording`, as [`Recorder::left_recording`] finds it
+/// A meeting about to be deleted, as [`Recorder::left_recording`] finds it
 /// on disk.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeftRecording {
     /// The audio folders its files may be in, each once: the one it was
-    /// recorded into and the settings' one. A delete removes the meeting's
-    /// folder in each.
+    /// recorded into, the settings' one and the known ones. A delete
+    /// removes the meeting's folder in each when no asset names it (a
+    /// meeting left `recording`, one that failed before its asset was
+    /// saved), so the next launch does not adopt its master as a recording
+    /// with no meeting.
     pub folders: Vec<PathBuf>,
     /// Its master in one of them was written within the last seconds, or
     /// at a time ahead of the clock: another process (the Swift app

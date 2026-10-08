@@ -252,18 +252,22 @@ impl MeetingListViewModel {
     /// refused and the reason shown. A file that resists does not stop the
     /// rest; the first failure is shown, since the rows are gone and no
     /// sweep finds that audio again. A deleted selection clears itself when
-    /// the list reloads. With `left`, the meeting is one left `recording`
-    /// ([`Self::can_delete`]): it goes too, and its folder in each of
-    /// `left`'s audio folders with it, since no asset row names it. Returns
-    /// whether the rows went. Swift: `MeetingStore.delete`.
+    /// the list reloads. With `left_recording`, the meeting is one left
+    /// `recording` ([`Self::can_delete`]): it goes too. When no asset row
+    /// names the meeting's files (one left `recording`, one that failed
+    /// before its asset was saved), its folder in each of `left`'s audio
+    /// folders goes with it, so the next launch does not adopt the master
+    /// again. Returns whether the rows went. Swift: `MeetingStore.delete`,
+    /// which removed only what an asset named.
     pub fn delete(
         &mut self,
         id: Uuid,
         store: &Store,
         files: &dyn FileSystem,
-        left: Option<&LeftRecording>,
+        left: &LeftRecording,
+        left_recording: bool,
     ) -> bool {
-        let outcome = if left.is_some() {
+        let outcome = if left_recording {
             store.delete_meeting_left_recording(id)
         } else {
             store.delete_meeting(id)
@@ -276,7 +280,7 @@ impl MeetingListViewModel {
             }
         };
         let mut paths = deleted.files_to_remove(id);
-        if let Some(left) = left {
+        if left_recording || deleted.assets.is_empty() {
             paths.extend(
                 left.folders
                     .iter()

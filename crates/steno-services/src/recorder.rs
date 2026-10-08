@@ -1445,21 +1445,14 @@ impl Recorder for CaptureRecorder {
         }
     }
 
-    /// The folder recorded for the meeting ([`crate::audio_folders`]) and
-    /// the settings' one; a master in either modified within the launch's
+    /// The folder recorded for the meeting ([`crate::audio_folders`]), the
+    /// settings' one and the known ones (`recovery::meeting_folders`); a
+    /// master in one modified within the launch's
     /// [`LiveRecordingCheck::fresh_within`](crate::recovery::LiveRecordingCheck::fresh_within)
-    /// counts as still written. A record or settings that cannot be read
-    /// give no folder.
+    /// counts as still written.
     fn left_recording(&self, meeting_id: Uuid) -> LeftRecording {
-        let recorded = crate::audio_folders::recorded(&self.support_directory)
-            .ok()
-            .and_then(|mut recorded| recorded.remove(&meeting_id));
-        let current = self
-            .store
-            .settings()
-            .ok()
-            .and_then(|settings| steno_core::paths::file_url_path(&settings.audio_folder));
-        let folders = crate::recovery::distinct(recorded.into_iter().chain(current), &[]);
+        let folders =
+            crate::recovery::meeting_folders(&self.store, &self.support_directory, meeting_id);
         let check = crate::recovery::LiveRecordingCheck::default();
         let still_written = folders
             .iter()
@@ -2812,23 +2805,28 @@ mod tests {
         );
     }
 
-    /// A meeting left `recording` names the folder it was recorded into and
-    /// the settings' one, and counts as still written while its master was
-    /// modified within the launch's ten seconds, so the host refuses to
-    /// delete it; an hour-old master does not.
+    /// A meeting left `recording` names the folder it was recorded into,
+    /// the settings' one and the known ones, and counts as still written
+    /// while its master was modified within the launch's ten seconds, so
+    /// the host refuses to delete it; an hour-old master does not.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_left_recording_is_still_written_while_its_master_is_fresh() {
         let harness = harness(&[]);
         let meeting_id = Uuid::new_v4();
+        let support = harness.dir.path().join("support");
         let recorded = harness.dir.path().join("elsewhere");
-        crate::audio_folders::record(&harness.dir.path().join("support"), meeting_id, &recorded)
-            .unwrap();
+        let retired = harness.dir.path().join("retired");
+        crate::audio_folders::record(&support, meeting_id, &recorded).unwrap();
+        crate::audio_folders::remember(&support, &retired).unwrap();
         let master = crate::recovery::master_path(&recorded, meeting_id);
         std::fs::create_dir_all(master.parent().unwrap()).unwrap();
         let file = std::fs::File::create(&master).unwrap();
 
         let left = harness.recorder.left_recording(meeting_id);
-        assert_eq!(left.folders, [recorded, harness.dir.path().join("audio")]);
+        assert_eq!(
+            left.folders,
+            [recorded, harness.dir.path().join("audio"), retired.clone()]
+        );
         assert!(left.still_written);
 
         file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3_600))
@@ -2838,7 +2836,7 @@ mod tests {
         harness.recorder.forget_recording(meeting_id);
         assert_eq!(
             harness.recorder.left_recording(meeting_id).folders,
-            [harness.dir.path().join("audio")]
+            [harness.dir.path().join("audio"), retired]
         );
     }
 

@@ -1504,22 +1504,18 @@ impl BridgeHost for Host {
             };
             (prompt, recording)
         };
-        // A row left `recording` may be one another process still records
-        // (the Swift app started after this one): its master on disk says
-        // so. Read with the lock released.
-        let left = if recording {
-            let left = self
-                .shared
-                .services
-                .recorder
-                .left_recording(params.meeting_id);
-            if left.still_written {
-                return Err(BridgeError::failed(STILL_RECORDING));
-            }
-            Some(left)
-        } else {
-            None
-        };
+        // Where the meeting's folder may be, for a meeting no asset names
+        // the files of. A row left `recording` may be one another process
+        // still records (the Swift app started after this one): its master
+        // on disk says so. Read with the lock released.
+        let left = self
+            .shared
+            .services
+            .recorder
+            .left_recording(params.meeting_id);
+        if recording && left.still_written {
+            return Err(BridgeError::failed(STILL_RECORDING));
+        }
         let confirmed = self.confirm(&prompt);
         if confirmed {
             let now = self.now();
@@ -1531,7 +1527,8 @@ impl BridgeHost for Host {
                         params.meeting_id,
                         &self.shared.store,
                         &*self.shared.services.file_system,
-                        left.as_ref(),
+                        &left,
+                        recording,
                     );
                     inner.list.reload(&self.shared.store);
                     // The store's `deleted` event, posted only when the rows
@@ -1546,7 +1543,7 @@ impl BridgeHost for Host {
                     }
                 },
             );
-            if deleted && left.is_some() {
+            if deleted && recording {
                 self.shared
                     .services
                     .recorder

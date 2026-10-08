@@ -135,6 +135,29 @@ pub(crate) fn distinct(
     distinct
 }
 
+/// The audio folders the folder of meeting `meeting_id` may be in, each
+/// once: the one it was recorded into ([`crate::audio_folders::recorded`]),
+/// the settings' one and the known ones. A record, settings or list that
+/// cannot be read gives none. A delete removes the meeting's folder in
+/// each when no asset names it (a meeting left `recording`, one that
+/// failed before its asset was saved), so the launch does not adopt its
+/// master again (`Recorder::left_recording`).
+pub(crate) fn meeting_folders(
+    store: &Store,
+    support_directory: &Path,
+    meeting_id: Uuid,
+) -> Vec<PathBuf> {
+    let recorded = crate::audio_folders::recorded(support_directory)
+        .ok()
+        .and_then(|mut recorded| recorded.remove(&meeting_id));
+    let current = store
+        .settings()
+        .ok()
+        .and_then(|settings| file_url_path(&settings.audio_folder));
+    let known = crate::audio_folders::known(support_directory).unwrap_or_default();
+    distinct(recorded.into_iter().chain(current).chain(known), &[])
+}
+
 /// The folders a master may be in besides the two that decide a meeting
 /// (the recorded one and the settings'), each once: the `known` folders
 /// ([`crate::audio_folders::known`]), then the folder of each stored asset
