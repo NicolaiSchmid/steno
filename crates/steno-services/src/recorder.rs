@@ -1572,7 +1572,8 @@ mod tests {
     }
 
     /// A harness whose capture records on `first` and, after one device
-    /// change 0.3 s in, on `after`.
+    /// change 1 s in, on `after`: late enough that a test reads the start's
+    /// status before the rebuild changes it.
     fn harness_on_inputs(
         first: steno_audio::CaptureInput,
         after: steno_audio::CaptureInput,
@@ -1588,7 +1589,7 @@ mod tests {
                 600.0,
             )
             .real_time(true)
-            .change_device_after(0.3)
+            .change_device_after(1.0)
             .stream(stream(&first))
             .stream_after_restart(stream(&after));
             CaptureSession::with_backend(
