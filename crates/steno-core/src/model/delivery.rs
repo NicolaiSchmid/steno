@@ -142,10 +142,10 @@ pub struct DeliveryReceipt {
     pub files: Vec<DeliveredFile>,
     pub renderer_version: i64,
     /// What this delivery could not do although it succeeded, in words for
-    /// the user: the meeting's export line shows them until the next
-    /// delivery, which starts without any. Empty, and absent from the JSON,
-    /// when there is nothing to say, so a receipt without warnings reads
-    /// and encodes as Swift's. Swift: none.
+    /// the user: the meeting's export line and `steno deliver` show them
+    /// until the next delivery, which starts without any. Empty, and absent
+    /// from the JSON, when there is nothing to say, so a receipt without
+    /// warnings reads and encodes as Swift's. Swift: none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
 }

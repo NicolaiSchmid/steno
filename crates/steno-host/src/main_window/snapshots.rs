@@ -309,8 +309,7 @@ pub fn turns(
 
 /// One delivery as the footer words it: the destination, then "Exported
 /// 10:02", "Pending" or "Failed: reason", and after an export each warning
-/// its receipt carries ("The audio was already removed, so the export has
-/// no audio file"). Swift: `MainWindowSnapshots.deliveryLine`; the
+/// its receipt carries. Swift: `MainWindowSnapshots.deliveryLine`; the
 /// warnings are Rust only.
 #[must_use]
 pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
