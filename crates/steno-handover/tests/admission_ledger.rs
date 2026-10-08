@@ -446,6 +446,57 @@ async fn a_takeover_during_the_first_admission_completes_with_its_meeting() {
 }
 
 #[tokio::test]
+async fn admitted_bytes_over_another_devices_unfinished_upload_are_refused() {
+    // The phone's first file under the id was admitted. Another device
+    // then announced other bytes under the id, a new recording, and its
+    // upload is under way. The phone announces its admitted file again:
+    // answered `complete`, it would replace the receipt of that upload,
+    // whose file is still on its way. It is answered 409 instead, that
+    // upload is left alone, and it completes as a meeting of its own.
+    let (store, intake) = store_and_intake();
+    let test = service(&store, &intake).await;
+    let phone = Phone::pair(&test).await;
+    let first = seeded_bytes(2 * CHUNK_SIZE as usize, 42);
+    let metadata = phone.metadata(&first, CHUNK_SIZE);
+    let id = metadata.recording_id;
+    phone.upload_all(&metadata, &first).await;
+    let first_meeting = completed(&phone, id).await;
+
+    let other = Phone::pair(&test).await;
+    let other_bytes = seeded_bytes(2 * CHUNK_SIZE as usize, 43);
+    let theirs = under(&other, id, &other_bytes, CHUNK_SIZE);
+    let parts = chunks(&other_bytes, CHUNK_SIZE);
+    assert_eq!(other.announce(&theirs).await.status, 201, "a new recording");
+    assert_eq!(other.upload(id, 0, &parts[0]).await.status, 204);
+
+    let refused = phone.announce(&metadata).await;
+    assert_eq!(refused.status, 409);
+    let receipt = store.handover_receipt(id).unwrap().unwrap();
+    assert_eq!(
+        (
+            receipt.device_id,
+            receipt.sha256.clone(),
+            receipt.state,
+            receipt.received_chunks
+        ),
+        (
+            other.device_id,
+            theirs.sha256.clone(),
+            HandoverState::Receiving,
+            vec![0]
+        ),
+        "the other device's upload stays"
+    );
+    assert!(test.inbox().has_partial(id), "and so does its partial");
+
+    assert_eq!(other.upload(id, 1, &parts[1]).await.status, 204);
+    let their_meeting = completed(&other, id).await;
+    assert_ne!(their_meeting, first_meeting);
+    assert_eq!(intake.meetings(), [first_meeting, their_meeting]);
+    test.stop().await;
+}
+
+#[tokio::test]
 async fn a_late_complete_of_replaced_bytes_leaves_the_new_upload_unfinished() {
     // The phone's `complete` of the first file is in the intake when it
     // announces another file under the id (a new recording). Either the
