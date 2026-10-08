@@ -358,18 +358,21 @@ impl LocalRecordingIntake {
         let now = pipeline.dependencies().now.clone();
         Self::new(
             store,
-            enqueue_through(pipeline, ProcessingPipeline::enqueue),
+            enqueue_through(pipeline, ProcessingPipeline::enqueue_stopped_recording),
             now,
             zone,
         )
     }
 
-    /// Writes the `recording` meeting and its `them` participants in one
-    /// transaction. An empty title becomes the default title with
+    /// Writes the `recording` meeting `meeting_id` and its `them`
+    /// participants in one transaction. The caller picks the id, so the
+    /// recorder can note where the recording goes before its row exists.
+    /// An empty title becomes the default title with
     /// `title_origin` default; a title with a calendar event id is
     /// `calendar`, one without is `user`.
     pub fn begin(
         &self,
+        meeting_id: Uuid,
         source: MeetingSource,
         title: Option<&str>,
         calendar_event_id: Option<&str>,
@@ -387,7 +390,7 @@ impl LocalRecordingIntake {
             TitleOrigin::Calendar
         };
         let meeting = Meeting {
-            id: Uuid::new_v4(),
+            id: meeting_id,
             title: if trimmed.is_empty() {
                 default_title(source, started_at, self.zone)
             } else {
@@ -423,10 +426,14 @@ impl LocalRecordingIntake {
     /// Writes the duration and the end reason, sets the asset's retention
     /// (`retention`, else the settings' default as it is now) with
     /// `expires_at` cleared, and enqueues the meeting: the meeting, now
-    /// `queued`, and its asset in one commit. A commit that finds the
+    /// `queued`, and its asset in one commit, which writes only while the
+    /// row is still `recording` and keeps what else was saved on it since
+    /// ([`Store::save_stopped_recording`]). A commit that finds the
     /// database busy is tried again, up to [`Self::COMMIT_ATTEMPTS`] in
     /// all ([`Self::with_commit_attempts`]). A meeting that is not
-    /// `recording` is left alone, its row untouched. Any other failure
+    /// `recording`, when `complete` reads it or when it commits, is left
+    /// alone, its row untouched, and one deleted meanwhile is not brought
+    /// back. Any other failure
     /// leaves the meeting `recording` and returns the error: the recording
     /// stays on disk, and the next launch's recovery finds it there and
     /// queues it. Swift marked the meeting failed without its asset, so the
@@ -485,7 +492,25 @@ impl LocalRecordingIntake {
         asset.meeting_id = meeting_id;
         asset.retention = retention;
         asset.expires_at = None;
-        (self.enqueue)(meeting.clone(), asset).await?;
+        if let Err(failure) = (self.enqueue)(meeting.clone(), asset).await {
+            // The commit checks the row again: one that moved on or went
+            // since it was read above is not this recording's to save.
+            if !failure.is_busy()
+                && let Ok(now) = self.store.meeting(meeting_id)
+            {
+                match now {
+                    None => return Err(StoreError::MeetingNotFound(meeting_id).into()),
+                    Some(now) if now.state != MeetingState::Recording => {
+                        return Err(LocalRecordingIntakeError::NotRecording(
+                            meeting_id,
+                            now.state.kind(),
+                        ));
+                    }
+                    Some(_) => {}
+                }
+            }
+            return Err(failure.into());
+        }
         Ok(meeting)
     }
 
@@ -710,7 +735,14 @@ mod tests {
             FixedOffset::east_opt(0).unwrap(),
         );
         let meeting = intake
-            .begin(MeetingSource::MacInPerson, None, None, &[], at)
+            .begin(
+                Uuid::new_v4(),
+                MeetingSource::MacInPerson,
+                None,
+                None,
+                &[],
+                at,
+            )
             .unwrap();
         assert_eq!(
             store.meeting(meeting.id).unwrap().unwrap().state,
@@ -747,7 +779,7 @@ mod tests {
             let (store, calls, after_call) = (store.clone(), calls.clone(), after_call.clone());
             Box::pin(async move {
                 let committed = store
-                    .save_meeting_with_asset(&meeting, &asset)
+                    .save_stopped_recording(&meeting, &asset)
                     .map_err(|error| PipelineFailure::wrapping(&error, PipelineStage::Decode));
                 after_call(calls.fetch_add(1, Ordering::SeqCst) + 1);
                 committed
@@ -873,6 +905,86 @@ mod tests {
         assert!(error.is_busy(), "{error}");
         assert_eq!(calls.load(Ordering::SeqCst), 1, "one try");
         assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), meeting);
+    }
+
+    /// The commit checks the row again in its own transaction: a recording
+    /// failed or deleted between `complete`'s read and its commit (here by
+    /// the enqueue, just before it commits as the pipeline does) is not
+    /// brought back `queued`, and nothing is written; a note saved
+    /// meanwhile on one still `recording` is kept by the commit.
+    #[tokio::test]
+    async fn a_recording_that_moved_on_before_the_commit_is_not_brought_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let before_commit = |change: fn(&Store, Uuid)| -> Enqueue {
+            let store = store.clone();
+            Arc::new(move |meeting: Meeting, asset: AudioAsset| {
+                let store = store.clone();
+                Box::pin(async move {
+                    change(&store, meeting.id);
+                    store
+                        .save_stopped_recording(&meeting, &asset)
+                        .map_err(|error| PipelineFailure::wrapping(&error, PipelineStage::Decode))
+                })
+            })
+        };
+        let intake = |enqueue| {
+            LocalRecordingIntake::new(
+                store.clone(),
+                enqueue,
+                Arc::new(Utc::now),
+                FixedOffset::east_opt(0).unwrap(),
+            )
+        };
+
+        let (failed, result) = a_recording(&store, dir.path());
+        let error = intake(before_commit(|store, id| {
+            store
+                .set_state(id, MeetingState::Failed { reason: "x".into() }, Utc::now())
+                .unwrap();
+        }))
+        .complete(failed.id, result, None)
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                LocalRecordingIntakeError::NotRecording(_, MeetingStateKind::Failed)
+            ),
+            "{error}"
+        );
+        assert!(store.asset(failed.id).unwrap().is_none());
+
+        let (deleted, result) = a_recording(&store, dir.path());
+        let error = intake(before_commit(|store, id| {
+            store.delete_meeting_left_recording(id).unwrap();
+        }))
+        .complete(deleted.id, result, None)
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                LocalRecordingIntakeError::Store(StoreError::MeetingNotFound(_))
+            ),
+            "{error}"
+        );
+        assert!(store.meeting(deleted.id).unwrap().is_none());
+        assert!(store.asset(deleted.id).unwrap().is_none());
+
+        let (noted, result) = a_recording(&store, dir.path());
+        intake(before_commit(|store, id| {
+            let mut meeting = store.meeting(id).unwrap().unwrap();
+            meeting.scratchpad = "a note".to_owned();
+            store.save_meeting(&meeting).unwrap();
+        }))
+        .complete(noted.id, result, None)
+        .await
+        .unwrap();
+        let stored = store.meeting(noted.id).unwrap().unwrap();
+        assert_eq!(stored.state, MeetingState::Queued);
+        assert_eq!(stored.duration, 12.0);
+        assert_eq!(stored.scratchpad, "a note");
     }
 
     /// Makes every meeting insert fail, as a full disk or a busy store

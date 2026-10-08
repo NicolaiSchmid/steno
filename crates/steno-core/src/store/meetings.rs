@@ -175,6 +175,31 @@ impl Store {
         })
     }
 
+    /// A stopped recording's commit (`LocalRecordingIntake::complete`,
+    /// through `ProcessingPipeline::enqueue_stopped_recording`), in one
+    /// transaction and only while the stored row is still `recording`: the
+    /// row takes `meeting`'s duration, end reason, state and `updatedAt`
+    /// and keeps the rest as stored (a title or notes saved since the
+    /// caller read it), and `asset` is saved. A row that moved on fails with
+    /// [`StoreError::NotRecording`] and one that is gone with
+    /// [`StoreError::MeetingNotFound`], and nothing is written, so a
+    /// recording deleted or failed meanwhile is not brought back. Rust
+    /// only: Swift's `complete` saved the row it had read.
+    pub fn save_stopped_recording(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
+        self.write(|transaction| {
+            let mut stored = current(transaction, meeting.id)?;
+            if stored.state != MeetingState::Recording {
+                return Err(StoreError::NotRecording(meeting.id, stored.state.kind()));
+            }
+            stored.duration = meeting.duration;
+            stored.end_reason.clone_from(&meeting.end_reason);
+            stored.state = meeting.state.clone();
+            stored.updated_at = meeting.updated_at;
+            save(transaction, &stored)?;
+            assets::save(transaction, asset)
+        })
+    }
+
     /// The meeting and its participants in one transaction (recording
     /// start); every participant is re-pointed at the meeting.
     pub fn save_meeting_with_participants(
