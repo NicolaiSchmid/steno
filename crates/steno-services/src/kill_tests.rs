@@ -15,7 +15,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use steno_audio::writer::{LaneFrames, RecordingFiles, RecordingWriter, RecordingWriting};
 use steno_audio::{CaptureConfiguration, CaptureError, CaptureSession};
@@ -24,8 +24,7 @@ use steno_core::{MeetingState, MeetingStateKind, RecordingEndReason, Store, path
 use steno_host::services::Recorder as _;
 
 use crate::recorder::MakeCaptureSession;
-use crate::recovery::LiveRecordingCheck;
-use crate::testing::{app_over_fakes, synthetic_capture};
+use crate::testing::{an_hour_later, app_over_fakes, synthetic_capture};
 
 /// The directory the child records under; unset outside a child.
 const DIRECTORY: &str = "STENO_KILL_TEST_DIRECTORY";
@@ -77,6 +76,11 @@ impl Reports {
     /// Written when the writer waits at its gate.
     fn gated(&self) -> PathBuf {
         self.0.join("gated")
+    }
+
+    /// The writes counted so far.
+    fn write_count(&self) -> u64 {
+        std::fs::metadata(self.frames()).map_or(0, |metadata| metadata.len() / 8)
     }
 
     /// The frames the counted writes wrote, and the most one write wrote.
@@ -211,7 +215,7 @@ fn child_records_until_killed() {
     assert!(status.meeting_id.is_some(), "{status:?}");
     if gate == Gate::AfterFinish {
         let reports = Reports(directory.clone());
-        while std::fs::metadata(reports.frames()).map_or(0, |metadata| metadata.len()) < 20 * 8 {
+        while reports.write_count() < 20 {
             std::thread::sleep(Duration::from_millis(10));
         }
         app.recorder.stop();
@@ -276,11 +280,7 @@ struct Relaunched {
 async fn relaunch(directory: &Path) -> Relaunched {
     let store = Arc::new(Store::open(directory.join("steno.sqlite")).unwrap());
     let mut app = app_over_fakes(directory, &store, synthetic_capture());
-    app.live_recording_check = LiveRecordingCheck {
-        now: Arc::new(|| SystemTime::now() + Duration::from_secs(3_600)),
-        wait: Arc::new(|_| panic!("an old master is not waited for")),
-        ..LiveRecordingCheck::default()
-    };
+    app.live_recording_check = an_hour_later();
     let meetings = store.meetings(10, 0).unwrap();
     assert_eq!(meetings.len(), 1, "the child's one meeting");
     assert_eq!(meetings[0].state, MeetingState::Recording);
@@ -362,7 +362,7 @@ async fn a_kill_after_some_frames_recovers_them() {
     let reports = Reports(dir.path().to_path_buf());
     let mut child = spawn_child(dir.path(), Gate::None);
     kill_when(&mut child, dir.path(), "ten writes", || {
-        std::fs::metadata(reports.frames()).is_ok_and(|metadata| metadata.len() >= 10 * 8)
+        reports.write_count() >= 10
     });
     let written = reports.written();
     let recovered = assert_recovered(&relaunch(dir.path()).await, written);

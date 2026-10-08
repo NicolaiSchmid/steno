@@ -1,7 +1,7 @@
 //! What the unit tests share: a store in a temp directory, the
 //! pipeline's dependencies over core's fakes, the app's graph over them,
-//! frames for a recording writer, and the waits that fail a test instead
-//! of hanging it.
+//! frames for a recording writer, a live check that counts every master
+//! old, and the waits that fail a test instead of hanging it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,6 +144,16 @@ pub fn app_over_fakes(
         live_recording_check: crate::recovery::LiveRecordingCheck::default(),
         launch_work: std::sync::Mutex::default(),
         database_lock: None,
+    }
+}
+
+/// A live check whose clock reads an hour after now: every master is a
+/// crash's, and none is waited for.
+pub fn an_hour_later() -> crate::recovery::LiveRecordingCheck {
+    crate::recovery::LiveRecordingCheck {
+        now: Arc::new(|| std::time::SystemTime::now() + Duration::from_secs(3_600)),
+        wait: Arc::new(|_| panic!("an old master is not waited for")),
+        ..crate::recovery::LiveRecordingCheck::default()
     }
 }
 

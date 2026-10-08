@@ -1045,8 +1045,7 @@ mod tests {
     async fn launch_recovers_a_recording_the_last_process_left() {
         let (dir, store) = crate::testing::temp_store();
         let mut app = recording_app(&dir, &store);
-        app.live_recording_check.now =
-            Arc::new(|| std::time::SystemTime::now() + std::time::Duration::from_secs(3_600));
+        app.live_recording_check = crate::testing::an_hour_later();
         let meeting = steno_pipeline::LocalRecordingIntake::over(
             store.clone(),
             app.pipeline.current(),
@@ -1192,18 +1191,10 @@ mod tests {
         );
     }
 
-    /// [`crate::testing::app_over_fakes`] under `dir`.
-    fn app_recording_with(
-        dir: &tempfile::TempDir,
-        store: &Arc<Store>,
-        make_session: crate::recorder::MakeCaptureSession,
-    ) -> App {
-        crate::testing::app_over_fakes(dir.path(), store, make_session)
-    }
-
-    /// [`app_recording_with`] over a synthetic tone.
+    /// [`crate::testing::app_over_fakes`] under `dir` over a synthetic
+    /// tone.
     fn recording_app(dir: &tempfile::TempDir, store: &Arc<Store>) -> App {
-        app_recording_with(dir, store, crate::testing::synthetic_capture())
+        crate::testing::app_over_fakes(dir.path(), store, crate::testing::synthetic_capture())
     }
 
     /// `app`'s host with the hook `App::launch` wires, without the launch's
@@ -1236,8 +1227,8 @@ mod tests {
         use steno_bridge::BridgeMethod;
         use steno_host::services::Recorder as _;
         let (dir, store) = temp_store();
-        let app = app_recording_with(
-            &dir,
+        let app = crate::testing::app_over_fakes(
+            dir.path(),
             &store,
             Arc::new(|_| Err("no capture device".to_owned())),
         );

@@ -456,7 +456,9 @@ mod tests {
 
     use super::*;
     use crate::pipeline::CurrentPipeline;
-    use crate::testing::{current_pipeline, fake_dependencies, temp_store, write_frames};
+    use crate::testing::{
+        an_hour_later, current_pipeline, fake_dependencies, temp_store, write_frames,
+    };
 
     struct Harness {
         dir: tempfile::TempDir,
@@ -515,16 +517,6 @@ mod tests {
 
         fn state(&self, meeting: &Meeting) -> MeetingState {
             self.store.meeting(meeting.id).unwrap().unwrap().state
-        }
-    }
-
-    /// A check whose clock reads an hour after now: every master is a
-    /// crash's, and none is waited for.
-    fn an_hour_later() -> LiveRecordingCheck {
-        LiveRecordingCheck {
-            now: Arc::new(|| SystemTime::now() + Duration::from_secs(3_600)),
-            wait: Arc::new(|_| panic!("an old master is not waited for")),
-            ..LiveRecordingCheck::default()
         }
     }
 
