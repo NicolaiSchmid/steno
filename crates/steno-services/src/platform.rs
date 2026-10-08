@@ -263,10 +263,10 @@ mod tests {
     }
 
     /// The disk's folder usage asks the durable writes about the folder's
-    /// drive: a test folder does not warn, and on Windows the FAT32 drive
-    /// CI mounts (`STENO_FAT32_VOLUME`) does.
+    /// drive: a test folder is not reported, and on Windows the FAT32 drive
+    /// CI mounts (`STENO_FAT32_VOLUME`) is.
     #[test]
-    fn the_disk_folder_usage_warns_only_on_a_drive_that_may_lose_recent_writes() {
+    fn the_disk_folder_usage_reports_a_drive_that_may_lose_recent_writes() {
         let directory = tempfile::tempdir().unwrap();
         assert!(!DiskFolderUsage.may_lose_recent_writes(directory.path()));
         if cfg!(windows)

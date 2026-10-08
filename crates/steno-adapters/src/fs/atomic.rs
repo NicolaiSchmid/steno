@@ -87,7 +87,8 @@ impl AtomicFileWriter {
             }
         }
         opened
-            .and_then(|file| file.sync_all())
+            .map_err(|error| Self::failure(target, "open", &error))?
+            .sync_all()
             .map_err(|error| Self::failure(target, "fsync", &error))
     }
 

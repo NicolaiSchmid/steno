@@ -280,7 +280,7 @@ jobs:
             on_a_fat32_drive_the_intake_writes_succeed_and_settings_warn
             on_an_exfat_drive_the_intake_writes_succeed_and_settings_warn
           )
-          usage=the_disk_folder_usage_warns_only_on_a_drive_that_may_lose_recent_writes
+          usage=the_disk_folder_usage_reports_a_drive_that_may_lose_recent_writes
           cargo test --workspace --lib --locked -- --exact --nocapture \
             "files::tests::${tests[0]}" "files::tests::${tests[1]}" \
             "platform::tests::$usage" 2>&1 | tee "$log"

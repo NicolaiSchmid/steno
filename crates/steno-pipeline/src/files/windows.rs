@@ -94,7 +94,7 @@ pub(super) fn flush_directory(directory: &Path) -> io::Result<()> {
             tracing::warn!(
                 folder = %directory.display(),
                 %error,
-                "the drive does not flush folders; the flush of the renamed file makes the write durable"
+                "the drive does not flush folders; passed over"
             );
             Ok(())
         }

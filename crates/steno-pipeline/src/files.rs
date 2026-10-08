@@ -2,14 +2,15 @@
 //! `preferences.json`, the CLI's `meeting.json`; Swift:
 //! `Data.write(to:options: .atomic)`), copying a recording so it survives a
 //! power loss (the phone intake), creating folders whose entries survive
-//! one, and reading and writing a JSON file this process owns, set aside
-//! when it does not parse (`preferences.json`, `export-retries.json`).
-//! The services and the CLI use these too, so there is one implementation.
-//! On Windows a folder flush alone does not make a rename durable (the FAT
-//! driver treats one as a no-op), so the renames are written through and
-//! the renamed file is flushed as well as the folders (`windows`);
-//! [`may_lose_recent_writes`] tells Settings about a drive where that may
-//! not be enough.
+//! one (a new meeting folder among them), and reading and writing a JSON
+//! file this process owns, set aside when it does not parse
+//! (`preferences.json`, `export-retries.json`). The services and the CLI
+//! use these too, so there is one implementation. On Windows a folder
+//! flush alone does not make a rename durable (the FAT driver treats a
+//! flush of a folder other than the drive's root as a no-op), so the
+//! renames are written through and the renamed file is flushed as well as
+//! the folders (`windows`); [`may_lose_recent_writes`] tells Settings about
+//! a drive where that may not be enough.
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -103,7 +104,8 @@ const STALE_AFTER: Duration = Duration::from_secs(60);
 /// old file or the new one, never a torn one, and two writers into one
 /// folder never share a temporary. The sync comes before the rename, so a
 /// crash cannot leave the new name over empty or partly written data; the
-/// folder is synced after it, so the rename itself survives a crash. A
+/// folder is synced after it (on Windows the rename is written through and
+/// the renamed file flushed), so the rename itself survives a crash. A
 /// failure removes the temporary; temporaries a killed writer left behind
 /// are removed by a later write once they are a minute old.
 pub fn replace_file(path: &Path, data: &[u8], access: Access) -> std::io::Result<()> {
@@ -129,7 +131,10 @@ fn copy_durably_with(syncs: &dyn Syncs, source: &Path, destination: &Path) -> st
 }
 
 /// `std::fs::create_dir_all`, with the parent of every folder it creates
-/// synced, so the new folders themselves survive a power loss.
+/// synced, so the new folders themselves survive a power loss. On Windows a
+/// failed folder flush is an error, and on a FAT drive the folders are on
+/// the disk only once a file written into them is flushed
+/// ([`copy_durably`]).
 pub fn create_dir_all_durably(directory: &Path) -> std::io::Result<()> {
     create_dir_all_durably_with(&Disk, directory)
 }
@@ -864,9 +869,10 @@ mod tests {
     }
 
     /// The product's folder creation and copy on a FAT32 or an exFAT
-    /// drive: both succeed (the FAT driver treats a flush of a folder other
-    /// than the drive's root as a no-op, and flushes the renamed file with
-    /// its folders), a folder made at the drive's root flushes the root,
+    /// drive: both succeed (on FAT32 the driver treats a flush of a folder
+    /// other than the drive's root as a no-op, and flushes the renamed file
+    /// with its folders; on exFAT CI shows the same), a folder made at the
+    /// drive's root flushes the root,
     /// and Settings warns. So the intake does not answer 500 there. CI's
     /// Windows job mounts both drives and names them in
     /// `STENO_FAT32_VOLUME` and `STENO_EXFAT_VOLUME`; without one the test
