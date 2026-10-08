@@ -348,7 +348,8 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
 /// the move is a rename, which replaces a taken name, so a check that the
 /// name is free comes first and is all that guards it there. If the old
 /// name cannot be removed after the link, the error is returned and both
-/// names hold the bytes.
+/// names hold the bytes. On Windows that removal and the rename are tried
+/// again while the file is busy (`steno_core::busy_file`).
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
@@ -367,7 +368,7 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
         };
         match std::fs::hard_link(path, &candidate) {
             Ok(()) => {
-                std::fs::remove_file(path)?;
+                retried(&Disk, || std::fs::remove_file(path))?;
                 break candidate;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
@@ -377,7 +378,7 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
             // read-only folder), the rename fails the same way.
             Err(_) => match candidate.symlink_metadata() {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::rename(path, &candidate)?;
+                    rename_with_std(&Disk, path, &candidate)?;
                     break candidate;
                 }
                 Err(error) => return Err(error),
