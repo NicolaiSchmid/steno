@@ -565,8 +565,8 @@ fn in_person_records_only_the_microphone_by_its_uid() {
     stop_and_check_teardown(&backend, &sink);
 }
 
-/// The test microphone, standing in for a chosen one that is missing.
-fn test_mic_standing_in() -> CaptureInput {
+/// The test microphone, as the fallback for a chosen one that is missing.
+fn test_mic_as_the_fallback() -> CaptureInput {
     CaptureInput {
         uid: MIC.to_owned(),
         name: Some("Steno test microphone".to_owned()),
@@ -583,10 +583,10 @@ fn an_unknown_microphone_records_the_default_source_and_follows_it() {
     let backend = Arc::new(LiveCaptureBackend::new());
     // A Core Audio UID, as a settings file synced from a Mac holds.
     let stream = start(&backend, &lanes, Some("BuiltInMicrophoneDevice"), &sink).expect("start");
-    assert_eq!(stream.input, Some(test_mic_standing_in()));
+    assert_eq!(stream.input, Some(test_mic_as_the_fallback()));
     let audio = collect(&sink, 24_000);
     assert_tone(&audio[0], MIC_TONE, SINK_TONE, "the default source");
-    // Standing in, the capture follows the default as one without a UID.
+    // On the fallback, the capture follows the default as one without a UID.
     let other = TemporaryMic::create("steno-test-mic-default");
     let _restore = DefaultSource;
     DefaultSource::set(other.name);
@@ -607,7 +607,7 @@ fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
     let (sink, reasons) = reporting_sink(&lanes);
     let backend = Arc::new(LiveCaptureBackend::new());
     let stream = start(&backend, &lanes, Some(LATER), &sink).expect("start");
-    assert_eq!(stream.input, Some(test_mic_standing_in()));
+    assert_eq!(stream.input, Some(test_mic_as_the_fallback()));
     LOGS.lock().unwrap().clear();
     let later = TemporaryMic::create(LATER);
     assert_eq!(
@@ -688,6 +688,27 @@ fn session_choosing_the_stalled_source(directory: &Path) -> CaptureSession {
         Arc::new(SystemClock::new()),
     )
     .expect("the session")
+}
+
+/// A chosen source that is linked but whose graph never runs fails the
+/// start with [`CaptureError::DidNotRun`], the error the session answers by
+/// trying the default at once, and leaves the backend ready to start again.
+#[test]
+#[ignore = "needs a PipeWire daemon; run under scripts/pipewire-headless.sh with -- --ignored"]
+fn a_chosen_source_that_does_not_run_fails_the_start_as_did_not_run() {
+    let lanes = [AudioLane::Mixed];
+    let sink = Arc::new(LaneFrameSink::new(&lanes));
+    let backend = Arc::new(LiveCaptureBackend::new());
+    {
+        let _stalled = StalledSource::create();
+        let started = start(&backend, &lanes, Some(StalledSource::NAME), &sink);
+        assert!(
+            matches!(started, Err(CaptureError::DidNotRun(_))),
+            "the first cycle's deadline: {started:?}"
+        );
+    }
+    start(&backend, &lanes, None, &sink).expect("the default after the failure");
+    stop(&backend);
 }
 
 /// A chosen source that is connected but does not run never costs the
