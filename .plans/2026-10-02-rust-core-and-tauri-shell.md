@@ -730,7 +730,8 @@ still has to draw the window side. `[ ]` is not ported yet.
 - [ ] Meeting detection (`DetectionController`: one prompt at a time, suppressed while
   recording or when the setting is off): WP5.
 - [x] Retention sweep at launch and after `retentionApplied`, interrupted recordings
-  marked failed at launch, unfinished processing resumed at launch
+  recovered from their master at launch or, with none on disk, marked failed
+  (`steno_services::recovery`), unfinished processing resumed at launch
   (`steno_services::App::launch`).
 - [ ] Pending speaker reviews (`speakersNeedReview`): the pipeline posts the event and
   the host republishes `progress`; the tray (WP8) shows no badge for it; it follows the
@@ -1040,8 +1041,11 @@ still has to draw the window side. `[ ]` is not ported yet.
   (`CodexCredentialStore::stored`), as Swift's `refreshCodexStatus` read it. The
   calls still block the bridge call that made them, as Swift's awaited calls held the
   window's task.
-- A meeting a previous process left recording fails at launch with Swift's "Recording
-  was interrupted before it finished." (`Store::INTERRUPTED_RECORDING_REASON`).
+- A meeting a previous process left recording is recovered at launch from its master
+  on disk and queued with the end reason `failed` (`steno_services::recovery`; Rust
+  only). Only when every audio folder it may be in is readable and none holds its
+  master does it fail, with Swift's "Recording was interrupted before it finished."
+  (`Store::INTERRUPTED_RECORDING_REASON`).
 - A recording start warms the pipeline up only when the models of the current
   pipeline's engine and the diarizer's are installed (`SpeechModels::engine_installed`),
   so it never downloads, as Swift's `warmUpPipelineIfModelsInstalled`.
