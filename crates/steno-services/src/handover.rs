@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use steno_core::protocols::BoundaryResult;
 use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store};
@@ -140,19 +140,15 @@ impl ListenerHandover {
 
     /// Why a waiting handover still has no listener.
     pub fn still_waiting(&self, reason: String) {
-        *self
-            .waiting
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = reason;
+        *self.reason() = reason;
+    }
+
+    fn reason(&self) -> MutexGuard<'_, String> {
+        self.waiting.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn unavailable(&self) -> String {
-        format!(
-            "Phone handover is unavailable: {}",
-            self.waiting
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        )
+        format!("Phone handover is unavailable: {}", self.reason())
     }
 }
 

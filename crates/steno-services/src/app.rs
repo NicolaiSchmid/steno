@@ -297,20 +297,16 @@ fn handover_listener(
     runtime: &tokio::runtime::Handle,
 ) -> Result<Arc<ListenerHandover>, String> {
     HandoverService::checkpoint_store(store).map_err(|error| error.to_string())?;
-    match listener_over_identity(store, pipeline, secrets, paths, zone, runtime) {
-        Ok((service, mac_id)) => Ok(Arc::new(ListenerHandover::over(
-            service,
-            mac_id,
-            store.clone(),
-            runtime.clone(),
-        ))),
-        Err(error) if waits_on_the_keyring(&error) => Ok(Arc::new(ListenerHandover::waiting(
-            error.to_string(),
-            store.clone(),
-            runtime.clone(),
-        ))),
-        Err(error) => Err(error.to_string()),
-    }
+    let handover = match listener_over_identity(store, pipeline, secrets, paths, zone, runtime) {
+        Ok((service, mac_id)) => {
+            ListenerHandover::over(service, mac_id, store.clone(), runtime.clone())
+        }
+        Err(error) if waits_on_the_keyring(&error) => {
+            ListenerHandover::waiting(error.to_string(), store.clone(), runtime.clone())
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(Arc::new(handover))
 }
 
 /// The listener over the identity the secret store holds, or one minted
@@ -743,8 +739,8 @@ impl App {
         self.recorder.stop_for_quit();
         if let Some(handover) = self
             .handover
-            .as_ref()
-            .and_then(|handover| handover.listener())
+            .as_deref()
+            .and_then(ListenerHandover::listener)
         {
             block_on(&self.runtime, handover.stop());
         }
@@ -875,10 +871,10 @@ impl App {
         }
         if let Some(handover) = self
             .handover
-            .as_ref()
-            .and_then(|handover| handover.listener())
+            .as_deref()
+            .and_then(ListenerHandover::listener)
+            .cloned()
         {
-            let handover = handover.clone();
             tokio::spawn(async move { start_if_paired(&handover).await });
         }
         host.store_changed();
