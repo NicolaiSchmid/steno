@@ -1451,6 +1451,57 @@ fn recording_follows_the_recorder_and_the_start_selects_the_live_row() {
     assert_eq!(harness.host.next_flush_due(), None);
 }
 
+/// The web app tells a live `recording` row from one a failed save left by
+/// the recorder's state, so the list follows the recorder: when its state
+/// or meeting moves (here a stop that queued its meeting), the list is
+/// reloaded and published at once, not at the next store change; a level
+/// update alone reloads nothing. Rust only.
+#[test]
+fn the_list_follows_the_recorders_state_and_meeting() {
+    let mut row = meeting(
+        1,
+        "Call",
+        TitleOrigin::Default,
+        NOW,
+        60.0,
+        MeetingSource::MacCall,
+        &[],
+        MeetingState::Recording,
+        None,
+    );
+    let seeded = row.clone();
+    let harness = Harness::builder()
+        .seed(move |store, _| store.save_meeting(&seeded).unwrap())
+        .build();
+    harness
+        .fakes
+        .recorder
+        .set_status(steno_host::services::RecorderStatus {
+            state: RecordingState::Recording,
+            meeting_id: Some(uuid(1)),
+            ..steno_host::services::RecorderStatus::idle()
+        });
+    harness.host.recorder_changed();
+    harness.sink.clear();
+    harness.host.recorder_changed();
+    assert_eq!(
+        harness.sink.count(BridgeTopic::MeetingsList),
+        0,
+        "levels alone"
+    );
+
+    // The stop queued the meeting, then the recorder went idle.
+    row.state = MeetingState::Queued;
+    harness.store.save_meeting(&row).unwrap();
+    harness
+        .fakes
+        .recorder
+        .set_status(steno_host::services::RecorderStatus::idle());
+    harness.host.recorder_changed();
+    let list = harness.sink.last(BridgeTopic::MeetingsList).unwrap();
+    assert_eq!(list["groups"][0]["meetings"][0]["state"], "queued");
+}
+
 /// Swift: `DisplayTitleTests`.
 #[test]
 fn derived_titles_read_weekday_or_month_day_and_time() {

@@ -208,6 +208,9 @@ struct Inner {
     subtitles: BTreeMap<SettingsSection, String>,
     onboarding: OnboardingViewModel,
     publisher: TopicPublisher,
+    /// The recorder's state and meeting at its last change, so the list is
+    /// reloaded when they move and not with every level update.
+    recorder_seen: Option<(RecordingState, Option<Uuid>)>,
 }
 
 /// What every clone of a [`Host`] shares: the store, the services, the
@@ -430,6 +433,7 @@ impl Host {
                 subtitles,
                 onboarding,
                 publisher,
+                recorder_seen: None,
             }),
             sink: Mutex::new(None),
             publishing: Mutex::new(()),
@@ -767,10 +771,26 @@ impl Host {
         self.publish();
     }
 
-    /// The recorder's state, levels or messages changed.
+    /// The recorder's state, levels or messages changed. When its state or
+    /// its meeting moved, the list is reloaded as for
+    /// [`Self::store_changed`]: a start wrote the meeting `recording`, a
+    /// stop queued it, and the list must not wait for the next change to
+    /// show it, since the web app tells a live row from one left
+    /// `recording` by the recorder's state. Rust only: the Swift app's list
+    /// observes the meeting table (`observeMeetings`).
     pub fn recorder_changed(&self) {
-        self.lock().publisher.schedule(BridgeTopic::Recording);
-        self.publish();
+        let status = self.shared.services.recorder.status();
+        let seen = Some((status.state, status.meeting_id));
+        let moved = {
+            let mut inner = self.lock();
+            inner.publisher.schedule(BridgeTopic::Recording);
+            std::mem::replace(&mut inner.recorder_seen, seen) != seen
+        };
+        if moved {
+            self.store_changed();
+        } else {
+            self.publish();
+        }
     }
 
     /// One event from the pipeline's bus.
