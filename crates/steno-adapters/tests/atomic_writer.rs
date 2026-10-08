@@ -141,3 +141,31 @@ fn a_missing_parent_directory_fails_naming_the_target() {
     assert!(error.underlying.starts_with("open"));
     assert_eq!(list(directory.path()), Vec::<String>::new());
 }
+
+/// On Windows a target another handle holds without sharing its deletion
+/// (a sync or antivirus client) refuses the rename past its retries: the
+/// write fails, the target keeps its bytes and no temporary is left.
+#[cfg(windows)]
+#[test]
+fn a_target_held_past_the_retries_fails_and_keeps_its_bytes() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    /// `FILE_SHARE_READ | FILE_SHARE_WRITE`, without `FILE_SHARE_DELETE`.
+    const SHARE_READ_WRITE: u32 = 0x1 | 0x2;
+    let directory = temp_dir("atomic-held");
+    let target = directory.path().join("note.md");
+    AtomicFileWriter::write(b"keep\n", &target).unwrap();
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(SHARE_READ_WRITE)
+        .open(&target)
+        .unwrap();
+    let error = AtomicFileWriter::write(b"new\n", &target).unwrap_err();
+    drop(holder);
+    assert!(
+        error.underlying.starts_with("rename"),
+        "{}",
+        error.underlying
+    );
+    assert_eq!(fs::read(&target).unwrap(), b"keep\n");
+    assert_eq!(list(directory.path()), ["note.md"]);
+}

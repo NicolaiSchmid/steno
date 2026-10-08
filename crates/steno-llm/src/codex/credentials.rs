@@ -818,8 +818,9 @@ impl CodexCredentialStore {
         ))
     }
 
-    /// Temp file beside the target with mode 0600, synced, then `rename`,
-    /// then the folder synced: readers see the old or the new file, never
+    /// Temp file beside the target with mode 0600, synced, then `rename`
+    /// (tried again on Windows while the file is busy,
+    /// `steno_core::busy_file`), then the folder synced: readers see the old or the new file, never
     /// a partial one, the mode never opens up on the way, and, where both
     /// syncs succeed, the new tokens survive a power loss. A temporary
     /// that could not be written whole holds no usable copy and is
@@ -857,8 +858,10 @@ impl CodexCredentialStore {
             });
         }
         // A `codex login` that lands between the caller's read and this
-        // rename is replaced; only a file lock would close that window.
-        if let Err(error) = std::fs::rename(&temporary, self.file_path()) {
+        // rename is replaced; only a file lock would close that window. On
+        // Windows the rename is tried again while another handle (the Codex
+        // CLI, a sync or antivirus client) holds the file for a moment.
+        if let Err(error) = steno_core::busy_file::rename(&temporary, &self.file_path()) {
             return Err(WriteFailure {
                 detail: format!(
                     "could not replace the Codex sign-in file: {error}; the new sign-in is left in {}",
