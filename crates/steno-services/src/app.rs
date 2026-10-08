@@ -367,16 +367,16 @@ fn lock_or_run_without(
 /// The listener's configuration: the default, and in this crate's tests
 /// loopback only, unadvertised, with the inbox under the test's support
 /// directory.
-#[cfg_attr(not(test), allow(unused_variables))]
 fn listener_configuration(paths: &StenoPaths) -> steno_handover::HandoverConfiguration {
     let configuration = steno_handover::HandoverConfiguration::default();
-    #[cfg(test)]
-    let configuration = steno_handover::HandoverConfiguration {
+    if !cfg!(test) {
+        return configuration;
+    }
+    steno_handover::HandoverConfiguration {
         advertise: false,
         inbox_directory: paths.support_directory.join("handover-inbox"),
         ..configuration
-    };
-    configuration
+    }
 }
 
 /// Whether the identity could not be read because the keyring was asking
@@ -2025,7 +2025,11 @@ mod tests {
         };
         assert!(reason.contains("waiting for an answer"), "{reason}");
         assert!(steno_host::services::Handover::start(handover.as_ref()).is_err());
-        assert!(asked.secrets.inner.keys().len() == 1, "nothing minted");
+        assert_eq!(
+            asked.secrets.inner.keys(),
+            [SecretKey::llm_api_key()],
+            "nothing minted"
+        );
         assert_eq!(*asked.keys_read.lock().unwrap(), [None]);
         let summaries = asked.snapshot(steno_bridge::BridgeTopic::SettingsSummaries);
         assert_eq!(summaries["hasAPIKey"], false);
