@@ -348,7 +348,7 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
 /// the move is a rename, which replaces a taken name, so a check that the
 /// name is free comes first and is all that guards it there. If the old
 /// name cannot be removed after the link, the error is returned and both
-/// names hold the bytes. On Windows that removal and the rename are tried
+/// names hold the bytes; an old name already gone is no error. On Windows that removal and the rename are tried
 /// again while the file is busy (`steno_core::busy_file`).
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
@@ -367,10 +367,12 @@ pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
             path.with_file_name(format!("{base}-{attempt}"))
         };
         match std::fs::hard_link(path, &candidate) {
-            Ok(()) => {
-                retried(&Disk, || std::fs::remove_file(path))?;
-                break candidate;
-            }
+            Ok(()) => match retried(&Disk, || std::fs::remove_file(path)) {
+                // The old name already gone (another `set_aside` removed
+                // it in between) still leaves the bytes at the link.
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+                _ => break candidate,
+            },
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => attempt += 1,
             // No hard link here (FAT, some network shares, a Linux that
             // protects links to files of other users), so fall back to a
