@@ -5,6 +5,11 @@
 //! one, and reading and writing a JSON file this process owns, set aside
 //! when it does not parse (`preferences.json`, `export-retries.json`).
 //! The services and the CLI use these too, so there is one implementation.
+//! On Windows, which cannot sync a folder, the renames are written through
+//! instead (`windows`).
+
+#[cfg(windows)]
+mod windows;
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
@@ -159,21 +164,34 @@ fn write_durably(
     Ok(())
 }
 
-/// `std::fs::rename`. Windows refuses to replace a file another writer is
-/// replacing at the same instant ("access denied"), so there a refusal is
-/// retried every 10 ms, 49 times at most (about half a second); elsewhere
-/// the rename is tried once.
+/// `std::fs::rename`, the caller's folder sync making it durable. Windows
+/// cannot sync a folder, so there the rename is written through first
+/// (`windows::rename_written_through`), and should that fail, std's rename
+/// is followed by a flush of the renamed file (`windows::flush`). Windows
+/// also refuses to replace a file another writer is replacing at the same
+/// instant ("access denied"), so there std's refusal is retried every
+/// 10 ms, 49 times at most (about half a second); elsewhere the rename is
+/// tried once.
 fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    if windows::rename_written_through(from, to).is_ok() {
+        return Ok(());
+    }
     let retries = if cfg!(windows) { 49 } else { 0 };
+    let mut renamed = std::fs::rename(from, to);
     for _ in 0..retries {
-        match std::fs::rename(from, to) {
+        match &renamed {
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 std::thread::sleep(Duration::from_millis(10));
+                renamed = std::fs::rename(from, to);
             }
-            outcome => return outcome,
+            _ => break,
         }
     }
-    std::fs::rename(from, to)
+    renamed?;
+    #[cfg(windows)]
+    windows::flush(to)?;
+    Ok(())
 }
 
 /// Removes this file's temporaries in `directory` that are older than
@@ -534,6 +552,41 @@ mod tests {
             temporaries(destination.parent().unwrap()),
             Vec::<String>::new()
         );
+    }
+
+    /// The product's copy replaces a file at the destination with the
+    /// source's bytes, leaves the source and no temporary; on Windows its
+    /// rename is the written-through one.
+    #[test]
+    fn a_durable_copy_replaces_the_destination_and_leaves_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("upload.m4a");
+        std::fs::write(&source, vec![7u8; 100_000]).unwrap();
+        let destination = dir.path().join("meeting").join("recording.m4a");
+        create_dir_all_durably(destination.parent().unwrap()).unwrap();
+        std::fs::write(&destination, b"an earlier copy").unwrap();
+        copy_durably(&source, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), vec![7u8; 100_000]);
+        assert_eq!(std::fs::read(&source).unwrap(), vec![7u8; 100_000]);
+        assert_eq!(
+            temporaries(destination.parent().unwrap()),
+            Vec::<String>::new()
+        );
+    }
+
+    /// A file another handle holds open is still replaced: on Windows the
+    /// written-through rename refuses it, and std's rename and the flush
+    /// after it take over.
+    #[test]
+    fn a_file_held_open_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preferences.json");
+        std::fs::write(&path, b"old").unwrap();
+        let reader = File::open(&path).unwrap();
+        replace_file(&path, b"new", Access::Default).unwrap();
+        drop(reader);
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        assert_eq!(temporaries(dir.path()), Vec::<String>::new());
     }
 
     /// A failure before the rename leaves no destination and no
