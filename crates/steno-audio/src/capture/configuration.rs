@@ -291,7 +291,7 @@ pub enum DeviceChangeReason {
     AudioServiceRestarted,
     /// The session asks again for the chosen microphone it replaced with
     /// the default input because the chosen one did not open
-    /// (`CaptureSession::FALLBACK_RECHECK`). Rust only.
+    /// (`CaptureSession::CHOSEN_INPUT_RECHECK`). Rust only.
     ChosenInputRecheck,
 }
 

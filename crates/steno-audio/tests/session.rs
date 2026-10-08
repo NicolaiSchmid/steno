@@ -4019,7 +4019,7 @@ fn a_gap_runs_from_the_last_frame_the_watch_thread_saw() {
 }
 
 /// A chosen microphone that did not open at the start: the session records
-/// the default in its place and, after `FALLBACK_RECHECK`, asks for the
+/// the default in its place and, after `CHOSEN_INPUT_RECHECK`, asks for the
 /// chosen one again. Still not opening, it stays on the default and waits
 /// twice as long before the next ask, which finds it and returns to it.
 #[test]
@@ -4035,7 +4035,7 @@ fn the_session_asks_again_for_a_chosen_microphone_it_replaced() {
     session.start(Uuid::new_v4()).unwrap();
     assert_eq!(input(), ChosenOrDefault::fallback());
 
-    advance_while_delivering(&clock, delivered, CaptureSession::FALLBACK_RECHECK);
+    advance_while_delivering(&clock, delivered, CaptureSession::CHOSEN_INPUT_RECHECK);
     assert_eq!(
         notices.recv_timeout(RECV).unwrap(),
         CaptureNotice::DeviceChanged(DeviceChangeReason::ChosenInputRecheck)
@@ -4050,11 +4050,11 @@ fn the_session_asks_again_for_a_chosen_microphone_it_replaced() {
     assert_eq!(backend.asked(), asked);
 
     backend.opens.store(true, Ordering::Relaxed);
-    advance_while_delivering(&clock, delivered, CaptureSession::FALLBACK_RECHECK);
+    advance_while_delivering(&clock, delivered, CaptureSession::CHOSEN_INPUT_RECHECK);
     assert!(clock.wait_for_sleepers(1));
     settle();
     assert!(notices.try_recv().is_err(), "the second ask waits 10 s");
-    advance_while_delivering(&clock, delivered, CaptureSession::FALLBACK_RECHECK);
+    advance_while_delivering(&clock, delivered, CaptureSession::CHOSEN_INPUT_RECHECK);
     assert_eq!(
         notices.recv_timeout(RECV).unwrap(),
         CaptureNotice::DeviceChanged(DeviceChangeReason::ChosenInputRecheck)
@@ -4066,7 +4066,11 @@ fn the_session_asks_again_for_a_chosen_microphone_it_replaced() {
     assert_eq!(input(), ChosenOrDefault::chosen(), "back on the chosen one");
 
     // On the chosen microphone nothing asks again.
-    advance_while_delivering(&clock, delivered, CaptureSession::FALLBACK_RECHECK_LONGEST);
+    advance_while_delivering(
+        &clock,
+        delivered,
+        CaptureSession::CHOSEN_INPUT_RECHECK_LONGEST,
+    );
     assert!(clock.wait_for_sleepers(1));
     settle();
     assert!(notices.try_recv().is_err());

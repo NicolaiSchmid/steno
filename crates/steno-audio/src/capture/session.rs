@@ -65,10 +65,10 @@
 //! backend spends coalescing a change is not lost from the master either.
 //! The same thread asks for the chosen microphone again
 //! ([`DeviceChangeReason::ChosenInputRecheck`]) once a recording has run
-//! [`CaptureSession::FALLBACK_RECHECK`] on the default input the session put
+//! [`CaptureSession::CHOSEN_INPUT_RECHECK`] on the default input the session put
 //! in its place, which no backend watches; each ask that finds it still
 //! not opening doubles the wait, up to
-//! [`CaptureSession::FALLBACK_RECHECK_LONGEST`]. All Rust only: Swift had
+//! [`CaptureSession::CHOSEN_INPUT_RECHECK_LONGEST`]. All Rust only: Swift had
 //! no watchdog.
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
@@ -349,12 +349,12 @@ struct Recheck {
 }
 
 impl Recheck {
-    /// The first ask after `FALLBACK_RECHECK`; after one that found the
+    /// The first ask after `CHOSEN_INPUT_RECHECK`; after one that found the
     /// chosen microphone still not opening, twice the wait, up to
-    /// `FALLBACK_RECHECK_LONGEST`.
+    /// `CHOSEN_INPUT_RECHECK_LONGEST`.
     fn after(previous: Option<Recheck>, now: Duration) -> Self {
-        let interval = previous.map_or(CaptureSession::FALLBACK_RECHECK, |previous| {
-            (previous.interval * 2).min(CaptureSession::FALLBACK_RECHECK_LONGEST)
+        let interval = previous.map_or(CaptureSession::CHOSEN_INPUT_RECHECK, |previous| {
+            (previous.interval * 2).min(CaptureSession::CHOSEN_INPUT_RECHECK_LONGEST)
         });
         Self {
             due: now + interval,
@@ -416,13 +416,15 @@ impl CaptureSession {
     pub const STALL_CHECK_INTERVAL: Duration = Duration::from_millis(100);
     /// How long a recording runs on the default input the session put in
     /// place of a chosen microphone that did not open before the session
-    /// asks for the chosen one again, as the live backends re-check a
-    /// chosen one that is missing. Rust only.
-    pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
+    /// asks for the chosen one again. The live backends' own
+    /// `FALLBACK_RECHECK` is another thing: how often they look for a
+    /// chosen microphone that is missing, which needs no restart. Rust
+    /// only.
+    pub const CHOSEN_INPUT_RECHECK: Duration = Duration::from_secs(5);
     /// The longest wait between those asks: each that finds the chosen
     /// microphone still not opening doubles the wait up to this, since each
     /// costs a gap (on Linux up to the 3 s start deadline). Rust only.
-    pub const FALLBACK_RECHECK_LONGEST: Duration = Duration::from_secs(80);
+    pub const CHOSEN_INPUT_RECHECK_LONGEST: Duration = Duration::from_secs(80);
     /// Frames the writer may fall behind the processing thread before
     /// frames are dropped and counted: 2000 (20 s) by default, so a disk
     /// that stalls for seconds (a slow sync, a sleeping external drive)
@@ -1575,7 +1577,7 @@ impl Core {
     /// statistics and the notice follow. A change reported during the
     /// rebuild starts the next one. `on_the_default` says the stream is the
     /// default input the session put in the chosen microphone's place,
-    /// which the watch thread asks for again (`FALLBACK_RECHECK`). `false`
+    /// which the watch thread asks for again (`CHOSEN_INPUT_RECHECK`). `false`
     /// when a stop came first.
     fn resume(
         self: &Arc<Self>,
