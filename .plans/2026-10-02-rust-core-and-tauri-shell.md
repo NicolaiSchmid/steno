@@ -1680,9 +1680,8 @@ parity item until a plan says otherwise:
   `RateConverter`, then the 3:1 FIR) stays under -60 dB below 8 kHz.
   FLEURS German through the 44.1 kHz path gives 5.02 % WER, through the
   48 kHz path 5.51 % (`steno-speech`'s `tests/fleurs.rs`, model gated);
-  FLEURS is 16 kHz, so that proves the passband, not the fold. Final as it
-  is unless Nicolai rejects the 7 to 8 kHz fold (open; a sharper sinc would
-  be an A-package; stable plan D9 and A9).
+  FLEURS is 16 kHz, so that proves the passband, not the fold. Final, the
+  fold included: Nicolai accepted it on 2026-10-08 (stable plan D9 and A9).
 - **The sidecar lags the master decode by one group delay.** The live
   16 kHz sidecar is the same FIR run causally, so its onset sits 32 samples
   (2 ms) after the master decode's; `decode` prefers the sidecar, so a
