@@ -79,19 +79,30 @@ extension MeetingStore {
 
   /// The phone intake's admission: the `.complete` receipt, the meeting,
   /// its asset and the admission's ledger row (`admittedMeeting`) in one
-  /// transaction, on the disk when it returns (`writeDurably`). The phone
-  /// deletes its copy once `complete` answers 200, so no commit may hold the
-  /// receipt without the meeting, and a power loss must not roll either
-  /// back. A ledger row of the same recording id, size and SHA-256 stays as
-  /// it is (`INSERT OR IGNORE`): the first admission of those bytes stands.
+  /// transaction, on the disk when it returns (`writeDurably`), and the
+  /// meeting the receipt was completed with. The phone deletes its copy once
+  /// `complete` answers 200, so no commit may hold the receipt without the
+  /// meeting, and a power loss must not roll either back.
+  ///
+  /// When the ledger already holds these bytes (the same recording id, size
+  /// and SHA-256) and their meeting still exists, the receipt is completed
+  /// with that meeting, `meeting` and `asset` are not written, and that
+  /// meeting's id comes back: the same bytes are one recording. Another
+  /// device's upload of them can reach the intake after the first admission
+  /// committed (it took the receipt over during that intake), and a second
+  /// meeting would be a duplicate. A row whose meeting the user deleted
+  /// stays as it is (`INSERT OR IGNORE`), and the admission writes
+  /// `meeting`.
+  ///
   /// Throws `MeetingStoreError.receiptOfAnotherUpload`, with nothing
   /// written, when the stored receipt belongs to another device than
   /// `receipt` or holds another size or SHA-256: completed, it would answer
   /// that device's `complete`, or the `complete` of the other bytes, with
   /// this meeting, and the phone would delete a recording never admitted.
   /// Rust: `Store::save_admission_durably`.
+  @discardableResult
   public func saveDurably(_ receipt: HandoverReceipt, meeting: Meeting, asset: AudioAsset)
-    async throws
+    async throws -> UUID
   {
     try await writeDurably { db in
       let stored = try HandoverReceiptRow
@@ -104,6 +115,20 @@ extension MeetingStore {
       {
         throw MeetingStoreError.receiptOfAnotherUpload(receipt.recordingID)
       }
+      let earlier = try HandoverAdmissionRow
+        .filter(HandoverAdmissionRow.Columns.recordingID == receipt.recordingID.uuidString)
+        .filter(HandoverAdmissionRow.Columns.byteCount == receipt.byteCount)
+        .filter(HandoverAdmissionRow.Columns.sha256 == receipt.sha256)
+        .fetchOne(db)?
+        .meetingID
+      if let earlier,
+        try MeetingRow.filter(MeetingRow.Columns.id == earlier.uuidString).fetchCount(db) > 0
+      {
+        var completed = receipt
+        completed.state = .complete(meetingID: earlier)
+        try HandoverReceiptRow(completed).save(db)
+        return earlier
+      }
       try MeetingRow(meeting).save(db)
       try AudioAssetRow(asset).save(db)
       try HandoverReceiptRow(receipt).save(db)
@@ -111,6 +136,7 @@ extension MeetingStore {
         recordingID: receipt.recordingID, byteCount: receipt.byteCount, sha256: receipt.sha256,
         meetingID: meeting.id, admittedAt: receipt.updatedAt
       ).insert(db, onConflict: .ignore)
+      return meeting.id
     }
   }
 

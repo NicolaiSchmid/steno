@@ -5,7 +5,8 @@ import Synchronization
 /// An intake that commits each admission as core's `RecordingIntake` does,
 /// without the copy: the `.complete` receipt, a meeting under a fresh id and
 /// its asset in one durable transaction, which writes the ledger row
-/// (`MeetingStore.saveDurably(_:meeting:asset:)`), and it refuses another
+/// (`MeetingStore.saveDurably(_:meeting:asset:)`), or the receipt alone with
+/// the meeting the ledger holds for the same bytes; it refuses another
 /// upload's receipt the same way. `holdNext(_:)` holds the next admission
 /// before or after its commit until `release()`, once. Rust: `StoreIntake`
 /// in `crates/steno-handover/tests/common/mod.rs`.
@@ -72,9 +73,11 @@ final class StoreIntake: HandoverIntake, Sendable {
     asset.id = UUID()
     asset.meetingID = meeting.id
     receipt.state = .complete(meetingID: meeting.id)
-    try await store.saveDurably(receipt, meeting: meeting, asset: asset)
-    committed.withLock { $0.append(meeting.id) }
+    let admitted = try await store.saveDurably(receipt, meeting: meeting, asset: asset)
+    if admitted == meeting.id {
+      committed.withLock { $0.append(meeting.id) }
+    }
     await wait(held, at: .afterTheCommit)
-    return meeting.id
+    return admitted
   }
 }

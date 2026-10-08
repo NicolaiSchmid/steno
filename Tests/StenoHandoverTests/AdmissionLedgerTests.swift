@@ -9,8 +9,9 @@ import Testing
 /// happened to its receipt (a revoke, a meeting delete, a line save after the
 /// intake's commit, a restart); other bytes under a recording id are a new
 /// recording; the same bytes in another split restart the partial; the same
-/// bytes from another device take the receipt over; and a late `complete` of
-/// replaced bytes never completes the new upload. The intake commits like the
+/// bytes from another device take the receipt over, and admitted twice are
+/// one meeting; and a late `complete` of replaced bytes never completes the
+/// new upload. The intake commits like the
 /// real one (`StoreIntake`), so the ledger row exists exactly when an
 /// admission committed. The design is
 /// `.plans/2026-10-08-handover-admission-ledger.md`. Rust:
@@ -289,6 +290,88 @@ import Testing
     #expect(try back.json(Wire.RecordingStatus.self).state == .complete)
     #expect(try await Self.completed(older, id) == meetingID)
     #expect(intake.meetings == [meetingID], "admitted once")
+    await test.stop()
+  }
+
+  @Test func aTakeoverDuringTheFirstAdmissionCompletesWithItsMeeting() async throws {
+    // The older device's `complete` is in the intake, past its commit, when
+    // the newer device announces the same bytes and takes the receipt over:
+    // its save puts the newer device's unfinished receipt over the
+    // `.complete` one. The partial went to the intake, so the newer device's
+    // `complete` finds none and its upload starts over. When it reaches the
+    // intake, the ledger holds those bytes, and its `complete` answers the
+    // first meeting: the same bytes are one recording, and a second meeting
+    // would be a duplicate. Rust:
+    // `a_takeover_during_the_first_admission_completes_with_its_meeting`.
+    let store = try MeetingStore.inMemory()
+    let intake = StoreIntake(store)
+    let test = try await Self.service(store, intake)
+    let older = try await Phone.pair(test.service)
+    let bytes = Phone.seededBytes(count: 2 * Self.chunkSize + 3, seed: 41)
+    let metadata = older.metadata(for: bytes, chunkSize: Self.chunkSize)
+    let id = metadata.recordingID
+    try await older.uploadAll(metadata, bytes)
+    let newer = try await Phone.pair(test.service)
+
+    intake.holdNext(.afterTheCommit)
+    async let first = older.complete(id)
+    await intake.held()
+    #expect(try await newer.announce(metadata).status == 200, "taken over")
+    intake.release()
+    let answer = try await first
+    #expect(answer.status == 200)
+    let meetingID = try answer.json(Wire.CompleteResponse.self).meetingID
+    #expect(
+      try await store.handoverReceipt(recordingID: id)?.state == .receiving,
+      "the takeover's save landed after the commit")
+    #expect(try await newer.complete(id).status == 409, "no partial left")
+
+    try await newer.uploadAll(metadata, bytes)
+    #expect(try await Self.completed(newer, id) == meetingID, "the first meeting")
+    #expect(intake.meetings == [meetingID], "admitted once")
+    #expect(
+      try await store.handoverReceipt(recordingID: id)?.state == .complete(meetingID: meetingID))
+    try await Self.delivered(test, older, metadata)
+    await test.stop()
+  }
+
+  @Test func admittedBytesOverAnotherDevicesUnfinishedUploadAreRefused() async throws {
+    // The phone's first file under the id was admitted. Another device then
+    // announced other bytes under the id, a new recording, and its upload is
+    // under way. The phone announces its admitted file again: answered
+    // `.complete`, it would replace the receipt of that upload, whose file is
+    // still on its way. It is answered 409 instead, that upload is left
+    // alone, and it completes as a meeting of its own. Rust:
+    // `admitted_bytes_over_another_devices_unfinished_upload_are_refused`.
+    let store = try MeetingStore.inMemory()
+    let intake = StoreIntake(store)
+    let test = try await Self.service(store, intake)
+    let phone = try await Phone.pair(test.service)
+    let first = Phone.seededBytes(count: 2 * Self.chunkSize, seed: 42)
+    let metadata = phone.metadata(for: first, chunkSize: Self.chunkSize)
+    let id = metadata.recordingID
+    try await phone.uploadAll(metadata, first)
+    let firstMeeting = try await Self.completed(phone, id)
+
+    let other = try await Phone.pair(test.service)
+    let otherBytes = Phone.seededBytes(count: 2 * Self.chunkSize, seed: 43)
+    let theirs = other.metadata(for: otherBytes, recordingID: id, chunkSize: Self.chunkSize)
+    let parts = Phone.chunks(of: otherBytes, size: Self.chunkSize)
+    #expect(try await other.announce(theirs).status == 201, "a new recording")
+    #expect(try await other.upload(id, chunk: 0, parts[0]).status == 204)
+
+    #expect(try await phone.announce(metadata).status == 409)
+    let receipt = try #require(try await store.handoverReceipt(recordingID: id))
+    #expect(receipt.deviceID == other.deviceID, "the other device's upload stays")
+    #expect(receipt.sha256 == theirs.sha256)
+    #expect(receipt.state == .receiving)
+    #expect(receipt.receivedChunks == [0])
+    #expect(test.service.engine.inbox.hasPartial(id), "and so does its partial")
+
+    #expect(try await other.upload(id, chunk: 1, parts[1]).status == 204)
+    let theirMeeting = try await Self.completed(other, id)
+    #expect(theirMeeting != firstMeeting)
+    #expect(intake.meetings == [firstMeeting, theirMeeting])
     await test.stop()
   }
 

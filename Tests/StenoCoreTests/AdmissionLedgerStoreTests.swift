@@ -45,8 +45,9 @@ import Testing
   /// and a meeting delete takes the meeting and the receipt, and both leave
   /// the row. Other bytes under the same recording id are a second admission
   /// with a row of their own, once their receipt replaced the first one; over
-  /// the first receipt they are refused. The same bytes admitted again keep
-  /// the first row. Rust:
+  /// the first receipt they are refused. The same bytes admitted again are
+  /// the meeting the ledger holds while it exists, and once it is deleted a
+  /// new meeting whose admission keeps the first row. Rust:
   /// `an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave`.
   @Test func anAdmissionWritesItsLedgerRow() async throws {
     let store = try MeetingStore.inMemory()
@@ -92,19 +93,23 @@ import Testing
     try await store.saveDurably(otherBytes, meeting: second, asset: secondAsset)
     let (sameBytes, third, thirdAsset) = Self.admission(503, sha256: 7)
     try await store.save(unfinished(sameBytes))
-    try await store.saveDurably(sameBytes, meeting: third, asset: thirdAsset)
+    #expect(
+      try await store.saveDurably(sameBytes, meeting: third, asset: thirdAsset) == meeting.id,
+      "the same bytes are the meeting the ledger holds")
+    #expect(try await store.meeting(id: third.id) == nil, "no second meeting")
+    #expect(
+      try await store.handoverReceipt(recordingID: id)?.state == .complete(meetingID: meeting.id))
     #expect(
       try await store.admittedMeeting(
         recordingID: id, byteCount: first.byteCount, sha256: Data(repeating: 8, count: 32))
         == second.id, "other bytes are an admission of their own")
-    #expect(
-      try await store.admittedMeeting(
-        recordingID: id, byteCount: first.byteCount, sha256: first.sha256) == meeting.id,
-      "the first admission of the same bytes stands")
 
-    try await store.delete(meetingID: third.id)
+    // Once the user deleted that meeting, the same bytes are admitted as a
+    // new one, and the first admission's row stands.
+    try await store.delete(meetingID: meeting.id)
     #expect(try await store.handoverReceipt(recordingID: id) == nil)
-    try await store.save(first)
+    try await store.save(unfinished(sameBytes))
+    #expect(try await store.saveDurably(sameBytes, meeting: third, asset: thirdAsset) == third.id)
     try await store.delete(deviceID: device.id)
     #expect(try await store.handoverReceipt(recordingID: id) == nil, "the revoke cascades")
     #expect(try await Self.ledgerRows(store).count == 2, "the ledger keeps both rows")

@@ -481,6 +481,50 @@ import Testing
     #expect(try await CommitLog.synchronous(of: store) == 1)
   }
 
+  /// The same bytes admitted under another device's receipt (it took the
+  /// receipt over while the first admission ran, and wrote it back
+  /// unfinished) are the meeting the ledger holds: the receipt is completed
+  /// with it, no second meeting is written or enqueued, and neither the copy
+  /// nor its folder stays. Rust:
+  /// `bytes_the_ledger_holds_are_admitted_as_their_meeting`.
+  @Test func bytesTheLedgerHoldsAreAdmittedAsTheirMeeting() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.inMemory()
+    let (settingsStore, audio) = try await Self.audioFolder(in: directory, for: store)
+    let enqueued = Enqueued()
+    let intake = RecordingIntake(
+      store: store, settings: settingsStore,
+      enqueue: { meeting, asset in await enqueued.record(meeting, asset) })
+    let metadata = SampleData.recordingMetadata()
+    let first = try await intake.admit(
+      file: try Self.upload(in: directory), metadata: metadata, device: SampleData.pairedDevice())
+    var newer = SampleData.pairedDevice()
+    newer.id = SampleData.uuid(190)
+    try await store.save(newer, tokenHash: Data(repeating: 2, count: 32))
+    var taken = try #require(try await store.handoverReceipt(recordingID: metadata.recordingID))
+    taken.deviceID = newer.id
+    taken.state = .receiving
+    try await store.save(taken)
+    let upload = try Self.upload(in: directory)
+
+    let again = try await intake.admit(file: upload, metadata: metadata, device: newer)
+
+    #expect(again == first, "the ledger's meeting")
+    #expect(try await store.meetings().map(\.id) == [first])
+    #expect(await enqueued.calls.count == 1, "nothing more is enqueued")
+    let receipt = try #require(try await store.handoverReceipt(recordingID: metadata.recordingID))
+    #expect(receipt.deviceID == newer.id)
+    #expect(receipt.state == .complete(meetingID: first))
+    #expect(
+      try Self.copies(in: audio).map(\.lastPathComponent) == ["recording.m4a"],
+      "the second copy is gone")
+    #expect(
+      try FileManager.default.contentsOfDirectory(atPath: audio.path)
+        == [first.uuidString], "and so is its folder")
+    #expect(!FileManager.default.fileExists(atPath: upload.path))
+  }
+
   /// A `.complete` receipt whose meeting is gone (the separate receipt and
   /// meeting commits of earlier releases, with a crash or a full disk
   /// between them) is not an idempotent return: the intake admits the file
