@@ -884,10 +884,10 @@ impl ProcessingPipeline {
     /// app [`MAX_CRASHED_RUNS`] times ([`crate::crash_loop`]), with
     /// [`TOO_MANY_CRASHED_RUNS`]; its audio is kept, and a retention
     /// stamp an earlier run left is cleared so the sweep keeps it too. A
-    /// meeting with any such run waits, then runs alone, so a crash is
-    /// charged to the one run in flight. Returns the meetings whose
-    /// processing was started, those that wait last: none once the
-    /// pipeline [quits](Self::quit).
+    /// meeting with any such run waits, then runs alone, so its crashes
+    /// are charged to it, not to the meetings waiting behind it. Returns
+    /// the meetings whose processing was started, those that wait last:
+    /// none once the pipeline [quits](Self::quit).
     pub fn resume_unfinished(&self) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
@@ -2198,7 +2198,7 @@ enum Turn {
     /// After every run the launch started at once, and one at a time,
     /// oldest first: a meeting with runs that ended with the app waits for
     /// the launch's write guard and is counted only when it has it, so a
-    /// crash is charged to the run in flight and not to the meetings
+    /// crash is charged to the run that is running and not to the meetings
     /// waiting behind it.
     Alone(oneshot::Receiver<OwnedRwLockWriteGuard<()>>),
 }

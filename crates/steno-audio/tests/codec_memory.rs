@@ -7,7 +7,7 @@
 //! per thread and the harness runs tests on several.
 //!
 //! The lanes are a minute long by default; `STENO_CODEC_MEMORY_SECONDS`
-//! sets the master's length (7 200 for the two-hour figure in the plan).
+//! sets the master's length (7 200 for a two-hour master).
 //! Files go under the target dir's scratch directory and are deleted at
 //! the end.
 

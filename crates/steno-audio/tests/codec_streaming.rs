@@ -2,8 +2,8 @@
 //! (`tests/whole_file/`, kept verbatim): every lane, every mixdown and
 //! every error must come out bit for bit the same. The inputs cover what
 //! the decoder meets: the recording writer's two-lane 48 kHz CAF with its
-//! sidecars, an unfinished master, CAF and WAV at 8, 16, 22.05, 44.1, 48
-//! and 96 kHz, mono and stereo, 16-bit and float, lengths around the FIR's
+//! sidecars, an unfinished master, CAF (Float32) and WAV (16-bit and
+//! float) at 8, 16, 22.05, 44.1, 48 and 96 kHz, mono and stereo, lengths around the FIR's
 //! 480-sample frame and the decoder's 32 768-frame block, an empty file,
 //! the phone's AAC and MP3 fixtures, and sidecars that are missing, empty,
 //! unfinished or the wrong shape. With `STENO_FLEURS_DIR` set the FLEURS
