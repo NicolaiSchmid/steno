@@ -240,7 +240,23 @@ fn a_busy_meeting_cannot_be_deleted() {
         store.delete_meeting(meeting.id),
         Err(StoreError::MeetingBusy(_, MeetingStateKind::Processing))
     ));
+    assert!(matches!(
+        store.delete_meeting_left_recording(meeting.id),
+        Err(StoreError::MeetingBusy(_, MeetingStateKind::Processing))
+    ));
     assert_eq!(count(&store, "meeting"), 1);
+
+    // A recording row: refused by the plain delete, removed by the one for
+    // a meeting left `recording` (Rust only).
+    meeting.state = MeetingState::Recording;
+    store.save_meeting(&meeting).unwrap();
+    assert!(matches!(
+        store.delete_meeting(meeting.id),
+        Err(StoreError::MeetingBusy(_, MeetingStateKind::Recording))
+    ));
+    assert_eq!(count(&store, "meeting"), 1);
+    store.delete_meeting_left_recording(meeting.id).unwrap();
+    assert_eq!(count(&store, "meeting"), 0);
 }
 
 #[test]

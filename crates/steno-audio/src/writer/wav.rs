@@ -178,7 +178,7 @@ impl WavStreamWriter {
         file.seek(SeekFrom::Start(0)).map_err(io)?;
         file.write_all(&Self::header(sample_rate, samples))
             .map_err(io)?;
-        durable::sync(&file, File::sync_all).map_err(io)?;
+        durable::sync(&file, FullSyncs::DISK.close).map_err(io)?;
         Ok(samples)
     }
 

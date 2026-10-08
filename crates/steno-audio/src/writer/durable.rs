@@ -133,6 +133,21 @@ mod tests {
         }
     }
 
+    /// The product's full syncs are the ones the module doc names: the
+    /// counting tests of the writers swap them, so this pins what they
+    /// stand in for.
+    #[test]
+    fn the_disks_full_syncs_are_sync_data_then_sync_all() {
+        assert!(std::ptr::fn_addr_eq(
+            FullSyncs::DISK.periodic,
+            File::sync_data as SyncFn
+        ));
+        assert!(std::ptr::fn_addr_eq(
+            FullSyncs::DISK.close,
+            File::sync_all as SyncFn
+        ));
+    }
+
     /// The syncs and the fallback this platform has, on a real file: on
     /// the Mac this passes with the temporary directory on a WebDAV mount.
     #[test]

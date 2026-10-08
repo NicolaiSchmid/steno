@@ -39,6 +39,8 @@ use crate::testing::{an_hour_later, app_over_fakes, synthetic_capture, synthetic
 const DIRECTORY: &str = "STENO_KILL_TEST_DIRECTORY";
 /// The child's [`Gate`].
 const GATE: &str = "STENO_KILL_TEST_GATE";
+/// The test's process id, which the child watches as its parent's.
+const PARENT: &str = "STENO_KILL_TEST_PARENT";
 
 /// Where the child's writer waits to be killed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +48,7 @@ enum Gate {
     /// In the first write, after the writer created the files.
     FirstWrite,
     /// Nowhere: the test kills it once frames are on disk.
-    None,
+    Open,
     /// In the stop, after the writer's finish and before the save.
     AfterFinish,
 }
@@ -55,13 +57,13 @@ impl Gate {
     fn name(self) -> &'static str {
         match self {
             Gate::FirstWrite => "first-write",
-            Gate::None => "none",
+            Gate::Open => "open",
             Gate::AfterFinish => "after-finish",
         }
     }
 
     fn named(name: &str) -> Self {
-        [Gate::FirstWrite, Gate::None, Gate::AfterFinish]
+        [Gate::FirstWrite, Gate::Open, Gate::AfterFinish]
             .into_iter()
             .find(|gate| gate.name() == name)
             .expect("a known gate")
@@ -186,13 +188,14 @@ fn gated_capture(gate: Gate, reports: &Path) -> MakeCaptureSession {
 /// process that dies before its child.
 const CHILD_LIFETIME: Duration = Duration::from_secs(180);
 
-/// Ends this process once its parent is gone (on Unix its parent id
-/// changes: the orphan is adopted) or [`CHILD_LIFETIME`] is up, so a killed
-/// or failed test leaves no recorder behind holding memory or a build slot.
+/// Ends this process once its parent is gone (on Unix its parent id is no
+/// longer the test's, passed in [`PARENT`]: the orphan is adopted, even
+/// before the child got here) or [`CHILD_LIFETIME`] is up, so a killed or
+/// failed test leaves no recorder behind holding memory or a build slot.
 fn die_with_the_parent() {
     let deadline = Instant::now() + CHILD_LIFETIME;
     #[cfg(unix)]
-    let parent = std::os::unix::process::parent_id();
+    let parent: u32 = std::env::var(PARENT).unwrap().parse().unwrap();
     std::thread::spawn(move || {
         loop {
             #[cfg(unix)]
@@ -271,6 +274,7 @@ fn spawn_child(directory: &Path, gate: Gate) -> ChildGuard {
         ])
         .env(DIRECTORY, directory)
         .env(GATE, gate.name())
+        .env(PARENT, std::process::id().to_string())
         .stdin(Stdio::null())
         .stdout(output("child.out"))
         .stderr(output("child.err"))
@@ -421,7 +425,7 @@ async fn a_kill_before_the_first_write_fails_the_meeting() {
 async fn a_kill_after_some_frames_recovers_them() {
     let dir = tempfile::tempdir().unwrap();
     let reports = Reports(dir.path().to_path_buf());
-    let mut child = spawn_child(dir.path(), Gate::None);
+    let mut child = spawn_child(dir.path(), Gate::Open);
     kill_when(&mut child, dir.path(), "ten writes", || {
         reports.write_count() >= 10
     });
@@ -437,7 +441,7 @@ async fn a_kill_after_some_frames_recovers_them() {
 async fn a_kill_mid_recording_recovers_what_was_written_and_synced() {
     let dir = tempfile::tempdir().unwrap();
     let reports = Reports(dir.path().to_path_buf());
-    let mut child = spawn_child(dir.path(), Gate::None);
+    let mut child = spawn_child(dir.path(), Gate::Open);
     kill_when(&mut child, dir.path(), "the first sync", || {
         reports.sync_count() >= 1
     });
@@ -483,14 +487,14 @@ async fn a_kill_between_the_writers_finish_and_the_save_recovers_the_recording()
 
 /// The first recording in a newly chosen folder, which no asset names
 /// yet; the setting moves to another folder while it runs, then the kill.
-/// The recorder listed its folder before it wrote the row
+/// The recorder recorded its folder before it wrote the row
 /// ([`crate::audio_folders`]), so the next launch recovers the master from
 /// there, though the settings name a folder that is there and empty.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_after_the_folder_changed_recovers_from_the_folder_it_started_in() {
     let dir = tempfile::tempdir().unwrap();
     let reports = Reports(dir.path().to_path_buf());
-    let mut child = spawn_child(dir.path(), Gate::None);
+    let mut child = spawn_child(dir.path(), Gate::Open);
     let elsewhere = dir.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     wait_until(&mut child, dir.path(), "five writes", || {
