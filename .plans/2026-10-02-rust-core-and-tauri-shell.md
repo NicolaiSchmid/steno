@@ -1265,15 +1265,20 @@ still has to draw the window side. `[ ]` is not ported yet.
   user deleted while the notes still name this meeting is written back in place, as
   in Swift. A pinned folder that is gone is claimed again by creating it (a dangling
   symlink counts as there), and a folder a delivery created is removed again when it
-  is still empty after the delivery failed. With person pages off, the meeting's
-  lines on its listed pages keep linking the old folder's note until a delivery with
-  person pages on.
-- When the audio copy is on, the mixdown is gone and the meeting folder holds no
-  audio copy, the Rust destination writes the notes and returns a warning in the
-  receipt ("The audio was already removed, so the export has no audio file"), which
-  the meeting's export line shows. Swift fails the delivery with `audioUnavailable`
-  after writing every other file, so its export stays failed on every retry. The
-  Rust `ObsidianError` has no `AudioUnavailable`.
+  is still empty after the delivery failed. When that removal fails (on Windows a sync
+  client can hold the folder open), the empty folder reads as taken and the next
+  attempt claims `X-2`; this is accepted. With person pages off, the meeting's lines
+  on its listed pages keep linking the old folder's note until a delivery with person
+  pages on.
+- When the audio copy is on, a phone recording (`M4aAac`) without a mixdown is copied
+  from its own AAC file; Swift fails it with `audioUnavailable`. When the audio copy
+  is on, the mixdown is gone and the meeting folder holds no audio file on disk (a
+  receipt entry for one that is gone is dropped), the Rust destination writes the
+  notes and returns a warning in the receipt ("The audio was already removed, so the
+  export has no audio file"), which the meeting's export line and `steno deliver`
+  show. Swift fails the delivery with `audioUnavailable` after writing every other
+  file, so its export stays failed on every retry. The Rust `ObsidianError` has no
+  `AudioUnavailable`.
 - On Windows the Rust person pages keep off the reserved device names (`Con` becomes
   `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
   names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.
