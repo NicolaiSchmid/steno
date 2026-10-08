@@ -556,13 +556,14 @@ Every package is written in parallel except where a dependency is named:
     **Nicolai**, with a paired phone: switch the computer to another network and
     back; `dns-sd -B _steno._tcp` (or `avahi-browse -rt _steno._tcp` on Linux)
     shows the record each time, and the phone uploads without a restart.
-  - As built: the name is chosen in
-    `HandoverConfiguration::default_service_name`, which the shell, the services
-    graph and `steno dev handover serve` all read, not passed by the shell.
-    `whoami::devicename()` returns a `Result` in `whoami` 2.1; on Windows the host
-    name now comes from `whoami::hostname()`, where `Steno` stood before. The
-    watcher is the `mdns-sd` daemon's interface check (5 s), with a one-minute
-    recheck; the listener already served every address on one port.
+  - As built: the shell passes no name. `HandoverConfiguration::default_service_name`,
+    which the shell, the services graph and `steno dev handover serve` all read,
+    picks it; on Windows the host name now comes from `whoami::hostname()`, where
+    `Steno` stood before. The watcher is the `mdns-sd` daemon's interface check
+    (5 s), with a one-minute recheck: a daemon report always registers the record
+    while the computer has an address, a quiet recheck only when the addresses
+    moved. The record's host is `steno-<name>.local.`, never the computer's own
+    host name. The listener already served every address on one port.
 - **S6 The new identifier and the import** (`feat/desktop-identifier`).
   - **Identifier.** `tauri.conf.json` sets `identifier` to
     `com.nicolaischmid.steno.desktop` (D5). `Info.plist` carries the Swift

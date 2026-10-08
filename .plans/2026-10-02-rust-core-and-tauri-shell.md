@@ -2049,16 +2049,28 @@ touch and admission lines; each fix is ported to Swift before cutover.
   (`advertise::windows_keeps`), which leaves out Wintun, TAP and Hyper-V adapters.
 - Network change, both apps: the record follows the computer's addresses. Swift's
   `NWListener` does it in mDNSResponder. Rust's advertiser
-  (`crates/steno-handover/src/server/advertise.rs`) registers the record again,
-  under the same name, TXT record and port, each time the `mdns-sd` daemon reports
-  an address added or removed (its interface check, every 5 s, after it joined the
-  new network's multicast group) and at least once a minute, whenever the LAN
-  addresses moved; a record with no address waits for the next network. The
-  listener binds every IPv4 address on one port, so an address gained after start
-  is served on the same port, and its LAN check runs once per connection at accept,
-  so a network change cuts no connection in flight.
-- Network, Rust differs: layer-2 tunnels (a TAP device, `feth`) and bridges (`docker0`, `bridge100`) are not
-  point-to-point, and are served; Swift classes bridges `.other`. A LAN numbered in
+  (`crates/steno-handover/src/server/advertise.rs`) registers the record again under
+  the same name, TXT record and port. A report from the `mdns-sd` daemon of an
+  address added or removed (its interface check, every 5 s, sent after it joined the
+  new network's multicast group) always registers it while the computer has an
+  address, because only a registration made after the report is announced on a
+  network the daemon has just joined. A quiet recheck, once a minute without a
+  report, registers it only when the LAN addresses moved. A failed registration is
+  tried again at the next change, and a record with no address waits for the next
+  network. The listener binds every IPv4 address on one port, so an address gained
+  after start is served on the same port. Its LAN check runs once per connection at
+  accept, so the listener closes no connection; one on an address that leaves breaks
+  with it, and the phone resumes from the partial.
+- Network change, Rust differs: the record's host is `steno-<name>.local.`
+  (`Advertiser::host_name`), a name only Steno answers for, where Swift's record uses
+  mDNSResponder's own host; the computer's host name stays with mDNSResponder, Avahi
+  or Windows. A withdraw within one interface check of a switch sends its goodbye
+  only on the old network, which is gone, so a phone that kept browsing can show the
+  record until its TTL runs out, and its connection fails and is retried; a limit of
+  `mdns-sd`.
+- Network, Rust differs: layer-2 tunnels (a TAP device, `feth`) and bridges
+  (`docker0`, `bridge100`) are not point-to-point, and are served; Swift classes
+  bridges `.other`. A LAN numbered in
   `100.64.0.0/10` is refused, on every platform. Rust judges a connection by its local
   address where Swift judges the interface it arrives on, so on Linux and macOS (weak
   host model) a packet addressed to the LAN address that arrives over a tunnel is
@@ -2314,12 +2326,17 @@ touch and admission lines; each fix is ported to Swift before cutover.
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. Rust's `HandoverConfiguration::default_service_name`
   takes the first of `NAME_SOURCES`: on the Mac the computer name
-  (`whoami::devicename`, the same `SCDynamicStoreCopyComputerName`), so a phone shows
-  the same name after the handoff; then, and on Linux and Windows first, `HOSTNAME`,
-  `/etc/hostname` and the system's host name (`whoami::hostname`); `Steno` when none
-  says. The name is shown, never pinned: the phone finds the computer by the TXT
-  record's `id`, resolves the instance it browsed, and pins the certificate's
-  fingerprint; the identity's `CN` takes the name only when an identity is minted.
+  (`whoami::devicename`, which reads the same `SCDynamicStoreCopyComputerName` as
+  Swift), so a phone shows the same name after the handoff; then, and on Linux and
+  Windows first, `HOSTNAME`, `/etc/hostname` and the system's host name
+  (`whoami::hostname`). Rust differs: its last fallback is `Steno` when none gives
+  one, where Swift's is the host name. The name is shown, never pinned: the phone
+  finds the computer by the TXT record's `id`, resolves the instance it browsed, and
+  pins the certificate's fingerprint; the identity's `CN` takes the name only when
+  an identity is minted. A phone keeps the name it paired under (`Steno` from an
+  earlier Rust build) until it pairs again. While the Swift and the Rust app run at
+  once during the handoff, both claim the same instance name and one is renamed
+  "(2)"; both are display only, since the phone finds the computer by its `id`.
 - Phone queue (`mobile/src/features/`):
   - Adoption. Every load lists `Documents/queue/` and adds a row for each recording
     file of 1 KiB or more (`MIN_RECORDING_BYTES`; smaller holds no meaningful audio)
