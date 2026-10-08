@@ -178,36 +178,31 @@ impl SecretServiceStore {
     pub fn unlocked_after_prompt(&self) -> SecretsUnlocked {
         let mut phase = self.shared.phase.subscribe();
         Box::pin(async move {
-            loop {
-                if let Phase::Chosen { service, asked } = *phase.borrow_and_update() {
-                    if service && asked {
-                        return;
-                    }
-                    break;
-                }
-                if phase.changed().await.is_err() {
-                    break;
-                }
+            let opened_after_asking = matches!(
+                phase
+                    .wait_for(|phase| matches!(phase, Phase::Chosen { .. }))
+                    .await
+                    .as_deref(),
+                Ok(Phase::Chosen {
+                    service: true,
+                    asked: true
+                })
+            );
+            if !opened_after_asking {
+                std::future::pending::<()>().await;
             }
-            std::future::pending::<()>().await;
         })
     }
 
     /// The chosen backend, waiting for the choice unless it waits on the
-    /// user.
+    /// user. The backend is set before the phase turns `Chosen`.
     async fn backend(&self) -> Result<&Backend, KeyringUnavailable> {
         let mut phase = self.shared.phase.subscribe();
-        loop {
-            if let Some(backend) = self.shared.backend.get() {
-                return Ok(backend);
-            }
-            if *phase.borrow_and_update() == Phase::Asking {
-                return Err(KeyringUnavailable::Unlocking);
-            }
-            if phase.changed().await.is_err() {
-                return Err(KeyringUnavailable::Unlocking);
-            }
-        }
+        let _ = phase.wait_for(|phase| *phase != Phase::Choosing).await;
+        self.shared
+            .backend
+            .get()
+            .ok_or(KeyringUnavailable::Unlocking)
     }
 
     /// Asks with the store's timeout and nothing to note.
@@ -223,9 +218,10 @@ impl SecretServiceStore {
     #[cfg(test)]
     async fn chosen(&self) {
         let mut phase = self.shared.phase.subscribe();
-        while !matches!(*phase.borrow_and_update(), Phase::Chosen { .. }) {
-            phase.changed().await.unwrap();
-        }
+        phase
+            .wait_for(|phase| matches!(phase, Phase::Chosen { .. }))
+            .await
+            .unwrap();
     }
 }
 
