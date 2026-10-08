@@ -12,13 +12,40 @@ permissions:
 jobs:
   diag:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Run
-        working-directory: spikes/winrace-diag
-        env:
-          ROUNDS: '60'
-          PAR: '4'
-          VARIANTS: diag2
-        run: cargo run
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Clippy steno-pipeline
+        shell: bash
+        run: cargo clippy -p steno-pipeline --all-targets --locked -- -D warnings
+      - name: Files tests
+        shell: bash
+        run: cargo test -p steno-pipeline --lib --locked files:: -- --nocapture
+      - name: Parallel soak
+        shell: bash
+        run: |
+          for i in $(seq 20); do
+            cargo test -p steno-pipeline --lib --locked -q files::tests::parallel_writers_into_one_folder_never_lose_or_tear_a_file -- --exact 2>&1 | grep -E "test result|panicked|Err"
+            test "${PIPESTATUS[0]}" = 0 || exit 1
+          done
+      - name: Mutations
+        shell: bash
+        run: |
+          mutate() {
+            name=$1; shift
+            git checkout -- crates
+            "$@"
+            git diff --stat
+            if cargo test -p steno-pipeline --lib --locked -q files:: > mut.log 2>&1; then
+              echo "MUTATION $name SURVIVED"
+            else
+              echo "MUTATION $name KILLED"; grep -E "FAILED|panicked" mut.log | head -8
+            fi
+          }
+          mutate no-retries sed -i 's/let retries = if cfg!(windows) { RETRIES } else { 0 };/let retries = 0;/' crates/steno-pipeline/src/files.rs
+          mutate no-access-denied sed -i 's/ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION | ERROR_ACCESS_DENIED/ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION/' crates/steno-pipeline/src/files/windows.rs
+          mutate no-lock sed -i 's/let _writing = windows::lock_path(to);//' crates/steno-pipeline/src/files.rs
+          git checkout -- crates
