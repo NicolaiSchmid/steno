@@ -66,10 +66,14 @@ mod imp {
                     note(log, format!("  {label} retried code={}", c(&e)));
                     std::thread::sleep(Duration::from_millis(10));
                 }
+                Err(e) => {
+                    note(log, format!("  {label} gave up code={}", c(&e)));
+                    return Err(e);
+                }
                 o => return o,
             }
         }
-        a()
+        a().inspect_err(|e| note(log, format!("  {label} exhausted code={}", c(e))))
     }
 
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -78,6 +82,8 @@ mod imp {
         NoWriteThrough,
         WriteThroughNoReopen,
         Locked,
+        RetryOnly,
+        Fixed,
     }
 
     #[derive(Default)]
@@ -103,7 +109,8 @@ mod imp {
             }
         }
         if !wt_ok {
-            retried(log, "std rename", |e| e.kind() == io::ErrorKind::PermissionDenied, || {
+            let busy = |e: &io::Error| if matches!(v, V::RetryOnly | V::Fixed) { matches!(e.raw_os_error(), Some(5 | 32 | 33)) } else { e.kind() == io::ErrorKind::PermissionDenied };
+            retried(log, "std rename", busy, || {
                 std::fs::rename(from, to)
             })
             .map_err(|e| ("std rename", e))?;
@@ -111,11 +118,14 @@ mod imp {
         if v == V::WriteThroughNoReopen && wt_ok {
             return Ok(());
         }
-        let f = retried(log, "reopen", |e| e.raw_os_error() == Some(32), || {
+        let busy = |e: &io::Error| if matches!(v, V::RetryOnly | V::Fixed) { matches!(e.raw_os_error(), Some(5 | 32 | 33)) } else { e.raw_os_error() == Some(32) };
+        let f = retried(log, "reopen", busy, || {
             OpenOptions::new().write(true).open(to)
         })
         .map_err(|e| ("reopen", e))?;
-        f.sync_all().map_err(|e| ("flush file", e))
+        f.sync_all().map_err(|e| ("flush file", e))?;
+        if !wt_ok { note(log, "  std renamed and flushed".into()); }
+        Ok(())
     }
 
     fn flush_dir(d: &Path) -> io::Result<()> {
@@ -134,12 +144,12 @@ mod imp {
             .suffix(".partial")
             .tempfile_in(dir)
             .inspect_err(|e| note(log, format!("FINAL create code={}", c(e))))?;
-        t.write_all(data)?;
-        t.as_file().sync_all()?;
-        let (f, tmp) = t.keep().map_err(|e| e.error)?;
+        t.write_all(data).inspect_err(|e| note(log, format!("FINAL write code={}", c(e))))?;
+        t.as_file().sync_all().inspect_err(|e| note(log, format!("FINAL sync temp code={}", c(e))))?;
+        let (f, tmp) = t.keep().map_err(|e| e.error).inspect_err(|e| note(log, format!("FINAL keep code={}", c(e))))?;
         drop(f);
         let lock = locks.get(path);
-        let _g = (v == V::Locked).then(|| lock.lock().unwrap());
+        let _g = matches!(v, V::Locked | V::Fixed).then(|| lock.lock().unwrap());
         if let Err((stage, e)) = rename_over(v, log, &tmp, path) {
             note(
                 log,
@@ -267,18 +277,26 @@ mod imp {
     }
 
     pub fn main() {
-        probes();
+        if std::env::var("PROBES").is_ok() { probes(); }
         let rounds: usize = std::env::var("ROUNDS").ok().and_then(|s| s.parse().ok()).unwrap_or(15);
-        for v in [V::Current, V::NoWriteThrough, V::WriteThroughNoReopen, V::Locked] {
+        let par: usize = std::env::var("PAR").ok().and_then(|s| s.parse().ok()).unwrap_or(1);
+        let variants: Vec<V> = match std::env::var("VARIANTS").as_deref() {
+            Ok("diag2") => vec![V::Current, V::RetryOnly, V::Fixed],
+            _ => vec![V::Current, V::NoWriteThrough, V::WriteThroughNoReopen, V::Locked],
+        };
+        for v in variants {
             let log = Arc::new(Log::default());
             let locks = Arc::new(Locks::default());
             let (mut failed, mut torn, mut left) = (0, 0, 0);
             let t = Instant::now();
-            for _ in 0..rounds {
-                let (f, whole, l) = round(v, &log, &locks);
-                failed += f;
-                torn += usize::from(!whole);
-                left += l;
+            for _ in 0..rounds.div_ceil(par) {
+                let handles: Vec<_> = (0..par).map(|_| { let (log, locks) = (log.clone(), locks.clone()); std::thread::spawn(move || round(v, &log, &locks)) }).collect();
+                for h in handles {
+                    let (f, whole, l) = h.join().unwrap();
+                    failed += f;
+                    torn += usize::from(!whole);
+                    left += l;
+                }
             }
             println!("VARIANT {v:?}: rounds={rounds} failed_writes={failed} torn_or_lost_files={torn} temporaries_left={left} secs={:.1}", t.elapsed().as_secs_f64());
             for (k, n) in log.lock().unwrap().iter() {

@@ -18,5 +18,7 @@ jobs:
       - name: Run
         working-directory: spikes/winrace-diag
         env:
-          ROUNDS: '20'
-        run: cargo run --release
+          ROUNDS: '60'
+          PAR: '4'
+          VARIANTS: diag2
+        run: cargo run
