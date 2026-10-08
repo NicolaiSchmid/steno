@@ -100,13 +100,17 @@ const NCP_SUPER_MAGIC: u32 = 0x564C;
 /// `ORANGEFS_SUPER_MAGIC`.
 #[cfg(any(target_os = "linux", test))]
 const ORANGEFS_SUPER_MAGIC: u32 = 0x2003_0528;
+/// `VBOXSF_SUPER_MAGIC`, a share from a `VirtualBox` host (`fs/vboxsf`,
+/// outside the uapi header).
+#[cfg(any(target_os = "linux", test))]
+const VBOXSF_SUPER_MAGIC: u32 = 0x786F_4256;
 /// `FUSE_SUPER_MAGIC`, every FUSE file system (`fuse` and `fuseblk`).
 #[cfg(any(target_os = "linux", test))]
 const FUSE_SUPER_MAGIC: u32 = 0x6573_5546;
 
 /// The magic numbers of the Linux network file systems outside FUSE.
 #[cfg(any(target_os = "linux", test))]
-const NETWORK_MAGIC_NUMBERS: [u32; 13] = [
+const NETWORK_MAGIC_NUMBERS: [u32; 14] = [
     NFS_SUPER_MAGIC,
     SMB_SUPER_MAGIC,
     CIFS_MAGIC_NUMBER,
@@ -120,15 +124,18 @@ const NETWORK_MAGIC_NUMBERS: [u32; 13] = [
     CODA_SUPER_MAGIC,
     NCP_SUPER_MAGIC,
     ORANGEFS_SUPER_MAGIC,
+    VBOXSF_SUPER_MAGIC,
 ];
 
 /// The FUSE types in `/proc/self/mountinfo` that reach another machine:
 /// sshfs, rclone, GNOME's `gvfsd-fuse` and KDE's `kio-fuse`, under which
-/// the file managers mount SMB, SFTP and `WebDAV` shares, the Gluster and
-/// Ceph clients, the S3 and Cloud Storage mounts (s3fs, gcsfuse,
-/// mountpoint-s3, `JuiceFS`), curlftpfs and smbnetfs.
+/// the file managers mount SMB, SFTP and `WebDAV` shares. Then the Gluster
+/// and Ceph clients, the S3 and Cloud Storage mounts (s3fs, gcsfuse,
+/// mountpoint-s3, `JuiceFS`), curlftpfs, smbnetfs, and `virtiofs`, a share
+/// from a VM host. A bare `fuse` mount is decided by its source instead
+/// (`is_a_linux_network_file_system`).
 #[cfg(any(target_os = "linux", test))]
-const REMOTE_FUSE_TYPES: [&str; 12] = [
+const REMOTE_FUSE_TYPES: [&str; 13] = [
     "fuse.sshfs",
     "fuse.rclone",
     "fuse.gvfsd-fuse",
@@ -141,6 +148,7 @@ const REMOTE_FUSE_TYPES: [&str; 12] = [
     "fuse.juicefs",
     "fuse.curlftpfs",
     "fuse.smbnetfs",
+    "virtiofs",
 ];
 
 /// A mount's file system type and source as `/proc/self/mountinfo` names
@@ -275,6 +283,7 @@ mod tests {
             CODA_SUPER_MAGIC,
             NCP_SUPER_MAGIC,
             ORANGEFS_SUPER_MAGIC,
+            VBOXSF_SUPER_MAGIC,
         ] {
             assert!(is_a_linux_network_file_system(magic, unread), "{magic:#x}");
         }
@@ -310,6 +319,7 @@ mod tests {
             "fuse.juicefs",
             "fuse.curlftpfs",
             "fuse.smbnetfs",
+            "virtiofs",
         ] {
             assert!(
                 is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(mount(name, "server"))),
