@@ -1491,13 +1491,14 @@ mod tests {
             models,
             chrono::FixedOffset::east_opt(0).unwrap(),
             tokio::runtime::Handle::current(),
+            dir.path().join("support"),
         );
         recorder.watch_disk_with({
             let free = free.clone();
             disk_with(move |_| Ok(volume(free.load(Ordering::SeqCst))))
         });
         Harness {
-            _dir: dir,
+            dir,
             store: store.clone(),
             free,
             capture: capture_slot,
@@ -2160,32 +2161,44 @@ mod tests {
     /// The synthetic capture, its writer [dying](DyingWriter) after
     /// `frames` frames.
     fn dying_capture(frames: usize, died: Arc<AtomicBool>) -> MakeCaptureSession {
-        Arc::new(move |configuration: CaptureConfiguration| {
-            let lanes = configuration.lanes();
-            let mut options = steno_audio::testing::synthetic::SyntheticOptions::tones(
-                &lanes,
-                &[(steno_core::AudioLane::Mic, 440.0)],
-                600.0,
-            );
-            options.real_time = true;
-            let died = died.clone();
-            CaptureSession::with_writer_factory(
-                configuration,
-                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
-                None,
-                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
-                Arc::new(steno_audio::SystemClock::new()),
-                Arc::new(move |layout, lanes, keep_raw| {
-                    Ok(Box::new(DyingWriter {
-                        inner: steno_audio::writer::RecordingWriter::new(layout, lanes, keep_raw)?,
-                        left: frames,
-                        died: died.clone(),
-                    })
-                        as Box<dyn steno_audio::writer::RecordingWriting>)
-                }),
-            )
-            .map_err(|error| error.to_string())
+        crate::testing::synthetic_capture_through(move |inner| {
+            Box::new(DyingWriter {
+                inner,
+                left: frames,
+                died: died.clone(),
+            })
         })
+    }
+
+    /// A stop for the app's exit tries its commit once: with the database
+    /// held past the busy timeout (here 1 s), quitting returns after one
+    /// wait, where three tries would take 3 s (15 s at the product's 5 s
+    /// timeout, past the exit's 10 s patience), and the meeting stays
+    /// `recording` for the next launch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_for_the_exit_tries_its_commit_once() {
+        let harness = harness_over(
+            models_with(&[]),
+            "parakeet-v3",
+            platform_rule(SpeechSettings::default()),
+        );
+        harness
+            .store
+            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_secs(1))?))
+            .unwrap();
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let hold =
+            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
+        let started = std::time::Instant::now();
+        quit(&harness.recorder);
+        let took = started.elapsed();
+        drop(hold);
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+        assert_eq!(
+            harness.store.meeting(meeting_id).unwrap().unwrap().state,
+            steno_core::MeetingState::Recording
+        );
     }
 
     /// A stop whose capture failed (the writer died and took the asset)
