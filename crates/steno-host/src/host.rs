@@ -1167,7 +1167,11 @@ impl Host {
     /// A command on `window`'s Summaries form: that window's model, its own
     /// topic, and the probe the model asked for run outside the lock
     /// afterwards. The four form commands pass the calling window (see the
-    /// module doc), the Codex card and Save the Settings window.
+    /// module doc), the Codex card and Save the Settings window. A save
+    /// that writes the key does so under the lock, and a keyring may ask
+    /// the user to confirm or unlock that write (the Linux store waits up
+    /// to two minutes): until the user answers, every window and the tray
+    /// wait with it.
     fn summaries_command(
         &self,
         window: BridgeWindow,

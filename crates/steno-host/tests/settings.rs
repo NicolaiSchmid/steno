@@ -967,6 +967,84 @@ fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
     assert!(summaries.get("error").is_none(), "{summaries}");
 }
 
+/// Over a key that could not be read, a field typed into and emptied
+/// again, or typed into before the section loaded again, saves nothing
+/// over the key; a key typed and saved replaces it and the unreadable
+/// message goes.
+#[test]
+fn only_a_typed_key_replaces_one_that_could_not_be_read() {
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+    let harness = Harness::builder()
+        .seed(|_, fakes| {
+            block_on(
+                fakes
+                    .secrets
+                    .set_secret(&SecretKey::llm_api_key(), Some("sk-stored")),
+            )
+            .unwrap();
+            fakes.secrets.fail_reads(Some("the keyring is locked"));
+        })
+        .build();
+    let stored = || {
+        harness.fakes.secrets.fail_reads(None);
+        let key = block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key())).unwrap();
+        harness
+            .fakes
+            .secrets
+            .fail_reads(Some("the keyring is locked"));
+        key
+    };
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    for typed in ["s", ""] {
+        harness
+            .host
+            .settings_summaries_update(update(None, None, Some(typed), None))
+            .unwrap();
+    }
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(stored().as_deref(), Some("sk-stored"), "typed and erased");
+
+    // Typed, then the section loads again before a save.
+    harness
+        .host
+        .settings_summaries_update(update(None, None, Some("sk-half"), None))
+        .unwrap();
+    harness.host.secrets_changed();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1"), None, None, None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        stored().as_deref(),
+        Some("sk-stored"),
+        "a reload drops the edit"
+    );
+
+    harness
+        .host
+        .settings_summaries_update(update(None, None, Some("sk-typed"), None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(stored().as_deref(), Some("sk-typed"));
+    let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
+    assert!(summaries.get("error").is_none(), "{summaries}");
+}
+
 /// Swift: `testLLMValidatesAndSavesSettingsAndKey`, `testLLMInvalidInputSavesNothing`,
 /// `testLLMCommitSavesOnlyChangesThenProbes`, `testLLMSelectPresetFillsAndStoresTheAddress`,
 /// `summariesAndExportDraftsStoreOnSave`.

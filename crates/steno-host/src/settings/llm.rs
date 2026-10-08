@@ -161,7 +161,7 @@ pub enum CodexStatus {
 
 /// The stored API key as a read of the secret store found it. A read that
 /// failed (a locked keyring) is not an absent key: the form starts empty,
-/// says why, and a save leaves the stored key alone until the user types
+/// says why, and a save leaves the stored key alone unless the user typed
 /// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyRead {
@@ -174,7 +174,7 @@ pub enum KeyRead {
 impl KeyRead {
     /// The message the section shows over [`KeyRead::Unreadable`]'s reason.
     pub const UNREADABLE: &'static str =
-        "The saved API key could not be read. Saving keeps it unless you type a new one.";
+        "The saved API key could not be read. Saving other changes keeps it.";
 }
 
 impl<E: std::fmt::Display> From<Result<Option<String>, E>> for KeyRead {
@@ -235,12 +235,9 @@ pub struct LlmSettingsViewModel {
     codex_context_tokens: i64,
     stored: Option<Stored>,
     /// Where the secret store keeps the key, as it said at the last load.
-    pub key_place: Option<SecretPlace>,
+    pub key_store: Option<SecretPlace>,
     /// Why the last load could not read the stored key; `None` once read.
     key_unreadable: Option<String>,
-    /// Whether the user changed the key field since the last load or save;
-    /// a save writes the key only then.
-    key_edited: bool,
     /// A probe asked for (by Test, or by a save of a configured endpoint)
     /// and not yet begun; the host takes it with [`Self::begin_pending_probe`]
     /// and runs it outside its lock.
@@ -270,9 +267,8 @@ impl LlmSettingsViewModel {
             codex_model: String::new(),
             codex_context_tokens: Settings::DEFAULT_CODEX_CONTEXT_TOKENS,
             stored: None,
-            key_place: None,
+            key_store: None,
             key_unreadable: None,
-            key_edited: false,
             probe_pending: false,
         }
     }
@@ -293,8 +289,7 @@ impl LlmSettingsViewModel {
             KeyRead::Unreadable(reason) => (None, Some(reason)),
         };
         self.key_unreadable = unreadable;
-        self.key_edited = false;
-        self.key_place = services.secrets.place();
+        self.key_store = services.secrets.place();
         let settings = match store.settings() {
             Ok(settings) => settings,
             Err(error) => {
@@ -622,13 +617,13 @@ impl LlmSettingsViewModel {
             return;
         }
         let draft = self.draft();
-        match Self::store(&draft, self.key_edited, store, services, now) {
+        let write_key = self.writes_key(&draft);
+        match Self::store(&draft, write_key, store, services, now) {
             Ok(settings) => {
                 self.is_configured = llm_configured(&settings);
                 self.stored = Some(draft);
                 self.errors.clear();
-                if self.key_edited {
-                    self.key_edited = false;
+                if write_key {
                     self.key_unreadable = None;
                 }
                 self.show_unreadable_key();
@@ -637,10 +632,23 @@ impl LlmSettingsViewModel {
         }
     }
 
-    /// The settings, the key in the secret store when the user edited it,
-    /// then the pipeline rebuilt on them; the settings as written. Swift
-    /// wrote the key on every save; an untouched field is not a reason to
-    /// write, and over a key that could not be read it would delete it.
+    /// Whether a save writes the key: the field differs from the key the
+    /// last load read or the last save wrote. Over a key that could not be
+    /// read that is a typed key only, so an empty field never removes it.
+    fn writes_key(&self, draft: &Stored) -> bool {
+        let held = self
+            .stored
+            .as_ref()
+            .and_then(|stored| stored.api_key.as_ref());
+        draft.api_key.as_ref() != held
+    }
+
+    /// The settings, the key in the secret store when `write_key`
+    /// ([`Self::writes_key`]), then the pipeline rebuilt on them; the
+    /// settings as written. Swift wrote the key on every save; an
+    /// unchanged field is not a reason to write, and over a key that could
+    /// not be read it would delete it. The write may wait on the user, as
+    /// a keyring may ask to confirm or unlock it.
     fn store(
         draft: &Stored,
         write_key: bool,
@@ -742,7 +750,6 @@ impl LlmSettingsViewModel {
             self.context_tokens_text.clone_from(tokens);
         }
         if let Some(key) = &update.api_key {
-            self.key_edited |= *key != self.api_key;
             self.api_key.clone_from(key);
         }
     }

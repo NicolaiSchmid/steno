@@ -341,7 +341,7 @@ pub fn summaries(
         codex,
         error: llm.errors.error.clone(),
         error_details: llm.errors.details.clone(),
-        key_store: llm.key_place.map(|place| match place {
+        key_store: llm.key_store.map(|place| match place {
             SecretPlace::Keyring => SummariesKeyStore::Keyring,
             SecretPlace::File => SummariesKeyStore::File,
         }),
