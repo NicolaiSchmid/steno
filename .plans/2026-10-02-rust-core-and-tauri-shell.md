@@ -1674,22 +1674,31 @@ parity item until a plan says otherwise:
   quality; the two are not bit-identical. The 3:1 FIR is flat to 7 kHz;
   the sinc, measured in `crates/steno-audio/tests/codec.rs` from 44.1 kHz,
   is within 0.3 dB to 6 kHz and -1.3 dB at 6.5 kHz, with 12 kHz aliasing
-  below -50 dB. Accept at cutover or lengthen the sinc; a plan decides.
+  below -50 dB. A sweep (`tests/resampler_sweep.rs`) puts every alias that
+  lands below 7 kHz under -60 dB and folds 8 to 9 kHz into 7 to 8 kHz at
+  -21 to -58 dB; the capture's path for a 44.1 kHz device (the
+  `RateConverter`, then the 3:1 FIR) stays under -60 dB below 8 kHz.
+  FLEURS German through the 44.1 kHz path gives 5.02 % WER, through the
+  48 kHz path 5.51 % (`steno-speech`'s `tests/fleurs.rs`, model gated).
+  Final as it is (stable plan D9 and A9).
 - **The sidecar lags the master decode by one group delay.** The live
   16 kHz sidecar is the same FIR run causally, so its onset sits 32 samples
   (2 ms) after the master decode's; `decode` prefers the sidecar, so a
   transcript's timestamps shift by 2 ms depending on which file was read.
   Swift had the same relationship (causal sidecar writer, delay-compensated
-  `AVAudioConverter`); `tests/codec.rs` pins both onsets. Either compensate
-  the sidecar at cutover or accept 2 ms.
-- **AAC priming is not trimmed.** AVFoundation dropped the encoder's
+  `AVAudioConverter`); `tests/codec.rs` pins both onsets and the 32 samples
+  between them. Accepted (stable plan D9).
+- **AAC priming is trimmed: parity.** AVFoundation dropped the encoder's
   priming samples; symphonia 0.5 trims them for MP3 (the LAME tag, with
   `enable_gapless`, measured: onset at sample 2 of an ffmpeg encode) but
-  parses and ignores the MP4 edit list and does not read `iTunSMPB`, so an
-  AAC lane from the phone starts 1 024 samples at 44.1 kHz (23 ms) late
-  (measured on `Tests/Fixtures/audio/tone-440-44k1-500ms.m4a`; iOS
-  encoders prime 2 112). Fix at cutover: read the `elst` media time from
-  the container and drop it before resampling, or accept 23 to 48 ms.
+  parses and ignores the MP4 edit list and does not read `iTunSMPB`. The
+  decoder reads them itself (`codec::priming`: the sound track's `elst`
+  media time, else the `iTunSMPB` tag, where Apple's writer stores its
+  2 112 samples) and drops exactly that many frames by packet timestamp, so
+  an AAC lane starts on the encoder's first sample
+  (`Tests/Fixtures/audio/tone-440-44k1-onset-200ms.m4a` lands on its onset
+  sample). Only AAC in MP4 changes; the padding after the last sample stays
+  (under a packet of silence).
 - **AAC-LC only.** AVFoundation also decoded HE-AAC; symphonia decodes
   AAC-LC alone. The iOS recorder writes AAC-LC, so nothing is lost today; a
   plan adds HE-AAC if an import needs it.
@@ -2998,6 +3007,7 @@ PR off `main`.
 | On Windows the other renames of a file Steno writes share #252's busy-file retries (`steno_core::busy_file`): the vault writer's rename and reopen, the handover inbox's promote and metadata, the Codex sign-in file, the model downloads, `files::set_aside` and the speaker clips' staged writes and moves into place; speaker clips written all or none are a follow-up (`steno-core`, `steno-pipeline`, `steno-adapters`, `steno-handover`, `steno-llm`, `steno-speech`) | `fix/windows-rename-retry` | #256 | open |
 | Speaker clips under per-run names (`speakers/<SPEAKER-UUID>-<RUN-UUID>.wav`), written durably and only into the meeting's own folder before the merge, named in the merge's durable transaction that keeps the confirmations, and after that commit the clip files of the meeting's speakers that no row names swept from that folder while the run holds the meeting in the in-flight set; a confirmed speaker the re-run gives no clip keeps its clip, and a dropped one its files, and retention also removes the unnamed ones: a run that fails or ends at any point leaves each speaker naming a whole clip (`steno-core`, `steno-pipeline`) | `fix/per-run-speaker-clips` | #257 | open |
 | A lost display saves first, the portal's session monitor and logout inhibitor, a logout called off keeps recording, Xfce on Wayland saves at the query, Xfce's Quit Program saves and its Save Session records on, Settings and onboarding kept on Linux (#160) | `fix/desktop-linux-session-end` | #220 | in review |
+| Stable plan A9: the AAC priming trimmed from the edit list or the gapless tag; the resamplers' sweep and the FLEURS 44.1 against 48 kHz comparison; the macOS capture's first callback logged against its start; `steno dev onsets`, and `record --keep-raw-mic` naming `mic.raw.caf` (`steno-audio`, `steno-speech` tests, `steno-cli`) | `fix/a9-final-audio-choices` | #246 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
