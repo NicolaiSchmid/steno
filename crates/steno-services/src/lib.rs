@@ -71,6 +71,8 @@
 pub mod app;
 pub mod export;
 pub mod handover;
+#[cfg(test)]
+mod kill_tests;
 pub mod llm;
 pub mod logs;
 pub mod pipeline;
