@@ -153,18 +153,21 @@ impl Default for HandoverConfiguration {
 mod tests {
     use super::*;
 
+    /// The Mac's sources; Linux and Windows use the host name ones after
+    /// the first.
+    const MAC: [NameSource; 4] = [
+        NameSource::ComputerName,
+        NameSource::HostnameVariable,
+        NameSource::EtcHostname,
+        NameSource::SystemHostname,
+    ];
+
     #[test]
     fn the_mac_asks_for_the_computer_name_first_and_linux_and_windows_for_the_host_name() {
-        let host_name = [
-            NameSource::HostnameVariable,
-            NameSource::EtcHostname,
-            NameSource::SystemHostname,
-        ];
         if cfg!(target_os = "macos") {
-            assert_eq!(NAME_SOURCES[0], NameSource::ComputerName);
-            assert_eq!(&NAME_SOURCES[1..], &host_name[..]);
+            assert_eq!(NAME_SOURCES, &MAC[..]);
         } else {
-            assert_eq!(NAME_SOURCES, &host_name[..]);
+            assert_eq!(NAME_SOURCES, &MAC[1..]);
             assert_eq!(
                 NameSource::ComputerName.read(),
                 None,
@@ -175,30 +178,24 @@ mod tests {
 
     #[test]
     fn the_default_is_the_first_name_a_source_gives_in_order() {
-        let mac = [
-            NameSource::ComputerName,
-            NameSource::HostnameVariable,
-            NameSource::EtcHostname,
-            NameSource::SystemHostname,
-        ];
         let reader = |names: [Option<&'static str>; 4]| {
             move |source: NameSource| {
-                let index = mac.iter().position(|&known| known == source).unwrap();
+                let index = MAC.iter().position(|&known| known == source).unwrap();
                 names[index].map(str::to_owned)
             }
         };
         let all = reader([Some("Studio"), Some("env"), Some("etc"), Some("host")]);
-        assert_eq!(first_name(&mac, all), "Studio");
-        assert_eq!(first_name(&mac[1..], all), "env");
+        assert_eq!(first_name(&MAC, all), "Studio");
+        assert_eq!(first_name(&MAC[1..], all), "env");
         assert_eq!(
-            first_name(&mac, reader([None, None, Some("etc"), Some("host")])),
+            first_name(&MAC, reader([None, None, Some("etc"), Some("host")])),
             "etc"
         );
         assert_eq!(
-            first_name(&mac, reader([None, None, None, Some("host")])),
+            first_name(&MAC, reader([None, None, None, Some("host")])),
             "host"
         );
-        assert_eq!(first_name(&mac, reader([None; 4])), "Steno");
+        assert_eq!(first_name(&MAC, reader([None; 4])), "Steno");
         assert!(
             NameSource::SystemHostname.read().is_some(),
             "every platform has a host name"
