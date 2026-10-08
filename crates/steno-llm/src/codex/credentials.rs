@@ -859,8 +859,9 @@ impl CodexCredentialStore {
         }
         // A `codex login` that lands between the caller's read and this
         // rename is replaced; only a file lock would close that window. On
-        // Windows the rename is tried again while another handle (the Codex
-        // CLI, a sync or antivirus client) holds the file for a moment.
+        // Windows the rename is tried again while another handle (a sync or
+        // antivirus client) holds the file for a moment, which widens that
+        // window by up to about 0.9 s; accepted, as the window itself is.
         if let Err(error) = steno_core::busy_file::rename(&temporary, &self.file_path()) {
             return Err(WriteFailure {
                 detail: format!(

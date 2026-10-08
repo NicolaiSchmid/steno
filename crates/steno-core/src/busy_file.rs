@@ -2,13 +2,19 @@
 //! antivirus client, a media player or another writer may open a file
 //! without sharing the access a rename or an open asks for, and Windows
 //! then refuses the call until that handle lets go, usually within
-//! milliseconds. Every rename and reopen of a file Steno writes goes
-//! through [`retried`] (or [`rename`]), which tries such a call again for
-//! about 0.9 s before it reports the error; elsewhere, where no handle
-//! blocks a rename, the call runs once. `steno_pipeline::files`' durable
-//! writes, the vault writer, the handover inbox, the Codex sign-in file,
-//! the model downloads and the speaker clips share it, so their retries
-//! cannot drift apart. Rust only: the Swift app runs on macOS alone.
+//! milliseconds. Every rename of a file Steno writes, and a durable
+//! write's reopen for its flush, goes through [`retried`] (or [`rename`]),
+//! which tries such a call again for about 0.9 s before it reports the
+//! error; elsewhere, where no handle blocks a rename, the call runs once.
+//! `steno_pipeline::files`' durable writes and its `set_aside`, the vault
+//! writer, the handover inbox, the Codex sign-in file, the model downloads
+//! and the speaker clips share it, so their retries cannot drift apart.
+//! Rust only: the Swift app runs on macOS alone.
+//!
+//! [`is_busy`] names the errors of such a handle; [`retried_with`] takes
+//! the tries, the predicate and the wait as arguments, for the tests and
+//! for the durable writes' recorded waits; [`RETRIES`], [`FIRST_WAIT`]
+//! and [`LONGEST_WAIT`] set the backoff.
 
 use std::io;
 use std::path::Path;
@@ -133,8 +139,8 @@ mod tests {
         assert!(waits.iter().sum::<Duration>() < Duration::from_secs(1));
     }
 
-    /// A file that lets go after two busy tries is renamed on the third,
-    /// and nothing waits after it.
+    /// A file that lets go after two busy tries succeeds on the third, and
+    /// nothing waits after it.
     #[test]
     fn a_file_that_lets_go_succeeds_on_the_next_try() {
         let (outcome, tries, waits) = run(9, 2);

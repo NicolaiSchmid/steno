@@ -14,10 +14,9 @@
 //! the file (Windows' FAT driver flushes a file's parent folders with it),
 //! which a written-through rename leaves in the cache.
 //!
-//! `steno_core::busy_file::is_busy` names the errors of a file another
-//! handle holds for a moment, which the caller tries again, and
-//! [`lock_path`] makes this process's writers of one path (spelled the
-//! same) rename and flush one after the other.
+//! The retries of a file another handle holds for a moment live in
+//! `steno_core::busy_file`; [`lock_path`] makes this process's writers of
+//! one path (spelled the same) rename and flush one after the other.
 //!
 //! [`flush_directory`] flushes a folder's entries: on NTFS the ones
 //! `create_dir_all_durably` and `create_new_dir_durably` made; the FAT

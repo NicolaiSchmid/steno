@@ -27,7 +27,7 @@
 //!   calls were recorded on.
 //! - [`content_hash`]: the SHA-256 every receipt carries.
 //! - [`busy_file`]: the retries of a file Windows reports another handle
-//!   holds for a moment, which every rename of a file Steno writes shares.
+//!   holds for a moment, which Steno's durable writes and renames share.
 //! - [`crash_log`]: a file in the support directory for every panic, in
 //!   the app and in the speech sidecar.
 //! - [`database_lock`]: the lock that keeps one process per database.
