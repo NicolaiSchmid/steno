@@ -1325,9 +1325,9 @@ parity item until a plan says otherwise:
     not run (`CaptureError::DidNotRun`, PipeWire's 3 s first-cycle
     deadline). The gap is then one failed start long (about 3 s of wall time
     on PipeWire), within the 10 s a gap is filled with silence
-    (`MAXIMUM_GAP`), so the master stays on wall time. Waiting out all four
-    restarts would cost about 14 s on PipeWire, 4 s of it missing from the
-    master.
+    (`MAXIMUM_GAP`), so the restarts take nothing from the master. Waiting
+    out all four restarts would cost about 14 s on PipeWire, 4 s of it
+    missing from the master.
   - **The warning.** The recorder sets the recording snapshot's `warning` to
     "Recording from <name>. The microphone chosen in Settings is not
     available." (or "from the system default microphone" when the input has
@@ -1341,10 +1341,14 @@ parity item until a plan says otherwise:
     looks only for another microphone and ignores one that did not
     resolve); its return reads as `DefaultInputChanged`, and the rebuild
     records it again. A fallback the session chose watches for nothing: the
-    next rebuild asks for the chosen microphone again. A Bluetooth headset
-    gone for a second while it changes profile is recorded on the default
-    input meanwhile, with a short gap at each switch, where Swift's four
-    failed restarts end the recording.
+    next rebuild asks for the chosen microphone again. That rebuild comes
+    when a default device moves or one in use goes, not when the chosen one
+    is plugged in again. A return whose first restart fails ends here too,
+    so the recording can stay on the default for the rest of the meeting.
+    A Bluetooth headset gone for a second while it changes profile is
+    recorded on the default input meanwhile, and stays there when the
+    headset does not open at once; each switch costs a short gap, where
+    Swift's four failed restarts end the recording.
   - **Settings** lists the stored device as "Microphone not connected" until
     the user picks again or it comes back.
 - **Steno's own aggregates are not inputs.** On the Mac,
@@ -2575,7 +2579,7 @@ PR off `main`.
 | A first announce, one that finds no receipt in memory or the store, discards every inbox file of the recording id before it opens its own, so an old verified file is never admitted unhashed; Swift's announce answers a failed receipt read with 500 (`steno-handover`, Swift core) | `fix/handover-first-announce-discard` | #239 | open |
 | The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
-| Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
+| Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
