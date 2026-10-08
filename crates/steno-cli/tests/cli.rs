@@ -869,6 +869,107 @@ fn aec_bench_runs_on_the_synthetic_fixtures() {
     assert!(out.exists());
 }
 
+/// `dev onsets` prints where a sound starts in each channel, from
+/// `--after` on: a click at 0.25 s and a tone from 1.5 s in a 16 kHz WAV.
+#[test]
+fn dev_onsets_finds_the_first_loud_sample_of_each_channel() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let path = home.join("tone.wav");
+    let mut samples = vec![0i16; 32_000];
+    samples[4_000] = 16_000;
+    for (index, sample) in samples[24_000..].iter_mut().enumerate() {
+        *sample = if index % 16 < 8 { 8_000 } else { -8_000 };
+    }
+    let mut writer = steno_audio::writer::WavStreamWriter::create(&path, 16_000).unwrap();
+    writer.write(&samples).unwrap();
+    writer.finish().unwrap();
+    let file = path.to_str().unwrap();
+
+    let from_start = steno(&["dev", "onsets", file], home);
+    assert_eq!(from_start.status, 0, "{}", from_start.stderr);
+    assert_eq!(
+        from_start.stdout.trim(),
+        format!("{file} channel 0: onset 0.250 s, peak -6.2 dBFS")
+    );
+    let after = steno(&["dev", "onsets", "--after", "1", file], home);
+    assert_eq!(
+        after.stdout.trim(),
+        format!("{file} channel 0: onset 1.500 s, peak -12.2 dBFS")
+    );
+    let quiet = steno(&["dev", "onsets", "--threshold", "-3", file], home);
+    assert!(quiet.stdout.contains("no onset"), "{}", quiet.stdout);
+    let wrong = steno(&["dev", "onsets", "--after", "-1", file], home);
+    assert_eq!(wrong.status, 1);
+    let missing = steno(&["dev", "onsets", "missing.wav"], home);
+    assert_eq!(missing.status, 2, "{}", missing.stdout);
+}
+
+/// A call recorded with `--keep-raw-mic` keeps the microphone before echo
+/// cancellation as `mic.raw.caf` beside the master, and says where: the
+/// second take of the stable plan's A9 check on the Mac reads the tone's
+/// residual there when the cancellation hides it.
+#[test]
+fn record_keeps_the_raw_mic_when_asked() {
+    let home = tempfile::tempdir().unwrap();
+    let home = home.path();
+    let out = home.join("audio");
+    let id = uuid::Uuid::new_v4();
+    let result = steno(
+        &[
+            "record",
+            "--backend",
+            "synthetic",
+            "--mode",
+            "call",
+            "--seconds",
+            "0.5",
+            "--keep-raw-mic",
+            "--out",
+            out.to_str().unwrap(),
+            "--meeting-id",
+            &id.to_string(),
+            "--quiet",
+        ],
+        home,
+    );
+    assert_eq!(result.status, 0, "{}", result.stderr);
+    let layout = steno_core::RecordingLayout::new(&out, id);
+    let raw = layout.directory.join("mic.raw.caf");
+    assert!(
+        result
+            .stdout
+            .contains(&format!("raw mic: {}", raw.display())),
+        "{}",
+        result.stdout
+    );
+    let file = steno_audio::writer::CafFile::read(&raw).unwrap();
+    assert_eq!(file.channels.len(), 1);
+    assert!(
+        file.channels[0].len() >= 4_800,
+        "{} frames",
+        file.channels[0].len()
+    );
+
+    let without = steno(
+        &[
+            "record",
+            "--backend",
+            "synthetic",
+            "--mode",
+            "call",
+            "--seconds",
+            "0.2",
+            "--out",
+            out.to_str().unwrap(),
+            "--quiet",
+        ],
+        home,
+    );
+    assert_eq!(without.status, 0, "{}", without.stderr);
+    assert!(!without.stdout.contains("raw mic:"), "{}", without.stdout);
+}
+
 #[test]
 fn record_with_the_synthetic_backend_writes_a_meeting_folder() {
     let home = tempfile::tempdir().unwrap();
