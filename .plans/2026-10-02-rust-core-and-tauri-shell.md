@@ -777,13 +777,17 @@ still has to draw the window side. `[ ]` is not ported yet.
   512 MiB free and a stop that saves before the disk fills (Rust only). A volume that
   reports no size or more free than its size counts as unreadable and never stops a
   recording. On the Mac a low reading only warns, never refusing a start or stopping a
-  recording, and its minutes count to a full disk, where a failed write still ends the
-  recording saved: `statvfs` leaves out APFS's purgeable space (tens of GB with local
-  Time Machine snapshots), and a meeting not recorded is lost. The Mac gets the floor
-  once `steno-macos` (#236, the stable plan's D10) reads
+  recording, and its minutes count to a full disk: `statvfs` leaves out APFS's purgeable
+  space (tens of GB with local Time Machine snapshots), and a meeting not recorded is
+  lost. A failed write there ends the recording and Steno tries to save it, but a disk
+  that is truly full can fail the save too (the meeting marked failed without its asset
+  row, or left `recording`); the files stay, and P3's salvage at launch (#233) and P17's
+  asset row recover them. The Mac gets the floor, and the save its room, once
+  `steno-macos` (#236, the stable plan's D10) reads
   `NSURLVolumeAvailableCapacityForImportantUsageKey`, which counts that space and takes
-  `unsafe`. A start or a stop that panics leaves the recorder idle with an error, and a
-  capture start that panics leaves the session `Failed`. A panic in the shell leaves
+  `unsafe`. A start or a stop that panics leaves the recorder idle with an error (a start
+  that panics after its meeting began also fails the meeting and removes its folder),
+  and a capture start that panics leaves the session `Failed`, its backend stopped. A panic in the shell leaves
   `crash-<UTC time>.log` in the support directory, and one in the speech sidecar
   `crash-<UTC time>-sidecar.log`, the newest 20 kept
   (`steno_core::crash_log::install_crash_log_hook`, P38), since an app opened from the
