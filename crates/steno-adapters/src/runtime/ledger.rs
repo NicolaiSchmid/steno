@@ -99,9 +99,7 @@ impl DeliveryLedger {
                 .claimed
                 .as_deref()
                 .is_some_and(|folder| Self::name_in(path, folder).is_some())
-            || self
-                .previous_files()
-                .any(|file| file.ownership == FileOwnership::Owned && file.relative_path == path)
+            || self.delivered_hash(path).is_some()
     }
 
     /// Moves the receipt from `from`, the pinned folder that is no longer
@@ -195,11 +193,12 @@ impl DeliveryLedger {
         let prefix = format!("{stem} (Steno ");
         let suffix = format!("){extension}");
         self.previous_files()
-            .filter(|file| file.ownership == FileOwnership::Owned)
             .filter(|file| {
-                file.relative_path.starts_with(&prefix) && file.relative_path.ends_with(&suffix)
+                file.ownership == FileOwnership::Owned
+                    && file.relative_path.starts_with(&prefix)
+                    && file.relative_path.ends_with(&suffix)
             })
-            .max_by(|left, right| left.relative_path.cmp(&right.relative_path))
+            .max_by_key(|file| &file.relative_path)
     }
 
     /// The path of a new copy beside `path`, stamped `stamp`.
