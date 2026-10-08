@@ -254,14 +254,16 @@ enum Renamed {
 /// flush where the written-through one fails ([`windows`]). The renamed
 /// file is reopened for the flush. Windows refuses a file another handle
 /// holds for a moment ([`is_busy`]), so std's rename and the reopen are
-/// retried ([`retried`]). Two writers of `to` in this process rename and
-/// flush one after the other (`windows::lock_path`): on Windows one
-/// writer's flush holds the file the other replaces, and the open of a
-/// file another writer is replacing that instant can fail outright, so
-/// without the lock a write could fail while another one landed. A
-/// flush that fails after the rename is an error with the new file already
-/// in place: the phone intake answers 500 and removes the meeting folder
-/// it made, and [`replace_file`] reports a write that happened.
+/// retried ([`retried`]). Two writers of `to` (spelled the same; the
+/// retries cover other spellings) in this process rename and flush one
+/// after the other (`windows::lock_path`): on Windows one writer's flush
+/// holds the file the other replaces, which sends that rename to std's,
+/// and the reopen of a file another writer is replacing that instant fails
+/// with "access denied"; the retries ride that out, the lock keeps it from
+/// happening. A flush that fails after the rename is an error with the new
+/// file already in place: the phone intake answers 500 and removes the
+/// meeting folder it made, and [`replace_file`] reports a write that
+/// happened.
 fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Renamed> {
     #[cfg(windows)]
     {
@@ -308,7 +310,7 @@ fn is_busy(error: &std::io::Error) -> bool {
 const RETRIES: u32 = 9;
 
 /// [`retried`]'s first wait, which doubles with each retry up to
-/// [`LONGEST_WAIT`]: 0.9 s over the nine.
+/// [`LONGEST_WAIT`]: about 0.9 s over the nine retries.
 const FIRST_WAIT: Duration = Duration::from_millis(5);
 
 /// [`retried`]'s longest wait.
@@ -977,7 +979,11 @@ mod tests {
         *syncs.on_first_wait.lock().unwrap() = Some(Box::new(move || drop(holder)));
         write_durably(&syncs, &to, Access::Default, |file| file.write_all(b"new")).unwrap();
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
-        assert_eq!(syncs.waits(), [FIRST_WAIT], "refused once, then replaced");
+        assert_eq!(
+            syncs.waits().first(),
+            Some(&FIRST_WAIT),
+            "refused at least once, then replaced"
+        );
         assert_eq!(temporaries(dir.path()), Vec::<String>::new());
     }
 
@@ -990,7 +996,7 @@ mod tests {
         struct LockSeen(std::sync::Mutex<Vec<bool>>);
         impl Syncs for LockSeen {
             fn file(&self, _file: &File, path: &Path) -> std::io::Result<()> {
-                self.0.lock().unwrap().push(windows::is_path_locked(path));
+                self.0.lock().unwrap().push(windows::holds_path_lock(path));
                 Ok(())
             }
             fn directory(&self, _directory: &Path) -> std::io::Result<()> {

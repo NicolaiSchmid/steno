@@ -6,13 +6,18 @@
 //! `tempfile`'s `persist` does the same. [`rename_written_through`] adds
 //! `MOVEFILE_WRITE_THROUGH`, with which `MoveFileExW` returns only once the
 //! rename is on the disk. Where that call fails (a target another handle
-//! holds open, which only std's fallback to POSIX rename semantics
-//! replaces), the caller renames with std. Either way the caller then
-//! flushes the renamed file. On NTFS that flush commits the volume's
-//! journal, which holds the rename and, written in order, the folders
-//! created before it. On FAT32 it also flushes every folder above the file
-//! (Windows' FAT driver flushes a file's parent folders with it), which a
-//! written-through rename leaves in the cache.
+//! holds open; std's fallback to POSIX rename semantics replaces it when
+//! that handle shares deletion), the caller renames with std. Either way
+//! the caller then flushes the renamed file. On NTFS that flush commits the
+//! volume's journal, which holds the rename and, written in order, the
+//! folders created before it. On FAT32 it also flushes every folder above
+//! the file (Windows' FAT driver flushes a file's parent folders with it),
+//! which a written-through rename leaves in the cache.
+//!
+//! [`is_busy`] names the errors of a file another handle holds for a
+//! moment, which the caller tries again, and [`lock_path`] makes this
+//! process's writers of one path (spelled the same) rename and flush one
+//! after the other.
 //!
 //! [`flush_directory`] flushes a folder's entries: on NTFS the ones
 //! `create_dir_all_durably` and `create_new_dir_durably` made; the FAT
@@ -124,10 +129,11 @@ fn refuses_folder_flush(error: &io::Error) -> bool {
 }
 
 /// Whether `error` is Windows refusing a file another handle holds, usually
-/// for a moment: a sharing violation or a lock violation (a sync or
-/// antivirus client opened it without sharing the access asked for), or
-/// "access denied" (a replace of a file such a handle holds open, or an
-/// open of a file being deleted or replaced that instant).
+/// for a moment: a sharing violation (a sync or antivirus client opened it
+/// without sharing the access asked for) or a lock violation (it locked a
+/// range of it), or "access denied" (a replace of a file such a handle
+/// holds open, or an open of a file being deleted or replaced that
+/// instant).
 pub(super) fn is_busy(error: &io::Error) -> bool {
     win32_code(error).is_some_and(|code| {
         matches!(
@@ -138,15 +144,41 @@ pub(super) fn is_busy(error: &io::Error) -> bool {
 }
 
 /// The locks [`lock_path`] hands out, one per hash of a path; two paths
-/// that share one only wait for each other.
+/// that share one only wait for each other, at most through the holder's
+/// retries of a busy file (about 1.8 s).
 static PATH_LOCKS: [Mutex<()>; 64] = [const { Mutex::new(()) }; 64];
+
+/// A writer's hold on the lock of a path ([`lock_path`]), let go when
+/// dropped.
+pub(super) struct PathLock {
+    _guard: MutexGuard<'static, ()>,
+}
 
 /// Holds the lock of `path` in this process, so two writers of one path
 /// (spelled the same) rename and flush one after the other.
-pub(super) fn lock_path(path: &Path) -> MutexGuard<'static, ()> {
-    PATH_LOCKS[path_lock_index(path)]
+pub(super) fn lock_path(path: &Path) -> PathLock {
+    let index = path_lock_index(path);
+    let guard = PATH_LOCKS[index]
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    #[cfg(test)]
+    HELD_HERE.set(Some(index));
+    PathLock { _guard: guard }
+}
+
+#[cfg(test)]
+impl Drop for PathLock {
+    fn drop(&mut self) {
+        HELD_HERE.set(None);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The index in [`PATH_LOCKS`] of the lock this thread holds, so a
+    /// test asks about its own writer, not another test's on a path that
+    /// shares the lock.
+    static HELD_HERE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// The index in [`PATH_LOCKS`] of `path`'s lock.
@@ -156,11 +188,10 @@ fn path_lock_index(path: &Path) -> usize {
     usize::from(hasher.finish().to_le_bytes()[0]) % PATH_LOCKS.len()
 }
 
-/// Whether some writer holds the lock of `path` (or of a path that shares
-/// it).
+/// Whether this thread holds the lock of `path`.
 #[cfg(test)]
-pub(super) fn is_path_locked(path: &Path) -> bool {
-    PATH_LOCKS[path_lock_index(path)].try_lock().is_err()
+pub(super) fn holds_path_lock(path: &Path) -> bool {
+    HELD_HERE.get() == Some(path_lock_index(path))
 }
 
 /// The Win32 error code of `error`, if it came from the OS.
