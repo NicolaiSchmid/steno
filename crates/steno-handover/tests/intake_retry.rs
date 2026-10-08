@@ -403,9 +403,10 @@ async fn another_phones_first_announce_after_a_restart_and_a_revoke_admits_its_o
 /// committed the two separately, and a crash or a full disk could land in
 /// between) is not admitted. The phone never got the 200 and holds the
 /// recording, so after a restart the sweep keeps the verified file, a
-/// re-announce lists every chunk without saying `complete`, and
-/// `complete`, with or without that announce, admits the file again
-/// instead of answering the missing meeting.
+/// re-announce lists every chunk without saying `complete`, and `complete`,
+/// with or without that announce, admits the file again instead of answering
+/// the missing meeting. Swift:
+/// `aCompleteReceiptWithoutItsMeetingIsAdmittedAgainAfterARestart`.
 #[tokio::test]
 async fn a_complete_receipt_without_its_meeting_is_admitted_again_after_a_restart() {
     let first = TestService::with_chunk_size(CHUNK_SIZE).await;

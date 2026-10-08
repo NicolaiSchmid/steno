@@ -19,11 +19,11 @@ final class AppEnvironmentTests: XCTestCase {
     XCTAssertNil(environment.handover)
   }
 
-  /// The handover listener is built only over a store whose WAL is on the
-  /// disk: a checkpoint that fails (here one another connection blocks)
-  /// throws before the identity is read, which `live` turns into a startup
-  /// warning with the handover off; once the checkpoint succeeds the
-  /// listener is built. Rust: `a_store_that_cannot_sync_keeps_the_handover_off`.
+  /// The handover listener is built only over a store whose commits are on the
+  /// disk: a checkpoint that fails (here one another connection blocks) throws
+  /// before the identity is read, which `live` turns into a startup warning
+  /// with the handover off; once the checkpoint succeeds the listener is built.
+  /// Rust: `a_store_that_cannot_sync_keeps_the_handover_off`.
   func testAStoreThatCannotSyncKeepsTheHandoverOff() async throws {
     let directory = try TestSupport.temporaryDirectory("steno-sync")
     defer { try? FileManager.default.removeItem(at: directory) }

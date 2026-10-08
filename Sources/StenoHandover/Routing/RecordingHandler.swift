@@ -393,7 +393,7 @@ extension HandoverEngine {
   /// The `.failed` reason after the intake threw; the detail is logged.
   static let intakeRefused = "the intake refused the file"
   /// The `.failed` reason a stored `.complete` receipt reads as when its
-  /// meeting is missing (`storedReceipt`).
+  /// meeting is missing (`storedReceipt`). Rust: `Engine::MEETING_MISSING`.
   static let meetingMissing = "the admitted meeting is missing"
 
   static func status(of receipt: HandoverReceipt) -> Wire.RecordingStatus {

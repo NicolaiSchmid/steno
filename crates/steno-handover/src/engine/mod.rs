@@ -324,7 +324,8 @@ impl Engine {
     /// The `failed` reason after the intake refused; the detail is logged.
     pub const INTAKE_REFUSED: &'static str = "the intake refused the file";
     /// The `failed` reason a stored `complete` receipt reads as when its
-    /// meeting is missing (`stored_receipt`).
+    /// meeting is missing (`stored_receipt`). Swift:
+    /// `HandoverEngine.meetingMissing`.
     pub const MEETING_MISSING: &'static str = "the admitted meeting is missing";
 
     /// The two answers of the gate. `unauthorized` is the phone's "the

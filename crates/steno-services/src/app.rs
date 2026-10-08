@@ -1507,12 +1507,11 @@ mod tests {
         );
     }
 
-    /// The handover listener is built only over a store whose WAL is on
-    /// the disk: a checkpoint that fails (here one another connection
-    /// blocks, with no busy timeout so the test does not wait) keeps the
-    /// handover off, before an identity is minted; once the checkpoint
-    /// succeeds the listener is built. Swift:
-    /// `testAStoreThatCannotSyncKeepsTheHandoverOff`.
+    /// The handover listener is built only over a store whose commits are on
+    /// the disk: a checkpoint that fails (here one another connection blocks,
+    /// with no busy timeout so the test does not wait) keeps the handover off,
+    /// before an identity is minted; once the checkpoint succeeds the listener
+    /// is built. Swift: `testAStoreThatCannotSyncKeepsTheHandoverOff`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_store_that_cannot_sync_keeps_the_handover_off() {
         let (dir, store) = temp_store();

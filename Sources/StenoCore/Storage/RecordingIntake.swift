@@ -94,12 +94,9 @@ public struct RecordingIntake: HandoverIntake, Sendable {
       throw MeetingStoreError.receiptOfAnotherDevice(metadata.recordingID)
     }
     // A retry of an admitted recording is answered from the store with no
-    // write of its own: its admission is on the disk, committed durably by
-    // this process or by an earlier one, whose commits the launch
-    // checkpoint copied into the synced database file before the listener
-    // started, restarting the WAL so that no older frame is replayed over
-    // them (`MeetingStore.checkpointDurably()`), even one that recovery
-    // read back after a failed WAL sync.
+    // write of its own: the launch checkpoint
+    // (`HandoverService.checkpointStore(_:)`) put every earlier commit on the
+    // disk, and this process commits its admissions durably.
     if let meetingID = existing?.state.meetingID, try await store.meeting(id: meetingID) != nil {
       return meetingID
     }

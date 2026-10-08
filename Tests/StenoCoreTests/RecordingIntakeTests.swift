@@ -149,6 +149,11 @@ import Testing
     try await store.writer.write { [sql] db in try db.execute(sql: sql) }
   }
 
+  /// A failed admission commit (a full disk) leaves a `.failed` receipt, the
+  /// upload for the retry and no meeting, and removes the copy once that
+  /// receipt is saved; the retry then completes the same receipt. Rust: the
+  /// refused half of
+  /// `a_phone_recording_lands_in_the_audio_folder_and_a_refused_one_leaves_no_copy`.
   @Test func aFailedAdmissionCommitLeavesAFailedReceiptTheUploadAndNoMeeting() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -223,13 +228,13 @@ import Testing
     #expect(try copies.first.map { try Data(contentsOf: $0) } == Data([1]))
   }
 
-  /// A receipt of another phone under the same recording id is never
-  /// completed. The admitting phone was revoked and the other one announced
-  /// the id, before the intake read the receipt or between its read and its
-  /// commit; either way the admitting phone then paired again. The intake
-  /// refuses, and the other phone's receipt stays as it was: completed, it
-  /// would answer that phone's `complete` with this meeting, and that phone
-  /// would delete a recording never admitted.
+  /// A receipt of another phone under the same recording id is never completed.
+  /// The admitting phone was revoked and the other one announced the id, before
+  /// the intake read the receipt or between its read and its commit; either way
+  /// the admitting phone then paired again. The intake refuses, and the other
+  /// phone's receipt stays as it was: completed, it would answer that phone's
+  /// `complete` with this meeting, and that phone would delete a recording
+  /// never admitted. Rust: `a_receipt_of_another_phone_is_never_completed`.
   @Test(arguments: [false, true])
   func aReceiptOfAnotherPhoneIsNeverCompleted(afterTheRead: Bool) async throws {
     let directory = try Fixtures.temporaryDirectory()
@@ -289,9 +294,10 @@ import Testing
     #expect(FileManager.default.fileExists(atPath: upload.path))
   }
 
-  /// Once the rows committed, the recording is admitted: an enqueue that
-  /// fails then (the app is shutting down) leaves the meeting `.queued` for
-  /// the next launch, and the phone is told `complete`.
+  /// Once the rows committed, the recording is admitted: an enqueue that fails
+  /// then (the app is shutting down) leaves the meeting `.queued` for the next
+  /// launch, and the phone is told `complete`. Rust:
+  /// `an_enqueue_that_fails_after_the_commit_still_admits`.
   @Test func anEnqueueThatFailsAfterTheCommitStillAdmits() async throws {
     struct Boom: Error {}
     let directory = try Fixtures.temporaryDirectory()
@@ -386,11 +392,12 @@ import Testing
 
   /// The production intake over the real pipeline commits the `.complete`
   /// receipt, the meeting and its asset in one transaction under
-  /// `synchronous = FULL`, and leaves the writer at `NORMAL`. Every commit
-  /// is a point a crash could stop at, and none holds the receipt without
-  /// the meeting. A power loss after the commit cannot be tested; that it
-  /// ran under `FULL` can. The enqueue (`ProcessingPipeline.enqueueSaved`)
-  /// writes nothing: no other commit saves the meeting with its asset.
+  /// `synchronous = FULL`, and leaves the writer at `NORMAL`. Every commit is a
+  /// point a crash could stop at, and none holds the receipt without the
+  /// meeting. A power loss after the commit cannot be tested; that it ran under
+  /// `FULL` can. The enqueue (`ProcessingPipeline.enqueueSaved`) writes
+  /// nothing: no other commit saves the meeting with its asset. Rust:
+  /// `the_production_intake_commits_its_receipt_and_meeting_durably`.
   @Test func theProductionIntakeCommitsItsReceiptAndMeetingDurably() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }

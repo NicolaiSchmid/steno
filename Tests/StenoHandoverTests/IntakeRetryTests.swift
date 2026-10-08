@@ -321,13 +321,12 @@ final class ScriptedIntake: HandoverIntake, Sendable {
     #expect(try Data(contentsOf: try #require(admissions.first?.file)) == bytes)
   }
 
-  /// A `.complete` receipt whose meeting never committed (earlier releases
-  /// committed the two separately, and a crash or a full disk could land in
-  /// between) is not admitted. The phone never got the 200 and holds the
-  /// recording, so after a restart the sweep keeps the verified file, a
-  /// re-announce lists every chunk without saying `.complete`, and
-  /// `complete`, with or without that announce, admits the file again
-  /// instead of answering the missing meeting.
+  /// A `.complete` receipt whose meeting never committed (earlier releases committed the two
+  /// separately, and a crash or a full disk could land in between) is not admitted. The phone never
+  /// got the 200 and holds the recording, so after a restart the sweep keeps the verified file, a
+  /// re-announce lists every chunk without saying `.complete`, and `complete`, with or without that
+  /// announce, admits the file again instead of answering the missing meeting. Rust:
+  /// `a_complete_receipt_without_its_meeting_is_admitted_again_after_a_restart`.
   @Test func aCompleteReceiptWithoutItsMeetingIsAdmittedAgainAfterARestart() async throws {
     try await TestService.run(chunkSize: Self.chunkSize) { first in
       let phone = try await Phone.pair(first.service)

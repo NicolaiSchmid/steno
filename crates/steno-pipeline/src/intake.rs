@@ -141,12 +141,9 @@ impl HandoverIntake for RecordingIntake {
             return Err(StoreError::ReceiptOfAnotherDevice(metadata.recording_id).into());
         }
         // A retry of an admitted recording is answered from the store with
-        // no write of its own: its admission is on the disk, committed
-        // durably by this process or by an earlier one, whose commits the
-        // launch checkpoint copied into the synced database file before the
-        // listener started, restarting the WAL so that no older frame is
-        // replayed over them (`Store::checkpoint_durably`), even one that
-        // recovery read back after a failed WAL sync.
+        // no write of its own: the launch checkpoint
+        // (`HandoverService::checkpoint_store`) put every earlier commit on
+        // the disk, and this process commits its admissions durably.
         if let Some(meeting_id) = existing
             .as_ref()
             .and_then(|receipt| receipt.state.meeting_id())
@@ -664,6 +661,11 @@ mod tests {
         (enqueue, admitted)
     }
 
+    /// A phone recording lands in the audio folder as its meeting's master,
+    /// and the upload is deleted. A refused one (a failed admission commit)
+    /// leaves a `failed` receipt, the upload for the retry and no copy.
+    /// Swift: `admitPlacesTheFileEnqueuesOnceAndIsIdempotent` and
+    /// `aFailedAdmissionCommitLeavesAFailedReceiptTheUploadAndNoMeeting`.
     #[tokio::test]
     async fn a_phone_recording_lands_in_the_audio_folder_and_a_refused_one_leaves_no_copy() {
         let dir = tempfile::tempdir().unwrap();
@@ -769,12 +771,13 @@ mod tests {
     }
 
     /// A receipt of another phone under the same recording id is never
-    /// completed. The admitting phone was revoked and the other one
-    /// announced the id, before the intake read the receipt or between its
-    /// read and its commit; either way the admitting phone then paired
-    /// again. The intake refuses, and the other phone's receipt stays as it
-    /// was: completed, it would answer that phone's `complete` with this
-    /// meeting, and that phone would delete a recording never admitted.
+    /// completed. The admitting phone was revoked and the other one announced
+    /// the id, before the intake read the receipt or between its read and its
+    /// commit; either way the admitting phone then paired again. The intake
+    /// refuses, and the other phone's receipt stays as it was: completed, it
+    /// would answer that phone's `complete` with this meeting, and that phone
+    /// would delete a recording never admitted. Swift:
+    /// `aReceiptOfAnotherPhoneIsNeverCompleted(afterTheRead:)`.
     #[tokio::test]
     async fn a_receipt_of_another_phone_is_never_completed() {
         for after_the_read in [false, true] {
@@ -851,8 +854,9 @@ mod tests {
     }
 
     /// Once the rows committed, the recording is admitted: an enqueue that
-    /// fails then (the pipeline is gone) leaves the meeting `queued` for
-    /// the next launch, and the phone is told `complete`.
+    /// fails then (the pipeline is gone) leaves the meeting `queued` for the
+    /// next launch, and the phone is told `complete`. Swift:
+    /// `anEnqueueThatFailsAfterTheCommitStillAdmits`.
     #[tokio::test]
     async fn an_enqueue_that_fails_after_the_commit_still_admits() {
         let dir = tempfile::tempdir().unwrap();
@@ -995,13 +999,13 @@ mod tests {
             .unwrap()
     }
 
-    /// The production intake commits the `complete` receipt and the
-    /// meeting in one transaction under `synchronous = FULL`, and leaves
-    /// the connection at `NORMAL`. Every commit is a point a crash could
-    /// stop at, and that one is the only one: the enqueue
-    /// ([`ProcessingPipeline::enqueue_saved`]) writes nothing. A power
-    /// loss after the commit cannot be tested; that it ran under `FULL`
-    /// can.
+    /// The production intake commits the `complete` receipt and the meeting in
+    /// one transaction under `synchronous = FULL`, and leaves the connection at
+    /// `NORMAL`. Every commit is a point a crash could stop at, and that one is
+    /// the only one: the enqueue ([`ProcessingPipeline::enqueue_saved`]) writes
+    /// nothing. A power loss after the commit cannot be tested; that it ran
+    /// under `FULL` can. Swift:
+    /// `theProductionIntakeCommitsItsReceiptAndMeetingDurably`.
     #[tokio::test]
     async fn the_production_intake_commits_its_receipt_and_meeting_durably() {
         let dir = tempfile::tempdir().unwrap();

@@ -226,10 +226,11 @@ mod tests {
 
     use super::*;
 
-    /// A pairing and a revoke commit under `synchronous = FULL` (2): the
-    /// phone keeps the token from the pairing's answer, so a power loss must
-    /// not forget the pairing, nor bring a revoked phone back. That the
-    /// commit then survives a power loss is SQLite's and cannot be tested.
+    /// A pairing and a revoke commit under `synchronous = FULL` (2): the phone
+    /// keeps the token from the pairing's answer, so a power loss must not
+    /// forget the pairing, nor bring a revoked phone back. That the commit then
+    /// survives a power loss is SQLite's and cannot be tested. Swift:
+    /// `aPairingAndARevokeCommitDurably`.
     #[test]
     fn a_pairing_and_a_revoke_commit_durably() {
         let directory = tempfile::tempdir().unwrap();
