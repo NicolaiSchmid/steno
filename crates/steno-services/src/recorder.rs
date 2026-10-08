@@ -396,7 +396,7 @@ impl CaptureRecorder {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = disk;
     }
 
-    fn disk(&self) -> DiskWatch {
+    pub(crate) fn disk(&self) -> DiskWatch {
         self.disk
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -622,11 +622,11 @@ impl CaptureRecorder {
     }
 
     /// The watcher of the recording of `meeting_id` (see the module doc),
-    /// until its session leaves `Recording` or is gone: a `Failed` the
-    /// session reached on its own finishes the recording here, and every
-    /// `disk.interval` so does a write that failed without one (the
-    /// session could not spawn its thread to end it), and the free space
-    /// for `folder` is read against `rate` bytes a second.
+    /// until its session leaves `Recording` or is gone. A `Failed` the
+    /// session reached on its own finishes the recording here. Every
+    /// `disk.interval` so does a write that failed without one (the session
+    /// could not spawn its thread to end it), and the free space for
+    /// `folder` is read against `rate` bytes a second.
     fn watch(
         this: &Weak<Self>,
         meeting_id: Uuid,
@@ -761,20 +761,22 @@ impl CaptureRecorder {
     /// stopped on its own; without it, a failure the result carries (a
     /// device that stayed lost, a write or a close that failed) does
     /// ([`ended_with`]). A panic on the way leaves the recorder `Idle`
-    /// too ([`StopUnwinding`]), so the next recording can start and a quit
-    /// does not wait for good.
+    /// too ([`Unwinding`]), so the next recording can start and a quit
+    /// does not wait for good. One before or inside the save leaves the
+    /// meeting's row `recording` over closed files (the session's drop
+    /// closes them), which the next launch fails as interrupted, the files
+    /// kept.
     fn finish_stop(&self, active: Active, reason: RecordingEndReason, error: Option<String>) {
-        let unwinding = StopUnwinding(self);
+        let unwinding = Unwinding::of(self, RecordingState::Stopping, SAVE_PANICKED);
         self.notify();
         let intake = self.intake();
-        let mut ended = error;
         let outcome = match active.session.stop() {
             Ok(result) => {
                 log_dropped_frames(active.meeting_id, &result.statistics);
                 if let Some(failure) = &result.failure {
                     log_failure(active.meeting_id, failure, &reason);
                 }
-                ended = ended.or_else(|| {
+                let ended = error.or_else(|| {
                     result
                         .failure
                         .as_ref()
@@ -795,7 +797,7 @@ impl CaptureRecorder {
                     ),
                 );
                 match completed {
-                    Ok(_) => Ok(recording_warning(active.mode, &statistics)),
+                    Ok(_) => Ok((recording_warning(active.mode, &statistics), ended)),
                     Err(error) => Err(format!("Recording could not be saved: {error}")),
                 }
             }
@@ -811,7 +813,7 @@ impl CaptureRecorder {
         }
         let _ = active.notice_thread.join();
         // Read once the notice thread is gone, so its last rebuild counts.
-        let outcome = outcome.map(|warning| {
+        let outcome = outcome.map(|(warning, ended)| {
             let note = active
                 .fallback
                 .lock()
@@ -819,15 +821,16 @@ impl CaptureRecorder {
                 .was_on
                 .as_deref()
                 .map(fallback_note);
-            [warning, note]
+            let warning = [warning, note]
                 .into_iter()
                 .flatten()
-                .reduce(|warning, note| format!("{warning} {note}"))
+                .reduce(|warning, note| format!("{warning} {note}"));
+            (warning, ended)
         });
         let mut inner = self.inner();
         Self::idle(&mut inner);
         match outcome {
-            Ok(warning) => {
+            Ok((warning, ended)) => {
                 inner.status.warning = warning;
                 inner.status.error = ended;
             }
@@ -850,19 +853,38 @@ impl CaptureRecorder {
     }
 }
 
-/// Held through [`CaptureRecorder::finish_stop`]: if it unwinds, the drop
-/// leaves the recorder `Idle` with an error instead of `Stopping` for good,
-/// which `settle` (a quit) would wait on forever and which no start or
-/// Stop leaves. Forgotten once the outcome is in the status.
-struct StopUnwinding<'a>(&'a CaptureRecorder);
+/// Held through [`CaptureRecorder::finish_stop`] in `Stopping` and through
+/// a start in `Starting`: if either unwinds, the drop leaves the recorder
+/// `Idle` with `error` instead of in that state for good, which `settle`
+/// (a quit) would wait on forever and which no start or Stop leaves; a
+/// state the step had already left is left alone. Forgotten once the
+/// outcome is in the status.
+struct Unwinding<'a> {
+    recorder: &'a CaptureRecorder,
+    holds: RecordingState,
+    error: &'static str,
+}
 
-impl Drop for StopUnwinding<'_> {
+impl<'a> Unwinding<'a> {
+    fn of(recorder: &'a CaptureRecorder, holds: RecordingState, error: &'static str) -> Self {
+        Self {
+            recorder,
+            holds,
+            error,
+        }
+    }
+}
+
+impl Drop for Unwinding<'_> {
     fn drop(&mut self) {
-        let recorder = self.0;
+        let recorder = self.recorder;
         let mut inner = recorder.inner();
+        if inner.status.state != self.holds {
+            return;
+        }
         CaptureRecorder::idle(&mut inner);
         inner.status.warning = None;
-        inner.status.error = Some(SAVE_PANICKED.to_owned());
+        inner.status.error = Some(self.error.to_owned());
         drop(inner);
         recorder.notify();
     }
@@ -870,6 +892,9 @@ impl Drop for StopUnwinding<'_> {
 
 /// The status line of a stop that a fault inside Steno cut short.
 const SAVE_PANICKED: &str = "Steno ran into a problem while saving the recording.";
+
+/// The status line of a start that a fault inside Steno cut short.
+const START_PANICKED: &str = "Recording could not start: Steno ran into a problem.";
 
 impl Recorder for CaptureRecorder {
     fn status(&self) -> RecorderStatus {
@@ -907,6 +932,9 @@ impl Recorder for CaptureRecorder {
             inner.status.error = None;
             inner.status.warning = None;
         }
+        // A meeting row a panicking start had begun stays `recording`
+        // until the next launch fails it as interrupted.
+        let unwinding = Unwinding::of(self, RecordingState::Starting, START_PANICKED);
         self.notify();
         match self.start_inner(mode, call_app) {
             Ok(()) => self.warm_up_if_installed(),
@@ -916,6 +944,7 @@ impl Recorder for CaptureRecorder {
                 inner.status.error = Some(format!("Recording could not start: {error}"));
             }
         }
+        std::mem::forget(unwinding);
         self.notify();
     }
 
@@ -973,7 +1002,7 @@ impl Recorder for CaptureRecorder {
 /// full behind a slow disk, ring overruns while the computer was too busy,
 /// frames a stop left undrained and, on Windows, the slips that absorb
 /// clock drift. A device that disappeared is the status's error instead
-/// ([`ended_early`]). Swift:
+/// ([`ended_with`]). Swift:
 /// `RecordingController.stop`, where a device loss replaced the silent-lane
 /// line as a warning and that line reads "The system audio lane stayed
 /// silent"; the joining and the dropped frames are Rust only.
@@ -1975,9 +2004,32 @@ mod tests {
     /// the status says why it stopped.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_writer_that_fails_mid_recording_ends_and_saves_the_recording() {
+        writer_fails_mid_recording(false).await;
+    }
+
+    /// As [`a_writer_that_fails_mid_recording_ends_and_saves_the_recording`],
+    /// when the session finds no thread to end the recording on: the state
+    /// stays `Recording`, and the watcher's tick reads the failed write
+    /// ([`CaptureSession::write_failed`]) and stops and saves it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_write_the_session_cannot_end_is_stopped_by_the_watcher() {
+        writer_fails_mid_recording(true).await;
+    }
+
+    /// A recording whose writer fails after 30 frames ends on its own,
+    /// saved and with the plain error line; `no_thread` refuses the
+    /// session its thread to end it on.
+    async fn writer_fails_mid_recording(no_thread: bool) {
         let harness = harness(&[]);
         let log = steno_pipeline::fixtures::CapturedLog::warnings();
-        harness.capture_with(failing_capture(Some(30), |options| options));
+        let make = failing_capture(Some(30), |options| options);
+        harness.capture_with(Arc::new(move |configuration| {
+            let session = make(configuration)?;
+            if no_thread {
+                session.refuse_the_writer_failure_thread();
+            }
+            Ok(session)
+        }));
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let meeting = ended_on_its_own(&harness, meeting_id).await;
@@ -2049,12 +2101,19 @@ mod tests {
     }
 
     /// A stop that panics part way (here the host's change hook, on the
-    /// stopping thread) leaves the recorder idle with an error rather than
-    /// stopping for good, and the next recording starts.
+    /// stopping thread, before the save) leaves the recorder idle with an
+    /// error rather than stopping for good, and the next recording starts.
+    /// The meeting's row stays `recording` for the next launch, over a
+    /// master the session's drop closed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_that_panics_leaves_the_recorder_idle_with_an_error() {
         let harness = harness(&[]);
         start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        eventually("frames reached the files", || {
+            harness.recorder.status().levels.is_some()
+        })
+        .await;
         let watched = Arc::downgrade(&harness.recorder);
         harness.recorder.on_change(Arc::new(move || {
             let stopping = watched
@@ -2072,6 +2131,41 @@ mod tests {
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
         assert_eq!(status.error.as_deref(), Some(SAVE_PANICKED));
+        let meeting = harness.store.meeting(meeting_id).unwrap().unwrap();
+        assert_eq!(meeting.state, steno_core::MeetingState::Recording);
+        let audio_folder =
+            steno_core::paths::file_url_path(&harness.store.settings().unwrap().audio_folder)
+                .unwrap();
+        let master = steno_core::RecordingLayout::new(&audio_folder, meeting_id)
+            .master(steno_core::AudioFormat::Caf48kFloat32);
+        assert!(steno_audio::CafFile::read(&master).unwrap().frame_count() > 0);
+        start(&harness.recorder).await;
+        stop(&harness.recorder).await;
+    }
+
+    /// A start that panics part way (here the host's change hook, on the
+    /// starting thread) leaves the recorder idle with an error rather than
+    /// starting for good, and the next recording starts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_that_panics_leaves_the_recorder_idle_with_an_error() {
+        let harness = harness(&[]);
+        let watched = Arc::downgrade(&harness.recorder);
+        harness.recorder.on_change(Arc::new(move || {
+            let starting = watched
+                .upgrade()
+                .is_some_and(|recorder| recorder.status().state == RecordingState::Starting);
+            let on_the_start = std::thread::current().name() == Some("test-start");
+            assert!(!(starting && on_the_start), "the change hook panics");
+        }));
+        let starter = harness.recorder.clone();
+        let starting = std::thread::Builder::new()
+            .name("test-start".into())
+            .spawn(move || starter.start(CaptureMode::InPerson, None))
+            .unwrap();
+        assert!(starting.join().is_err(), "the start panicked");
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Idle);
+        assert_eq!(status.error.as_deref(), Some(START_PANICKED));
         start(&harness.recorder).await;
         stop(&harness.recorder).await;
     }

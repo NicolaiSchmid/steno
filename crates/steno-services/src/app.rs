@@ -884,6 +884,19 @@ mod tests {
         assert_eq!(listed, expected);
     }
 
+    /// The recorder's disk watch reads the volume of the database's folder
+    /// beside the recordings folder's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_recorder_watches_the_database_folder_s_volume_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("elsewhere").join("steno.sqlite");
+        let mut options = options_under(&dir.path().join("support"));
+        options.database_path = Some(database.clone());
+        let app = build(options).unwrap();
+        let disk = app.recorder.disk();
+        assert_eq!(disk.database_folder.as_deref(), database.parent());
+    }
+
     /// What `App::launch` does to a meeting a previous process left
     /// recording: it fails with Swift's reason.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

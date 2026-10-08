@@ -11,6 +11,10 @@
 //! the Swift app had the system's crash reporter.
 //!
 //! The file stays on the computer, as every log does; nothing sends it.
+//! The panic's message is written as it was raised, so it can hold text
+//! the panicking code was handling (a slice of a string in an
+//! out-of-bounds message, a path), unlike the log lines, which carry
+//! counts and kinds only.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
