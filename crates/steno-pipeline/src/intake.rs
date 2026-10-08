@@ -327,6 +327,7 @@ pub struct LocalRecordingIntake {
     enqueue: Enqueue,
     now: Now,
     zone: FixedOffset,
+    commit_attempts: usize,
 }
 
 impl LocalRecordingIntake {
@@ -337,7 +338,18 @@ impl LocalRecordingIntake {
             enqueue,
             now,
             zone,
+            commit_attempts: Self::COMMIT_ATTEMPTS,
         }
+    }
+
+    /// This intake with [`Self::complete`] trying its commit `attempts`
+    /// times in all (at least once) instead of [`Self::COMMIT_ATTEMPTS`]:
+    /// a stop for the app's exit tries once, so it ends within the exit's
+    /// patience.
+    #[must_use]
+    pub fn with_commit_attempts(mut self, attempts: usize) -> Self {
+        self.commit_attempts = attempts.max(1);
+        self
     }
 
     /// The production wiring over `pipeline`.
@@ -413,7 +425,7 @@ impl LocalRecordingIntake {
     /// `expires_at` cleared, and enqueues the meeting: the meeting, now
     /// `queued`, and its asset in one commit. A commit that finds the
     /// database busy is tried again, up to [`Self::COMMIT_ATTEMPTS`] in
-    /// all. A meeting that is not `recording` is left alone, its row
+    /// all ([`Self::with_commit_attempts`]). A meeting that is not `recording` is left alone, its row
     /// untouched. Any other failure leaves the meeting `recording` and
     /// returns the error: the recording stays on disk, and the next
     /// launch's recovery finds it there and queues it. Swift marked the
@@ -431,7 +443,7 @@ impl LocalRecordingIntake {
                 .complete_inner(meeting_id, result.clone(), retention)
                 .await
             {
-                Err(error) if error.is_busy() && attempt < Self::COMMIT_ATTEMPTS => {
+                Err(error) if error.is_busy() && attempt < self.commit_attempts => {
                     tracing::debug!(%meeting_id, attempt, "the recording's commit found the database busy");
                     attempt += 1;
                 }
@@ -780,17 +792,23 @@ mod tests {
         );
         assert!(store.asset(meeting.id).unwrap().is_some());
 
+        // The lock is released after the last try, so a write after it (a
+        // `fail`, as before) would land and show.
         let (meeting, result) = a_recording(&store, dir.path());
-        let hold = WriteLockHold::new(&path);
+        let hold = Mutex::new(Some(WriteLockHold::new(&path)));
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let enqueue = committing_enqueue(store.clone(), calls.clone(), move |call| {
+            if call == LocalRecordingIntake::COMMIT_ATTEMPTS {
+                hold.lock().unwrap().take();
+            }
+        });
         let intake = LocalRecordingIntake::new(
             store.clone(),
-            committing_enqueue(store.clone(), calls.clone(), |_| {}),
+            enqueue,
             Arc::new(Utc::now),
             FixedOffset::east_opt(0).unwrap(),
         );
         let error = intake.complete(meeting.id, result, None).await.unwrap_err();
-        drop(hold);
         assert!(error.is_busy(), "{error}");
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -802,6 +820,59 @@ mod tests {
         assert!(store.asset(meeting.id).unwrap().is_none());
     }
 
+    /// A commit that fails for another reason (a full disk) is not tried
+    /// again and leaves the meeting `recording`, as `begin` wrote it; an
+    /// intake set to one try does not retry a busy commit either.
+    #[tokio::test]
+    async fn a_failed_commit_leaves_the_recording_and_only_a_busy_one_is_tried_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path().join("steno.sqlite")).unwrap());
+        let (meeting, result) = a_recording(&store, dir.path());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let enqueue: Enqueue = {
+            let calls = calls.clone();
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Err(PipelineFailure::new(
+                        PipelineStage::Decode,
+                        "database or disk is full",
+                    ))
+                })
+            })
+        };
+        let intake = LocalRecordingIntake::new(
+            store.clone(),
+            enqueue,
+            Arc::new(Utc::now),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let error = intake.complete(meeting.id, result, None).await.unwrap_err();
+        assert!(!error.is_busy(), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "not tried again");
+        assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), meeting);
+        assert!(store.asset(meeting.id).unwrap().is_none());
+
+        let path = dir.path().join("steno.sqlite");
+        store
+            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_millis(20))?))
+            .unwrap();
+        let (meeting, result) = a_recording(&store, dir.path());
+        let hold = WriteLockHold::new(&path);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let intake = LocalRecordingIntake::new(
+            store.clone(),
+            committing_enqueue(store.clone(), calls.clone(), |_| {}),
+            Arc::new(Utc::now),
+            FixedOffset::east_opt(0).unwrap(),
+        )
+        .with_commit_attempts(1);
+        let error = intake.complete(meeting.id, result, None).await.unwrap_err();
+        drop(hold);
+        assert!(error.is_busy(), "{error}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one try");
+        assert_eq!(store.meeting(meeting.id).unwrap().unwrap(), meeting);
+    }
 
     /// Makes every meeting insert fail, as a full disk or a busy store
     /// would fail the admission's commit; with `failed_receipts_too`, the
