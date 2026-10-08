@@ -4,24 +4,36 @@
 //! can lose in a power cut a recording the durable writes synced, so
 //! Settings warns about an audio folder on a network mount.
 //!
-//! `statfs` names the file system: on Linux by its magic number
-//! (`is_a_network_file_system`), on macOS by its type name
-//! (`is_a_network_file_system_name`). A FUSE mount on Linux shares one
-//! magic number among local and remote file systems, so its type is read
-//! from `/proc/self/mountinfo` (`mount_type`), and only the remote ones
-//! warn. On macOS FUSE reports one type name for all its file systems, and
-//! there it serves remote ones (sshfs, rclone, cloud drives) almost only,
-//! so every macFUSE mount warns.
+//! `statfs` names the file system. On Linux its magic number decides
+//! (`is_a_linux_network_file_system`). A FUSE mount shares one magic number
+//! among local and remote file systems, so its type is read from
+//! `/proc/self/mountinfo` (`mount_type`), and only the remote ones warn. On
+//! macOS a mount without `MNT_LOCAL` warns, except an `autofs` trigger,
+//! whose flags say nothing about what it mounts; the type name decides as
+//! well (`is_a_macos_network_file_system`), because macFUSE reports
+//! `macfuse` (or a name beginning with it), never whether it is remote, and
+//! sets `MNT_LOCAL` for a mount made with `-o local`. macFUSE serves remote
+//! file systems (sshfs, rclone, cloud drives) almost only, so every macFUSE
+//! mount warns.
 
-/// Whether the nearest existing folder of `path` is on a network mount;
-/// false where no part of it exists or its file system cannot be read.
+use std::path::Path;
+
+/// Whether `path`, or its nearest ancestor that exists, is on a network
+/// mount; false where no part of it exists or its file system cannot be
+/// read. A FUSE mount whose server has gone (`ENOTCONN`) reads as missing,
+/// so the folder it is mounted on decides until it is back; writes into it
+/// fail meanwhile.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(super) fn is_on_a_network_mount(path: &std::path::Path) -> bool {
-    let Some(existing) = path.ancestors().find(|ancestor| ancestor.exists()) else {
+pub(super) fn is_on_a_network_mount(path: &Path) -> bool {
+    let Some(existing) = nearest_existing(path) else {
         return false;
     };
-    let Ok(stat) = rustix::fs::statfs(existing) else {
-        return false;
+    let stat = match rustix::fs::statfs(existing) {
+        Ok(stat) => stat,
+        Err(error) => {
+            tracing::debug!(folder = %existing.display(), %error, "the folder's file system could not be read");
+            return false;
+        }
     };
     #[cfg(target_os = "linux")]
     {
@@ -34,12 +46,18 @@ pub(super) fn is_on_a_network_mount(path: &std::path::Path) -> bool {
             reason = "f_type's width and sign differ between targets"
         )]
         let magic = stat.f_type as u32;
-        is_a_network_file_system(magic, || mount_type_of(existing))
+        is_a_linux_network_file_system(magic, || mount_type_of(existing))
     }
     #[cfg(target_os = "macos")]
     {
-        is_a_network_file_system_name(&type_name(&stat.f_fstypename))
+        is_a_macos_network_file_system(&type_name(&stat.f_fstypename), stat.f_flags)
     }
+}
+
+/// `path`, or its nearest ancestor that exists.
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+fn nearest_existing(path: &Path) -> Option<&Path> {
+    path.ancestors().find(|ancestor| ancestor.exists())
 }
 
 /// `NFS_SUPER_MAGIC`.
@@ -54,37 +72,102 @@ const CIFS_MAGIC_NUMBER: u32 = 0xFF53_4D42;
 /// `SMB2_MAGIC_NUMBER`, the `cifs` client mounted as `smb3`.
 #[cfg(any(target_os = "linux", test))]
 const SMB2_MAGIC_NUMBER: u32 = 0xFE53_4D42;
+/// `CEPH_SUPER_MAGIC`, the kernel Ceph client.
+#[cfg(any(target_os = "linux", test))]
+const CEPH_SUPER_MAGIC: u32 = 0x00C3_6400;
+/// `AFS_SUPER_MAGIC`, the `OpenAFS` client.
+#[cfg(any(target_os = "linux", test))]
+const AFS_SUPER_MAGIC: u32 = 0x5346_414F;
+/// `AFS_FS_MAGIC`, the kernel's own AFS client (kAFS).
+#[cfg(any(target_os = "linux", test))]
+const AFS_FS_MAGIC: u32 = 0x6B41_4653;
+/// `V9FS_MAGIC`, 9P (a share from a VM host or another machine).
+#[cfg(any(target_os = "linux", test))]
+const V9FS_MAGIC: u32 = 0x0102_1997;
+/// `LL_SUPER_MAGIC`, Lustre.
+#[cfg(any(target_os = "linux", test))]
+const LUSTRE_SUPER_MAGIC: u32 = 0x0BD0_0BD0;
+/// `GPFS_SUPER_MAGIC`, IBM Storage Scale.
+#[cfg(any(target_os = "linux", test))]
+const GPFS_SUPER_MAGIC: u32 = 0x4750_4653;
+/// `CODA_SUPER_MAGIC`.
+#[cfg(any(target_os = "linux", test))]
+const CODA_SUPER_MAGIC: u32 = 0x7375_7245;
+/// `NCP_SUPER_MAGIC`, the `NetWare` client.
+#[cfg(any(target_os = "linux", test))]
+const NCP_SUPER_MAGIC: u32 = 0x564C;
+/// `ORANGEFS_SUPER_MAGIC`.
+#[cfg(any(target_os = "linux", test))]
+const ORANGEFS_SUPER_MAGIC: u32 = 0x2003_0528;
 /// `FUSE_SUPER_MAGIC`, every FUSE file system (`fuse` and `fuseblk`).
 #[cfg(any(target_os = "linux", test))]
 const FUSE_SUPER_MAGIC: u32 = 0x6573_5546;
 
-/// The FUSE types in `/proc/self/mountinfo` that reach another machine:
-/// sshfs, rclone, and GNOME's `gvfsd-fuse`, under which the file manager
-/// mounts SMB, SFTP and `WebDAV` shares.
+/// The magic numbers of the Linux network file systems outside FUSE.
 #[cfg(any(target_os = "linux", test))]
-const REMOTE_FUSE_TYPES: [&str; 3] = ["fuse.sshfs", "fuse.rclone", "fuse.gvfsd-fuse"];
+const NETWORK_MAGIC_NUMBERS: [u32; 13] = [
+    NFS_SUPER_MAGIC,
+    SMB_SUPER_MAGIC,
+    CIFS_MAGIC_NUMBER,
+    SMB2_MAGIC_NUMBER,
+    CEPH_SUPER_MAGIC,
+    AFS_SUPER_MAGIC,
+    AFS_FS_MAGIC,
+    V9FS_MAGIC,
+    LUSTRE_SUPER_MAGIC,
+    GPFS_SUPER_MAGIC,
+    CODA_SUPER_MAGIC,
+    NCP_SUPER_MAGIC,
+    ORANGEFS_SUPER_MAGIC,
+];
+
+/// The FUSE types in `/proc/self/mountinfo` that reach another machine:
+/// sshfs, rclone, GNOME's `gvfsd-fuse` and KDE's `kio-fuse`, under which
+/// the file managers mount SMB, SFTP and `WebDAV` shares, the Gluster and
+/// Ceph clients, the S3 and Cloud Storage mounts (s3fs, gcsfuse,
+/// mountpoint-s3, `JuiceFS`), curlftpfs and smbnetfs.
+#[cfg(any(target_os = "linux", test))]
+const REMOTE_FUSE_TYPES: [&str; 12] = [
+    "fuse.sshfs",
+    "fuse.rclone",
+    "fuse.gvfsd-fuse",
+    "fuse.kio-fuse",
+    "fuse.glusterfs",
+    "fuse.ceph-fuse",
+    "fuse.s3fs",
+    "fuse.gcsfuse",
+    "fuse.mountpoint-s3",
+    "fuse.juicefs",
+    "fuse.curlftpfs",
+    "fuse.smbnetfs",
+];
 
 /// Whether the Linux file system with the `statfs` magic number `magic` is
-/// a network mount: NFS and SMB, and a FUSE mount whose type
-/// (`fuse_type`, read only for FUSE) is a remote one.
+/// a network mount: one of [`NETWORK_MAGIC_NUMBERS`], or a FUSE mount whose
+/// type (`fuse_type`, read only for FUSE) is one of [`REMOTE_FUSE_TYPES`].
 #[cfg(any(target_os = "linux", test))]
-fn is_a_network_file_system(magic: u32, fuse_type: impl FnOnce() -> Option<String>) -> bool {
-    match magic {
-        NFS_SUPER_MAGIC | SMB_SUPER_MAGIC | CIFS_MAGIC_NUMBER | SMB2_MAGIC_NUMBER => true,
-        FUSE_SUPER_MAGIC => {
-            fuse_type().is_some_and(|name| REMOTE_FUSE_TYPES.contains(&name.as_str()))
-        }
-        _ => false,
+fn is_a_linux_network_file_system(magic: u32, fuse_type: impl FnOnce() -> Option<String>) -> bool {
+    if magic == FUSE_SUPER_MAGIC {
+        fuse_type().is_some_and(|name| REMOTE_FUSE_TYPES.contains(&name.as_str()))
+    } else {
+        NETWORK_MAGIC_NUMBERS.contains(&magic)
     }
 }
 
 /// The type `/proc/self/mountinfo` names for the mount `folder` is on,
 /// found by the folder's device number.
 #[cfg(target_os = "linux")]
-fn mount_type_of(folder: &std::path::Path) -> Option<String> {
+fn mount_type_of(folder: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt as _;
-    let device = std::fs::metadata(folder).ok()?.dev();
-    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let read = || -> std::io::Result<_> {
+        let device = std::fs::metadata(folder)?.dev();
+        Ok((device, std::fs::read_to_string("/proc/self/mountinfo")?))
+    };
+    let (device, mountinfo) = read()
+        .inspect_err(|error| {
+            tracing::debug!(folder = %folder.display(), %error, "the folder's FUSE type could not be read");
+        })
+        .ok()?;
     mount_type(
         &mountinfo,
         rustix::fs::major(device),
@@ -110,12 +193,19 @@ fn mount_type(mountinfo: &str, major: u32, minor: u32) -> Option<&str> {
     })
 }
 
-/// Whether the macOS file system type `name` (`statfs`'s `f_fstypename`)
-/// is a network mount: SMB, NFS, AFP, `WebDAV`, and every macFUSE mount
+/// `MNT_LOCAL`, the `statfs` flag of a macOS file system on a local device.
+#[cfg(any(target_os = "macos", test))]
+const MNT_LOCAL: u32 = 0x1000;
+
+/// Whether the macOS file system with the type name `name` and the mount
+/// flags `flags` (`statfs`'s `f_fstypename` and `f_flags`) is a network
+/// mount: one without [`MNT_LOCAL`] other than an `autofs` trigger, and,
+/// whatever its flags, SMB, NFS, AFP, `WebDAV` and every macFUSE mount
 /// (`macfuse`, `osxfuse` before version 4, with or without a suffix).
 #[cfg(any(target_os = "macos", test))]
-fn is_a_network_file_system_name(name: &str) -> bool {
-    matches!(name, "smbfs" | "nfs" | "afpfs" | "webdav")
+fn is_a_macos_network_file_system(name: &str, flags: u32) -> bool {
+    ((flags & MNT_LOCAL) == 0 && name != "autofs")
+        || matches!(name, "smbfs" | "nfs" | "afpfs" | "webdav")
         || name.starts_with("macfuse")
         || name.starts_with("osxfuse")
 }
@@ -135,41 +225,81 @@ fn type_name(name: &[std::ffi::c_char]) -> String {
 mod tests {
     use super::*;
 
-    /// NFS and the three SMB clients warn; local file systems do not.
+    /// A missing folder is read through its nearest ancestor that exists.
     #[test]
-    fn nfs_and_smb_are_network_file_systems_and_local_ones_are_not() {
+    fn a_missing_folder_resolves_to_its_nearest_existing_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(nearest_existing(dir.path()), Some(dir.path()));
+        let deeper = dir.path().join("missing").join("deeper");
+        assert_eq!(nearest_existing(&deeper), Some(dir.path()));
+    }
+
+    /// NFS, the three SMB clients and the other network file systems warn;
+    /// local file systems do not.
+    #[test]
+    fn linux_nfs_and_smb_warn_and_local_file_systems_do_not() {
         let unread = || -> Option<String> { panic!("read the type of a mount that is not FUSE") };
         for magic in [
             NFS_SUPER_MAGIC,
             SMB_SUPER_MAGIC,
             CIFS_MAGIC_NUMBER,
             SMB2_MAGIC_NUMBER,
+            CEPH_SUPER_MAGIC,
+            AFS_SUPER_MAGIC,
+            AFS_FS_MAGIC,
+            V9FS_MAGIC,
+            LUSTRE_SUPER_MAGIC,
+            GPFS_SUPER_MAGIC,
+            CODA_SUPER_MAGIC,
+            NCP_SUPER_MAGIC,
+            ORANGEFS_SUPER_MAGIC,
         ] {
-            assert!(is_a_network_file_system(magic, unread), "{magic:#x}");
+            assert!(is_a_linux_network_file_system(magic, unread), "{magic:#x}");
         }
-        // ext4, btrfs, xfs, tmpfs, overlayfs.
-        for magic in [0xEF53, 0x9123_683E, 0x5846_5342, 0x0102_1994, 0x794C_7630] {
-            assert!(!is_a_network_file_system(magic, unread), "{magic:#x}");
+        // ext4, btrfs, xfs, tmpfs, overlayfs, and balloon-kvm-fs, whose
+        // number has been mistaken for OrangeFS's.
+        for magic in [
+            0xEF53,
+            0x9123_683E,
+            0x5846_5342,
+            0x0102_1994,
+            0x794C_7630,
+            0x1366_1366,
+        ] {
+            assert!(!is_a_linux_network_file_system(magic, unread), "{magic:#x}");
         }
     }
 
     /// A FUSE mount warns only when its type is a remote one, and not when
     /// the type cannot be read.
     #[test]
-    fn a_fuse_mount_is_a_network_file_system_only_when_its_type_is_remote() {
-        for name in ["fuse.sshfs", "fuse.rclone", "fuse.gvfsd-fuse"] {
+    fn a_linux_fuse_mount_warns_only_when_its_type_is_remote() {
+        for name in [
+            "fuse.sshfs",
+            "fuse.rclone",
+            "fuse.gvfsd-fuse",
+            "fuse.kio-fuse",
+            "fuse.glusterfs",
+            "fuse.ceph-fuse",
+            "fuse.s3fs",
+            "fuse.gcsfuse",
+            "fuse.mountpoint-s3",
+            "fuse.juicefs",
+            "fuse.curlftpfs",
+            "fuse.smbnetfs",
+        ] {
             assert!(
-                is_a_network_file_system(FUSE_SUPER_MAGIC, || Some(name.to_owned())),
+                is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(name.to_owned())),
                 "{name}"
             );
         }
         for name in ["fuseblk", "fuse.portal", "fuse.appimage", "fuse"] {
             assert!(
-                !is_a_network_file_system(FUSE_SUPER_MAGIC, || Some(name.to_owned())),
+                !is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(name.to_owned())),
                 "{name}"
             );
         }
-        assert!(!is_a_network_file_system(FUSE_SUPER_MAGIC, || None));
+        assert!(!is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || None));
     }
 
     /// The type is found by the device number, after the optional fields,
@@ -191,16 +321,13 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_mount_type_of_proc_is_proc() {
-        assert_eq!(
-            mount_type_of(std::path::Path::new("/proc")).as_deref(),
-            Some("proc")
-        );
+        assert_eq!(mount_type_of(Path::new("/proc")).as_deref(), Some("proc"));
     }
 
-    /// SMB, NFS, AFP, `WebDAV` and macFUSE warn on macOS; APFS, HFS+, exFAT
-    /// and FAT do not.
+    /// SMB, NFS, AFP, `WebDAV` and macFUSE warn on macOS even with
+    /// `MNT_LOCAL` set; APFS, HFS+, exFAT, FAT and devfs with it do not.
     #[test]
-    fn macos_network_file_systems_are_named() {
+    fn macos_network_file_system_names_warn() {
         for name in [
             "smbfs",
             "nfs",
@@ -210,11 +337,25 @@ mod tests {
             "osxfuse",
             "macfuse_sshfs",
         ] {
-            assert!(is_a_network_file_system_name(name), "{name}");
+            assert!(is_a_macos_network_file_system(name, MNT_LOCAL), "{name}");
         }
         for name in ["apfs", "hfs", "exfat", "msdos", "devfs", ""] {
-            assert!(!is_a_network_file_system_name(name), "{name}");
+            assert!(!is_a_macos_network_file_system(name, MNT_LOCAL), "{name}");
         }
+    }
+
+    /// A macOS mount without `MNT_LOCAL` warns whatever its name, except an
+    /// `autofs` trigger (flags as read on a Mac).
+    #[test]
+    fn a_macos_mount_without_mnt_local_warns_except_autofs() {
+        let trigger = 0x0450_0000;
+        assert_eq!(trigger & MNT_LOCAL, 0);
+        assert!(!is_a_macos_network_file_system("autofs", trigger));
+        for name in ["apfs", "unlisted"] {
+            assert!(is_a_macos_network_file_system(name, trigger), "{name}");
+        }
+        // APFS as read on the same host: `MNT_LOCAL` set.
+        assert!(!is_a_macos_network_file_system("apfs", 0x4480_D001));
     }
 
     /// The NUL ends the type name in its buffer.
