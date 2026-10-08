@@ -788,21 +788,26 @@ impl App {
     /// 3. Meetings left queued or processing are processed again, exports
     ///    left unfinished are re-exported
     ///    ([`ProcessingPipeline::redeliver_unfinished`](steno_pipeline::ProcessingPipeline::redeliver_unfinished)),
-    ///    and the retention sweep runs. Where the secret store can ask (the
-    ///    Secret Service), the meetings and exports wait until it chose and
-    ///    the reread below ran, so none runs on a pipeline built without the
-    ///    key. The choice includes the unlock and the first launch's move or
-    ///    a later launch's tidy; on a locked keyring or `KeePassXC` each of
-    ///    their prompts may stay up for two minutes, so a meeting a crash
-    ///    left processing can show as processing that long (it is not a
-    ///    hang).
+    ///    and the retention sweep runs.
     /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
     ///    10 s for a master that is still written): those recordings are
-    ///    recovered, left alone or failed, and the list is refreshed. This
-    ///    does not wait for the secret store, so a recording recovered while
-    ///    the keyring asks runs on the pipeline built without the API key.
+    ///    recovered, left alone or failed, and the list is refreshed.
     /// 5. Meanwhile the login item is registered the first time, and the
     ///    handover listener starts when a phone is already paired.
+    ///
+    /// Where the secret store can ask (the Secret Service), steps 3 and 4
+    /// (all but the sweep) wait until it chose and the reread below ran, so
+    /// no meeting, export or recovered recording runs on a pipeline built
+    /// without the key. The choice includes the unlock and the first
+    /// launch's move or a later launch's tidy; on a locked keyring or
+    /// `KeePassXC` each of their prompts may stay up for two minutes, so a
+    /// meeting a crash left processing can show as processing that long (it
+    /// is not a hang). [`build`] itself may wait on the user once: on the
+    /// first launch over an open keyring with no identity in it, the
+    /// handover identity is minted into it on the calling thread, before
+    /// any window shows, and that write waits up to two minutes when the
+    /// provider asks to confirm the new item (`KeePassXC` answers every new
+    /// item with a prompt, which may show a window).
     ///
     /// When the keyring answers later, after a read failed while it asked
     /// the user, the pipeline is built again, the host reads the API key
@@ -864,16 +869,35 @@ impl App {
 
         let interrupted = Interrupted::list(&self.store, &self.paths.support_directory);
         let recover = self.recover_unfinished();
+        let reconcile = {
+            let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
+            let (check, zone, runtime) = (
+                self.live_recording_check.clone(),
+                self.zone,
+                self.runtime.clone(),
+            );
+            let host = host.clone();
+            move || {
+                reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
+                host.store_changed();
+            }
+        };
         let unlocked = self
             .secrets_unlocked
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        match unlocked {
-            None => recover(),
+        let work = match unlocked {
+            None => {
+                recover();
+                run_sweep(&self.sweep);
+                tokio::task::spawn_blocking(reconcile)
+            }
             // The pipeline built while the keyring asked has no API key, so
-            // the meetings wait for the one built after the answer.
+            // the meetings and the interrupted recordings wait for the one
+            // built after the answer.
             Some(unlocked) => {
+                run_sweep(&self.sweep);
                 let reread = self.reread_after_unlock(host);
                 tokio::spawn(async move {
                     let read_again = unlocked.await;
@@ -882,24 +906,11 @@ impl App {
                             reread();
                         }
                         recover();
+                        reconcile();
                     })
                     .await;
-                });
+                })
             }
-        }
-        run_sweep(&self.sweep);
-        let work = {
-            let (store, pipeline) = (self.store.clone(), self.pipeline.clone());
-            let (check, zone, runtime) = (
-                self.live_recording_check.clone(),
-                self.zone,
-                self.runtime.clone(),
-            );
-            let host = host.clone();
-            tokio::task::spawn_blocking(move || {
-                reconcile_at_launch(&store, &pipeline, &interrupted, &check, zone, &runtime);
-                host.store_changed();
-            })
         };
         *self
             .launch_work
@@ -1927,6 +1938,8 @@ mod tests {
         handover: Arc<ListenerHandover>,
         keys_read: Arc<std::sync::Mutex<Vec<Option<String>>>>,
         queued: uuid::Uuid,
+        /// A meeting the last process left recording, with no audio.
+        interrupted: uuid::Uuid,
         paired: Vec<PairedDevice>,
         answered: Option<tokio::sync::oneshot::Sender<()>>,
     }
@@ -1976,6 +1989,13 @@ mod tests {
             let mut meeting = steno_core::testing::sample_data::meeting();
             meeting.state = steno_core::MeetingState::Queued;
             store.save_meeting(&meeting).unwrap();
+            let audio_folder = store.settings().unwrap().audio_folder;
+            std::fs::create_dir_all(steno_core::paths::file_url_path(&audio_folder).unwrap())
+                .unwrap();
+            let mut interrupted = steno_core::testing::sample_data::meeting();
+            interrupted.id = uuid::Uuid::new_v4();
+            interrupted.state = steno_core::MeetingState::Recording;
+            store.save_meeting(&interrupted).unwrap();
 
             let handover = handover_listener(
                 &app.store,
@@ -2002,6 +2022,7 @@ mod tests {
                 handover,
                 keys_read,
                 queued: meeting.id,
+                interrupted: interrupted.id,
                 paired: phones,
                 answered: Some(answered),
             }
@@ -2015,6 +2036,10 @@ mod tests {
 
         fn queued_state(&self) -> steno_core::MeetingState {
             self.app.store.meeting(self.queued).unwrap().unwrap().state
+        }
+
+        fn interrupted_state(&self) -> steno_core::MeetingState {
+            self.app.store.meeting(self.interrupted).unwrap().unwrap().state
         }
 
         /// Waits until the crash recovery ran, which ends the reread.
@@ -2084,9 +2109,22 @@ mod tests {
             steno_core::MeetingState::Queued,
             "no recovery on the pipeline built without the key"
         );
+        assert_eq!(
+            asked.interrupted_state(),
+            steno_core::MeetingState::Recording,
+            "nor of an interrupted recording"
+        );
 
         asked.answer(None);
         asked.until_recovered().await;
+        asked.app.launch_finished().await;
+        assert!(
+            matches!(
+                asked.interrupted_state(),
+                steno_core::MeetingState::Failed { .. }
+            ),
+            "the interrupted recording is settled after the answer"
+        );
         assert!(handover.listener().is_some());
         assert_ne!(
             steno_host::services::Handover::mac_id(handover.as_ref()),
