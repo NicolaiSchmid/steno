@@ -49,12 +49,9 @@ impl Syncs for Disk {
         }
         #[cfg(not(windows))]
         {
-            #[cfg(unix)]
             if let Ok(handle) = File::open(directory) {
                 let _ = handle.sync_all();
             }
-            #[cfg(not(unix))]
-            let _ = directory;
             Ok(())
         }
     }
