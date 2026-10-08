@@ -8,7 +8,7 @@
 //! A new version is one PR that adds `migrations/00N_vN.sql`, its entry in
 //! [`MIGRATIONS`] and the Swift `Step` running the same SQL; neither side
 //! ships alone. Like GRDB, this module ignores an applied identifier it
-//! does not know, with a warning in the log ([`ignore_unknown`]): a newer
+//! does not know, with a warning in the log: a newer
 //! build migrated the database, and since a migration only adds tables and
 //! columns and never changes existing ones, this build still reads and
 //! writes what it knows. `migrations/README.md` has the full procedure.
