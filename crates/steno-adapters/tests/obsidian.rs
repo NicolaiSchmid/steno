@@ -4,19 +4,24 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use common::*;
 use steno_adapters::fs::AtomicFileWriter;
-use steno_adapters::obsidian::{ManagedBlock, ObsidianError, ObsidianFolderDestination};
+use steno_adapters::obsidian::{
+    DeliveryStep, ManagedBlock, ObsidianError, ObsidianFolderDestination,
+};
 use steno_adapters::rendering::ArtifactRenderer;
 use steno_core::content_hash::sha256;
 use steno_core::json::uuid_string;
 use steno_core::paths::{file_url, file_url_path};
 use steno_core::{
-    DeliveryReceipt, FileOwnership, MeetingExport, ObsidianSettings, Person, Platform,
-    SpeakerAssignment,
+    AudioFormat, AudioLane, DeliveryReceipt, FileOwnership, MeetingExport, ObsidianSettings,
+    Person, Platform, SpeakerAssignment,
 };
 
 struct Vault {
@@ -97,6 +102,12 @@ fn meeting_files(slug: &str) -> Vec<String> {
 
 fn without_audio(files: Vec<String>) -> Vec<String> {
     files.into_iter().filter(|f| f != "audio.m4a").collect()
+}
+
+/// The files a delivery without audio writes into `<FOLDER>-2`, the second
+/// folder of the slug.
+fn second_folder_files() -> Vec<String> {
+    without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
 }
 
 fn paths(receipt: &DeliveryReceipt) -> Vec<String> {
@@ -257,11 +268,6 @@ fn validate_rejects_missing_unwritable_and_bad_people_folder() {
         .unwrap();
     vault.destination_with(true, None).validate_vault().unwrap();
     assert!(vault.list("").is_empty(), "the probe leaves nothing behind");
-    assert!(
-        ObsidianError::AudioUnavailable
-            .to_string()
-            .contains("no audio mixdown")
-    );
 }
 
 #[cfg(unix)]
@@ -474,13 +480,14 @@ fn files_the_app_never_wrote_are_not_opened_on_reexport() {
 }
 
 #[test]
-fn missing_mixdown_fails_after_every_other_file_is_written() {
+fn a_missing_mixdown_writes_every_other_file_and_warns() {
     let vault = Vault::new();
     let mut export = export();
     export.audio.as_mut().unwrap().mixdown_url = None;
+    let receipt = deliver(&vault.destination(), &export, None);
     assert_eq!(
-        vault.destination().deliver_meeting(&export, None),
-        Err(ObsidianError::AudioUnavailable)
+        receipt.warnings,
+        ["The audio was already removed, so the export has no audio file"]
     );
     assert_eq!(
         vault.list(FOLDER),
@@ -642,10 +649,7 @@ fn a_second_meeting_on_the_same_day_gets_the_next_suffix_and_shares_the_person_p
         vault.list("Meetings"),
         [FOLDER_SLUG.to_owned(), format!("{FOLDER_SLUG}-2")]
     );
-    assert_eq!(
-        vault.list(&format!("{FOLDER}-2")),
-        without_audio(meeting_files(&format!("{FOLDER_SLUG}-2")))
-    );
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
     for (path, data) in files_one
         .iter()
         .filter(|(path, _)| !path.starts_with("People/"))
@@ -766,6 +770,7 @@ fn a_pinned_folder_with_a_trailing_slash_still_names_the_notes_after_it() {
         folder: format!("{FOLDER}/"),
         files: vec![],
         renderer_version: ArtifactRenderer::VERSION,
+        warnings: Vec::new(),
     };
 
     let receipt = deliver(&vault.destination(), &export, Some(&pinned));
@@ -918,14 +923,15 @@ fn a_moved_vault_is_written_fresh_under_the_pinned_folder_and_the_old_one_is_lef
 }
 
 #[test]
-fn a_mixdown_path_without_a_file_is_audio_unavailable() {
+fn a_mixdown_path_without_a_file_delivers_without_audio_and_warns() {
     let vault = Vault::new();
     let mut export = export();
     export.audio.as_mut().unwrap().mixdown_url =
         Some(file_url(&vault.directory.path().join("gone.m4a"), false));
+    let receipt = deliver(&vault.destination(), &export, None);
     assert_eq!(
-        vault.destination().deliver_meeting(&export, None),
-        Err(ObsidianError::AudioUnavailable)
+        receipt.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
     );
     assert_eq!(
         vault.list(FOLDER),
@@ -941,6 +947,7 @@ fn a_mixdown_path_without_a_file_is_audio_unavailable() {
         7,
         "with audio off the missing mixdown is no error"
     );
+    assert_eq!(no_audio.warnings, Vec::<String>::new(), "and no warning");
 }
 
 #[test]
@@ -1005,6 +1012,141 @@ fn a_users_audio_file_counts_when_the_mixdown_is_gone() {
     assert_eq!(vault.text(&format!("{FOLDER}/audio.m4a")), "user audio\n");
     assert!(!paths(&second).iter().any(|p| p.ends_with("audio.m4a")));
     assert_eq!(second.files.len(), first.files.len());
+    assert_eq!(second.warnings, Vec::<String>::new());
+}
+
+/// A handover meeting as `persist` leaves it: one AAC file at the asset's
+/// own URL and no mixdown.
+fn phone_export(vault: &Vault) -> MeetingExport {
+    let mut export = export();
+    let recording = vault.directory.path().join("recording.m4a");
+    fs::write(&recording, mixdown_bytes()).unwrap();
+    let audio = export.audio.as_mut().unwrap();
+    audio.url = file_url(&recording, false);
+    audio.format = AudioFormat::M4aAac;
+    audio.lanes = vec![AudioLane::Mic];
+    audio.sidecars_16k = BTreeMap::new();
+    audio.mixdown_url = None;
+    export
+}
+
+#[test]
+fn a_phone_meeting_without_a_mixdown_copies_its_recording() {
+    let vault = Vault::new();
+    let receipt = deliver(&vault.destination(), &phone_export(&vault), None);
+    assert_eq!(receipt.warnings, Vec::<String>::new());
+    assert_eq!(vault.list(FOLDER), meeting_files(FOLDER_SLUG));
+    assert_eq!(vault.read(&format!("{FOLDER}/audio.m4a")), mixdown_bytes());
+    assert!(paths(&receipt).contains(&format!("{FOLDER}/audio.m4a")));
+}
+
+#[test]
+fn a_phone_meeting_whose_recording_was_swept_warns() {
+    let vault = Vault::new();
+    let export = phone_export(&vault);
+    fs::remove_file(vault.directory.path().join("recording.m4a")).unwrap();
+    let receipt = deliver(&vault.destination(), &export, None);
+    assert_eq!(
+        receipt.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
+    );
+    assert_eq!(
+        vault.list(FOLDER),
+        without_audio(meeting_files(FOLDER_SLUG))
+    );
+}
+
+/// The meeting folder, with its audio copy, is deleted, the sweep removes
+/// the mixdown, and a redelivery creates the pinned folder again: it warns,
+/// and the receipt drops the audio copy and lists every other file again.
+#[test]
+fn a_gone_pinned_folder_with_the_mixdown_swept_warns() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    let audio = format!("{FOLDER}/audio.m4a");
+    assert!(paths(&first).contains(&audio));
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let again = deliver(&destination, &ours, Some(&first));
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(
+        vault.list(FOLDER),
+        without_audio(meeting_files(FOLDER_SLUG))
+    );
+    assert_eq!(
+        again.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
+    );
+    assert_eq!(
+        paths(&again),
+        paths(&first)
+            .into_iter()
+            .filter(|path| *path != audio)
+            .collect::<Vec<_>>(),
+        "every other file is listed again"
+    );
+}
+
+#[test]
+fn a_deleted_audio_copy_with_the_mixdown_swept_warns() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    fs::remove_file(vault.path(&format!("{FOLDER}/audio.m4a"))).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let again = deliver(&destination, &ours, Some(&first));
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(
+        again.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
+    );
+    assert!(!paths(&again).contains(&format!("{FOLDER}/audio.m4a")));
+}
+
+/// A link left where the audio copy was is still an entry in the folder:
+/// the receipt keeps it, so the copy is never taken for the user's file.
+#[cfg(unix)]
+#[test]
+fn an_audio_copy_left_as_a_dangling_link_stays_on_the_receipt() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    let copy = vault.path(&format!("{FOLDER}/audio.m4a"));
+    fs::remove_file(&copy).unwrap();
+    std::os::unix::fs::symlink(vault.directory.path().join("nowhere.m4a"), &copy).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let again = deliver(&destination, &ours, Some(&first));
+    assert_eq!(again.folder, FOLDER);
+    assert!(paths(&again).contains(&format!("{FOLDER}/audio.m4a")));
+    assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_mixdown_that_cannot_be_checked_is_a_read_failure_not_missing_audio() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let vault = Vault::new();
+    let locked = vault.directory.path().join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    let mixdown = locked.join("audio.m4a");
+    fs::write(&mixdown, mixdown_bytes()).unwrap();
+    let mut export = export();
+    export.audio.as_mut().unwrap().mixdown_url = Some(file_url(&mixdown, false));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::metadata(&mixdown).is_ok() {
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        return; // root
+    }
+    let delivered = vault.destination().deliver_meeting(&export, None);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    match delivered {
+        Err(ObsidianError::ReadFailed { path, .. }) => assert_eq!(Path::new(&path), mixdown),
+        other => panic!("expected ReadFailed, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1186,4 +1328,903 @@ fn the_sample_clip_url_round_trips_as_a_file_url() {
         Some(PathBuf::from("/tmp/a b/ü.wav"))
     );
     assert_eq!(file_url_path("https://example.com/x"), None);
+}
+
+/// How long a race test waits for the other side to reach its step before
+/// it fails; a safety net against a hang, never part of the ordering.
+const STEP_LIMIT: Duration = Duration::from_secs(60);
+
+const ANNA_PAGE: &str = "People/Anna Müller.md";
+
+/// What the second delivery of a race did first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Second {
+    WaitedForTheVault,
+    Finished,
+}
+
+#[test]
+fn two_meetings_delivered_at_once_both_keep_their_line_on_a_shared_person_page() {
+    let vault = Vault::new();
+    let one = export();
+    let mut two = one.clone();
+    two.meeting.id = uuid(2);
+    two.meeting.started_at = one.meeting.started_at + chrono::Duration::hours(3);
+
+    // The first delivery stops after it read Anna's page; the second runs
+    // until it either waits for the vault or finishes. Only then does the
+    // first go on, so without the vault lock the second's line is written
+    // between the first's read and its write, every time.
+    let (paused, first_paused) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let first = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if step == DeliveryStep::WritingPersonPage(ANNA_PAGE) {
+                let _ = paused.send(());
+                let _ = released.lock().unwrap().recv();
+            }
+        });
+    // The second names the vault `vault/../vault`: only a lock keyed by
+    // the vault itself, not by the configured path, makes it wait.
+    let (events, second_events) = mpsc::channel();
+    let waiting = events.clone();
+    let second = destination_at(&vault.root.join("../vault"), false, Some("People"))
+        .with_step_hook(move |step| {
+            if step == DeliveryStep::WaitingForVault {
+                let _ = waiting.send(Second::WaitedForTheVault);
+            }
+        });
+
+    let (receipt_one, receipt_two, second_first) = std::thread::scope(|scope| {
+        // Moved in, so a panic here drops it and frees the first delivery.
+        let release = release;
+        let first_run = scope.spawn(|| first.deliver_meeting(&one, None));
+        first_paused
+            .recv_timeout(STEP_LIMIT)
+            .expect("the first delivery reaches the page");
+        let second_run = scope.spawn(|| {
+            let receipt = second.deliver_meeting(&two, None);
+            let _ = events.send(Second::Finished);
+            receipt
+        });
+        let second_first = second_events
+            .recv_timeout(STEP_LIMIT)
+            .expect("the second delivery waits or finishes");
+        release.send(()).unwrap();
+        (
+            first_run.join().unwrap().unwrap(),
+            second_run.join().unwrap().unwrap(),
+            second_first,
+        )
+    });
+
+    let anna = vault.text(ANNA_PAGE);
+    assert!(
+        anna.contains(&ManagedBlock::marker(one.meeting.id)),
+        "the first meeting's line"
+    );
+    assert!(
+        anna.contains(&ManagedBlock::marker(two.meeting.id)),
+        "the second meeting's line survives the first's write"
+    );
+    assert_eq!(
+        second_first,
+        Second::WaitedForTheVault,
+        "the second delivery waits for the first"
+    );
+    assert_eq!(receipt_one.folder, FOLDER);
+    assert_eq!(receipt_two.folder, format!("{FOLDER}-2"));
+}
+
+#[test]
+fn a_folder_another_writer_claims_first_is_never_shared() {
+    let vault = Vault::new();
+    let ours = export();
+    let mut theirs = ours.clone();
+    theirs.meeting.id = uuid(99);
+    let their_json = ArtifactRenderer::new().render_json(&theirs).unwrap();
+
+    // Another process (the Swift app, a second CLI) creates the same
+    // folder and writes its meeting.json just before this delivery claims
+    // it.
+    let root = vault.root.clone();
+    let json = their_json.clone();
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            let folder = root.join(FOLDER);
+            if step == DeliveryStep::ClaimingFolder(FOLDER) && !folder.exists() {
+                fs::create_dir_all(&folder).unwrap();
+                fs::write(folder.join("meeting.json"), &json).unwrap();
+                fs::write(folder.join("notes.md"), b"theirs\n").unwrap();
+            }
+        });
+    let receipt = deliver(&destination, &ours, None);
+
+    assert_eq!(receipt.folder, format!("{FOLDER}-2"));
+    assert_eq!(vault.list(FOLDER), ["meeting.json", "notes.md"]);
+    assert_eq!(
+        vault.read(&format!("{FOLDER}/meeting.json")),
+        their_json,
+        "the other writer's meeting.json is untouched"
+    );
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+}
+
+/// Every file directly in `folder` with its bytes, by name.
+fn contents(vault: &Vault, folder: &str) -> Vec<(String, Vec<u8>)> {
+    vault
+        .list(folder)
+        .into_iter()
+        .map(|name| {
+            let bytes = vault.read(&format!("{folder}/{name}"));
+            (name, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn a_redelivery_whose_folder_another_meeting_claimed_since_gets_a_folder_of_its_own() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = lose_the_folder_to_another_meeting(&vault, &destination, &destination, &ours);
+    let their_files = contents(&vault, FOLDER);
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+    assert_eq!(
+        contents(&vault, FOLDER),
+        their_files,
+        "the other meeting's notes are untouched"
+    );
+    assert!(
+        paths(&again)
+            .iter()
+            .all(|path| !path.starts_with(&format!("{FOLDER}/"))),
+        "the receipt no longer lists the other meeting's files: {:?}",
+        paths(&again)
+    );
+    let anna = vault.text(ANNA_PAGE);
+    assert!(anna.contains(&ManagedBlock::marker(ours.meeting.id)));
+    assert!(anna.contains(&ManagedBlock::marker(uuid(2))));
+}
+
+/// The export with its first decision reworded: a change the folder note
+/// shows and the folder name does not.
+fn with_a_changed_decision(export: &MeetingExport) -> MeetingExport {
+    let mut changed = export.clone();
+    changed.decisions[0].text = String::from("Die Aufteilung wird verschoben.");
+    changed
+}
+
+/// `ours` delivered with `destination`, its folder removed by the user, and
+/// another meeting with the same date and title (id 2) delivered into the
+/// name since with `theirs_with`. Returns `ours`' receipt.
+fn lose_the_folder_to_another_meeting(
+    vault: &Vault,
+    destination: &ObsidianFolderDestination,
+    theirs_with: &ObsidianFolderDestination,
+    ours: &MeetingExport,
+) -> DeliveryReceipt {
+    let mut theirs = ours.clone();
+    theirs.meeting.id = uuid(2);
+    let first = deliver(destination, ours, None);
+    assert_eq!(first.folder, FOLDER);
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    let their_receipt = deliver(theirs_with, &theirs, None);
+    assert_eq!(their_receipt.folder, FOLDER);
+    first
+}
+
+#[test]
+fn a_redelivery_that_failed_after_claiming_a_folder_writes_that_folder_the_next_time() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = lose_the_folder_to_another_meeting(
+        &vault,
+        &destination,
+        &vault.destination_with(false, None),
+        &ours,
+    );
+    let two = format!("{FOLDER}-2");
+
+    // The first redelivery claims `-2`, writes the meeting's notes there and
+    // then fails on a person page that is not UTF-8.
+    let mut latin1 = b"# Anna M".to_vec();
+    latin1.push(0xFC);
+    latin1.extend(b"ller\n");
+    fs::write(vault.path(ANNA_PAGE), &latin1).unwrap();
+    assert!(matches!(
+        destination.deliver_meeting(&ours, Some(&first)),
+        Err(ObsidianError::ReadFailed { .. })
+    ));
+    assert_eq!(vault.list(&two), second_folder_files());
+
+    // The page is fixed and the meeting changed; the receipt is still the
+    // one pinned at the lost folder.
+    fs::write(vault.path(ANNA_PAGE), b"# Anna\n").unwrap();
+    let changed = with_a_changed_decision(&ours);
+    let again = deliver(&destination, &changed, Some(&first));
+
+    assert_eq!(again.folder, two);
+    let expected: Vec<String> = second_folder_files()
+        .into_iter()
+        .map(|name| format!("{two}/{name}"))
+        .collect();
+    let listed: Vec<String> = paths(&again)
+        .into_iter()
+        .filter(|path| path.starts_with(&format!("{two}/")))
+        .collect();
+    assert_eq!(listed, expected, "every file of the claimed folder");
+    assert!(
+        vault
+            .text(&format!("{two}/{FOLDER_SLUG}-2.md"))
+            .contains("Die Aufteilung wird verschoben."),
+        "the folder note has the change"
+    );
+    assert_eq!(
+        vault.read(&format!("{two}/meeting.json")),
+        ArtifactRenderer::new().render_json(&changed).unwrap()
+    );
+}
+
+#[test]
+fn a_redelivery_without_its_audio_writes_the_folder_it_claimed_and_warns() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = lose_the_folder_to_another_meeting(
+        &vault,
+        &destination,
+        &vault.destination_with(false, None),
+        &ours,
+    );
+    let two = format!("{FOLDER}-2");
+    // The retention sweep removed the mixdown, and the audio copy left with
+    // the removed folder.
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let theirs = contents(&vault, FOLDER);
+
+    let again = deliver(&destination, &with_a_changed_decision(&ours), Some(&first));
+
+    assert_eq!(again.folder, two);
+    assert_eq!(
+        again.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
+    );
+    assert_eq!(
+        vault.list(&two),
+        second_folder_files(),
+        "the notes, no audio"
+    );
+    assert!(
+        vault
+            .text(&format!("{two}/{FOLDER_SLUG}-2.md"))
+            .contains("Die Aufteilung wird verschoben."),
+        "the folder note has the change"
+    );
+    assert_eq!(
+        contents(&vault, FOLDER),
+        theirs,
+        "the other meeting's folder is untouched"
+    );
+}
+
+#[test]
+fn a_lost_folder_drops_only_its_own_files_from_the_receipt() {
+    let vault = Vault::new();
+    let ours = export();
+    let first = lose_the_folder_to_another_meeting(
+        &vault,
+        &vault.destination_with(false, Some("People")),
+        &vault.destination_with(false, None),
+        &ours,
+    );
+    assert_eq!(
+        managed(&first),
+        ["People/Anna Müller.md", "People/Nicolai Schmid.md"]
+    );
+
+    // With people off the person pages are not rendered, so only the
+    // ledger carries them into the receipt.
+    let again = deliver(&vault.destination_with(false, None), &ours, Some(&first));
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(
+        managed(&again),
+        managed(&first),
+        "the person pages stay listed"
+    );
+    assert!(
+        paths(&again)
+            .iter()
+            .all(|path| !path.starts_with(&format!("{FOLDER}/"))),
+        "{:?}",
+        paths(&again)
+    );
+}
+
+#[test]
+fn a_pinned_meeting_json_that_names_no_meeting_gets_a_folder_of_its_own() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = deliver(&destination, &ours, None);
+    fs::write(
+        vault.path(&format!("{FOLDER}/meeting.json")),
+        b"{\"meeting\": 7}\n",
+    )
+    .unwrap();
+    let left = contents(&vault, FOLDER);
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(contents(&vault, FOLDER), left, "never written over");
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+}
+
+#[test]
+fn a_deleted_meeting_json_is_written_back_in_the_same_folder() {
+    // Either note alone names the meeting: `transcript.vtt` with the folder
+    // note deleted too, then the folder note with `transcript.vtt` deleted.
+    // The note left is rewritten with CRLF line endings (git's
+    // `core.autocrlf`, a Windows editor) and the id in capitals, as Swift
+    // writes it.
+    let note = format!("{FOLDER_SLUG}.md");
+    for (other, left) in [
+        (note.as_str(), "transcript.vtt"),
+        ("transcript.vtt", note.as_str()),
+    ] {
+        let deleted = ["meeting.json", other];
+        let vault = Vault::new();
+        let destination = vault.destination_with(false, Some("People"));
+        let mut ours = export();
+        ours.meeting.id = "0d133bbf-29e8-49aa-af88-951c84fd8e5a".parse().unwrap();
+        let first = deliver(&destination, &ours, None);
+        for name in deleted {
+            fs::remove_file(vault.path(&format!("{FOLDER}/{name}"))).unwrap();
+        }
+        let left = format!("{FOLDER}/{left}");
+        let id = ours.meeting.id.to_string();
+        let rewritten = vault
+            .text(&left)
+            .replace(&id, &id.to_uppercase())
+            .replace('\n', "\r\n");
+        assert!(
+            rewritten.contains(&id.to_uppercase()),
+            "{left} names the id"
+        );
+        fs::write(vault.path(&left), rewritten).unwrap();
+
+        let again = deliver(&destination, &ours, Some(&first));
+
+        assert_eq!(again.folder, FOLDER, "{deleted:?}: same folder");
+        assert_eq!(
+            vault.read(&format!("{FOLDER}/meeting.json")),
+            ArtifactRenderer::new().render_json(&ours).unwrap(),
+            "{deleted:?}: written back"
+        );
+        assert!(
+            !vault.path(&format!("{FOLDER}-2")).exists(),
+            "{deleted:?}: no duplicate folder"
+        );
+    }
+}
+
+#[test]
+fn a_deleted_meeting_json_with_the_mixdown_swept_still_delivers() {
+    let vault = Vault::new();
+    let destination = vault.destination();
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    fs::remove_file(vault.path(&format!("{FOLDER}/meeting.json"))).unwrap();
+    fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+
+    let again = deliver(&destination, &with_a_changed_decision(&ours), Some(&first));
+
+    assert_eq!(again.folder, FOLDER);
+    assert!(vault.path(&format!("{FOLDER}/audio.m4a")).exists());
+    assert_eq!(
+        again.warnings,
+        Vec::<String>::new(),
+        "the copy in the folder is the audio"
+    );
+}
+
+#[test]
+fn a_folder_without_meeting_json_whose_notes_name_another_meeting_is_never_written() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = lose_the_folder_to_another_meeting(
+        &vault,
+        &destination,
+        &vault.destination_with(false, None),
+        &ours,
+    );
+    fs::remove_file(vault.path(&format!("{FOLDER}/meeting.json"))).unwrap();
+    let their_files = contents(&vault, FOLDER);
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(
+        contents(&vault, FOLDER),
+        their_files,
+        "the other meeting's notes are untouched"
+    );
+}
+
+#[test]
+fn a_pinned_meeting_json_that_cannot_be_read_fails_the_delivery() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = deliver(&destination, &ours, None);
+    // A directory in its place: reading it fails with an error other than
+    // a missing file on every platform.
+    let json = vault.path(&format!("{FOLDER}/meeting.json"));
+    fs::remove_file(&json).unwrap();
+    fs::create_dir(&json).unwrap();
+
+    match destination.deliver_meeting(&ours, Some(&first)) {
+        Err(ObsidianError::ReadFailed { path, .. }) => assert_eq!(Path::new(&path), json),
+        other => panic!("expected ReadFailed, got {other:?}"),
+    }
+    assert!(
+        !vault.path(&format!("{FOLDER}-2")).exists(),
+        "no folder claimed"
+    );
+}
+
+#[test]
+fn a_note_that_cannot_be_read_fails_the_delivery() {
+    // With `meeting.json` gone, `transcript.vtt` is read first, then the
+    // folder note; a directory in either's place fails on every platform.
+    let note = format!("{FOLDER_SLUG}.md");
+    for (unreadable, deleted) in [
+        ("transcript.vtt", None),
+        (note.as_str(), Some("transcript.vtt")),
+    ] {
+        let vault = Vault::new();
+        let destination = vault.destination_with(false, Some("People"));
+        let ours = export();
+        let first = deliver(&destination, &ours, None);
+        for name in ["meeting.json", unreadable].into_iter().chain(deleted) {
+            fs::remove_file(vault.path(&format!("{FOLDER}/{name}"))).unwrap();
+        }
+        let path = vault.path(&format!("{FOLDER}/{unreadable}"));
+        fs::create_dir(&path).unwrap();
+
+        match destination.deliver_meeting(&ours, Some(&first)) {
+            Err(ObsidianError::ReadFailed { path: failed, .. }) => {
+                assert_eq!(Path::new(&failed), path, "{unreadable}");
+            }
+            other => panic!("{unreadable}: expected ReadFailed, got {other:?}"),
+        }
+        assert!(
+            !vault.path(&format!("{FOLDER}-2")).exists(),
+            "{unreadable}: no folder claimed"
+        );
+    }
+}
+
+#[test]
+fn a_gone_pinned_folder_is_claimed_again_in_place() {
+    let vault = Vault::new();
+    let claims = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&claims);
+    let destination = vault.destination().with_step_hook(move |step| {
+        if let DeliveryStep::ClaimingFolder(folder) = step {
+            seen.lock().unwrap().push(folder.to_owned());
+        }
+    });
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    fs::remove_dir_all(vault.path("Meetings")).unwrap();
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(paths(&again), paths(&first));
+    assert_eq!(vault.list(FOLDER), meeting_files(FOLDER_SLUG));
+    assert_eq!(
+        *claims.lock().unwrap(),
+        [FOLDER, FOLDER],
+        "claimed, then claimed again"
+    );
+}
+
+#[test]
+fn a_gone_pinned_folder_another_writer_takes_first_is_never_written() {
+    let vault = Vault::new();
+    let ours = export();
+    let first = deliver(&vault.destination_with(false, Some("People")), &ours, None);
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    let mut theirs = ours.clone();
+    theirs.meeting.id = uuid(99);
+    let their_json = ArtifactRenderer::new().render_json(&theirs).unwrap();
+
+    // Another process creates the folder again for its own meeting just
+    // before this redelivery claims it.
+    let root = vault.root.clone();
+    let json = their_json.clone();
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            let folder = root.join(FOLDER);
+            if step == DeliveryStep::ClaimingFolder(FOLDER) && !folder.exists() {
+                fs::create_dir(&folder).unwrap();
+                fs::write(folder.join("meeting.json"), &json).unwrap();
+            }
+        });
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(vault.list(FOLDER), ["meeting.json"]);
+    assert_eq!(vault.read(&format!("{FOLDER}/meeting.json")), their_json);
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_symlink_at_the_pinned_folder_gets_a_folder_of_its_own() {
+    let vault = Vault::new();
+    let claims = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&claims);
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if let DeliveryStep::ClaimingFolder(folder) = step {
+                seen.lock().unwrap().push(folder.to_owned());
+            }
+        });
+    let ours = export();
+    let first = deliver(&destination, &ours, None);
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    let nowhere = vault.directory.path().join("nowhere");
+    std::os::unix::fs::symlink(&nowhere, vault.path(FOLDER)).unwrap();
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert!(
+        fs::symlink_metadata(vault.path(FOLDER))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link stays"
+    );
+    assert!(!nowhere.exists(), "the link target is not created");
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+    assert_eq!(
+        *claims.lock().unwrap(),
+        [FOLDER.to_owned(), FOLDER.to_owned(), format!("{FOLDER}-2")],
+        "the link is not created over: one claim of the pinned name, then the suffix"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_whose_first_write_fails_is_removed_so_the_next_attempt_claims_it_again() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let vault = Vault::new();
+    let locked = vault.directory.path().join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(locked.join("probe"), b"").is_ok() {
+        return; // root
+    }
+    let ours = export();
+    let first = deliver(&vault.destination_with(false, Some("People")), &ours, None);
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+
+    // The pinned folder is gone, so the redelivery creates it again; then
+    // its first write fails.
+    let root = vault.root.clone();
+    let failing = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if step == DeliveryStep::WritingFolder(FOLDER) {
+                fs::set_permissions(root.join(FOLDER), fs::Permissions::from_mode(0o555)).unwrap();
+            }
+        });
+    assert!(matches!(
+        failing.deliver_meeting(&ours, Some(&first)),
+        Err(ObsidianError::WriteFailed { .. })
+    ));
+    assert!(!vault.path(FOLDER).exists(), "the empty folder is removed");
+
+    let again = deliver(
+        &vault.destination_with(false, Some("People")),
+        &ours,
+        Some(&first),
+    );
+
+    assert_eq!(again.folder, FOLDER, "the same name, no duplicate");
+    assert!(!vault.path(&format!("{FOLDER}-2")).exists());
+    assert_eq!(
+        vault.list(FOLDER),
+        without_audio(meeting_files(FOLDER_SLUG))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_claim_that_fails_ends_the_delivery_with_its_error() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let vault = Vault::new();
+    let meetings = vault.path("Meetings");
+    fs::create_dir_all(&meetings).unwrap();
+    fs::set_permissions(&meetings, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(meetings.join("probe"), b"").is_ok() {
+        return; // root
+    }
+    // A claim error read as "taken" would try `-2`, `-3` and on forever;
+    // the hook ends such a run instead of letting it hang.
+    let claims = AtomicUsize::new(0);
+    let destination = vault
+        .destination_with(false, None)
+        .with_step_hook(move |step| {
+            if let DeliveryStep::ClaimingFolder(candidate) = step {
+                assert!(
+                    claims.fetch_add(1, Ordering::Relaxed) == 0,
+                    "a second claim, of {candidate}, after a failed one"
+                );
+            }
+        });
+    let delivered = destination.deliver_meeting(&export(), None);
+    fs::set_permissions(&meetings, fs::Permissions::from_mode(0o755)).unwrap();
+
+    match delivered {
+        Err(ObsidianError::WriteFailed { path, .. }) => {
+            assert_eq!(path, vault.path(FOLDER).to_string_lossy());
+        }
+        other => panic!("expected WriteFailed, got {other:?}"),
+    }
+    assert_eq!(vault.list("Meetings"), Vec::<String>::new());
+}
+
+#[test]
+fn a_delivery_after_one_that_panicked_holding_the_vault_still_runs() {
+    let vault = Vault::new();
+    let one = export();
+    let panicking = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(|step| {
+            if let DeliveryStep::WritingPersonPage(_) = step {
+                panic!("a delivery that stops half way");
+            }
+        });
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        panicking.deliver_meeting(&one, None)
+    }));
+    assert!(panicked.is_err(), "the hook panicked inside the delivery");
+
+    let receipt = deliver(&vault.destination_with(false, Some("People")), &one, None);
+    assert_eq!(
+        receipt.folder, FOLDER,
+        "the stopped attempt's folder is reused"
+    );
+    assert!(
+        vault
+            .text(ANNA_PAGE)
+            .contains(&ManagedBlock::marker(one.meeting.id))
+    );
+}
+
+#[test]
+fn a_delivery_waiting_for_one_that_panics_holding_the_vault_still_runs() {
+    let vault = Vault::new();
+    let one = export();
+    let (paused, first_paused) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let panicking = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if let DeliveryStep::WritingPersonPage(_) = step {
+                let _ = paused.send(());
+                let _ = released.lock().unwrap().recv();
+                panic!("a delivery that stops half way");
+            }
+        });
+    let (waiting, second_waits) = mpsc::channel();
+    let second = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if step == DeliveryStep::WaitingForVault {
+                let _ = waiting.send(());
+            }
+        });
+
+    let (panicked, receipt) = std::thread::scope(|scope| {
+        let release = release;
+        let first_run = scope.spawn(|| panicking.deliver_meeting(&one, None));
+        first_paused
+            .recv_timeout(STEP_LIMIT)
+            .expect("the first delivery reaches the page");
+        let second_run = scope.spawn(|| second.deliver_meeting(&one, None));
+        second_waits
+            .recv_timeout(STEP_LIMIT)
+            .expect("the second delivery waits for the vault");
+        release.send(()).unwrap();
+        (first_run.join().is_err(), second_run.join())
+    });
+
+    assert!(panicked, "the hook panicked inside the first delivery");
+    let receipt = receipt
+        .expect("the waiting delivery takes the poisoned lock")
+        .unwrap();
+    assert_eq!(receipt.folder, FOLDER);
+    assert!(
+        vault
+            .text(ANNA_PAGE)
+            .contains(&ManagedBlock::marker(one.meeting.id))
+    );
+}
+
+#[tokio::test]
+async fn destination_deliver_runs_off_the_runtime_thread_and_raises_a_panic_again() {
+    use steno_core::Destination as _;
+
+    let vault = Vault::new();
+    let test_thread = std::thread::current().id();
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if let DeliveryStep::WritingPersonPage(_) = step {
+                assert_ne!(
+                    std::thread::current().id(),
+                    test_thread,
+                    "the delivery runs on the blocking pool"
+                );
+                panic!("a delivery that stops half way");
+            }
+        });
+    let delivered = tokio::spawn(async move { destination.deliver(&export(), None).await }).await;
+
+    let panic = delivered
+        .expect_err("the panic reaches the caller")
+        .into_panic();
+    assert_eq!(
+        panic.downcast_ref::<&str>(),
+        Some(&"a delivery that stops half way")
+    );
+}
+
+/// `export()` with the first person and participant renamed.
+fn with_anna_named(name: &str) -> MeetingExport {
+    let mut export = export();
+    name.clone_into(&mut export.persons[0].display_name);
+    name.clone_into(&mut export.participants[0].display_name);
+    export
+}
+
+/// Whether the folder at `directory` treats names that differ in case as
+/// one (APFS and NTFS by default; not ext4).
+fn is_case_insensitive(directory: &Path) -> bool {
+    let probe = directory.join("case-probe");
+    fs::write(&probe, b"").unwrap();
+    let insensitive = directory.join("CASE-PROBE").exists();
+    fs::remove_file(&probe).unwrap();
+    insensitive
+}
+
+/// A case-insensitive folder played on a case-sensitive Unix one: the old
+/// spelling is a symlink to the page the new one names, so both are one
+/// file as `anna` and `Anna` are on APFS.
+#[cfg(unix)]
+#[test]
+fn a_case_only_rename_keeps_the_meeting_on_a_page_both_spellings_name() {
+    let vault = Vault::new();
+    if is_case_insensitive(&vault.root) {
+        return; // the next test runs the real thing
+    }
+    let destination = vault.destination_with(false, Some("People"));
+    let first = deliver(&destination, &with_anna_named("anna müller"), None);
+    fs::rename(vault.path("People/anna müller.md"), vault.path(ANNA_PAGE)).unwrap();
+    std::os::unix::fs::symlink("Anna Müller.md", vault.path("People/anna müller.md")).unwrap();
+
+    let second = deliver(&destination, &with_anna_named("Anna Müller"), Some(&first));
+
+    let marker = ManagedBlock::marker(export().meeting.id);
+    assert!(vault.text(ANNA_PAGE).contains(&marker));
+    assert!(
+        fs::symlink_metadata(vault.path("People/anna müller.md"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the old spelling is not written as a page of its own"
+    );
+    assert!(
+        vault.text("People/anna müller.md").contains(&marker),
+        "the one page keeps the meeting"
+    );
+    assert_eq!(
+        managed(&second),
+        [
+            ANNA_PAGE,
+            "People/Nicolai Schmid.md",
+            "People/anna müller.md"
+        ]
+    );
+}
+
+/// The same rename on the real folder where it is case-insensitive (the
+/// macOS and Windows runners); a case-sensitive one has the next test.
+#[test]
+fn a_case_only_rename_on_a_case_insensitive_vault_keeps_the_meeting_on_the_page() {
+    let vault = Vault::new();
+    if !is_case_insensitive(&vault.root) {
+        return;
+    }
+    let destination = vault.destination_with(false, Some("People"));
+    let first = deliver(&destination, &with_anna_named("anna müller"), None);
+    deliver(&destination, &with_anna_named("Anna Müller"), Some(&first));
+
+    let pages = vault.list("People");
+    assert_eq!(pages.len(), 2, "one page per person: {pages:?}");
+    assert!(
+        vault
+            .text(ANNA_PAGE)
+            .contains(&ManagedBlock::marker(export().meeting.id)),
+        "the renamed person's page keeps the meeting"
+    );
+}
+
+#[test]
+fn a_case_only_rename_on_a_case_sensitive_vault_moves_the_line_to_the_new_page() {
+    let vault = Vault::new();
+    if is_case_insensitive(&vault.root) {
+        return;
+    }
+    let destination = vault.destination_with(false, Some("People"));
+    let first = deliver(&destination, &with_anna_named("anna müller"), None);
+    deliver(&destination, &with_anna_named("Anna Müller"), Some(&first));
+
+    assert_eq!(
+        vault.list("People"),
+        ["Anna Müller.md", "Nicolai Schmid.md", "anna müller.md"],
+        "two names, two pages"
+    );
+    let marker = ManagedBlock::marker(export().meeting.id);
+    assert!(vault.text(ANNA_PAGE).contains(&marker));
+    assert!(
+        !vault.text("People/anna müller.md").contains(&marker),
+        "the old page is another file and loses the line"
+    );
+}
+
+#[test]
+fn a_person_named_after_a_windows_device_gets_a_page_windows_can_create() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let receipt = deliver(&destination, &with_anna_named("Con"), None);
+
+    let (page, link) = if cfg!(windows) {
+        ("People/Con_.md", "[[Con_|Con]]")
+    } else {
+        ("People/Con.md", "[[Con]]")
+    };
+    assert!(managed(&receipt).contains(&page.to_owned()));
+    assert!(
+        vault
+            .text(page)
+            .contains(&ManagedBlock::marker(export().meeting.id))
+    );
+    assert!(
+        vault
+            .text(&format!("{FOLDER}/{FOLDER_SLUG}.md"))
+            .contains(link),
+        "the folder note links the page"
+    );
 }

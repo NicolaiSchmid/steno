@@ -20,9 +20,9 @@ pub type DestinationFactory = dyn Fn(&Settings) -> Vec<Arc<dyn Destination>> + S
 /// its stored receipt as `previous`. Never fails; a failed export or
 /// destination is a `Failed` row and the next destination still runs. There
 /// is no separate re-export path: the pipeline's redeliver calls
-/// [`DeliveryDispatcher::deliver_all`] again. `deliver_all` does blocking
-/// file I/O (the `fsync`ed writes, the audio copy) on the calling thread;
-/// run it under `spawn_blocking` or an equivalent, not on an async worker.
+/// [`DeliveryDispatcher::deliver_all`] again. The Obsidian destination
+/// runs its file I/O on tokio's blocking pool, so `deliver_all` needs a
+/// tokio runtime; the store calls it makes still block the calling thread.
 pub struct DeliveryCoordinator {
     store: Arc<Store>,
     destinations: Box<DestinationFactory>,

@@ -1390,6 +1390,51 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The person-page writer should write file names NFC-normalised, as the Rust writer
   does; Foundation writes `Anna Müller.md` in NFD on APFS, which maps both to one
   file, but a vault synced to a normalisation-sensitive filesystem gets two files.
+- `ObsidianFolderDestination.deliver` should run one delivery per vault at a time, as
+  the Rust destination does with its per-vault lock: `DeliveryCoordinator` is an
+  actor but re-entrant at `await destination.deliver`, so two meetings finishing at
+  once can drop one meeting's line from a shared person page, pick one folder for two
+  first deliveries with the same slug, and sweep each other's temp files. A first
+  delivery should claim its folder by creating it without intermediate directories,
+  a folder that is already there counting as taken unless it holds this meeting's
+  `meeting.json`, as the Rust `claim_folder` does. Between the two apps, or two CLI
+  runs, on one vault only the folder claim holds; the person-page merge and the temp
+  sweep are not guarded across processes in either app.
+- `removeMeetingLine` should skip a listed page that is the same file as a page this
+  delivery rendered, as the Rust destination does (device and inode on Unix and the
+  final path name on Windows; Swift can compare `fileResourceIdentifier`): on APFS a
+  person renamed from `anna` to `Anna` today loses this meeting's line from the one
+  page both names refer to.
+- A redelivery should check whose `meeting.json` the pinned folder holds before it
+  writes there, as the Rust destination does: when the user moved or deleted the
+  meeting's folder and a meeting with the same date and title claimed the name since,
+  Swift writes over that meeting's notes. The Rust destination claims and writes a
+  folder as a first delivery would (`X-2`) and drops the old folder's files from the
+  receipt. It does the same when the pinned folder's `meeting.json` names no meeting,
+  or is missing and neither the `transcript.vtt` header nor the folder note's
+  `steno_id` names this meeting: a duplicate folder, never an overwrite. A
+  `meeting.json` or note that cannot be read fails the delivery. A `meeting.json` the
+  user deleted while the notes still name this meeting is written back in place, as
+  in Swift. A pinned folder that is gone is claimed again by creating it (a dangling
+  symlink counts as there), and a folder a delivery created is removed again when it
+  is still empty after the delivery failed. When that removal fails (on Windows a sync
+  client can hold the folder open), the empty folder reads as taken and the next
+  attempt claims `X-2`; this is accepted. With person pages off, the meeting's lines
+  on its listed pages keep linking the old folder's note until a delivery with person
+  pages on.
+- When the audio copy is on, a phone recording (`M4aAac`) without a mixdown is copied
+  from its own AAC file; Swift fails it with `audioUnavailable`. When the audio copy
+  is on, the file it copies (the mixdown, or a phone recording's AAC file) is gone
+  and the meeting folder holds no audio file on disk (a receipt entry for one that
+  is gone is dropped), the Rust destination writes the
+  notes and returns a warning in the receipt ("The audio was already removed, so the
+  export has no audio file"), which the meeting's export line and `steno deliver`
+  show. Swift fails the delivery with `audioUnavailable` after writing every other
+  file, so its export stays failed on every retry. The Rust `ObsidianError` has no
+  `AudioUnavailable`.
+- On Windows the Rust person pages keep off the reserved device names (`Con` becomes
+  `Con_.md`, linked `[[Con_|Con]]`); the Swift app runs on the Mac only, where the
+  names are allowed, so it has nothing to mirror and both apps name a Mac page `Con.md`.
 
 ### Audio
 

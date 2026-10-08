@@ -239,3 +239,29 @@ fn rows_grdb_wrote_read_back_as_values() {
     );
     assert_eq!(settings.audio_folder, "file:///support/Audio/");
 }
+
+#[test]
+fn a_receipt_keeps_its_warnings_and_one_without_reads_and_encodes_as_swifts() {
+    let swift = r#"{"files":[],"folder":"Meetings/x","rendererVersion":3,"root":"/vault"}"#;
+    let receipt: DeliveryReceipt = serde_json::from_str(swift).unwrap();
+    assert_eq!(receipt.warnings, Vec::<String>::new());
+    assert_eq!(
+        serde_json::to_value(&receipt).unwrap().to_string(),
+        swift,
+        "no warnings key (a map without preserve_order sorts its keys)"
+    );
+
+    let warned = DeliveryReceipt {
+        warnings: vec!["The audio was already removed".to_owned()],
+        ..receipt
+    };
+    let json = serde_json::to_string(&warned).unwrap();
+    assert!(
+        json.contains(r#""warnings":["The audio was already removed"]"#),
+        "{json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<DeliveryReceipt>(&json).unwrap(),
+        warned
+    );
+}

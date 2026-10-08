@@ -229,6 +229,7 @@ pub fn populate(store: &Store) -> Meeting {
                     sha256: vec![1, 2, 3],
                 }],
                 renderer_version: 3,
+                warnings: Vec::new(),
             }),
         })
         .unwrap();

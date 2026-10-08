@@ -658,6 +658,7 @@ fn reveal_layout_and_the_recorder_messages_reach_their_services() {
                 folder: "Meetings/2026-09-29 Produktstrategie".to_owned(),
                 files: Vec::new(),
                 renderer_version: 1,
+                warnings: Vec::new(),
             }),
         })
         .unwrap();
@@ -1530,4 +1531,38 @@ fn turns_merge_consecutive_segments_and_delivery_lines_name_the_destination() {
         ..delivered
     };
     assert_eq!(delivery_line(&pending, utc()), "markdown · Pending");
+}
+
+#[test]
+fn an_export_line_shows_the_warnings_of_the_receipt_it_delivered() {
+    const NO_AUDIO: &str = "The audio was already removed, so the export has no audio file";
+    let delivered = Delivery {
+        id: uuid(9),
+        meeting_id: uuid(MEETING),
+        destination_id: "obsidian-folder".to_owned(),
+        status: DeliveryStatus::Delivered,
+        last_attempt_at: Some(date("2026-09-29T08:02:00.000Z")),
+        receipt: Some(steno_core::DeliveryReceipt {
+            root: "/vault".to_owned(),
+            folder: "Meetings/2026-09-29 Produktstrategie".to_owned(),
+            files: Vec::new(),
+            renderer_version: 1,
+            warnings: vec![NO_AUDIO.to_owned()],
+        }),
+    };
+    assert_eq!(
+        delivery_line(&delivered, utc()),
+        format!("Obsidian · Exported 08:02 · {NO_AUDIO}")
+    );
+
+    // A later attempt that failed keeps the last receipt; its warning is
+    // not this attempt's.
+    let failed = Delivery {
+        status: DeliveryStatus::Failed("disk full".to_owned()),
+        ..delivered
+    };
+    assert_eq!(
+        delivery_line(&failed, utc()),
+        "Obsidian · Failed: disk full"
+    );
 }

@@ -65,6 +65,7 @@ impl Destination for RecordingDestination {
                 sha256: vec![if previous.is_none() { 1 } else { 2 }; 32],
             }],
             renderer_version: 7,
+            warnings: Vec::new(),
         })
     }
 }
@@ -103,7 +104,10 @@ fn as_destination(destination: &Arc<RecordingDestination>) -> Arc<dyn Destinatio
 #[tokio::test]
 async fn one_row_per_destination_failures_do_not_block_the_next() {
     let store = store();
-    let failing = RecordingDestination::new("a-fails", Some(ObsidianError::AudioUnavailable));
+    let failing = RecordingDestination::new(
+        "a-fails",
+        Some(ObsidianError::VaultMissing("/vault".to_owned())),
+    );
     let working = RecordingDestination::new("b-works", None);
     let coordinator = coordinator(
         &store,
@@ -122,7 +126,7 @@ async fn one_row_per_destination_failures_do_not_block_the_next() {
     );
     assert_eq!(
         results[0].status,
-        DeliveryStatus::Failed(ObsidianError::AudioUnavailable.to_string())
+        DeliveryStatus::Failed(ObsidianError::VaultMissing("/vault".to_owned()).to_string())
     );
     assert_eq!(results[0].receipt, None);
     assert_eq!(results[1].status, DeliveryStatus::Delivered);
@@ -172,7 +176,8 @@ async fn a_failed_run_keeps_the_previous_receipt_for_the_next_attempt() {
     let first = coordinator(&store, vec![as_destination(&working)], now())
         .deliver_all(meeting_id())
         .await;
-    let broken = RecordingDestination::new("x", Some(ObsidianError::AudioUnavailable));
+    let broken =
+        RecordingDestination::new("x", Some(ObsidianError::VaultMissing("/vault".to_owned())));
     let second = coordinator(&store, vec![as_destination(&broken)], now())
         .deliver_all(meeting_id())
         .await;

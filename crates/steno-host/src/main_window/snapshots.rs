@@ -308,7 +308,9 @@ pub fn turns(
 }
 
 /// One delivery as the footer words it: the destination, then "Exported
-/// 10:02", "Pending" or "Failed: reason". Swift: `MainWindowSnapshots.deliveryLine`.
+/// 10:02", "Pending" or "Failed: reason", and after an export each warning
+/// its receipt carries. Swift: `MainWindowSnapshots.deliveryLine`; the
+/// warnings are Rust only.
 #[must_use]
 pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
     let status = match &delivery.status {
@@ -319,7 +321,14 @@ pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
         ),
         DeliveryStatus::Failed(message) => format!("Failed: {message}"),
     };
-    format!("{} · {status}", destination_display_name(delivery))
+    let mut line = format!("{} · {status}", destination_display_name(delivery));
+    if let (DeliveryStatus::Delivered, Some(receipt)) = (&delivery.status, &delivery.receipt) {
+        for warning in &receipt.warnings {
+            line.push_str(" · ");
+            line.push_str(warning);
+        }
+    }
+    line
 }
 
 /// A failed delivery once the launch stopped retrying it: "Export to

@@ -32,6 +32,7 @@ fn receipt(root: &str, files: &[(&str, FileOwnership)]) -> DeliveryReceipt {
             })
             .collect(),
         renderer_version: 1,
+        warnings: Vec::new(),
     }
 }
 
@@ -185,6 +186,27 @@ fn the_receipt_carries_unwritten_files_and_records_new_ones() {
 }
 
 #[test]
+fn a_forgotten_file_leaves_the_receipt() {
+    let previous = receipt(
+        ROOT,
+        &[(NOTE, FileOwnership::Owned), (AUDIO, FileOwnership::Owned)],
+    );
+    let mut ledger = DeliveryLedger::new(Some(&previous), ROOT);
+    ledger.forget(AUDIO);
+    ledger.forget("Meetings/2026-09-24-sync/never-listed.md");
+    let receipt = ledger.receipt(LEDGER_FOLDER, ArtifactRenderer::VERSION);
+    assert_eq!(
+        receipt
+            .files
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        [NOTE],
+        "a path never listed is no change"
+    );
+}
+
+#[test]
 fn the_collision_rule_suffixes_taken_folders_and_reuses_a_crashed_attempt() {
     let ours = uuid(1);
     let theirs = uuid(2);
@@ -224,6 +246,82 @@ fn the_collision_rule_suffixes_taken_folders_and_reuses_a_crashed_attempt() {
         "our own meeting.json: a crashed attempt, reused"
     );
     assert_eq!(resolve(&[(base, Some(theirs)), (&two, Some(ours))]), two);
+}
+
+#[test]
+fn claiming_a_folder_tries_each_candidate_once_and_stops_at_a_failed_claim() {
+    let ours = uuid(1);
+    let base = LEDGER_FOLDER;
+    let two = format!("{base}-2");
+    let mut tried = Vec::new();
+    let claimed = DeliveryLedger::claim_folder(
+        base,
+        ours,
+        |candidate| {
+            tried.push(candidate.to_owned());
+            Ok::<_, String>(candidate == two)
+        },
+        |_| None,
+    );
+    assert_eq!(
+        claimed,
+        Ok(two.clone()),
+        "the first candidate that is created"
+    );
+    assert_eq!(tried, [base.to_owned(), two.clone()]);
+
+    let reused = DeliveryLedger::claim_folder(
+        base,
+        ours,
+        |_| Ok::<_, String>(false),
+        |folder| (folder == base).then_some(ours),
+    );
+    assert_eq!(reused, Ok(base.to_owned()), "a crashed attempt of ours");
+
+    let failed = DeliveryLedger::claim_folder(
+        base,
+        ours,
+        |candidate| {
+            if candidate == base {
+                Ok(false)
+            } else {
+                Err(format!("{candidate}: denied"))
+            }
+        },
+        |_| Some(uuid(2)),
+    );
+    assert_eq!(failed, Err(format!("{two}: denied")));
+}
+
+#[test]
+fn moving_the_folder_drops_its_files_and_writes_the_claimed_one_as_on_a_first_delivery() {
+    let previous = receipt(
+        ROOT,
+        &[
+            (NOTE, FileOwnership::Owned),
+            (ANNA, FileOwnership::ManagedBlock),
+        ],
+    );
+    let mut ledger = DeliveryLedger::new(Some(&previous), ROOT);
+    let claimed = format!("{LEDGER_FOLDER}-2");
+    ledger.move_folder(LEDGER_FOLDER, &claimed);
+
+    assert_eq!(
+        ledger.files().keys().collect::<Vec<_>>(),
+        [ANNA],
+        "only the lost folder's files leave"
+    );
+    assert!(ledger.may_write(&format!("{claimed}/meeting.json"), true));
+    assert!(
+        !ledger.may_write(&format!("{claimed}/sub/notes.md"), true),
+        "directly in the claimed folder only"
+    );
+    assert!(
+        !ledger.may_write(&format!("{claimed}0.md"), true),
+        "a sibling with the same prefix is not in the claimed folder"
+    );
+    assert!(!ledger.may_write(AUDIO, true), "the lost folder: as before");
+    assert_eq!(ledger.receipt(&claimed, 1).folder, claimed);
 }
 
 #[test]

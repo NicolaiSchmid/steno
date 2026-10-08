@@ -1,22 +1,24 @@
 //! The Obsidian vault folder destination.
 //! Swift: `Sources/StenoAdapters/Obsidian/ObsidianFolderDestination.swift`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, TryLockError};
 
 use chrono_tz::Tz;
 use steno_core::paths::file_url_path;
 use steno_core::{
-    BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport, ObsidianSettings,
-    Platform, async_trait,
+    AudioFormat, BoundaryResult, DeliveryReceipt, Destination, FileOwnership, MeetingExport,
+    ObsidianSettings, Platform, async_trait,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
 use super::ManagedBlock;
 use crate::fs::{AtomicFileWriter, LocalFolderSink};
-use crate::naming::MeetingFolder;
+use crate::naming::{MeetingFolder, Note};
 use crate::rendering::{ArtifactRenderer, LinkStyle, PersonPage, RenderOptions};
 use crate::runtime::DeliveryLedger;
 
@@ -33,8 +35,70 @@ pub enum ObsidianError {
     ReadFailed { path: String, underlying: String },
     #[error("Could not write {path}: {underlying}")]
     WriteFailed { path: String, underlying: String },
-    #[error("The meeting has no audio mixdown to copy; every other file was written.")]
-    AudioUnavailable,
+}
+
+/// A point inside [`ObsidianFolderDestination::deliver_meeting`] that a
+/// test can stop a delivery at, so a race with a second delivery (or with
+/// another process, played by the test) runs in a chosen order instead of
+/// by luck. Exported with the `testing` feature only; production code never
+/// installs a hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "testing"), allow(dead_code))]
+pub enum DeliveryStep<'a> {
+    /// Another delivery in this process holds the vault; this one waits for
+    /// it before touching anything.
+    WaitingForVault,
+    /// A delivery is about to claim this meeting folder by creating it: a
+    /// first delivery, a redelivery whose pinned folder is gone, or one
+    /// whose pinned folder is no longer this meeting's.
+    ClaimingFolder(&'a str),
+    /// The meeting folder is in place and its files are about to be
+    /// written.
+    WritingFolder(&'a str),
+    /// The person page at this path has been read (or found missing) and
+    /// is about to be written with this meeting's line merged in.
+    WritingPersonPage(&'a str),
+}
+
+/// The hook a test installs with
+/// [`ObsidianFolderDestination::with_step_hook`] (feature `testing`).
+#[cfg(feature = "testing")]
+#[derive(Clone)]
+struct StepHook(Arc<dyn Fn(DeliveryStep<'_>) + Send + Sync>);
+
+#[cfg(feature = "testing")]
+impl std::fmt::Debug for StepHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StepHook")
+    }
+}
+
+/// The folder's basename, which every note in it is named after. Swift's
+/// `lastPathComponent`: a pinned `Meetings/x/` still names `x`.
+fn folder_slug(folder: &str) -> String {
+    Path::new(folder).file_name().map_or_else(
+        || folder.to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// An audio copy's file name: `audio` or `audio.<ext>`.
+fn is_audio(name: &str) -> bool {
+    name == "audio" || name.starts_with("audio.")
+}
+
+/// The lock every delivery into the vault at `vault_path` holds from start
+/// to end, one per vault in the process, so two deliveries merge a shared
+/// person page, claim meeting folders and sweep temp files one after the
+/// other. Keyed by the canonical path (the configured one when it cannot be
+/// resolved), so two spellings of one vault share a lock. Another process
+/// on the vault is not covered; only the folder claim holds across
+/// processes.
+fn vault_lock(vault_path: &str) -> Arc<Mutex<()>> {
+    static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = LazyLock::new(Mutex::default);
+    let key = fs::canonicalize(vault_path).unwrap_or_else(|_| PathBuf::from(vault_path));
+    let mut locks = LOCKS.lock().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(locks.entry(key).or_default())
 }
 
 /// The Obsidian vault folder destination: `Meetings/<date>-<slug>/` with the
@@ -45,7 +109,9 @@ pub enum ObsidianError {
 /// and keeps everything else. The policy (which receipt applies, what may be
 /// written, what the receipt says) is [`DeliveryLedger`]'s; this type
 /// renders, asks the ledger and writes through [`LocalFolderSink`]. Nothing
-/// is deleted but the writer's own temp files.
+/// is deleted but the writer's own temp files and a meeting folder this
+/// delivery created and left empty. Deliveries into one vault run one at a
+/// time in a process (`vault_lock`).
 #[derive(Debug, Clone)]
 pub struct ObsidianFolderDestination {
     /// [`ObsidianFolderDestination::DESTINATION_ID`] for the app's stored
@@ -62,10 +128,21 @@ pub struct ObsidianFolderDestination {
     /// recorded every call it stores; tests pin it.
     platform: Platform,
     sink: LocalFolderSink,
+    /// The tests' [`DeliveryStep`] hook; `None` outside them.
+    #[cfg(feature = "testing")]
+    steps: Option<StepHook>,
 }
 
 impl ObsidianFolderDestination {
     pub const DESTINATION_ID: &'static str = "obsidian-folder";
+
+    /// The receipt's warning when the audio copy is on, the file it copies
+    /// is gone (the retention sweep removes it with the master) and the
+    /// meeting folder holds no audio file: the notes are delivered without
+    /// it. Swift fails with `audioUnavailable` instead (parity note in the
+    /// plan).
+    pub const NO_AUDIO_WARNING: &'static str =
+        "The audio was already removed, so the export has no audio file";
 
     /// The stored destination for `settings`, with its dates in `time_zone`
     /// and its calls named after [`Platform::CURRENT`].
@@ -103,6 +180,8 @@ impl ObsidianFolderDestination {
             time_zone,
             platform: Platform::CURRENT,
             sink,
+            #[cfg(feature = "testing")]
+            steps: None,
         }
     }
 
@@ -112,6 +191,28 @@ impl ObsidianFolderDestination {
     pub fn with_platform(mut self, platform: Platform) -> Self {
         self.platform = platform;
         self
+    }
+
+    /// The same destination calling `hook` at every [`DeliveryStep`] it
+    /// reaches; the hook may block to hold the delivery there.
+    #[cfg(feature = "testing")]
+    #[must_use]
+    pub fn with_step_hook(
+        mut self,
+        hook: impl Fn(DeliveryStep<'_>) + Send + Sync + 'static,
+    ) -> Self {
+        self.steps = Some(StepHook(Arc::new(hook)));
+        self
+    }
+
+    /// Calls the tests' hook; without the `testing` feature every step
+    /// passes straight through.
+    #[cfg_attr(not(feature = "testing"), allow(clippy::unused_self, unused_variables))]
+    fn reached(&self, step: DeliveryStep<'_>) {
+        #[cfg(feature = "testing")]
+        if let Some(StepHook(hook)) = &self.steps {
+            hook(step);
+        }
     }
 
     #[must_use]
@@ -142,23 +243,80 @@ impl ObsidianFolderDestination {
             .map_err(|_| ObsidianError::VaultNotWritable(self.settings.vault_path.clone()))
     }
 
-    /// [`Destination::deliver`] without the boundary error wrapper; the CLI
-    /// calls it directly.
+    /// [`Destination::deliver`] without the boundary error wrapper and on
+    /// the calling thread, where the tests call it. Blocks while another
+    /// delivery into the same vault runs in this process (`vault_lock`). A
+    /// delivery without the audio it should copy succeeds and says so in
+    /// the receipt's `warnings` ([`Self::NO_AUDIO_WARNING`]).
     pub fn deliver_meeting(
         &self,
         meeting: &MeetingExport,
         previous: Option<&DeliveryReceipt>,
     ) -> Result<DeliveryReceipt, ObsidianError> {
+        let lock = vault_lock(&self.settings.vault_path);
+        // `try_lock` first only so a test hook sees that this delivery
+        // waits. A delivery that panicked leaves nothing behind the lock to
+        // repair, so a poisoned lock is taken as it is.
+        let _vault = match lock.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => {
+                self.reached(DeliveryStep::WaitingForVault);
+                lock.lock().unwrap_or_else(PoisonError::into_inner)
+            }
+        };
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
-        let folder = ledger
-            .pinned_folder()
-            .map_or_else(|| self.resolve_folder(meeting), str::to_owned);
-        // Swift's `lastPathComponent`: a pinned `Meetings/x/` still names `x`.
-        let slug = Path::new(&folder).file_name().map_or_else(
-            || folder.clone(),
-            |name| name.to_string_lossy().into_owned(),
-        );
+        let (folder, created) = self.folder_for(meeting, &mut ledger)?;
+        let written = self.write_meeting(meeting, &folder, &mut ledger);
+        if written.is_err() && created {
+            // Only an empty folder is removed, so the next attempt claims
+            // the same name instead of reading it as no longer this
+            // meeting's; one that holds a file stays.
+            let _ = fs::remove_dir(self.sink.path(&folder));
+        }
+        let warnings = written?;
+        Ok(DeliveryReceipt {
+            warnings,
+            ..ledger.receipt(&folder, ArtifactRenderer::VERSION)
+        })
+    }
+
+    /// The meeting folder of this delivery, and whether this delivery
+    /// created it. Without a pinned folder it claims one
+    /// ([`Self::claim_folder`]). A pinned folder that is gone is claimed
+    /// again by creating it (`symlink_metadata`, so a dangling link counts
+    /// as there). One that is there, or that something else created first,
+    /// is kept when [`Self::keeps_pin`] says so; otherwise the delivery
+    /// claims a folder as a first one does and moves its receipt there.
+    fn folder_for(
+        &self,
+        meeting: &MeetingExport,
+        ledger: &mut DeliveryLedger,
+    ) -> Result<(String, bool), ObsidianError> {
+        let Some(pinned) = ledger.pinned_folder().map(str::to_owned) else {
+            return self.claim_folder(meeting);
+        };
+        if !self.sink.entry_exists(&pinned) && self.recreate(&pinned)? {
+            return Ok((pinned, true));
+        }
+        if self.keeps_pin(&pinned, meeting.meeting.id)? {
+            return Ok((pinned, false));
+        }
+        let (claimed, created) = self.claim_folder(meeting)?;
+        ledger.move_folder(&pinned, &claimed);
+        Ok((claimed, created))
+    }
+
+    /// Writes the meeting's files into `folder`, its person pages and its
+    /// audio copy; returns the receipt's warnings.
+    fn write_meeting(
+        &self,
+        meeting: &MeetingExport,
+        folder: &str,
+        ledger: &mut DeliveryLedger,
+    ) -> Result<Vec<String>, ObsidianError> {
+        let slug = folder_slug(folder);
         let options = RenderOptions {
             link_style: LinkStyle::Wikilink,
             person_pages: self.settings.people_folder.is_some(),
@@ -168,8 +326,9 @@ impl ObsidianFolderDestination {
         };
         let renderer = ArtifactRenderer::new();
 
-        self.writing(&folder, || self.sink.create_directory(&folder))?;
-        AtomicFileWriter::remove_stale_temporaries(&self.sink.path(&folder));
+        self.writing(folder, || self.sink.create_directory(folder))?;
+        AtomicFileWriter::remove_stale_temporaries(&self.sink.path(folder));
+        self.reached(DeliveryStep::WritingFolder(folder));
 
         let artifacts = renderer
             .render_meeting_files(meeting, &options, Some(&slug))
@@ -179,7 +338,7 @@ impl ObsidianFolderDestination {
             })?;
         for artifact in artifacts {
             self.write_owned(
-                &mut ledger,
+                ledger,
                 &format!("{folder}/{}", artifact.file_name),
                 &artifact.data,
             )?;
@@ -187,13 +346,13 @@ impl ObsidianFolderDestination {
 
         if let Some(people_folder) = &self.settings.people_folder {
             let pages = renderer.render_person_pages(meeting, &options, Some(&slug));
-            self.write_person_pages(people_folder, pages, meeting.meeting.id, &mut ledger)?;
+            self.write_person_pages(people_folder, pages, meeting.meeting.id, ledger)?;
         }
-        if self.settings.include_audio {
-            self.copy_audio(meeting, &folder, &mut ledger)?;
+        let mut warnings = Vec::new();
+        if self.settings.include_audio && !self.copy_audio(meeting, folder, ledger)? {
+            warnings.push(Self::NO_AUDIO_WARNING.to_owned());
         }
-
-        Ok(ledger.receipt(&folder, ArtifactRenderer::VERSION))
+        Ok(warnings)
     }
 
     /// Writes every rendered page into `people_folder`: whole when the page
@@ -216,7 +375,9 @@ impl ObsidianFolderDestination {
             let path = format!("{people_folder}/{}", page.file_name);
             rendered.insert(path.clone());
             let mut data = page.page.into_bytes();
-            if let Some(existing) = self.reading(&path, || self.sink.read(&path))? {
+            let existing = self.reading(&path, || self.sink.read(&path))?;
+            self.reached(DeliveryStep::WritingPersonPage(&path));
+            if let Some(existing) = existing {
                 // A page that is not UTF-8 text cannot be merged without
                 // changing bytes outside the block, so it is left as it
                 // is and reported.
@@ -234,33 +395,47 @@ impl ObsidianFolderDestination {
         self.remove_meeting_line(&rendered, meeting_id, ledger)
     }
 
-    /// Copies the mixdown into the meeting folder while it exists; after the
-    /// retention sweep the copy already in the vault (in the receipt or on
-    /// disk) is the audio. Only when neither is there has the meeting no
-    /// audio to deliver.
+    /// Copies the mixdown into the meeting folder, or for a phone recording
+    /// (`M4aAac`) without one its AAC file. When that file is gone, an
+    /// audio file already in the folder is the audio, and a receipt entry
+    /// for one that is gone is dropped. `Ok(false)` when there is no audio;
+    /// a file that cannot be checked is [`ObsidianError::ReadFailed`].
     fn copy_audio(
         &self,
         meeting: &MeetingExport,
         folder: &str,
         ledger: &mut DeliveryLedger,
-    ) -> Result<(), ObsidianError> {
-        let mixdown = meeting
+    ) -> Result<bool, ObsidianError> {
+        let source = meeting
             .audio
             .as_ref()
-            .and_then(|audio| audio.mixdown_url.as_deref())
-            .and_then(file_url_path)
-            .filter(|path| path.exists());
-        let Some(mixdown) = mixdown else {
-            return if self.audio_is_in_the_vault(folder, ledger) {
-                Ok(())
-            } else {
-                Err(ObsidianError::AudioUnavailable)
-            };
+            .and_then(|audio| match &audio.mixdown_url {
+                Some(mixdown) => file_url_path(mixdown),
+                None if audio.format == AudioFormat::M4aAac => file_url_path(&audio.url),
+                None => None,
+            });
+        let source = match source {
+            Some(path) if self.reading(&path.to_string_lossy(), || path.try_exists())? => path,
+            _ => {
+                let gone: Vec<String> = ledger
+                    .files()
+                    .keys()
+                    .filter(|path| {
+                        DeliveryLedger::name_in(path, folder).is_some_and(is_audio)
+                            && !self.sink.entry_exists(path)
+                    })
+                    .cloned()
+                    .collect();
+                for path in &gone {
+                    ledger.forget(path);
+                }
+                return Ok(self.audio_is_in_the_vault(folder));
+            }
         };
         let data = self
-            .reading(&mixdown.to_string_lossy(), || fs::read(&mixdown).map(Some))?
+            .reading(&source.to_string_lossy(), || fs::read(&source).map(Some))?
             .unwrap_or_default();
-        let extension = mixdown
+        let extension = source
             .extension()
             .map(|extension| extension.to_string_lossy().into_owned())
             .unwrap_or_default();
@@ -268,7 +443,8 @@ impl ObsidianFolderDestination {
             ledger,
             &format!("{folder}/{}", MeetingFolder::audio_file(&extension)),
             &data,
-        )
+        )?;
+        Ok(true)
     }
 
     fn write_owned(
@@ -291,8 +467,12 @@ impl ObsidianFolderDestination {
     /// skipped and a page that is not UTF-8 text is left as it is; neither
     /// fails the delivery, since there is nothing of ours to correct in the
     /// first case and no safe way to in the second. An unchanged page is not
-    /// rewritten. The path stays in the receipt either way, as every file
-    /// the app wrote does.
+    /// rewritten. A listed page that is the same file as a rendered one
+    /// ([`LocalFolderSink::same_file`]) is not stale: on a case-insensitive
+    /// vault a person renamed from `anna` to `Anna` renders `Anna.md`, which
+    /// is the receipt's `anna.md`, and removing the line there would drop
+    /// it from the page just written. The path stays in the receipt either
+    /// way, as every file the app wrote does.
     fn remove_meeting_line(
         &self,
         rendered: &HashSet<String>,
@@ -300,6 +480,9 @@ impl ObsidianFolderDestination {
         ledger: &mut DeliveryLedger,
     ) -> Result<(), ObsidianError> {
         for path in &ledger.stale_managed_pages(rendered) {
+            if rendered.iter().any(|page| self.sink.same_file(path, page)) {
+                continue;
+            }
             let Some(existing) = self.reading(path, || self.sink.read(path))? else {
                 continue;
             };
@@ -317,40 +500,126 @@ impl ObsidianFolderDestination {
         Ok(())
     }
 
-    /// The folder of a first delivery: the scope's path with the ledger's
-    /// collision rule, fed by the two things only this destination knows.
-    pub(crate) fn resolve_folder(&self, meeting: &MeetingExport) -> String {
-        DeliveryLedger::resolve_folder(
-            &MeetingFolder::path(&meeting.meeting, self.time_zone),
+    /// The folder of a delivery without one: the scope's path with the
+    /// ledger's collision rule ([`DeliveryLedger::claim_folder`]), each
+    /// candidate claimed by creating it under `Meetings/` (created as
+    /// needed), and whether this delivery created it (a candidate holding
+    /// this meeting's `meeting.json` is reused). A candidate whose
+    /// `meeting.json` cannot be read counts as taken.
+    fn claim_folder(&self, meeting: &MeetingExport) -> Result<(String, bool), ObsidianError> {
+        let base = MeetingFolder::path(&meeting.meeting, self.time_zone);
+        self.writing(MeetingFolder::ROOT, || {
+            self.sink.create_directory(MeetingFolder::ROOT)
+        })?;
+        let mut created = false;
+        let folder = DeliveryLedger::claim_folder(
+            &base,
             meeting.meeting.id,
-            |folder| self.sink.exists(folder),
-            |folder| {
-                let data = self
-                    .sink
-                    .read(&format!("{folder}/{}", MeetingFolder::JSON))
-                    .ok()
-                    .flatten()?;
-                let probe: serde_json::Value = serde_json::from_slice(&data).ok()?;
-                probe
-                    .pointer("/meeting/id")?
-                    .as_str()
-                    .and_then(|id| Uuid::parse_str(id).ok())
+            |candidate| {
+                created = self.create(candidate)?;
+                Ok(created)
             },
-        )
+            |folder| self.meeting_of(folder).ok().flatten(),
+        )?;
+        Ok((folder, created))
     }
 
-    /// An `audio` or `audio.<ext>` file in the meeting folder, listed in the
-    /// receipt or present on disk.
-    fn audio_is_in_the_vault(&self, folder: &str, ledger: &DeliveryLedger) -> bool {
-        fn is_audio(name: &str) -> bool {
-            name == "audio" || name.starts_with("audio.")
+    /// Creates the gone pinned `folder` again, its parent first: `Ok(true)`
+    /// when this delivery created it, `Ok(false)` when something took the
+    /// name first.
+    fn recreate(&self, folder: &str) -> Result<bool, ObsidianError> {
+        if let Some(parent) = Path::new(folder).parent() {
+            let parent = parent.to_string_lossy();
+            self.writing(&parent, || self.sink.create_directory(&parent))?;
         }
-        ledger.lists(folder, is_audio)
-            || self
-                .sink
-                .file_names(folder)
-                .iter()
-                .any(|name| is_audio(name))
+        self.create(folder)
+    }
+
+    /// Claims `folder` by creating it, its parent already there: `Ok(true)`
+    /// when this delivery created it, `Ok(false)` when anything was at the
+    /// path.
+    fn create(&self, folder: &str) -> Result<bool, ObsidianError> {
+        self.reached(DeliveryStep::ClaimingFolder(folder));
+        match self.sink.create_new_directory(folder) {
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
+            created => self.writing(folder, || created.map(|()| true)),
+        }
+    }
+
+    /// Whether a pinned folder that is there is still this meeting's: a
+    /// directory whose `meeting.json` names this meeting, or, with
+    /// `meeting.json` missing, one where the `transcript.vtt` header or the
+    /// folder note's `steno_id` names it. The user moved or deleted this
+    /// meeting's folder, and a meeting with the same date and title may have
+    /// claimed the name since; a folder that is not this meeting's is never
+    /// written, so the cost is a duplicate folder. A `meeting.json` or note
+    /// that cannot be read is [`ObsidianError::ReadFailed`].
+    fn keeps_pin(&self, folder: &str, id: Uuid) -> Result<bool, ObsidianError> {
+        if !self.sink.is_directory(folder) {
+            return Ok(false);
+        }
+        if self
+            .sink
+            .exists(&format!("{folder}/{}", MeetingFolder::JSON))
+        {
+            return Ok(self.meeting_of(folder)? == Some(id));
+        }
+        self.a_note_carries(folder, id)
+    }
+
+    /// Whether `transcript.vtt` (its `WEBVTT - Steno <id>` header) or the
+    /// folder note (its `steno_id` frontmatter line) in `folder` names `id`.
+    /// A note that is missing or not UTF-8 text names no meeting; one that
+    /// cannot be read is [`ObsidianError::ReadFailed`].
+    fn a_note_carries(&self, folder: &str, id: Uuid) -> Result<bool, ObsidianError> {
+        let read = |name: &str| -> Result<Option<String>, ObsidianError> {
+            let path = format!("{folder}/{name}");
+            let data = self.reading(&path, || self.sink.read(&path))?;
+            Ok(data.and_then(|data| String::from_utf8(data).ok()))
+        };
+        let named = |value: &str| value.trim().trim_matches('"').parse::<Uuid>().ok() == Some(id);
+        let vtt = read(MeetingFolder::VTT)?;
+        if vtt.is_some_and(|text| {
+            text.lines()
+                .next()
+                .and_then(|header| header.strip_prefix("WEBVTT - Steno "))
+                .is_some_and(named)
+        }) {
+            return Ok(true);
+        }
+        let note = read(&MeetingFolder::note_file(
+            Note::Folder,
+            &folder_slug(folder),
+        ))?;
+        Ok(note.is_some_and(|text| {
+            text.lines()
+                .skip(1)
+                .take_while(|line| *line != "---")
+                .filter_map(|line| line.strip_prefix("steno_id:"))
+                .any(named)
+        }))
+    }
+
+    /// The meeting whose `meeting.json` is in `folder`: `None` when the
+    /// file is missing or names no meeting. Any other read error is
+    /// [`ObsidianError::ReadFailed`], so a file another program holds open
+    /// fails the delivery instead of passing for another meeting's.
+    fn meeting_of(&self, folder: &str) -> Result<Option<Uuid>, ObsidianError> {
+        let path = format!("{folder}/{}", MeetingFolder::JSON);
+        let Some(data) = self.reading(&path, || self.sink.read(&path))? else {
+            return Ok(None);
+        };
+        let probe: Option<serde_json::Value> = serde_json::from_slice(&data).ok();
+        Ok(probe.and_then(|probe| probe.pointer("/meeting/id")?.as_str()?.parse().ok()))
+    }
+
+    /// Whether an `audio` or `audio.<ext>` file is in the meeting folder on
+    /// disk.
+    fn audio_is_in_the_vault(&self, folder: &str) -> bool {
+        self.sink
+            .file_names(folder)
+            .iter()
+            .any(|name| is_audio(name))
     }
 
     /// The vault exists and the people folder, if any, passes
@@ -425,11 +694,30 @@ impl Destination for ObsidianFolderDestination {
         Ok(self.validate_vault()?)
     }
 
+    /// [`ObsidianFolderDestination::deliver_meeting`] on tokio's blocking
+    /// pool: it waits on the vault lock and does blocking file I/O (the
+    /// `fsync`ed writes, the audio copy), which would otherwise park a
+    /// runtime worker. A panic inside it is raised again here, so the
+    /// pipeline's `catch_unwind` still sees it. A task the runtime
+    /// cancelled at shutdown comes back as an error.
     async fn deliver(
         &self,
         meeting: &MeetingExport,
         previous: Option<&DeliveryReceipt>,
     ) -> BoundaryResult<DeliveryReceipt> {
-        Ok(self.deliver_meeting(meeting, previous)?)
+        let destination = self.clone();
+        let meeting = meeting.clone();
+        let previous = previous.cloned();
+        let delivered = tokio::task::spawn_blocking(move || {
+            destination.deliver_meeting(&meeting, previous.as_ref())
+        })
+        .await;
+        match delivered {
+            Ok(receipt) => Ok(receipt?),
+            Err(error) => match error.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                Err(cancelled) => Err(cancelled.into()),
+            },
+        }
     }
 }
