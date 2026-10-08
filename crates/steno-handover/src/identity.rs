@@ -116,11 +116,10 @@ impl HandoverIdentity {
     /// The guard against a silent re-pair, on every platform: the
     /// identity's fingerprint is recorded in `record` from the first load or
     /// mint on, and the database (`store`) lists the paired phones. The
-    /// load is
-    /// [`IdentityError::Unavailable`], and mints nothing, when the secret
-    /// store cannot be read; when it holds no identity while a fingerprint
-    /// is recorded or a phone is paired; and when the identity's
-    /// fingerprint is not the recorded one. The paired phones are the
+    /// load is [`IdentityError::Unavailable`], and mints nothing, when the
+    /// secret store cannot be read; when it holds no identity while a
+    /// fingerprint is recorded or a phone is paired; and when the
+    /// identity's fingerprint is not the recorded one. The paired phones are the
     /// anchor a rollback keeps: an identity found without a recorded
     /// fingerprint has it recorded again. Only with no phone paired, no
     /// fingerprint and no identity is one minted.

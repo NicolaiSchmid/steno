@@ -80,8 +80,8 @@ pub type SecretsUnlocked = std::pin::Pin<Box<dyn std::future::Future<Output = ()
 
 /// A secret Steno cannot reach because the keyring that holds it is
 /// locked, still waiting for the user to answer its prompt, or was not
-/// open when the app started. Never a reason to treat the secret as absent: a caller that
-/// would mint or delete on `None` stops instead.
+/// open when the app started. Never a reason to treat the secret as
+/// absent: a caller that would mint or delete on `None` stops instead.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyringUnavailable {
     /// The keyring is waiting for the user to answer its prompt.
