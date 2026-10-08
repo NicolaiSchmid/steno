@@ -125,18 +125,10 @@ fn show_logs() {
         .try_init();
 }
 
-/// Every log line so far, for a test that checks which path in the
-/// backend reported a change when the report alone looks the same.
+/// Every log line since a test last cleared it, for a test that checks
+/// which path in the backend reported a change when the report alone looks
+/// the same.
 static LOGS: Mutex<String> = Mutex::new(String::new());
-
-/// The log lines since `LOGS` was `from` bytes long.
-fn logs_since(from: usize) -> String {
-    LOGS.lock().unwrap()[from..].to_owned()
-}
-
-fn logs_so_far() -> usize {
-    LOGS.lock().unwrap().len()
-}
 
 /// Writes the logs into the test output (through `print!`, as the test
 /// writer does, so the harness captures them) and into [`LOGS`].
@@ -616,7 +608,7 @@ fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
     let backend = Arc::new(LiveCaptureBackend::new());
     let stream = start(&backend, &lanes, Some(LATER), &sink).expect("start");
     assert_eq!(stream.input, Some(test_mic_standing_in()));
-    let logged = logs_so_far();
+    LOGS.lock().unwrap().clear();
     let later = TemporaryMic::create(LATER);
     assert_eq!(
         next_report(&reasons),
@@ -624,7 +616,7 @@ fn a_chosen_microphone_that_comes_back_is_reported_and_recorded_again() {
         "its arrival"
     );
     assert!(
-        logs_since(logged).contains("the chosen source's"),
+        LOGS.lock().unwrap().contains("the chosen source's"),
         "the announce of the chosen source marked the change, not other churn"
     );
     // The session's rebuild: stop, re-arm, start again.
