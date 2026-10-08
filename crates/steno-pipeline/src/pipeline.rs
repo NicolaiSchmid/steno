@@ -2623,9 +2623,7 @@ fn write_sample_clips_with(
     rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     for (path, _) in clips {
-        if left_aside(path) {
-            rename(&previous_clip(path), path)?;
-        }
+        put_back(path, &rename)?;
     }
     let remove_staged = || {
         for (path, _) in clips {
@@ -2639,39 +2637,42 @@ fn write_sample_clips_with(
         remove_staged();
         return Err(error);
     }
-    // Every path a replace has started on and whether its earlier clip was
-    // copied beside it; the first `replaced` of them hold the new clip.
-    let mut copied: Vec<(&Path, bool)> = Vec::new();
-    let mut replaced = 0;
+    let undo = |path: &Path, undone: std::io::Result<()>| {
+        if let Err(error) = undone {
+            tracing::warn!(
+                clip = %path.display(),
+                %error,
+                "a speaker clip could not be put back after a failed write"
+            );
+        }
+    };
+    // Every path that holds its new clip, and whether its earlier clip was
+    // copied beside it.
+    let mut replaced: Vec<(&Path, bool)> = Vec::new();
     let placed = clips.iter().try_for_each(|(path, _)| {
         let kept = copy_aside(path)?;
-        copied.push((path, kept));
-        rename(&staged_clip(path), path)?;
-        replaced += 1;
+        rename(&staged_clip(path), path).inspect_err(|_| {
+            // A refused rename never lands: the path still holds the
+            // earlier clip, so its copy goes.
+            if kept {
+                undo(path, remove_if_present(&previous_clip(path)));
+            }
+        })?;
+        replaced.push((path, kept));
         Ok(())
     });
     if let Err(error) = placed {
-        for (index, &(path, kept)) in copied.iter().enumerate().rev() {
-            let undone = match (index < replaced, kept) {
-                (true, true) => rename(&previous_clip(path), path),
-                (true, false) => remove_if_present(path),
-                // A refused rename never lands: the path still holds the
-                // earlier clip, so its copy goes.
-                (false, true) => remove_if_present(&previous_clip(path)),
-                (false, false) => Ok(()),
-            };
-            if let Err(undo) = undone {
-                tracing::warn!(
-                    clip = %path.display(),
-                    error = %undo,
-                    "a speaker clip could not be put back after a failed write"
-                );
+        for &(path, kept) in replaced.iter().rev() {
+            if kept {
+                undo(path, rename(&previous_clip(path), path));
+            } else {
+                undo(path, remove_if_present(path));
             }
         }
         remove_staged();
         return Err(error);
     }
-    for (path, kept) in copied {
+    for (path, kept) in replaced {
         if kept {
             let _ = busy_file::retried(|| std::fs::remove_file(previous_clip(path)));
         }
@@ -2690,9 +2691,17 @@ fn previous_clip(path: &Path) -> PathBuf {
     path.with_extension("wav.previous")
 }
 
-/// Whether `path` holds no clip and an earlier one waits beside it.
-fn left_aside(path: &Path) -> bool {
-    matches!(path.try_exists(), Ok(false)) && previous_clip(path).exists()
+/// Puts the earlier clip waiting beside `path` back with `rename` when the
+/// path holds none.
+fn put_back(
+    path: &Path,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if matches!(path.try_exists(), Ok(false)) && previous_clip(path).exists() {
+        rename(&previous_clip(path), path)
+    } else {
+        Ok(())
+    }
 }
 
 /// Copies the earlier clip at `path` beside it, over a copy an earlier
@@ -2733,12 +2742,10 @@ fn restore_sample_clips(directory: &Path) {
             remove_if_present(&beside)
         } else if let Some(stem) = name.strip_suffix(".wav.previous") {
             let path = directory.join(format!("{stem}.wav"));
-            match path.try_exists() {
-                Ok(false) => busy_file::rename(&beside, &path),
-                Ok(true) if same_bytes(&beside, &path) => {
-                    busy_file::retried(|| remove_if_present(&beside))
-                }
-                _ => Ok(()),
+            if same_bytes(&beside, &path) {
+                busy_file::retried(|| remove_if_present(&beside))
+            } else {
+                put_back(&path, busy_file::rename)
             }
         } else {
             Ok(())
