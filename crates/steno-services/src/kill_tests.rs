@@ -9,7 +9,10 @@
 //! first periodic sync, and in the stop, between the writer's finish and
 //! the save. The writer counts its frames and its syncs into files the
 //! test reads, so the test knows what reached the files before the kill.
-//! A child dies with its test: the test kills it when its guard drops, and
+//! A kill keeps the page cache, so these tests show what a crash leaves,
+//! not what a power loss does; that each sync is a full sync of the data
+//! is the writers' own test (`each_sync_is_one_full_sync_and_the_finish_one_more`
+//! in `steno_audio::writer`). A child dies with its test: the test kills it when its guard drops, and
 //! the child ends itself once its parent is gone or its own time is up.
 //! Rust only: Swift had no recovery.
 
@@ -426,7 +429,8 @@ async fn a_kill_after_some_frames_recovers_them() {
 }
 
 /// Killed mid-recording, after the writer's first periodic sync, which
-/// the count shows happened before the kill.
+/// the count shows returned before the kill: every frame it covered is
+/// recovered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_mid_recording_recovers_what_was_written_and_synced() {
     let dir = tempfile::tempdir().unwrap();
