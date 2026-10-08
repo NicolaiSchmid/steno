@@ -1,9 +1,10 @@
 //! Decode and mixdown on files built in setup: a two-channel 48 kHz CAF
 //! from the recording writer, a 16 kHz WAV master, and the sinc resampler
-//! on a 44.1 kHz tone; plus the phone path's containers on two committed
+//! on a 44.1 kHz tone; plus the phone path's containers on three committed
 //! synthetic fixtures (`Tests/Fixtures/audio/tone-440-44k1-500ms.{m4a,mp3}`,
-//! ffmpeg encodes of half a second of a 440 Hz sine; there is no AAC or MP3
-//! encoder in pure Rust to build them in setup).
+//! ffmpeg encodes of half a second of a 440 Hz sine, and
+//! `tone-440-44k1-onset-200ms.m4a`, the same sine after 0.2 s of silence;
+//! there is no AAC or MP3 encoder in pure Rust to build them in setup).
 //! Swift: `Tests/StenoAudioTests/AVFoundationAudioCodecTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
@@ -397,17 +398,14 @@ fn fixture(name: &str) -> PathBuf {
 
 /// The phone path's containers: half a second of a 440 Hz sine at 0.5,
 /// mono 44.1 kHz, as AAC-LC and as MP3 (96 kbps, ffmpeg). Frequency,
-/// level and the exact-length rule hold through `decode_path`. The start
-/// offset is the encoder priming: symphonia trims it for MP3 (the LAME tag,
-/// with `enable_gapless`) and not for MP4 (the edit list goes unread), so
-/// an AAC lane begins 1 024 samples (23 ms) late. Both offsets are measured
-/// here and recorded in the plan's Audio parity list.
+/// level and the exact-length rule hold through `decode_path`, and both
+/// start on the encoder's first sample: symphonia trims the MP3 priming
+/// (the LAME tag, with `enable_gapless`), the decoder the AAC priming the
+/// MP4 edit list declares (1 024 samples, which the lane used to start
+/// with). The onset fixture below pins the AAC cut to the sample.
 #[test]
-fn aac_and_mp3_fixtures_decode_with_their_priming_measured() {
-    for (name, priming_at_source_rate) in [
-        ("tone-440-44k1-500ms.m4a", 1_000..=1_100usize),
-        ("tone-440-44k1-500ms.mp3", 0..=16),
-    ] {
+fn aac_and_mp3_fixtures_decode_from_their_first_sample() {
+    for name in ["tone-440-44k1-500ms.m4a", "tone-440-44k1-500ms.mp3"] {
         let path = fixture(name);
         let source = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
         assert_eq!((source.sample_rate, source.channels), (44_100, 1), "{name}");
@@ -415,28 +413,180 @@ fn aac_and_mp3_fixtures_decode_with_their_priming_measured() {
         let expected_len = (source.samples.len() as f64 * 16_000.0 / 44_100.0).round() as usize;
         assert_eq!(decoded.len(), expected_len, "{name}: exact length rule");
         assert!(
-            (22_050..=22_050 + 4_096).contains(&source.samples.len()),
+            (22_050..=22_050 + 2_048).contains(&source.samples.len()),
             "{name}: {} source samples",
             source.samples.len()
         );
         let onset_source = onset(&source.samples, 0.05);
         let onset_16k = onset(&decoded.samples, 0.05);
         println!(
-            "{name}: {} samples at 44.1 kHz, onset at {onset_source} ({:.1} ms); {} samples at 16 kHz, onset at {onset_16k}",
+            "{name}: {} samples at 44.1 kHz, onset at {onset_source}; {} samples at 16 kHz, onset at {onset_16k}",
             source.samples.len(),
-            onset_source as f64 / 44.1,
             decoded.len()
         );
-        assert!(
-            priming_at_source_rate.contains(&onset_source),
-            "{name}: priming {onset_source} samples"
-        );
+        assert!(onset_source <= 16, "{name}: onset at {onset_source}");
         let steady = &decoded.samples[onset_16k + 400..onset_16k + 400 + 6_000];
         let level = level_against_sine(steady, 0.5);
         assert!(level.abs() < 1.0, "{name}: level {level} dB");
         let hertz = frequency(steady, 16_000.0);
         assert!((hertz - 440.0).abs() < 5.0, "{name}: {hertz} Hz");
     }
+}
+
+/// The ISO boxes `path` names (`[b"moov", b"trak", b"edts"]`) as the
+/// offset of the last one's header: a walk from the file's top level.
+fn box_offset(bytes: &[u8], path: &[&[u8; 4]]) -> usize {
+    let (mut at, mut end) = (0, bytes.len());
+    for (depth, kind) in path.iter().enumerate() {
+        loop {
+            assert!(at + 8 <= end, "no {} box", String::from_utf8_lossy(*kind));
+            let size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            if &bytes[at + 4..at + 8] == *kind {
+                if depth + 1 < path.len() {
+                    end = at + size;
+                    at += 8;
+                }
+                break;
+            }
+            at += size;
+        }
+    }
+    at
+}
+
+/// The onset fixture as Apple's writer lays the priming out: its edit
+/// list renamed `free` (the box stays, so no offset moves), and, when
+/// `priming` is given, iTunes' gapless tag naming it appended to `moov`,
+/// the file's last box.
+fn without_edit_list(bytes: &[u8], priming: Option<u32>) -> Vec<u8> {
+    let mut bytes = bytes.to_vec();
+    let edts = box_offset(&bytes, &[b"moov", b"trak", b"edts"]);
+    bytes[edts + 4..edts + 8].copy_from_slice(b"free");
+    let Some(priming) = priming else {
+        return bytes;
+    };
+    let moov = box_offset(&bytes, &[b"moov"]);
+    let moov_size = u32::from_be_bytes(bytes[moov..moov + 4].try_into().unwrap()) as usize;
+    assert_eq!(moov + moov_size, bytes.len(), "moov is the last box");
+    let full_box = |kind: &[u8; 4], body: &[u8]| {
+        let mut b = ((body.len() + 12) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(body);
+        b
+    };
+    let plain_box = |kind: &[u8; 4], body: &[u8]| {
+        let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(body);
+        b
+    };
+    let value = format!(" 00000000 {priming:08X} 00000000 0000000000005A00");
+    let mut data = vec![0, 0, 0, 1, 0, 0, 0, 0];
+    data.extend_from_slice(value.as_bytes());
+    let item = plain_box(
+        b"----",
+        &[
+            full_box(b"mean", b"com.apple.iTunes"),
+            full_box(b"name", b"iTunSMPB"),
+            plain_box(b"data", &data),
+        ]
+        .concat(),
+    );
+    let mut handler = vec![0u8; 4];
+    handler.extend_from_slice(b"mdirappl");
+    handler.extend_from_slice(&[0; 9]);
+    let meta = full_box(
+        b"meta",
+        &[full_box(b"hdlr", &handler), plain_box(b"ilst", &item)].concat(),
+    );
+    let udta = plain_box(b"udta", &meta);
+    let grown = (moov_size + udta.len()) as u32;
+    bytes[moov..moov + 4].copy_from_slice(&grown.to_be_bytes());
+    bytes.extend_from_slice(&udta);
+    bytes
+}
+
+/// The AAC priming trimmed to the sample. The fixture is 0.2 s of silence
+/// and then a 440 Hz sine at 0.5 from sample 8 820 (ffmpeg's AAC encoder,
+/// which primes 1 024 samples and says so in the edit list). The lane
+/// starts on the encoder's first sample, so the tone crosses the onset
+/// threshold on the sample the PCM given to the encoder does (8 822), and
+/// at 3 201 at 16 kHz; the same through iTunes' gapless tag, Apple's
+/// layout. Without either the decode keeps the priming and the tone
+/// starts 1 024 samples late, the decoder's old offset: the trim comes
+/// from the container, not from a constant.
+#[test]
+fn the_aac_priming_is_trimmed_to_the_sample() {
+    const ONSET: usize = 8_820;
+    const PRIMING: usize = 1_024;
+    // Where the threshold catches the sine as ffmpeg was given it.
+    let pcm: Vec<f32> = (0..22_050)
+        .map(|n| {
+            if n < ONSET {
+                return 0.0;
+            }
+            let t = (n - ONSET) as f64 / 44_100.0;
+            (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as f32
+        })
+        .collect();
+    let pcm_onset = onset(&pcm, 0.05);
+    assert_eq!(pcm_onset, ONSET + 2);
+    let original = std::fs::read(fixture("tone-440-44k1-onset-200ms.m4a")).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let variants = [
+        ("edit list", original.clone(), 0),
+        (
+            "gapless tag",
+            without_edit_list(&original, Some(PRIMING as u32)),
+            0,
+        ),
+        ("neither", without_edit_list(&original, None), PRIMING),
+    ];
+    let mut untrimmed = None;
+    for (name, bytes, late) in variants {
+        let path = directory.path().join(format!("{name}.m4a"));
+        std::fs::write(&path, bytes).unwrap();
+        let source = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
+        let at_source = onset(&source.samples, 0.05);
+        let decoded = SymphoniaAudioCodec::decode_path(&path, 0, AudioLane::Mixed).unwrap();
+        let at_16k = onset(&decoded.samples, 0.05);
+        println!(
+            "{name}: {} samples, onset at {at_source}; at 16 kHz {} samples, onset at {at_16k}",
+            source.samples.len(),
+            decoded.len()
+        );
+        let expected = pcm_onset + late;
+        assert_eq!(at_source, expected, "{name}: onset");
+        let expected_16k = (expected * 16_000 + 22_050) / 44_100;
+        assert!(
+            at_16k.abs_diff(expected_16k) <= 1,
+            "{name}: onset at {at_16k} at 16 kHz, expected {expected_16k}"
+        );
+        // Nothing before the tone but the encoder's quiet pre-echo.
+        let before = rms_decibels(&source.samples[..ONSET + late - 1_024]);
+        assert!(before < -60.0, "{name}: {before} dB before the onset");
+        if late > 0 {
+            untrimmed = Some(source.samples);
+        }
+    }
+    // The trimmed decode is the untrimmed one less exactly its priming.
+    let untrimmed = untrimmed.unwrap();
+    let trimmed = SymphoniaAudioCodec::read_channel(
+        &fixture("tone-440-44k1-onset-200ms.m4a"),
+        0,
+        AudioLane::Mixed,
+    )
+    .unwrap()
+    .samples;
+    assert_eq!(trimmed.len(), untrimmed.len() - PRIMING);
+    assert!(
+        trimmed
+            .iter()
+            .zip(&untrimmed[PRIMING..])
+            .all(|(a, b)| a.to_bits() == b.to_bits()),
+        "the same samples, the priming dropped"
+    );
 }
 
 /// The phone's 44.1 kHz through the sinc resampler: level within 0.1 dB,

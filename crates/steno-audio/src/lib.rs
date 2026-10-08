@@ -9,7 +9,8 @@
 //!   and the live backend (Core Audio on macOS, PipeWire on Linux, WASAPI
 //!   on Windows).
 //! - [`codec`]: [`SymphoniaAudioCodec`], decoding recordings and phone
-//!   files to 16 kHz mono a block at a time, and the mixdown.
+//!   files to 16 kHz mono a block at a time (an AAC file's encoder priming
+//!   dropped), and the mixdown.
 //! - [`detection`]: the [`MeetingDetector`]: which processes hold the
 //!   microphone, debounced into a call starting and ending, the WASAPI
 //!   session mapping, and the live process-activity source on each

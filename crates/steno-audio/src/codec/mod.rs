@@ -37,15 +37,21 @@
 //! - **Encoder priming.** AVFoundation trimmed the encoder's priming
 //!   samples; symphonia 0.5 trims them for MP3 (the LAME tag, with
 //!   `enable_gapless`) but not for MP4, whose edit list it parses and
-//!   ignores. An AAC lane therefore starts with the priming (1 024
-//!   samples at 44.1 kHz, 23 ms, for an ffmpeg encode; measured in
-//!   `tests/codec.rs`) and runs that much late. Tracked as a parity item.
+//!   ignores. For AAC in MP4 the decoder reads the priming itself
+//!   ([`priming`]: the edit list, else iTunes' gapless tag) and drops
+//!   exactly that many frames from the start, by the packets' timestamps,
+//!   so the lane starts on the first sample the encoder was given (1 024
+//!   samples at 44.1 kHz, 23 ms, for an ffmpeg encode; 2 112, 48 ms, for
+//!   Apple's; `tests/codec.rs`). Every other input decodes as before, bit
+//!   for bit. The padding after the last sample stays (under a packet of
+//!   silence), as the exact-length rule counts what was decoded.
 //! - **CAF**: PCM only (what the writer produces); a CAF holding AAC fails.
 //! - An unfinished master (data chunk size -1) decodes to its last whole
 //!   frame through the crate's own CAF reader (the chunk walk
 //!   [`CafFile`](crate::writer::CafFile) uses) before symphonia is
 //!   tried, as the Swift test demands.
 
+pub mod priming;
 pub mod resample;
 pub mod sinc;
 
@@ -56,13 +62,15 @@ use steno_core::{
     paths::file_url_path,
 };
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{Decoder, DecoderOptions};
+use symphonia::core::codecs::{CODEC_TYPE_AAC, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
+use symphonia::core::units::TimeBase;
 
+use priming::Priming;
 pub use resample::LaneResampler;
 use resample::length_at_16k;
 
@@ -362,6 +370,53 @@ struct SymphoniaFrames {
     track_id: u32,
     /// The track's frame count, as its header declares it.
     frames: Option<u64>,
+    /// The encoder priming to drop: AAC in MP4 only.
+    priming: Option<Trim>,
+}
+
+/// The frames before a track's first presented sample, and how to place a
+/// packet against them.
+#[derive(Debug, Clone, Copy)]
+struct Trim {
+    /// Frames at `rate` to drop from the start.
+    frames: u64,
+    rate: u32,
+    /// The packets' timestamp unit.
+    time_base: TimeBase,
+}
+
+impl Trim {
+    /// For AAC in an MP4 file that declares its priming.
+    fn for_track(path: &Path, params: &symphonia::core::codecs::CodecParameters) -> Option<Self> {
+        if params.codec != CODEC_TYPE_AAC {
+            return None;
+        }
+        let priming = Priming::read(path)?;
+        let rate = params.sample_rate?;
+        let Some(frames) = priming.frames(rate) else {
+            tracing::warn!(
+                ?priming,
+                rate,
+                "the AAC track starts later than any priming; decoding it from its first sample"
+            );
+            return None;
+        };
+        Some(Self {
+            frames,
+            rate,
+            time_base: params.time_base?,
+        })
+    }
+
+    /// How many of the `frames` a packet at `ts` decodes to fall before
+    /// the first presented sample. By timestamp rather than by count, so a
+    /// packet skipped as corrupt does not move the cut into the audio.
+    fn frames_before(self, ts: u64, frames: usize) -> usize {
+        let numerator = u128::from(ts) * u128::from(self.time_base.numer) * u128::from(self.rate);
+        let start = numerator / u128::from(self.time_base.denom.max(1));
+        let before = u128::from(self.frames).saturating_sub(start);
+        usize::try_from(before).map_or(frames, |before| before.min(frames))
+    }
 }
 
 impl SymphoniaFrames {
@@ -391,6 +446,7 @@ impl SymphoniaFrames {
             .ok_or_else(|| CodecError::UnsupportedFormat("no audio track".into()))?;
         let track_id = track.id;
         let frames = track.codec_params.n_frames;
+        let priming = Trim::for_track(path, &track.codec_params);
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(|e| CodecError::UnsupportedFormat(e.to_string()))?;
@@ -400,6 +456,7 @@ impl SymphoniaFrames {
             decoder,
             track_id,
             frames,
+            priming,
         })
     }
 
@@ -430,6 +487,9 @@ impl SymphoniaFrames {
                 Err(SymphoniaError::DecodeError(_)) => continue,
                 Err(e) => return Err(CodecError::ConversionFailed(e.to_string())),
             };
+            let primed = self
+                .priming
+                .map_or(0, |trim| trim.frames_before(packet.ts(), audio.frames()));
             let shape = *audio.spec();
             let count = shape.channels.count();
             let packet_spec = Spec {
@@ -451,7 +511,10 @@ impl SymphoniaFrames {
             }
             buffer.copy_interleaved_ref(audio);
             if audible {
-                each(Event::Frames(packet_spec, buffer.samples()))?;
+                each(Event::Frames(
+                    packet_spec,
+                    &buffer.samples()[primed * count..],
+                ))?;
             }
         }
         spec.filter(|spec| spec.audible()).ok_or_else(|| {
