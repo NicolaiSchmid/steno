@@ -14,6 +14,8 @@
 //!   microphone, debounced into a call starting and ending, the WASAPI
 //!   session mapping, and the live process-activity source on each
 //!   platform.
+//! - [`playback`]: the [`Playback`] gate: no in-app playback while
+//!   recording.
 //! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
 //!   bodies, the processing thread, the rate converter and the relay;
 //!   everything on the real-time path.
@@ -116,6 +118,7 @@ pub mod capture;
 pub mod clock;
 pub mod codec;
 pub mod detection;
+pub mod playback;
 pub mod realtime;
 pub mod testing;
 pub mod writer;
@@ -143,5 +146,6 @@ pub use codec::{CodecError, SymphoniaAudioCodec};
 pub use detection::{
     MeetingDetector, MeetingEvent, ProcessAudioActivity, ProcessAudioActivitySource,
 };
+pub use playback::{Playback, PlaybackPermit, PlaybackRefused, RecordingHold};
 pub use realtime::LaneFrameSink;
 pub use writer::{CafFile, CafHeader, RecordingWriter, WavFile};
