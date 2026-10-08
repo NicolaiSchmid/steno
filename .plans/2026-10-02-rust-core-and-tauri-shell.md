@@ -973,8 +973,11 @@ still has to draw the window side. `[ ]` is not ported yet.
 - The pipelines a reload builds share one in-flight set (P16; `InFlight`, as they
   share the `QuitLatch`), so the new pipeline refuses a meeting the retired one
   still processes or re-exports
-  (`after_a_reload_a_meeting_the_retired_pipeline_re_exports_is_refused`). Swift
-  kept it per pipeline.
+  (`after_a_reload_a_meeting_the_retired_pipeline_re_exports_is_refused`). The start
+  claim of `enqueue`, `reprocess` and `resume_unfinished` (#228's `claim_start`) is
+  one check-and-insert on the set's assets, so a second start across pipelines is
+  refused too (`a_reprocess_is_refused_while_a_retired_pipeline_runs_the_meeting`).
+  Swift kept it per pipeline.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file
