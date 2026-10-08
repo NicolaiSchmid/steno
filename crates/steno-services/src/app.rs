@@ -361,6 +361,11 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
         zone,
         runtime.clone(),
     );
+    // The database's volume counts beside the recordings folder's: the
+    // save writes there too.
+    recorder.watch_disk_with(crate::recorder::DiskWatch::system(
+        database_path.parent().map(std::path::Path::to_path_buf),
+    ));
 
     let handover = match handover_listener(&store, &pipeline, &secrets, zone, &runtime) {
         Ok(pair) => Some(pair),
