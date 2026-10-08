@@ -46,7 +46,8 @@ use crate::files::{read_json, write_json};
 pub struct ExportRetries {
     path: PathBuf,
     counts: Mutex<BTreeMap<Uuid, u32>>,
-    /// False when the file on disk could not be read or set aside.
+    /// False for [`in_memory`](Self::in_memory), and when the file on disk
+    /// could not be read or set aside.
     writable: bool,
 }
 
@@ -124,8 +125,8 @@ impl ExportRetries {
         self.write(&counts);
     }
 
-    /// Keeps the counts of the meetings `keep` names, so a meeting that
-    /// delivered every row since (or that was deleted) starts again from 0.
+    /// Keeps only the counts of the meetings `keep` accepts. The launch
+    /// drops a meeting that delivered every row since, or that was deleted.
     pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
         let mut counts = self.lock();
         let before = counts.len();

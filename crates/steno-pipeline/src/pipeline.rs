@@ -124,7 +124,8 @@ pub enum ReprocessError {
     #[error("meeting {0}'s audio is no longer on disk")]
     AudioGone(Uuid),
     /// Another operation holds the meeting (a run, a summary rerun or a
-    /// redelivery), or a run of its asset is starting.
+    /// redelivery), or a background run holds its recording, on any
+    /// pipeline sharing the in-flight set.
     #[error("meeting {0} is busy")]
     Busy(Uuid),
     /// The app is exiting: nothing was saved, and the meeting can be
@@ -766,8 +767,8 @@ fn all_delivered(deliveries: &[Delivery]) -> bool {
         .all(|delivery| delivery.status == DeliveryStatus::Delivered)
 }
 
-/// The reason a delivery an export left `pending` is saved failed with,
-/// when no failure names one: the process ended mid-export, or the
+/// The failure saved on a delivery an export left `pending` when no
+/// failure names a reason: the process ended mid-export, or the
 /// dispatcher returned without finishing the row.
 const EXPORT_INTERRUPTED: &str = "the export stopped before it finished";
 
@@ -849,8 +850,8 @@ impl ProcessingPipeline {
     /// pipeline [quits](Self::quit), the meeting is saved and stays
     /// `queued` for the next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let starting = self.claim_or_refuse(meeting, asset)?;
-        self.enqueue_claimed(meeting, asset, starting)
+        let claim = self.claim_or_refuse(meeting, asset)?;
+        self.enqueue_claimed(meeting, asset, claim)
     }
 
     /// [`ProcessingPipeline::enqueue`] of a meeting the caller saved
@@ -862,14 +863,14 @@ impl ProcessingPipeline {
     /// nothing starts and the meeting waits `queued` for the next launch.
     /// Swift: `ProcessingPipeline.enqueueSaved`.
     pub fn enqueue_saved(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let starting = self.claim_or_refuse(meeting, asset)?;
-        self.start(asset, Turn::Now(None), starting);
+        let claim = self.claim_or_refuse(meeting, asset)?;
+        self.start(asset, Turn::Now(None), claim);
         Ok(())
     }
 
     /// [`ProcessingPipeline::claim_start`] for `enqueue` and
     /// `enqueue_saved`, refused as a failed `decode`.
-    fn claim_or_refuse(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<Starting> {
+    fn claim_or_refuse(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<AssetClaim> {
         self.claim_start(meeting.id, asset.id).ok_or_else(|| {
             PipelineFailure::new(
                 PipelineStage::Decode,
@@ -885,7 +886,7 @@ impl ProcessingPipeline {
         &self,
         meeting: &Meeting,
         asset: &AudioAsset,
-        starting: Starting,
+        claim: AssetClaim,
     ) -> Result<()> {
         let mut queued = meeting.clone();
         queued.state = MeetingState::Queued;
@@ -899,7 +900,7 @@ impl ProcessingPipeline {
         // Processed afresh: earlier runs that ended with the app no longer
         // count against it.
         RunCount::of(&asset).clear();
-        self.start(&asset, Turn::Now(None), starting);
+        self.start(&asset, Turn::Now(None), claim);
         Ok(())
     }
 
@@ -933,24 +934,24 @@ impl ProcessingPipeline {
         if !file_url_path(&asset.url).is_some_and(|master| master.exists()) {
             return Err(ReprocessError::AudioGone(meeting_id));
         }
-        let starting = self
+        let claim = self
             .claim_start(meeting_id, asset.id)
             .ok_or(ReprocessError::Busy(meeting_id))?;
         asset.expires_at = None;
-        Ok(self.enqueue_claimed(&meeting, &asset, starting)?)
+        Ok(self.enqueue_claimed(&meeting, &asset, claim)?)
     }
 
     /// Claims `asset_id` for a background run of `meeting_id` in the
-    /// in-flight set, until the claim drops before its run starts or the
-    /// run ends; `None` while the asset runs or is claimed, or the meeting
-    /// is in flight, on any pipeline sharing the set. The check and the
+    /// in-flight set. The run holds the claim until it ends, and a run that
+    /// never starts drops it. `None` while the asset runs or is claimed, or
+    /// the meeting is in flight, on any pipeline sharing the set. The check and the
     /// claim are one step under the set's lock.
-    fn claim_start(&self, meeting_id: Uuid, asset_id: Uuid) -> Option<Starting> {
+    fn claim_start(&self, meeting_id: Uuid, asset_id: Uuid) -> Option<AssetClaim> {
         let mut in_flight = self.in_flight_set();
         if in_flight.meetings.contains(&meeting_id) || !in_flight.assets.insert(asset_id) {
             return None;
         }
-        Some(Starting {
+        Some(AssetClaim {
             pipeline: self.clone(),
             asset_id,
         })
@@ -1000,7 +1001,7 @@ impl ProcessingPipeline {
                 )?;
                 continue;
             };
-            let Some(starting) = self.claim_start(meeting.id, asset.id) else {
+            let Some(claim) = self.claim_start(meeting.id, asset.id) else {
                 continue;
             };
             let count = RunCount::of(&asset);
@@ -1030,19 +1031,19 @@ impl ProcessingPipeline {
                 continue;
             }
             if crashed > 0 {
-                alone.push((meeting.id, asset, starting));
+                alone.push((meeting.id, asset, claim));
                 continue;
             }
             // Never refused: no run asks to go alone before the loop ends.
             let shared = turns.clone().try_read_owned().ok();
-            self.start(&asset, Turn::Now(shared), starting);
+            self.start(&asset, Turn::Now(shared), claim);
             resumed.push(meeting.id);
         }
         let mut turns_alone = Vec::new();
-        for (meeting_id, asset, starting) in alone {
+        for (meeting_id, asset, claim) in alone {
             let (turn, waiting) = oneshot::channel();
             turns_alone.push(turn);
-            self.start(&asset, Turn::Alone(waiting), starting);
+            self.start(&asset, Turn::Alone(waiting), claim);
             resumed.push(meeting_id);
         }
         if !turns_alone.is_empty() {
@@ -1063,22 +1064,29 @@ impl ProcessingPipeline {
     /// that `failed` more than a day ([`ExportRetries::INTERVAL`]) before
     /// the pipeline's clock, after it, or was never attempted.
     ///
-    /// So a launch retries a failed export once, and at most once a day.
-    /// Each launch re-export is counted in `retries` before it runs, so an
-    /// exit mid-export counts too, and the count is reset once every row is
-    /// delivered. After [`ExportRetries::LIMIT`] launch re-exports in a row
+    /// A launch retries a failed export at most once, and once a day at
+    /// most. Each launch re-export is counted in `retries` before it runs,
+    /// so an exit mid-export counts too, and the count is reset once every
+    /// row is delivered. After [`ExportRetries::LIMIT`] launch re-exports in a row
     /// that did not deliver every row, the meeting is left for the user,
-    /// whose re-export resets the count. A failed launch re-export marks
-    /// its rows still `pending` as failed, and so does the launch for a
-    /// meeting it stopped retrying, so the detail says the export keeps
-    /// failing.
+    /// whose re-export resets the count. A launch re-export that leaves a
+    /// row `pending` saves it failed, and so does the launch for a meeting
+    /// it stopped retrying, so the detail says the export keeps failing.
     ///
     /// The meetings run one at a time in one background task, each claimed
     /// when its turn comes, so the others stay free for the user meanwhile;
-    /// one another operation holds is skipped, since its own run exports
-    /// it. A failure is logged, not posted as `OperationFailed`: the user
-    /// did not ask for this export, so the detail must not say "Export
-    /// again failed". Returns the meetings to re-export, none once the
+    /// a meeting another operation holds is skipped, since its own run
+    /// exports it, and so is one that, once claimed, is no longer ready
+    /// with a row `pending` or failed (the user exported it meanwhile).
+    /// The claim takes the meeting and not its asset, so a background run
+    /// that holds the asset and has not admitted the meeting yet would then
+    /// fail as already being processed; no such run starts on a ready
+    /// meeting until Process again does, and this claim must then refuse
+    /// the asset too.
+    ///
+    /// A failure is logged, not posted as `OperationFailed`: the user did
+    /// not ask for this export, so the detail must not say "Export again
+    /// failed". Returns the meetings to re-export, none once the
     /// pipeline [quits](Self::quit). Needs a `tokio` runtime. Rust only.
     pub fn redeliver_unfinished(&self, retries: &Arc<ExportRetries>) -> Result<Vec<Uuid>> {
         if self.quitting() {
@@ -1122,13 +1130,20 @@ impl ProcessingPipeline {
 
     /// One meeting of [`redeliver_unfinished`](Self::redeliver_unfinished):
     /// claimed now, then counted in `retries` before the re-export runs
-    /// and reset once every row is delivered. A refused claim is not
-    /// counted. The file is written on a blocking thread.
+    /// and reset once every row is delivered. A refused claim, or a
+    /// meeting no longer owed once claimed, is not counted. The file is
+    /// written on a blocking thread.
     async fn redeliver_at_launch(&self, meeting_id: Uuid, retries: &Arc<ExportRetries>) {
         // Refused: a meeting in flight exports at the end of its run.
-        let Ok(operation) = self.claim_deliver_again(meeting_id) else {
+        let Ok(admitted) = self.admit(meeting_id, PipelineStage::Deliver) else {
             return;
         };
+        // Read under the claim: since the launch found it, the user may
+        // have exported it, or a run may have left it not ready.
+        let Some(meeting) = self.still_owed(meeting_id) else {
+            return;
+        };
+        let operation = self.deliver_again_claimed(meeting, admitted);
         // Counted before the export writes its rows, so the detail those
         // writes reload already reads the count: the last failure before
         // the stop shows "keeps failing" at once.
@@ -1157,8 +1172,10 @@ impl ProcessingPipeline {
     }
 
     /// Saves the meeting's deliveries still `pending` as failed with
-    /// `reason`, keeping their last attempt and receipt. The caller holds
-    /// the meeting's claim. A store error is logged and leaves the rows.
+    /// `reason`, keeping their receipt and their last attempt, stamped now
+    /// when there is none so the row waits a day like any failure. The
+    /// caller holds the meeting's claim. A store error is logged and leaves
+    /// the rows.
     fn fail_pending_deliveries(&self, meeting_id: Uuid, reason: &str) {
         let store = self.store();
         let rows = match store.deliveries(meeting_id) {
@@ -1173,6 +1190,7 @@ impl ProcessingPipeline {
                 continue;
             }
             row.status = DeliveryStatus::Failed(reason.to_owned());
+            row.last_attempt_at.get_or_insert(self.now());
             if let Err(error) = store.save_delivery(&row) {
                 tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "a delivery could not be saved failed");
             }
@@ -1188,7 +1206,7 @@ impl ProcessingPipeline {
     fn spawn_tracked(
         &self,
         key: Uuid,
-        claim: Option<Starting>,
+        claim: Option<AssetClaim>,
         work: impl Future<Output = ()> + Send + 'static,
     ) {
         let pipeline = self.clone();
@@ -1205,14 +1223,14 @@ impl ProcessingPipeline {
     }
 
     /// Processes `asset` in the background
-    /// ([`spawn_tracked`](Self::spawn_tracked)) under its [`Starting`]
-    /// claim, which the run holds until it ends; a run that does not start
+    /// ([`spawn_tracked`](Self::spawn_tracked)) under its [`AssetClaim`],
+    /// which the run holds until it ends; a run that does not start
     /// releases it. Once the pipeline quits, nothing starts. The run is
     /// counted in the meeting's folder before it starts (on this thread,
     /// unless it waits for its [`Turn`]), and the count is cleared when it
     /// ends or the run taken back when the app exits first
     /// ([`CountedRun`]).
-    fn start(&self, asset: &AudioAsset, turn: Turn, starting: Starting) {
+    fn start(&self, asset: &AudioAsset, turn: Turn, claim: AssetClaim) {
         let asset_id = asset.id;
         let latch = self.inner.dependencies.quit_latch.clone();
         let count = RunCount::of(asset);
@@ -1225,7 +1243,7 @@ impl ProcessingPipeline {
             Turn::Alone(_) => None,
         };
         let pipeline = self.clone();
-        self.spawn_tracked(asset_id, Some(starting), async move {
+        self.spawn_tracked(asset_id, Some(claim), async move {
             let (_shared, _alone) = match turn {
                 Turn::Now(shared) => (shared, None),
                 Turn::Alone(waiting) => match waiting.await {
@@ -1688,10 +1706,10 @@ impl ProcessingPipeline {
         }))
     }
 
-    /// [`claim_redeliver`](Self::claim_redeliver) without the
-    /// `OperationFailed` event, for the launch's re-exports. A row the
-    /// re-export leaves `pending` is saved failed before the claim is
-    /// released.
+    /// The re-export [`claim_redeliver`](Self::claim_redeliver) reports,
+    /// without the `OperationFailed` event, which the launch's re-exports
+    /// use directly. A row the re-export leaves `pending` is saved failed
+    /// before the claim is released.
     fn claim_deliver_again(&self, meeting_id: Uuid) -> Result<Operation> {
         let meeting = required(
             PipelineStage::Deliver,
@@ -1699,8 +1717,33 @@ impl ProcessingPipeline {
             || format!("meeting {meeting_id} not found"),
         )?;
         let admitted = self.admit(meeting_id, PipelineStage::Deliver)?;
+        Ok(self.deliver_again_claimed(meeting, admitted))
+    }
+
+    /// The meeting, when it is still `ready` with a delivery `pending` or
+    /// failed: what the launch re-exports once it holds the claim. A store
+    /// error reads as not owed, and the next launch looks again.
+    fn still_owed(&self, meeting_id: Uuid) -> Option<Meeting> {
+        let store = self.store();
+        let meeting = store.meeting(meeting_id).ok().flatten()?;
+        let owed = meeting.state == MeetingState::Ready
+            && store.deliveries(meeting_id).is_ok_and(|rows| {
+                rows.iter().any(|row| {
+                    matches!(
+                        row.status,
+                        DeliveryStatus::Pending | DeliveryStatus::Failed(_)
+                    )
+                })
+            });
+        owed.then_some(meeting)
+    }
+
+    /// [`claim_deliver_again`](Self::claim_deliver_again) once `admitted`
+    /// holds the meeting.
+    fn deliver_again_claimed(&self, meeting: Meeting, admitted: Admitted) -> Operation {
+        let meeting_id = meeting.id;
         let pipeline = self.clone();
-        Ok(Box::pin(async move {
+        Box::pin(async move {
             let result =
                 unless_it_panics(|| PipelineStage::Deliver, pipeline.deliver_again(&meeting)).await;
             // A row still `pending` here was left by a panic or a
@@ -1713,7 +1756,7 @@ impl ProcessingPipeline {
             pipeline.fail_pending_deliveries(meeting_id, reason);
             drop(admitted);
             result
-        }))
+        })
     }
 
     async fn deliver_again(&self, meeting: &Meeting) -> Result<()> {
@@ -2470,12 +2513,12 @@ fn not_started(asset_id: Uuid) {
 /// ([`ProcessingPipeline::claim_start`]); dropping it releases the claim,
 /// before the run starts or, held by the run's [`Running`] mark, when the
 /// run ends.
-struct Starting {
+struct AssetClaim {
     pipeline: ProcessingPipeline,
     asset_id: Uuid,
 }
 
-impl Drop for Starting {
+impl Drop for AssetClaim {
     fn drop(&mut self) {
         self.pipeline.in_flight_set().assets.remove(&self.asset_id);
     }
@@ -2488,7 +2531,7 @@ impl Drop for Starting {
 struct Running {
     pipeline: ProcessingPipeline,
     key: Uuid,
-    _claim: Option<Starting>,
+    _claim: Option<AssetClaim>,
 }
 
 impl Drop for Running {
