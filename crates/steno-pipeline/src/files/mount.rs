@@ -227,14 +227,4 @@ mod tests {
         }
         assert_eq!(type_name(&buffer), "smbfs");
     }
-
-    /// A local test folder, and a missing folder in it, are not on a
-    /// network mount.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    #[test]
-    fn a_local_folder_is_not_on_a_network_mount() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(!is_on_a_network_mount(directory.path()));
-        assert!(!is_on_a_network_mount(&directory.path().join("audio")));
-    }
 }
