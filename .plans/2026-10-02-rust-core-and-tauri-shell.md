@@ -1147,17 +1147,16 @@ still has to draw the window side. `[ ]` is not ported yet.
   commit writes over those frames or voids them, and removes the copy only once that
   save succeeds; otherwise the copy stays, an orphan at worst, and a replayed
   admission still finds its master. The phone keeps its copy either way. Orphan
-  masters (a crash after the copy, a failed save that fails too) are not cleaned up or
-  offered for re-import yet; the capture recovery's scan of audio folders without a
-  meeting row owns them (`fix/recovery-adopts-orphans`, stacked on #233). The intake
-  completes only a receipt of the admitting device: its read and, again, the
-  admission's transaction refuse another device's receipt under the same recording id
+  masters are not cleaned up or offered for re-import yet (the
+  `fix/recovery-adopts-orphans` item in "Open after the port"). The intake completes
+  only a receipt of the admitting device: its read and, again, the admission's
+  transaction refuse another device's receipt under the same recording id
   (`StoreError::ReceiptOfAnotherDevice`, `MeetingStoreError.receiptOfAnotherDevice`)
   and leave that receipt as it is, the copy removed. The intake's writes run outside
   the engine's line of store writes, so between its read and its commit the admitting
   phone can be revoked and another phone announce the id; completed, that phone's
   receipt would answer its `complete` with this meeting and it would delete a
-  recording never admitted. Every production wiring goes through it
+  recording never admitted. Every production wiring goes through this intake
   (`RecordingIntake::over`, `steno_services::app::handover_intake`, Swift's
   `RecordingIntake.init(currentPipeline:)`, which `AppEnvironment.makeIntake` and
   `init(pipeline:)` go through).
@@ -1184,29 +1183,32 @@ still has to draw the window side. `[ ]` is not ported yet.
   commit.
 - At launch, before the handover listener exists, both apps checkpoint the store
   durably (`Store::checkpoint_durably`, `MeetingStore.checkpointDurably()`):
-  `wal_checkpoint(RESTART)` under `FULL` with `fullfsync` copies every commit in the
-  WAL into the database file, syncs it and waits until no reader is left in the WAL,
-  and one durable write that changes a page (a private table created and dropped,
-  which leaves the schema and the applied migrations as they were) then restarts the
-  WAL with a new salt and syncs its header. After a crash, recovery can read back an
-  admission whose WAL sync failed (Linux keeps a page whose fsync failed in its cache,
-  marked clean), and the intake answers a retried `complete` from a stored `complete`
-  receipt without a write of its own; the checkpoint puts that admission in the synced
-  database file first, and the restart keeps a power loss from replaying the older
-  frames still in the WAL file over it (recovery skips every frame under the old
-  salt). A checkpoint that fails, or that another connection (a writer, or a reader
-  still in the WAL) blocks when the busy timeout runs out (`SQLITE_BUSY`), keeps the
-  handover off until the next launch, with a startup warning (the Mac app's menu bar,
-  the Rust shell's log) and Settings' unavailable callout; the rest of the app runs
-  (`handover_listener` in `crates/steno-services/src/app.rs`,
-  `AppEnvironment.makeHandover`). Tests check at the file level that the WAL's salt
-  changes and that another connection's write lock or read transaction makes the
-  checkpoint fail, and with the write lock held expect no listener and no identity
-  read. The launch checkpoint is one helper, `HandoverService::checkpoint_store` and
-  `HandoverService.checkpointStore(_:)`, which fails with `StoreNotSynced`; the CLI's
-  `steno dev handover serve` in both apps runs it before it mints the identity and
-  exits nonzero when it fails. The CLI's store is in memory, so its checkpoint has no
-  WAL to copy and no test can make it fail; the helper is tested through the apps.
+  `wal_checkpoint(TRUNCATE)` under `FULL` with `fullfsync` copies every commit in the
+  WAL into the database file, syncs it, waits until no reader is left in the WAL and
+  truncates the WAL file, keeping a new salt for its next header; one durable write
+  that changes a page (a private table created and dropped, which leaves the schema
+  and the applied migrations as they were) then writes that header and syncs it with
+  its frames. After a crash, recovery can read back an admission whose WAL sync failed
+  (Linux keeps a page whose fsync failed in its cache, marked clean), and the intake
+  answers a retried `complete` from a stored `complete` receipt without a write of its
+  own; the checkpoint puts that admission in the synced database file first. The
+  truncation itself is not synced; the synced header is what counts, since recovery
+  replays only the frames under the header's current salt, so a power loss replays
+  none of the older frames over the checkpointed pages. A checkpoint that fails, or
+  that another connection (a writer, or a reader still in the WAL) blocks when the
+  busy timeout runs out (`SQLITE_BUSY`), keeps the handover off until the next launch,
+  with a startup warning (the Mac app's menu bar, the Rust shell's log) and Settings'
+  unavailable callout; the rest of the app runs (`handover_listener` in
+  `crates/steno-services/src/app.rs`, `AppEnvironment.makeHandover`). Tests check at
+  the file level that the WAL file shrinks and its salt changes, that the write after
+  the checkpoint commits under `FULL`, and that another connection's write lock or
+  read transaction makes the checkpoint fail, and with the write lock held expect no
+  listener and no identity read. The launch checkpoint is one helper,
+  `HandoverService::checkpoint_store` and `HandoverService.checkpointStore(_:)`, which
+  fails with `StoreNotSynced`; the CLI's `steno dev handover serve` in both apps runs
+  it before it mints the identity and exits nonzero when it fails. The CLI's store is
+  in memory, so its checkpoint has no WAL to copy and no test can make it fail; the
+  helper is tested through the apps.
 
 ### Adapters
 
@@ -2302,6 +2304,20 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
     in as a new recording, as in the part above. Where: the 409 of `reannounce` (also
     reached from `announce`) in `crates/steno-handover/src/engine/recording.rs` and of
     `announce` in `Sources/StenoHandover/Routing/RecordingHandler.swift`. Found: #223.
+- **`fix/recovery-adopts-orphans`.** Orphan masters, both apps: a recording's master
+  in the audio folder with no meeting row, which neither app cleans up or offers for
+  re-import. The phone intake copies the master before its commit, so a crash between
+  the copy and the commit leaves one. So does a failed admission commit whose `failed`
+  save fails too: the copy stays because Linux keeps a page whose fsync failed in its
+  cache, marked clean, and recovery after a crash can bring the admission back with
+  it; when recovery does not, the copy is an orphan. So does the re-admission of a
+  `complete` receipt whose meeting is missing (the Handover "Admission" item): the
+  earlier admission's copy stays beside the new meeting's. The phone keeps its copy
+  in every case, so the orphan costs disk space, not a recording. The capture
+  recovery's scan of audio folders without a meeting row is to adopt them. Where:
+  `RecordingIntake::admit` in `crates/steno-pipeline/src/intake.rs` and
+  `RecordingIntake.admit` in `Sources/StenoCore/Storage/RecordingIntake.swift`; the
+  Store item on `RecordingIntake.admit`. Found: #213.
 - **Unowned.** Linux keeps secrets in the 0600 `secrets.json` under the support
   directory, not in the Secret Service. Where: `crates/steno-services/src/secrets.rs`.
   Found: #173.
