@@ -22,8 +22,10 @@ final class RateConverter: @unchecked Sendable {
   static let taps = 64
   /// The lowest device rate the converter accepts: narrowband hands-free.
   static let minimumRate: Double = 8_000
-  /// The highest: four input samples per output at 48 kHz, well inside one
-  /// window.
+  /// The highest: four input samples per output at 48 kHz. The 64 taps then
+  /// leave a transition band about 9 kHz wide, so content just above 24 kHz
+  /// aliases into the top of the band (a 28 kHz tone lands at 20 kHz, at
+  /// -49 dB); below 8 kHz nothing aliases above -97 dB.
   static let maximumRate: Double = 192_000
 
   /// Whether a device at `rate` hertz can be converted.
@@ -46,9 +48,10 @@ final class RateConverter: @unchecked Sendable {
   private var remainder = 0
 
   /// `inputRate` to `outputRate` hertz (rounded to whole hertz, both
-  /// supported), for calls of at most `maximumInput` samples.
+  /// supported: the session checks the device's rate before it builds one),
+  /// for calls of at most `maximumInput` samples.
   init(inputRate: Double, outputRate: Double, maximumInput: Int) {
-    precondition(Self.supports(inputRate) && Self.supports(outputRate))
+    assert(Self.supports(inputRate) && Self.supports(outputRate))
     self.inputRate = Int(inputRate.rounded())
     self.outputRate = Int(outputRate.rounded())
     self.maximumInput = maximumInput

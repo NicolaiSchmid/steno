@@ -482,6 +482,24 @@ import Testing
       CaptureSession.farEndDelayFrames(inputLatencyFrames: 0, outputLatencyFrames: 480) == 480)
   }
 
+  /// Frame counts move between rates rounded down: a device's to 48 kHz, and
+  /// a microphone on its own clock to the stream's; a rate that could not be
+  /// read leaves the count alone.
+  @Test func frameCountsAreRescaledBetweenRatesRoundingDown() {
+    let handsFree = CaptureStream(
+      sampleRate: 24_000, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil)
+    #expect(handsFree.atOutputRate(240 + 4_800) == 10_080)
+    #expect(CaptureStream.synthetic.atOutputRate(5_041) == 5_041)
+    // 1 000 * 48 000 / 44 100 = 1 088.4.
+    let consumer = CaptureStream(
+      sampleRate: 44_100, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil)
+    #expect(consumer.atOutputRate(1_000) == 1_088)
+    // A 48 kHz microphone beside a 24 kHz clock master.
+    #expect(CaptureStream.rescaled(481, from: 48_000, to: 24_000) == 240)
+    #expect(CaptureStream.rescaled(481, from: 0, to: 24_000) == 481)
+    #expect(CaptureStream.rescaled(481, from: .nan, to: 24_000) == 481)
+  }
+
   /// The backend describes the stream it opened; the session keeps it while
   /// recording (capture-spike prints it) and drops it with the recording.
   @Test func theSessionExposesTheBackendsStreamWhileRecording() async throws {
@@ -674,18 +692,51 @@ import Testing
     #expect(clock.pendingSleepers == 0)
   }
 
+  /// Keeps every far-end sample it is handed and passes the microphone
+  /// through.
+  final class FarEndRecorder: EchoCanceller, @unchecked Sendable {
+    let sampleRate: Double
+    let frameSize: Int
+    private let lock = NSLock()
+    private var samples: [Float] = []
+
+    init(sampleRate: Double, frameSize: Int) throws {
+      self.sampleRate = sampleRate
+      self.frameSize = frameSize
+    }
+
+    var farEnd: [Float] {
+      lock.lock()
+      defer { lock.unlock() }
+      return samples
+    }
+
+    func process(
+      nearEnd: UnsafeBufferPointer<Float>, farEnd: UnsafeBufferPointer<Float>,
+      out: UnsafeMutableBufferPointer<Float>
+    ) {
+      lock.lock()
+      samples.append(contentsOf: farEnd)
+      lock.unlock()
+      for index in 0..<min(nearEnd.count, out.count) { out[index] = nearEnd[index] }
+    }
+  }
+
   /// A headset in the hands-free profile keeps the aggregate at 24 kHz: the
-  /// recording still starts, and the master and the sidecars are 48 and
-  /// 16 kHz with the tones at their frequencies and levels.
+  /// recording still starts, the master and the sidecars are 48 and 16 kHz
+  /// with the tones at their frequencies and levels, and the far end reaches
+  /// the canceller delayed by the device latencies in 48 kHz frames.
   @Test func aDeviceAt24KilohertzRecordsTheUsualFiles() async throws {
     let directory = try Fixtures.temporaryDirectory("session")
     defer { try? FileManager.default.removeItem(at: directory) }
+    let handsFree = CaptureStream(
+      sampleRate: 24_000, inputLatencyFrames: 240, outputLatencyFrames: 4_800, layout: nil)
     let backend = SyntheticCaptureBackend(
-      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 3, sampleRate: 24_000)
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 3, stream: handsFree)
+    let recorder = try FarEndRecorder(sampleRate: 48_000, frameSize: 480)
     let session = try CaptureSession(
       configuration: configuration(.call, in: directory), backend: backend,
-      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
-      writerHeadroomFrames: 1_000)
+      echoCanceller: recorder, writerHeadroomFrames: 1_000)
     try await session.start(meetingID: UUID())
     #expect(await session.stream?.sampleRate == 24_000)
     await backend.waitUntilFinished()
@@ -693,9 +744,11 @@ import Testing
 
     #expect(backend.framesDelivered == 3 * 24_000)
     #expect(result.statistics.droppedFrames == [:])
-    // Less half a converter window and the last partial frame.
-    #expect(abs(result.statistics.duration - 3) < 0.015, "\(result.statistics.duration) s")
+    // 72 000 device samples less half a converter window convert to
+    // 2 * (72 000 - 32) = 143 936 outputs: 299 whole frames.
     let master = try CAFFile.read(result.asset.url)
+    #expect(master.frameCount == 143_520)
+    #expect(result.statistics.duration == 143_520 / StenoAudio.sampleRate)
     #expect(master.sampleRate == StenoAudio.sampleRate)
     #expect(master.channels.count == 2)
     for (channel, hertz) in [(0, 440.0), (1, 1_000.0)] {
@@ -705,7 +758,14 @@ import Testing
       #expect(abs(RateConverterTests.levelAgainstHalfScaleSine(steady)) < 0.1)
     }
     let mic = try WAVAudioDecoder.read(result.asset.sidecars16k[.mic]!)
-    #expect(abs(mic.duration - 3) < 0.015)
+    #expect(mic.samples.count == 143_520 / 3)
+    // 240 + 4 800 frames at 24 kHz are 10 080 at 48 kHz: the far end is the
+    // system lane that many samples late, zeros before.
+    let farEnd = recorder.farEnd
+    let system = master.channels[1]
+    #expect(farEnd.count == system.count)
+    #expect(farEnd.prefix(10_080).allSatisfy { $0 == 0 })
+    #expect(Array(farEnd.dropFirst(10_080)) == Array(system.prefix(system.count - 10_080)))
   }
 
   /// The call starts and the headset enters the hands-free profile while
@@ -729,8 +789,6 @@ import Testing
     #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
     #expect(await notices.next() == .deviceResumed(attempt: 1, gapSeconds: 0))
     #expect(await session.stream == handsFree)
-    // The far-end delay is built from the latencies in 48 kHz frames.
-    #expect(handsFree.resampled(240 + 4_800) == 10_080)
     await backend.waitUntilFinished()
     let result = try await session.stop()
 
@@ -738,8 +796,10 @@ import Testing
     #expect(result.statistics.deviceChanges == 1)
     #expect(!result.statistics.endedOnDeviceLoss)
     #expect(result.statistics.droppedFrames == [:])
-    #expect(abs(result.statistics.duration - 3) < 0.015, "\(result.statistics.duration) s")
+    // 100 frames at 48 kHz, then 48 000 samples at 24 kHz less half a window:
+    // 2 * (48 000 - 32) = 95 936 outputs, 199 whole frames.
     let master = try CAFFile.read(result.asset.url)
+    #expect(master.frameCount == (100 + 199) * 480)
     let after = master.channels[0][52_800..<140_000]
     let measured = RateConverterTests.frequency(after)
     #expect(abs(measured - 440) < 2, "\(measured) Hz after the change")

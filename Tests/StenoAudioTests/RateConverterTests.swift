@@ -5,8 +5,10 @@ import Testing
 
 /// The streaming converter from a device's rate to 48 kHz
 /// (`.plans/2026-10-05-device-sample-rate.md`): chunking changes nothing, a
-/// tone keeps its level and frequency from every rate a Mac device runs at,
-/// and the timing holds. Rust: `crates/steno-audio/tests/rate_converter.rs`.
+/// tone keeps its level and frequency from every rate a Mac device runs at
+/// and leaves no spur, and the timing holds. Rust:
+/// `crates/steno-audio/tests/rate_converter.rs`, which also compares the
+/// stream with the offline sinc resampler (no Swift equivalent).
 @Suite struct RateConverterTests {
   /// `seconds` of a sine of `hertz` at amplitude 0.5, sampled at `rate`.
   func tone(_ hertz: Double, at rate: Double, seconds: Double = 1) -> [Float] {
@@ -71,6 +73,37 @@ import Testing
     #expect(abs(Self.frequency(steady) - 1_000) < 2)
   }
 
+  /// What a 1 kHz tone leaves once the sine fitted to it is removed, in dB
+  /// against the tone: the converter's spurs and images, and nothing of the
+  /// tone's own level. At 44.1 kHz most outputs sit between two phases,
+  /// where the adjacent phases are blended.
+  @Test func aToneFrom44Point1KilohertzLeavesNoSpur() {
+    let rate = 44_100.0
+    let output = convert(tone(1_000, at: rate), from: rate, chunks: [480])
+    // 800 whole periods of the steady part.
+    let start = 1_000
+    let steady = output[start..<39_400]
+    let angle = { (index: Int) in 2 * Double.pi * 1_000 * Double(index) / StenoAudio.sampleRate }
+    var sine = 0.0
+    var cosine = 0.0
+    for (offset, sample) in steady.enumerated() {
+      sine += Double(sample) * sin(angle(start + offset))
+      cosine += Double(sample) * cos(angle(start + offset))
+    }
+    let count = Double(steady.count)
+    sine = 2 * sine / count
+    cosine = 2 * cosine / count
+    var residual = 0.0
+    for (offset, sample) in steady.enumerated() {
+      let at = angle(start + offset)
+      let error = Double(sample) - sine * sin(at) - cosine * cos(at)
+      residual += error * error
+    }
+    residual /= count
+    let decibels = 10 * log10(residual / ((sine * sine + cosine * cosine) / 2))
+    #expect(decibels < -80, "the residual is \(decibels) dB")
+  }
+
   @Test func contentAbove48kNyquistIsRejected() {
     let output = convert(tone(30_000, at: 96_000), from: 96_000, chunks: [480])
     #expect(Self.levelAgainstHalfScaleSine(output[1_000..<40_000]) < -50)
@@ -79,7 +112,7 @@ import Testing
   /// An impulse at device sample 100 lands on output sample 200 at 24 kHz
   /// and 300 at 16 kHz: the lanes keep their timing.
   @Test(arguments: [(24_000.0, 200), (16_000.0, 300)])
-  func inputZeroIsOutputZero(rate: Double, at expected: Int) {
+  func anImpulseLandsOnItsOutputSample(rate: Double, at expected: Int) {
     var input = [Float](repeating: 0, count: 1_000)
     input[100] = 1
     let output = convert(input, from: rate, chunks: [160])

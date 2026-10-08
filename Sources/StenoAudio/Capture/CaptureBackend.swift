@@ -30,7 +30,8 @@ public struct CaptureStream: Sendable, Equatable {
   /// hands-free profile runs at 24 or 16 kHz).
   public var sampleRate: Double
   /// Latency plus safety offset of the microphone's input path, in frames at
-  /// `sampleRate`.
+  /// `sampleRate` (a microphone on its own clock has its latency rescaled
+  /// from its own rate).
   public var inputLatencyFrames: Int
   /// Latency plus safety offset of the loudspeaker's output path, in frames
   /// at `sampleRate`: the tap sees a sample this long before the room hears
@@ -52,10 +53,19 @@ public struct CaptureStream: Sendable, Equatable {
   public static let synthetic = CaptureStream(
     sampleRate: StenoAudio.sampleRate, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil)
 
-  /// `samples` at the stream's rate as samples at `StenoAudio.sampleRate`,
-  /// rounded down.
-  public func resampled(_ samples: Int) -> Int {
-    guard sampleRate != StenoAudio.sampleRate else { return samples }
-    return Int((Double(samples) * StenoAudio.sampleRate / sampleRate).rounded(.down))
+  /// `samples` counted at the stream's rate as samples at
+  /// `StenoAudio.sampleRate`, the rate the processing thread converts to,
+  /// rounded down (`rescaled`).
+  public func atOutputRate(_ samples: Int) -> Int {
+    Self.rescaled(samples, from: sampleRate, to: StenoAudio.sampleRate)
+  }
+
+  /// `frames` counted at `from` hertz as frames at `to` hertz, rounded down:
+  /// an over-delayed far end is the one error the echo canceller cannot
+  /// recover from. Unchanged when the rates are equal or either is not
+  /// positive (a rate that could not be read).
+  public static func rescaled(_ frames: Int, from: Double, to: Double) -> Int {
+    guard from != to, from > 0, to > 0 else { return frames }
+    return Int((Double(frames) * to / from).rounded(.down))
   }
 }

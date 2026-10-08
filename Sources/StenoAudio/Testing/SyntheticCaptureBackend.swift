@@ -45,21 +45,21 @@ public struct SyntheticLane: Sendable, Equatable {
 /// (one by default), not once per `start`, or the rebuilt backend
 /// would report again and loop. `restartsThatFail` makes that many `start`
 /// calls after the first throw `CaptureError.inputDeviceUnavailable`, the
-/// device still absent; `streamAfterRestart` is what every restart reports
-/// (new latencies, a new rate), the first start's stream when nil.
-/// `sampleRate` is the rate the first start runs at, as a device the Mac
-/// cannot move to 48 kHz; the tones keep their frequencies at any rate.
-/// `seconds` counts per `start`, so a restarted backend delivers again, and
-/// `framesDelivered` sums over starts (in each start's rate).
+/// device still absent; `stream` is what the first start reports and
+/// `streamAfterRestart` what every restart reports (new latencies, a new
+/// rate), `.synthetic` when nil. A start delivers at the rate of the stream
+/// it reports, as a device the Mac cannot move to 48 kHz; the tones keep
+/// their frequencies at any rate. `seconds` counts per `start`, so a
+/// restarted backend delivers again, and `framesDelivered` sums over starts
+/// (in each start's rate).
 public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable {
   public let signals: [AudioLane: SyntheticLane]
   public let seconds: TimeInterval
   public let callbackFrames: Int
   public let realTime: Bool
   public let changeDeviceAfter: TimeInterval?
+  public let stream: CaptureStream?
   public let streamAfterRestart: CaptureStream?
-  /// The rate the first start delivers and reports.
-  public let sampleRate: Double
   private let lock = NSLock()
   private var thread: Thread?
   private var changesRemaining: Int
@@ -72,12 +72,12 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
 
   public init(
     signals: [AudioLane: SyntheticLane], seconds: TimeInterval, callbackFrames: Int = 512,
-    sampleRate: Double = StenoAudio.sampleRate, realTime: Bool = false,
-    changeDeviceAfter: TimeInterval? = nil, changes: Int = 1, restartsThatFail: Int = 0,
+    realTime: Bool = false, changeDeviceAfter: TimeInterval? = nil, changes: Int = 1,
+    restartsThatFail: Int = 0, stream: CaptureStream? = nil,
     streamAfterRestart: CaptureStream? = nil
   ) {
     self.signals = signals
-    self.sampleRate = sampleRate
+    self.stream = stream
     self.seconds = seconds
     self.callbackFrames = callbackFrames
     self.realTime = realTime
@@ -90,8 +90,8 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
   /// The plan's spelling: one tone per lane at amplitude 0.5.
   public convenience init(
     lanes: [AudioLane], tone: [AudioLane: Double], seconds: TimeInterval,
-    sampleRate: Double = StenoAudio.sampleRate, changeDeviceAfter: TimeInterval? = nil,
-    changes: Int = 1, restartsThatFail: Int = 0, streamAfterRestart: CaptureStream? = nil,
+    changeDeviceAfter: TimeInterval? = nil, changes: Int = 1, restartsThatFail: Int = 0,
+    stream: CaptureStream? = nil, streamAfterRestart: CaptureStream? = nil,
     realTime: Bool = false
   ) {
     var signals: [AudioLane: SyntheticLane] = [:]
@@ -99,9 +99,8 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
       signals[lane] = tone[lane].map { SyntheticLane(frequency: $0) } ?? .silence
     }
     self.init(
-      signals: signals, seconds: seconds, sampleRate: sampleRate, realTime: realTime,
-      changeDeviceAfter: changeDeviceAfter,
-      changes: changes, restartsThatFail: restartsThatFail,
+      signals: signals, seconds: seconds, realTime: realTime, changeDeviceAfter: changeDeviceAfter,
+      changes: changes, restartsThatFail: restartsThatFail, stream: stream,
       streamAfterRestart: streamAfterRestart)
   }
 
@@ -139,9 +138,7 @@ public final class SyntheticCaptureBackend: CaptureBackend, @unchecked Sendable 
     }
     stopRequested.store(false, ordering: .releasing)
     completion.reset()
-    let first = CaptureStream(
-      sampleRate: self.sampleRate, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil)
-    let stream = isRestart ? (streamAfterRestart ?? first) : first
+    let stream = (isRestart ? streamAfterRestart : self.stream) ?? .synthetic
     let sampleRate = stream.sampleRate
     let generator = Generator(
       lanes: lanes, signals: signals, sampleRate: sampleRate, callbackFrames: callbackFrames)

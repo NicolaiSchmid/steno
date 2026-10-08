@@ -173,27 +173,32 @@ import Testing
 
     /// A headset in the hands-free profile: the rings carry 24 kHz and the
     /// loop converts every lane to 48 kHz before the canceller, still
-    /// without allocating.
-    @Test func theProcessingLoopConverting24KilohertzAllocatesNothingAfterWarmUp() throws {
+    /// without allocating. At 22.05 kHz a frame's worth of device samples is
+    /// not a whole number (220.5), so the reads leave a part of one behind.
+    /// The material's samples, read at the device's rate: 4 800 and then
+    /// 52 800 in all. Half a window is held back, so at 24 kHz they convert
+    /// to 2 * (4 800 - 32) and 2 * (52 800 - 32) outputs, 19 and then 219
+    /// whole frames; at 22.05 kHz to 10 380 and 114 870, 21 and 239.
+    @Test(arguments: [(24_000.0, 19, 219), (22_050.0, 21, 239)])
+    func theConvertingProcessingLoopAllocatesNothingAfterWarmUp(
+      rate: Double, warmFrames: Int, frames: Int
+    ) throws {
       let lanes: [AudioLane] = [.mic, .system]
       let sink = LaneFrameSink(lanes: lanes)
       let relay = FrameRelay(channels: 3, frameSize: Self.frameSize, capacityFrames: 256)
       let thread = ProcessingThread(
         sink: sink, relay: relay,
         configuration: .init(
-          lanes: lanes, deviceRate: 24_000,
+          lanes: lanes, deviceRate: rate,
           echoCanceller: try SpeexEchoCanceller(sampleRate: 48_000, frameSize: Self.frameSize),
           farEndDelayFrames: 7_200, keepRawMic: true))
       defer { thread.stop() }
 
-      // The material's samples, read as 24 kHz: 4 800 then 52 800 device
-      // samples convert to 2 * 4 800 - 64 and 2 * 52 800 - 64 outputs (half a
-      // window held back), 19 and then 219 whole frames.
       let warmUp = Material(seconds: 0.1)
       defer { warmUp.release() }
       warmUp.deliver(to: sink)
       thread.drain()
-      #expect(thread.framesProcessed == 19)
+      #expect(thread.framesProcessed == warmFrames)
 
       let second = Material(seconds: 1)
       defer { second.release() }
@@ -204,7 +209,7 @@ import Testing
       #expect(
         allocations.count == 0,
         "\(allocations.count) allocations on the converting path\(allocations.stacks)")
-      #expect(thread.framesProcessed == 219)
+      #expect(thread.framesProcessed == frames)
       #expect(sink.availableToRead == 0)
       #expect(sink.droppedSamples.isEmpty)
       #expect(relay.droppedFrames == [0, 0, 0])

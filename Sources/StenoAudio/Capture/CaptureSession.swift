@@ -80,6 +80,9 @@ public actor CaptureSession {
     /// listeners are live before the gap is written); `resume` starts the
     /// next rebuild from it instead of losing it.
     var pendingChange: DeviceChangeReason?
+    /// The rate of a restarted stream no `resume` has taken yet, which the
+    /// rings then carry; nil while they carry `stream`'s.
+    var restartedRate: Double?
   }
 
   /// Opens the files for one recording; `RecordingWriter.init` in
@@ -214,8 +217,8 @@ public actor CaptureSession {
     guard configuration.usesEchoCancellation else { return 0 }
     // The latencies are device frames; the canceller runs at 48 kHz.
     return Self.farEndDelayFrames(
-      inputLatencyFrames: stream.resampled(stream.inputLatencyFrames),
-      outputLatencyFrames: stream.resampled(stream.outputLatencyFrames))
+      inputLatencyFrames: stream.atOutputRate(stream.inputLatencyFrames),
+      outputLatencyFrames: stream.atOutputRate(stream.outputLatencyFrames))
   }
 
   /// Whether the relay and the writer carry the raw microphone channel.
@@ -226,10 +229,15 @@ public actor CaptureSession {
   private func makeProcessingThread(
     sink: LaneFrameSink, relay: FrameRelay, stream: CaptureStream, levels: LevelSlot?
   ) -> ProcessingThread {
-    ProcessingThread(
+    // The live backend refuses a rate the converter cannot take; one that
+    // reports such a rate anyway is recorded unconverted rather than
+    // trapping in `RateConverter.init`.
+    let deviceRate =
+      RateConverter.supports(stream.sampleRate) ? stream.sampleRate : StenoAudio.sampleRate
+    return ProcessingThread(
       sink: sink, relay: relay,
       configuration: .init(
-        lanes: configuration.lanes, deviceRate: stream.sampleRate, echoCanceller: echoCanceller,
+        lanes: configuration.lanes, deviceRate: deviceRate, echoCanceller: echoCanceller,
         farEndDelayFrames: farEndDelayFrames(for: stream), keepRawMic: keepRaw),
       levels: levels)
   }
@@ -336,9 +344,13 @@ public actor CaptureSession {
     let files = active.writer.files
     let lanes = configuration.lanes
     var dropped: [AudioLane: Int] = [:]
-    // The rings hold the device's rate; the counts are 48 kHz frames.
+    // The rings hold the device's rate (a restarted stream's when the stop
+    // overtook its `resume`); the counts are 48 kHz frames.
+    let ringRate = active.restartedRate ?? active.stream.sampleRate
     for (lane, samples) in active.sink.droppedSamples {
-      dropped[lane, default: 0] += active.stream.resampled(samples) / StenoAudio.frameSize
+      dropped[lane, default: 0] +=
+        CaptureStream.rescaled(samples, from: ringRate, to: StenoAudio.sampleRate)
+        / StenoAudio.frameSize
     }
     for (index, frames) in active.relay.droppedFrames.enumerated() where index < lanes.count {
       if frames > 0 { dropped[lanes[index], default: 0] += frames }
@@ -410,6 +422,9 @@ public actor CaptureSession {
     echoCanceller?.reset()
     switch await restartBackend(sink: current.sink, generation: generation) {
     case .started(let stream, let attempt):
+      // The rings fill at the restarted rate from here; a stop before
+      // `resume` counts their drops in it.
+      active?.restartedRate = stream.sampleRate
       // The gap grows through every failed attempt and is written once, in
       // full, when a start succeeds.
       let gapFrames = Self.gapFrames(for: min(elapsed(), Self.maximumGap))
@@ -475,6 +490,7 @@ public actor CaptureSession {
     updated.gapSeconds += gapSeconds
     updated.rebuild = nil
     updated.pendingChange = nil
+    updated.restartedRate = nil
     active = updated
     emit(.deviceResumed(attempt: attempt, gapSeconds: gapSeconds))
     if let pending { deviceChanged(pending) }
@@ -489,13 +505,15 @@ public actor CaptureSession {
 
   /// Zeros in every written channel for `frames` relay frames, from the
   /// actor, through the relay the writer thread keeps draining. The rings
-  /// under the sink are not touched: they hold two seconds and nothing
-  /// drains them while the processing thread is stopped, so a longer gap
-  /// would silently shrink into `droppedSamples`. A full relay (a long gap,
-  /// or a writer still behind the old producer) is waited out in 5 ms steps
-  /// on the clock; `hasRoom` is asked first because a refused `beginFrame`
-  /// counts as a dropped frame. Returns false when the rebuild was abandoned
-  /// meanwhile (a stop cancelled the wait or replaced the recording).
+  /// under the sink are not touched: they hold two seconds at 48 kHz (sized
+  /// before the device's rate is known, so less above it: 0.68 s at
+  /// 192 kHz) and nothing drains them while the processing thread is
+  /// stopped, so a longer gap would silently shrink into `droppedSamples`. A
+  /// full relay (a long gap, or a writer still behind the old producer) is
+  /// waited out in 5 ms steps on the clock; `hasRoom` is asked first because
+  /// a refused `beginFrame` counts as a dropped frame. Returns false when the
+  /// rebuild was abandoned meanwhile (a stop cancelled the wait or replaced
+  /// the recording).
   private func writeSilence(frames: Int, into relay: FrameRelay, generation: Int) async -> Bool {
     guard frames > 0 else { return true }
     let zeros = [Float](repeating: 0, count: relay.frameSize)
@@ -531,7 +549,7 @@ public actor CaptureSession {
   ) async -> Bool {
     // The rings hold the restarted device's rate.
     let backlog = {
-      min(stream.resampled(sink.availableToRead) / StenoAudio.frameSize, relay.capacityFrames)
+      min(stream.atOutputRate(sink.availableToRead) / StenoAudio.frameSize, relay.capacityFrames)
     }
     while relay.capacityFrames - relay.availableFrames < backlog() {
       guard stillRebuilding(generation) else { return false }
