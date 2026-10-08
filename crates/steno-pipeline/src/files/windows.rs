@@ -15,10 +15,14 @@
 //! written-through rename leaves in the cache.
 //!
 //! [`flush_directory`] flushes a folder's entries: on NTFS the ones
-//! `create_dir_all_durably` made; the FAT driver does nothing for a folder
-//! other than the drive's root, so there the file's flush is the one that
-//! counts. exFAT's driver is not published, so Settings warns about an
-//! audio folder on a drive that is not NTFS ([`file_system_name`]).
+//! `create_dir_all_durably` made; the FAT driver flushes the drive's root
+//! but treats a flush of any other folder as a no-op, so there the file's
+//! flush is the one that counts. A drive that refuses to flush a folder
+//! (some network shares and virtual drives) is logged and passed over, as
+//! a failed folder sync is on Linux and macOS; the flush of the renamed
+//! file stays an error. exFAT's driver is not published, so Settings warns
+//! about an audio folder on a drive that is neither NTFS nor `ReFS`
+//! ([`file_system_name`]).
 //!
 //! A long path is passed with the `\\?\` prefix, from the length at which
 //! std adds it, so a long audio folder still takes the written-through
@@ -31,7 +35,10 @@ use std::os::windows::fs::OpenOptionsExt as _;
 use std::os::windows::io::AsRawHandle as _;
 use std::path::Path;
 
-use windows_sys::Win32::Foundation::MAX_PATH;
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
+    ERROR_SHARING_VIOLATION, MAX_PATH,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     FILE_APPEND_DATA, FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_DATA, GetVolumeInformationByHandleW,
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -64,7 +71,10 @@ pub(super) fn rename_written_through(from: &Path, to: &Path) -> io::Result<()> {
 /// the folder). The flush needs a handle that may write: a folder's
 /// `FILE_APPEND_DATA` is the right to add a subfolder and its
 /// `FILE_WRITE_DATA` the right to add a file, and a caller that has just
-/// made one of the two in it holds that right, so each is tried.
+/// made one of the two in it holds that right, so each is tried. A folder
+/// that does not open is an error; once it has opened, a drive that
+/// refuses the flush ([`refuses_folder_flush`]) is logged and passed over,
+/// and any other failure of the flush is an error.
 pub(super) fn flush_directory(directory: &Path) -> io::Result<()> {
     let open = |access| {
         OpenOptions::new()
@@ -76,11 +86,52 @@ pub(super) fn flush_directory(directory: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => open(FILE_WRITE_DATA)?,
         opened => opened?,
     };
-    folder.sync_all()
+    match folder.sync_all() {
+        Err(error) if refuses_folder_flush(&error) => {
+            tracing::warn!(
+                folder = %directory.display(),
+                %error,
+                "the drive does not flush folders; the flush of the renamed file makes the write durable"
+            );
+            Ok(())
+        }
+        flushed => flushed,
+    }
 }
 
-/// The name of the file system `path` is on ("NTFS", "FAT32", "exFAT"),
-/// read from the nearest folder of it that exists.
+/// Whether `error`, from the flush of a folder that opened, is the drive
+/// declining the call rather than failing to write: "incorrect function"
+/// and "not supported" from a file system or redirector without a folder
+/// flush, "access denied" and "invalid parameter" from servers that answer
+/// a folder flush that way (older Samba among them).
+fn refuses_folder_flush(error: &io::Error) -> bool {
+    win32_code(error).is_some_and(|code| {
+        matches!(
+            code,
+            ERROR_INVALID_FUNCTION
+                | ERROR_NOT_SUPPORTED
+                | ERROR_ACCESS_DENIED
+                | ERROR_INVALID_PARAMETER
+        )
+    })
+}
+
+/// Whether `error` is a sharing violation: another process (a sync or
+/// antivirus client) holds the file open without sharing the access asked
+/// for, usually for a moment.
+pub(super) fn is_sharing_violation(error: &io::Error) -> bool {
+    win32_code(error) == Some(ERROR_SHARING_VIOLATION)
+}
+
+/// The Win32 error code of `error`, if it came from the OS.
+fn win32_code(error: &io::Error) -> Option<u32> {
+    error
+        .raw_os_error()
+        .and_then(|code| u32::try_from(code).ok())
+}
+
+/// The name of the file system `path` is on (`"NTFS"`, `"ReFS"`,
+/// `"FAT32"`, `"exFAT"`), read from the nearest folder of it that exists.
 pub(super) fn file_system_name(path: &Path) -> io::Result<String> {
     const NAME_UNITS: u32 = MAX_PATH + 1;
     let existing = path
@@ -258,6 +309,32 @@ mod tests {
         flush_directory(&folder).unwrap();
         let error = flush_directory(&directory.path().join("missing")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    /// A drive that declines a folder flush is told apart from one that
+    /// fails to write: only the first is passed over.
+    #[test]
+    fn only_a_refused_folder_flush_is_passed_over() {
+        let error = |code: u32| io::Error::from_raw_os_error(i32::try_from(code).unwrap());
+        for refused in [
+            ERROR_INVALID_FUNCTION,
+            ERROR_NOT_SUPPORTED,
+            ERROR_ACCESS_DENIED,
+            ERROR_INVALID_PARAMETER,
+        ] {
+            assert!(refuses_folder_flush(&error(refused)), "{refused}");
+        }
+        for failed in [
+            windows_sys::Win32::Foundation::ERROR_CRC,
+            windows_sys::Win32::Foundation::ERROR_DISK_FULL,
+            windows_sys::Win32::Foundation::ERROR_WRITE_FAULT,
+            ERROR_SHARING_VIOLATION,
+        ] {
+            assert!(!refuses_folder_flush(&error(failed)), "{failed}");
+        }
+        assert!(!refuses_folder_flush(&io::Error::other("not from the OS")));
+        assert!(is_sharing_violation(&error(ERROR_SHARING_VIOLATION)));
+        assert!(!is_sharing_violation(&error(ERROR_ACCESS_DENIED)));
     }
 
     /// The runner's temporary folder is on NTFS, and a folder that does not

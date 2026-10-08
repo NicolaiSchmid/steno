@@ -5,10 +5,11 @@
 //! one, and reading and writing a JSON file this process owns, set aside
 //! when it does not parse (`preferences.json`, `export-retries.json`).
 //! The services and the CLI use these too, so there is one implementation.
-//! On Windows, which cannot sync a folder the way the other platforms do,
-//! the renames are written through and the renamed file and the folders
-//! flushed instead (`windows`); [`may_lose_recent_writes`] tells Settings
-//! about a drive where that may not be enough.
+//! On Windows a folder flush alone does not make a rename durable (the FAT
+//! driver treats one as a no-op), so the renames are written through and
+//! the renamed file is flushed as well as the folders (`windows`);
+//! [`may_lose_recent_writes`] tells Settings about a drive where that may
+//! not be enough.
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
@@ -28,9 +29,11 @@ trait Syncs {
     /// Flushes `file`, written at `path`, to the disk.
     fn file(&self, file: &File, path: &Path) -> std::io::Result<()>;
     /// Makes the entries of `directory` (a rename, a new folder) durable.
-    /// Best effort on Linux and macOS, which ignore a failed sync; on
-    /// Windows a failed flush is an error, so the phone intake answers 500
-    /// and the phone keeps its copy.
+    /// Best effort on Linux and macOS (a failed sync is ignored). On
+    /// Windows a folder that does not open, or a flush that fails to write,
+    /// is an error, so the phone intake answers 500 and the phone keeps its
+    /// copy; a drive that refuses to flush a folder is logged and passed
+    /// over, since the flush of the renamed file carries the entries there.
     fn directory(&self, directory: &Path) -> std::io::Result<()>;
 }
 
@@ -59,13 +62,14 @@ impl Syncs for Disk {
 
 /// Whether a power cut may lose a recording just written into `folder`, for
 /// the warning in Settings: true on Windows for a folder on a drive that is
-/// not NTFS (FAT32, exFAT), whose folder entries the durable writes cannot
-/// be sure to flush (`windows`); false elsewhere, and where the drive
-/// cannot be read.
+/// neither NTFS nor `ReFS` (FAT32, exFAT), whose folder entries the durable
+/// writes cannot be sure to flush (`windows`); false elsewhere, and where
+/// the drive cannot be read.
 pub fn may_lose_recent_writes(folder: &Path) -> bool {
     #[cfg(windows)]
     {
-        windows::file_system_name(folder).is_ok_and(|name| name != "NTFS")
+        windows::file_system_name(folder)
+            .is_ok_and(|name| !matches!(name.as_str(), "NTFS" | "ReFS"))
     }
     #[cfg(not(windows))]
     {
@@ -202,10 +206,13 @@ enum Renamed {
 }
 
 /// Renames `from` onto `to`. Elsewhere the caller's folder sync makes the
-/// rename durable; on Windows, which cannot sync a folder, the rename is
-/// written through and the renamed file then flushed through `syncs`, with
-/// std's rename before the same flush where the written-through one fails
-/// ([`windows`]). A flush that fails after the rename is an error with the
+/// rename durable; on Windows, where a folder flush does not cover a
+/// rename on every drive, the rename is written through and the renamed
+/// file then flushed through `syncs`, with std's rename before the same
+/// flush where the written-through one fails ([`windows`]). The renamed
+/// file is reopened for the flush, and a sharing violation (a sync or
+/// antivirus client that opened the new file) is retried as
+/// [`rename_with_std`] retries. A flush that fails after the rename is an error with the
 /// new file already in place: the phone intake answers 500 and copies the
 /// phone's retry into a new folder, leaving this copy an orphan, and
 /// [`replace_file`] reports a write that happened.
@@ -218,7 +225,10 @@ fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Ren
             rename_with_std(from, to)?;
             Renamed::WithStd
         };
-        syncs.file(&OpenOptions::new().write(true).open(to)?, to)?;
+        let renamed_file = retried(windows::is_sharing_violation, || {
+            OpenOptions::new().write(true).open(to)
+        })?;
+        syncs.file(&renamed_file, to)?;
         Ok(renamed)
     }
     #[cfg(not(windows))]
@@ -231,19 +241,29 @@ fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Ren
 
 /// `std::fs::rename`. Windows refuses to replace a file another writer is
 /// replacing at the same instant ("access denied"), so there a refusal is
-/// retried every 10 ms, 49 times at most (about half a second); elsewhere
-/// the rename is tried once.
+/// retried ([`retried`]); elsewhere the rename is tried once.
 fn rename_with_std(from: &Path, to: &Path) -> std::io::Result<()> {
+    retried(
+        |error| error.kind() == std::io::ErrorKind::PermissionDenied,
+        || std::fs::rename(from, to),
+    )
+}
+
+/// Runs `attempt`. On Windows, where another process may hold a file for a
+/// moment, an error `busy` accepts is retried every 10 ms, 49 times at most
+/// (about half a second); elsewhere `attempt` runs once.
+fn retried<T>(
+    busy: impl Fn(&std::io::Error) -> bool,
+    mut attempt: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
     let retries = if cfg!(windows) { 49 } else { 0 };
     for _ in 0..retries {
-        match std::fs::rename(from, to) {
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+        match attempt() {
+            Err(error) if busy(&error) => std::thread::sleep(Duration::from_millis(10)),
             outcome => return outcome,
         }
     }
-    std::fs::rename(from, to)
+    attempt()
 }
 
 /// Removes this file's temporaries in `directory` that are older than
@@ -705,8 +725,8 @@ mod tests {
         assert_eq!(temporaries(&meeting), Vec::<String>::new());
     }
 
-    /// Only a Windows drive that is not NTFS warns; the test folders of
-    /// every CI runner are on one that may not lose a recording.
+    /// Only a Windows drive that is neither NTFS nor `ReFS` warns; the test
+    /// folders of every CI runner are on a drive that does not warn.
     #[test]
     fn a_test_folder_is_not_on_a_drive_that_may_lose_recent_writes() {
         let dir = tempfile::tempdir().unwrap();
@@ -752,21 +772,25 @@ mod tests {
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
     }
 
-    /// The product's folder creation and copy on a FAT32 drive: both
-    /// succeed (the FAT driver flushes a folder below the root as a no-op,
-    /// and the renamed file with its folders), so the intake does not
-    /// answer 500 there, and Settings warns. CI's Windows job mounts a
-    /// FAT32 image and names it in `STENO_FAT32_VOLUME`; without it the
-    /// test skips.
+    /// The product's folder creation and copy on a FAT32 or an exFAT
+    /// drive: both succeed (the FAT driver treats a flush of a folder other
+    /// than the drive's root as a no-op, and flushes the renamed file with
+    /// its folders), a folder made at the drive's root flushes the root,
+    /// and Settings warns. So the intake does not answer 500 there. CI's
+    /// Windows job mounts both drives and names them in
+    /// `STENO_FAT32_VOLUME` and `STENO_EXFAT_VOLUME`; without one the test
+    /// for it skips.
     #[cfg(windows)]
-    #[test]
-    fn on_a_fat32_drive_the_intake_writes_succeed_and_settings_warn() {
-        let Some(volume) = std::env::var_os("STENO_FAT32_VOLUME") else {
-            eprintln!("SKIPPED: STENO_FAT32_VOLUME names no FAT32 drive");
+    fn the_intake_writes_succeed_and_settings_warn(variable: &str, file_system: &str) {
+        let Some(volume) = std::env::var_os(variable) else {
+            eprintln!("SKIPPED: {variable} names no {file_system} drive");
             return;
         };
-        let root = tempfile::tempdir_in(volume).unwrap();
-        assert_eq!(windows::file_system_name(root.path()).unwrap(), "FAT32");
+        let at_root = Path::new(&volume).join(format!("steno-{}", uuid::Uuid::new_v4()));
+        create_dir_all_durably(&at_root).unwrap();
+        std::fs::remove_dir(&at_root).unwrap();
+        let root = tempfile::tempdir_in(&volume).unwrap();
+        assert_eq!(windows::file_system_name(root.path()).unwrap(), file_system);
         assert!(may_lose_recent_writes(root.path()));
         let meeting = root.path().join("audio").join("0B6F4B1E");
         create_dir_all_durably(&meeting).unwrap();
@@ -776,6 +800,18 @@ mod tests {
         copy_durably(&source, &destination).unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), vec![7u8; 100_000]);
         assert_eq!(temporaries(&meeting), Vec::<String>::new());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_a_fat32_drive_the_intake_writes_succeed_and_settings_warn() {
+        the_intake_writes_succeed_and_settings_warn("STENO_FAT32_VOLUME", "FAT32");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_an_exfat_drive_the_intake_writes_succeed_and_settings_warn() {
+        the_intake_writes_succeed_and_settings_warn("STENO_EXFAT_VOLUME", "exFAT");
     }
 
     #[test]
