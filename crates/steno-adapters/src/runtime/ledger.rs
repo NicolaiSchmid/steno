@@ -163,6 +163,7 @@ impl DeliveryLedger {
             folder: folder.to_owned(),
             files: self.files.values().cloned().collect(),
             renderer_version,
+            warnings: Vec::new(),
         }
     }
 

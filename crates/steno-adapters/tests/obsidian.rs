@@ -773,6 +773,7 @@ fn a_pinned_folder_with_a_trailing_slash_still_names_the_notes_after_it() {
         folder: format!("{FOLDER}/"),
         files: vec![],
         renderer_version: ArtifactRenderer::VERSION,
+        warnings: Vec::new(),
     };
 
     let receipt = deliver(&vault.destination(), &export, Some(&pinned));

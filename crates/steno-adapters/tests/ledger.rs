@@ -32,6 +32,7 @@ fn receipt(root: &str, files: &[(&str, FileOwnership)]) -> DeliveryReceipt {
             })
             .collect(),
         renderer_version: 1,
+        warnings: Vec::new(),
     }
 }
 

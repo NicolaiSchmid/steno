@@ -65,6 +65,7 @@ impl Destination for RecordingDestination {
                 sha256: vec![if previous.is_none() { 1 } else { 2 }; 32],
             }],
             renderer_version: 7,
+            warnings: Vec::new(),
         })
     }
 }

@@ -97,6 +97,7 @@ impl Destination for FakeDestination {
                 sha256: crate::content_hash::sha256(data.as_bytes()),
             }],
             renderer_version: Self::RENDERER_VERSION,
+            warnings: Vec::new(),
         })
     }
 }

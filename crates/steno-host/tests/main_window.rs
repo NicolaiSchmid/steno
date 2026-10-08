@@ -658,6 +658,7 @@ fn reveal_layout_and_the_recorder_messages_reach_their_services() {
                 folder: "Meetings/2026-09-29 Produktstrategie".to_owned(),
                 files: Vec::new(),
                 renderer_version: 1,
+                warnings: Vec::new(),
             }),
         })
         .unwrap();
