@@ -16,7 +16,7 @@
 //! an hour is left and, on Linux and Windows, does not start without room
 //! and stops and is saved before the disk fills. On the Mac a low reading
 //! only warns, since `statvfs` leaves out the space APFS would purge for
-//! the user. A volume that reports no size, or more space free than it
+//! the user, and a disk that is truly full can fail the save. A volume that reports no size, or more space free than it
 //! holds (some network and FUSE file systems), counts as unreadable and
 //! never warns, stops or refuses a recording. Rust only: Swift had no disk
 //! check.
@@ -73,8 +73,10 @@ pub(crate) struct DiskWatch {
     pub(crate) database_folder: Option<PathBuf>,
     /// Whether a reading below [`Self::STOP_BELOW_BYTES`] refuses a start
     /// and stops a recording; when not, it only warns, and the minutes
-    /// left count to a full disk, where a failed write ends the recording
-    /// saved. Off on the Mac only ([`Self::system`]).
+    /// left count to a full disk. There a failed write ends the recording
+    /// and Steno tries to save it, but a disk that is truly full can fail
+    /// the save too; the files stay for the recovery at the next launch.
+    /// Off on the Mac only ([`Self::system`]).
     pub(crate) stops: bool,
 }
 
@@ -85,8 +87,9 @@ impl DiskWatch {
     /// on the Mac `statvfs` leaves out the space APFS would purge for the
     /// user (tens of GB with local Time Machine snapshots), so a reading
     /// below it there only warns ([`Self::stops`]); a recording refused or
-    /// cut on a disk that had room would lose the meeting. The Mac gets the
-    /// floor once the `steno-macos` crate reads
+    /// cut on a disk that had room would lose the meeting. Nothing keeps
+    /// the save its room there yet, so a disk that is truly full can fail
+    /// it. The Mac gets the floor once the `steno-macos` crate reads
     /// `NSURLVolumeAvailableCapacityForImportantUsageKey`, which counts that
     /// space (reading it takes `unsafe`, which belongs there).
     pub(crate) const STOP_BELOW_BYTES: u64 = 512 * 1024 * 1024;

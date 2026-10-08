@@ -16,7 +16,9 @@
 //! would report again and loop. `restarts_that_fail` makes that many
 //! `start` calls after the first fail with `InputDeviceUnavailable`, the
 //! device still absent; `restart_panics` makes the first restart panic,
-//! for the session's guard around its rebuild; `stream` is what the first
+//! for the session's guard around its rebuild, and
+//! `start_panics_once_running` the first start once its producer runs,
+//! for the guard around the session's start; `stream` is what the first
 //! start reports and `stream_after_restart` what every restart reports
 //! (new latencies, the fallback microphone), `SYNTHETIC` when `None`.
 //! `seconds` counts per `start`, so a restarted backend delivers again,
@@ -115,6 +117,8 @@ pub struct SyntheticOptions {
     pub stream: Option<CaptureStream>,
     /// The first restart after a change panics.
     pub restart_panics: bool,
+    /// The first start panics once its producer thread runs.
+    pub start_panics_once_running: bool,
     /// The stream the restarted backend reports, when it should differ.
     pub stream_after_restart: Option<CaptureStream>,
 }
@@ -151,6 +155,7 @@ impl SyntheticOptions {
             restarts_that_fail: 0,
             stream: None,
             restart_panics: false,
+            start_panics_once_running: false,
             stream_after_restart: None,
         }
     }
@@ -194,6 +199,13 @@ impl SyntheticOptions {
     #[must_use]
     pub fn restart_panics(mut self) -> Self {
         self.restart_panics = true;
+        self
+    }
+
+    /// Panic in the first start, once the producer runs.
+    #[must_use]
+    pub fn start_panics_once_running(mut self) -> Self {
+        self.start_panics_once_running = true;
         self
     }
 
@@ -392,6 +404,10 @@ impl CaptureBackend for SyntheticCaptureBackend {
             })
             .expect("spawn synthetic producer");
         state.thread = Some(thread);
+        if self.options.start_panics_once_running && state.start_count == 1 {
+            drop(state);
+            panic!("the synthetic backend's start panics once it runs");
+        }
         let stream = if is_restart {
             &self.options.stream_after_restart
         } else {

@@ -1007,18 +1007,10 @@ impl Core {
         // handed over. `finish()` copes with each, as it does when a stop
         // cuts a rebuild short: it stops the backend again, stops a
         // processing thread only when there is one, and drains the rings.
-        let steps = AssertUnwindSafe(|| self.rebuild_steps(generation, cancel));
+        let steps = AssertUnwindSafe(|| self.rebuild_steps(generation, recording, cancel));
         std::panic::catch_unwind(steps).unwrap_or_else(|_| {
             tracing::error!("following a device change panicked; the recording ends");
-            // Only the newest rebuild of this recording's: an older one's
-            // recording, or its place, belongs to another thread now.
-            let current = {
-                let inner = self.lock();
-                inner.rebuild_generation == generation && inner.recordings_started == recording
-            };
-            if current {
-                self.device_lost();
-            }
+            self.device_lost(recording, generation);
             (0, 0.0)
         })
     }
@@ -1031,7 +1023,12 @@ impl Core {
     /// `resume` did not account because a stop came first, and the old
     /// processing thread's system-lane peak for a `finish()` that took the
     /// recording before this thread could fold it in.
-    fn rebuild_steps(self: &Arc<Self>, generation: usize, cancel: &Cancel) -> (usize, f32) {
+    fn rebuild_steps(
+        self: &Arc<Self>,
+        generation: usize,
+        recording: usize,
+        cancel: &Cancel,
+    ) -> (usize, f32) {
         // The stopwatch runs from before the teardown: the HAL calls in
         // `stop()` take tens to hundreds of milliseconds during a device
         // transition, and that is dead time in the master too.
@@ -1104,7 +1101,7 @@ impl Core {
             }
             Restart::Abandoned => 0,
             Restart::Exhausted => {
-                self.device_lost();
+                self.device_lost(recording, generation);
                 0
             }
         };
@@ -1321,12 +1318,18 @@ impl Core {
         true
     }
 
-    /// Every restart failed: the recording ends, finalised and carried in
-    /// `Failed(DeviceLost)`.
-    fn device_lost(&self) {
+    /// Every restart failed, or the rebuild panicked: the recording ends,
+    /// finalised and carried in `Failed(DeviceLost)`. Only when the
+    /// rebuild numbered `generation` of the start numbered `recording` is
+    /// still the newest, checked under the same lock as the change: an
+    /// older one's recording, or its place, belongs to another thread now.
+    fn device_lost(&self, recording: usize, generation: usize) {
         {
             let mut inner = self.lock();
-            if !matches!(inner.state, CaptureState::Recording { .. }) {
+            if !matches!(inner.state, CaptureState::Recording { .. })
+                || inner.recordings_started != recording
+                || inner.rebuild_generation != generation
+            {
                 return;
             }
             let Some(active) = inner.active.as_mut() else {
