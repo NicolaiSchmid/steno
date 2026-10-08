@@ -1,9 +1,15 @@
-//! How many launch re-exports of a meeting failed in a row, kept in
-//! `export-retries.json` in the support directory (meeting id to count),
-//! so the launch stops retrying an export that keeps failing and the
-//! meeting's detail says so. The database has no column for it, and the
-//! Swift app never reads the file, so a rollback ignores it. Rust only:
-//! Swift retried a failed export only when asked.
+//! How many launch re-exports in a row of a meeting did not deliver every
+//! row, kept in `export-retries.json` in the support directory (meeting id
+//! to count), so the launch stops retrying an export that keeps failing
+//! and the meeting's detail says so. The database has no column for it,
+//! and the Swift app never reads the file, so a rollback ignores it. Rust
+//! only: Swift retried a failed export only when asked.
+//!
+//! The processing's launch recovery keeps a count of its own, of the
+//! processing runs that ended with the app. The two stay apart: an export
+//! also fails without taking the app down, a ready meeting's note is
+//! retried rather than its processing failed, and only the user's export
+//! starts this count again.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -14,9 +20,11 @@ use uuid::Uuid;
 
 use crate::files::{read_json, write_json};
 
-/// The failed launch re-exports in a row of each meeting
+/// The launch re-exports in a row of each meeting that did not deliver
+/// every row
 /// ([`ProcessingPipeline::redeliver_unfinished`](crate::ProcessingPipeline::redeliver_unfinished)
-/// counts them; the user's Export again [resets](Self::reset) the count).
+/// counts each before it runs; any re-export the user causes
+/// [resets](Self::reset) the count).
 /// Read with [`read_json`], so a missing or corrupt file counts 0 for every
 /// meeting, and replaced with [`write_json`] on every change; a file that
 /// may not be written leaves the counts of this run in memory only, as
@@ -46,8 +54,8 @@ impl ExportRetries {
     /// The file's name in the support directory.
     pub const FILE_NAME: &'static str = "export-retries.json";
 
-    /// The failed launch re-exports in a row after which the launch stops
-    /// retrying a meeting's failed export.
+    /// The launch re-exports in a row that did not deliver every row after
+    /// which the launch stops retrying a meeting's failed export.
     pub const LIMIT: u32 = 3;
 
     /// How long after its last attempt a failed export is retried at
@@ -84,21 +92,22 @@ impl ExportRetries {
         }
     }
 
-    /// The failed launch re-exports in a row of `meeting_id`.
+    /// The launch re-exports in a row of `meeting_id` that did not deliver
+    /// every row.
     #[must_use]
     pub fn count(&self, meeting_id: Uuid) -> u32 {
         self.lock().get(&meeting_id).copied().unwrap_or(0)
     }
 
     /// Whether the launch stopped retrying `meeting_id`'s failed export:
-    /// it failed [`LIMIT`](Self::LIMIT) launches in a row.
+    /// [`LIMIT`](Self::LIMIT) launches in a row did not deliver every row.
     #[must_use]
     pub fn stopped(&self, meeting_id: Uuid) -> bool {
         self.count(meeting_id) >= Self::LIMIT
     }
 
-    /// Starts `meeting_id`'s count again from 0: the user exported it
-    /// again, or a launch re-export left no delivery failed.
+    /// Starts `meeting_id`'s count again from 0: the user caused a
+    /// re-export, or a launch re-export delivered every row.
     pub fn reset(&self, meeting_id: Uuid) {
         let mut counts = self.lock();
         if counts.remove(&meeting_id).is_some() {
@@ -106,16 +115,17 @@ impl ExportRetries {
         }
     }
 
-    /// One more failed launch re-export of `meeting_id`.
-    pub(crate) fn failed(&self, meeting_id: Uuid) {
+    /// One more launch re-export of `meeting_id`, counted before it runs so
+    /// an exit mid-export counts too.
+    pub(crate) fn attempted(&self, meeting_id: Uuid) {
         let mut counts = self.lock();
         let count = counts.entry(meeting_id).or_insert(0);
         *count = count.saturating_add(1);
         self.write(&counts);
     }
 
-    /// Keeps the counts of the meetings `keep` names, so a meeting deleted
-    /// or exported since its last failure starts again from 0.
+    /// Keeps the counts of the meetings `keep` names, so a meeting that
+    /// delivered every row since (or that was deleted) starts again from 0.
     pub(crate) fn retain(&self, mut keep: impl FnMut(Uuid) -> bool) {
         let mut counts = self.lock();
         let before = counts.len();
@@ -147,6 +157,14 @@ impl ExportRetries {
 mod tests {
     use super::*;
 
+    /// The limits P28 of `.plans/2026-10-07-stable-promotion.md` names:
+    /// three launches, once a day.
+    #[test]
+    fn the_limits_are_three_launches_once_a_day() {
+        assert_eq!(ExportRetries::LIMIT, 3);
+        assert_eq!(ExportRetries::INTERVAL, TimeDelta::hours(24));
+    }
+
     /// The counts survive a restart, a reset removes the meeting from the
     /// file, and a meeting stops at the limit.
     #[test]
@@ -156,9 +174,9 @@ mod tests {
         let retries = ExportRetries::in_directory(dir.path());
         for _ in 0..ExportRetries::LIMIT {
             assert!(!retries.stopped(meeting));
-            retries.failed(meeting);
+            retries.attempted(meeting);
         }
-        retries.failed(other);
+        retries.attempted(other);
         let relaunched = ExportRetries::in_directory(dir.path());
         assert_eq!(relaunched.count(meeting), ExportRetries::LIMIT);
         assert!(relaunched.stopped(meeting));
@@ -185,7 +203,7 @@ mod tests {
         let meeting = Uuid::new_v4();
         let retries = ExportRetries::in_directory(dir.path());
         assert_eq!(retries.count(meeting), 0);
-        retries.failed(meeting);
+        retries.attempted(meeting);
         assert_eq!(ExportRetries::in_directory(dir.path()).count(meeting), 1);
         let aside: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -194,5 +212,30 @@ mod tests {
             .collect();
         assert_eq!(aside.len(), 1);
         assert_eq!(std::fs::read(aside[0].path()).unwrap(), b"{not json");
+    }
+
+    /// A file that cannot be read for another reason than its absence is
+    /// left as it is and never written: the counts of this run live in
+    /// memory only.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_never_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(ExportRetries::FILE_NAME);
+        let (meeting, other) = (Uuid::new_v4(), Uuid::new_v4());
+        let stored = format!("{{\"{other}\": 2}}");
+        std::fs::write(&path, &stored).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Root reads past the mode; nothing to test.
+            return;
+        }
+        let retries = ExportRetries::new(&path);
+        retries.attempted(meeting);
+        assert_eq!(retries.count(meeting), 1, "the run still has its count");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), stored);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

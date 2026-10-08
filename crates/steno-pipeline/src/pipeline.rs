@@ -33,12 +33,11 @@ use std::time::Instant;
 use chrono::{DateTime, Utc};
 use steno_core::{
     AudioAsset, AudioBuffer16k, AudioDecoder, AudioLane, AudioRetention, CleanupInput, Delivery,
-    DeliveryDispatcher, DeliveryStatus, DeliveryStatusKind, Diarizer, LanguageTag, LlmUsage,
-    Meeting, MeetingEvent, MeetingOperation, MeetingSource, MeetingState, MeetingStateKind,
-    MeetingSummarizer, Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout,
-    Settings, Speaker, SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError,
-    SummaryInput, SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment,
-    derived_uuid,
+    DeliveryDispatcher, DeliveryStatus, Diarizer, LanguageTag, LlmUsage, Meeting, MeetingEvent,
+    MeetingOperation, MeetingSource, MeetingState, MeetingStateKind, MeetingSummarizer,
+    Participant, ParticipantRole, PipelineStage, RawSegment, RecordingLayout, Settings, Speaker,
+    SpeakerAssignment, SpeakerMemory, SpeechEngine, Store, StoreError, SummaryInput,
+    SummaryTemplate, TimeRange, TitleOrigin, TranscriptCleaner, TranscriptSegment, derived_uuid,
     paths::{file_url, file_url_path},
     protocols::{BoxError, DEFAULT_MATCH_MARGIN},
 };
@@ -242,8 +241,8 @@ impl QuitLatch {
 /// The meetings with an operation in progress and the recordings being
 /// processed, shared by every pipeline whose dependencies carry it, so a
 /// reload's new pipeline refuses a meeting the retired one still holds.
-/// Clones share one set. Lock order: a pipeline's own state lock is taken
-/// before this set's, never while this set's is held.
+/// Clones share one set. Its lock is never held together with a
+/// pipeline's own state lock.
 /// Swift: `inFlight`, `admissions` and `running` of `ProcessingPipeline`
 /// in `Sources/StenoCore/Pipeline/ProcessingPipeline.swift`, which each
 /// pipeline kept for itself, so after `reloadPipeline()` the new one could
@@ -758,10 +757,18 @@ async fn unless_it_panics<T>(
         .unwrap_or_else(|_| Err(PipelineFailure::new(stage(), OPERATION_PANICKED)))
 }
 
-/// Whether `delivery` failed.
-fn failed(delivery: &Delivery) -> bool {
-    delivery.status.kind() == DeliveryStatusKind::Failed
+/// Whether every row of `deliveries` went through (none for a deleted
+/// meeting).
+fn all_delivered(deliveries: &[Delivery]) -> bool {
+    deliveries
+        .iter()
+        .all(|delivery| delivery.status == DeliveryStatus::Delivered)
 }
+
+/// The reason a delivery an export left `pending` is saved failed with,
+/// when no failure names one: the process ended mid-export, or the
+/// dispatcher returned without finishing the row.
+const EXPORT_INTERRUPTED: &str = "the export stopped before it finished";
 
 /// The row an operation needs, or a failure for `stage` that says what
 /// is `missing`.
@@ -1051,47 +1058,52 @@ impl ProcessingPipeline {
     }
 
     /// Launch recovery for the exports (P28 of
-    /// `.plans/2026-10-07-stable-promotion.md`): re-exports, one meeting at
-    /// a time in one background task, every ready meeting with a delivery a
-    /// previous process left `pending`, or one that `failed` at least a day
-    /// ([`ExportRetries::INTERVAL`]) before the pipeline's clock or was
-    /// never attempted, so a launch retries a failed export once and at
-    /// most once a day. After [`ExportRetries::LIMIT`] failed launch
-    /// re-exports in a row the meeting's failed export is left for the
-    /// user's Export again, which resets the count; a `pending` delivery
-    /// is re-exported still. Each meeting is claimed when its turn comes,
-    /// so the others stay free for the user meanwhile; one another
-    /// operation holds is skipped, since its own run delivers it. A
-    /// failure is logged, not posted as `OperationFailed`: the user did
-    /// not ask for this export, so the detail must not say "Export again
-    /// failed". Returns the meetings to re-export, none once the pipeline
-    /// [quits](Self::quit). Needs a `tokio` runtime. Rust only.
+    /// `.plans/2026-10-07-stable-promotion.md`): re-exports every ready
+    /// meeting with a delivery a previous process left `pending`, or one
+    /// that `failed` more than a day ([`ExportRetries::INTERVAL`]) before
+    /// the pipeline's clock, after it, or was never attempted.
+    ///
+    /// So a launch retries a failed export once, and at most once a day.
+    /// Each launch re-export is counted in `retries` before it runs, so an
+    /// exit mid-export counts too, and the count is reset once every row is
+    /// delivered. After [`ExportRetries::LIMIT`] launch re-exports in a row
+    /// that did not deliver every row, the meeting is left for the user,
+    /// whose re-export resets the count. A failed launch re-export marks
+    /// its rows still `pending` as failed, and so does the launch for a
+    /// meeting it stopped retrying, so the detail says the export keeps
+    /// failing.
+    ///
+    /// The meetings run one at a time in one background task, each claimed
+    /// when its turn comes, so the others stay free for the user meanwhile;
+    /// one another operation holds is skipped, since its own run exports
+    /// it. A failure is logged, not posted as `OperationFailed`: the user
+    /// did not ask for this export, so the detail must not say "Export
+    /// again failed". Returns the meetings to re-export, none once the
+    /// pipeline [quits](Self::quit). Needs a `tokio` runtime. Rust only.
     pub fn redeliver_unfinished(&self, retries: &Arc<ExportRetries>) -> Result<Vec<Uuid>> {
         if self.quitting() {
             return Ok(Vec::new());
         }
         let store = self.store();
-        // A meeting with no failed delivery left (exported since, or
-        // deleted) ends its run of failures.
+        // A meeting whose deliveries all went through since (or that was
+        // deleted) starts again from 0.
         retries.retain(|meeting_id| {
             store
                 .deliveries(meeting_id)
-                .map_or(true, |rows| rows.iter().any(failed))
+                .map_or(true, |rows| !all_delivered(&rows))
         });
         let found = attributing(
             PipelineStage::Deliver,
-            store.meetings_with_unfinished_deliveries(self.now() - ExportRetries::INTERVAL),
+            store.meetings_with_unfinished_deliveries(self.now(), ExportRetries::INTERVAL),
         )?;
-        let mut owed = Vec::new();
-        for meeting_id in found {
-            if retries.stopped(meeting_id)
-                && !attributing(PipelineStage::Deliver, store.deliveries(meeting_id))?
-                    .iter()
-                    .any(|delivery| delivery.status == DeliveryStatus::Pending)
-            {
-                continue;
+        let (stopped, owed): (Vec<Uuid>, Vec<Uuid>) = found
+            .into_iter()
+            .partition(|meeting_id| retries.stopped(*meeting_id));
+        for meeting_id in stopped {
+            // Refused: the operation holding it saves its own rows.
+            if let Ok(_admitted) = self.admit(meeting_id, PipelineStage::Deliver) {
+                self.fail_pending_deliveries(meeting_id, EXPORT_INTERRUPTED);
             }
-            owed.push(meeting_id);
         }
         if !owed.is_empty() {
             let pipeline = self.clone();
@@ -1101,7 +1113,7 @@ impl ProcessingPipeline {
                     if pipeline.quitting() {
                         return;
                     }
-                    pipeline.re_export_at_launch(meeting_id, &retries).await;
+                    pipeline.redeliver_at_launch(meeting_id, &retries).await;
                 }
             });
         }
@@ -1109,14 +1121,19 @@ impl ProcessingPipeline {
     }
 
     /// One meeting of [`redeliver_unfinished`](Self::redeliver_unfinished):
-    /// claimed now, re-exported, and counted in `retries` as failed while a
-    /// delivery is still failed, else reset. The file is written on a
-    /// blocking thread.
-    async fn re_export_at_launch(&self, meeting_id: Uuid, retries: &Arc<ExportRetries>) {
-        // Refused: a meeting in flight delivers at the end of its run.
+    /// claimed now, then counted in `retries` before the re-export runs
+    /// and reset once every row is delivered. A refused claim is not
+    /// counted. The file is written on a blocking thread.
+    async fn redeliver_at_launch(&self, meeting_id: Uuid, retries: &Arc<ExportRetries>) {
+        // Refused: a meeting in flight exports at the end of its run.
         let Ok(operation) = self.claim_deliver_again(meeting_id) else {
             return;
         };
+        // Counted before the export writes its rows, so the detail those
+        // writes reload already reads the count: the last failure before
+        // the stop shows "keeps failing" at once.
+        let counted = retries.clone();
+        let _ = tokio::task::spawn_blocking(move || counted.attempted(meeting_id)).await;
         if let Err(failure) = operation.await {
             tracing::warn!(
                 target: BACKGROUND_RUN_LOG,
@@ -1126,19 +1143,40 @@ impl ProcessingPipeline {
             );
             tracing::debug!(target: BACKGROUND_RUN_LOG, %meeting_id, %failure, "launch re-export failure");
         }
-        let Ok(rows) = self.store().deliveries(meeting_id) else {
-            return;
-        };
-        let still_failed = rows.iter().any(failed);
-        let retries = retries.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if still_failed {
-                retries.failed(meeting_id);
-            } else {
-                retries.reset(meeting_id);
+        // Read once the claim is released. A re-export the user causes
+        // meanwhile resets the count as well, so whichever reset comes
+        // first, the count ends at 0; a refused one leaves it alone.
+        if self
+            .store()
+            .deliveries(meeting_id)
+            .is_ok_and(|rows| all_delivered(&rows))
+        {
+            let retries = retries.clone();
+            let _ = tokio::task::spawn_blocking(move || retries.reset(meeting_id)).await;
+        }
+    }
+
+    /// Saves the meeting's deliveries still `pending` as failed with
+    /// `reason`, keeping their last attempt and receipt. The caller holds
+    /// the meeting's claim. A store error is logged and leaves the rows.
+    fn fail_pending_deliveries(&self, meeting_id: Uuid, reason: &str) {
+        let store = self.store();
+        let rows = match store.deliveries(meeting_id) {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "deliveries could not be read");
+                return;
             }
-        })
-        .await;
+        };
+        for mut row in rows {
+            if row.status != DeliveryStatus::Pending {
+                continue;
+            }
+            row.status = DeliveryStatus::Failed(reason.to_owned());
+            if let Err(error) = store.save_delivery(&row) {
+                tracing::warn!(target: BACKGROUND_RUN_LOG, %meeting_id, %error, "a delivery could not be saved failed");
+            }
+        }
     }
 
     /// Spawns `work` among the background runs
@@ -1643,7 +1681,9 @@ impl ProcessingPipeline {
     }
 
     /// [`claim_redeliver`](Self::claim_redeliver) without the
-    /// `OperationFailed` event, for the launch's re-exports.
+    /// `OperationFailed` event, for the launch's re-exports. A row the
+    /// re-export leaves `pending` is saved failed before the claim is
+    /// released.
     fn claim_deliver_again(&self, meeting_id: Uuid) -> Result<Operation> {
         let meeting = required(
             PipelineStage::Deliver,
@@ -1655,6 +1695,14 @@ impl ProcessingPipeline {
         Ok(Box::pin(async move {
             let result =
                 unless_it_panics(|| PipelineStage::Deliver, pipeline.deliver_again(&meeting)).await;
+            // A row still `pending` here was left by a panic or a
+            // dispatcher that stopped mid-export: saved failed while the
+            // claim is held, so the count and the detail see a failure.
+            let reason = result
+                .as_ref()
+                .err()
+                .map_or(EXPORT_INTERRUPTED, |failure| failure.reason.as_str());
+            pipeline.fail_pending_deliveries(meeting_id, reason);
             drop(admitted);
             result
         }))

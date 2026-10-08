@@ -8,7 +8,7 @@
 //! | Module | What it holds |
 //! |--------|---------------|
 //! | [`pipeline`] | [`ProcessingPipeline`]: `enqueue` and `enqueue_saved`, `reprocess` (refused with a [`ReprocessError`]), `process`, `rerun_summary` and `redeliver` (with their `claim_` halves), `resume_unfinished` and `redeliver_unfinished` for the launch, the in-flight set ([`InFlight`]) a reload shares, `warm_up` and `warm_up_diarizer`, the speech engine's release after a job's lanes (its claims in [`SharedSpeechEngine`], found again through [`WeakSpeechEngine`]), `quit` and its [`QuitLatch`] for the app's exit, `apply_retention`, the stages |
-//! | [`export_retries`] | [`ExportRetries`], the failed launch re-exports in a row per meeting, in `export-retries.json` |
+//! | [`export_retries`] | [`ExportRetries`], the launch re-exports in a row per meeting that did not deliver every row, in `export-retries.json` |
 //! | [`estimator`] | The learned stage rates, their seeds and the arithmetic behind `progress` |
 //! | [`run`] | One run's progress state with the monotonic clamp |
 //! | [`crash_loop`] | Launch recovery's guard against a crash loop: the runs that ended with the app, counted in the meeting's folder |

@@ -110,8 +110,9 @@ pub struct App {
     pub events: MeetingEventBus,
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
-    /// The failed launch re-exports in a row per meeting, which the launch
-    /// counts and the user's Export again resets.
+    /// The launch re-exports in a row per meeting that did not deliver
+    /// every row, which the launch counts and any re-export the user causes
+    /// resets.
     pub export_retries: Arc<ExportRetries>,
     pub services: Services,
     pub handover: Option<Arc<HandoverService>>,
