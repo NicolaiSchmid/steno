@@ -41,6 +41,13 @@ impl LocalFolderSink {
         self.path(relative).exists()
     }
 
+    /// Whether anything is at `relative`, a final symlink not followed: a
+    /// dangling link is there, where [`Self::exists`] says it is not.
+    #[must_use]
+    pub fn entry_exists(&self, relative: &str) -> bool {
+        fs::symlink_metadata(self.path(relative)).is_ok()
+    }
+
     #[must_use]
     pub fn is_directory(&self, relative: &str) -> bool {
         self.path(relative).is_dir()

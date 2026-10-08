@@ -6,7 +6,7 @@ mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use common::*;
@@ -267,11 +267,6 @@ fn validate_rejects_missing_unwritable_and_bad_people_folder() {
         .unwrap();
     vault.destination_with(true, None).validate_vault().unwrap();
     assert!(vault.list("").is_empty(), "the probe leaves nothing behind");
-    assert!(
-        ObsidianError::AudioUnavailable
-            .to_string()
-            .contains("no audio mixdown")
-    );
 }
 
 #[cfg(unix)]
@@ -484,13 +479,14 @@ fn files_the_app_never_wrote_are_not_opened_on_reexport() {
 }
 
 #[test]
-fn missing_mixdown_fails_after_every_other_file_is_written() {
+fn a_missing_mixdown_writes_every_other_file_and_warns() {
     let vault = Vault::new();
     let mut export = export();
     export.audio.as_mut().unwrap().mixdown_url = None;
+    let receipt = deliver(&vault.destination(), &export, None);
     assert_eq!(
-        vault.destination().deliver_meeting(&export, None),
-        Err(ObsidianError::AudioUnavailable)
+        receipt.warnings,
+        ["The audio was already removed, so the export has no audio file"]
     );
     assert_eq!(
         vault.list(FOLDER),
@@ -926,14 +922,15 @@ fn a_moved_vault_is_written_fresh_under_the_pinned_folder_and_the_old_one_is_lef
 }
 
 #[test]
-fn a_mixdown_path_without_a_file_is_audio_unavailable() {
+fn a_mixdown_path_without_a_file_delivers_without_audio_and_warns() {
     let vault = Vault::new();
     let mut export = export();
     export.audio.as_mut().unwrap().mixdown_url =
         Some(file_url(&vault.directory.path().join("gone.m4a"), false));
+    let receipt = deliver(&vault.destination(), &export, None);
     assert_eq!(
-        vault.destination().deliver_meeting(&export, None),
-        Err(ObsidianError::AudioUnavailable)
+        receipt.warnings,
+        [ObsidianFolderDestination::NO_AUDIO_WARNING]
     );
     assert_eq!(
         vault.list(FOLDER),
@@ -949,6 +946,7 @@ fn a_mixdown_path_without_a_file_is_audio_unavailable() {
         7,
         "with audio off the missing mixdown is no error"
     );
+    assert_eq!(no_audio.warnings, Vec::<String>::new(), "and no warning");
 }
 
 #[test]
@@ -1441,7 +1439,7 @@ fn a_redelivery_that_failed_after_claiming_a_folder_writes_that_folder_the_next_
 }
 
 #[test]
-fn a_redelivery_without_its_audio_still_updates_the_folder_it_claimed() {
+fn a_redelivery_without_its_audio_writes_the_folder_it_claimed_and_warns() {
     let vault = Vault::new();
     let destination = vault.destination();
     let ours = vault.export_with_audio();
@@ -1455,22 +1453,30 @@ fn a_redelivery_without_its_audio_still_updates_the_folder_it_claimed() {
     // The retention sweep removed the mixdown, and the audio copy left with
     // the removed folder.
     fs::remove_file(vault.directory.path().join("audio.m4a")).unwrap();
+    let theirs = contents(&vault, FOLDER);
 
+    let again = deliver(&destination, &with_a_changed_decision(&ours), Some(&first));
+
+    assert_eq!(again.folder, two);
     assert_eq!(
-        destination.deliver_meeting(&ours, Some(&first)),
-        Err(ObsidianError::AudioUnavailable)
+        again.warnings,
+        ["The audio was already removed, so the export has no audio file"]
     );
-    let changed = with_a_changed_decision(&ours);
     assert_eq!(
-        destination.deliver_meeting(&changed, Some(&first)),
-        Err(ObsidianError::AudioUnavailable),
-        "the audio is gone for good"
+        vault.list(&two),
+        second_folder_files(),
+        "the notes, no audio"
     );
     assert!(
         vault
             .text(&format!("{two}/{FOLDER_SLUG}-2.md"))
             .contains("Die Aufteilung wird verschoben."),
-        "every other file was written, as the error says"
+        "the folder note has the change"
+    );
+    assert_eq!(
+        contents(&vault, FOLDER),
+        theirs,
+        "the other meeting's folder is untouched"
     );
 }
 
@@ -1569,10 +1575,15 @@ fn a_deleted_meeting_json_with_the_mixdown_swept_still_delivers() {
 
     assert_eq!(again.folder, FOLDER);
     assert!(vault.path(&format!("{FOLDER}/audio.m4a")).exists());
+    assert_eq!(
+        again.warnings,
+        Vec::<String>::new(),
+        "the copy in the folder is the audio"
+    );
 }
 
 #[test]
-fn a_folder_without_meeting_json_whose_notes_name_another_meeting_is_lost() {
+fn a_folder_without_meeting_json_whose_notes_name_another_meeting_is_never_written() {
     let vault = Vault::new();
     let destination = vault.destination_with(false, Some("People"));
     let ours = export();
@@ -1614,6 +1625,165 @@ fn a_pinned_meeting_json_that_cannot_be_read_fails_the_delivery() {
     assert!(
         !vault.path(&format!("{FOLDER}-2")).exists(),
         "no folder claimed"
+    );
+}
+
+#[test]
+fn a_note_that_cannot_be_read_fails_the_delivery() {
+    // With `meeting.json` gone, `transcript.vtt` is read first, then the
+    // folder note; a directory in either's place fails on every platform.
+    let note = format!("{FOLDER_SLUG}.md");
+    for (unreadable, deleted) in [
+        ("transcript.vtt", None),
+        (note.as_str(), Some("transcript.vtt")),
+    ] {
+        let vault = Vault::new();
+        let destination = vault.destination_with(false, Some("People"));
+        let ours = export();
+        let first = deliver(&destination, &ours, None);
+        for name in ["meeting.json", unreadable].into_iter().chain(deleted) {
+            fs::remove_file(vault.path(&format!("{FOLDER}/{name}"))).unwrap();
+        }
+        let path = vault.path(&format!("{FOLDER}/{unreadable}"));
+        fs::create_dir(&path).unwrap();
+
+        match destination.deliver_meeting(&ours, Some(&first)) {
+            Err(ObsidianError::ReadFailed { path: failed, .. }) => {
+                assert_eq!(Path::new(&failed), path, "{unreadable}");
+            }
+            other => panic!("{unreadable}: expected ReadFailed, got {other:?}"),
+        }
+        assert!(
+            !vault.path(&format!("{FOLDER}-2")).exists(),
+            "{unreadable}: no folder claimed"
+        );
+    }
+}
+
+#[test]
+fn a_gone_pinned_folder_is_claimed_again_in_place() {
+    let vault = Vault::new();
+    let claims = Arc::new(Mutex::new(Vec::new()));
+    let seen = Arc::clone(&claims);
+    let destination = vault.destination().with_step_hook(move |step| {
+        if let DeliveryStep::ClaimingFolder(folder) = step {
+            seen.lock().unwrap().push(folder.to_owned());
+        }
+    });
+    let ours = vault.export_with_audio();
+    let first = deliver(&destination, &ours, None);
+    fs::remove_dir_all(vault.path("Meetings")).unwrap();
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, FOLDER);
+    assert_eq!(paths(&again), paths(&first));
+    assert_eq!(vault.list(FOLDER), meeting_files(FOLDER_SLUG));
+    assert_eq!(
+        *claims.lock().unwrap(),
+        [FOLDER, FOLDER],
+        "claimed, then claimed again"
+    );
+}
+
+#[test]
+fn a_gone_pinned_folder_another_writer_takes_first_is_never_written() {
+    let vault = Vault::new();
+    let ours = export();
+    let first = deliver(&vault.destination_with(false, Some("People")), &ours, None);
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    let mut theirs = ours.clone();
+    theirs.meeting.id = uuid(99);
+    let their_json = ArtifactRenderer::new().render_json(&theirs).unwrap();
+
+    // Another process creates the folder again for its own meeting just
+    // before this redelivery claims it.
+    let root = vault.root.clone();
+    let json = their_json.clone();
+    let destination = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            let folder = root.join(FOLDER);
+            if step == DeliveryStep::ClaimingFolder(FOLDER) && !folder.exists() {
+                fs::create_dir(&folder).unwrap();
+                fs::write(folder.join("meeting.json"), &json).unwrap();
+            }
+        });
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert_eq!(vault.list(FOLDER), ["meeting.json"]);
+    assert_eq!(vault.read(&format!("{FOLDER}/meeting.json")), their_json);
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_symlink_at_the_pinned_folder_gets_a_folder_of_its_own() {
+    let vault = Vault::new();
+    let destination = vault.destination_with(false, Some("People"));
+    let ours = export();
+    let first = deliver(&destination, &ours, None);
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+    let nowhere = vault.directory.path().join("nowhere");
+    std::os::unix::fs::symlink(&nowhere, vault.path(FOLDER)).unwrap();
+
+    let again = deliver(&destination, &ours, Some(&first));
+
+    assert_eq!(again.folder, format!("{FOLDER}-2"));
+    assert!(
+        fs::symlink_metadata(vault.path(FOLDER))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "the link stays"
+    );
+    assert!(!nowhere.exists(), "the link target is not created");
+    assert_eq!(vault.list(&format!("{FOLDER}-2")), second_folder_files());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_whose_first_write_fails_is_removed_so_the_next_attempt_claims_it_again() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let vault = Vault::new();
+    let locked = vault.directory.path().join("locked");
+    fs::create_dir_all(&locked).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    if fs::write(locked.join("probe"), b"").is_ok() {
+        return; // root
+    }
+    let ours = export();
+    let first = deliver(&vault.destination_with(false, Some("People")), &ours, None);
+    fs::remove_dir_all(vault.path(FOLDER)).unwrap();
+
+    // The pinned folder is gone, so the redelivery creates it again; then
+    // its first write fails.
+    let root = vault.root.clone();
+    let failing = vault
+        .destination_with(false, Some("People"))
+        .with_step_hook(move |step| {
+            if step == DeliveryStep::WritingFolder(FOLDER) {
+                fs::set_permissions(root.join(FOLDER), fs::Permissions::from_mode(0o555)).unwrap();
+            }
+        });
+    assert!(matches!(
+        failing.deliver_meeting(&ours, Some(&first)),
+        Err(ObsidianError::WriteFailed { .. })
+    ));
+    assert!(!vault.path(FOLDER).exists(), "the empty folder is removed");
+
+    let again = deliver(
+        &vault.destination_with(false, Some("People")),
+        &ours,
+        Some(&first),
+    );
+
+    assert_eq!(again.folder, FOLDER, "the same name, no duplicate");
+    assert!(!vault.path(&format!("{FOLDER}-2")).exists());
+    assert_eq!(
+        vault.list(FOLDER),
+        without_audio(meeting_files(FOLDER_SLUG))
     );
 }
 

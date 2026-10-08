@@ -35,8 +35,6 @@ pub enum ObsidianError {
     ReadFailed { path: String, underlying: String },
     #[error("Could not write {path}: {underlying}")]
     WriteFailed { path: String, underlying: String },
-    #[error("The meeting has no audio mixdown to copy; every other file was written.")]
-    AudioUnavailable,
 }
 
 /// A point inside [`ObsidianFolderDestination::deliver_meeting`] that a
@@ -50,10 +48,13 @@ pub enum DeliveryStep<'a> {
     /// Another delivery in this process holds the vault; this one waits for
     /// it before touching anything.
     WaitingForVault,
-    /// A delivery without a folder of its own (a first one, or a redelivery
-    /// whose pinned folder is no longer this meeting's) is about to claim
-    /// this meeting folder by creating it.
+    /// A delivery is about to claim this meeting folder by creating it: a
+    /// first delivery, a redelivery whose pinned folder is gone, or one
+    /// whose pinned folder is no longer this meeting's.
     ClaimingFolder(&'a str),
+    /// The meeting folder is in place and its files are about to be
+    /// written.
+    WritingFolder(&'a str),
     /// The person page at this path has been read (or found missing) and
     /// is about to be written with this meeting's line merged in.
     WritingPersonPage(&'a str),
@@ -103,8 +104,9 @@ fn vault_lock(vault_path: &str) -> Arc<Mutex<()>> {
 /// and keeps everything else. The policy (which receipt applies, what may be
 /// written, what the receipt says) is [`DeliveryLedger`]'s; this type
 /// renders, asks the ledger and writes through [`LocalFolderSink`]. Nothing
-/// is deleted but the writer's own temp files. Deliveries into one vault
-/// run one at a time in a process (`vault_lock`).
+/// is deleted but the writer's own temp files and a meeting folder this
+/// delivery created and left empty. Deliveries into one vault run one at a
+/// time in a process (`vault_lock`).
 #[derive(Debug, Clone)]
 pub struct ObsidianFolderDestination {
     /// [`ObsidianFolderDestination::DESTINATION_ID`] for the app's stored
@@ -128,6 +130,13 @@ pub struct ObsidianFolderDestination {
 
 impl ObsidianFolderDestination {
     pub const DESTINATION_ID: &'static str = "obsidian-folder";
+
+    /// The receipt's warning when the audio copy is on but the mixdown is
+    /// gone (the retention sweep removed it) and the meeting folder holds
+    /// no copy: the notes are delivered without it. Swift fails the
+    /// delivery with `audioUnavailable` instead (parity note in the plan).
+    pub const NO_AUDIO_WARNING: &'static str =
+        "The audio was already removed, so the export has no audio file";
 
     /// The stored destination for `settings`, with its dates in `time_zone`
     /// and its calls named after [`Platform::CURRENT`].
@@ -230,7 +239,9 @@ impl ObsidianFolderDestination {
 
     /// [`Destination::deliver`] without the boundary error wrapper and on
     /// the calling thread, where the tests call it. Blocks while another
-    /// delivery into the same vault runs in this process (`vault_lock`).
+    /// delivery into the same vault runs in this process (`vault_lock`). A
+    /// delivery without the audio it should copy succeeds and says so in
+    /// the receipt's `warnings` ([`Self::NO_AUDIO_WARNING`]).
     pub fn deliver_meeting(
         &self,
         meeting: &MeetingExport,
@@ -250,16 +261,56 @@ impl ObsidianFolderDestination {
         };
         self.check_vault()?;
         let mut ledger = DeliveryLedger::new(previous, &self.settings.vault_path);
-        let folder = match ledger.pinned_folder().map(str::to_owned) {
-            Some(lost) if self.is_lost(&lost, meeting.meeting.id)? => {
-                let claimed = self.claim_folder(meeting)?;
-                ledger.move_folder(&lost, &claimed);
-                claimed
-            }
-            Some(folder) => folder,
-            None => self.claim_folder(meeting)?,
+        let (folder, created) = self.folder_for(meeting, &mut ledger)?;
+        let written = self.write_meeting(meeting, &folder, &mut ledger);
+        if written.is_err() && created {
+            // Only an empty folder is removed, so the next attempt claims
+            // the same name instead of reading it as no longer this
+            // meeting's; one that holds a file stays.
+            let _ = fs::remove_dir(self.sink.path(&folder));
+        }
+        let warnings = written?;
+        Ok(DeliveryReceipt {
+            warnings,
+            ..ledger.receipt(&folder, ArtifactRenderer::VERSION)
+        })
+    }
+
+    /// The meeting folder of this delivery, and whether this delivery
+    /// created it. Without a pinned folder it claims one
+    /// ([`Self::claim_folder`]). A pinned folder that is gone is claimed
+    /// again by creating it (`symlink_metadata`, so a dangling link counts
+    /// as there). One that is there, or that something else created first,
+    /// is kept when [`Self::keeps_pin`] says so; otherwise the delivery
+    /// claims a folder as a first one does and moves its receipt there.
+    fn folder_for(
+        &self,
+        meeting: &MeetingExport,
+        ledger: &mut DeliveryLedger,
+    ) -> Result<(String, bool), ObsidianError> {
+        let Some(pinned) = ledger.pinned_folder().map(str::to_owned) else {
+            return self.claim_folder(meeting);
         };
-        let slug = folder_slug(&folder);
+        if !self.sink.entry_exists(&pinned) && self.recreate(&pinned)? {
+            return Ok((pinned, true));
+        }
+        if self.keeps_pin(&pinned, meeting.meeting.id)? {
+            return Ok((pinned, false));
+        }
+        let (claimed, created) = self.claim_folder(meeting)?;
+        ledger.move_folder(&pinned, &claimed);
+        Ok((claimed, created))
+    }
+
+    /// Writes the meeting's files into `folder`, its person pages and its
+    /// audio copy; returns the receipt's warnings.
+    fn write_meeting(
+        &self,
+        meeting: &MeetingExport,
+        folder: &str,
+        ledger: &mut DeliveryLedger,
+    ) -> Result<Vec<String>, ObsidianError> {
+        let slug = folder_slug(folder);
         let options = RenderOptions {
             link_style: LinkStyle::Wikilink,
             person_pages: self.settings.people_folder.is_some(),
@@ -269,8 +320,9 @@ impl ObsidianFolderDestination {
         };
         let renderer = ArtifactRenderer::new();
 
-        self.writing(&folder, || self.sink.create_directory(&folder))?;
-        AtomicFileWriter::remove_stale_temporaries(&self.sink.path(&folder));
+        self.writing(folder, || self.sink.create_directory(folder))?;
+        AtomicFileWriter::remove_stale_temporaries(&self.sink.path(folder));
+        self.reached(DeliveryStep::WritingFolder(folder));
 
         let artifacts = renderer
             .render_meeting_files(meeting, &options, Some(&slug))
@@ -280,7 +332,7 @@ impl ObsidianFolderDestination {
             })?;
         for artifact in artifacts {
             self.write_owned(
-                &mut ledger,
+                ledger,
                 &format!("{folder}/{}", artifact.file_name),
                 &artifact.data,
             )?;
@@ -288,13 +340,13 @@ impl ObsidianFolderDestination {
 
         if let Some(people_folder) = &self.settings.people_folder {
             let pages = renderer.render_person_pages(meeting, &options, Some(&slug));
-            self.write_person_pages(people_folder, pages, meeting.meeting.id, &mut ledger)?;
+            self.write_person_pages(people_folder, pages, meeting.meeting.id, ledger)?;
         }
-        if self.settings.include_audio {
-            self.copy_audio(meeting, &folder, &mut ledger)?;
+        let mut warnings = Vec::new();
+        if self.settings.include_audio && !self.copy_audio(meeting, folder, ledger)? {
+            warnings.push(Self::NO_AUDIO_WARNING.to_owned());
         }
-
-        Ok(ledger.receipt(&folder, ArtifactRenderer::VERSION))
+        Ok(warnings)
     }
 
     /// Writes every rendered page into `people_folder`: whole when the page
@@ -339,14 +391,14 @@ impl ObsidianFolderDestination {
 
     /// Copies the mixdown into the meeting folder while it exists; after the
     /// retention sweep the copy already in the vault (in the receipt or on
-    /// disk) is the audio. Only when neither is there has the meeting no
-    /// audio to deliver.
+    /// disk) is the audio. `Ok(false)` when neither is there: the meeting
+    /// has no audio to deliver.
     fn copy_audio(
         &self,
         meeting: &MeetingExport,
         folder: &str,
         ledger: &mut DeliveryLedger,
-    ) -> Result<(), ObsidianError> {
+    ) -> Result<bool, ObsidianError> {
         let mixdown = meeting
             .audio
             .as_ref()
@@ -354,11 +406,7 @@ impl ObsidianFolderDestination {
             .and_then(file_url_path)
             .filter(|path| path.exists());
         let Some(mixdown) = mixdown else {
-            return if self.audio_is_in_the_vault(folder, ledger) {
-                Ok(())
-            } else {
-                Err(ObsidianError::AudioUnavailable)
-            };
+            return Ok(self.audio_is_in_the_vault(folder, ledger));
         };
         let data = self
             .reading(&mixdown.to_string_lossy(), || fs::read(&mixdown).map(Some))?
@@ -371,7 +419,8 @@ impl ObsidianFolderDestination {
             ledger,
             &format!("{folder}/{}", MeetingFolder::audio_file(&extension)),
             &data,
-        )
+        )?;
+        Ok(true)
     }
 
     fn write_owned(
@@ -430,70 +479,101 @@ impl ObsidianFolderDestination {
     /// The folder of a delivery without one: the scope's path with the
     /// ledger's collision rule ([`DeliveryLedger::claim_folder`]), each
     /// candidate claimed by creating it under `Meetings/` (created as
-    /// needed). A candidate whose `meeting.json` cannot be read counts as
-    /// taken.
-    fn claim_folder(&self, meeting: &MeetingExport) -> Result<String, ObsidianError> {
+    /// needed), and whether this delivery created it (a candidate holding
+    /// this meeting's `meeting.json` is reused). A candidate whose
+    /// `meeting.json` cannot be read counts as taken.
+    fn claim_folder(&self, meeting: &MeetingExport) -> Result<(String, bool), ObsidianError> {
         let base = MeetingFolder::path(&meeting.meeting, self.time_zone);
         self.writing(MeetingFolder::ROOT, || {
             self.sink.create_directory(MeetingFolder::ROOT)
         })?;
-        DeliveryLedger::claim_folder(
+        let mut created = false;
+        let folder = DeliveryLedger::claim_folder(
             &base,
             meeting.meeting.id,
             |candidate| {
-                self.reached(DeliveryStep::ClaimingFolder(candidate));
-                match self.sink.create_new_directory(candidate) {
-                    Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
-                    created => self.writing(candidate, || created.map(|()| true)),
-                }
+                created = self.create(candidate)?;
+                Ok(created)
             },
             |folder| self.meeting_of(folder).ok().flatten(),
-        )
+        )?;
+        Ok((folder, created))
     }
 
-    /// The pinned folder is lost when it is there but no longer this
-    /// meeting's: its `meeting.json` names another meeting or none, or is
-    /// missing and no note's `steno_id` names this meeting. The user moved or
-    /// deleted this meeting's folder, and a meeting with the same date and
-    /// title may have claimed the name since. A lost folder is never written:
-    /// the delivery claims a folder as a first one does and moves its receipt
-    /// there, so the cost is a duplicate folder. A folder that is gone is not
-    /// lost: the delivery recreates it, as Swift's does.
-    fn is_lost(&self, folder: &str, id: Uuid) -> Result<bool, ObsidianError> {
-        if !self.sink.exists(folder) {
+    /// Creates the gone pinned `folder` again, its parent first: `Ok(true)`
+    /// when this delivery created it, `Ok(false)` when something took the
+    /// name first.
+    fn recreate(&self, folder: &str) -> Result<bool, ObsidianError> {
+        if let Some(parent) = Path::new(folder).parent() {
+            let parent = parent.to_string_lossy();
+            self.writing(&parent, || self.sink.create_directory(&parent))?;
+        }
+        self.create(folder)
+    }
+
+    /// Claims `folder` by creating it, its parent already there: `Ok(true)`
+    /// when this delivery created it, `Ok(false)` when anything was at the
+    /// path.
+    fn create(&self, folder: &str) -> Result<bool, ObsidianError> {
+        self.reached(DeliveryStep::ClaimingFolder(folder));
+        match self.sink.create_new_directory(folder) {
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Ok(false),
+            created => self.writing(folder, || created.map(|()| true)),
+        }
+    }
+
+    /// Whether a pinned folder that is there is still this meeting's: a
+    /// directory whose `meeting.json` names this meeting, or, with
+    /// `meeting.json` missing, one where the `transcript.vtt` header or the
+    /// folder note's `steno_id` names it. The user moved or deleted this
+    /// meeting's folder, and a meeting with the same date and title may have
+    /// claimed the name since; a folder that is not this meeting's is never
+    /// written, so the cost is a duplicate folder. A `meeting.json` or note
+    /// that cannot be read is [`ObsidianError::ReadFailed`].
+    fn keeps_pin(&self, folder: &str, id: Uuid) -> Result<bool, ObsidianError> {
+        if !self.sink.is_directory(folder) {
             return Ok(false);
         }
         if self
             .sink
             .exists(&format!("{folder}/{}", MeetingFolder::JSON))
         {
-            return Ok(self.meeting_of(folder)? != Some(id));
+            return Ok(self.meeting_of(folder)? == Some(id));
         }
-        Ok(!self.a_note_names(folder, id))
+        self.a_note_carries(folder, id)
     }
 
     /// Whether `transcript.vtt` (its `WEBVTT - Steno <id>` header) or the
     /// folder note (its `steno_id` frontmatter line) in `folder` names `id`.
-    /// A note that is missing or cannot be read names no meeting.
-    fn a_note_names(&self, folder: &str, id: Uuid) -> bool {
-        let read = |name: &str| {
-            let data = self.sink.read(&format!("{folder}/{name}")).ok()??;
-            String::from_utf8(data).ok()
+    /// A note that is missing or not UTF-8 text names no meeting; one that
+    /// cannot be read is [`ObsidianError::ReadFailed`].
+    fn a_note_carries(&self, folder: &str, id: Uuid) -> Result<bool, ObsidianError> {
+        let read = |name: &str| -> Result<Option<String>, ObsidianError> {
+            let path = format!("{folder}/{name}");
+            let data = self.reading(&path, || self.sink.read(&path))?;
+            Ok(data.and_then(|data| String::from_utf8(data).ok()))
         };
         let named = |value: &str| value.trim().trim_matches('"').parse::<Uuid>().ok() == Some(id);
-        let note = MeetingFolder::note_file(Note::Folder, &folder_slug(folder));
-        read(MeetingFolder::VTT).is_some_and(|text| {
+        let vtt = read(MeetingFolder::VTT)?;
+        if vtt.is_some_and(|text| {
             text.lines()
                 .next()
                 .and_then(|header| header.strip_prefix("WEBVTT - Steno "))
                 .is_some_and(named)
-        }) || read(&note).is_some_and(|text| {
+        }) {
+            return Ok(true);
+        }
+        let note = read(&MeetingFolder::note_file(
+            Note::Folder,
+            &folder_slug(folder),
+        ))?;
+        Ok(note.is_some_and(|text| {
             text.lines()
                 .skip(1)
                 .take_while(|line| *line != "---")
                 .filter_map(|line| line.strip_prefix("steno_id:"))
                 .any(named)
-        })
+        }))
     }
 
     /// The meeting whose `meeting.json` is in `folder`: `None` when the

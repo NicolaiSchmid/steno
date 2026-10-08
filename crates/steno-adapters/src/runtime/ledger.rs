@@ -243,12 +243,12 @@ impl DeliveryLedger {
     /// with `-2`, `-3`, … appended while the candidate is taken, that is,
     /// already there and holding another meeting's `meeting.json` (or
     /// none); a candidate holding `meeting_id` is a crashed or failed
-    /// attempt and is reused. `claim` creates the
-    /// candidate and says whether it was new (`Ok(true)`, the folder is
-    /// this delivery's) or something was already at the path (`Ok(false)`,
-    /// which `meeting_of` then decides). Creating is the claim, so two
-    /// first deliveries with the same slug, in one process or two, never
-    /// share a folder. A failed `claim` ends the search with its error.
+    /// attempt and is reused. `claim` creates the candidate and says whether
+    /// it was new (`Ok(true)`, the folder is this delivery's) or something
+    /// was already at the path (`Ok(false)`, which `meeting_of` then
+    /// decides). Creating is the claim, so two first deliveries with the
+    /// same slug, in one process or two, never share a folder. A failed
+    /// `claim` ends the search with its error.
     /// Swift: none; `resolveFolder` looks up and the first write creates
     /// the folder.
     pub fn claim_folder<E>(
