@@ -208,14 +208,18 @@ describe("MeetingList rows", () => {
 			throw new Error("fixture has no meeting");
 		}
 		const queued = { ...row, state: "queued" as const, preview: undefined };
-		expect(rowPreview(queued, undefined)).toBe("Waiting to process.");
+		expect(rowPreview(queued, undefined, false)).toBe("Waiting to process.");
 		expect(
-			rowPreview(queued, {
-				meetingID: row.id,
-				stage: "modelsMissing",
-				title: "Download the speech models in Settings",
-				fraction: 0,
-			}),
+			rowPreview(
+				queued,
+				{
+					meetingID: row.id,
+					stage: "modelsMissing",
+					title: "Download the speech models in Settings",
+					fraction: 0,
+				},
+				false,
+			),
 		).toBe("Download the speech models in Settings.");
 	});
 
