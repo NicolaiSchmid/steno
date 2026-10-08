@@ -4,17 +4,21 @@
 //! can lose in a power cut a recording the durable writes synced, so
 //! Settings warns about an audio folder on a network mount.
 //!
-//! `statfs` names the file system. On Linux its magic number decides
-//! (`is_a_linux_network_file_system`). A FUSE mount shares one magic number
-//! among local and remote file systems, so its type is read from
-//! `/proc/self/mountinfo` (`mount_type`), and only the remote ones warn. On
-//! macOS a mount without `MNT_LOCAL` warns, except an `autofs` trigger,
-//! whose flags say nothing about what it mounts; the type name decides as
-//! well (`is_a_macos_network_file_system`), because macFUSE reports
-//! `macfuse` (or a name beginning with it), never whether it is remote, and
-//! sets `MNT_LOCAL` for a mount made with `-o local`. macFUSE serves remote
-//! file systems (sshfs, rclone, cloud drives) almost only, so every macFUSE
-//! mount warns.
+//! [`is_on_a_network_mount`] reads `statfs` for the folder, or its nearest
+//! ancestor that exists (`nearest_existing`). On Linux the magic number
+//! decides (`is_a_linux_network_file_system`). A FUSE mount shares one magic
+//! number among local and remote file systems, so its type and source are
+//! read from `/proc/self/mountinfo` (`mount_of`), and only the remote types,
+//! or a bare `fuse` mount of an `http://` or `https://` source (davfs2),
+//! warn.
+//!
+//! On macOS a mount without `MNT_LOCAL` warns, except an `autofs` trigger,
+//! whose flags say nothing about what it mounts. The type name decides as
+//! well (`is_a_macos_network_file_system`): macFUSE reports `macfuse` (or a
+//! name beginning with it), never whether it is remote, and sets
+//! `MNT_LOCAL` for a mount made with `-o local`. macFUSE serves remote file
+//! systems (sshfs, rclone, cloud drives) almost only, so every macFUSE mount
+//! warns, a local disk read through it (ntfs-3g, ext4fuse) included.
 
 use std::path::Path;
 
@@ -44,7 +48,7 @@ pub(super) fn is_on_a_network_mount(path: &Path) -> bool {
             reason = "f_type's width and sign differ between targets"
         )]
         let magic = stat.f_type as u32;
-        is_a_linux_network_file_system(magic, || mount_type_of(existing))
+        is_a_linux_network_file_system(magic, || mount_of(existing))
     }
     #[cfg(target_os = "macos")]
     {
@@ -139,22 +143,39 @@ const REMOTE_FUSE_TYPES: [&str; 12] = [
     "fuse.smbnetfs",
 ];
 
-/// Whether the Linux file system with the `statfs` magic number `magic` is
-/// a network mount: one of [`NETWORK_MAGIC_NUMBERS`], or a FUSE mount whose
-/// type (`fuse_type`, read only for FUSE) is one of [`REMOTE_FUSE_TYPES`].
+/// A mount's file system type and source as `/proc/self/mountinfo` names
+/// them, such as `fuse.sshfs` and `me@nas:/srv`.
 #[cfg(any(target_os = "linux", test))]
-fn is_a_linux_network_file_system(magic: u32, fuse_type: impl FnOnce() -> Option<String>) -> bool {
+#[derive(Debug, PartialEq, Eq)]
+struct Mount {
+    file_system: String,
+    source: String,
+}
+
+/// Whether the Linux file system with the `statfs` magic number `magic` is
+/// a network mount: one of [`NETWORK_MAGIC_NUMBERS`], or a FUSE mount
+/// (`fuse_mount`, read only for FUSE) whose type is one of
+/// [`REMOTE_FUSE_TYPES`], or whose type is a bare `fuse` and whose source
+/// starts `http://` or `https://`, as davfs2 mounts a `WebDAV` share.
+#[cfg(any(target_os = "linux", test))]
+fn is_a_linux_network_file_system(magic: u32, fuse_mount: impl FnOnce() -> Option<Mount>) -> bool {
     if magic == FUSE_SUPER_MAGIC {
-        fuse_type().is_some_and(|name| REMOTE_FUSE_TYPES.contains(&name.as_str()))
+        fuse_mount().is_some_and(|mount| {
+            REMOTE_FUSE_TYPES.contains(&mount.file_system.as_str())
+                || (mount.file_system == "fuse"
+                    && ["http://", "https://"]
+                        .iter()
+                        .any(|scheme| mount.source.starts_with(scheme)))
+        })
     } else {
         NETWORK_MAGIC_NUMBERS.contains(&magic)
     }
 }
 
-/// The type `/proc/self/mountinfo` names for the mount `folder` is on,
-/// found by the folder's device number.
+/// The mount `folder` is on, as `/proc/self/mountinfo` names it, found by
+/// the folder's device number.
 #[cfg(target_os = "linux")]
-fn mount_type_of(folder: &Path) -> Option<String> {
+fn mount_of(folder: &Path) -> Option<Mount> {
     use std::os::unix::fs::MetadataExt as _;
     let read = || -> std::io::Result<_> {
         let device = std::fs::metadata(folder)?.dev();
@@ -162,31 +183,34 @@ fn mount_type_of(folder: &Path) -> Option<String> {
     };
     let (device, mountinfo) = read()
         .inspect_err(|error| {
-            tracing::debug!(folder = %folder.display(), %error, "the folder's FUSE type could not be read");
+            tracing::debug!(folder = %folder.display(), %error, "the folder's FUSE mount could not be read");
         })
         .ok()?;
-    mount_type(
+    mount_on_device(
         &mountinfo,
         rustix::fs::major(device),
         rustix::fs::minor(device),
     )
-    .map(str::to_owned)
 }
 
-/// The file system type of the mount of device `major:minor` in
-/// `mountinfo`, whose lines read `<id> <parent> <major:minor> <root>
-/// <mount point> <options> [optional fields] - <type> <source> <options>`.
-/// The fields before the ` - ` escape their spaces, so the first ` - `
-/// ends them.
+/// The mount of device `major:minor` in `mountinfo`, whose lines read
+/// `<id> <parent> <major:minor> <root> <mount point> <options> [optional
+/// fields] - <type> <source> <options>`. Every field escapes its spaces, so
+/// the first ` - ` ends the optional fields and the type and source split
+/// at a space.
 #[cfg(any(target_os = "linux", test))]
-fn mount_type(mountinfo: &str, major: u32, minor: u32) -> Option<&str> {
+fn mount_on_device(mountinfo: &str, major: u32, minor: u32) -> Option<Mount> {
     let device = format!("{major}:{minor}");
     mountinfo.lines().find_map(|line| {
         let (mount, file_system) = line.split_once(" - ")?;
         if mount.split(' ').nth(2)? != device {
             return None;
         }
-        file_system.split(' ').next()
+        let mut fields = file_system.split(' ');
+        Some(Mount {
+            file_system: fields.next()?.to_owned(),
+            source: fields.next()?.to_owned(),
+        })
     })
 }
 
@@ -235,7 +259,8 @@ mod tests {
     /// local file systems do not.
     #[test]
     fn linux_nfs_and_smb_warn_and_local_file_systems_do_not() {
-        let unread = || -> Option<String> { panic!("read the type of a mount that is not FUSE") };
+        let unread =
+            || -> Option<Mount> { panic!("read the mount of a file system that is not FUSE") };
         for magic in [
             NFS_SUPER_MAGIC,
             SMB_SUPER_MAGIC,
@@ -267,10 +292,11 @@ mod tests {
         }
     }
 
-    /// A FUSE mount warns only when its type is a remote one, and not when
-    /// the type cannot be read.
+    /// A FUSE mount warns only when its type is a remote one or it is a bare
+    /// `fuse` mount of an `http(s)://` source, and not when the mount cannot
+    /// be read.
     #[test]
-    fn a_linux_fuse_mount_warns_only_when_its_type_is_remote() {
+    fn a_linux_fuse_mount_warns_only_when_its_type_or_source_is_remote() {
         for name in [
             "fuse.sshfs",
             "fuse.rclone",
@@ -286,39 +312,77 @@ mod tests {
             "fuse.smbnetfs",
         ] {
             assert!(
-                is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(name.to_owned())),
+                is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(mount(name, "server"))),
                 "{name}"
             );
         }
-        for name in ["fuseblk", "fuse.portal", "fuse.appimage", "fuse"] {
+        // davfs2.
+        for source in ["http://127.0.0.1:47811/", "https://cloud.example.com/dav/"] {
             assert!(
-                !is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(name.to_owned())),
-                "{name}"
+                is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(mount("fuse", source))),
+                "{source}"
+            );
+        }
+        for (name, source) in [
+            ("fuseblk", "/dev/sdb1"),
+            ("fuse.portal", "portal"),
+            ("fuse.appimage", "/home/me/App.AppImage"),
+            ("fuse", "/dev/sdb1"),
+        ] {
+            assert!(
+                !is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || Some(mount(name, source))),
+                "{name} {source}"
             );
         }
         assert!(!is_a_linux_network_file_system(FUSE_SUPER_MAGIC, || None));
     }
 
-    /// The type is found by the device number, after the optional fields,
-    /// in a mount point with an escaped space.
+    fn mount(file_system: &str, source: &str) -> Mount {
+        Mount {
+            file_system: file_system.to_owned(),
+            source: source.to_owned(),
+        }
+    }
+
+    /// The type and source are found by the device number, after the
+    /// optional fields, in a mount point with an escaped space.
     #[test]
-    fn the_mount_type_is_read_by_device_number() {
+    fn the_mount_is_read_by_device_number() {
         let mountinfo = "\
 22 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw
 45 22 0:41 / /home/me/NAS\\040share rw,nosuid,nodev,relatime shared:30 master:2 - fuse.sshfs me@nas:/srv rw,user_id=1000
-46 22 0:42 / /mnt/backup rw,relatime - nfs4 nas:/backup rw,vers=4.2";
-        assert_eq!(mount_type(mountinfo, 259, 2), Some("ext4"));
-        assert_eq!(mount_type(mountinfo, 0, 41), Some("fuse.sshfs"));
-        assert_eq!(mount_type(mountinfo, 0, 42), Some("nfs4"));
-        assert_eq!(mount_type(mountinfo, 0, 4), None);
+46 22 0:42 / /mnt/backup rw,relatime - nfs4 nas:/backup rw,vers=4.2
+47 22 0:82 / /home/me/dav rw,nosuid,nodev,relatime shared:31 - fuse http://127.0.0.1:47811/ rw,user_id=0,group_id=0";
+        assert_eq!(
+            mount_on_device(mountinfo, 259, 2),
+            Some(mount("ext4", "/dev/nvme0n1p2"))
+        );
+        assert_eq!(
+            mount_on_device(mountinfo, 0, 41),
+            Some(mount("fuse.sshfs", "me@nas:/srv"))
+        );
+        assert_eq!(
+            mount_on_device(mountinfo, 0, 42),
+            Some(mount("nfs4", "nas:/backup"))
+        );
+        assert_eq!(
+            mount_on_device(mountinfo, 0, 82),
+            Some(mount("fuse", "http://127.0.0.1:47811/"))
+        );
+        assert_eq!(mount_on_device(mountinfo, 0, 4), None);
     }
 
-    /// The kernel's mountinfo is keyed as `mount_type_of` reads it:
-    /// `/proc` is found as `proc`.
+    /// The kernel's mountinfo is keyed as `mount_of` reads it: `/proc` is
+    /// found as `proc`.
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_mount_type_of_proc_is_proc() {
-        assert_eq!(mount_type_of(Path::new("/proc")).as_deref(), Some("proc"));
+    fn the_mount_of_proc_is_proc() {
+        assert_eq!(
+            mount_of(Path::new("/proc"))
+                .map(|mount| mount.file_system)
+                .as_deref(),
+            Some("proc")
+        );
     }
 
     /// SMB, NFS, AFP, `WebDAV` and macFUSE warn on macOS even with
