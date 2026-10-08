@@ -81,7 +81,7 @@ pub fn notice_line(notice: &CaptureNotice) -> String {
             format!("{}; reconnecting", reason_words(*reason))
         }
         CaptureNotice::StillRestarting { attempt } => {
-            format!("no audio after {attempt} restarts; still trying until it runs or the stop")
+            format!("no audio after {attempt} restarts; still trying until one runs or you stop")
         }
         CaptureNotice::DeviceResumed {
             attempt,
@@ -96,13 +96,13 @@ pub fn notice_line(notice: &CaptureNotice) -> String {
 fn reason_words(reason: DeviceChangeReason) -> &'static str {
     match reason {
         DeviceChangeReason::DefaultOutputChanged => "the default output moved",
-        DeviceChangeReason::DefaultInputChanged => "the microphone to record moved",
+        DeviceChangeReason::DefaultInputChanged => "the default microphone changed",
         DeviceChangeReason::OutputDeviceGone => "the output device is gone",
         DeviceChangeReason::InputDeviceGone => "the microphone is gone",
         DeviceChangeReason::SampleRateChanged => "the devices' sample rate changed",
         DeviceChangeReason::DeliveryStalled => "no audio arrives from the devices",
         DeviceChangeReason::AudioServiceRestarted => "the audio service restarted",
-        DeviceChangeReason::ChosenInputRecheck => "the chosen microphone delivers again",
+        DeviceChangeReason::ChosenInputRecheck => "the chosen microphone is back",
     }
 }
 
