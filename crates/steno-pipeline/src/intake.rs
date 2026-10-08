@@ -132,14 +132,18 @@ impl HandoverIntake for RecordingIntake {
         device: &PairedDevice,
     ) -> BoundaryResult<Uuid> {
         let existing = self.store.handover_receipt(metadata.recording_id)?;
-        // Another phone's receipt under this id (this one was revoked, and
-        // that one announced the id) is never completed or answered from:
-        // that phone would take this meeting for its own and delete its copy.
-        if existing
-            .as_ref()
-            .is_some_and(|receipt| receipt.device_id != device.id)
-        {
-            return Err(StoreError::ReceiptOfAnotherDevice(metadata.recording_id).into());
+        // Another upload's receipt under this id is never completed or
+        // answered from: another phone's (this one was revoked, and that one
+        // announced the id or took the receipt over), which would take this
+        // meeting for its own and delete its copy; or one of other bytes (the
+        // phone announced another file under the id), whose `complete` would
+        // get this meeting and delete a file never admitted.
+        if existing.as_ref().is_some_and(|receipt| {
+            receipt.device_id != device.id
+                || receipt.byte_count != metadata.byte_count
+                || receipt.sha256 != metadata.sha256
+        }) {
+            return Err(StoreError::ReceiptOfAnotherUpload(metadata.recording_id).into());
         }
         // A retry of an admitted recording is answered from the store with
         // no write of its own: the launch checkpoint
@@ -211,7 +215,7 @@ impl HandoverIntake for RecordingIntake {
             .store
             .save_admission_durably(&receipt, &meeting, &asset)
         {
-            if matches!(error, StoreError::ReceiptOfAnotherDevice(_)) {
+            if matches!(error, StoreError::ReceiptOfAnotherUpload(_)) {
                 // The refusal wrote nothing, and another phone's receipt is
                 // left as it is.
                 let _ = std::fs::remove_file(&destination);
@@ -713,6 +717,13 @@ mod tests {
             store.handover_receipt(metadata.recording_id).unwrap().unwrap().state,
             HandoverState::Complete { meeting_id: id } if id == meeting_id
         ));
+        assert_eq!(
+            store
+                .admitted_meeting(metadata.recording_id, metadata.byte_count, &metadata.sha256)
+                .unwrap(),
+            Some(meeting_id),
+            "the admission's ledger row commits with it"
+        );
 
         refuse_writes(&store, false);
         std::fs::write(&upload, b"aac bytes").unwrap();
@@ -788,17 +799,21 @@ mod tests {
         assert!(admitted.lock().unwrap().is_empty());
     }
 
-    /// A receipt of another phone under the same recording id is never
-    /// completed. The admitting phone was revoked and the other one announced
-    /// the id, before the intake read the receipt or between its read and its
-    /// commit; either way the admitting phone then paired again. The intake
-    /// refuses, and the other phone's receipt stays as it was: completed, it
-    /// would answer that phone's `complete` with this meeting, and that phone
-    /// would delete a recording never admitted. Swift:
-    /// `aReceiptOfAnotherPhoneIsNeverCompleted(afterTheRead:)`.
+    /// A receipt of another upload under the same recording id is never
+    /// completed: another phone's (the admitting phone was revoked and the
+    /// other one announced the id; the admitting phone then paired again),
+    /// or the admitting phone's own of other bytes (it announced another file
+    /// under the id), made before the intake read the receipt or between
+    /// its read and its commit. The intake refuses, and that receipt stays
+    /// as it was: completed, it would answer that upload's `complete` with
+    /// this meeting, and the phone would delete a recording never admitted;
+    /// no ledger row says those bytes were admitted. Swift:
+    /// `aReceiptOfAnotherUploadIsNeverCompleted(afterTheRead:otherBytes:)`.
     #[tokio::test]
-    async fn a_receipt_of_another_phone_is_never_completed() {
-        for after_the_read in [false, true] {
+    async fn a_receipt_of_another_upload_is_never_completed() {
+        for (after_the_read, other_bytes) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let dir = tempfile::tempdir().unwrap();
             let store = store_with_audio_folder(dir.path());
             let now = Utc::now();
@@ -809,13 +824,25 @@ mod tests {
                 ..device.clone()
             };
             // The revoke, the other phone's announce, and this phone pairing
-            // again under the same device id.
+            // again under the same device id; or this phone's announce of
+            // another file under the id.
+            let owner = if other_bytes { &device } else { &other };
+            let theirs = HandoverReceipt {
+                sha256: if other_bytes {
+                    vec![1; 32]
+                } else {
+                    metadata.sha256.clone()
+                },
+                ..receipt_of(owner, &metadata, HandoverState::Receiving, now)
+            };
             let takeover = {
                 let (store, device, other) = (store.clone(), device.clone(), other.clone());
-                let theirs = receipt_of(&other, &metadata, HandoverState::Receiving, now);
+                let theirs = theirs.clone();
                 move || {
-                    store.delete_paired_device(device.id).unwrap();
-                    store.save_paired_device(&other, &[2; 32]).unwrap();
+                    if !other_bytes {
+                        store.delete_paired_device(device.id).unwrap();
+                        store.save_paired_device(&other, &[2; 32]).unwrap();
+                    }
                     store.save_handover_receipt(&theirs).unwrap();
                     store.save_paired_device(&device, &[1; 32]).unwrap();
                 }
@@ -849,7 +876,7 @@ mod tests {
             let error = intake.admit(&upload, &metadata, &device).await.unwrap_err();
 
             assert!(
-                error.to_string().contains("belongs to another device"),
+                error.to_string().contains("belongs to another upload"),
                 "{error}"
             );
             let receipt = store
@@ -857,9 +884,16 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                (receipt.device_id, receipt.state),
-                (other.id, HandoverState::Receiving),
-                "the other phone's receipt is untouched (after the read: {after_the_read})"
+                (receipt.device_id, receipt.sha256, receipt.state),
+                (theirs.device_id, theirs.sha256, theirs.state),
+                "the other upload's receipt is untouched \
+                 (after the read: {after_the_read}, other bytes: {other_bytes})"
+            );
+            assert_eq!(
+                store
+                    .admitted_meeting(metadata.recording_id, metadata.byte_count, &metadata.sha256)
+                    .unwrap(),
+                None
             );
             assert_eq!(store.all_meetings().unwrap(), []);
             assert_eq!(

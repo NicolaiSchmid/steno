@@ -37,7 +37,7 @@ pub use timings::StageRateRow;
 
 use crate::model::MeetingStateKind;
 
-/// Errors a store call can raise beyond SQLite's own, plus the two the
+/// Errors a store call can raise beyond SQLite's own, plus the ones the
 /// migrator adds. Swift: `MeetingStoreError` in
 /// `Sources/StenoCore/Storage/MeetingStore.swift`; the cases the Swift
 /// store raises from methods not ported yet are absent here.
@@ -75,17 +75,15 @@ pub enum StoreError {
     /// the meeting's files.
     #[error("meeting {0} is {1} and cannot be deleted")]
     MeetingBusy(Uuid, MeetingStateKind),
-    /// The phone intake's admission of a recording whose receipt belongs to
-    /// another device, raised at the intake's own read and by
-    /// `save_admission_durably`: the admitting phone was revoked and another
-    /// one announced the same recording id. Swift:
-    /// `MeetingStoreError.receiptOfAnotherDevice`.
-    #[error("recording {0} belongs to another device")]
-    ReceiptOfAnotherDevice(Uuid),
-    /// The database has a migration this build does not know: a newer app
-    /// wrote it, and this one must not touch it.
-    #[error("the database was migrated by a newer version ({0})")]
-    UnknownMigration(String),
+    /// The phone intake's admission of a recording whose receipt is another
+    /// upload's, raised at the intake's own read and by
+    /// `save_admission_durably`: it belongs to another device (the admitting
+    /// phone was revoked and another one announced the same recording id,
+    /// or took the receipt over), or it holds other bytes (the phone
+    /// announced another file under the id). Swift:
+    /// `MeetingStoreError.receiptOfAnotherUpload`.
+    #[error("the receipt of recording {0} belongs to another upload")]
+    ReceiptOfAnotherUpload(Uuid),
     /// [`Store::open_without_migrating`] only: the database lacks a
     /// migration this build would apply (the payload, the first of them),
     /// so an older app still runs on it, or the app is still migrating it.
@@ -165,8 +163,10 @@ impl std::fmt::Debug for Store {
 }
 
 impl Store {
-    /// Opens (creating) the database at `path` and applies every pending
-    /// migration. The parent directory is created. The connection is set up
+    /// Opens (creating) the database at `path`, applies every pending
+    /// migration and backfills the admission ledger
+    /// ([`Store::backfill_handover_admissions`]). The parent directory is
+    /// created. The connection is set up
     /// like the Swift app's writer: WAL mode, `synchronous = NORMAL`, foreign
     /// keys on and a five-second busy timeout. With `NORMAL` in WAL mode a
     /// commit waits for an fsync only when it runs a checkpoint or is the
@@ -195,10 +195,11 @@ impl Store {
     /// Opens the existing database at `path` as [`Store::open`] does, but
     /// applies no migration: for a process that runs beside the app that
     /// holds the database (`steno export` while Steno runs), which must
-    /// not change the schema under it. Fails when the file is missing, and
-    /// when the database records a migration this build does not know
-    /// ([`StoreError::UnknownMigration`]) or lacks one it would apply
-    /// ([`StoreError::PendingMigration`]). Rust only: the Swift CLI always
+    /// not change the schema under it; the admission backfill of
+    /// [`Store::open`] does not run either. Fails when the file is missing,
+    /// and when the database lacks a migration this build would apply
+    /// ([`StoreError::PendingMigration`]); one it does not know is ignored,
+    /// as [`Store::open`] ignores it. Rust only: the Swift CLI always
     /// migrated.
     pub fn open_without_migrating(path: impl AsRef<Path>) -> Result<Store> {
         use rusqlite::OpenFlags;
@@ -214,10 +215,14 @@ impl Store {
         Self::new(Connection::open_in_memory()?)
     }
 
+    /// The store over `connection`, migrated, with the admission ledger
+    /// backfilled ([`Store::backfill_handover_admissions`]).
     fn new(mut connection: Connection) -> Result<Store> {
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::migrate(&mut connection)?;
-        Ok(Self::over(connection))
+        let store = Self::over(connection);
+        store.backfill_handover_admissions()?;
+        Ok(store)
     }
 
     /// The store over a connection that is set up and at the current

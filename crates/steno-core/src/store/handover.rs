@@ -1,5 +1,6 @@
-//! `pairedDevice` and `handoverReceipt` rows: the phones paired with this
-//! computer and where each phone recording's handover stands.
+//! `pairedDevice`, `handoverReceipt` and `handoverAdmission` rows: the
+//! phones paired with this computer, where each phone recording's handover
+//! stands, and the ledger of the recordings admitted.
 //! Swift: `Sources/StenoCore/Storage/MeetingStore+Handover.swift`.
 
 use chrono::{DateTime, Utc};
@@ -159,15 +160,19 @@ impl Store {
         self.write_durably(|transaction| save_receipt(transaction, receipt))
     }
 
-    /// The phone intake's admission: the `complete` receipt, the meeting
-    /// and its asset in one transaction, on the disk when it returns
-    /// ([`Store::write_durably`]). The phone deletes its copy once
+    /// The phone intake's admission: the `complete` receipt, the meeting,
+    /// its asset and the admission's ledger row (see
+    /// [`Store::admitted_meeting`]) in one transaction, on the disk when it
+    /// returns ([`Store::write_durably`]). The phone deletes its copy once
     /// `complete` answers 200, so no commit may hold the receipt without
-    /// the meeting, and a power loss must not roll either back.
-    /// Fails with [`StoreError::ReceiptOfAnotherDevice`], writing nothing,
-    /// when the stored receipt belongs to another device than `receipt`:
-    /// completed, it would answer that device's `complete` with this
-    /// meeting.
+    /// the meeting, and a power loss must not roll either back. A ledger
+    /// row of the same recording id, size and SHA-256 stays as it is
+    /// (`INSERT OR IGNORE`): the first admission of those bytes stands.
+    /// Fails with [`StoreError::ReceiptOfAnotherUpload`], writing nothing,
+    /// when the stored receipt belongs to another device than `receipt` or
+    /// holds another size or SHA-256: completed, it would answer that
+    /// device's `complete`, or the `complete` of the other bytes, with this
+    /// meeting, and the phone would delete a recording never admitted.
     /// Swift: `MeetingStore.saveDurably(_:meeting:asset:)`.
     pub fn save_admission_durably(
         &self,
@@ -176,22 +181,97 @@ impl Store {
         asset: &AudioAsset,
     ) -> Result<()> {
         self.write_durably(|transaction| {
-            let owner = transaction
+            let stored = transaction
                 .query_row(
-                    "SELECT deviceID FROM handoverReceipt WHERE recordingID = ?1",
+                    "SELECT deviceID, byteCount, sha256 FROM handoverReceipt \
+                     WHERE recordingID = ?1",
                     [DbUuid(receipt.recording_id)],
-                    |row| row.col::<DbUuid>("deviceID"),
+                    |row| {
+                        Ok((
+                            row.col::<DbUuid>("deviceID")?,
+                            row.get::<_, i64>("byteCount")?,
+                            row.get::<_, Vec<u8>>("sha256")?,
+                        ))
+                    },
                 )
                 .optional()?;
-            if owner.is_some_and(|owner| owner != receipt.device_id) {
-                return Err(StoreError::ReceiptOfAnotherDevice(receipt.recording_id));
+            if stored.is_some_and(|(device_id, byte_count, sha256)| {
+                (device_id, byte_count, sha256.as_slice())
+                    != (
+                        receipt.device_id,
+                        receipt.byte_count,
+                        receipt.sha256.as_slice(),
+                    )
+            }) {
+                return Err(StoreError::ReceiptOfAnotherUpload(receipt.recording_id));
             }
             meetings::save(transaction, meeting)?;
             assets::save(transaction, asset)?;
-            save_receipt(transaction, receipt)
+            save_receipt(transaction, receipt)?;
+            transaction.execute(
+                "INSERT OR IGNORE INTO handoverAdmission \
+                 (recordingID, byteCount, sha256, meetingID, admittedAt) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    DbUuid(receipt.recording_id),
+                    receipt.byte_count,
+                    receipt.sha256,
+                    DbUuid(meeting.id),
+                    DbDate(receipt.updated_at),
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The meeting the phone recording `recording_id` of `byte_count` bytes
+    /// hashing to `sha256` was admitted as, from the admission ledger
+    /// (`handoverAdmission`, schema v5). A row is written in the
+    /// admission's own transaction ([`Store::save_admission_durably`]) and
+    /// never deleted: not by a revoke, whose cascade takes the receipts,
+    /// nor by a meeting delete, so the meeting may be gone. The handover
+    /// answers a phone that announces those bytes again "delivered" from
+    /// it, so the phone deletes its copy instead of uploading it as a
+    /// second meeting. Swift: `MeetingStore.admittedMeeting`.
+    pub fn admitted_meeting(
+        &self,
+        recording_id: Uuid,
+        byte_count: i64,
+        sha256: &[u8],
+    ) -> Result<Option<Uuid>> {
+        self.read(|connection| {
+            Ok(connection
+                .query_row(
+                    "SELECT meetingID FROM handoverAdmission \
+                     WHERE recordingID = ?1 AND byteCount = ?2 AND sha256 = ?3",
+                    params![DbUuid(recording_id), byte_count, sha256],
+                    |row| row.col::<DbUuid>("meetingID"),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Writes the ledger row of every `complete` receipt whose meeting row
+    /// exists and that has none yet: the admissions before schema v5, and
+    /// those an older app committed during a rollback, since it ignores v5
+    /// and writes no row. [`Store::open`] runs it every time. Swift: the
+    /// backfill in `MeetingStore.init`.
+    pub fn backfill_handover_admissions(&self) -> Result<()> {
+        self.write(|transaction| {
+            transaction.execute_batch(BACKFILL_ADMISSIONS)?;
+            Ok(())
         })
     }
 }
+
+/// [`Store::backfill_handover_admissions`]; the Swift backfill runs the same
+/// text.
+const BACKFILL_ADMISSIONS: &str = "INSERT OR IGNORE INTO \"handoverAdmission\" \
+     (\"recordingID\", \"byteCount\", \"sha256\", \"meetingID\", \"admittedAt\") \
+     SELECT \"recordingID\", \"byteCount\", \"sha256\", \"meetingID\", \"updatedAt\" \
+     FROM \"handoverReceipt\" \
+     WHERE \"state\" = 'complete' \
+     AND \"meetingID\" IN (SELECT \"id\" FROM \"meeting\")";
 
 fn save_receipt(connection: &Connection, receipt: &HandoverReceipt) -> Result<()> {
     let kind = receipt.state.kind();
