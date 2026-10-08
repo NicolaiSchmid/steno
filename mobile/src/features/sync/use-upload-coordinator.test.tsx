@@ -19,21 +19,41 @@ import {
 	setState,
 } from "@/features/queue/queue-index";
 import { taskIDs } from "./upload-coordinator";
-import { useUploadCoordinator } from "./use-upload-coordinator";
+import {
+	RERESOLVE_INTERVAL_MS,
+	useUploadCoordinator,
+} from "./use-upload-coordinator";
 
 /**
  * The hook over a fake native module and a fake discovery that sees both
  * Macs: Mac B's `resolve` answers only when the test releases it, and every
  * pinned request and background upload is recorded with its URL and
  * bearer. The real recording client and executor run on top. The pairing,
- * a re-pairing still saving (`replacing`) and the queue are plain state the
+ * a re-pairing still saving (`replacing`), the queue, each Mac's address,
+ * the addresses that answer nothing and the app state are plain state the
  * test drives. It renders under `StrictMode`, so every effect runs twice.
  */
 const fake = vi.hoisted(() => {
 	const listeners = new Map<string, Set<(event: unknown) => void>>();
+	const appStateListeners = new Set<(state: string) => void>();
 	return {
 		listeners,
+		appStateListeners,
 		sent: [] as { url: string; auth: string | undefined }[],
+		/** The pin of every request and upload, in order. */
+		pins: [] as string[],
+		/** Every service name resolved, in order. */
+		resolves: [] as string[],
+		/** The address each Mac's service resolves to. */
+		hosts: {} as Record<string, string>,
+		/** Addresses where nothing answers: a request there fails to connect. */
+		down: new Set<string>(),
+		/** When set, `resolve` rejects. */
+		failResolve: false,
+		/** When set, the Mac answers a `PUT` with this status. */
+		putStatus: null as number | null,
+		/** The task ids `pendingUploads` reports. */
+		pending: [] as string[],
 		cancelled: [] as string[],
 		/** When set, `cancelUpload` rejects. */
 		failCancel: false,
@@ -68,6 +88,10 @@ const HOSTS: Record<string, string> = {
 	"Mac B": "10.0.0.2",
 };
 
+function hostOf(url: string) {
+	return new URL(url).hostname;
+}
+
 const link = {
 	addListener(event: string, listener: (event: unknown) => void) {
 		const set = fake.listeners.get(event) ?? new Set();
@@ -76,17 +100,22 @@ const link = {
 		return { remove: () => set.delete(listener) };
 	},
 	resolve(serviceName: string) {
-		const mac = { host: HOSTS[serviceName], port: 1 };
+		fake.resolves.push(serviceName);
+		if (fake.failResolve) {
+			return Promise.reject(new Error(`Resolving ${serviceName} timed out`));
+		}
+		const mac = { host: fake.hosts[serviceName], port: 1 };
 		if (serviceName !== "Mac B") return Promise.resolve(mac);
 		return new Promise((resolve) => {
 			fake.releaseMacB = () => resolve(mac);
 		});
 	},
 	async pendingUploads() {
-		return [];
+		return [...fake.pending];
 	},
 	async startUpload(spec: UploadSpec) {
 		fake.sent.push({ url: spec.url, auth: spec.headers.Authorization });
+		fake.pins.push(spec.fingerprint);
 		await fake.holdUpload;
 	},
 	async cancelUpload(taskID: string) {
@@ -95,7 +124,14 @@ const link = {
 	},
 	async request(request: PinnedRequest) {
 		fake.sent.push({ url: request.url, auth: request.headers.Authorization });
+		fake.pins.push(request.fingerprint);
 		await fake.holdRequest;
+		if (fake.down.has(hostOf(request.url))) {
+			throw new Error("Could not connect to the server.");
+		}
+		if (request.method === "PUT" && fake.putStatus !== null) {
+			return { status: fake.putStatus, headers: {}, body: "" };
+		}
 		if (request.method === "POST") {
 			return { status: 200, headers: {}, body: '{"meetingID":"m"}' };
 		}
@@ -112,7 +148,13 @@ const link = {
 
 vi.mock("expo", () => ({ requireNativeModule: () => link }));
 vi.mock("react-native", () => ({
-	AppState: { addEventListener: () => ({ remove() {} }) },
+	AppState: {
+		currentState: "active",
+		addEventListener(_event: "change", listener: (state: string) => void) {
+			fake.appStateListeners.add(listener);
+			return { remove: () => fake.appStateListeners.delete(listener) };
+		},
+	},
 }));
 vi.mock("@/features/discovery/use-mac-discovery", () => ({
 	useMacDiscovery: () => ({
@@ -203,6 +245,14 @@ async function mount(initial: QueueIndex, pairing: Pairing) {
 	await settle();
 	return {
 		row: (id: string) => findRecording(latest, id),
+		/** Queues a one-chunk recording, as the recorder does after a stop. */
+		add: async (id: string) => {
+			await act(async () => {
+				latest = withRecording(latest, id, 100);
+				flushSync(() => setIndex(latest));
+			});
+			await settle();
+		},
 		reachable: () =>
 			(fake.coordinator as ReturnType<typeof useUploadCoordinator>).reachable,
 		repair: (next: Pairing | null) => act(async () => setPairing(next)),
@@ -239,6 +289,39 @@ function finished(id: string): UploadFinished {
 	return { taskID: taskIDs.chunk(id, 0), status: 204, body: "" };
 }
 
+function connectFailed(id: string): UploadFailed {
+	return {
+		taskID: taskIDs.chunk(id, 0),
+		message: "Could not connect to the server.",
+		retryable: true,
+	};
+}
+
+/** Fake timers and clock, so a backoff and the resolve timer can elapse. */
+function startFakeClock() {
+	vi.useFakeTimers({
+		shouldAdvanceTime: true,
+		toFake: [
+			"setTimeout",
+			"clearTimeout",
+			"setInterval",
+			"clearInterval",
+			"Date",
+		],
+	});
+}
+
+async function elapse(ms: number) {
+	await act(() => vi.advanceTimersByTimeAsync(ms));
+	await settle();
+}
+
+function appState(state: "active" | "background") {
+	act(() => {
+		for (const listener of fake.appStateListeners) listener(state);
+	});
+}
+
 function cancelled(id: string): UploadFailed {
 	return {
 		taskID: taskIDs.chunk(id, 0),
@@ -249,7 +332,15 @@ function cancelled(id: string): UploadFailed {
 
 beforeEach(() => {
 	fake.listeners.clear();
+	fake.appStateListeners.clear();
 	fake.sent.length = 0;
+	fake.pins.length = 0;
+	fake.resolves.length = 0;
+	fake.hosts = { ...HOSTS };
+	fake.down.clear();
+	fake.failResolve = false;
+	fake.putStatus = null;
+	fake.pending = [];
 	fake.cancelled.length = 0;
 	fake.failCancel = false;
 	fake.releaseMacB = null;
@@ -473,6 +564,181 @@ describe("useUploadCoordinator", () => {
 			} finally {
 				vi.useRealTimers();
 			}
+		});
+	});
+
+	describe("when the Mac's address changes under the same name", () => {
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("resolves again after a request fails to connect, and retries at the new address", async () => {
+			startFakeClock();
+			const h = await mount(EMPTY_INDEX, A);
+			expect(h.reachable()).toBe(true);
+			// A new lease: the old address answers nothing, the name stays.
+			fake.hosts["Mac A"] = "10.0.0.9";
+			fake.down.add("10.0.0.1");
+			const resolved = fake.resolves.length;
+			await h.add("a");
+			expect(fake.sent[0]).toEqual({
+				url: "https://10.0.0.1:1/v1/recordings/a",
+				auth: "Bearer token-a",
+			});
+			expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
+			expect(fake.resolves.length).toBe(resolved + 1);
+
+			await elapse(5_000);
+			expect(fake.sent).toContainEqual({
+				url: "https://10.0.0.9:1/v1/recordings/a",
+				auth: "Bearer token-a",
+			});
+			expect(h.row("a")?.state).toBe("uploading");
+			// Only the probe of whether the old address still answers went
+			// there, and every request kept the pairing's pin.
+			for (const request of fake.sent.slice(1)) {
+				if (hostOf(request.url) === "10.0.0.1") {
+					expect(request.url).toBe("https://10.0.0.1:1/v1/hello");
+				}
+			}
+			expect(new Set(fake.pins)).toEqual(new Set(["FP-mac-a"]));
+		});
+
+		it("resolves again only after a failure to connect, not after an answer", async () => {
+			const h = await mount(EMPTY_INDEX, A);
+			const resolved = fake.resolves.length;
+			fake.putStatus = 500;
+			await h.add("a");
+			expect(h.row("a")).toMatchObject({
+				state: "queued",
+				lastError: "The Mac answered 500",
+			});
+			await act(async () =>
+				fake.emit("uploadFinished", { ...finished("a"), status: 500 }),
+			);
+			await act(async () => fake.emit("uploadFailed", cancelled("a")));
+			await settle();
+			expect(fake.resolves.length).toBe(resolved);
+
+			await act(async () => fake.emit("uploadFailed", connectFailed("a")));
+			await settle();
+			expect(fake.resolves.length).toBe(resolved + 1);
+		});
+
+		it("resolves on the timer only while uploads are queued in the foreground", async () => {
+			startFakeClock();
+			const h = await mount(EMPTY_INDEX, A);
+			const resolved = fake.resolves.length;
+			await elapse(2 * RERESOLVE_INTERVAL_MS);
+			expect(fake.resolves.length).toBe(resolved);
+
+			// Its chunk is out, so the row stays `uploading`.
+			await h.add("a");
+			expect(h.row("a")?.state).toBe("uploading");
+			await elapse(RERESOLVE_INTERVAL_MS);
+			expect(fake.resolves.length).toBe(resolved + 1);
+
+			appState("background");
+			await elapse(2 * RERESOLVE_INTERVAL_MS);
+			expect(fake.resolves.length).toBe(resolved + 1);
+			appState("active");
+			await settle();
+			await elapse(RERESOLVE_INTERVAL_MS);
+			expect(fake.resolves.length).toBe(resolved + 2);
+
+			await act(async () => fake.emit("uploadFinished", finished("a")));
+			await settle();
+			expect(h.row("a")?.state).toBe("delivered");
+			await elapse(2 * RERESOLVE_INTERVAL_MS);
+			expect(fake.resolves.length).toBe(resolved + 2);
+		});
+
+		it("retries a failed resolve on the timer", async () => {
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				startFakeClock();
+				fake.failResolve = true;
+				const h = await mount(queued("a"), A);
+				expect(h.reachable()).toBe(false);
+				expect(fake.sent).toEqual([]);
+				expect(warn).toHaveBeenCalledWith(
+					"[sync] resolve failed",
+					expect.any(Error),
+				);
+
+				fake.failResolve = false;
+				await elapse(RERESOLVE_INTERVAL_MS);
+				expect(h.reachable()).toBe(true);
+				expect(fake.sent).toContainEqual({
+					url: "https://10.0.0.1:1/v1/recordings/a",
+					auth: "Bearer token-a",
+				});
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it("cancels the chunks out to the old address and sends them to the new one", async () => {
+			startFakeClock();
+			const h = await mount(queued("a"), A);
+			expect(fake.sent.at(-1)?.url).toBe(
+				"https://10.0.0.1:1/v1/recordings/a/chunks/0",
+			);
+			// The background session would retry this chunk at the old
+			// address; no request fails, so only the timer finds the new one.
+			fake.pending = [taskIDs.chunk("a", 0)];
+			fake.hosts["Mac A"] = "10.0.0.9";
+			fake.down.add("10.0.0.1");
+			await elapse(RERESOLVE_INTERVAL_MS);
+			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
+
+			fake.pending = [];
+			await act(async () => fake.emit("uploadFailed", cancelled("a")));
+			await settle();
+			expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
+			await elapse(5_000);
+			expect(fake.sent.at(-1)).toEqual({
+				url: "https://10.0.0.9:1/v1/recordings/a/chunks/0",
+				auth: "Bearer token-a",
+			});
+			expect(h.row("a")?.state).toBe("uploading");
+		});
+
+		it("cancels a chunk to the old address whose task was still being created", async () => {
+			startFakeClock();
+			const upload = Promise.withResolvers<void>();
+			fake.holdUpload = upload.promise;
+			await mount(queued("a"), A);
+			expect(fake.sent.at(-1)?.url).toBe(
+				"https://10.0.0.1:1/v1/recordings/a/chunks/0",
+			);
+			fake.hosts["Mac A"] = "10.0.0.9";
+			fake.down.add("10.0.0.1");
+			await elapse(RERESOLVE_INTERVAL_MS);
+			expect(fake.cancelled).toEqual([]);
+			await act(async () => upload.resolve());
+			await settle();
+			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
+		});
+
+		it("keeps the address in use while it still answers", async () => {
+			startFakeClock();
+			const h = await mount(queued("a"), A);
+			fake.pending = [taskIDs.chunk("a", 0)];
+			// A Mac on Wi-Fi and Ethernet of one LAN resolves to either.
+			fake.hosts["Mac A"] = "10.0.0.9";
+			await elapse(RERESOLVE_INTERVAL_MS);
+			expect(fake.cancelled).toEqual([]);
+			expect(fake.sent.at(-1)?.url).toBe("https://10.0.0.1:1/v1/hello");
+
+			fake.pending = [];
+			await act(async () => fake.emit("uploadFinished", finished("a")));
+			await settle();
+			expect(fake.sent.at(-1)?.url).toBe(
+				"https://10.0.0.1:1/v1/recordings/a/complete",
+			);
+			expect(h.row("a")?.state).toBe("delivered");
+			expect(fake.sent.some((r) => hostOf(r.url) === "10.0.0.9")).toBe(false);
 		});
 	});
 });
