@@ -1140,14 +1140,15 @@ impl Host {
     /// and Export sections show, so those reload when it did. The exit is
     /// the model's: the command that sets `finished` closes the window, as
     /// `OnboardingWindow` did on that change, after the page saw it.
-    fn onboarding_command(&self, body: impl FnOnce(&mut Inner)) {
-        let finished = {
+    /// Answers what `body` answered.
+    fn onboarding_command<R>(&self, body: impl FnOnce(&mut Inner) -> R) -> R {
+        let (answer, finished) = {
             let mut inner = self.lock();
             let was_finished = inner.onboarding.finished;
-            body(&mut inner);
+            let answer = body(&mut inner);
             inner.publisher.schedule(BridgeTopic::Onboarding);
             self.follow_settings(&mut inner, true);
-            !was_finished && inner.onboarding.finished
+            (answer, !was_finished && inner.onboarding.finished)
         };
         self.publish();
         self.run_pending_probe(BridgeWindow::Onboarding);
@@ -1157,6 +1158,7 @@ impl Host {
                 .opener
                 .close_window(BridgeWindow::Onboarding);
         }
+        answer
     }
 
     fn command(&self, topics: &[BridgeTopic], body: impl FnOnce(&mut Inner)) {
@@ -2323,9 +2325,7 @@ impl BridgeHost for Host {
         let Some(import) = self.shared.services.swift_import.clone() else {
             return Ok(());
         };
-        let mut began = false;
-        self.onboarding_command(|inner| began = inner.onboarding.begin_import());
-        if !began {
+        if !self.onboarding_command(|inner| inner.onboarding.begin_import()) {
             return Ok(());
         }
         let status = import.run();
