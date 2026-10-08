@@ -304,7 +304,7 @@ why and the alternative.
   the audio processing is stable and ideally the final version before we
   cutover to the tauri version."
   - **Reading:** no change to the audio and speech path is planned after the
-    cutover. A1 to A9 land before `0.11.0-rc.1`, so the rehearsals run on the
+    cutover. A1 to A10 land before `0.11.0-rc.1`, so the rehearsals run on the
     final pipeline. A fix found during the candidates becomes a new candidate
     and restarts the stability count (G2).
   - **The remaining differences, each made final.** Confirmed 2026-10-07.
@@ -315,7 +315,7 @@ why and the alternative.
     | Resampler (44.1 kHz phone audio) | Final as it is, proven by A9 | Within 0.3 dB to 6 kHz; A9's sweep and speech tests show no aliasing into the speech band. |
     | Sidecar's 2 ms lag | Final, accepted | Far below a word; Swift had the same relationship. |
     | AAC priming (23 to 48 ms late on phone recordings) | Fixed first (A9) | Reading the container's edit list is small and makes the decode exact, as AVFoundation's was. |
-    | Call mode without an output client (the tap's IOProc runs only once another client opens the output) | Checked first on the Mac in a GUI session (A9) | If a call's first seconds are lost, the remedy becomes an A-package before the first candidate; otherwise final. |
+    | Call mode without an output client (the tap's IOProc runs only once another client opens the output) | Fixed first (A10) | Forge reproduces the loss over SSH: 0 callbacks while nothing plays. The tap aggregate runs only while a process the tap includes drives the output. The Swift app shares the defect and keeps its exclusion of its own process until the handoff, so this is not a regression, but D3 makes the loss blocking. The fix includes Steno in the tap, so the rule is: no in-app playback while recording, enforced by `Playback`. |
 
   - The Swift defects under "Store", "Adapters", "Handover", "LLM" and "Audio"
     and the CLI's `--title`, and the parity notes' other "before cutover" ports
@@ -437,6 +437,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | A7 | The Linux input device list and the device UID fallback | #222 |
 | A8 | Meeting detection on Linux, over PipeWire's streams | #222 |
 | A9 | The final choices proven: the AAC priming trimmed; the resampler's sweep and speech tests; the 2 ms lag pinned; call mode without an output client checked on the Mac | audio |
+| A10 | Call mode without an output client: the tap includes Steno, and the capture starts a silent output IOProc of its own, so the tap and the microphone run from the start with nothing playing; no in-app playback while recording, enforced by `Playback` | audio |
 
 **Per Linux target, blocking that target's listing (D6):**
 
@@ -464,7 +465,10 @@ after the port".
 - The tray's badge for pending speaker reviews; the main window shows them.
 - The menu bar's queue and five recent meetings.
 - The macOS Record and Find Meetings menu items; the page answers ⌘⇧R and ⌘F.
-- The clip player.
+- The clip player. It plays from Steno's own process, which the call capture's
+  tap includes (A10): it asks `steno_audio::Playback` for every playback and
+  plays nothing while a recording runs (no in-app playback while recording,
+  enforced by `Playback`).
 - Layer-shell panels on wlroots, Hyprland and Plasma (X2's rules cover them
   until then).
 - The speech settings without a Settings row, which
@@ -718,6 +722,102 @@ Each lands before `0.11.0-rc.1`.
     ~/Applications/Steno.app`, so Launch Services starts it under its own grants.
     If either bound is missed, the remedy becomes an A-package before the first
     candidate.
+- **A10 Call mode without an output client.**
+  - **The defect.** In call mode the aggregate holds the output device (its
+    clock master), the microphone and the process tap. With nothing playing,
+    `AudioDeviceStart` returns 0 and the IOProc is never called: neither the
+    tap nor the microphone delivers until some app plays. A call that starts
+    in silence loses everything up to the first sound. Forge reproduces it
+    over SSH (0 callbacks in 4 s). The Swift app has the same defect, which
+    closes at the handoff (D9) and is not ported.
+  - **Diagnostics** (Forge over SSH, nothing playing, a scratch IOProc on
+    hand-built aggregates, one variant per run, timed from before the start):
+
+    | Variant | First callback |
+    |---|---|
+    | The capture's IOProc zero-fills the aggregate's output | none: the IOProc is never called, and the HAL hands an IOProc zeroed output anyway |
+    | Output and microphone, no tap; or the output alone | 40 to 65 ms |
+    | Output, microphone and tap (Steno excluded); or output and tap | none |
+    | Steno excluded, plus a silent IOProc of Steno's own on the speakers (started at once, or after its first callback) | none, with the speakers running |
+    | Steno excluded, plus an AudioQueue of Steno's own playing silence | none, with the speakers running |
+    | Steno excluded, and a silent `afplay` (another process) already playing | 67 ms |
+    | Steno not excluded, no client | none |
+    | Steno not excluded, plus a silent IOProc of Steno's own | 88.8 ms |
+
+    The tap aggregate runs only while a process the tap includes drives the
+    output. The aggregate's output streams were in place and enabled for the
+    IOProc (`kAudioDevicePropertyIOProcStreamUsage`) throughout.
+  - **The remedy.**
+    - The tap includes Steno's own process (the global tap, no exclusion).
+    - The call capture owns a silent IOProc on the default output device
+      (the system output when that does not resolve). It starts once the
+      aggregate is built and before the aggregate's IOProc, and is stopped
+      and destroyed last, after the tap. Started before the aggregate is
+      built, it made `start` about 300 ms slower.
+    - It is rebuilt with the capture on every device change, so it follows
+      the default output. One that does not start is logged and the capture
+      goes on as before.
+    - Its body writes zeros over its output buffers (the HAL has zeroed them
+      already): no allocation, lock or syscall.
+    - The clock master, the drift compensation, the latency arithmetic of A6
+      and the echo-cancellation alignment are unchanged.
+  - **The rule: no in-app playback while recording, enforced by `Playback`.**
+    Steno's own output now reaches the system lane, so `steno_audio::Playback`
+    is the one gate every in-app playback goes through. Steno plays nothing
+    today; the clip player (What follows) will be the first.
+    - While a recording runs, the gate refuses playback ("Playback is off
+      while Steno records. It works again once the recording stops.").
+    - Playback that runs when a recording starts is stopped first.
+    - The capture session takes the hold before its backend (and the tap)
+      starts, keeps it across every rebuild, and releases it after the
+      teardown; a drop guard releases it on an error or a panic.
+  - **Considered and declined.**
+    - **A helper process that plays the silence**, keeping Steno excluded:
+      another process's lifetime, crash handling and device-change rebuild,
+      for a gate that covers the same risk in Steno's own code.
+    - **The microphone as clock master:** no microphone in System-only mode;
+      the aggregate at a hands-free headset's rate; another clock under A6's
+      latency rescale and the echo cancellation. The diagnostics show that
+      the gating follows the processes the tap includes, not the clock.
+  - **Tests.**
+    - Unit: the silent IOProc writes only zeros over a fake buffer list
+      (past a null `mData` and a size of 0, nothing past a buffer's size),
+      and allocates nothing (`tests/realtime.rs`, under the counting
+      allocator).
+    - Unit: the gate, alone and in the capture session: refused while
+      recording and across a rebuild, held at every backend start and stop,
+      released after a failed or panicking start, running playback stopped,
+      two sessions.
+    - Forge, live, one test at a time: `call_capture_runs_from_its_start_with_nothing_playing`
+      fails on main (0 callbacks) and passes on the branch. The bound is
+      timed from `start` returning, which starts the aggregate's IOProc last:
+      over five runs the first callback came 25 to 64 ms after it, and 89 to
+      154 ms after `start` was called, whose tap, aggregate and rate settle
+      take 54 to 100 ms on main too. 3.96 to 3.99 s of frames in 4 s; the
+      system lane all zeros, which over SSH proves nothing about its content.
+      A stop and start as a rebuild runs them gets its first callback within
+      the bound each time, and a silent `afplay` playing meanwhile changes
+      nothing. Without the silent output (a mutation) the test fails with 0
+      callbacks. Forge has only built-in speakers, so a default-output change
+      is not exercised.
+  - **Nicolai**, on a build of A10's branch, in a GUI session with the
+    capture permission granted, on speakers:
+    1. Nothing playing: run the branch's CLI, `cargo run --release -p
+       steno-cli -- dev capture-spike --lanes call --seconds 20 --out ~/a10`,
+       from a terminal that has the permission, and play nothing. Pass when
+       it prints `nonzero system: 0 of 960000 samples` (digital silence).
+    2. A9's tone step: start the call recording in silence and play a tone at
+       10 s. Pass when the first callback comes within 100 ms of the start
+       (of `start` returning, as above) and the tone's onset lies within
+       50 ms in both channels.
+    3. A hands-free headset: pair a Bluetooth headset as the output and run
+       step 1's command with nothing playing. Pass when the headset stays in
+       its stereo profile and the output's rate stays at 44.1 or 48 kHz, not
+       16 or 24 (`system_profiler SPAudioDataType`, the headset's
+       "Current SampleRate", read while it records). Opening the output is not
+       expected to switch the profile; only opening its microphone does, and
+       the call capture opens the default input as before.
+  - Owner: audio. It lands before `0.11.0-rc.1`, with its own pipeline.
 
 ### P: no data lost (D3)
 
@@ -1436,9 +1536,9 @@ an hour that saves it (P5), and a `kill` that P3 recovers.
 ## Order of operations and gates
 
 1. **Every decision is confirmed** (2026-10-07). The call-mode row of D9
-   closes from A9's check in step 2.
+   closes with A10 in step 2.
 2. **Every package is written,** in parallel except for the dependencies under
-   "Work packages": S1 to S7, A1 to A9, P1 to P38, X1 to X7. Any further gap the
+   "Work packages": S1 to S7, A1 to A10, P1 to P38, X1 to X7. Any further gap the
    data-loss audit finds joins the P table: before G1 it lands with the others;
    after G1 it lands as a new candidate (G2).
 3. **Gate G1.** Every S, A and P row and X1 to X7 are closed, the pull requests
