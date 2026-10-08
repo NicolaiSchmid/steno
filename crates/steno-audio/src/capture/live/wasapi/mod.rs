@@ -1010,6 +1010,28 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
 
+    /// The session watches a capture whose master is the microphone, the
+    /// call's and the room's; a capture of the system lane alone, whose
+    /// endpoint loopback delivers nothing while nothing plays, is not
+    /// watched.
+    #[test]
+    fn only_a_capture_with_a_microphone_master_delivers_continuously() {
+        let backend = LiveCaptureBackend::new();
+        for (lanes, continuously) in [
+            (&[AudioLane::Mic, AudioLane::System][..], true),
+            (&[AudioLane::Mixed][..], true),
+            (&[AudioLane::Mic][..], true),
+            (&[AudioLane::System][..], false),
+            (&[][..], false),
+        ] {
+            assert_eq!(
+                backend.delivers_continuously(lanes),
+                continuously,
+                "{lanes:?}"
+            );
+        }
+    }
+
     /// A watcher that is judging a burst when `stop()` comes (a late one
     /// that came alive behaves the same) is joined: its report lands
     /// before `stop()` returns, never after.
