@@ -90,6 +90,12 @@ public struct AudioDeviceInfo: Sendable, Equatable, Hashable, Identifiable {
       return Int(latency) + Int(safety)
     }
 
+    /// `kAudioDevicePropertyNominalSampleRate` of one device; 0 when it
+    /// cannot be read (a device that is gone).
+    static func nominalSampleRate(of id: AudioObjectID) -> Double {
+      (try? id.readFloat64(AudioObjectPropertyAddress(kAudioDevicePropertyNominalSampleRate))) ?? 0
+    }
+
     /// `kAudioDevicePropertyDeviceIsAlive`: false once the HAL has dropped
     /// the device, and when the object cannot be read at all.
     static func isAlive(_ id: AudioObjectID) -> Bool {
@@ -111,8 +117,7 @@ public struct AudioDeviceInfo: Sendable, Equatable, Hashable, Identifiable {
         name: (try? id.readString(AudioObjectPropertyAddress(kAudioObjectPropertyName))) ?? "",
         inputChannels: inputChannelCounts(of: id).reduce(0, +),
         outputChannels: outputChannelCounts(of: id).reduce(0, +),
-        nominalSampleRate: (try? id.readFloat64(
-          AudioObjectPropertyAddress(kAudioDevicePropertyNominalSampleRate))) ?? 0,
+        nominalSampleRate: nominalSampleRate(of: id),
         transportType: transportName(transport),
         isRunningSomewhere: (try? id.readBool(
           AudioObjectPropertyAddress(kAudioDevicePropertyDeviceIsRunningSomewhere))) ?? false,

@@ -27,6 +27,8 @@ final class RateConverter: @unchecked Sendable {
   /// aliases into the top of the band (a 28 kHz tone lands at 20 kHz, at
   /// -49 dB); below 8 kHz nothing aliases above -97 dB.
   static let maximumRate: Double = 192_000
+  /// The zeros the history starts with, so output 0 centres on input 0.
+  private static let leadingZeros = taps / 2 - 1
 
   /// Whether a device at `rate` hertz can be converted.
   static func supports(_ rate: Double) -> Bool {
@@ -41,7 +43,7 @@ final class RateConverter: @unchecked Sendable {
   /// Input not yet consumed by a window, from `history[0]`.
   private let history: UnsafeMutablePointer<Float>
   private let historyCapacity: Int
-  private var filled = 0
+  private var filled = RateConverter.leadingZeros
   /// The next output's whole input position in `history`.
   private var index = 0
   /// Its fraction, in units of `1 / outputRate`.
@@ -52,21 +54,18 @@ final class RateConverter: @unchecked Sendable {
   /// for calls of at most `maximumInput` samples.
   init(inputRate: Double, outputRate: Double, maximumInput: Int) {
     assert(Self.supports(inputRate) && Self.supports(outputRate))
-    self.inputRate = Int(inputRate.rounded())
-    self.outputRate = Int(outputRate.rounded())
+    let (inputRate, outputRate) = (inputRate.rounded(), outputRate.rounded())
+    self.inputRate = Int(inputRate)
+    self.outputRate = Int(outputRate)
     self.maximumInput = maximumInput
-    let coefficients = Self.table(inputRate: inputRate.rounded(), outputRate: outputRate.rounded())
-    let table = UnsafeMutablePointer<Float>.allocate(capacity: coefficients.count)
-    coefficients.withUnsafeBufferPointer {
-      table.initialize(from: $0.baseAddress!, count: coefficients.count)
-    }
-    self.table = table
+    let coefficients = Self.table(inputRate: inputRate, outputRate: outputRate)
+    table = .allocate(capacity: coefficients.count)
+    table.initialize(from: coefficients, count: coefficients.count)
     // A window never holds more than `taps - 1` samples it has not
     // consumed, so that plus one call's input always fits.
     historyCapacity = Self.taps - 1 + maximumInput
     history = .allocate(capacity: historyCapacity)
     history.initialize(repeating: 0, count: historyCapacity)
-    reset()
   }
 
   deinit {
@@ -82,7 +81,7 @@ final class RateConverter: @unchecked Sendable {
   /// Back to the start of a signal: zeros before input 0, position 0.
   func reset() {
     history.update(repeating: 0, count: historyCapacity)
-    filled = Self.taps / 2 - 1
+    filled = Self.leadingZeros
     index = 0
     remainder = 0
   }

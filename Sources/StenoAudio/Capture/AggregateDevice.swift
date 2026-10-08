@@ -50,10 +50,7 @@
       self.uid = uid
     }
 
-    var nominalSampleRate: Double {
-      (try? deviceID.readFloat64(AudioObjectPropertyAddress(kAudioDevicePropertyNominalSampleRate)))
-        ?? 0
-    }
+    var nominalSampleRate: Double { AudioDevices.nominalSampleRate(of: deviceID) }
 
     func setNominalSampleRate(_ rate: Double) throws {
       try deviceID.write(

@@ -101,14 +101,11 @@ struct DeviceSnapshot: Sendable, Equatable {
             input = try? AudioDevices.defaultInput()
           }
         }
-        let rate =
-          (try? aggregateID.readFloat64(
-            AudioObjectPropertyAddress(kAudioDevicePropertyNominalSampleRate))) ?? 0
         return DeviceSnapshot(
           outputUID: output?.uid, defaultOutputUID: Self.defaultOutputUID(), inputUID: input?.uid,
           outputAlive: AudioDevices.isAlive(outputID),
           inputAlive: micID.map(AudioDevices.isAlive) ?? false,
-          sampleRate: rate)
+          sampleRate: AudioDevices.nominalSampleRate(of: aggregateID))
       }
     }
 
@@ -273,10 +270,8 @@ struct DeviceSnapshot: Sendable, Equatable {
           let id = AudioObjectID(mic.id)
           let frames = AudioDevices.latencyFrames(of: id, scope: kAudioObjectPropertyScopeInput)
           guard micSubDevice != 0 else { return frames }
-          let micRate =
-            (try? id.readFloat64(
-              AudioObjectPropertyAddress(kAudioDevicePropertyNominalSampleRate))) ?? 0
-          return CaptureStream.rescaled(frames, from: micRate, to: sampleRate)
+          return CaptureStream.rescaled(
+            frames, from: AudioDevices.nominalSampleRate(of: id), to: sampleRate)
         } ?? 0
       let outputLatency = AudioDevices.latencyFrames(
         of: AudioObjectID(output.id), scope: kAudioObjectPropertyScopeOutput)
