@@ -115,7 +115,8 @@ impl HandoverIdentity {
     ///
     /// The guard against a silent re-pair, on every platform: the
     /// identity's fingerprint is recorded in `record` from the first load or
-    /// mint on, and `store` lists the paired phones. The load is
+    /// mint on, and the database (`store`) lists the paired phones. The
+    /// load is
     /// [`IdentityError::Unavailable`], and mints nothing, when the secret
     /// store cannot be read; when it holds no identity while a fingerprint
     /// is recorded or a phone is paired; and when the identity's
@@ -156,9 +157,11 @@ impl HandoverIdentity {
     }
 
     /// Stores the identity in `secrets` and records its fingerprint in
-    /// `record`: every write of the identity goes through here (the mint,
-    /// and an identity brought over from elsewhere), so the two never
-    /// disagree for longer than this call.
+    /// `record`, over whatever either held: every write of the identity
+    /// goes through here (the mint, and an identity brought over from
+    /// elsewhere). The secret is written first, so a write that fails
+    /// records nothing; a record that fails after it leaves the next load
+    /// [`Unavailability::Replaced`], never a mint.
     pub async fn store(
         &self,
         secrets: &dyn SecretStore,
@@ -282,10 +285,16 @@ pub trait FingerprintRecord: Send + Sync {
 /// Why the identity is unavailable rather than minted.
 #[derive(Debug, Error)]
 pub enum Unavailability {
+    /// The secret store's read failed (a locked keyring, a keyring still
+    /// asking the user); the error says why.
     #[error("the secret store could not be read ({0})")]
     Unreadable(BoxError),
+    /// The secret store holds no identity, though a fingerprint is
+    /// recorded or a phone is paired.
     #[error("the identity this computer's phones paired with is not in the secret store")]
     Missing,
+    /// The secret store's identity is not the one whose fingerprint is
+    /// recorded.
     #[error(
         "the secret store holds another identity than the one this computer's phones paired with"
     )]

@@ -366,3 +366,77 @@ async fn store_writes_the_identity_and_records_its_fingerprint() {
     let loaded = places.load("x").await.unwrap();
     assert_eq!(loaded.fingerprint(), identity.fingerprint());
 }
+
+/// `store` over another identity (an identity brought over from the Swift
+/// app replaces the minted one): the secret and the record both take the
+/// new one, and the next load finds it.
+#[tokio::test]
+async fn store_replaces_an_identity_and_a_fingerprint_recorded_before() {
+    let places = Places::new();
+    let first = places.load("x").await.unwrap();
+    let replacement = HandoverIdentity::mint("y", Utc::now()).unwrap();
+    replacement
+        .store(&places.secrets, &places.record)
+        .await
+        .unwrap();
+    assert_ne!(first.fingerprint(), replacement.fingerprint());
+    assert_eq!(places.record.get(), Some(hex(&replacement.fingerprint())));
+    assert_eq!(places.stored_pem(), Some(replacement.to_pem().unwrap()));
+    let loaded = places.load("x").await.unwrap();
+    assert_eq!(loaded.fingerprint(), replacement.fingerprint());
+}
+
+/// A record that cannot be read is an error, never "nothing recorded":
+/// nothing is minted over it.
+#[tokio::test]
+async fn a_record_that_cannot_be_read_mints_nothing() {
+    struct Damaged;
+    impl FingerprintRecord for Damaged {
+        fn recorded(&self) -> BoundaryResult<Option<String>> {
+            Err("the record does not parse".into())
+        }
+        fn record(&self, _fingerprint: &str) -> BoundaryResult<()> {
+            panic!("nothing is recorded");
+        }
+    }
+    let places = Places::new();
+    let error = HandoverIdentity::load_or_create(
+        &places.secrets,
+        &Damaged,
+        places.store(),
+        "x",
+        Utc::now(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, IdentityError::Record(_)), "{error}");
+    assert_eq!(places.stored_pem(), None, "nothing minted");
+}
+
+/// A mint whose write fails records nothing, so the next load may mint
+/// again instead of finding a fingerprint without its identity.
+#[tokio::test]
+async fn a_mint_whose_write_fails_records_nothing() {
+    struct Refusing;
+    #[steno_core::async_trait]
+    impl SecretStore for Refusing {
+        async fn secret(&self, _key: &SecretKey) -> BoundaryResult<Option<String>> {
+            Ok(None)
+        }
+        async fn set_secret(&self, _key: &SecretKey, _value: Option<&str>) -> BoundaryResult<()> {
+            Err("the keyring refused the write".into())
+        }
+    }
+    let places = Places::new();
+    let error = HandoverIdentity::load_or_create(
+        &Refusing,
+        &places.record,
+        places.store(),
+        "x",
+        Utc::now(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, IdentityError::Secrets(_)), "{error}");
+    assert_eq!(places.record.get(), None);
+}
