@@ -2032,7 +2032,7 @@ touch and admission lines; each fix is ported to Swift before cutover.
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
 - Announce, the same in both apps (`.plans/2026-10-08-handover-admission-ledger.md`,
-  #<v5>): `Engine::announce` and `HandoverEngine.announce` read the receipt, and the
+  #243): `Engine::announce` and `HandoverEngine.announce` read the receipt, and the
   admission ledger only where it decides something (no receipt, or one of other
   bytes). Bytes the ledger holds are answered 200 `complete` with every chunk
   listed, from a `complete` receipt saved for the announcing device with the
@@ -2717,7 +2717,7 @@ PR off `main`.
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
 | Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
 | On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
-| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and in another split restart it; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #<v5> | open |
+| Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and in another split restart it; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
