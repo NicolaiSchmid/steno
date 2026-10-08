@@ -333,6 +333,45 @@ final class MeetingDetailViewModelTests: XCTestCase {
     XCTAssertEqual(stored?.tags, ["ops", "q4"])
   }
 
+  // MARK: Process again
+
+  /// "Process again" is refused in words for a ready meeting and for a
+  /// failed one whose master is gone; on a failed meeting with its master
+  /// it enqueues the meeting again: the error line stays clear, the run
+  /// replaces the old failure, and the retention stamp the earlier run left
+  /// is gone, so a run that fails again keeps the audio.
+  func testProcessAgainRunsAFailedMeetingWithItsRecording() async throws {
+    let environment = try await TestSupport.environment()
+    let model = await makeModel(environment)
+    XCTAssertFalse(model.canProcessAgain, "ready")
+    await model.processAgain()
+    XCTAssertEqual(model.error, "Only a failed meeting can be processed again.")
+
+    let original = "Transcription failed: model not installed"
+    try await environment.store.setState(
+      .failed(reason: original), meetingID: SampleData.meetingID, now: TestSupport.now)
+    await TestSupport.waitUntil("failed observed") { model.meeting?.state.isFailed == true }
+    XCTAssertFalse(model.canProcessAgain, "the seed's master is not on disk")
+    await model.processAgain()
+    XCTAssertEqual(
+      model.error,
+      "The recording is no longer on this Mac, so the meeting cannot be processed again.")
+
+    let folder = try await placeMaster(
+      environment, retention: .keepDays(30), expiresAt: TestSupport.now.addingTimeInterval(86_400))
+    defer { try? FileManager.default.removeItem(at: folder) }
+    await TestSupport.waitUntil("master observed") { model.recordingFilesExist }
+    XCTAssertTrue(model.canProcessAgain)
+    await model.processAgain()
+    XCTAssertNil(model.error, model.error ?? "")
+    XCTAssertFalse(model.isBusy)
+    await environment.pipeline.waitUntilIdle()
+    let stored = try await environment.store.meeting(id: SampleData.meetingID)
+    XCTAssertNotEqual(stored?.state, .failed(reason: original), "the meeting ran again")
+    let asset = try await environment.store.asset(meetingID: SampleData.meetingID)
+    XCTAssertNil(asset?.expiresAt, "the earlier stamp is gone")
+  }
+
   // MARK: Setup status
 
   /// `summaryStatus` for a ready meeting with a summary, without one before
