@@ -2255,7 +2255,7 @@ mod tests {
     /// held past the busy timeout (here 1 s), quitting returns after one
     /// wait, where three tries would take 3 s (15 s at the product's 5 s
     /// timeout, past the exit's 10 s patience), and the meeting stays
-    /// `recording` for the next launch.
+    /// `recording` for the next launch, its folder still recorded.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_for_the_exit_tries_its_commit_once() {
         let harness = harness_over(
@@ -2276,10 +2276,7 @@ mod tests {
         let took = started.elapsed();
         drop(hold);
         assert!(took < std::time::Duration::from_secs(2), "{took:?}");
-        assert_eq!(
-            harness.store.meeting(meeting_id).unwrap().unwrap().state,
-            steno_core::MeetingState::Recording
-        );
+        assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
     }
 
     /// The meeting of `meeting_id` was kept for the next launch: its row
@@ -2328,6 +2325,23 @@ mod tests {
         // The stop's notice holds it 0.3 s ([`held_in`]), then one try.
         assert!(took < std::time::Duration::from_millis(2_500), "{took:?}");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
+    }
+
+    /// A stop that saves its recording forgets the folder recorded for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_saved_stop_forgets_the_recorded_folder() {
+        let harness = harness(&[]);
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let support = harness.dir.path().join("support");
+        assert!(
+            crate::audio_folders::recorded(&support)
+                .unwrap()
+                .contains_key(&meeting_id)
+        );
+        stop(&harness.recorder).await;
+        assert!(harness.store.asset(meeting_id).unwrap().is_some());
+        assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
     }
 
     /// A stop whose capture failed (the writer died and took the asset)
@@ -2409,6 +2423,38 @@ mod tests {
             stop(&harness.recorder).await;
             assert_kept(&harness, meeting_id, &audio);
         }
+    }
+
+    /// A start whose meeting cannot be written (the database held past the
+    /// busy timeout) forgets the folder it recorded first, and writes no
+    /// row; the folder stays known.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_whose_meeting_cannot_be_written_forgets_its_folder() {
+        let harness = harness(&[]);
+        harness
+            .store
+            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_millis(100))?))
+            .unwrap();
+        let hold =
+            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
+        let starting = harness.recorder.clone();
+        tokio::task::spawn_blocking(move || starting.start(CaptureMode::InPerson, None))
+            .await
+            .unwrap();
+        drop(hold);
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Idle);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("Recording could not start: Steno could not create the meeting.")
+        );
+        assert_eq!(harness.store.meetings(10, 0).unwrap(), Vec::new());
+        let support = harness.dir.path().join("support");
+        assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
+        assert_eq!(
+            crate::audio_folders::known(&support).unwrap(),
+            [harness.dir.path().join("audio")]
+        );
     }
 
     /// The recorder notes a recording's folder before the master exists:
