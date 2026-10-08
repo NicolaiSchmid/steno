@@ -393,12 +393,12 @@ enum KeyGate {
 
 impl std::fmt::Debug for KeyGate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            KeyGate::Closed => f.write_str("Closed"),
-            KeyGate::Read(None) => f.write_str("Read(None)"),
-            KeyGate::Read(Some(_)) => f.write_str("Read(Some(<redacted>))"),
-            KeyGate::Open => f.write_str("Open"),
-        }
+        f.write_str(match self {
+            KeyGate::Closed => "Closed",
+            KeyGate::Read(None) => "Read(None)",
+            KeyGate::Read(Some(_)) => "Read(Some(<redacted>))",
+            KeyGate::Open => "Open",
+        })
     }
 }
 
@@ -615,6 +615,12 @@ pub const DENIED_EXPORT: &str =
 /// The step's line when the export failed another way.
 pub const FAILED_EXPORT: &str = "Steno could not bring over this Mac's phone pairing.";
 
+/// The step's line for an export or store that macOS refused (`denied`)
+/// or that failed another way.
+fn export_error(denied: bool) -> &'static str {
+    if denied { DENIED_EXPORT } else { FAILED_EXPORT }
+}
+
 impl ImportStep {
     fn state(&self) -> MutexGuard<'_, StepState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -657,11 +663,7 @@ impl ImportStep {
             .export_identity(&certificate, &passphrase)
             .map_err(|refusal| {
                 tracing::warn!(%refusal, "the Swift handover identity was not exported");
-                if refusal.denied {
-                    DENIED_EXPORT
-                } else {
-                    FAILED_EXPORT
-                }
+                export_error(refusal.denied)
             })?;
         let (_, bundle) = decode_pkcs12(&pkcs12, &passphrase, &certificate).map_err(|error| {
             tracing::warn!(%error, "the exported Swift handover identity was refused");
@@ -688,11 +690,7 @@ impl ImportStep {
             tracing::warn!(%error, "the Swift handover identity was not stored");
             let mut state = self.state();
             state.bundle = Some(bundle);
-            if state.items.replaces_identity {
-                DENIED_EXPORT
-            } else {
-                FAILED_EXPORT
-            }
+            export_error(state.items.replaces_identity)
         })
     }
 }
