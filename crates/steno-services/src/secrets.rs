@@ -487,7 +487,10 @@ mod tests {
         assert_eq!(store.kept_api_key().as_deref(), Some("sk-1"));
 
         memory.fail_reads(Some("the keyring is locked"));
-        assert!(store.secret(&key).await.is_err(), "the failure passes through");
+        assert!(
+            store.secret(&key).await.is_err(),
+            "the failure passes through"
+        );
         assert_eq!(store.kept_api_key().as_deref(), Some("sk-1"));
         store.set_secret(&key, Some("sk-2")).await.unwrap();
         assert_eq!(store.kept_api_key().as_deref(), Some("sk-2"));
@@ -520,9 +523,15 @@ mod tests {
         assert!(refusing.set_secret(&key, Some("sk-2")).await.is_err());
         assert_eq!(refusing.kept_api_key(), None);
 
-        let (reading, release) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+        let (reading, release) = (
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(tokio::sync::Notify::new()),
+        );
         let slow = Arc::new(KeepsApiKey::new(Arc::new(SlowReads {
-            inner: steno_core::testing::InMemorySecretStore::with([(key.clone(), "sk-1".to_owned())]),
+            inner: steno_core::testing::InMemorySecretStore::with([(
+                key.clone(),
+                "sk-1".to_owned(),
+            )]),
             reading: reading.clone(),
             release: release.clone(),
         })));
@@ -533,7 +542,11 @@ mod tests {
         reading.notified().await;
         slow.set_secret(&key, None).await.unwrap();
         release.notify_one();
-        assert_eq!(read.await.unwrap().as_deref(), Some("sk-1"), "read before the removal");
+        assert_eq!(
+            read.await.unwrap().as_deref(),
+            Some("sk-1"),
+            "read before the removal"
+        );
         assert_eq!(slow.kept_api_key(), None, "the removal wins");
     }
 

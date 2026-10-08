@@ -1111,7 +1111,10 @@ fn a_reread_gives_way_to_a_later_load_but_not_to_a_model_only_save() {
         KeyRead::Present("sk-new".to_owned()),
     );
     model.reload_key(services, KeyRead::Present("sk-old".to_owned()), read_at);
-    assert_eq!(model.api_key, "sk-new", "the load came after the read began");
+    assert_eq!(
+        model.api_key, "sk-new",
+        "the load came after the read began"
+    );
 
     let mut settings = harness.store.settings().unwrap();
     settings.llm_provider = LlmProvider::Endpoint;
@@ -1128,11 +1131,7 @@ fn a_reread_gives_way_to_a_later_load_but_not_to_a_model_only_save() {
         harness.store.settings().unwrap().llm_model.as_deref(),
         Some("gpt-other")
     );
-    model.reload_key(
-        services,
-        KeyRead::Present("sk-stored".to_owned()),
-        read_at,
-    );
+    model.reload_key(services, KeyRead::Present("sk-stored".to_owned()), read_at);
     assert_eq!(model.api_key, "sk-stored", "the model-only save kept it");
     assert!(model.has_stored_api_key());
     assert_eq!(model.errors.error, None, "the unreadable message went");
@@ -1161,9 +1160,7 @@ impl Hold {
         let state = self.state.lock().unwrap();
         let (_state, timeout) = self
             .changed
-            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
-                !state.1
-            })
+            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| !state.1)
             .unwrap();
         assert!(!timeout.timed_out(), "no read was held");
     }

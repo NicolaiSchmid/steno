@@ -2039,7 +2039,12 @@ mod tests {
         }
 
         fn interrupted_state(&self) -> steno_core::MeetingState {
-            self.app.store.meeting(self.interrupted).unwrap().unwrap().state
+            self.app
+                .store
+                .meeting(self.interrupted)
+                .unwrap()
+                .unwrap()
+                .state
         }
 
         /// Waits until the crash recovery ran, which ends the reread.
@@ -2354,9 +2359,7 @@ mod tests {
             known_people: Vec::new(),
         };
         let _ = cleaner.clean(&input).await;
-        server.requests()[before]
-            .authorization()
-            .map(str::to_owned)
+        server.requests()[before].authorization().map(str::to_owned)
     }
 
     /// A keyring locked again while the app runs fails a rebuild's read
