@@ -788,13 +788,13 @@ import Testing
         """) + String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations")
   }
 
-  /// A durable checkpoint starts the WAL over: the file was truncated, and
-  /// its header has a new salt, so recovery after a power loss replays none
-  /// of the frames written before it. The write that restarts it is the
-  /// checkpoint's only commit and runs under `synchronous = FULL` (2), and
-  /// it leaves the schema and the applied migrations as they were.
-  /// Rust: `a_durable_checkpoint_restarts_the_wal`, and
-  /// `the_wal_restart_write_commits_under_full` in `store/mod.rs`.
+  /// A durable checkpoint starts the WAL over: the file was truncated, so it
+  /// holds only the frames written since, under a header with a new salt, and
+  /// recovery after a power loss replays none of the frames before it. The
+  /// write that restarts it is the checkpoint's only commit and runs under
+  /// `synchronous = FULL` (2), and it leaves the schema and the applied
+  /// migrations as they were. Rust: `a_durable_checkpoint_restarts_the_wal`,
+  /// and `the_wal_restart_write_commits_under_full` in `store/mod.rs`.
   @Test func aDurableCheckpointRestartsTheWAL() async throws {
     let directory = try Fixtures.temporaryDirectory()
     defer { try? FileManager.default.removeItem(at: directory) }
@@ -802,15 +802,25 @@ import Testing
     let store = try MeetingStore.onDisk(at: url)
     try await store.save(SampleData.meeting())
     let salt = try Self.walSalt(url)
-    let length = try Self.walFile(url).count
     let schema = try await store.writer.read(Self.schema)
     let log = try await CommitLog.install(on: store)
 
     try await store.checkpointDurably()
 
     #expect(try Self.walSalt(url) != salt, "the WAL restarted")
-    #expect(try Self.walFile(url).count < length, "the WAL file was truncated before the write")
     #expect(log.commits == [CommitLog.Commit(synchronous: 2, tables: [])])
+    // A passive checkpoint answers with the frames in the WAL and leaves the
+    // file as it is. Apple's SQLite cuts a restarted WAL down to 32 KiB
+    // (`journal_size_limit`), so only the exact length shows the truncation.
+    let (frames, _) = try await store.writer.writeWithoutTransaction { db in
+      try db.checkpoint(.passive)
+    }
+    let pageSize = try await store.writer.read { db in
+      try Int.fetchOne(db, sql: "PRAGMA page_size") ?? 0
+    }
+    #expect(
+      try Self.walFile(url).count == 32 + frames * (24 + pageSize),
+      "the WAL file holds the header and the write's frames only: it was truncated first")
     #expect(try await store.writer.read(Self.schema) == schema)
     #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
   }

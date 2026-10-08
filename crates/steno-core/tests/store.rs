@@ -853,11 +853,11 @@ fn wal_salt(database: &std::path::Path) -> Vec<u8> {
         .to_vec()
 }
 
-/// A durable checkpoint starts the WAL over: the file was truncated, and
-/// its header has a new salt, so recovery after a power loss replays none
-/// of the frames written before it. The write that restarts it leaves the
-/// schema and the applied migrations as they were. Swift:
-/// `aDurableCheckpointRestartsTheWAL`.
+/// A durable checkpoint starts the WAL over: the file was truncated, so it
+/// holds only the frames written since, under a header with a new salt, and
+/// recovery after a power loss replays none of the frames before it. The
+/// write that restarts it leaves the schema and the applied migrations as
+/// they were. Swift: `aDurableCheckpointRestartsTheWAL`.
 #[test]
 fn a_durable_checkpoint_restarts_the_wal() {
     let dir = tempfile::tempdir().unwrap();
@@ -865,22 +865,30 @@ fn a_durable_checkpoint_restarts_the_wal() {
     let store = Store::open(&path).unwrap();
     store
         .write(|transaction| {
-            transaction.execute_batch(
-                "CREATE TABLE probe(x); INSERT INTO probe VALUES (zeroblob(65536));",
-            )?;
+            transaction.execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (42);")?;
             Ok(())
         })
         .unwrap();
     let salt = wal_salt(&path);
-    let length = wal_file(&path).len();
     let schema = store.schema_dump().unwrap();
 
     store.checkpoint_durably().unwrap();
 
     assert_ne!(wal_salt(&path), salt, "the WAL restarted");
-    assert!(
-        wal_file(&path).len() < length,
-        "the WAL file was truncated before the write"
+    // A passive checkpoint answers with the frames in the WAL and leaves
+    // the file as it is.
+    let (frames, page_size): (i64, i64) = store
+        .read(|connection| {
+            let frames =
+                connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(1))?;
+            let page_size = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+            Ok((frames, page_size))
+        })
+        .unwrap();
+    assert_eq!(
+        i64::try_from(wal_file(&path).len()).unwrap(),
+        32 + frames * (24 + page_size),
+        "the WAL file holds the header and the write's frames only: it was truncated first"
     );
     assert_eq!(store.schema_dump().unwrap(), schema);
     assert_eq!(store.read(sync_levels).unwrap(), (1, false));
