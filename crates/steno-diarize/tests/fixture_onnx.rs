@@ -28,14 +28,11 @@ fn fixture(name: &str) -> AudioBuffer16k {
     AudioBuffer16k::new(samples)
 }
 
-fn store() -> ModelStore {
-    ModelStore::from_environment()
-}
-
 #[test]
 #[ignore = "needs the ONNX model files (STENO_MODELS_DIR or a download)"]
 fn two_voices_fixture_gives_two_speakers() {
-    let backend = OnnxBackend::from_store(&store(), 2).expect("backend loads");
+    let backend =
+        OnnxBackend::from_store(&ModelStore::from_environment(), 2).expect("backend loads");
     let mut pipeline = Pipeline::new(backend, DiarizerConfig::default());
     let audio = fixture("two-speakers-mf.wav");
     let result = pipeline.diarize(&audio).expect("diarizes");
@@ -60,7 +57,8 @@ fn two_voices_fixture_gives_two_speakers() {
 #[test]
 #[ignore = "needs the ONNX model files (STENO_MODELS_DIR or a download)"]
 fn the_segmentation_model_reports_pyannotes_geometry() {
-    let backend = OnnxBackend::from_store(&store(), 2).expect("backend loads");
+    let backend =
+        OnnxBackend::from_store(&ModelStore::from_environment(), 2).expect("backend loads");
     let geometry = steno_diarize::DiarizationBackend::geometry(&backend);
     assert_eq!(geometry, &steno_diarize::SegmentationGeometry::PYANNOTE_3_0);
     assert_eq!(backend.embedding_dimension(), 256);

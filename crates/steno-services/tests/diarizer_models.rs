@@ -107,10 +107,12 @@ fn answer(
     };
     let mut out = stream;
     let not_found = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    if !healthy.load(Ordering::SeqCst) {
-        if !first {
-            return out.write_all(not_found);
-        }
+    let healthy = healthy.load(Ordering::SeqCst);
+    if !healthy && !first {
+        return out.write_all(not_found);
+    }
+    let bytes = served.and_then(|root| std::fs::read(root.join(&path)).ok());
+    if !healthy {
         // The size the manifest declares, so the store takes the cut for
         // a dropped connection, not for a short file.
         let size = models::asset()
@@ -118,9 +120,7 @@ fn answer(
             .iter()
             .find(|file| path.ends_with(&file.name))
             .map_or(CUT_AFTER * 2, |file| usize::try_from(file.size).unwrap());
-        let body = served
-            .and_then(|root| std::fs::read(root.join(&path)).ok())
-            .unwrap_or_else(|| vec![0; size]);
+        let body = bytes.unwrap_or_else(|| vec![0; size]);
         write!(
             out,
             "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\nConnection: close\r\n\r\n"
@@ -129,7 +129,7 @@ fn answer(
         out.flush()?;
         return stream.shutdown(Shutdown::Both);
     }
-    let Some(body) = served.and_then(|root| std::fs::read(root.join(&path)).ok()) else {
+    let Some(body) = bytes else {
         return out.write_all(not_found);
     };
     let start = range

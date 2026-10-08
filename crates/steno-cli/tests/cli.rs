@@ -596,14 +596,8 @@ fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
     // its manifest size.
     let diarization = models.join("onnx").join("diarization");
     std::fs::create_dir_all(&diarization).unwrap();
-    let asset = steno_diarize::models::asset();
-    let diarizer_files: Vec<_> = asset
-        .files
-        .iter()
-        .map(|file| diarization.join(&file.name))
-        .collect();
-    for (path, file) in diarizer_files.iter().zip(&asset.files) {
-        std::fs::File::create(path)
+    for file in &steno_diarize::models::asset().files {
+        std::fs::File::create(diarization.join(&file.name))
             .unwrap()
             .set_len(file.size)
             .unwrap();
@@ -629,10 +623,7 @@ fn dev_models_lists_and_removes_in_the_models_dir_it_is_given() {
         list.stdout
     );
     dev_models(home, &["remove", "offlineDiarizer"]);
-    assert!(
-        diarizer_files.iter().all(|file| !file.exists()),
-        "removed from --models-dir"
-    );
+    assert!(!diarization.exists(), "removed from --models-dir");
     // Removing an asset that is not installed succeeds.
     dev_models(home, &["remove", "parakeetV3"]);
 }
