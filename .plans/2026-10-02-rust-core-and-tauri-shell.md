@@ -1399,13 +1399,20 @@ still has to draw the window side. `[ ]` is not ported yet.
   to start over: `enqueue` or `reprocess` clears the count. A file, not a column, so
   no migration; it is kept only in a folder named after the meeting's id, so two
   meetings never share one.
-- "Process again": its pipeline entry point, `ProcessingPipeline::reprocess`, has
-  landed (refused with a typed `ReprocessError` when the meeting is unfinished or
-  busy, its master is gone, or the app is quitting; it drops the retention stamp an
-  earlier run left, so a retry that fails keeps the audio, and the retention sweep
-  checks each asset again in the write that removes its files, so a meeting queued
-  after the sweep read its list keeps its audio); the bridge method, its button and
-  `steno process --meeting` are P9 in `.plans/2026-10-07-stable-promotion.md`.
+- "Process again" (P9 in `.plans/2026-10-07-stable-promotion.md`): its pipeline
+  entry point, `ProcessingPipeline::reprocess`, is refused with a typed
+  `ReprocessError` when the meeting is unfinished or busy, its master is gone, or
+  the app is quitting; it drops the retention stamp an earlier run left, so a retry
+  that fails keeps the audio, and the retention sweep checks each asset again in the
+  write that removes its files, so a meeting queued after the sweep read its list
+  keeps its audio. The bridge method `meeting.processAgain` (no params, on the
+  selected meeting) is answered through the host's `Pipeline::process_again`, whose
+  `ProcessAgainRefusal` the detail words on its error line (nothing while the app
+  quits); the page offers the button on a failed meeting while
+  `retention.filesExist`, so the snapshot gained no field. The Swift app answers the
+  method too, from its own `enqueue` with the stored asset and its stamp cleared, so
+  the button works there during the rollback window; Swift had no such action
+  before. `steno process --meeting <id>` is Rust only.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
   under 5 % of the mic lane's speech and under ten seconds is diarized on the mic lane
   (`pipeline::diarized_lane_after_transcription`, `tap_carried_no_conversation`); the
