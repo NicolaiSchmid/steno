@@ -93,12 +93,11 @@ extension HandoverEngine {
     // No live upload of another device can be in them. A device's
     // recording routes read its receipt into memory before they touch a
     // file, and memory drops it only when that device is revoked, so only
-    // a revoked device's request can still be at work on them. The phone
-    // deletes its copy only on a 200 from `complete`, and such a request
-    // answers a refusal, an error or a re-announce's status, after which
-    // the phone keeps its recording, or the 200 of an admission whose
-    // intake opened the verified file before the discard and copies it
-    // whole.
+    // a revoked device's request can still be at work on them. Such a
+    // request answers a refusal, an error or a re-announce's status, and
+    // the phone deletes its copy only on a 200 from `complete`, so it keeps
+    // its recording; or it answers the 200 of an admission whose intake
+    // opened the verified file before the discard and copies it whole.
     inbox.discard(recordingID)
     do {
       try inbox.begin(metadata)

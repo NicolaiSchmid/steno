@@ -295,10 +295,10 @@ pub struct Engine {
     pub inbox: Inbox,
     receipts: watch::Sender<Vec<HandoverReceipt>>,
     state: Mutex<State>,
-    /// Held while a recording's inbox files are created (from a first
-    /// announce's `change` through [`Engine::open_files`], and
-    /// [`Engine::reopen_missing_files`]) and while
-    /// [`Engine::discard_own`], [`Engine::discard_own_while_revoked`] and
+    /// Held while a recording's inbox files are created
+    /// ([`Engine::open_files`], from a first announce's `change`;
+    /// [`Engine::reopen_missing_files`]) and while [`Engine::discard_own`],
+    /// [`Engine::discard_own_while_revoked`] and
     /// [`Engine::discard_and_forget_own`] check memory and discard; see
     /// there. Swift: none; the actor runs the check, `begin` and the
     /// receipt in one step.
@@ -758,12 +758,14 @@ impl Engine {
 
     /// Opens the files of the receipt a first announce (one whose read found
     /// no receipt in memory or the store) just made for `device_id`: an
-    /// empty partial and the metadata sidecar. The caller holds `files`
-    /// from before that `change` until this returns, so no file is created
-    /// or discarded in between ([`Engine::discard_own`]). `None`, with
-    /// nothing opened, when memory no longer holds this device's receipt:
-    /// the device was revoked since its receipt read, and memory holds none
-    /// or, once it paired again, a receipt another request wrote back.
+    /// empty partial and the metadata sidecar. `_files` is the caller's
+    /// guard of the files lock, passed so the signature proves the lock is
+    /// held; the caller holds it from before that `change` until this
+    /// returns, so no file is created or discarded in between
+    /// ([`Engine::discard_own`]). `None`, with nothing opened, when memory
+    /// no longer holds this device's receipt: the device was revoked since
+    /// its receipt read, and memory holds none or, once it paired again,
+    /// another device's receipt.
     ///
     /// Every file of the recording id goes first. Whatever is there belongs
     /// to no receipt: a verified file left by an intake failure whose
@@ -776,10 +778,10 @@ impl Engine {
     /// recording routes read its receipt into memory before they touch a
     /// file, and memory drops it only when that device is revoked. `change`
     /// made this receipt only because memory held none, so only a revoked
-    /// device's request can still be at work on them. The phone deletes its
-    /// copy only on a 200 from `complete`, and such a request answers a
-    /// refusal, an error or a re-announce's status, after which the phone
-    /// keeps its recording, or the 200 of an admission whose intake opened
+    /// device's request can still be at work on them. Such a request
+    /// answers a refusal, an error or a re-announce's status, and the phone
+    /// deletes its copy only on a 200 from `complete`, so it keeps its
+    /// recording; or it answers the 200 of an admission whose intake opened
     /// the verified file before the discard and copies it whole (the open
     /// file outlives its name).
     ///
@@ -930,8 +932,8 @@ impl Engine {
     /// no place is taken and its `Err` comes back. If the read and the
     /// write were two steps, two requests on two threads could start from
     /// the same copy, and the later one would drop the other's change in
-    /// memory and in the store. The clock is read before the guard, so a
-    /// slow clock never holds the lock.
+    /// memory and in the store. The clock is read before the state guard,
+    /// so a slow clock never holds the state lock.
     fn change<Declined>(
         &self,
         recording_id: Uuid,
