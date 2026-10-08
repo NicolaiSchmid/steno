@@ -597,11 +597,18 @@ impl CaptureRecorder {
                 started_at,
             )
             .map_err(|e| e.to_string())?;
+        let begun = BegunMeeting {
+            intake: &intake,
+            meeting_id: meeting.id,
+            session: Some(session.clone()),
+            folder: steno_core::RecordingLayout::new(&audio_folder, meeting.id).directory,
+        };
         let levels_receiver = session.levels();
         let notices = session.notices();
         // Before the start, so a failure right after it is not missed.
         let states = session.states();
         if let Err(error) = session.start(meeting.id) {
+            begun.disarm();
             let _ = intake.fail(meeting.id, &format!("Recording could not start: {error}"));
             return Err(error.to_string());
         }
@@ -643,6 +650,7 @@ impl CaptureRecorder {
                 },
             });
         }
+        begun.disarm();
         // Not joined: it may be the thread that finishes the recording,
         // and it ends on its own once the session is gone.
         let this = self.this.clone();
@@ -935,6 +943,40 @@ impl Drop for Unwinding<'_> {
     }
 }
 
+/// Held through a start from the moment its meeting is begun until it
+/// records: if the start unwinds (a panic in the session's start, or after
+/// it), the drop stops the session, which closes the files its writer
+/// made, removes the meeting's folder, as the session does when its
+/// backend does not start, and marks the meeting failed, so neither a
+/// `recording` row nor a folder of empty files is left of a start the
+/// user was told did not happen. Rust only.
+struct BegunMeeting<'a> {
+    intake: &'a LocalRecordingIntake,
+    meeting_id: Uuid,
+    /// The session being started; `None` once the start is through.
+    session: Option<Arc<CaptureSession>>,
+    folder: PathBuf,
+}
+
+impl BegunMeeting<'_> {
+    fn disarm(mut self) {
+        self.session = None;
+    }
+}
+
+impl Drop for BegunMeeting<'_> {
+    fn drop(&mut self) {
+        let Some(session) = self.session.take() else {
+            return;
+        };
+        // An error here is the session's state after its own guard.
+        let _ = session.stop();
+        drop(session);
+        let _ = std::fs::remove_dir_all(&self.folder);
+        let _ = self.intake.fail(self.meeting_id, START_PANICKED);
+    }
+}
+
 /// The status line of a stop that a fault inside Steno cut short.
 const SAVE_PANICKED: &str = "Steno ran into a problem while saving the recording.";
 
@@ -980,8 +1022,8 @@ impl Recorder for CaptureRecorder {
             inner.status.error = None;
             inner.status.warning = None;
         }
-        // A meeting row a panicking start had begun stays `recording`
-        // until the next launch fails it as interrupted.
+        // A meeting a panicking start had begun is failed on the way
+        // ([`BegunMeeting`]).
         let unwinding = Unwinding::of(self, RecordingState::Starting, START_PANICKED);
         self.notify();
         match self.start_inner(mode, call_app) {
@@ -2216,6 +2258,45 @@ mod tests {
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Idle);
         assert_eq!(status.error.as_deref(), Some(START_PANICKED));
+        start(&harness.recorder).await;
+        stop(&harness.recorder).await;
+    }
+
+    /// A start that panics once its meeting is begun and its writer made
+    /// the files (here the backend's start, once it runs) fails the
+    /// meeting and leaves no folder, and the next recording starts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_start_that_panics_after_the_meeting_began_fails_it_and_leaves_no_folder() {
+        let harness = harness(&[]);
+        harness.capture_with(failing_capture(
+            None,
+            SyntheticOptions::start_panics_once_running,
+        ));
+        let starter = harness.recorder.clone();
+        let starting = std::thread::spawn(move || starter.start(CaptureMode::InPerson, None));
+        assert!(starting.join().is_err(), "the start panicked");
+        let status = harness.recorder.status();
+        assert_eq!(status.state, RecordingState::Idle);
+        assert_eq!(status.error.as_deref(), Some(START_PANICKED));
+        let meetings = harness.store.all_meetings().unwrap();
+        let [meeting] = meetings.as_slice() else {
+            panic!("one meeting: {meetings:?}");
+        };
+        assert_eq!(
+            meeting.state,
+            steno_core::MeetingState::Failed {
+                reason: START_PANICKED.to_owned()
+            }
+        );
+        let audio_folder =
+            steno_core::paths::file_url_path(&harness.store.settings().unwrap().audio_folder)
+                .unwrap();
+        assert!(
+            !steno_core::RecordingLayout::new(&audio_folder, meeting.id)
+                .directory
+                .exists()
+        );
+        harness.capture_with(synthetic_capture());
         start(&harness.recorder).await;
         stop(&harness.recorder).await;
     }
