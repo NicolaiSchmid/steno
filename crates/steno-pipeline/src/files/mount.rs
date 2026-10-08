@@ -266,7 +266,7 @@ mod tests {
     /// NFS, the three SMB clients and the other network file systems warn;
     /// local file systems do not.
     #[test]
-    fn linux_nfs_and_smb_warn_and_local_file_systems_do_not() {
+    fn linux_network_file_systems_warn_and_local_ones_do_not() {
         let unread =
             || -> Option<Mount> { panic!("read the mount of a file system that is not FUSE") };
         for magic in [
@@ -287,8 +287,8 @@ mod tests {
         ] {
             assert!(is_a_linux_network_file_system(magic, unread), "{magic:#x}");
         }
-        // ext4, btrfs, xfs, tmpfs, overlayfs, and balloon-kvm-fs, whose
-        // number has been mistaken for OrangeFS's.
+        // ext4, btrfs, xfs, tmpfs, overlayfs and balloon-kvm-fs
+        // (`0x13661366`), a local one.
         for magic in [
             0xEF53,
             0x9123_683E,
@@ -298,6 +298,24 @@ mod tests {
             0x1366_1366,
         ] {
             assert!(!is_a_linux_network_file_system(magic, unread), "{magic:#x}");
+        }
+    }
+
+    /// The magic numbers libc names as well match its values, so a typo in
+    /// one, `FUSE_SUPER_MAGIC` above all, fails here. libc names none of
+    /// the others.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_magic_numbers_libc_names_match_it() {
+        for (ours, libc) in [
+            (NFS_SUPER_MAGIC, libc::NFS_SUPER_MAGIC),
+            (SMB_SUPER_MAGIC, libc::SMB_SUPER_MAGIC),
+            (AFS_SUPER_MAGIC, libc::AFS_SUPER_MAGIC),
+            (CODA_SUPER_MAGIC, libc::CODA_SUPER_MAGIC),
+            (NCP_SUPER_MAGIC, libc::NCP_SUPER_MAGIC),
+            (FUSE_SUPER_MAGIC, libc::FUSE_SUPER_MAGIC),
+        ] {
+            assert_eq!(Ok(ours), u32::try_from(libc), "{ours:#x}");
         }
     }
 
@@ -425,8 +443,11 @@ mod tests {
         for name in ["apfs", "unlisted"] {
             assert!(is_a_macos_network_file_system(name, trigger), "{name}");
         }
-        // APFS as read on the same host: `MNT_LOCAL` set.
+        // APFS volumes as read on the same host: `MNT_LOCAL` set. The data
+        // volume's flags hold neither `0x1` nor `0x4000`, so a wrong
+        // `MNT_LOCAL` fails here on every platform.
         assert!(!is_a_macos_network_file_system("apfs", 0x4480_D001));
+        assert!(!is_a_macos_network_file_system("apfs", 0x0490_9080));
     }
 
     /// The NUL ends the type name in its buffer.

@@ -43,6 +43,10 @@ windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem", "Win32
 # Settings warns about (`files::mount`).
 rustix.workspace = true
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+# Pins the Linux magic numbers `files::mount` names to libc's values.
+libc.workspace = true
+
 [dev-dependencies]
 steno-core = { path = "../steno-core", features = ["testing"] }
 steno-pipeline = { path = ".", features = ["testing"] }
