@@ -4,7 +4,9 @@
 //! thread that drains the rings in 10 ms frames (converting a device that
 //! does not run at 48 kHz on the way), the relay to the writer thread, and
 //! the first callback's time (`first_callback`).
-//! Nothing here allocates or locks once constructed.
+//! Nothing here allocates or locks once constructed, except
+//! [`first_callback_line`], the log line `stop()` formats off the audio
+//! thread beside the mark it reads.
 //! Swift: `Sources/StenoAudio/RealTime/`.
 
 pub mod first_callback;

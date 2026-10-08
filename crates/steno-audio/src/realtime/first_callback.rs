@@ -58,7 +58,7 @@ impl FirstCallback {
     /// The first callback's offset from `started` (a host time taken just
     /// before the device was started), `to_nanos` turning the clock's ticks
     /// into nanoseconds; `None` when no callback came. A callback stamped
-    /// before `started` counts as no offset.
+    /// before `started` counts as an offset of 0.
     #[must_use]
     pub fn offset(&self, started: u64, to_nanos: impl Fn(u64) -> u64) -> Option<Duration> {
         let first = self.host_time()?;

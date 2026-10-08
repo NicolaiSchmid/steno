@@ -22,9 +22,12 @@
 //! they land below 7 kHz (-67 dB at 6.9 to 7.0 kHz, under -90 dB below
 //! 6.8 kHz), but its transition band (cutoff 0.45 of 16 kHz, 64 taps)
 //! folds 8 to 9 kHz into 7 to 8 kHz at -21 to -58 dB. That band is above
-//! the flat passband (0.3 dB to 6 kHz), and `steno-speech`'s
-//! `fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k` measures
-//! what it costs a transcript.
+//! the flat passband (0.3 dB to 6 kHz). What the fold costs a transcript
+//! is unmeasured: `steno-speech`'s
+//! `fleurs_wer_from_44k1_is_at_most_a_tenth_of_a_point_over_48k` starts
+//! from 16 kHz recordings, so neither lane carries anything above 7.2 kHz
+//! there. Whether the fold is acceptable rests on this sweep alone (stable
+//! plan D9).
 
 #![allow(
     clippy::cast_precision_loss,

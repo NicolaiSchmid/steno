@@ -444,7 +444,7 @@ pub struct Onsets {
     /// Look from this many seconds into each file.
     #[arg(long, default_value_t = 0.0, allow_negative_numbers = true)]
     pub after: f64,
-    /// The level, in dBFS, the first sample louder than which is the onset.
+    /// The onset is the first sample louder than this, in dBFS.
     #[arg(long, default_value_t = -30.0, allow_negative_numbers = true)]
     pub threshold: f64,
 }
