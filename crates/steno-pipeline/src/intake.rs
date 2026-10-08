@@ -327,7 +327,7 @@ pub struct LocalRecordingIntake {
     enqueue: Enqueue,
     now: Now,
     zone: FixedOffset,
-    keep_trying: Arc<dyn Fn() -> bool + Send + Sync>,
+    keep_trying: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 impl LocalRecordingIntake {
@@ -338,7 +338,7 @@ impl LocalRecordingIntake {
             enqueue,
             now,
             zone,
-            keep_trying: Arc::new(|| true),
+            keep_trying: Box::new(|| true),
         }
     }
 
@@ -352,7 +352,7 @@ impl LocalRecordingIntake {
         mut self,
         keep_trying: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Self {
-        self.keep_trying = Arc::new(keep_trying);
+        self.keep_trying = Box::new(keep_trying);
         self
     }
 

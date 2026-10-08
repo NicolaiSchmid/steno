@@ -301,7 +301,7 @@ const FILES_NOT_FINISHED: &str =
 const MEETING_NOT_STORED: &str = "Recording could not be saved: Steno could not store the meeting.";
 
 /// Why a stop did not save its recording.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 enum Unsaved {
     /// The recording stays on disk and its meeting `recording`, for the
     /// next launch to recover ([`KEPT_FOR_THE_NEXT_LAUNCH`]).
