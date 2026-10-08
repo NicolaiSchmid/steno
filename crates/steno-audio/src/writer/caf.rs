@@ -14,7 +14,8 @@ use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::bytes::{ReadAt, WindowedFile};
-use super::{durable, io_error};
+use super::durable::{self, FullSyncs};
+use super::io_error;
 use crate::capture::CaptureError;
 
 /// Streams Float32 PCM into a CAF whose data size stays -1 until `finish`;
@@ -27,6 +28,7 @@ pub struct CafStreamWriter {
     file: Option<File>,
     /// Interleaved frames as little-endian bytes, reused per write.
     scratch: Vec<u8>,
+    syncs: FullSyncs,
 }
 
 impl std::fmt::Debug for CafStreamWriter {
@@ -77,7 +79,15 @@ impl CafStreamWriter {
             frames_written: 0,
             file: Some(file),
             scratch: Vec::new(),
+            syncs: FullSyncs::DISK,
         })
+    }
+
+    /// The writer, its syncs made through `syncs`.
+    #[cfg(test)]
+    fn syncing_through(mut self, syncs: FullSyncs) -> Self {
+        self.syncs = syncs;
+        self
     }
 
     /// Where it writes.
@@ -130,7 +140,7 @@ impl CafStreamWriter {
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file
             .as_ref()
-            .map_or(Ok(()), |file| durable::sync(file, File::sync_data))
+            .map_or(Ok(()), |file| durable::sync(file, self.syncs.periodic))
     }
 
     /// Patches the data chunk size (edit count plus samples), flushes and
@@ -146,7 +156,7 @@ impl CafStreamWriter {
             .map_err(|e| io_error(&self.path, &e))?;
         file.write_all(&size.to_be_bytes())
             .map_err(|e| io_error(&self.path, &e))?;
-        durable::sync(&file, File::sync_all).map_err(|e| io_error(&self.path, &e))?;
+        durable::sync(&file, self.syncs.close).map_err(|e| io_error(&self.path, &e))?;
         Ok(())
     }
 
@@ -492,4 +502,51 @@ fn be_u32(data: &[u8], offset: usize) -> u32 {
 
 fn be_u64(data: &[u8], offset: usize) -> u64 {
     u64::from_be_bytes(data[offset..offset + 8].try_into().unwrap_or([0; 8]))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// Every `sync` is one full sync of the data, through `durable`'s
+    /// fallback, and `finish` one of everything (P21: a frame synced is on
+    /// the disk, not in the page cache a kill keeps); nothing syncs after
+    /// `finish`.
+    #[test]
+    fn each_sync_is_one_full_sync_and_the_finish_one_more() {
+        static PERIODIC: AtomicUsize = AtomicUsize::new(0);
+        static CLOSE: AtomicUsize = AtomicUsize::new(0);
+        let syncs = FullSyncs {
+            periodic: |file| {
+                PERIODIC.fetch_add(1, Ordering::SeqCst);
+                file.sync_data()
+            },
+            close: |file| {
+                CLOSE.fetch_add(1, Ordering::SeqCst);
+                file.sync_all()
+            },
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("recording.caf");
+        let mut writer = CafStreamWriter::create(&path, 48_000.0, 2)
+            .unwrap()
+            .syncing_through(syncs);
+        for synced in 1..=3 {
+            writer.write(&[0.25; 960], 480).unwrap();
+            writer.sync().unwrap();
+            assert_eq!(PERIODIC.load(Ordering::SeqCst), synced);
+        }
+        assert_eq!(CLOSE.load(Ordering::SeqCst), 0);
+        writer.finish().unwrap();
+        writer.sync().unwrap();
+        assert_eq!(
+            (
+                PERIODIC.load(Ordering::SeqCst),
+                CLOSE.load(Ordering::SeqCst)
+            ),
+            (3, 1)
+        );
+    }
 }

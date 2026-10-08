@@ -1,5 +1,6 @@
 //! The one sync every recording file goes through, the writer thread's
-//! periodic one and both closes: the full sync first and, on the Mac, a
+//! periodic one, both closes and crash recovery's patch of a sidecar
+//! (`WavStreamWriter::recover`): the full sync first and, on the Mac, a
 //! plain `fsync` when the filesystem refuses it. `File::sync_data` and
 //! `File::sync_all` are `F_FULLFSYNC` there, which a network share can
 //! refuse (a WebDAV mount answers ENOTTY, an uncategorized error kind)
@@ -16,7 +17,25 @@ use std::fs::File;
 use std::io;
 
 /// A sync of an open file.
-type SyncFn = fn(&File) -> io::Result<()>;
+pub(crate) type SyncFn = fn(&File) -> io::Result<()>;
+
+/// The full syncs a file writer passes to [`sync`]: `File::sync_data` for
+/// its periodic sync (the samples and the size), `File::sync_all` when it
+/// closes. The writers' tests swap in syncs that count, so a writer sync
+/// that skips its full sync fails a test.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FullSyncs {
+    pub(crate) periodic: SyncFn,
+    pub(crate) close: SyncFn,
+}
+
+impl FullSyncs {
+    /// The product's.
+    pub(crate) const DISK: Self = Self {
+        periodic: File::sync_data,
+        close: File::sync_all,
+    };
+}
 
 /// What [`sync`] tries when the full sync fails.
 #[cfg(target_os = "macos")]

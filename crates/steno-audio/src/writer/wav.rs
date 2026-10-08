@@ -8,7 +8,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use super::bytes::{ReadAt, WindowedFile};
-use super::{durable, io_error};
+use super::durable::{self, FullSyncs};
+use super::io_error;
 use crate::capture::CaptureError;
 
 /// Streams 16 kHz mono Int16 PCM into a RIFF/WAVE file: header with zero
@@ -21,6 +22,7 @@ pub struct WavStreamWriter {
     samples_written: usize,
     file: Option<File>,
     scratch: Vec<u8>,
+    syncs: FullSyncs,
 }
 
 impl std::fmt::Debug for WavStreamWriter {
@@ -56,7 +58,15 @@ impl WavStreamWriter {
             samples_written: 0,
             file: Some(file),
             scratch: Vec::new(),
+            syncs: FullSyncs::DISK,
         })
+    }
+
+    /// The writer, its syncs made through `syncs`.
+    #[cfg(test)]
+    fn syncing_through(mut self, syncs: FullSyncs) -> Self {
+        self.syncs = syncs;
+        self
     }
 
     /// Where it writes.
@@ -104,7 +114,7 @@ impl WavStreamWriter {
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file
             .as_ref()
-            .map_or(Ok(()), |file| durable::sync(file, File::sync_data))
+            .map_or(Ok(()), |file| durable::sync(file, self.syncs.periodic))
     }
 
     /// Patches the sizes, syncs and closes; once.
@@ -116,7 +126,7 @@ impl WavStreamWriter {
             .map_err(|e| io_error(&self.path, &e))?;
         file.write_all(&Self::header(self.sample_rate, self.samples_written))
             .map_err(|e| io_error(&self.path, &e))?;
-        durable::sync(&file, File::sync_all).map_err(|e| io_error(&self.path, &e))?;
+        durable::sync(&file, self.syncs.close).map_err(|e| io_error(&self.path, &e))?;
         Ok(())
     }
 
@@ -168,7 +178,7 @@ impl WavStreamWriter {
         file.seek(SeekFrom::Start(0)).map_err(io)?;
         file.write_all(&Self::header(sample_rate, samples))
             .map_err(io)?;
-        file.sync_all().map_err(io)?;
+        durable::sync(&file, File::sync_all).map_err(io)?;
         Ok(samples)
     }
 
@@ -428,4 +438,50 @@ fn le_u16(data: &[u8], offset: usize) -> u16 {
 
 fn le_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap_or([0; 4]))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    /// As the master's: every `sync` is one full sync of the data, through
+    /// `durable`'s fallback, and `finish` one of everything; nothing syncs
+    /// after `finish`.
+    #[test]
+    fn each_sync_is_one_full_sync_and_the_finish_one_more() {
+        static PERIODIC: AtomicUsize = AtomicUsize::new(0);
+        static CLOSE: AtomicUsize = AtomicUsize::new(0);
+        let syncs = FullSyncs {
+            periodic: |file| {
+                PERIODIC.fetch_add(1, Ordering::SeqCst);
+                file.sync_data()
+            },
+            close: |file| {
+                CLOSE.fetch_add(1, Ordering::SeqCst);
+                file.sync_all()
+            },
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("mic.wav");
+        let mut writer = WavStreamWriter::create(&path, WavStreamWriter::SIDECAR_SAMPLE_RATE)
+            .unwrap()
+            .syncing_through(syncs);
+        for synced in 1..=3 {
+            writer.write(&[1_000; 160]).unwrap();
+            writer.sync().unwrap();
+            assert_eq!(PERIODIC.load(Ordering::SeqCst), synced);
+        }
+        assert_eq!(CLOSE.load(Ordering::SeqCst), 0);
+        writer.finish().unwrap();
+        writer.sync().unwrap();
+        assert_eq!(
+            (
+                PERIODIC.load(Ordering::SeqCst),
+                CLOSE.load(Ordering::SeqCst)
+            ),
+            (3, 1)
+        );
+    }
 }
