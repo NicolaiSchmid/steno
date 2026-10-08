@@ -2196,52 +2196,29 @@ mod tests {
         stop(&harness.recorder).await;
     }
 
-    /// A file writer that dies after `frames` frames, as a writer thread
-    /// that panics does: its files stay as a kill leaves them, and the
-    /// session's `stop()` fails without an asset.
-    struct DyingWriter {
-        inner: steno_audio::writer::RecordingWriter,
-        left: usize,
-        died: Arc<AtomicBool>,
-    }
-
-    impl steno_audio::writer::RecordingWriting for DyingWriter {
-        fn files(&self) -> steno_audio::writer::RecordingFiles {
-            self.inner.files()
-        }
-
-        fn write(
-            &mut self,
-            frames: &steno_audio::writer::LaneFrames<'_>,
-        ) -> Result<(), steno_audio::CaptureError> {
-            if self.left == 0 {
-                self.died.store(true, Ordering::SeqCst);
-                panic!("the writer dies");
-            }
-            self.left -= 1;
-            self.inner.write(frames)
-        }
-
-        fn sync(&mut self) -> std::io::Result<()> {
-            self.inner.sync()
-        }
-
-        fn finish(
-            &mut self,
-        ) -> Result<steno_audio::writer::RecordingFiles, steno_audio::CaptureError> {
-            self.inner.finish()
-        }
-    }
-
-    /// The synthetic capture, its writer [dying](DyingWriter) after
-    /// `frames` frames.
+    /// The synthetic capture, its writer thread dying (a panic) at its
+    /// write after the first `frames`, as a kill leaves the files: the
+    /// session's `stop()` then fails without an asset.
     fn dying_capture(frames: usize, died: Arc<AtomicBool>) -> MakeCaptureSession {
-        crate::testing::synthetic_capture_through(move |inner| {
-            Box::new(DyingWriter {
-                inner,
-                left: frames,
-                died: died.clone(),
-            })
+        Arc::new(move |configuration: CaptureConfiguration| {
+            let options = crate::testing::synthetic_tone(&configuration);
+            let died = died.clone();
+            session_with_writes(
+                configuration,
+                Arc::new(steno_audio::testing::SyntheticCaptureBackend::new(options)),
+                CaptureSession::DEFAULT_WRITER_HEADROOM_FRAMES,
+                move || {
+                    let (mut left, died) = (frames, died.clone());
+                    move || {
+                        if left == 0 {
+                            died.store(true, Ordering::SeqCst);
+                            panic!("the writer dies");
+                        }
+                        left -= 1;
+                        Ok(())
+                    }
+                },
+            )
         })
     }
 
