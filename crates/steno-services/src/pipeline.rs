@@ -177,20 +177,26 @@ impl CurrentPipeline {
 pub struct HostPipeline {
     pub pipeline: Arc<CurrentPipeline>,
     pub sweep: RetentionSweep,
-    /// Reset by the user's re-export, and read for the detail's "keeps
-    /// failing" line.
+    /// Reset by any re-export the user causes, and read for the detail's
+    /// "keeps failing" line.
     pub export_retries: Arc<ExportRetries>,
 }
 
 impl Pipeline for HostPipeline {
+    /// A summary re-run exports the new summary, so, once the meeting is
+    /// claimed, it resets the count of launch re-exports as `redeliver`
+    /// does.
     fn rerun_summary(&self, meeting_id: Uuid, template_id: &str) -> BoundaryResult<()> {
-        Ok(self
-            .pipeline
-            .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?)
+        self.pipeline
+            .claim_and_spawn(|pipeline| pipeline.claim_rerun_summary(meeting_id, template_id))?;
+        self.export_retries.reset(meeting_id);
+        Ok(())
     }
 
-    /// The user's Export again, which starts the meeting's count of failed
-    /// launch re-exports from 0 once the meeting is claimed.
+    /// Any re-export the user causes (Export again, or the re-export after
+    /// a speaker change), which starts the meeting's count of launch
+    /// re-exports from 0 once the meeting is claimed: a refused one leaves
+    /// the count.
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
         self.pipeline
             .claim_and_spawn(|pipeline| pipeline.claim_redeliver(meeting_id))?;
@@ -488,6 +494,30 @@ mod tests {
         );
     }
 
+    /// A summary re-run exports the new summary, so it starts the count of
+    /// failed launch re-exports from 0 as Export again does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_re_run_resets_the_failed_launch_re_exports() {
+        let (dir, store) = temp_store();
+        let id = ready_meeting(&store).id;
+        let path = dir.path().join(ExportRetries::FILE_NAME);
+        std::fs::write(&path, format!("{{\"{id}\": {}}}", ExportRetries::LIMIT)).unwrap();
+        let (summarizer, release, asked) = held();
+        let mut service = pipeline(&store, Some(Arc::new(summarizer)));
+        service.export_retries = Arc::new(ExportRetries::new(&path));
+        let service = Arc::new(service);
+        let first = service.clone();
+        assert_eq!(call(move || first.rerun_summary(id, "default")), Ok(()));
+        assert!(!service.export_keeps_failing(id));
+        assert_eq!(ExportRetries::new(&path).count(id), 0);
+        reached(&asked).await;
+        release.notify_one();
+        eventually("the re-run released its meeting", || {
+            service.pipeline.current().in_flight().is_empty()
+        })
+        .await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_re_run_that_fails_later_posts_the_failure_on_the_bus() {
         let (_dir, store) = temp_store();
@@ -598,7 +628,8 @@ mod tests {
 
     /// The user's Export again starts the meeting's count of failed launch
     /// re-exports from 0, on disk too, so the detail no longer says the
-    /// export keeps failing and the next launch retries it.
+    /// export keeps failing and the next launch retries it. One refused
+    /// because the meeting is busy leaves the count.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn export_again_resets_the_failed_launch_re_exports() {
         let (dir, store) = temp_store();
@@ -609,6 +640,16 @@ mod tests {
         service.export_retries = Arc::new(ExportRetries::new(&path));
         let service = Arc::new(service);
         assert!(service.export_keeps_failing(id));
+
+        let busy = service.pipeline.current().claim_redeliver(id).unwrap();
+        let refused = service.clone();
+        assert!(call(move || refused.redeliver(id)).is_err());
+        assert!(
+            service.export_keeps_failing(id),
+            "a refused one resets nothing"
+        );
+        assert_eq!(ExportRetries::new(&path).count(id), ExportRetries::LIMIT);
+        drop(busy);
 
         let first = service.clone();
         assert_eq!(call(move || first.redeliver(id)), Ok(()));
