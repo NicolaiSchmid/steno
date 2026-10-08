@@ -702,11 +702,13 @@ still has to draw the window side. `[ ]` is not ported yet.
   lock, resume, ranges, progress and the mirror (`<mirror>/diarization/<file>`); the
   services build the diarizer over `SpeechSetup::model_store`, and Settings and
   `steno dev models` read the asset. Who may download is the caller's
-  `steno_diarize::Install`: `Allowed` for the CLI's explicit commands, `Never` for
-  `steno process`, where a missing file is `DiarizeError::NotInstalled` with no
-  request (`steno_diarize::models::installed` is the same check without a load). The
-  app's `SpeechEngines` stays on `Allowed` until the pipeline's models-missing gate
-  lands, which flips it (S1 in `.plans/2026-10-07-stable-promotion.md`). Under
+  `steno_diarize::Install`: under `Never` a missing file is
+  `DiarizeError::NotInstalled` with no request (`steno_diarize::models::installed` is
+  the same check without a load). Every diarizer is on `Allowed` for now: the app's
+  `SpeechEngines` and `steno process` move to `Never` together with the pipeline's
+  models-missing gate (S1 in `.plans/2026-10-07-stable-promotion.md`), so a missing
+  model never ends in the fallback while "delete after processing" removes the
+  audio. Under
   `Allowed`, a download cut off while a meeting processes ends the job `ready` with
   the one room speaker, keeps the partial, and the next run resumes it
   (`a_diarizer_download_cut_off_mid_job_falls_back_and_keeps_the_recording`); the

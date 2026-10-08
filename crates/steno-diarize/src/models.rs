@@ -11,10 +11,9 @@
 //! `CoreML` models instead.
 //!
 //! Who may download them is the caller's [`Install`]: [`ensure`] installs
-//! what is missing ([`Install::Allowed`], the CLI's model commands and
-//! Settings' Download), [`installed`] only finds an installed folder
-//! ([`Install::Never`], the app's pipeline) and is the check a gate that
-//! asks whether a job can diarize calls too, so the two never disagree.
+//! what is missing ([`Install::Allowed`]), [`installed`] only finds an
+//! installed folder ([`Install::Never`]) and is the check a gate that asks
+//! whether a job can diarize calls too, so the two never disagree.
 //!
 //! [`DISPLAY_NAME`], [`LICENCE`] and [`ATTRIBUTION`] are the asset's name
 //! and the credit its licences require, for the notices the stable
@@ -64,11 +63,12 @@ pub const SEGMENTATION_REVISION: &str = "9403a6902bb58e3d5ae8c7e77c3422de279db2e
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Install {
     /// A missing file is downloaded first ([`ensure`]): the CLI's explicit
-    /// commands and Settings' Download.
+    /// commands, and the app's pipeline and `steno process` until the
+    /// pipeline checks for missing models itself.
     Allowed,
     /// A missing file is [`DiarizeError::NotInstalled`] and no request is
-    /// made ([`installed`]): the app's pipeline, which must not download
-    /// during a job.
+    /// made ([`installed`]): for a pipeline that checks for missing models
+    /// before a job, so it never downloads during one.
     Never,
 }
 

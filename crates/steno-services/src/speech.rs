@@ -512,11 +512,11 @@ impl SpeechEngine for LanguageTaggingEngine {
 /// The ONNX diarizer over [`SpeechSetup::model_store`], the store and
 /// mirror the speech models install through: it loads its two models from
 /// `<models directory>/onnx/diarization/` on first use. `install` says
-/// whether a missing file is downloaded first (`Install::Allowed`: the
-/// CLI's explicit commands) or fails the call with
-/// `DiarizeError::NotInstalled` and no request (`Install::Never`: a
-/// pipeline, which must not download during a job;
-/// `steno_diarize::models::installed` is the same check without a load).
+/// whether a missing file is downloaded first (`Install::Allowed`) or
+/// fails the call with `DiarizeError::NotInstalled` and no request
+/// (`Install::Never`, for a pipeline once it checks for missing models
+/// itself; `steno_diarize::models::installed` is the same check without a
+/// load).
 /// A load that fails fails that call only; the next call tries again,
 /// resuming a cut-off download where downloads are allowed.
 #[must_use]
