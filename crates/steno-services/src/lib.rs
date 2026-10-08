@@ -40,9 +40,12 @@
 //! into it and marks the file), else in the 0600 `secrets.json` under the
 //! support directory, the store the CLI uses everywhere; the choice is
 //! made once per process, on the store's own thread, and logged. A read
-//! never waits on the keyring's password prompt, so neither does
-//! [`build`]: a read made while the prompt is up fails, and
-//! [`App::launch`] reads again once the keyring opens. The `keyring`
+//! never waits on the keyring's prompt: one made while the prompt is up
+//! fails, and [`App::launch`] reads again once the keyring answered (the
+//! handover's identity too). [`build`] still waits for the choice until a
+//! prompt shows, so a provider that holds the bus name but never answers
+//! holds the start for one D-Bus call timeout (25 s) before the file is
+//! chosen. A write may wait on the user. The `keyring`
 //! crate's `linux-native` store is the kernel keyring, which does not
 //! survive a reboot (the handover identity and the LLM API key would
 //! vanish), so it is not used.

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use steno_core::protocols::BoundaryResult;
 use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store};
@@ -84,39 +84,126 @@ pub fn service(
 
 /// The host's `Handover` over the listener; blocks on the runtime for the
 /// few async calls (paired devices, start, stop, revoke).
+///
+/// The listener is there from the start ([`ListenerHandover::over`]), or
+/// comes later ([`ListenerHandover::waiting`]): when the keyring was still
+/// asking the user as the identity was read, the app reads it again once
+/// the keyring answers (`App::launch`) and hands the listener over with
+/// [`ListenerHandover::set`]. Until then the handover reads as failed with
+/// the reason, the paired phones come from the database, and every other
+/// call that needs the listener fails or does nothing.
 pub struct ListenerHandover {
-    pub service: Arc<HandoverService>,
-    pub mac_id: Uuid,
-    pub runtime: tokio::runtime::Handle,
+    listener: OnceLock<(Arc<HandoverService>, Uuid)>,
+    /// Why there is no listener yet.
+    waiting: Mutex<String>,
+    store: Arc<Store>,
+    runtime: tokio::runtime::Handle,
+}
+
+impl ListenerHandover {
+    /// The handover over `service`, whose identity's computer id is
+    /// `mac_id`.
+    #[must_use]
+    pub fn over(
+        service: Arc<HandoverService>,
+        mac_id: Uuid,
+        store: Arc<Store>,
+        runtime: tokio::runtime::Handle,
+    ) -> Self {
+        let handover = Self::waiting(String::new(), store, runtime);
+        let _ = handover.listener.set((service, mac_id));
+        handover
+    }
+
+    /// A handover over `store` without its listener yet, for `reason`.
+    #[must_use]
+    pub fn waiting(reason: String, store: Arc<Store>, runtime: tokio::runtime::Handle) -> Self {
+        ListenerHandover {
+            listener: OnceLock::new(),
+            waiting: Mutex::new(reason),
+            store,
+            runtime,
+        }
+    }
+
+    /// The listener, once there.
+    #[must_use]
+    pub fn listener(&self) -> Option<&Arc<HandoverService>> {
+        self.listener.get().map(|(service, _)| service)
+    }
+
+    /// Hands over the listener a waiting handover lacked; false (and
+    /// `service` unused) when it has one.
+    pub fn set(&self, service: Arc<HandoverService>, mac_id: Uuid) -> bool {
+        self.listener.set((service, mac_id)).is_ok()
+    }
+
+    /// Why a waiting handover still has no listener.
+    pub fn still_waiting(&self, reason: String) {
+        *self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = reason;
+    }
+
+    fn unavailable(&self) -> String {
+        format!(
+            "Phone handover is unavailable: {}",
+            self.waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        )
+    }
 }
 
 impl Handover for ListenerHandover {
     fn state(&self) -> ListenerState {
-        match self.service.state() {
+        let Some(service) = self.listener() else {
+            return ListenerState::Failed(self.unavailable());
+        };
+        match service.state() {
             steno_handover::ListenerState::Stopped => ListenerState::Stopped,
             steno_handover::ListenerState::Listening { port } => ListenerState::Listening(port),
             steno_handover::ListenerState::Failed(reason) => ListenerState::Failed(reason),
         }
     }
 
+    /// Empty until the listener is there.
     fn mac_id(&self) -> String {
-        steno_core::json::uuid_string(self.mac_id)
+        self.listener
+            .get()
+            .map(|(_, mac_id)| steno_core::json::uuid_string(*mac_id))
+            .unwrap_or_default()
     }
 
     fn paired_devices(&self) -> BoundaryResult<Vec<PairedDevice>> {
-        Ok(block_on(&self.runtime, self.service.paired_devices())?)
+        match self.listener() {
+            Some(service) => Ok(block_on(&self.runtime, service.paired_devices())?),
+            None => Ok(self.store.paired_devices()?),
+        }
     }
 
     fn start(&self) -> BoundaryResult<()> {
-        Ok(block_on(&self.runtime, self.service.start())?)
+        let service = self.listener().ok_or_else(|| self.unavailable())?;
+        Ok(block_on(&self.runtime, service.start())?)
     }
 
     fn stop(&self) {
-        block_on(&self.runtime, self.service.stop());
+        if let Some(service) = self.listener() {
+            block_on(&self.runtime, service.stop());
+        }
     }
 
+    /// Without the listener (which the host never meets, as it opens a
+    /// pairing only after `start` succeeded), a code that has run out.
     fn begin_pairing(&self) -> PairingCode {
-        let payload = self.service.begin_pairing();
+        let Some(service) = self.listener() else {
+            return PairingCode {
+                expires_at: chrono::DateTime::UNIX_EPOCH,
+                url_string: String::new(),
+            };
+        };
+        let payload = service.begin_pairing();
         PairingCode {
             expires_at: payload.expires_at,
             url_string: payload.url_string(),
@@ -124,15 +211,20 @@ impl Handover for ListenerHandover {
     }
 
     fn cancel_pairing(&self) {
-        self.service.cancel_pairing();
+        if let Some(service) = self.listener() {
+            service.cancel_pairing();
+        }
     }
 
     fn revoke(&self, device_id: Uuid) -> BoundaryResult<()> {
-        Ok(block_on(&self.runtime, self.service.revoke(device_id))?)
+        let service = self.listener().ok_or_else(|| self.unavailable())?;
+        Ok(block_on(&self.runtime, service.revoke(device_id))?)
     }
 
     fn receipts(&self) -> Vec<HandoverReceipt> {
-        self.service.receipts().borrow().clone()
+        self.listener()
+            .map(|service| service.receipts().borrow().clone())
+            .unwrap_or_default()
     }
 }
 
