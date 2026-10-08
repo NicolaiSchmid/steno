@@ -1,6 +1,7 @@
 //! What the unit tests share: a store in a temp directory, the
-//! pipeline's dependencies over core's fakes, frames for a recording
-//! writer, and the waits that fail a test instead of hanging it.
+//! pipeline's dependencies over core's fakes, the app's graph over them,
+//! frames for a recording writer, and the waits that fail a test instead
+//! of hanging it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -97,6 +98,53 @@ pub fn synthetic_tone(
     );
     options.real_time = true;
     options
+}
+
+/// The graph `build` assembles, over fakes, with a recorder over
+/// `make_session` that records into `root/audio`: what `App::shutdown`
+/// drives, the host's recorder, and the launch. On the current runtime.
+pub fn app_over_fakes(
+    root: &std::path::Path,
+    store: &Arc<Store>,
+    make_session: MakeCaptureSession,
+) -> crate::App {
+    let mut settings = store.settings().unwrap();
+    settings.audio_folder = steno_core::paths::file_url(&root.join("audio"), true);
+    store.save_settings(&settings).unwrap();
+    let pipeline = current_pipeline(fake_dependencies(store, "fake-engine"));
+    let zone = chrono::FixedOffset::east_opt(0).unwrap();
+    let fakes = steno_host::fakes::FakeServices::new(chrono::Utc::now());
+    let recorder = crate::recorder::CaptureRecorder::new(
+        store.clone(),
+        pipeline.clone(),
+        make_session,
+        fakes.permissions.clone(),
+        fakes.speech_models.clone(),
+        zone,
+        tokio::runtime::Handle::current(),
+    );
+    let mut services = fakes.services();
+    services.recorder = recorder.clone();
+    crate::App {
+        paths: steno_core::StenoPaths::new(root.join("support")),
+        store: store.clone(),
+        secrets: Arc::new(steno_core::testing::InMemorySecretStore::new()),
+        events: MeetingEventBus::new(),
+        pipeline,
+        sweep: steno_pipeline::RetentionSweep::new(store.clone()),
+        export_retries: Arc::new(steno_pipeline::ExportRetries::in_memory()),
+        services,
+        handover: None,
+        recorder,
+        models_directory: root.join("models"),
+        zone,
+        runtime: tokio::runtime::Handle::current(),
+        version: "0.0.0".to_owned(),
+        startup_warnings: Vec::new(),
+        live_recording_check: crate::recovery::LiveRecordingCheck::default(),
+        launch_work: std::sync::Mutex::default(),
+        database_lock: None,
+    }
 }
 
 /// Waits until `done` holds, failing the test with `what` after

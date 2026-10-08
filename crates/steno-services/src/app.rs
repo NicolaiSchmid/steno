@@ -131,7 +131,7 @@ pub struct App {
     /// being written ([`crate::recovery`]).
     pub live_recording_check: LiveRecordingCheck,
     /// The launch's background half, for [`App::launch_finished`].
-    launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub(crate) launch_work: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Held while the graph lives, so no second app or CLI command takes
     /// the same database; `None` on a filesystem without locks
     /// ([`DatabaseLockError::Unsupported`], a startup warning). Declared
@@ -438,11 +438,12 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
 
 /// The launch's work on the meetings a previous process left unfinished,
 /// in order: the interrupted recordings in `interrupted` are recovered,
-/// left alone while another process still writes them, or failed
-/// ([`reconcile_interrupted`]); meetings left queued or processing are
-/// processed again; the retention sweep runs. Blocks while a fresh master
-/// is sampled, so [`App::launch`] runs it on a blocking task.
-pub fn reconcile_at_launch(
+/// left alone while another process still writes them or while a folder
+/// they may be in cannot be read, or failed ([`reconcile_interrupted`]);
+/// meetings left queued or processing are processed again; the retention
+/// sweep runs. Blocks while a fresh master is watched, so [`App::launch`]
+/// runs it on a blocking task.
+pub(crate) fn reconcile_at_launch(
     store: &Arc<Store>,
     pipeline: &CurrentPipeline,
     sweep: &RetentionSweep,
@@ -684,9 +685,9 @@ impl App {
     /// Everything that happens once at launch, in order: the pipeline's
     /// events are subscribed and routed into the host; the meetings left
     /// `recording` are listed, before anything here can start a recording;
-    /// on a blocking task, since it may wait 1.5 s for a master that is
-    /// still written ([`reconcile_at_launch`]), those recordings are
-    /// recovered or failed, meetings left queued or processing are
+    /// on a blocking task, since it may wait up to 10 s for a master that
+    /// is still written (`reconcile_at_launch`), those recordings are
+    /// recovered, left alone or failed, meetings left queued or processing are
     /// processed again, exports left unfinished are re-exported
     /// ([`ProcessingPipeline::redeliver_unfinished`](steno_pipeline::ProcessingPipeline::redeliver_unfinished)),
     /// the retention sweep runs, and the list is
@@ -805,7 +806,7 @@ impl App {
         host.store_changed();
     }
 
-    /// Waits until the launch's background half ([`reconcile_at_launch`])
+    /// Waits until the launch's background half (`reconcile_at_launch`)
     /// has run; at once when [`App::launch`] was not called or this was
     /// already awaited.
     pub async fn launch_finished(&self) {
@@ -974,11 +975,14 @@ mod tests {
     }
 
     /// What `App::launch` does to a meeting a previous process left
-    /// recording: it fails with Swift's reason.
+    /// recording with no audio in the audio folder, which is there: it
+    /// fails with Swift's reason.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn launch_fails_a_recording_the_last_process_left_with_the_swift_reason() {
         let dir = tempfile::tempdir().unwrap();
         let app = build(options_under(&dir.path().join("support"))).unwrap();
+        let audio_folder = app.store.settings().unwrap().audio_folder;
+        std::fs::create_dir_all(steno_core::paths::file_url_path(&audio_folder).unwrap()).unwrap();
         let mut meeting = steno_core::testing::sample_data::meeting();
         meeting.state = steno_core::MeetingState::Recording;
         app.store.save_meeting(&meeting).unwrap();
@@ -1188,51 +1192,13 @@ mod tests {
         );
     }
 
-    /// The graph `build` assembles, over fakes, with a recorder over
-    /// `make_session` that records into `dir`: what `App::shutdown` drives,
-    /// and the host's recorder.
+    /// [`crate::testing::app_over_fakes`] under `dir`.
     fn app_recording_with(
         dir: &tempfile::TempDir,
         store: &Arc<Store>,
         make_session: crate::recorder::MakeCaptureSession,
     ) -> App {
-        let mut settings = store.settings().unwrap();
-        settings.audio_folder = file_url(&dir.path().join("audio"), true);
-        store.save_settings(&settings).unwrap();
-        let pipeline = crate::testing::current_pipeline(fake_dependencies(store, "fake-engine"));
-        let zone = FixedOffset::east_opt(0).unwrap();
-        let fakes = steno_host::fakes::FakeServices::new(Utc::now());
-        let recorder = CaptureRecorder::new(
-            store.clone(),
-            pipeline.clone(),
-            make_session,
-            fakes.permissions.clone(),
-            fakes.speech_models.clone(),
-            zone,
-            tokio::runtime::Handle::current(),
-        );
-        let mut services = fakes.services();
-        services.recorder = recorder.clone();
-        App {
-            paths: StenoPaths::new(dir.path().join("support")),
-            store: store.clone(),
-            secrets: Arc::new(steno_core::testing::InMemorySecretStore::new()),
-            events: MeetingEventBus::new(),
-            pipeline,
-            sweep: RetentionSweep::new(store.clone()),
-            export_retries: Arc::new(ExportRetries::in_memory()),
-            services,
-            handover: None,
-            recorder,
-            models_directory: dir.path().join("models"),
-            zone,
-            runtime: tokio::runtime::Handle::current(),
-            version: "0.0.0".to_owned(),
-            startup_warnings: Vec::new(),
-            live_recording_check: LiveRecordingCheck::default(),
-            launch_work: std::sync::Mutex::default(),
-            database_lock: None,
-        }
+        crate::testing::app_over_fakes(dir.path(), store, make_session)
     }
 
     /// [`app_recording_with`] over a synthetic tone.

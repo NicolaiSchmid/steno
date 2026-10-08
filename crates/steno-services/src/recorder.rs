@@ -42,6 +42,7 @@ use uuid::Uuid;
 
 use crate::block_on;
 use crate::pipeline::CurrentPipeline;
+use crate::recovery::RecoveryError;
 
 /// Builds a capture session for a configuration; the product passes
 /// `CaptureSession::new`, tests a synthetic backend.
@@ -968,12 +969,20 @@ impl CaptureRecorder {
     fn finish_stop(&self, active: Active, reason: RecordingEndReason, error: Option<String>) {
         let unwinding = Unwinding::of(self, RecordingState::Stopping, SAVE_PANICKED);
         self.notify();
-        let intake = self.intake();
+        // An exit's stop tries its commit once, so it ends within the
+        // exit's patience; a busy database leaves the meeting `recording`
+        // for the next launch.
+        let intake = if reason == RecordingEndReason::Quit {
+            self.intake().with_commit_attempts(1)
+        } else {
+            self.intake()
+        };
+        let meeting_id = active.meeting_id;
         let outcome = match active.session.stop() {
             Ok(result) => {
-                log_dropped_frames(active.meeting_id, &result.statistics);
+                log_dropped_frames(meeting_id, &result.statistics);
                 if let Some(failure) = &result.failure {
-                    log_failure(active.meeting_id, failure, &reason);
+                    log_failure(meeting_id, failure, &reason);
                 }
                 let ended = error.or_else(|| {
                     result
@@ -986,7 +995,7 @@ impl CaptureRecorder {
                 let completed = block_on(
                     &self.runtime,
                     intake.complete(
-                        active.meeting_id,
+                        meeting_id,
                         RecordingResult {
                             asset: result.asset,
                             duration,
@@ -997,30 +1006,35 @@ impl CaptureRecorder {
                 );
                 match completed {
                     Ok(_) => Ok((recording_warning(active.mode, &statistics), ended)),
-                    Err(error) => Err(not_saved(active.meeting_id, &error)),
+                    Err(error) => Err(not_saved(meeting_id, &error)),
                 }
             }
             // The writer failed and took the asset with it, but what it
             // wrote may still be on disk: recovered as an interrupted
             // recording is at launch, else the meeting fails as before.
             Err(failure) => {
-                log_not_saved(active.meeting_id, failure_kind(&failure));
+                log_not_saved(meeting_id, failure_kind(&failure));
                 let recovered = block_on(
                     &self.runtime,
                     crate::recovery::recover(
                         &intake,
-                        &active.audio_folder,
-                        active.meeting_id,
+                        std::slice::from_ref(&active.audio_folder),
+                        meeting_id,
                         source(active.mode),
                     ),
                 );
                 match recovered {
-                    Ok(_) => Ok((Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error)),
-                    Err(crate::recovery::RecoveryError::NotSaved(error)) => {
-                        Err(not_saved(active.meeting_id, &error))
+                    Ok(_) => {
+                        tracing::warn!(%meeting_id, "a recording whose capture failed was recovered");
+                        Ok((Some(RECOVERED_AFTER_A_FAILURE.to_owned()), error))
                     }
-                    Err(crate::recovery::RecoveryError::Unrecoverable(_)) => {
-                        let _ = intake.fail(active.meeting_id, FILES_NOT_FINISHED);
+                    Err(RecoveryError::NotSaved(error)) => Err(not_saved(meeting_id, &error)),
+                    Err(RecoveryError::Unreachable) => {
+                        tracing::warn!(%meeting_id, "a recording whose capture failed is left for the next launch: its folder cannot be read now");
+                        Err(KEPT_FOR_THE_NEXT_LAUNCH)
+                    }
+                    Err(RecoveryError::Unrecoverable(_)) => {
+                        let _ = intake.fail(meeting_id, FILES_NOT_FINISHED);
                         Err(FILES_NOT_FINISHED)
                     }
                 }
@@ -2107,6 +2121,10 @@ mod tests {
             }
             self.left -= 1;
             self.inner.write(frames)
+        }
+
+        fn sync(&mut self) -> std::io::Result<()> {
+            self.inner.sync()
         }
 
         fn finish(

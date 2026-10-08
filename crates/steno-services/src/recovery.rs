@@ -8,11 +8,19 @@
 //! so far was kept"). The recorder does the same for a stop whose capture
 //! failed. Rust only: Swift had no recovery.
 //!
-//! The launch leaves a recording alone while its master still grows: the
-//! Swift app and an older Rust build share the database and take no lock,
-//! so a row left `recording` may be one another process is still writing.
-//! Only a master modified within [`LiveRecordingCheck::fresh_within`] is
-//! sampled twice; an old crash's master is recovered at once.
+//! A row is failed only when its master is provably not there: the launch
+//! looks in the settings' audio folder and in every folder an asset's
+//! master sits in ([`audio_folders`]), since the user may have picked
+//! another folder while the recording ran. A folder that is missing or
+//! cannot be read (an unmounted volume, a permission not granted yet, an
+//! I/O error) keeps the row `recording` for the next launch.
+//!
+//! The launch also leaves a recording alone while its master is still
+//! written: the Swift app and an older Rust build share the database and
+//! take no lock, so a row left `recording` may be one another process is
+//! still writing. A master modified within
+//! [`LiveRecordingCheck::fresh_within`] is watched until it is that old;
+//! an old crash's master is recovered at once.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +30,7 @@ use chrono::Utc;
 use steno_audio::writer::{CafHeader, CafReadError, WavStreamWriter};
 use steno_core::{
     AudioAsset, AudioFormat, AudioLane, AudioRetention, Meeting, MeetingSource, RecordingEndReason,
-    RecordingLayout, Store,
+    RecordingLayout, Store, StoreError,
     paths::{file_url, file_url_path},
 };
 use steno_pipeline::{LocalRecordingIntake, LocalRecordingIntakeError, RecordingResult};
@@ -35,12 +43,9 @@ pub enum Unrecoverable {
     /// A phone meeting: its audio arrives whole through the handover.
     #[error("a {} meeting is not captured on this computer", .0.as_str())]
     NotCaptured(MeetingSource),
-    /// The settings name no audio folder this build can read.
-    #[error("the audio folder is not a file URL")]
-    NoAudioFolder,
     /// The writer never created the master, or it is gone.
-    #[error("no master at {}", .0.display())]
-    NoMaster(PathBuf),
+    #[error("no audio folder holds the master")]
+    NoMaster,
     /// Not a CAF the writer wrote, or a read failed.
     #[error(transparent)]
     Unreadable(#[from] CafReadError),
@@ -57,6 +62,10 @@ pub enum Unrecoverable {
 pub enum RecoveryError {
     #[error(transparent)]
     Unrecoverable(#[from] Unrecoverable),
+    /// A folder the master may be in could not be read; the meeting stays
+    /// `recording` for the next launch.
+    #[error("a folder the recording may be in cannot be read now")]
+    Unreachable,
     /// The asset was rebuilt but the intake could not save it; the meeting
     /// stays `recording` (`LocalRecordingIntake::complete`).
     #[error(transparent)]
@@ -74,9 +83,64 @@ fn lanes(source: MeetingSource) -> Result<Vec<AudioLane>, Unrecoverable> {
 }
 
 /// Where the master of `meeting_id` lives in `audio_folder`.
-#[must_use]
-pub fn master_path(audio_folder: &Path, meeting_id: Uuid) -> PathBuf {
+fn master_path(audio_folder: &Path, meeting_id: Uuid) -> PathBuf {
     RecordingLayout::new(audio_folder, meeting_id).master(AudioFormat::Caf48kFloat32)
+}
+
+/// Every audio folder a master may be in, each once: the one `settings`
+/// name first (`None` when it is not a file URL), then the folder of each
+/// stored asset (the folder above its meeting's folder), so a recording
+/// started before the user picked another folder is found where it was
+/// written.
+pub fn audio_folders(store: &Store, current: Option<PathBuf>) -> Result<Vec<PathBuf>, StoreError> {
+    let mut folders: Vec<PathBuf> = current.into_iter().collect();
+    for url in store.asset_urls()? {
+        let folder =
+            file_url_path(&url).and_then(|master| master.parent()?.parent().map(Path::to_path_buf));
+        if let Some(folder) = folder
+            && !folders.contains(&folder)
+        {
+            folders.push(folder);
+        }
+    }
+    Ok(folders)
+}
+
+/// Where a meeting's master was looked for, and what was found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Lookup {
+    /// The audio folder that holds the master.
+    Found(PathBuf),
+    /// Every folder was read and none holds it.
+    Absent,
+    /// None holds it, but a folder is missing or could not be read, so
+    /// the master may be there.
+    Unreachable,
+}
+
+/// Looks for the master of `meeting_id` in each of `folders`, in order.
+/// A folder that is missing counts as unreadable: an unmounted volume
+/// is missing until it is mounted again.
+#[must_use]
+pub fn find_master(folders: &[PathBuf], meeting_id: Uuid) -> Lookup {
+    let mut unreachable = folders.is_empty();
+    for folder in folders {
+        match std::fs::metadata(master_path(folder, meeting_id)) {
+            Ok(metadata) if metadata.is_file() => return Lookup::Found(folder.clone()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if std::fs::read_dir(folder).is_err() {
+                    unreachable = true;
+                }
+            }
+            Err(_) => unreachable = true,
+        }
+    }
+    if unreachable {
+        Lookup::Unreachable
+    } else {
+        Lookup::Absent
+    }
 }
 
 /// The recording the master of `meeting_id` in `audio_folder` holds, as
@@ -96,7 +160,7 @@ pub fn salvage(
     let layout = RecordingLayout::new(audio_folder, meeting_id);
     let master = layout.master(AudioFormat::Caf48kFloat32);
     if !master.is_file() {
-        return Err(Unrecoverable::NoMaster(master));
+        return Err(Unrecoverable::NoMaster);
     }
     let header = CafHeader::read(&master)?;
     if header.channel_count != lanes.len() {
@@ -139,16 +203,21 @@ pub fn salvage(
     })
 }
 
-/// [Salvages](salvage) the master of meeting `meeting_id` in
-/// `audio_folder` and queues the meeting through `intake`, under the
-/// settings' default retention.
+/// Looks for the master of meeting `meeting_id` in `folders`
+/// ([`find_master`]), [salvages](salvage) it and queues the meeting
+/// through `intake`, under the settings' default retention.
 pub async fn recover(
     intake: &LocalRecordingIntake,
-    audio_folder: &Path,
+    folders: &[PathBuf],
     meeting_id: Uuid,
     source: MeetingSource,
 ) -> Result<Meeting, RecoveryError> {
-    let result = salvage(audio_folder, meeting_id, source)?;
+    let folder = match find_master(folders, meeting_id) {
+        Lookup::Found(folder) => folder,
+        Lookup::Unreachable => return Err(RecoveryError::Unreachable),
+        Lookup::Absent => return Err(Unrecoverable::NoMaster.into()),
+    };
+    let result = salvage(&folder, meeting_id, source)?;
     Ok(intake.complete(meeting_id, result, None).await?)
 }
 
@@ -156,58 +225,87 @@ pub async fn recover(
 /// the wait are injectable so a test needs no real wait.
 #[derive(Clone)]
 pub struct LiveRecordingCheck {
-    /// A master modified longer ago than this is a crash's: recovered at once.
+    /// A master modified longer ago than this is a crash's: recovered at
+    /// once. A younger one is watched until it is this old, and counts as
+    /// still written when its modification time or its size changes
+    /// meanwhile. Covers a writer stalled by a device rebuild and a
+    /// network volume's cached file attributes.
     pub fresh_within: Duration,
-    /// How long apart a fresh master's size is sampled.
-    pub sample_gap: Duration,
+    /// The wall clock the masters' modification times are read against;
+    /// [`SystemTime::now`] in the product.
     pub now: Arc<dyn Fn() -> SystemTime + Send + Sync>,
+    /// Blocks the calling thread for the given time; [`std::thread::sleep`]
+    /// in the product.
     pub wait: Arc<dyn Fn(Duration) + Send + Sync>,
 }
 
 impl Default for LiveRecordingCheck {
-    /// Ten seconds and 1.5 s: the writer appends a frame every 10 ms.
+    /// Ten seconds: the writer appends a frame every 10 ms.
     fn default() -> Self {
         LiveRecordingCheck {
             fresh_within: Duration::from_secs(10),
-            sample_gap: Duration::from_millis(1_500),
             now: Arc::new(SystemTime::now),
             wait: Arc::new(std::thread::sleep),
         }
     }
 }
 
+/// A master's modification time and size.
+fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 impl LiveRecordingCheck {
-    /// Whether each of `masters` grew between two samples; a master that
-    /// is missing, old, or the same size both times is not live. One
-    /// wait covers every fresh master, and none is waited for when no
-    /// master is fresh.
-    fn growing(&self, masters: &[PathBuf]) -> Vec<bool> {
-        let now = (self.now)();
-        let first: Vec<Option<u64>> = masters
+    /// How much younger than [`Self::fresh_within`] a master modified at
+    /// `modified` is; zero once it is that old. A time ahead of the clock
+    /// counts as just modified.
+    fn left(&self, modified: SystemTime) -> Duration {
+        let age = (self.now)()
+            .duration_since(modified)
+            .unwrap_or(Duration::ZERO);
+        self.fresh_within.saturating_sub(age)
+    }
+
+    /// Whether each of `masters` is still written. A master that is
+    /// missing or old is not. A fresh one is watched, all of them through
+    /// one wait at a time, until it is [`Self::fresh_within`] old; one
+    /// whose modification time or size changes meanwhile, or that is still
+    /// young after waiting `fresh_within` in all (a modification time
+    /// ahead of the clock), is. Nothing is waited for when no master is
+    /// fresh.
+    fn still_written(&self, masters: &[Option<PathBuf>]) -> Vec<bool> {
+        let mut written = vec![false; masters.len()];
+        let mut watched: Vec<(usize, &Path, (SystemTime, u64))> = masters
             .iter()
-            .map(|path| {
-                let metadata = std::fs::metadata(path).ok()?;
-                let modified = metadata.modified().ok()?;
-                // A time ahead of the clock counts as fresh.
-                let fresh = now
-                    .duration_since(modified)
-                    .map_or(true, |age| age < self.fresh_within);
-                fresh.then_some(metadata.len())
+            .enumerate()
+            .filter_map(|(index, path)| {
+                let path = path.as_deref()?;
+                let stamp = stamp(path)?;
+                (self.left(stamp.0) > Duration::ZERO).then_some((index, path, stamp))
             })
             .collect();
-        if first.iter().all(Option::is_none) {
-            return vec![false; masters.len()];
+        let mut waited = Duration::ZERO;
+        while let Some(longest) = watched.iter().map(|(_, _, stamp)| self.left(stamp.0)).max() {
+            let budget = self.fresh_within.saturating_sub(waited);
+            if budget.is_zero() {
+                for (index, _, _) in watched {
+                    written[index] = true;
+                }
+                break;
+            }
+            let wait = longest.min(budget);
+            (self.wait)(wait);
+            waited += wait;
+            watched.retain(|&(index, path, first)| {
+                if stamp(path) != Some(first) {
+                    written[index] = true;
+                    return false;
+                }
+                self.left(first.0) > Duration::ZERO
+            });
         }
-        (self.wait)(self.sample_gap);
-        masters
-            .iter()
-            .zip(first)
-            .map(|(path, first)| {
-                first.is_some_and(|first| {
-                    std::fs::metadata(path).is_ok_and(|metadata| metadata.len() != first)
-                })
-            })
-            .collect()
+        written
     }
 }
 
@@ -216,8 +314,11 @@ impl LiveRecordingCheck {
 pub struct Reconciled {
     /// Recovered and queued.
     pub recovered: Vec<Uuid>,
-    /// Their master still grows: left `recording`.
+    /// Their master is still written: left `recording`.
     pub live: Vec<Uuid>,
+    /// A folder their master may be in could not be read: left
+    /// `recording` for the next launch.
+    pub unreachable: Vec<Uuid>,
     /// Recovered but not saved: left `recording` for the next launch.
     pub kept: Vec<Uuid>,
     /// Nothing to recover: failed with Swift's reason.
@@ -226,12 +327,15 @@ pub struct Reconciled {
 
 /// The launch's reconciliation of `meetings`, the rows a process left
 /// `recording` (listed by the caller before anything could start a
-/// recording here): each whose master still grows is left alone, each
-/// with a master is recovered and queued through `intake`, and the rest
-/// are failed with [`Store::INTERRUPTED_RECORDING_REASON`] through
+/// recording here). Each master is looked for in [`audio_folders`]. A
+/// meeting whose master is still written, or that may be in a folder that
+/// cannot be read now, is left alone; one with a master is recovered and
+/// queued through `intake`; the rest are failed with
+/// [`Store::INTERRUPTED_RECORDING_REASON`] through
 /// [`Store::fail_recordings`], which skips a row another process has
-/// moved on meanwhile. Blocks for [`LiveRecordingCheck::sample_gap`] when
-/// a master is fresh, so the caller runs it off the main thread. Swift:
+/// moved on meanwhile. Blocks for up to
+/// [`LiveRecordingCheck::fresh_within`] when a master is fresh, so the
+/// caller runs it off the main thread. Swift:
 /// `MeetingStore.failInterruptedRecordings` in `AppController.launch`, the
 /// failing part alone.
 pub fn reconcile_interrupted(
@@ -245,55 +349,84 @@ pub fn reconcile_interrupted(
     if meetings.is_empty() {
         return reconciled;
     }
-    let audio_folder = match store.settings() {
-        Ok(settings) => file_url_path(&settings.audio_folder),
+    let folders = store.settings().and_then(|settings| {
+        let current = file_url_path(&settings.audio_folder);
+        let named = current.is_some();
+        audio_folders(store, current).map(|folders| (folders, named))
+    });
+    let (folders, named) = match folders {
+        Ok(folders) => folders,
         Err(error) => {
-            // Nothing can be told apart without the folder; the next launch
-            // tries again.
+            // Nothing can be told apart without the folders; the next
+            // launch tries again.
             tracing::warn!(%error, "interrupted recordings left for the next launch");
             reconciled.kept = meetings.iter().map(|meeting| meeting.id).collect();
             return reconciled;
         }
     };
-    let masters: Vec<PathBuf> = meetings
+    // Settings whose audio folder this build cannot read may name the one
+    // a master is in: only a master found elsewhere is recovered.
+    let lookups: Vec<Lookup> = meetings
         .iter()
-        .map(|meeting| {
-            audio_folder
-                .as_deref()
-                .map(|folder| master_path(folder, meeting.id))
-                .unwrap_or_default()
+        .map(|meeting| match find_master(&folders, meeting.id) {
+            Lookup::Absent if !named => Lookup::Unreachable,
+            lookup => lookup,
         })
         .collect();
-    let growing = check.growing(&masters);
+    let masters: Vec<Option<PathBuf>> = meetings
+        .iter()
+        .zip(&lookups)
+        .map(|(meeting, lookup)| match lookup {
+            Lookup::Found(folder) => Some(master_path(folder, meeting.id)),
+            Lookup::Absent | Lookup::Unreachable => None,
+        })
+        .collect();
+    let written = check.still_written(&masters);
     let mut unrecovered = Vec::new();
-    for (meeting, growing) in meetings.iter().zip(growing) {
-        if growing {
-            tracing::info!(meeting_id = %meeting.id, "a recording another process is writing was left alone");
-            reconciled.live.push(meeting.id);
-            continue;
-        }
-        let recovered = match audio_folder.as_deref() {
-            Some(folder) => {
-                crate::block_on(runtime, recover(intake, folder, meeting.id, meeting.source))
+    // Warn names the meeting; an error, which can name its folder, goes
+    // to debug.
+    for ((meeting, lookup), written) in meetings.iter().zip(lookups).zip(written) {
+        let meeting_id = meeting.id;
+        let folder = match lookup {
+            Lookup::Found(_) if written => {
+                tracing::warn!(%meeting_id, "a recording another process is writing was left alone");
+                reconciled.live.push(meeting_id);
+                continue;
             }
-            None => Err(Unrecoverable::NoAudioFolder.into()),
+            Lookup::Found(folder) => folder,
+            Lookup::Unreachable => {
+                tracing::warn!(%meeting_id, "an interrupted recording's folder cannot be read now; the next launch tries again");
+                reconciled.unreachable.push(meeting_id);
+                continue;
+            }
+            Lookup::Absent => {
+                tracing::warn!(%meeting_id, "an interrupted recording has no audio on disk");
+                unrecovered.push(meeting_id);
+                continue;
+            }
         };
-        // Warn names the meeting; the error, which can name its folder,
-        // goes to debug.
+        let recovered = crate::block_on(
+            runtime,
+            recover(intake, &[folder], meeting_id, meeting.source),
+        );
         match recovered {
             Ok(_) => {
-                tracing::info!(meeting_id = %meeting.id, "an interrupted recording was recovered");
-                reconciled.recovered.push(meeting.id);
+                tracing::warn!(%meeting_id, "an interrupted recording was recovered");
+                reconciled.recovered.push(meeting_id);
             }
             Err(RecoveryError::Unrecoverable(error)) => {
-                tracing::warn!(meeting_id = %meeting.id, "an interrupted recording could not be recovered");
-                tracing::debug!(meeting_id = %meeting.id, %error, "unrecoverable recording");
-                unrecovered.push(meeting.id);
+                tracing::warn!(%meeting_id, "an interrupted recording could not be recovered");
+                tracing::debug!(%meeting_id, %error, "unrecoverable recording");
+                unrecovered.push(meeting_id);
+            }
+            Err(RecoveryError::Unreachable) => {
+                tracing::warn!(%meeting_id, "an interrupted recording's folder cannot be read now; the next launch tries again");
+                reconciled.unreachable.push(meeting_id);
             }
             Err(RecoveryError::NotSaved(error)) => {
-                tracing::warn!(meeting_id = %meeting.id, "a recovered recording could not be saved; the next launch tries again");
-                tracing::debug!(meeting_id = %meeting.id, %error, "recovered recording not saved");
-                reconciled.kept.push(meeting.id);
+                tracing::warn!(%meeting_id, "a recovered recording could not be saved; the next launch tries again");
+                tracing::debug!(%meeting_id, %error, "recovered recording not saved");
+                reconciled.kept.push(meeting_id);
             }
         }
     }
@@ -395,12 +528,27 @@ mod tests {
         }
     }
 
-    /// A check that finds every master fresh and runs `between` in place
-    /// of the wait.
-    fn sampled(between: impl Fn() + Send + Sync + 'static) -> LiveRecordingCheck {
+    /// A check over a clock that starts at the real now and moves only
+    /// when the check waits: each wait moves it on by the time asked for,
+    /// then runs `during` with the time waited in all.
+    fn clocked(during: impl Fn(Duration) + Send + Sync + 'static) -> LiveRecordingCheck {
+        let start = SystemTime::now();
+        let waited = Arc::new(Mutex::new(Duration::ZERO));
+        let now = {
+            let waited = waited.clone();
+            Arc::new(move || start + *waited.lock().unwrap())
+        };
+        let wait = Arc::new(move |duration| {
+            let total = {
+                let mut waited = waited.lock().unwrap();
+                *waited += duration;
+                *waited
+            };
+            during(total);
+        });
         LiveRecordingCheck {
-            now: Arc::new(SystemTime::now),
-            wait: Arc::new(move |_| between()),
+            now,
+            wait,
             ..LiveRecordingCheck::default()
         }
     }
@@ -524,10 +672,11 @@ mod tests {
     }
 
     /// A master another process is still writing (here a writer that
-    /// appends between the two samples) leaves its row `recording`, with
-    /// no asset; a fresh master that did not grow is recovered.
+    /// appends while the check waits) leaves its row `recording`, with no
+    /// asset. At the next launch the writer has stopped: the master is
+    /// watched until it is `fresh_within` old, no longer, and recovered.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_master_that_still_grows_is_left_recording() {
+    async fn a_master_that_is_still_written_is_left_recording() {
         let harness = Harness::new();
         let meeting = harness.begin(MeetingSource::MacInPerson);
         let mut writer = harness.writer(&meeting);
@@ -535,7 +684,7 @@ mod tests {
         let writer = Arc::new(Mutex::new(writer));
         let appending = {
             let writer = writer.clone();
-            sampled(move || write_frames(&mut writer.lock().unwrap(), 1))
+            clocked(move |_| write_frames(&mut writer.lock().unwrap(), 1))
         };
         let reconciled = harness.reconcile(std::slice::from_ref(&meeting), &appending);
         assert_eq!(reconciled.live, [meeting.id]);
@@ -543,14 +692,143 @@ mod tests {
         assert_eq!(harness.state(&meeting), MeetingState::Recording);
         assert!(harness.store.asset(meeting.id).unwrap().is_none());
 
-        // The writer stops; the next launch finds the master fresh but
-        // still, and recovers it.
         drop(writer);
-        let reconciled = harness.reconcile(std::slice::from_ref(&meeting), &sampled(|| {}));
+        let waited = Arc::new(Mutex::new(Duration::ZERO));
+        let still = {
+            let waited = waited.clone();
+            clocked(move |total| *waited.lock().unwrap() = total)
+        };
+        let reconciled = harness.reconcile(std::slice::from_ref(&meeting), &still);
         assert_eq!(reconciled.recovered, [meeting.id]);
+        let waited = *waited.lock().unwrap();
+        let fresh_within = LiveRecordingCheck::default().fresh_within;
+        assert!(
+            waited > fresh_within / 2 && waited <= fresh_within,
+            "{waited:?}"
+        );
         assert_eq!(
             harness.store.meeting(meeting.id).unwrap().unwrap().duration,
             5_280.0 / SAMPLE_RATE
+        );
+        harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// A writer that stalls for three seconds (a device rebuild's
+    /// backoff) and then goes on is still its owner's: the check waits
+    /// past the stall and sees the master change, the row stays
+    /// `recording`, and the owner's own stop saves the whole recording.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_writer_keeps_its_recording() {
+        let harness = Harness::new();
+        let meeting = harness.begin(MeetingSource::MacInPerson);
+        let mut writer = harness.writer(&meeting);
+        write_frames(&mut writer, 10);
+        let writer = Arc::new(Mutex::new(writer));
+        let stalled = {
+            let writer = writer.clone();
+            clocked(move |total| {
+                if total >= Duration::from_secs(3) {
+                    write_frames(&mut writer.lock().unwrap(), 1);
+                }
+            })
+        };
+        let reconciled = harness.reconcile(std::slice::from_ref(&meeting), &stalled);
+        assert_eq!(reconciled.live, [meeting.id]);
+        assert_eq!(harness.state(&meeting), MeetingState::Recording);
+
+        drop(stalled);
+        let mut writer = Arc::into_inner(writer).unwrap().into_inner().unwrap();
+        write_frames(&mut writer, 89);
+        let files = writer.finish().unwrap();
+        let completed = harness
+            .intake()
+            .complete(meeting.id, finished(&meeting, &files), None)
+            .await
+            .unwrap();
+        assert_eq!(completed.duration, 1.0, "100 frames");
+        assert_eq!(completed.end_reason, Some(RecordingEndReason::Manual));
+        harness.pipeline.current().wait_until_idle().await;
+    }
+
+    /// The handover a finished in-person capture makes of `files`.
+    fn finished(meeting: &Meeting, files: &steno_audio::writer::RecordingFiles) -> RecordingResult {
+        RecordingResult {
+            asset: AudioAsset {
+                id: Uuid::new_v4(),
+                meeting_id: meeting.id,
+                url: file_url(&files.master, false),
+                format: AudioFormat::Caf48kFloat32,
+                lanes: vec![AudioLane::Mixed],
+                sidecars_16k: std::collections::BTreeMap::new(),
+                mixdown_url: None,
+                retention: AudioRetention::KeepForever,
+                expires_at: None,
+            },
+            duration: files.duration,
+            end_reason: RecordingEndReason::Manual,
+        }
+    }
+
+    /// The master is looked for in every folder a recording was written
+    /// to: after the user picks another folder mid-recording, a master in
+    /// the old one (where an earlier recording's asset is) is recovered
+    /// from there. A row whose master may be in a folder that is missing
+    /// now (an unmounted volume) stays `recording`; one whose folders all
+    /// exist and hold no master fails as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_master_is_looked_for_in_every_audio_folder() {
+        let harness = Harness::new();
+        let earlier = harness.begin(MeetingSource::MacInPerson);
+        let mut writer = harness.writer(&earlier);
+        write_frames(&mut writer, 10);
+        let files = writer.finish().unwrap();
+        harness
+            .intake()
+            .complete(earlier.id, finished(&earlier, &files), None)
+            .await
+            .unwrap();
+        let moved = harness.begin(MeetingSource::MacInPerson);
+        let mut writer = harness.writer(&moved);
+        write_frames(&mut writer, 100);
+        drop(writer);
+        let set_folder = |folder: &Path| {
+            let mut settings = harness.store.settings().unwrap();
+            settings.audio_folder = file_url(folder, true);
+            harness.store.save_settings(&settings).unwrap();
+        };
+        let elsewhere = harness.dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        set_folder(&elsewhere);
+
+        let reconciled = harness.reconcile(std::slice::from_ref(&moved), &an_hour_later());
+        assert_eq!(reconciled.recovered, [moved.id]);
+        assert_eq!(
+            harness.store.asset(moved.id).unwrap().unwrap().url,
+            file_url(&master_path(&harness.audio_folder(), moved.id), false)
+        );
+        assert_eq!(
+            harness.store.meeting(moved.id).unwrap().unwrap().duration,
+            1.0
+        );
+
+        // No master anywhere, and the folder the settings name is not
+        // there: the master may be on it.
+        let unmounted = harness.begin(MeetingSource::MacInPerson);
+        set_folder(&harness.dir.path().join("unmounted"));
+        let reconciled = harness.reconcile(std::slice::from_ref(&unmounted), &an_hour_later());
+        assert_eq!(reconciled.unreachable, [unmounted.id]);
+        assert_eq!(reconciled.failed, Vec::<Uuid>::new());
+        assert_eq!(harness.state(&unmounted), MeetingState::Recording);
+
+        // Every folder there, empty of it: failed with Swift's reason.
+        set_folder(&elsewhere);
+        let reconciled = harness.reconcile(std::slice::from_ref(&unmounted), &an_hour_later());
+        assert_eq!(reconciled.failed, [unmounted.id]);
+        assert_eq!(
+            harness.state(&unmounted),
+            MeetingState::Failed {
+                reason: Store::INTERRUPTED_RECORDING_REASON.to_owned()
+            }
         );
         harness.pipeline.current().wait_until_idle().await;
     }
@@ -568,21 +846,7 @@ mod tests {
         let mut writer = harness.writer(&meeting);
         write_frames(&mut writer, 20);
         let files = writer.finish().unwrap();
-        let result = RecordingResult {
-            asset: AudioAsset {
-                id: Uuid::new_v4(),
-                meeting_id: meeting.id,
-                url: file_url(&files.master, false),
-                format: AudioFormat::Caf48kFloat32,
-                lanes: vec![AudioLane::Mixed],
-                sidecars_16k: std::collections::BTreeMap::new(),
-                mixdown_url: None,
-                retention: AudioRetention::KeepForever,
-                expires_at: None,
-            },
-            duration: files.duration,
-            end_reason: RecordingEndReason::Manual,
-        };
+        let result = finished(&meeting, &files);
 
         let hold = WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
         let error = harness
