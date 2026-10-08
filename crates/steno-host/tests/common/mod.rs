@@ -112,6 +112,8 @@ impl Drop for Harness {
 
 type Seed = Box<dyn FnOnce(&Store, &FakeServices)>;
 
+type ChangeServices = Box<dyn FnOnce(&mut steno_host::services::Services)>;
+
 /// A destructive prompt that sees the host while it is up.
 type Prompt = Box<dyn Fn(&Host, &ConfirmDestructiveParams) -> bool + Send + Sync>;
 
@@ -121,6 +123,7 @@ pub struct HarnessBuilder {
     prompt: Option<Prompt>,
     chosen: Option<PathBuf>,
     seed: Vec<Seed>,
+    change_services: Vec<ChangeServices>,
     page_ready: bool,
     platform: Platform,
 }
@@ -159,6 +162,16 @@ impl HarnessBuilder {
         self
     }
 
+    /// Changes the services the fakes give before the host is built (a
+    /// secret store of the test's own over the fake one).
+    pub fn change_services(
+        mut self,
+        change: impl FnOnce(&mut steno_host::services::Services) + 'static,
+    ) -> Self {
+        self.change_services.push(Box::new(change));
+        self
+    }
+
     /// The host runs on `platform`; the Mac (Swift's words) by default.
     pub fn platform(mut self, platform: Platform) -> Self {
         self.platform = platform;
@@ -187,9 +200,13 @@ impl HarnessBuilder {
         let prompt_host = Arc::new(Mutex::new(None::<Host>));
         let prompt_slot = prompt_host.clone();
         let chosen = self.chosen;
+        let mut services = self.fakes.services();
+        for change in self.change_services {
+            change(&mut services);
+        }
         let host = Host::new(
             store.clone(),
-            self.fakes.services(),
+            services,
             HostConfig {
                 version: VERSION.to_owned(),
                 zone: steno_host::labels::utc(),
@@ -233,6 +250,7 @@ impl Harness {
             prompt: None,
             chosen: None,
             seed: Vec::new(),
+            change_services: Vec::new(),
             page_ready: true,
             platform: Platform::Macos,
         }

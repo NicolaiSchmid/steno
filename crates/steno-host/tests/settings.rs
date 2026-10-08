@@ -19,7 +19,7 @@ use steno_bridge::{
     SetTemplateParams, SummariesUpdateParams,
 };
 use steno_core::paths::file_url;
-use steno_core::protocols::{SecretKey, SecretStore as _};
+use steno_core::protocols::{SecretKey, SecretStore};
 use steno_core::{AudioRetention, LlmProvider};
 use steno_host::services::{CodexModel, LoginItemStatus};
 use steno_host::settings::{KeyRead, LlmSettingsViewModel};
@@ -1090,6 +1090,176 @@ fn a_key_saved_while_it_was_read_again_keeps_the_saved_key() {
     assert_eq!(
         model.api_key, "sk-stored",
         "a read begun after the save applies"
+    );
+}
+
+/// A load of the key that lands while the host reads it again (a window
+/// opened meanwhile) holds the newer key, so the reread that began before
+/// it is dropped; a save that leaves the key alone (the model only) keeps
+/// the reread.
+#[test]
+fn a_reread_gives_way_to_a_later_load_but_not_to_a_model_only_save() {
+    let harness = a_harness_whose_key_cannot_be_read();
+    let services = harness.host.services();
+    let unreadable = || KeyRead::Unreadable("the keyring is locked".to_owned());
+    let mut model = LlmSettingsViewModel::new();
+    model.load(&harness.store, services, unreadable());
+    let read_at = model.key_version();
+    model.load(
+        &harness.store,
+        services,
+        KeyRead::Present("sk-new".to_owned()),
+    );
+    model.reload_key(services, KeyRead::Present("sk-old".to_owned()), read_at);
+    assert_eq!(model.api_key, "sk-new", "the load came after the read began");
+
+    let mut settings = harness.store.settings().unwrap();
+    settings.llm_provider = LlmProvider::Endpoint;
+    settings.llm_base_url = Some("https://api.openai.com/v1".to_owned());
+    settings.llm_model = Some("gpt-4.1-mini".to_owned());
+    harness.store.save_settings(&settings).unwrap();
+    let mut model = LlmSettingsViewModel::new();
+    model.load(&harness.store, services, unreadable());
+    let read_at = model.key_version();
+    "gpt-other".clone_into(&mut model.model);
+    model.save(&harness.store, services, now());
+    assert_eq!(model.errors.error.as_deref(), Some(KeyRead::UNREADABLE));
+    assert_eq!(
+        harness.store.settings().unwrap().llm_model.as_deref(),
+        Some("gpt-other")
+    );
+    model.reload_key(
+        services,
+        KeyRead::Present("sk-stored".to_owned()),
+        read_at,
+    );
+    assert_eq!(model.api_key, "sk-stored", "the model-only save kept it");
+    assert!(model.has_stored_api_key());
+    assert_eq!(model.errors.error, None, "the unreadable message went");
+}
+
+/// A secret store whose next read, once armed, takes the value and then
+/// waits until it is released: a read the test can save over.
+struct HeldReads {
+    inner: Arc<dyn SecretStore>,
+    hold: Arc<Hold>,
+}
+
+#[derive(Default)]
+struct Hold {
+    /// Armed, holding, released.
+    state: Mutex<(bool, bool, bool)>,
+    changed: Condvar,
+}
+
+impl Hold {
+    fn arm(&self) {
+        *self.state.lock().unwrap() = (true, false, false);
+    }
+
+    fn until_holding(&self) {
+        let state = self.state.lock().unwrap();
+        let (_state, timeout) = self
+            .changed
+            .wait_timeout_while(state, std::time::Duration::from_secs(10), |state| {
+                !state.1
+            })
+            .unwrap();
+        assert!(!timeout.timed_out(), "no read was held");
+    }
+
+    fn release(&self) {
+        self.state.lock().unwrap().2 = true;
+        self.changed.notify_all();
+    }
+}
+
+#[steno_core::async_trait]
+impl SecretStore for HeldReads {
+    async fn secret(
+        &self,
+        key: &SecretKey,
+    ) -> steno_core::protocols::BoundaryResult<Option<String>> {
+        let read = self.inner.secret(key).await;
+        let mut state = self.hold.state.lock().unwrap();
+        if state.0 {
+            state.0 = false;
+            state.1 = true;
+            self.hold.changed.notify_all();
+            drop(
+                self.hold
+                    .changed
+                    .wait_while(state, |state| !state.2)
+                    .unwrap(),
+            );
+        }
+        read
+    }
+
+    async fn set_secret(
+        &self,
+        key: &SecretKey,
+        value: Option<&str>,
+    ) -> steno_core::protocols::BoundaryResult<()> {
+        self.inner.set_secret(key, value).await
+    }
+}
+
+/// The reread takes the form's version before it reads the key: a key
+/// saved while the read is under way stays, though the read saw none.
+#[test]
+fn a_key_saved_during_the_reads_own_read_stays() {
+    let hold = Arc::new(Hold::default());
+    let harness = Harness::builder()
+        .seed(|_, fakes| fakes.secrets.fail_reads(Some("the keyring is locked")))
+        .change_services({
+            let hold = hold.clone();
+            move |services| {
+                services.secrets = Arc::new(HeldReads {
+                    inner: services.secrets.clone(),
+                    hold,
+                });
+            }
+        })
+        .build();
+    harness
+        .host
+        .settings_summaries_select_preset(SetStringParams {
+            value: "openAI".to_owned(),
+        })
+        .unwrap();
+    harness
+        .host
+        .settings_summaries_update(update(Some("gpt-4.1-mini"), None, None, None))
+        .unwrap();
+    harness.fakes.secrets.fail_reads(None);
+    hold.arm();
+    let reread = {
+        let host = harness.host.clone();
+        std::thread::spawn(move || host.secrets_changed())
+    };
+    hold.until_holding();
+    harness
+        .host
+        .settings_summaries_update(update(None, None, Some("sk-saved"), None))
+        .unwrap();
+    harness.host.settings_summaries_save().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
+        true
+    );
+    hold.release();
+    reread.join().unwrap();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsSummaries)["hasAPIKey"],
+        true,
+        "the read that saw no key is dropped"
+    );
+    assert_eq!(
+        block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
+            .unwrap()
+            .as_deref(),
+        Some("sk-saved")
     );
 }
 
