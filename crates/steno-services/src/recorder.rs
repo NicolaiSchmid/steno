@@ -1,8 +1,9 @@
 //! The host's `Recorder` over the capture session and the Mac recording
 //! intake. Swift: `apps/macos/Steno/Recording/RecordingController.swift`.
 //! The calendar lookup, the auto-stop after a call ends and the detection
-//! prompt are WP5's recorder policy (the plan's parity list); the status
-//! carries what the capture session reports.
+//! prompt are not here yet (the recorder's item in the parity list of
+//! `.plans/2026-10-02-rust-core-and-tauri-shell.md`); the status carries
+//! what the capture session reports.
 //!
 //! Each recording has a watcher thread. A session that fails on its own (a
 //! device that stayed lost, a write that failed on a full disk) is finished
@@ -14,11 +15,10 @@
 //! eye on the free space on the volumes of the recordings folder and of
 //! the database, the smaller of the two: a recording warns when about half
 //! an hour is left and, on Linux and Windows, does not start without room
-//! and stops and is saved before the disk fills. On the Mac a low reading
-//! only warns, since `statvfs` leaves out the space APFS would purge for
-//! the user, and a disk that is truly full can fail the save. A volume
-//! that reports no size, or more space free than it holds (some network
-//! and FUSE file systems), counts as unreadable and never warns, stops or
+//! and stops and is saved before the disk fills; on the Mac a low reading
+//! only warns (why on `DiskWatch::STOP_BELOW_BYTES`). A volume that
+//! reports no size, or more space free than it holds (some network and
+//! FUSE file systems), counts as unreadable and never warns, stops or
 //! refuses a recording. Rust only: Swift had no disk check.
 
 use std::path::{Path, PathBuf};
@@ -73,25 +73,25 @@ pub(crate) struct DiskWatch {
     pub(crate) database_folder: Option<PathBuf>,
     /// Whether a reading below [`Self::STOP_BELOW_BYTES`] refuses a start
     /// and stops a recording; when not, it only warns, and the minutes
-    /// left count to a full disk. There a failed write ends the recording
-    /// and Steno tries to save it, but a disk that is truly full can fail
-    /// the save too; the files stay for the recovery at the next launch.
-    /// Off on the Mac only ([`Self::system`]).
+    /// left count to a full disk. Off on the Mac only ([`Self::system`];
+    /// why on [`Self::STOP_BELOW_BYTES`]).
     pub(crate) stops: bool,
 }
 
 impl DiskWatch {
-    /// Below this a recording does not start, and one in progress stops
-    /// and is saved: room for the database, the processing and the system,
-    /// so the save itself never meets a full disk. Linux and Windows only:
-    /// on the Mac `statvfs` leaves out the space APFS would purge for the
-    /// user (tens of GB with local Time Machine snapshots), so a reading
-    /// below it there only warns ([`Self::stops`]); a recording refused or
-    /// cut on a disk that had room would lose the meeting. Nothing keeps
-    /// the save its room there yet, so a disk that is truly full can fail
-    /// it. The Mac gets the floor once the `steno-macos` crate reads
-    /// `NSURLVolumeAvailableCapacityForImportantUsageKey`, which counts that
-    /// space (reading it takes `unsafe`, which belongs there).
+    /// Below this a recording does not start, and one in progress stops and
+    /// is saved: room for the database, the processing and the system, so
+    /// the save itself never meets a full disk. Linux and Windows only: on
+    /// the Mac `statvfs` leaves out the space APFS would purge for the user
+    /// (tens of GB with local Time Machine snapshots), so a reading below
+    /// it there only warns ([`Self::stops`]); a recording refused or cut on
+    /// a disk that had room would lose the meeting. Nothing keeps the save
+    /// its room there yet: a failed write still ends the recording and
+    /// Steno tries to save it, but a disk that is truly full can fail the
+    /// save too, and the files stay for the recovery at the next launch.
+    /// The Mac gets the floor once the `steno-macos` crate reads
+    /// `NSURLVolumeAvailableCapacityForImportantUsageKey`, which counts
+    /// that space (reading it takes `unsafe`, which belongs there).
     pub(crate) const STOP_BELOW_BYTES: u64 = 512 * 1024 * 1024;
     /// The recording time left above [`Self::STOP_BELOW_BYTES`] below which
     /// a recording warns.
@@ -969,7 +969,9 @@ impl Drop for BegunMeeting<'_> {
         let Some(session) = self.session.take() else {
             return;
         };
-        // An error here is the session's state after its own guard.
+        // An error here is the session's state after its own guard. The
+        // stop comes first: it closes the files, and Windows does not
+        // delete a folder whose files are open.
         let _ = session.stop();
         let _ = std::fs::remove_dir_all(&self.folder);
         let _ = self.intake.fail(self.meeting_id, START_PANICKED);

@@ -24,18 +24,18 @@
 //! recording end in `Failed(DeviceLost)`. A chosen microphone that is gone
 //! fails no restart: the live backends then record the default input and
 //! say so in [`CaptureStream::input`], which [`CaptureSession::stream`]
-//! hands out (see [`CaptureBackend::start`]). One that is connected but does not open
-//! is the session's to replace: when the start, or a rebuild's last
-//! restart, fails on it, the session starts the backend once more without
-//! a UID and marks that input as the fallback, so the recording ends only
-//! when the default input cannot be opened either (Rust only: Swift fails
-//! the start, and ends the recording after its restarts). A rebuild tries
-//! the default already after its first failed restart when the stream it
-//! replaces was on the fallback, or after the first restart on which the
-//! graph did not run on the chosen microphone
+//! hands out (see [`CaptureBackend::start`]). One that is connected but
+//! does not open is the session's to replace: when the start, or a
+//! rebuild's last restart, fails on it, the session starts the backend once
+//! more without a UID and marks that input as the fallback, so the
+//! recording ends only when the default input cannot be opened either (Rust
+//! only: Swift fails the start, and ends the recording after its restarts).
+//! A rebuild tries the default already after its first failed restart when
+//! the stream it replaces was on the fallback, or after the first restart
+//! on which the graph did not run on the chosen microphone
 //! ([`CaptureError::DidNotRun`]), not after the last: the gap then stays
-//! under [`CaptureSession::MAXIMUM_GAP`] when that is the first restart,
-//! so the restarts take nothing from the master.
+//! under [`CaptureSession::MAXIMUM_GAP`] when that is the first restart, so
+//! the restarts take nothing from the master.
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole
@@ -808,12 +808,12 @@ impl Core {
     /// and the duration is what the master holds); the failure comes back
     /// in [`CaptureResult::failure`]: a failed write or close, else the
     /// device loss that ended the recording, else a sync that failed while
-    /// recording. `WriterFailed` with no asset when there is nothing to hand out:
-    /// the writer thread died and took the writer with it, or the master is
-    /// gone from disk (its folder deleted while recording; an unlinked file
-    /// still writes and closes without an error). The caller has set the
-    /// state to `Stopping`; the threads are stopped with the lock released
-    /// (see the module doc).
+    /// recording. `WriterFailed` with no asset when there is nothing to
+    /// hand out: the writer thread died and took the writer with it, or
+    /// the master is gone from disk (its folder deleted while recording; an
+    /// unlinked file still writes and closes without an error). The caller
+    /// has set the state to `Stopping`; the threads are stopped with the
+    /// lock released (see the module doc).
     fn finish(&self) -> Result<CaptureResult, CaptureError> {
         let mut active = self
             .lock()
@@ -1323,6 +1323,11 @@ impl Core {
     /// rebuild numbered `generation` of the start numbered `recording` is
     /// still the newest, checked under the same lock as the change: an
     /// older one's recording, or its place, belongs to another thread now.
+    /// The generation decides only for a panic after `resume` began the
+    /// next rebuild: before that no newer one can begin (`begin_rebuild`
+    /// keeps a report for later while this one holds `active.rebuild`),
+    /// and a stop leaves `Recording`. No test reaches it; it stays as the
+    /// guard for that case.
     fn device_lost(&self, recording: usize, generation: usize) {
         {
             let mut inner = self.lock();
