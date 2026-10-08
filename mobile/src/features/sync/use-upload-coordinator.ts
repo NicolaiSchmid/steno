@@ -23,7 +23,7 @@ import {
 	isPending,
 	resetForUpload,
 } from "@/features/queue/queue-index";
-import { adoptedOrigins } from "./adopted-origin";
+import { adoptedOrigin } from "./adopted-origin";
 import {
 	announce,
 	cancelAllUploads,
@@ -68,10 +68,10 @@ const REPAIRING_RECHECK_MS = 1000;
  * How often the Mac is resolved again while uploads are queued and the app
  * is in the foreground. A new address that keeps the Bonjour name (a new
  * lease, Ethernet instead of Wi-Fi on one LAN) sends no event, and chunks out
- * to the old address fail no request, so only this finds it. A resolve
- * already running absorbs the timer, so rounds do not overlap. A round costs
- * one Bonjour query, and one connection to the old address when the new one
- * differs; 30 s stays well under the 5 min backoff cap.
+ * to the old address fail no request, so only this finds it. A request while
+ * a round runs becomes one more round after it, so rounds do not overlap. A
+ * round costs one Bonjour query, and one connection to the old address when
+ * the new one differs; 30 s stays well under the 5 min backoff cap.
  */
 export const RERESOLVE_INTERVAL_MS = 30_000;
 
@@ -198,8 +198,9 @@ export function useUploadCoordinator(): UploadCoordinator {
 	// compares against the address the last process chose, since its chunks
 	// still go there. Once the address in use stops answering, the new one
 	// takes over and the chunks still out are cancelled: the background
-	// session would retry them at the old address for days. A cancelled chunk
-	// backs off and is sent again; the Mac keeps what it has.
+	// session would retry them at the old address for days. The file holds
+	// the new address before any chunk is sent to it. A cancelled chunk backs
+	// off and is sent again; the Mac keeps what it has.
 	// biome-ignore lint/correctness/useExhaustiveDependencies: a new round is what resolves again.
 	useEffect(() => {
 		if (!pairing || !serviceName) {
@@ -213,7 +214,7 @@ export function useUploadCoordinator(): UploadCoordinator {
 		const token = pairing.token;
 		const lastChosen = async (): Promise<MacSession | null> => {
 			if (adopted.current) return adopted.current;
-			const endpoint = await adoptedOrigins.read();
+			const endpoint = await adoptedOrigin.read();
 			return endpoint?.fingerprint === fingerprint ? { endpoint, token } : null;
 		};
 		const run = async () => {
@@ -231,19 +232,21 @@ export function useUploadCoordinator(): UploadCoordinator {
 				(current.endpoint.origin === found.endpoint.origin ||
 					(await answers(current.endpoint)));
 			if (cancelled) return;
+			if (!keep) {
+				await adoptedOrigin
+					.write(found.endpoint)
+					.catch((error) => console.warn("[sync] address not saved", error));
+				// A round cancelled meanwhile neither adopts nor cancels.
+				if (cancelled) return;
+			}
 			const chosen = keep ? current : found;
 			adopted.current = chosen;
-			if (!keep) {
-				void adoptedOrigins
-					.write(found.endpoint)
-					.catch((error) => console.warn("[sync] address not kept", error));
-				// A re-pairing cancels its own chunks (`cancelAllUploads` in the
-				// pairing path), so only a move within one pairing cancels here.
-				if (samePairing) {
-					await cancelAllUploads().catch((error) =>
-						console.warn("[sync] cancel failed", error),
-					);
-				}
+			// A re-pairing cancels its own chunks (`cancelAllUploads` in the
+			// pairing path), so only a move within one pairing cancels here.
+			if (!keep && samePairing) {
+				await cancelAllUploads().catch((error) =>
+					console.warn("[sync] cancel failed", error),
+				);
 			}
 			if (!cancelled) setResolved(chosen);
 		};

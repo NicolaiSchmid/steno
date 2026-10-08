@@ -17,9 +17,11 @@ import type { QueueFileAPI } from "@/features/queue/queue-storage";
  * address, as does a failed rename (expo removes the target before it
  * moves). Without it the first resolve adopts the new address and cancels
  * nothing, so a chunk carried over to a dead address waits for its own
- * failure; no recording is touched either way.
+ * failure (up to the session's 7-day resource timeout); no recording is
+ * touched either way.
  */
-export type AdoptedOrigins = {
+export type AdoptedOrigin = {
+	/** Waits for the writes already queued, so it sees the last address chosen. */
 	read(): Promise<MacEndpoint | null>;
 	/** Writes run one at a time, in call order. */
 	write(endpoint: MacEndpoint): Promise<void>;
@@ -42,14 +44,19 @@ export function parseAdoptedOrigin(text: string): MacEndpoint | null {
 		: null;
 }
 
-/** `path` is a `file://` URI, read when a file is first touched. */
-export function createAdoptedOrigins(
+/**
+ * `path` is a `file://` URI, computed at each read and write so that
+ * importing this module does not touch `Paths.document`.
+ */
+export function createAdoptedOrigin(
 	files: Pick<QueueFileAPI, "readText" | "writeText" | "rename">,
 	path: () => string,
-): AdoptedOrigins {
+): AdoptedOrigin {
+	// Never rejects: each write's failure goes to its own caller.
 	let writes: Promise<void> = Promise.resolve();
 	return {
 		async read() {
+			await writes;
 			try {
 				const text = await files.readText(path());
 				return text === null ? null : parseAdoptedOrigin(text);
@@ -70,7 +77,7 @@ export function createAdoptedOrigins(
 	};
 }
 
-export const adoptedOrigins = createAdoptedOrigins(
+export const adoptedOrigin = createAdoptedOrigin(
 	expoQueueFiles,
 	() => `${Paths.document.uri.replace(/\/+$/, "")}/sync/adopted-origin.json`,
 );

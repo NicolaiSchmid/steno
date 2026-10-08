@@ -60,6 +60,10 @@ const fake = vi.hoisted(() => {
 		certificates: {} as Record<string, string>,
 		/** The address the last process chose (`adopted-origin.ts`). */
 		adoptedOrigin: null as MacEndpoint | null,
+		/** Every write of it, in order. */
+		writes: [] as MacEndpoint[],
+		/** When set, the next write of it lands only once this resolves. */
+		holdWrite: null as Promise<void> | null,
 		/** Every queue file deleted, with the last request sent before it. */
 		deleted: [] as { fileName: string; after: string | undefined }[],
 		/** When set, `resolve` rejects. */
@@ -227,9 +231,11 @@ vi.mock("@/features/queue/queue-files", () => ({
 	}),
 }));
 vi.mock("./adopted-origin", () => ({
-	adoptedOrigins: {
+	adoptedOrigin: {
 		read: async () => fake.adoptedOrigin,
 		write: async (endpoint: MacEndpoint) => {
+			fake.writes.push(endpoint);
+			await fake.holdWrite;
 			fake.adoptedOrigin = endpoint;
 		},
 	},
@@ -371,6 +377,8 @@ beforeEach(() => {
 	fake.down.clear();
 	fake.certificates = {};
 	fake.adoptedOrigin = null;
+	fake.writes.length = 0;
+	fake.holdWrite = null;
 	fake.deleted.length = 0;
 	fake.failResolve = false;
 	fake.putStatus = null;
@@ -804,13 +812,15 @@ describe("useUploadCoordinator", () => {
 			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
 		});
 
-		it("keeps the address in use while it still answers", async () => {
+		it("keeps the address in use while it still answers, and writes nothing", async () => {
 			const h = await mount(queued("a"), A);
 			fake.pending = [taskIDs.chunk("a", 0)];
 			// A Mac on Wi-Fi and Ethernet of one LAN resolves to either.
 			fake.hosts["Mac A"] = "10.0.0.9";
+			const written = fake.writes.length;
 			await elapse(RERESOLVE_INTERVAL_MS);
 			expect(fake.cancelled).toEqual([]);
+			expect(fake.writes.length).toBe(written);
 			expect(fake.sent.at(-1)?.url).toBe("https://10.0.0.1:1/v1/hello");
 
 			fake.pending = [];
@@ -823,7 +833,7 @@ describe("useUploadCoordinator", () => {
 			expect(fake.sent.some((r) => hostOf(r.url) === "10.0.0.9")).toBe(false);
 		});
 
-		it("asks for no second resolve while one is running, and runs one more after it", async () => {
+		it("starts no second resolve while one runs, and one more after it", async () => {
 			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 			try {
 				await mount(EMPTY_INDEX, B);
@@ -844,7 +854,7 @@ describe("useUploadCoordinator", () => {
 			}
 		});
 
-		it("a resolve superseded by a re-pairing adopts nothing", async () => {
+		it("adopts and writes nothing from a resolve a re-pairing overtook", async () => {
 			const h = await mount(EMPTY_INDEX, B);
 			await h.repair(A);
 			await settle();
@@ -867,11 +877,12 @@ describe("useUploadCoordinator", () => {
 			const withBearerTo = (host: string) =>
 				fake.sent.filter((r) => r.auth && hostOf(r.url) === host);
 
-			it("cancels nothing while the persisted address still answers", async () => {
+			it("cancels and writes nothing while the persisted address still answers", async () => {
 				fake.adoptedOrigin = macAAt("10.0.0.1");
 				await mount(uploadingA(), A);
 				await elapse(RERESOLVE_INTERVAL_MS);
 				expect(fake.cancelled).toEqual([]);
+				expect(fake.writes).toEqual([]);
 				expect(fake.sent).toContainEqual({
 					url: "https://10.0.0.1:1/v1/recordings/a/chunks/1",
 					auth: "Bearer token-a",
@@ -890,6 +901,39 @@ describe("useUploadCoordinator", () => {
 					auth: "Bearer token-a",
 				});
 				expect(withBearerTo("10.0.0.1")).toEqual([]);
+			});
+
+			it("writes the new address before it cancels or sends anything there", async () => {
+				const write = Promise.withResolvers<void>();
+				fake.holdWrite = write.promise;
+				fake.adoptedOrigin = macAAt("10.0.0.1");
+				fake.down.add("10.0.0.1");
+				await mount(uploadingA(), A);
+				expect(fake.writes).toEqual([macAAt("10.0.0.9")]);
+				expect(fake.cancelled).toEqual([]);
+				expect(withBearerTo("10.0.0.9")).toEqual([]);
+
+				await act(async () => write.resolve());
+				await settle();
+				expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
+				expect(fake.sent).toContainEqual({
+					url: "https://10.0.0.9:1/v1/recordings/a/chunks/1",
+					auth: "Bearer token-a",
+				});
+			});
+
+			it("cancels nothing from a round that ends while its write is out", async () => {
+				const write = Promise.withResolvers<void>();
+				fake.holdWrite = write.promise;
+				fake.adoptedOrigin = macAAt("10.0.0.1");
+				fake.down.add("10.0.0.1");
+				await mount(uploadingA(), A);
+				act(() => root?.unmount());
+				root = null;
+				await act(async () => write.resolve());
+				await settle();
+				expect(fake.cancelled).toEqual([]);
+				expect(withBearerTo("10.0.0.9")).toEqual([]);
 			});
 
 			it("cancels nothing when no earlier address is known for the pairing", async () => {
