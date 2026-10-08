@@ -100,8 +100,8 @@ impl Inbox {
     /// Renames the complete partial to its final name. On Windows the
     /// removal of a verified file there and the rename are tried again
     /// while another handle (a sync or antivirus client) holds a file for a
-    /// moment (`steno_core::busy_file`); a verified file already gone is
-    /// fine. A failure leaves the partial in place, and `complete` answers
+    /// moment (`steno_core::busy_file`); on every platform a verified file
+    /// already gone is fine. A failure leaves the partial in place, and `complete` answers
     /// 500, so the phone keeps its copy and tries again.
     pub fn promote(&self, recording_id: Uuid, format: AudioFormat) -> std::io::Result<PathBuf> {
         let destination = self.verified(recording_id, format);
@@ -225,6 +225,20 @@ mod tests {
         inbox.discard(id);
         assert_eq!(files_of(&inbox, id), Vec::<String>::new());
         assert!(inbox.recording_ids().is_empty());
+    }
+
+    /// A partial already gone fails `promote`, so `complete` answers 500,
+    /// and no verified file appears.
+    #[test]
+    fn a_missing_partial_is_not_promoted() {
+        let directory = tempfile::tempdir().unwrap();
+        let inbox = Inbox::new(directory.path().join("inbox"));
+        let id = Uuid::new_v4();
+        inbox.begin(&metadata(id)).unwrap();
+        std::fs::remove_file(inbox.partial(id)).unwrap();
+        let error = inbox.promote(id, AudioFormat::M4aAac).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(!inbox.has_verified(id, AudioFormat::M4aAac));
     }
 
     /// On Windows a partial another handle holds without sharing its

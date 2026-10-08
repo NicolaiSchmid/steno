@@ -348,7 +348,8 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
 /// the move is a rename, which replaces a taken name, so a check that the
 /// name is free comes first and is all that guards it there. If the old
 /// name cannot be removed after the link, the error is returned and both
-/// names hold the bytes; an old name already gone is no error. On Windows
+/// names hold the bytes; on every platform an old name already gone is
+/// no error. On Windows
 /// that removal and the rename are tried again while the file is busy
 /// (`steno_core::busy_file`).
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
@@ -491,6 +492,17 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("preferences.json.corrupt-")
         );
+    }
+
+    /// A file already gone is not set aside: the error says so and no
+    /// copy appears.
+    #[test]
+    fn a_missing_file_is_not_set_aside() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("preferences.json");
+        let error = set_aside(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     fn temporaries(directory: &Path) -> Vec<String> {
