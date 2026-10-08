@@ -2721,6 +2721,19 @@ mod tests {
             .collect()
     }
 
+    /// `directory` holds `three_clips`' earlier clips as they were and
+    /// nothing else; `case` names the failure in a mismatch.
+    fn assert_only_the_earlier_clips(directory: &Path, case: &str) {
+        assert_eq!(names(directory), ["a.wav", "c.wav"], "{case}");
+        for name in ["a", "c"] {
+            assert_eq!(
+                std::fs::read(directory.join(format!("{name}.wav"))).unwrap(),
+                format!("{name}'s earlier voice").as_bytes(),
+                "{case}"
+            );
+        }
+    }
+
     /// The new clips replace the earlier ones, and nothing staged or set
     /// aside is left beside them.
     #[test]
@@ -2760,19 +2773,7 @@ mod tests {
             })
             .unwrap_err();
             assert_eq!(error.kind(), std::io::ErrorKind::ResourceBusy);
-            assert_eq!(
-                names(dir.path()),
-                ["a.wav", "c.wav"],
-                "refused {refused_from}"
-            );
-            assert_eq!(
-                std::fs::read(dir.path().join("a.wav")).unwrap(),
-                b"a's earlier voice"
-            );
-            assert_eq!(
-                std::fs::read(dir.path().join("c.wav")).unwrap(),
-                b"c's earlier voice"
-            );
+            assert_only_the_earlier_clips(dir.path(), refused_from);
         }
     }
 
@@ -2795,14 +2796,6 @@ mod tests {
         let error = write_sample_clips(&clips).unwrap_err();
         assert!(busy_file::is_busy(&error), "{error:?}");
         drop(holder);
-        assert_eq!(names(dir.path()), ["a.wav", "c.wav"]);
-        assert_eq!(
-            std::fs::read(dir.path().join("a.wav")).unwrap(),
-            b"a's earlier voice"
-        );
-        assert_eq!(
-            std::fs::read(dir.path().join("c.wav")).unwrap(),
-            b"c's earlier voice"
-        );
+        assert_only_the_earlier_clips(dir.path(), "c.wav");
     }
 }

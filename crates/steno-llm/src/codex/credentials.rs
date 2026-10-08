@@ -820,15 +820,15 @@ impl CodexCredentialStore {
 
     /// Temp file beside the target with mode 0600, synced, then `rename`
     /// (tried again on Windows while the file is busy,
-    /// `steno_core::busy_file`), then the folder synced: readers see the old or the new file, never
-    /// a partial one, the mode never opens up on the way, and, where both
-    /// syncs succeed, the new tokens survive a power loss. A temporary
-    /// that could not be written whole holds no usable copy and is
-    /// removed. A rename that fails leaves the temporary, mode 0600, with
-    /// the new tokens in it, in case the app quits before a later write
-    /// lands; that write removes it, and one left by a run that quit first
-    /// stays until removed by hand. The failure names the file, never what
-    /// it holds.
+    /// `steno_core::busy_file`), then the folder synced: readers see the
+    /// old or the new file, never a partial one, the mode never opens up
+    /// on the way, and, where both syncs succeed, the new tokens survive a
+    /// power loss. A temporary that could not be written whole holds no
+    /// usable copy and is removed. A rename that fails leaves the
+    /// temporary, mode 0600, with the new tokens in it, in case the app
+    /// quits before a later write lands; that write removes it, and one
+    /// left by a run that quit first stays until removed by hand. The
+    /// failure names the file, never what it holds.
     fn write(&self, document: &Map<String, Value>) -> Result<(), WriteFailure> {
         let text = crate::wire::swift_pretty(&Value::Object(document.clone()));
         let temporary = self
