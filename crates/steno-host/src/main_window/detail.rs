@@ -169,11 +169,6 @@ impl MeetingDetailViewModel {
         self.can_rerun() && self.llm_configured && self.has_transcript()
     }
 
-    fn is_failed(&self) -> bool {
-        self.meeting()
-            .is_some_and(|meeting| meeting.state.kind() == MeetingStateKind::Failed)
-    }
-
     /// "Re-export" and "Export now": without a vault there is nowhere to
     /// export to.
     #[must_use]
@@ -273,7 +268,10 @@ impl MeetingDetailViewModel {
     /// [`process_again_refusal_line`]'s words; one while the app quits
     /// shows nothing. Swift: `MeetingDetailViewModel.processAgain()`.
     pub fn process_again(&mut self, pipeline: &dyn Pipeline, platform: Platform) {
-        let outcome = if !self.is_failed() {
+        let failed = self
+            .meeting()
+            .is_some_and(|meeting| meeting.state.is_failed());
+        let outcome = if !failed {
             Err(ProcessAgainRefusal::NotFailed)
         } else if !self.recording_files_exist {
             Err(ProcessAgainRefusal::RecordingGone)
