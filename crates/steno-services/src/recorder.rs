@@ -1503,6 +1503,17 @@ mod tests {
         failing_reloads: Arc<AtomicBool>,
     }
 
+    impl Drop for Harness {
+        /// Waits for the pipeline's runs, so a test that saved a recording
+        /// leaves no file of its processing behind (a speaker clip).
+        fn drop(&mut self) {
+            let pipeline = self.recorder.pipeline.current();
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(pipeline.wait_until_idle());
+            });
+        }
+    }
+
     /// Where the app runs each engine id with `speech_settings`.
     fn platform_rule(
         speech_settings: SpeechSettings,
@@ -2332,6 +2343,77 @@ mod tests {
         // The stop's notice holds it 0.3 s ([`held_in`]), then one try.
         assert!(took < std::time::Duration::from_millis(2_500), "{took:?}");
         assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
+    }
+
+    /// A quit that comes while the stop's first try waits on the busy
+    /// database (past the notice's 0.3 s hold, [`held_in`]) is seen before
+    /// the next try: quitting returns once that try ends, where the
+    /// stop's three tries would take 3 s, and the meeting is kept.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_quit_during_the_stop_s_first_try_tries_no_more() {
+        let harness = harness(&[]);
+        harness
+            .store
+            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::from_secs(1))?))
+            .unwrap();
+        start(&harness.recorder).await;
+        let meeting_id = harness.recorder.status().meeting_id.unwrap();
+        let hold =
+            steno_core::testing::WriteLockHold::new(&harness.dir.path().join("steno.sqlite"));
+        let stop_seen = held_in(&harness.recorder, RecordingState::Stopping);
+        let stopper = harness.recorder.clone();
+        let started = std::time::Instant::now();
+        let manual = std::thread::spawn(move || stopper.stop());
+        stop_seen.recv_timeout(PATIENCE).expect("the stop began");
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        quit(&harness.recorder);
+        let took = started.elapsed();
+        drop(hold);
+        manual.join().unwrap();
+        assert!(took < std::time::Duration::from_millis(2_600), "{took:?}");
+        assert_kept(&harness, meeting_id, &harness.dir.path().join("audio"));
+    }
+
+    /// A stop whose meeting was failed or deleted while it recorded (the
+    /// Swift app's launch, a delete) says the meeting was not stored and
+    /// forgets its folder, and a deleted meeting is not brought back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stop_whose_meeting_moved_on_while_recording_settles() {
+        let changes: [fn(&Store, Uuid); 2] = [
+            |store, id| {
+                store
+                    .set_state(
+                        id,
+                        steno_core::MeetingState::Failed { reason: "x".into() },
+                        Utc::now(),
+                    )
+                    .unwrap();
+            },
+            |store, id| {
+                store.delete_meeting_left_recording(id).unwrap();
+            },
+        ];
+        for (change, deleted) in changes.into_iter().zip([false, true]) {
+            let harness = harness(&[]);
+            start(&harness.recorder).await;
+            let meeting_id = harness.recorder.status().meeting_id.unwrap();
+            change(&harness.store, meeting_id);
+            stop(&harness.recorder).await;
+            assert_eq!(
+                harness.recorder.status().error.as_deref(),
+                Some(MEETING_NOT_STORED)
+            );
+            assert_eq!(
+                harness.store.meeting(meeting_id).unwrap().is_none(),
+                deleted
+            );
+            assert!(harness.store.asset(meeting_id).unwrap().is_none());
+            assert!(
+                crate::audio_folders::recorded(&harness.dir.path().join("support"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
     }
 
     /// A stop that saves its recording forgets the folder recorded for it.

@@ -1425,6 +1425,53 @@ mod tests {
         commits
     }
 
+    /// A pipeline over `store` whose decoder and dispatcher nothing
+    /// reaches ([`Unreached`]), its clock stopped at `now`.
+    fn unreached_pipeline(store: &Arc<Store>, now: DateTime<Utc>) -> ProcessingPipeline {
+        ProcessingPipeline::new(
+            crate::PipelineDependencies::new(
+                Arc::new(Unreached),
+                Arc::new(steno_core::testing::FakeSpeechEngine::default()),
+                Arc::new(steno_core::testing::FakeDiarizer::default()),
+                Arc::new(steno_core::testing::InMemorySpeakerMemory::new(Vec::new())),
+                Arc::new(Unreached),
+                store.clone(),
+                crate::MeetingEventBus::new(),
+            )
+            .with_now(Arc::new(move || now)),
+        )
+    }
+
+    /// The production local intake commits a stopped recording through
+    /// [`ProcessingPipeline::enqueue_stopped_recording`]: its enqueue,
+    /// handed a recording whose row failed meanwhile, fails with the
+    /// store's `NotRecording` and writes nothing, where the plain
+    /// `enqueue` would bring the row back `queued`.
+    #[tokio::test]
+    async fn the_production_local_intake_commits_only_a_row_still_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_audio_folder(dir.path());
+        let (meeting, result) = a_recording(&store, dir.path());
+        let failed = MeetingState::Failed { reason: "x".into() };
+        store
+            .set_state(meeting.id, failed.clone(), Utc::now())
+            .unwrap();
+        let intake = LocalRecordingIntake::over(
+            store.clone(),
+            unreached_pipeline(&store, Utc::now()),
+            FixedOffset::east_opt(0).unwrap(),
+        );
+        let failure = (intake.enqueue)(meeting.clone(), result.asset)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            failure.reason,
+            StoreError::NotRecording(meeting.id, MeetingStateKind::Failed).to_string()
+        );
+        assert_eq!(store.meeting(meeting.id).unwrap().unwrap().state, failed);
+        assert!(store.asset(meeting.id).unwrap().is_none());
+    }
+
     /// `PRAGMA synchronous` on the store's connection outside a write.
     fn synchronous(store: &Store) -> i64 {
         store
@@ -1446,18 +1493,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = store_with_audio_folder(dir.path());
         let now = Utc::now();
-        let pipeline = ProcessingPipeline::new(
-            crate::PipelineDependencies::new(
-                Arc::new(Unreached),
-                Arc::new(steno_core::testing::FakeSpeechEngine::default()),
-                Arc::new(steno_core::testing::FakeDiarizer::default()),
-                Arc::new(steno_core::testing::InMemorySpeakerMemory::new(Vec::new())),
-                Arc::new(Unreached),
-                store.clone(),
-                crate::MeetingEventBus::new(),
-            )
-            .with_now(Arc::new(move || now)),
-        );
+        let pipeline = unreached_pipeline(&store, now);
         // The meeting is saved and stays queued; nothing is processed.
         pipeline.quit();
         let intake =

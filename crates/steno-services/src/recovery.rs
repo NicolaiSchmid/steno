@@ -1088,6 +1088,57 @@ mod tests {
         );
     }
 
+    /// A launch that cannot list the rows left `recording` forgets no
+    /// entry: without the rows, none can be told settled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_launch_that_cannot_list_the_meetings_forgets_no_entry() {
+        let harness = Harness::new();
+        let meeting = harness.begin(MeetingSource::MacCall);
+        harness.record(&meeting, &harness.audio_folder());
+        harness
+            .store
+            .write(|transaction| {
+                Ok(transaction.execute_batch("ALTER TABLE meeting RENAME TO gone")?)
+            })
+            .unwrap();
+
+        let interrupted = Interrupted::list(&harness.store, &harness.support_directory());
+        assert_eq!(interrupted.meetings, Vec::<Meeting>::new());
+        assert!(interrupted.recorded.is_none());
+        reconcile_interrupted(
+            &harness.store,
+            &harness.intake(),
+            &interrupted,
+            &an_hour_later(),
+            &tokio::runtime::Handle::current(),
+        );
+        assert_eq!(harness.recorded(&meeting), Some(harness.audio_folder()));
+    }
+
+    /// An entry recorded after the launch listed the record (a recording
+    /// started while the reconcile ran) stays; a listed one that settled
+    /// goes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_entry_recorded_during_the_reconcile_stays() {
+        let harness = Harness::new();
+        let failed = harness.begin(MeetingSource::MacCall);
+        harness.record(&failed, &harness.audio_folder());
+        harness.intake().fail(failed.id, "refused").unwrap();
+        let interrupted = harness.interrupted(&[]);
+        let started = harness.begin(MeetingSource::MacCall);
+        harness.record(&started, &harness.audio_folder());
+
+        reconcile_interrupted(
+            &harness.store,
+            &harness.intake(),
+            &interrupted,
+            &an_hour_later(),
+            &tokio::runtime::Handle::current(),
+        );
+        assert_eq!(harness.recorded(&failed), None);
+        assert_eq!(harness.recorded(&started), Some(harness.audio_folder()));
+    }
+
     /// A folder that is gone for good keeps a row only when it decides the
     /// meeting: a recording whose recorded folder is missing (an unmounted
     /// volume) stays `recording`, with its entry, while a known folder
