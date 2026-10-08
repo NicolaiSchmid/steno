@@ -17,15 +17,20 @@
 //! that is Ethernet or Wi-Fi, hardware, and up ([`windows_keeps`]), the
 //! counterpart of Swift's "not `.other`". The record carries those
 //! addresses, and the listener accepts connections on them and on loopback
-//! only. The addresses are read when the service starts and again, at most
-//! once a second, while it accepts; the record is not re-published when
-//! the computer changes network, whereas `NWListener` follows the change.
+//! only. The listener reads them again, at most once a second, while it
+//! accepts; the record follows them as `NWListener` follows a network
+//! change: each time the daemon reports an address added or removed
+//! ([`IP_CHECK_SECONDS`]), and at least every [`RECHECK`], the addresses
+//! are read again and, when they moved, the record is registered again
+//! under the same name, TXT record and port ([`Advertiser`]).
 //! Swift: `Network/HandoverServer.swift`.
 
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use if_addrs::{IfAddr, Interface};
-use mdns_sd::{ServiceDaemon, ServiceInfo};
+use mdns_sd::{DaemonEvent, RecvTimeoutError, ServiceDaemon, ServiceInfo};
 use uuid::Uuid;
 
 use crate::identity::HandoverIdentity;
@@ -208,17 +213,133 @@ mod windows_adapters {
     }
 }
 
+/// How often the daemon reads the interfaces, in seconds: it joins the
+/// multicast group of a new network and reports the change then, so the
+/// record cannot be announced there sooner. A Wi-Fi switch and its DHCP
+/// lease take seconds too, and the phone waits 15 s for the computer to
+/// appear before it backs off, so five seconds (`mdns-sd`'s default,
+/// stated here so a new default cannot change it) costs one interface
+/// query and no phone a retry.
+pub const IP_CHECK_SECONDS: u32 = 5;
+
+/// How long the advertiser waits for a report from the daemon before it
+/// reads the addresses anyway: a report the daemon dropped (its channel to
+/// the advertiser was full), or a change it does not report (a Windows
+/// adapter that stopped counting as hardware), is followed within a
+/// minute.
+pub const RECHECK: Duration = Duration::from_secs(60);
+
+/// What tells the advertiser that the computer's addresses may have
+/// changed. The product's is the daemon's own interface check; the tests
+/// drive a fake one.
+pub(crate) trait InterfaceWatcher {
+    /// Waits for the next possible change; `false` once the watch has
+    /// ended.
+    fn changed(&mut self) -> bool;
+}
+
+/// The daemon's reports, `IpAdd` and `IpDel`, sent during its interface
+/// check. It runs a registration only after that check, which joined the
+/// multicast group of every address it reported, so the record is
+/// announced on the new network. [`RECHECK`] without a report counts as a
+/// change; the watch ends with the daemon.
+struct DaemonWatcher(mdns_sd::Receiver<DaemonEvent>);
+
+impl InterfaceWatcher for DaemonWatcher {
+    fn changed(&mut self) -> bool {
+        loop {
+            if let Some(changed) = report(&self.0.recv_timeout(RECHECK)) {
+                return changed;
+            }
+        }
+    }
+}
+
+/// What one wait on the daemon's reports says: a possible change
+/// (`Some(true)`: an address added or removed, or [`RECHECK`] without a
+/// report), the end of the watch (`Some(false)`), or nothing to act on.
+fn report(received: &Result<DaemonEvent, RecvTimeoutError>) -> Option<bool> {
+    match received {
+        Ok(DaemonEvent::IpAdd(_) | DaemonEvent::IpDel(_)) | Err(RecvTimeoutError::Timeout) => {
+            Some(true)
+        }
+        Ok(_) => None,
+        Err(RecvTimeoutError::Disconnected) => Some(false),
+    }
+}
+
+/// What the record carries now, shared by the advertiser and the thread
+/// that follows the network.
+#[derive(Debug)]
+pub(crate) struct Published {
+    pub(crate) addresses: Vec<Ipv4Addr>,
+    /// Set by [`Advertiser::withdraw`]: nothing is registered after it.
+    pub(crate) withdrawn: bool,
+}
+
+/// Follows the network until `watcher` ends or the record is withdrawn:
+/// after each change it reads `lan` and, when the addresses moved,
+/// registers the record with them. A failed registration keeps the old
+/// addresses as the published ones, so the next change tries again. The
+/// lock is held across `register`, so [`Advertiser::withdraw`], which
+/// takes it too, never sees a registration land after its own goodbye.
+pub(crate) fn follow(
+    watcher: &mut impl InterfaceWatcher,
+    lan: impl Fn() -> Vec<Ipv4Addr>,
+    published: &Mutex<Published>,
+    mut register: impl FnMut(&[Ipv4Addr]) -> mdns_sd::Result<()>,
+) {
+    while watcher.changed() {
+        let addresses = lan();
+        let mut published = published.lock().unwrap_or_else(PoisonError::into_inner);
+        if published.withdrawn {
+            return;
+        }
+        if addresses == published.addresses {
+            continue;
+        }
+        match register(&addresses) {
+            Ok(()) => {
+                if addresses.is_empty() {
+                    tracing::warn!(
+                        target: "steno::handover",
+                        "no Wi-Fi or wired network: the phone cannot find this computer until it joins one"
+                    );
+                } else {
+                    tracing::info!(
+                        target: "steno::handover",
+                        "the network changed: the Bonjour record now carries {addresses:?}"
+                    );
+                }
+                published.addresses = addresses;
+            }
+            Err(error) => tracing::warn!(
+                target: "steno::handover",
+                "registering the Bonjour record again after a network change: {error}"
+            ),
+        }
+    }
+}
+
+/// The published record and the thread that registers it again when the
+/// network changes.
 pub struct Advertiser {
     daemon: ServiceDaemon,
     fullname: String,
+    published: Arc<Mutex<Published>>,
 }
 
 impl Advertiser {
     /// The service type in the form `mdns-sd` wants.
     pub const TYPE_DOMAIN: &'static str = "_steno._tcp.local.";
 
+    /// The longest instance name a DNS label holds, in bytes.
+    pub const INSTANCE_NAME_BYTES: usize = 63;
+
     /// The record for `service_name` on `port` at `addresses`, before it
-    /// is published.
+    /// is published. The instance name is `service_name` cut to
+    /// [`Self::INSTANCE_NAME_BYTES`] at a character boundary: a longer
+    /// label fails every packet, and a computer name can be longer.
     pub fn service_info(
         service_name: &str,
         mac_id: Uuid,
@@ -231,9 +352,13 @@ impl Advertiser {
         ];
         let host = format!("{}.", HandoverIdentity::san_label(service_name));
         let addresses: Vec<IpAddr> = addresses.iter().copied().map(IpAddr::V4).collect();
+        let mut end = service_name.len().min(Self::INSTANCE_NAME_BYTES);
+        while !service_name.is_char_boundary(end) {
+            end -= 1;
+        }
         ServiceInfo::new(
             Self::TYPE_DOMAIN,
-            service_name,
+            &service_name[..end],
             &host,
             &addresses[..],
             port,
@@ -241,23 +366,82 @@ impl Advertiser {
         )
     }
 
-    /// Publishes the record with `addresses`. An empty list publishes a
-    /// record no phone can resolve; the caller logs that.
-    pub fn publish(
+    /// Publishes the record with the computer's LAN addresses
+    /// ([`current_lan_addresses`]) and follows them from then on. With no
+    /// address the record is published empty, which no phone can resolve,
+    /// and filled once the computer joins a network.
+    pub fn publish(service_name: &str, mac_id: Uuid, port: u16) -> mdns_sd::Result<Self> {
+        let daemon = ServiceDaemon::new()?;
+        let published = Self::start(&daemon, service_name, mac_id, port);
+        match published {
+            Ok((fullname, published)) => Ok(Advertiser {
+                daemon,
+                fullname,
+                published,
+            }),
+            Err(error) => {
+                let _ = daemon.shutdown();
+                Err(error)
+            }
+        }
+    }
+
+    fn start(
+        daemon: &ServiceDaemon,
         service_name: &str,
         mac_id: Uuid,
         port: u16,
-        addresses: &[Ipv4Addr],
-    ) -> mdns_sd::Result<Self> {
-        let info = Self::service_info(service_name, mac_id, port, addresses)?;
+    ) -> mdns_sd::Result<(String, Arc<Mutex<Published>>)> {
+        daemon.set_ip_check_interval(IP_CHECK_SECONDS)?;
+        // Watch before the first read, so a change between the two is
+        // reported.
+        let mut watcher = DaemonWatcher(daemon.monitor()?);
+        let addresses = current_lan_addresses();
+        if addresses.is_empty() {
+            tracing::warn!(
+                target: "steno::handover",
+                "no Wi-Fi or wired network: the phone cannot find this computer until it joins one"
+            );
+        }
+        let info = Self::service_info(service_name, mac_id, port, &addresses)?;
         let fullname = info.get_fullname().to_owned();
-        let daemon = ServiceDaemon::new()?;
         daemon.register(info)?;
-        Ok(Advertiser { daemon, fullname })
+        let published = Arc::new(Mutex::new(Published {
+            addresses,
+            withdrawn: false,
+        }));
+        let following = published.clone();
+        let daemon = daemon.clone();
+        let service_name = service_name.to_owned();
+        let spawned = std::thread::Builder::new()
+            .name("steno-handover-bonjour".to_owned())
+            .spawn(move || {
+                follow(
+                    &mut watcher,
+                    current_lan_addresses,
+                    &following,
+                    |addresses| {
+                        daemon.register(Self::service_info(&service_name, mac_id, port, addresses)?)
+                    },
+                );
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(
+                target: "steno::handover",
+                "the Bonjour record will not follow a network change: {error}"
+            );
+        }
+        Ok((fullname, published))
     }
 
-    /// Withdraws the record and stops the daemon.
+    /// Withdraws the record and stops the daemon; the thread that follows
+    /// the network registers nothing after this and ends with the daemon.
     pub fn withdraw(self) {
+        let mut published = self
+            .published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        published.withdrawn = true;
         let _ = self.daemon.unregister(&self.fullname);
         let _ = self.daemon.shutdown();
     }
@@ -317,6 +501,133 @@ mod tests {
             vec![&address]
         );
         assert!(info.get_hostname().ends_with(".local."));
+    }
+
+    #[test]
+    fn a_name_too_long_for_a_label_is_cut_at_a_character_boundary() {
+        let mac_id = Uuid::nil();
+        let long = format!("{}\u{e9}tude", "a".repeat(62));
+        let info = Advertiser::service_info(&long, mac_id, 4242, &[]).unwrap();
+        assert_eq!(
+            info.get_fullname(),
+            format!("{}._steno._tcp.local.", "a".repeat(62))
+        );
+        let fits = "b".repeat(63);
+        let info = Advertiser::service_info(&fits, mac_id, 4242, &[]).unwrap();
+        assert_eq!(info.get_fullname(), format!("{fits}._steno._tcp.local."));
+    }
+
+    /// A watcher that reports one change per step, runs the step, and ends
+    /// after the last one.
+    struct Steps<'a>(std::collections::VecDeque<Box<dyn FnOnce() + 'a>>);
+
+    impl InterfaceWatcher for Steps<'_> {
+        fn changed(&mut self) -> bool {
+            self.0.pop_front().map(|step| step()).is_some()
+        }
+    }
+
+    fn published(addresses: &[Ipv4Addr]) -> Mutex<Published> {
+        Mutex::new(Published {
+            addresses: addresses.to_vec(),
+            withdrawn: false,
+        })
+    }
+
+    #[test]
+    fn a_change_that_moves_the_addresses_registers_the_record_again_with_them() {
+        let home = Ipv4Addr::new(192, 168, 1, 20);
+        let office = Ipv4Addr::new(10, 0, 0, 5);
+        let lan = Mutex::new(vec![home]);
+        let set = |addresses: Vec<Ipv4Addr>| {
+            let lan = &lan;
+            Box::new(move || *lan.lock().unwrap() = addresses) as Box<dyn FnOnce()>
+        };
+        let mut watcher = Steps(
+            [
+                set(vec![home]),
+                set(vec![home, office]),
+                set(vec![office]),
+                set(vec![]),
+                set(vec![home]),
+            ]
+            .into(),
+        );
+        let record = published(&[home]);
+        let mut registered = Vec::new();
+        follow(
+            &mut watcher,
+            || lan.lock().unwrap().clone(),
+            &record,
+            |addresses| {
+                registered.push(addresses.to_vec());
+                Ok(())
+            },
+        );
+        assert_eq!(
+            registered,
+            vec![vec![home, office], vec![office], vec![], vec![home]],
+            "registered again on each move, not for a change that moved nothing"
+        );
+        assert_eq!(record.lock().unwrap().addresses, vec![home]);
+    }
+
+    #[test]
+    fn a_failed_registration_is_tried_again_at_the_next_change() {
+        let office = Ipv4Addr::new(10, 0, 0, 5);
+        let mut watcher = Steps([Box::new(|| ()) as Box<dyn FnOnce()>, Box::new(|| ())].into());
+        let record = published(&[]);
+        let mut attempts = 0;
+        follow(
+            &mut watcher,
+            || vec![office],
+            &record,
+            |_| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(mdns_sd::Error::Again)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(attempts, 2);
+        assert_eq!(record.lock().unwrap().addresses, vec![office]);
+    }
+
+    #[test]
+    fn nothing_is_registered_once_the_record_is_withdrawn() {
+        let office = Ipv4Addr::new(10, 0, 0, 5);
+        let record = published(&[]);
+        let withdraw = || record.lock().unwrap().withdrawn = true;
+        let mut watcher = Steps(
+            [
+                Box::new(withdraw) as Box<dyn FnOnce()>,
+                Box::new(|| panic!("the watch goes on after a withdraw")),
+            ]
+            .into(),
+        );
+        follow(
+            &mut watcher,
+            || vec![office],
+            &record,
+            |_| panic!("registered after a withdraw"),
+        );
+        assert_eq!(record.lock().unwrap().addresses, Vec::<Ipv4Addr>::new());
+    }
+
+    #[test]
+    fn the_daemon_reports_a_change_for_an_address_and_a_quiet_recheck_and_ends_with_the_daemon() {
+        let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        assert_eq!(report(&Ok(DaemonEvent::IpAdd(address))), Some(true));
+        assert_eq!(report(&Ok(DaemonEvent::IpDel(address))), Some(true));
+        assert_eq!(report(&Err(RecvTimeoutError::Timeout)), Some(true));
+        assert_eq!(report(&Ok(DaemonEvent::Respond("en0".to_owned()))), None);
+        assert_eq!(
+            report(&Ok(DaemonEvent::Announce(String::new(), String::new()))),
+            None
+        );
+        assert_eq!(report(&Err(RecvTimeoutError::Disconnected)), Some(false));
     }
 
     #[test]
