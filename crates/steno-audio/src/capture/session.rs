@@ -65,11 +65,11 @@
 //! backend spends coalescing a change is not lost from the master either.
 //! The same thread asks for the chosen microphone again
 //! ([`DeviceChangeReason::ChosenInputRecheck`]) once a recording has run
-//! [`CaptureSession::CHOSEN_INPUT_RECHECK`] on the default input the session put
-//! in its place, which no backend watches; each ask that finds it still
-//! not opening doubles the wait, up to
-//! [`CaptureSession::CHOSEN_INPUT_RECHECK_LONGEST`]. All Rust only: Swift had
-//! no watchdog.
+//! [`CaptureSession::CHOSEN_INPUT_RECHECK`] on the default input the
+//! session put in its place, which no backend watches; each ask that finds
+//! it still not opening doubles the wait, up to
+//! [`CaptureSession::CHOSEN_INPUT_RECHECK_LONGEST`]. All Rust only: Swift
+//! had no watchdog.
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole
@@ -87,9 +87,10 @@
 //! lock first, and the stop then still answers with the recording that
 //! finalise produced, as in Swift, and leaves the new recording running
 //! (`InvalidState` only when the finalise left none, or was another
-//! `stop()` that ended `Idle`). Only `stop()` waits there; a finaliser never waits
-//! for a stopper, so the wait cannot deadlock, and a finaliser that panics
-//! leaves `Failed` with no recording rather than `Stopping` for good.
+//! `stop()` that ended `Idle`). Only `stop()` waits there; a finaliser
+//! never waits for a stopper, so the wait cannot deadlock, and a finaliser
+//! that panics leaves `Failed` with no recording rather than `Stopping` for
+//! good.
 //!
 //! # Threads
 //!
@@ -278,11 +279,6 @@ struct Active {
     ring_drops: RingDrops,
     /// The watch thread, over a backend that delivers continuously.
     watch: Option<Watch>,
-    /// What the watch thread last saw of the sink; `None` unwatched.
-    progress: Option<Progress>,
-    /// When to ask for the chosen microphone again, while the stream is
-    /// the default input the session put in its place; watched only.
-    recheck: Option<Recheck>,
     /// The recording's hold on [`Playback`], taken before the backend
     /// started, kept across rebuilds and dropped with `Active` at the end
     /// of `finish()`, after `backend.stop()`. `Some` from `start` on.
@@ -312,10 +308,16 @@ impl RingDrops {
     }
 }
 
-/// The watch thread of one recording and the token that ends it.
+/// The watch thread of one recording, the token that ends it, and what it
+/// keeps under the lock.
 struct Watch {
     cancel: Cancel,
     thread: JoinHandle<()>,
+    /// What the thread last saw of the sink.
+    progress: Progress,
+    /// When to ask for the chosen microphone again, while the stream is
+    /// the default input the session put in its place.
+    recheck: Option<Recheck>,
 }
 
 /// The sink's [`LaneFrameSink::frames_offered`] as the watch thread saw it.
@@ -328,16 +330,6 @@ struct Progress {
     /// frame reached the sink after that moment while the count stays.
     count: usize,
     at: Duration,
-}
-
-impl Progress {
-    fn new(count: usize, now: Duration) -> Self {
-        Self {
-            began_at: count,
-            count,
-            at: now,
-        }
-    }
 }
 
 /// The next ask for the chosen microphone after the session recorded the
@@ -937,11 +929,19 @@ impl Core {
                 .name("steno-watch".into())
                 .spawn(move || core.watch(recording, &token))
                 .expect("spawn watch thread");
-            Watch { cancel, thread }
+            let now = self.clock.now();
+            Watch {
+                cancel,
+                thread,
+                progress: Progress {
+                    began_at: 0,
+                    count: 0,
+                    at: now,
+                },
+                recheck: Self::replaced_the_chosen(&stream, on_the_default)
+                    .then(|| Recheck::after(None, now)),
+            }
         });
-        let now = self.clock.now();
-        let recheck = (watch.is_some() && Self::replaced_the_chosen(&stream, on_the_default))
-            .then(|| Recheck::after(None, now));
         inner.active = Some(Active {
             meeting_id,
             stream,
@@ -957,9 +957,7 @@ impl Core {
             rebuild: None,
             pending_change: None,
             ring_drops: RingDrops::default(),
-            progress: watch.as_ref().map(|_| Progress::new(0, now)),
             watch,
-            recheck,
             _recording_hold: hold.take(),
         });
         self.set_state(
@@ -1280,22 +1278,24 @@ impl Core {
                 let Some(active) = inner.active.as_mut() else {
                     return;
                 };
+                let Some(watched) = active.watch.as_mut() else {
+                    return;
+                };
                 if active.rebuild.is_some() {
                     continue;
                 }
                 let count = active.sink.frames_offered();
+                let progress = &mut watched.progress;
                 let mut reason = None;
-                if let Some(progress) = active.progress.as_mut() {
-                    if count != progress.count {
-                        progress.count = count;
-                        progress.at = now;
-                    } else if count != progress.began_at
-                        && now.saturating_sub(progress.at) > CaptureSession::STALL_TIMEOUT
-                    {
-                        reason = Some(DeviceChangeReason::DeliveryStalled);
-                    }
+                if count != progress.count {
+                    progress.count = count;
+                    progress.at = now;
+                } else if count != progress.began_at
+                    && now.saturating_sub(progress.at) > CaptureSession::STALL_TIMEOUT
+                {
+                    reason = Some(DeviceChangeReason::DeliveryStalled);
                 }
-                if reason.is_none() && active.recheck.is_some_and(|recheck| now >= recheck.due) {
+                if reason.is_none() && watched.recheck.is_some_and(|recheck| now >= recheck.due) {
                     reason = Some(DeviceChangeReason::ChosenInputRecheck);
                 }
                 reason.map(|reason| (Arc::clone(&active.sink), reason))
@@ -1352,12 +1352,11 @@ impl Core {
     /// backoff; the gap from the old stream's last frame (as the watch
     /// thread saw it; unwatched, from the moment the old backend was told
     /// to stop) is written as silence before the new processing thread
-    /// starts. The
-    /// sink, the relay, the writer thread and the files stay. Nothing here
-    /// runs on a real-time thread. Returns the silence frames written that
-    /// `resume` did not account because a stop came first, the old
-    /// processing thread's system-lane peak for a `finish()` that took the
-    /// recording before this thread could fold it in, and the rate of a
+    /// starts. The sink, the relay, the writer thread and the files stay.
+    /// Nothing here runs on a real-time thread. Returns the silence frames
+    /// written that `resume` did not account because a stop came first, the
+    /// old processing thread's system-lane peak for a `finish()` that took
+    /// the recording before this thread could fold it in, and the rate of a
     /// restarted stream that stop kept from its `resume`.
     fn rebuild_steps(
         self: &Arc<Self>,
@@ -1380,10 +1379,10 @@ impl Core {
             let Some(active) = inner.active.as_mut() else {
                 return (0, 0.0, None);
             };
-            if let Some(progress) = active.progress
-                && progress.count == active.sink.frames_offered()
+            if let Some(watch) = &active.watch
+                && watch.progress.count == active.sink.frames_offered()
             {
-                started = started.min(progress.at);
+                started = started.min(watch.progress.at);
             }
             (
                 Arc::clone(&active.sink),
@@ -1424,8 +1423,8 @@ impl Core {
                     .fold(sink.dropped_samples(), active.stream.sample_rate);
                 // No producer runs now: what the count reaches from here is
                 // the restarted stream's.
-                if let Some(progress) = active.progress.as_mut() {
-                    progress.began_at = sink.frames_offered();
+                if let Some(watch) = active.watch.as_mut() {
+                    watch.progress.began_at = sink.frames_offered();
                 }
             }
         }
@@ -1527,16 +1526,15 @@ impl Core {
                 Ok((stream, on_the_default)) => {
                     return Restart::Started(stream, attempt, on_the_default);
                 }
-                Err(CaptureError::DidNotRun(_)) if last => {}
-                Err(_) if last => return Restart::Exhausted,
+                Err(error) if last && !matches!(error, CaptureError::DidNotRun(_)) => {
+                    return Restart::Exhausted;
+                }
                 Err(_) => {}
             }
+            // The next pass checks the rebuild is still wanted.
             let backoff = CaptureSession::RESTART_BACKOFF
                 [(attempt - 1).min(CaptureSession::RESTART_BACKOFF.len() - 1)];
             if !self.clock.sleep(backoff, cancel) {
-                return Restart::Abandoned;
-            }
-            if !Self::still_rebuilding(&self.lock(), generation) {
                 return Restart::Abandoned;
             }
         }
@@ -1606,14 +1604,13 @@ impl Core {
         );
         processing.start();
         let pending = active.pending_change.take();
-        let now = self.clock.now();
-        if let Some(progress) = active.progress.as_mut() {
-            progress.count = sink.frames_offered();
-            progress.at = now;
+        if let Some(watch) = active.watch.as_mut() {
+            let now = self.clock.now();
+            watch.progress.count = sink.frames_offered();
+            watch.progress.at = now;
+            watch.recheck = Self::replaced_the_chosen(&stream, on_the_default)
+                .then(|| Recheck::after(watch.recheck, now));
         }
-        active.recheck = (active.watch.is_some()
-            && Self::replaced_the_chosen(&stream, on_the_default))
-        .then(|| Recheck::after(active.recheck, now));
         active.stream = stream;
         active.processing = Some(processing);
         active.device_changes += 1;
