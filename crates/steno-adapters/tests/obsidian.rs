@@ -1537,15 +1537,34 @@ fn a_pinned_meeting_json_that_names_no_meeting_gets_a_folder_of_its_own() {
 fn a_deleted_meeting_json_is_written_back_in_the_same_folder() {
     // Either note alone names the meeting: `transcript.vtt` with the folder
     // note deleted too, then the folder note with `transcript.vtt` deleted.
-    for other in [format!("{FOLDER_SLUG}.md"), "transcript.vtt".to_owned()] {
-        let deleted = ["meeting.json".to_owned(), other];
+    // The note left is rewritten with CRLF line endings (git's
+    // `core.autocrlf`, a Windows editor) and the id in capitals, as Swift
+    // writes it.
+    let note = format!("{FOLDER_SLUG}.md");
+    for (other, left) in [
+        (note.as_str(), "transcript.vtt"),
+        ("transcript.vtt", note.as_str()),
+    ] {
+        let deleted = ["meeting.json", other];
         let vault = Vault::new();
         let destination = vault.destination_with(false, Some("People"));
-        let ours = export();
+        let mut ours = export();
+        ours.meeting.id = "0d133bbf-29e8-49aa-af88-951c84fd8e5a".parse().unwrap();
         let first = deliver(&destination, &ours, None);
-        for name in &deleted {
+        for name in deleted {
             fs::remove_file(vault.path(&format!("{FOLDER}/{name}"))).unwrap();
         }
+        let left = format!("{FOLDER}/{left}");
+        let id = ours.meeting.id.to_string();
+        let rewritten = vault
+            .text(&left)
+            .replace(&id, &id.to_uppercase())
+            .replace('\n', "\r\n");
+        assert!(
+            rewritten.contains(&id.to_uppercase()),
+            "{left} names the id"
+        );
+        fs::write(vault.path(&left), rewritten).unwrap();
 
         let again = deliver(&destination, &ours, Some(&first));
 
