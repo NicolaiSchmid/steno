@@ -241,8 +241,8 @@ impl QuitLatch {
 /// The meetings with an operation in progress and the recordings being
 /// processed, shared by every pipeline whose dependencies carry it, so a
 /// reload's new pipeline refuses a meeting the retired one still holds.
-/// Clones share one set. Its lock is never held together with a
-/// pipeline's own state lock.
+/// Clones share one set. Its lock is never held while a pipeline's own
+/// state lock is taken.
 /// Swift: `inFlight`, `admissions` and `running` of `ProcessingPipeline`
 /// in `Sources/StenoCore/Pipeline/ProcessingPipeline.swift`, which each
 /// pipeline kept for itself, so after `reloadPipeline()` the new one could
@@ -953,7 +953,6 @@ impl ProcessingPipeline {
         Some(Starting {
             pipeline: self.clone(),
             asset_id,
-            started: false,
         })
     }
 
@@ -1109,7 +1108,7 @@ impl ProcessingPipeline {
         if !owed.is_empty() {
             let pipeline = self.clone();
             let (meetings, retries) = (owed.clone(), retries.clone());
-            self.spawn_tracked(Uuid::new_v4(), async move {
+            self.spawn_tracked(Uuid::new_v4(), None, async move {
                 for meeting_id in meetings {
                     if pipeline.quitting() {
                         return;
@@ -1181,16 +1180,25 @@ impl ProcessingPipeline {
     }
 
     /// Spawns `work` among the background runs
-    /// [`wait_until_idle`](Self::wait_until_idle) waits for, under `key`.
-    /// The state lock is held from the spawn to the insert, so the task
-    /// cannot finish and remove its entry before the entry exists; the
-    /// task's [`Running`] mark removes the entry however the task ends, a
-    /// panic included.
-    fn spawn_tracked(&self, key: Uuid, work: impl Future<Output = ()> + Send + 'static) {
+    /// [`wait_until_idle`](Self::wait_until_idle) waits for, under `key`,
+    /// holding `claim` until it ends. The state lock is held from the spawn
+    /// to the insert, so the task cannot finish and remove its entry before
+    /// the entry exists; the task's [`Running`] mark removes the entry and
+    /// then releases the claim however the task ends, a panic included.
+    fn spawn_tracked(
+        &self,
+        key: Uuid,
+        claim: Option<Starting>,
+        work: impl Future<Output = ()> + Send + 'static,
+    ) {
         let pipeline = self.clone();
         let mut state = self.state();
         let handle = tokio::spawn(async move {
-            let _running = Running { pipeline, key };
+            let _running = Running {
+                pipeline,
+                key,
+                _claim: claim,
+            };
             work.await;
         });
         state.running.insert(key, handle);
@@ -1217,7 +1225,7 @@ impl ProcessingPipeline {
             Turn::Alone(_) => None,
         };
         let pipeline = self.clone();
-        self.spawn_tracked(asset_id, async move {
+        self.spawn_tracked(asset_id, Some(starting), async move {
             let (_shared, _alone) = match turn {
                 Turn::Now(shared) => (shared, None),
                 Turn::Alone(waiting) => match waiting.await {
@@ -1256,7 +1264,6 @@ impl ProcessingPipeline {
                 tracing::debug!(target: BACKGROUND_RUN_LOG, %asset_id, %failure, "processing failure");
             }
         });
-        starting.started();
     }
 
     /// Waits for every background task: the processing `enqueue` and
@@ -2460,42 +2467,33 @@ fn not_started(asset_id: Uuid) {
 }
 
 /// An asset claimed in the in-flight set for a background run
-/// ([`ProcessingPipeline::claim_start`]). Dropped before the run starts, it
-/// releases the claim; once [`started`](Self::started), the run's
-/// [`Running`] mark releases it when the run ends.
+/// ([`ProcessingPipeline::claim_start`]); dropping it releases the claim,
+/// before the run starts or, held by the run's [`Running`] mark, when the
+/// run ends.
 struct Starting {
     pipeline: ProcessingPipeline,
     asset_id: Uuid,
-    started: bool,
-}
-
-impl Starting {
-    /// Hands the claim to the run that just started.
-    fn started(mut self) {
-        self.started = true;
-    }
 }
 
 impl Drop for Starting {
     fn drop(&mut self) {
-        if !self.started {
-            self.pipeline.in_flight_set().assets.remove(&self.asset_id);
-        }
+        self.pipeline.in_flight_set().assets.remove(&self.asset_id);
     }
 }
 
 /// A background run's entry in `running` (by asset id, or a key of its
-/// own for a re-export) and, for a processing run, in the in-flight set's
-/// `assets`; dropping it removes both.
+/// own for a re-export); dropping it removes the entry and then releases
+/// the processing run's claim, so a new claim of the asset never finds the
+/// old run's entry.
 struct Running {
     pipeline: ProcessingPipeline,
     key: Uuid,
+    _claim: Option<Starting>,
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
         self.pipeline.state().running.remove(&self.key);
-        self.pipeline.in_flight_set().assets.remove(&self.key);
     }
 }
 
