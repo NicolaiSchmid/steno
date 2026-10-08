@@ -242,7 +242,7 @@ impl HandoverIntake for RecordingIntake {
 
 /// Copies the verified upload `file` durably into the new meeting folder of
 /// `layout` and returns the copy's path. A folder already at the layout's
-/// path fails the attempt before anything is written and is left as it is
+/// path fails the attempt before the copy and is left as it is
 /// ([`crate::files::create_new_dir_durably`]). A failed copy removes the
 /// meeting folder, which only this call made; the upload and the phone's
 /// copy remain, and the phone's retry copies into a new folder.

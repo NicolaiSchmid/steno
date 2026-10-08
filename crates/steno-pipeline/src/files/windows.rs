@@ -15,9 +15,9 @@
 //! written-through rename leaves in the cache.
 //!
 //! [`flush_directory`] flushes a folder's entries: on NTFS the ones
-//! `create_dir_all_durably` made; the FAT driver flushes the drive's root
-//! but treats a flush of any other folder as a no-op, so there the file's
-//! flush is the one that counts. A drive that refuses to flush a folder
+//! `create_dir_all_durably` and `create_new_dir_durably` made; the FAT
+//! driver flushes the drive's root but treats a flush of any other folder
+//! as a no-op, so there the file's flush is the one that counts. A drive that refuses to flush a folder
 //! (some network shares and virtual drives) is logged and passed over, as
 //! a failed folder sync is on Linux and macOS; the flush of the renamed
 //! file stays an error. exFAT's driver is not published, so Settings warns

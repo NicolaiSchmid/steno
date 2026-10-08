@@ -142,7 +142,7 @@ pub fn create_dir_all_durably(directory: &Path) -> std::io::Result<()> {
 /// Creates the folder `directory`, which must not exist yet, with its
 /// missing parents, syncing the parent of every folder it creates as
 /// [`create_dir_all_durably`] does. A folder or file already at `directory`
-/// fails with `AlreadyExists` before anything is written, so a caller that
+/// fails with `AlreadyExists` before the folder is made, so a caller that
 /// removes the folder after a later failure removes only what it made; a
 /// sync that fails after the folder was made removes the folder again.
 pub fn create_new_dir_durably(directory: &Path) -> std::io::Result<()> {
@@ -173,9 +173,7 @@ fn create_dir_all_durably_with(syncs: &dyn Syncs, directory: &Path) -> std::io::
         .collect();
     std::fs::create_dir_all(directory)?;
     for created in missing.iter().rev() {
-        if let Some(parent) = created.parent().filter(|p| !p.as_os_str().is_empty()) {
-            syncs.directory(parent)?;
-        }
+        syncs.directory(folder_of(created))?;
     }
     Ok(())
 }
