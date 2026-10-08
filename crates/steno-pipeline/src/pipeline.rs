@@ -2594,7 +2594,9 @@ impl ProcessingPipeline {
                 .asset_by_id(asset.id)?
                 .unwrap_or_else(|| asset.clone());
             updated.expires_at = updated.retention.expiry(now);
-            store.save_asset(&updated)?;
+            // Durable, so the stamp that lets the sweep delete the
+            // recording never outlives the transcript it was kept for.
+            store.save_asset_durably(&updated)?;
             events.post(MeetingEvent::RetentionApplied { meeting_id });
             Ok::<_, StoreError>(())
         })

@@ -4455,6 +4455,16 @@ async fn a_row_failed_without_an_attempt_waits_a_day() {
     assert_eq!(export_retries(&world).count(id), 1);
 }
 
+/// The stored asset's retention stamp.
+fn expires_at(world: &World, asset: &AudioAsset) -> Option<DateTime<Utc>> {
+    world
+        .store
+        .asset_by_id(asset.id)
+        .unwrap()
+        .unwrap()
+        .expires_at
+}
+
 /// A meeting whose diarizer failed is ready with one unknown room speaker,
 /// but its speakers can still be found from the recording: the automatic
 /// retention keeps it unstamped, even under "delete after processing",
@@ -4473,12 +4483,7 @@ async fn a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers(
     pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
     assert_eq!(
-        world
-            .store
-            .asset_by_id(asset.id)
-            .unwrap()
-            .unwrap()
-            .expires_at,
+        expires_at(&world, &asset),
         None,
         "the speakers still need the recording"
     );
@@ -4487,15 +4492,7 @@ async fn a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers(
     world.pipeline.reprocess(meeting.id).unwrap();
     world.pipeline.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
-    assert_eq!(
-        world
-            .store
-            .asset_by_id(asset.id)
-            .unwrap()
-            .unwrap()
-            .expires_at,
-        Some(world.now)
-    );
+    assert_eq!(expires_at(&world, &asset), Some(world.now));
 }
 
 /// The user's own rule is applied as chosen, also while the speakers are
@@ -4512,15 +4509,7 @@ async fn a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed() {
         .apply_retention(meeting.id, AudioRetention::DeleteAfterProcessing)
         .await
         .unwrap();
-    assert_eq!(
-        world
-            .store
-            .asset_by_id(asset.id)
-            .unwrap()
-            .unwrap()
-            .expires_at,
-        Some(world.now)
-    );
+    assert_eq!(expires_at(&world, &asset), Some(world.now));
 }
 
 /// A recording longer than half a minute that came out with no transcript
@@ -4550,12 +4539,48 @@ async fn a_long_recording_with_no_transcript_keeps_its_recording() {
         world.pipeline.wait_until_idle().await;
         assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
         assert_eq!(world.store.segments(meeting.id).unwrap(), Vec::new());
-        let stamp = world
-            .store
-            .asset_by_id(asset.id)
-            .unwrap()
-            .unwrap()
-            .expires_at;
-        assert_eq!(stamp.is_none(), kept, "{duration} s");
+        assert_eq!(expires_at(&world, &asset).is_none(), kept, "{duration} s");
     }
+}
+
+/// The retention stamp, which lets the sweep delete the recording, commits
+/// under `synchronous = FULL`: that commit also syncs the transcript and
+/// summary written before it, so a power loss cannot leave the recording
+/// gone and its results rolled back. That the commit then survives a power
+/// loss is SQLite's and cannot be tested.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_retention_stamp_commits_durably() {
+    let world = world(true, None, AudioRetention::DeleteAfterProcessing);
+    let meeting = call_meeting(world.now);
+    let asset = call_asset(
+        &world.audio,
+        meeting.id,
+        AudioRetention::DeleteAfterProcessing,
+    );
+    let stamped: Arc<Mutex<Vec<i64>>> = Arc::default();
+    let seen = stamped.clone();
+    let asset_id = steno_core::store::convert::DbUuid(asset.id);
+    world.store.probe_commits(move |connection| {
+        let stamp: Option<String> = connection
+            .query_row(
+                "SELECT expiresAt FROM audioAsset WHERE id = ?1",
+                [&asset_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(None);
+        if stamp.is_some() {
+            let level = connection
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            seen.lock().unwrap().push(level);
+        }
+    });
+    world.pipeline.enqueue(&meeting, &asset).unwrap();
+    world.pipeline.wait_until_idle().await;
+    assert_eq!(expires_at(&world, &asset), Some(world.now));
+    assert_eq!(
+        stamped.lock().unwrap().first(),
+        Some(&2),
+        "the first commit that holds the stamp ran under FULL"
+    );
 }

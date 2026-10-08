@@ -1206,8 +1206,12 @@ still has to draw the window side. `[ ]` is not ported yet.
   rule the user applies is stamped as chosen
   (`a_diarizer_fallback_keeps_the_recording_until_a_run_finds_the_speakers`,
   `a_rule_the_user_applies_stamps_a_meeting_whose_diarizer_failed`,
-  `a_long_recording_with_no_transcript_keeps_its_recording`). Rust only: Swift stamps
-  once every delivery succeeded, and its diarizer failure fails the meeting.
+  `a_long_recording_with_no_transcript_keeps_its_recording`). The stamp itself commits
+  with `Store::save_asset_durably` (`synchronous = FULL` and `fullfsync`), which also
+  syncs the transcript and summary committed before it, so a power loss can never leave
+  the recording swept and its results rolled back
+  (`the_retention_stamp_commits_durably`). Rust only: Swift stamps once every delivery
+  succeeded, at its store's default level, and its diarizer failure fails the meeting.
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file

@@ -104,6 +104,17 @@ impl Store {
         self.write(|transaction| save(transaction, asset))
     }
 
+    /// [`Store::save_asset`] committed under `synchronous = FULL` with
+    /// `fullfsync` ([`Store::write_durably`]). The retention stamp goes this
+    /// way: once it is on disk the sweep may delete the recording, and a
+    /// durable commit also syncs every commit before it, the meeting's
+    /// transcript and summary among them, so a power loss can never leave
+    /// the recording deleted and its results rolled back. Rust only: Swift
+    /// stamps at its store's default level.
+    pub fn save_asset_durably(&self, asset: &AudioAsset) -> Result<()> {
+        self.write_durably(|transaction| save(transaction, asset))
+    }
+
     /// The meeting's asset (the first by id when there are several).
     pub fn asset(&self, meeting_id: Uuid) -> Result<Option<AudioAsset>> {
         self.read(|connection| {
