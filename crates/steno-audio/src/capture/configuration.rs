@@ -132,12 +132,13 @@ pub enum CaptureError {
     /// A backend error that is none of the above (its description).
     #[error("capture backend failed: {0}")]
     BackendFailed(String),
-    /// The devices were linked but delivered no audio before the start's
-    /// deadline (its description): on Linux, PipeWire ran no first cycle,
-    /// as for a source whose owner stalls or a Bluetooth headset still
-    /// switching profile. The session answers it on a chosen microphone by
-    /// trying the default input at once. Rust only; reads as
-    /// [`Self::BackendFailed`].
+    /// The graph did not run: the devices were linked but delivered no
+    /// audio before the start's deadline (its description). On Linux,
+    /// PipeWire ran no first cycle, as for a source whose owner stalls, a
+    /// Bluetooth headset still switching profile, or a sink whose monitor
+    /// does not run yet; which node held the graph up is not known. The
+    /// session answers it on a chosen microphone by trying the default
+    /// input at once. Rust only; reads as [`Self::BackendFailed`].
     #[error("capture backend failed: {0}")]
     DidNotRun(String),
     /// `start` while not idle, `stop` while not recording.

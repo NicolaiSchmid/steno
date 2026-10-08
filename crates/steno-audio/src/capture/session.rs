@@ -31,9 +31,11 @@
 //! when the default input cannot be opened either (Rust only: Swift fails
 //! the start, and ends the recording after its restarts). A rebuild tries
 //! the default already after its first failed restart when the stream it
-//! replaces was on the fallback, or when the chosen microphone did not run
-//! ([`CaptureError::DidNotRun`]): the gap then stays one restart long,
-//! under [`CaptureSession::MAXIMUM_GAP`], so the master stays on wall time.
+//! replaces was on the fallback, or after the first restart on which the
+//! graph did not run on the chosen microphone
+//! ([`CaptureError::DidNotRun`]), not after the last: the gap then stays
+//! under [`CaptureSession::MAXIMUM_GAP`] when that is the first restart,
+//! so the master stays on wall time.
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole
@@ -995,12 +997,13 @@ impl Core {
 
     /// `start` again, `RESTART_BACKOFF` apart on the clock, and once more on
     /// the default input (`start_on_the_default`) after the last failure,
-    /// or already after the first when waiting buys nothing: the stream
-    /// replaced was on the fallback (`on_the_fallback`), so the default
-    /// worked a moment ago, or the chosen microphone did not run
-    /// ([`CaptureError::DidNotRun`]: on Linux each such attempt waits out
-    /// the 3 s start deadline). That early try comes once; when it fails,
-    /// the restarts go on. `Started` with the attempt that succeeded,
+    /// or already after an earlier one when waiting buys nothing: the
+    /// stream replaced was on the fallback (`on_the_fallback`), so the
+    /// default worked a moment ago, or the graph did not run on the chosen
+    /// microphone ([`CaptureError::DidNotRun`]: on Linux each such attempt
+    /// waits out the 3 s start deadline). That early try comes once, after
+    /// the first failure that calls for it; when it fails, the restarts go
+    /// on. `Started` with the attempt that succeeded,
     /// `Exhausted` when the last one and the default failed, `Abandoned`
     /// when `stop()` cancelled a sleep or the recording is gone.
     fn restart_backend(

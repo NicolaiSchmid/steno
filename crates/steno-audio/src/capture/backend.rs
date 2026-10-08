@@ -29,8 +29,8 @@ pub trait CaptureBackend: Send + Sync {
     /// recording never fails or ends because the chosen microphone is
     /// missing while the default input can be opened. A chosen device that
     /// is connected but fails to open fails this `start` (with
-    /// [`CaptureError::DidNotRun`] when it was linked but delivered
-    /// nothing); the session then starts again without a UID (see
+    /// [`CaptureError::DidNotRun`] when it was linked but the graph
+    /// delivered nothing); the session then starts again without a UID (see
     /// `CaptureSession`).
     fn start(
         &self,
