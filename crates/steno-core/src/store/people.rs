@@ -610,18 +610,24 @@ impl Store {
 }
 
 impl Store {
-    /// Clears `sampleClipURL` on the listed speakers of `meeting_id`, after
-    /// the retention sweep removed the files.
+    /// Clears `sampleClipURL` on the listed speakers of `meeting_id`, once
+    /// their clip files are gone.
     /// Swift: `MeetingStore.clearSampleClips(meetingID:speakerIDs:)`.
     pub fn clear_sample_clips(&self, meeting_id: Uuid, speaker_ids: &[Uuid]) -> Result<()> {
-        self.write(|transaction| {
-            for id in speaker_ids {
-                transaction.execute(
-                    "UPDATE speaker SET sampleClipURL = NULL WHERE id = ?1 AND meetingID = ?2",
-                    params![DbUuid(*id), DbUuid(meeting_id)],
-                )?;
-            }
-            Ok(())
-        })
+        self.write(|transaction| clear_sample_clips(transaction, meeting_id, speaker_ids))
     }
+}
+
+pub(super) fn clear_sample_clips(
+    connection: &Connection,
+    meeting_id: Uuid,
+    speaker_ids: &[Uuid],
+) -> Result<()> {
+    for id in speaker_ids {
+        connection.execute(
+            "UPDATE speaker SET sampleClipURL = NULL WHERE id = ?1 AND meetingID = ?2",
+            params![DbUuid(*id), DbUuid(meeting_id)],
+        )?;
+    }
+    Ok(())
 }
