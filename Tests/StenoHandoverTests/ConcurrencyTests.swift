@@ -637,6 +637,124 @@ import Testing
     }
   }
 
+  @Test(.timeLimit(.minutes(1)))
+  func anAnnounceHeldInItsLedgerReadKeepsTheReceiptMadeMeanwhile() async throws {
+    // The phone announces a new recording twice at once (a retry after its
+    // own timeout). One announce found no receipt and is held in its ledger
+    // read while the other one answers 201 and chunk 0 lands. The held one
+    // then finds that receipt in memory and decides again with it: a
+    // re-announce, so chunk 0 stays. Deciding on what it read, it would make
+    // a fresh receipt and discard the partial chunk 0 is in. Rust: the
+    // replacement's check in `Engine::make_and_open`.
+    let gated = try await Gated(seed: 78)
+    defer { gated.remove() }
+    let (phone, id) = (gated.phone, gated.id)
+
+    gated.gate.admissionRead.arm()
+    let second = Task { [metadata = gated.metadata] in try await phone.announce(metadata) }
+    await gated.gate.admissionRead.held()
+    #expect(try await phone.announce(gated.metadata).code == 201)
+    #expect(await phone.upload(id, chunk: 0, gated.chunks[0]).code == 204)
+    gated.gate.admissionRead.release()
+    let reannounced = try await second.value
+
+    #expect(reannounced.code == 200, "answered as a re-announce")
+    #expect(
+      try reannounced.json(Wire.RecordingStatus.self)
+        == Wire.RecordingStatus(state: .receiving, receivedChunks: [0]))
+    #expect(phone.engine.inbox.hasPartial(id), "the partial stays")
+    #expect(try await gated.test.store.handoverReceipt(recordingID: id)?.receivedChunks == [0])
+    #expect(!gated.gate.timedOut, "nothing waited on the held read")
+  }
+
+  @Test(.timeLimit(.minutes(1)), arguments: [true, false])
+  func aChunkOfAReplacedUploadLeavesTheNewReceiptAlone(resplit: Bool) async throws {
+    // Chunk 0 is held after its file write, at an offset of the receipt's
+    // split, while the phone announces the same bytes in another split (the
+    // partial restarts) or another file under the id (a new recording). The
+    // chunk is not the new upload's: its fold finds no receipt of its
+    // upload in its split and changes nothing, 404, so the phone sends it
+    // again. Rust: `a_chunk_of_a_replaced_upload_leaves_the_new_receipt_alone`.
+    let chunkSize = 128 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let held = HeldWrite()
+      let engine = Self.engine(test, writeChunk: held.write)
+      let phone = try await EngineClient.paired(test, engine: engine)
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 79)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let id = metadata.recordingID
+      #expect(try await phone.announce(metadata).code == 201)
+      var next = metadata
+      if resplit {
+        next.chunkSize = chunkSize / 2
+      } else {
+        next = Phone.metadata(
+          for: Phone.seededBytes(count: 2 * chunkSize, seed: 80), deviceName: phone.device.name,
+          recordingID: id, chunkSize: chunkSize)
+      }
+
+      held.arm()
+      defer { held.release() }
+      let late = Task {
+        await phone.upload(id, chunk: 0, Phone.chunks(of: bytes, size: chunkSize)[0])
+      }
+      await held.held()
+      #expect(try await phone.announce(next).code == (resplit ? 200 : 201))
+      held.release()
+
+      #expect(await late.value.code == 404)
+      let inMemory = try #require(await engine.activeReceipts[id])
+      let stored = try #require(try await test.store.handoverReceipt(recordingID: id))
+      for receipt in [inMemory, stored] {
+        #expect(receipt.chunkSize == next.chunkSize)
+        #expect(receipt.sha256 == next.sha256)
+        #expect(receipt.receivedChunks == [], "not the earlier upload's chunk 0")
+      }
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func aLateCompleteOfAnotherSplitLeavesTheNewChunkSetAlone() async throws {
+    // The phone's `complete` is held after its hash while the phone
+    // announces the same bytes in another split, which restarts the
+    // partial, and sends chunk 0 of it. The `complete` then finds its
+    // partial replaced and answers 409; its empty chunk set is the earlier
+    // split's and leaves the new receipt alone. Written into it, it would
+    // drop chunk 0, and the phone would send it again. Rust:
+    // `a_late_complete_of_another_split_leaves_the_new_chunk_set_alone`.
+    let chunkSize = 128 * 1024
+    try await TestService.run(chunkSize: chunkSize, start: false) { test in
+      let held = HeldHash()
+      let engine = Self.engine(test, hashMatches: held.hashMatches)
+      let phone = try await EngineClient.paired(test, engine: engine)
+      let bytes = Phone.seededBytes(count: 2 * chunkSize, seed: 81)
+      let metadata = phone.metadata(for: bytes, chunkSize: chunkSize)
+      let id = metadata.recordingID
+      try await phone.uploadAll(metadata, bytes)
+      var resplit = metadata
+      resplit.chunkSize = chunkSize / 2
+
+      held.arm()
+      defer { held.release() }
+      let late = Task { await phone.complete(id) }
+      await held.held()
+      #expect(try await phone.announce(resplit).code == 200, "the partial restarts")
+      let halves = Phone.chunks(of: bytes, size: resplit.chunkSize)
+      #expect(await phone.upload(id, chunk: 0, halves[0]).code == 204)
+      held.release()
+
+      #expect(await late.value.code == 409)
+      let inMemory = try #require(await engine.activeReceipts[id])
+      let stored = try #require(try await test.store.handoverReceipt(recordingID: id))
+      for receipt in [inMemory, stored] {
+        #expect(receipt.chunkSize == resplit.chunkSize)
+        #expect(receipt.state == .receiving)
+        #expect(receipt.receivedChunks == [0], "the new split keeps its chunk")
+      }
+      #expect(engine.inbox.hasPartial(id))
+    }
+  }
+
   /// An engine beside `test`'s service, over its store, that admits through
   /// `intake` (by default `test`'s) behind a `MovingIntake`, and saves
   /// receipts, writes chunks and hashes the partial through the given seams.

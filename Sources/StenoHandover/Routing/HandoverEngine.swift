@@ -160,7 +160,9 @@ actor HandoverEngine: RequestHandling {
   /// same bytes. A receipt of another device (another phone announced the
   /// recording id, or took it over), or of other bytes (the phone announced
   /// another file under the id), is another upload, and a write a request
-  /// computed from `read` must not land on it. Rust: `same_upload`.
+  /// computed from `read` must not land on it. The chunk size is not part of
+  /// it: only the writes of a chunk set check it (`transition`, the chunk
+  /// fold in `receiveChunk`). Rust: `same_upload`.
   static func sameUpload(_ held: HandoverReceipt, _ read: HandoverReceipt) -> Bool {
     held.deviceID == read.deviceID && held.byteCount == read.byteCount
       && held.sha256 == read.sha256
@@ -389,6 +391,13 @@ actor HandoverEngine: RequestHandling {
   ///   the phone's next `complete` would start over and admit it again.
   ///   `receipt` comes back as memory holds it.
   ///
+  /// A chunk set is one split's, so `receivedChunks` is not written over a
+  /// receipt memory holds in another chunk size (the phone announced the
+  /// same bytes split otherwise since): a late `complete` of the earlier
+  /// split would empty the new split's chunks, and the phone would send them
+  /// again. Nothing changes then, and `receipt` comes back as the caller
+  /// passed it.
+  ///
   /// Callers that answer the phone whatever the write did use `try?`
   /// deliberately: memory already holds the change and the phone's next
   /// request re-reads.
@@ -397,8 +406,12 @@ actor HandoverEngine: RequestHandling {
   ) async throws {
     let held = activeReceipts[receipt.recordingID]
     if let held, !Self.sameUpload(held, receipt) { return }
+    if let held, held.state.kind == .complete {
+      receipt = held
+      return
+    }
+    if let held, receivedChunks != nil, held.chunkSize != receipt.chunkSize { return }
     receipt = held ?? receipt
-    if held?.state.kind == .complete { return }
     receipt.state = state
     if let receivedChunks { receipt.receivedChunks = receivedChunks }
     receipt.updatedAt = now()
