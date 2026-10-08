@@ -244,7 +244,8 @@ describe("MeetingList rows", () => {
 		expect(row.querySelector("time")).not.toBeNull();
 	});
 
-	it("shows Live with the pulse while a meeting records", async () => {
+	/** The fixture list with its first row still `recording`. */
+	async function recordingList(): Promise<MeetingsListSnapshot> {
 		const list = await fixtureList();
 		const first = list.groups[0];
 		if (!first) {
@@ -254,20 +255,26 @@ describe("MeetingList rows", () => {
 		if (!row) {
 			throw new Error("fixture has no meeting");
 		}
+		return {
+			...list,
+			groups: [
+				{
+					...first,
+					meetings: [
+						{ ...row, state: "recording", preview: undefined },
+						...rest,
+					],
+				},
+				...list.groups.slice(1),
+			],
+		};
+	}
+
+	it("shows Live with the pulse while a meeting records", async () => {
+		const snapshots = await loadFixtureSnapshots();
 		const harness = await createBridgeHarness("", {
-			"meetings.list": {
-				...list,
-				groups: [
-					{
-						...first,
-						meetings: [
-							{ ...row, state: "recording", preview: undefined },
-							...rest,
-						],
-					},
-					...list.groups.slice(1),
-				],
-			} satisfies MeetingsListSnapshot,
+			"meetings.list": await recordingList(),
+			recording: snapshots["recording.live"],
 		});
 		renderWithBridge(<MeetingList />, harness);
 		const element = screen.getByTestId(`meeting-${FIRST}`);
@@ -275,6 +282,20 @@ describe("MeetingList rows", () => {
 		expect(element).toHaveTextContent("Recording now.");
 		expect(element.querySelector(".animate-status-pulse")).not.toBeNull();
 		expect(element).not.toHaveTextContent("No summary");
+	});
+
+	it("says a recording row that is not the live one is not saved yet", async () => {
+		const harness = await createBridgeHarness("", {
+			"meetings.list": await recordingList(),
+		});
+		renderWithBridge(<MeetingList />, harness);
+		const element = screen.getByTestId(`meeting-${FIRST}`);
+		expect(element).toHaveTextContent(/^CallNot saved\d{1,2}:\d{2}/);
+		expect(element).toHaveTextContent(
+			"Not saved yet. Steno will process it the next time it starts.",
+		);
+		expect(element).not.toHaveTextContent("Recording now.");
+		expect(element.querySelector(".animate-status-pulse")).toBeNull();
 	});
 
 	it("labels each day group with its date after the hairline", async () => {
