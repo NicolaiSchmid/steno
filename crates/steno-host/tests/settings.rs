@@ -22,7 +22,7 @@ use steno_core::paths::file_url;
 use steno_core::protocols::{SecretKey, SecretStore as _};
 use steno_core::{AudioRetention, LlmProvider};
 use steno_host::services::{CodexModel, LoginItemStatus};
-use steno_host::settings::KeyRead;
+use steno_host::settings::{KeyRead, LlmSettingsViewModel};
 use steno_host::speech::ModelAsset;
 
 /// Swift: `pageReadyPublishesEveryTopicOnce` and `testOverviewSubtitles`.
@@ -1064,6 +1064,32 @@ fn a_reread_key_keeps_the_forms_unsaved_edits() {
             .unwrap()
             .as_deref(),
         Some("sk-stored")
+    );
+}
+
+/// A save that wrote the key while the host read it again keeps the saved
+/// key: the read began before the save, so it may hold the older key.
+#[test]
+fn a_key_saved_while_it_was_read_again_keeps_the_saved_key() {
+    let harness = a_harness_whose_key_cannot_be_read();
+    let services = harness.host.services();
+    let mut model = LlmSettingsViewModel::new();
+    model.load(
+        &harness.store,
+        services,
+        KeyRead::Unreadable("the keyring is locked".to_owned()),
+    );
+    let read_at = model.key_version();
+    let older = KeyRead::Present("sk-stored".to_owned());
+    "sk-saved".clone_into(&mut model.api_key);
+    model.save(&harness.store, services, now());
+    assert_eq!(model.errors.error, None);
+    model.reload_key(services, older.clone(), read_at);
+    assert_eq!(model.api_key, "sk-saved", "the older read is dropped");
+    model.reload_key(services, older, model.key_version());
+    assert_eq!(
+        model.api_key, "sk-stored",
+        "a read begun after the save applies"
     );
 }
 

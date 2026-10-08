@@ -176,7 +176,7 @@ pub enum KeyRead {
 impl KeyRead {
     /// The message the section shows over [`KeyRead::Unreadable`]'s reason.
     pub const UNREADABLE: &'static str =
-        "The saved API key could not be read. Saving other changes keeps it.";
+        "The API key could not be read. Saving other changes keeps it.";
 
     /// The key, and why it could not be read.
     fn split(self) -> (Option<String>, Option<String>) {
@@ -196,6 +196,12 @@ impl<E: std::fmt::Display> From<Result<Option<String>, E>> for KeyRead {
             Err(error) => KeyRead::Unreadable(error.to_string()),
         }
     }
+}
+
+/// The next [`LlmSettingsViewModel::key_version`], unique in the process.
+fn next_key_version() -> u64 {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    LAST.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1
 }
 
 /// Swift: `LLMSettingsViewModel.TestResult`.
@@ -245,7 +251,11 @@ pub struct LlmSettingsViewModel {
     pub codex_model: String,
     codex_context_tokens: i64,
     stored: Option<Stored>,
-    /// Where the secret store keeps the key, as it said at the last load.
+    /// Which load or write of the key `stored` holds
+    /// ([`Self::key_version`]).
+    key_version: u64,
+    /// Where the secret store keeps the key, as it said at the last load
+    /// or [`Self::reload_key`].
     pub key_store: Option<SecretPlace>,
     /// Why the last load could not read the stored key; `None` once read.
     key_unreadable: Option<String>,
@@ -278,6 +288,7 @@ impl LlmSettingsViewModel {
             codex_model: String::new(),
             codex_context_tokens: Settings::DEFAULT_CODEX_CONTEXT_TOKENS,
             stored: None,
+            key_version: 0,
             key_store: None,
             key_unreadable: None,
             probe_pending: false,
@@ -295,6 +306,7 @@ impl LlmSettingsViewModel {
 
     pub fn load(&mut self, store: &Store, services: &Services, key: KeyRead) {
         let (secret, unreadable) = key.split();
+        self.key_version = next_key_version();
         self.key_unreadable = unreadable;
         self.key_store = services.secrets.place();
         let settings = match store.settings() {
@@ -339,17 +351,29 @@ impl LlmSettingsViewModel {
         }
     }
 
+    /// Which load or write of the key the form holds; the host reads it
+    /// before it reads the key outside its lock and hands it to
+    /// [`Self::reload_key`]. Counted across every model, so a model made
+    /// later never matches an older one's.
+    #[must_use]
+    pub fn key_version(&self) -> u64 {
+        self.key_version
+    }
+
     /// The key read again after the secret store could not be read: the
     /// field, the stored key and the read error follow `key` unless the
-    /// field holds an unsaved edit, and the rest of the form stays as it
-    /// is, typed or not. Nothing changes before the first load.
-    pub fn reload_key(&mut self, services: &Services, key: KeyRead) {
+    /// field holds an unsaved edit, or a load or save of the key came
+    /// after the read began (the form's `key_version` is no longer
+    /// `read_at`, so `key` may be older than what it holds). The rest of
+    /// the form stays as it is, typed or not. Nothing changes before the
+    /// first load.
+    pub fn reload_key(&mut self, services: &Services, key: KeyRead, read_at: u64) {
         let typed = self.draft().api_key;
         let Some(stored) = self.stored.as_mut() else {
             return;
         };
         self.key_store = services.secrets.place();
-        if typed != stored.api_key {
+        if typed != stored.api_key || self.key_version != read_at {
             return;
         }
         let (secret, unreadable) = key.split();
@@ -651,6 +675,7 @@ impl LlmSettingsViewModel {
                 self.stored = Some(draft);
                 self.errors.clear();
                 if write_key {
+                    self.key_version = next_key_version();
                     self.key_unreadable = None;
                 }
                 self.show_unreadable_key();

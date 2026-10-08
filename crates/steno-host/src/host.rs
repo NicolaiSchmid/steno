@@ -923,15 +923,20 @@ impl Host {
     /// The secret store answers again after a read failed while the
     /// keyring asked the user (it opened, or the choice fell to the file):
     /// the Summaries section and onboarding's summaries step read the API
-    /// key again, unless their key field holds an unsaved edit, and keep
+    /// key again, unless their key field holds an unsaved edit or a save
+    /// wrote the key while it was read, and keep
     /// everything else they show ([`LlmSettingsViewModel::reload_key`]).
     pub fn secrets_changed(&self) {
+        let read_at = {
+            let inner = self.lock();
+            (inner.llm.key_version(), inner.onboarding.llm.key_version())
+        };
         let key = self.read_key();
         {
             let mut inner = self.lock();
             let services = &self.shared.services;
-            inner.llm.reload_key(services, key.clone());
-            inner.onboarding.llm.reload_key(services, key);
+            inner.llm.reload_key(services, key.clone(), read_at.0);
+            inner.onboarding.llm.reload_key(services, key, read_at.1);
             inner.publisher.schedule(BridgeTopic::SettingsSummaries);
             inner.publisher.schedule(BridgeTopic::Onboarding);
         }
