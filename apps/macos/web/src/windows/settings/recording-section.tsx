@@ -245,6 +245,7 @@ export function RecordingSection() {
 			{recording.audioFolderWarning ? (
 				<Callout
 					data-testid="audio-folder-warning"
+					description={`Choose a folder on your ${words.computer}'s main drive to keep them safe.`}
 					icon={<TriangleAlertIcon aria-hidden="true" />}
 					title={recording.audioFolderWarning}
 					variant="warning"

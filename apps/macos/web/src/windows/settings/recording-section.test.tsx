@@ -123,6 +123,9 @@ describe("RecordingSection", () => {
 		expect(screen.getByTestId("audio-folder-warning")).toHaveTextContent(
 			warning,
 		);
+		expect(screen.getByTestId("audio-folder-warning")).toHaveTextContent(
+			"main drive to keep them safe.",
+		);
 		unmount();
 		renderWithBridge(<RecordingSection />, await createBridgeHarness());
 		expect(
