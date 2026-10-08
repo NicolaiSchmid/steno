@@ -20,8 +20,9 @@ pub struct WriteFailure {
 /// Writes a file so a reader never sees a half-written one: the bytes go to
 /// `.steno-tmp-<8 hex>-<name>` in the target directory, are `fsync`ed, and
 /// a rename replaces the target in one step; on Unix the directory is
-/// `fsync`ed after the rename so the new name survives a crash too. A
-/// failure removes the temp file and leaves the target as it was.
+/// `fsync`ed after the rename so the new name survives a crash too, and on
+/// Windows the renamed file is flushed instead. A failure before the rename
+/// removes the temp file and leaves the target as it was.
 pub struct AtomicFileWriter;
 
 impl AtomicFileWriter {
@@ -33,22 +34,20 @@ impl AtomicFileWriter {
         let outcome = Self::write_bytes(data, &temporary, target).and_then(|()| {
             fs::rename(&temporary, target).map_err(|error| Self::failure(target, "rename", &error))
         });
-        match &outcome {
-            Ok(()) => Self::sync_directory(target),
-            Err(_) => {
-                let _ = fs::remove_file(&temporary);
-            }
+        if outcome.is_err() {
+            let _ = fs::remove_file(&temporary);
+            return outcome;
         }
-        outcome
+        Self::sync_directory(target)
     }
 
     /// `fsync` the directory after the rename so the directory entry is on
     /// disk, not only the bytes. Best effort: the data is already durable
     /// and the file is in place, so a directory that cannot be synced
-    /// (some network file systems) is not a failed write. Windows has no
-    /// directory handle to sync; the rename is left as it is there.
+    /// (some network file systems) is not a failed write.
     #[cfg(unix)]
-    fn sync_directory(target: &Path) {
+    #[allow(clippy::unnecessary_wraps)]
+    fn sync_directory(target: &Path) -> Result<(), WriteFailure> {
         if let Some(parent) = target.parent()
             && let Ok(directory) = fs::File::open(if parent.as_os_str().is_empty() {
                 Path::new(".")
@@ -58,10 +57,24 @@ impl AtomicFileWriter {
         {
             let _ = directory.sync_all();
         }
+        Ok(())
     }
 
+    /// Windows cannot sync a folder, so the renamed file is flushed: on NTFS
+    /// that commits the journal that holds the rename, and on FAT32 it
+    /// flushes the file's folders with it (`steno_pipeline::files` says
+    /// more). Unlike the Unix sync this is a failed write when it fails:
+    /// with "delete after processing" the vault's copy of the mixdown is the
+    /// only audio left once the sweep has run, so the export must not count
+    /// as done before it is on the disk.
     #[cfg(not(unix))]
-    fn sync_directory(_target: &Path) {}
+    fn sync_directory(target: &Path) -> Result<(), WriteFailure> {
+        OpenOptions::new()
+            .write(true)
+            .open(target)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| Self::failure(target, "fsync", &error))
+    }
 
     /// Removes every `.steno-tmp-*` left in `directory` by an earlier crash.
     /// Nothing else is ever removed.

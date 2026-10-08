@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use super::{AtomicFileWriter, WriteFailure};
 
 /// The local file system under one folder, addressed by paths relative to
-/// its root and written through [`AtomicFileWriter`]. The destination's one
+/// its root and written with [`AtomicFileWriter`]. The destination's one
 /// seam to disk; a `WebDAV` sink would be the second implementation, at which
 /// point a trait is extracted per the two-implementations rule.
 #[derive(Debug, Clone)]
