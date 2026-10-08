@@ -1338,13 +1338,9 @@ impl Core {
             .sleep(CaptureSession::STALL_CHECK_INTERVAL, cancel)
         {
             // Joined only once finished, so at once.
-            let delivered = if probe.as_ref().is_some_and(JoinHandle::is_finished) {
-                probe
-                    .take()
-                    .is_some_and(|probe| probe.join().unwrap_or(false))
-            } else {
-                false
-            };
+            let delivered = probe
+                .take_if(|probe| probe.is_finished())
+                .is_some_and(|probe| probe.join().unwrap_or(false));
             let (report, ask) = {
                 let mut inner = self.lock();
                 if inner.recordings_started != recording
@@ -1387,8 +1383,7 @@ impl Core {
                 }
                 (
                     reason.map(|reason| (Arc::clone(&active.sink), reason)),
-                    ask.then(|| self.configuration.input_device_uid.clone())
-                        .flatten(),
+                    self.configuration.input_device_uid.clone().filter(|_| ask),
                 )
             };
             if let Some(uid) = ask {
@@ -1636,12 +1631,12 @@ impl Core {
                 if !Self::still_rebuilding(&inner, generation) {
                     return Restart::Abandoned;
                 }
-                let first = (plan.default_first && !default_tried)
-                    .then(|| {
-                        default_tried = true;
-                        self.start_on_the_default(sink)
-                    })
-                    .flatten();
+                let first = if plan.default_first && !default_tried {
+                    default_tried = true;
+                    self.start_on_the_default(sink)
+                } else {
+                    None
+                };
                 match first {
                     Some(stream) => Ok((stream, true)),
                     None => self
