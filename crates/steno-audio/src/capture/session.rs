@@ -84,8 +84,10 @@
 //! `Stopping`, then answers from the outcome: the recording `Failed`
 //! carries, or `InvalidState` once the state is `Idle`. Swift's actor ran
 //! the queued stop right after the finalise; here a `start()` can take the
-//! lock first, and the stop then answers `InvalidState` rather than ending
-//! the new recording. Only `stop()` waits there; a finaliser never waits
+//! lock first, and the stop then still answers with the recording that
+//! finalise produced, as in Swift, and leaves the new recording running
+//! (`InvalidState` only when the finalise left none, or was another
+//! `stop()` that ended `Idle`). Only `stop()` waits there; a finaliser never waits
 //! for a stopper, so the wait cannot deadlock, and a finaliser that panics
 //! leaves `Failed` with no recording rather than `Stopping` for good.
 //!
@@ -234,6 +236,10 @@ struct Inner {
     /// and a writer failure that arrives late act on their own recording
     /// only, never on one started meanwhile.
     recordings_started: usize,
+    /// The newest recording a `Failed` state carried, with the start it
+    /// belongs to: the answer of a `stop()` that waited out its finalise
+    /// while a `start()` took the lock first.
+    finalised: Option<(usize, Box<CaptureResult>)>,
     /// Unit tests only: taken by the next `stop()` that finds `Stopping`
     /// and run once it has noted `recordings_started`, with the lock
     /// released, so a test can end the finalise and run a `start()` before
@@ -502,6 +508,7 @@ impl CaptureSession {
                     active: None,
                     rebuild_generation: 0,
                     recordings_started: 0,
+                    finalised: None,
                     #[cfg(test)]
                     before_stop_waits: None,
                 }),
@@ -624,7 +631,8 @@ impl CaptureSession {
     /// After `Failed` returns the finalised partial recording the state
     /// carries, or fails when the failure left no recording. While a writer
     /// failure or a device loss is finalising, waits for it and answers from
-    /// its outcome; `InvalidState` when a `start()` came in first. A write or
+    /// its outcome, the recording it finalised also when a `start()` came in
+    /// first (the new recording goes on). A write or
     /// close that fails during the teardown leaves the state `Failed` with the
     /// recording that is returned, and so does a sync that failed while
     /// recording: the recording is whole, part of it may not have reached the
@@ -689,6 +697,13 @@ impl Core {
     }
 
     fn set_state(&self, inner: &mut Inner, state: &CaptureState) {
+        if let CaptureState::Failed {
+            recording: Some(recording),
+            ..
+        } = state
+        {
+            inner.finalised = Some((inner.recordings_started, recording.clone()));
+        }
         inner.state = state.clone();
         inner
             .state_subscribers
@@ -979,10 +994,15 @@ impl Core {
             }
             // A `start()` took the lock first: the recording this stop was
             // for has ended, and the new one is not this caller's to stop.
+            // The finalise it waited for answers, as it would have had this
+            // stop come first (Swift's actor ran it right after).
             if inner.recordings_started != recording {
-                return Err(CaptureError::InvalidState(
-                    "stop after another recording started".into(),
-                ));
+                return match &inner.finalised {
+                    Some((finalised, result)) if *finalised == recording => Ok((**result).clone()),
+                    _ => Err(CaptureError::InvalidState(
+                        "stop after another recording started".into(),
+                    )),
+                };
             }
             match &inner.state {
                 CaptureState::Recording { .. } => {}
@@ -1847,6 +1867,8 @@ mod tests {
 
     use std::path::Path;
 
+    use steno_core::paths::file_url_path;
+
     use super::*;
     use crate::capture::CaptureMode;
     use crate::testing::SyntheticCaptureBackend;
@@ -1949,17 +1971,19 @@ mod tests {
     }
 
     /// A `start()` takes the lock between the finalise's `Failed` and the
-    /// waiting `stop()`: the stop answers `InvalidState` and leaves the new
-    /// recording running, instead of ending a meeting it was never asked
-    /// to end.
+    /// waiting `stop()`: the stop answers with the recording that finalise
+    /// produced, as Swift's actor did, and leaves the new recording
+    /// running, instead of ending a meeting it was never asked to end.
     #[test]
     fn a_stop_that_waited_does_not_stop_the_next_recording() {
         let directory = tempfile::tempdir().unwrap();
         let second = Uuid::new_v4();
-        let (session, stopped, _) = stop_that_waited(directory.path(), Some(second));
-        assert_eq!(
-            stopped.unwrap_err(),
-            CaptureError::InvalidState("stop after another recording started".into())
+        let (session, stopped, first) = stop_that_waited(directory.path(), Some(second));
+        let result = stopped.expect("the finalised recording, not InvalidState");
+        assert_eq!(result.asset.meeting_id, first);
+        assert!(
+            file_url_path(&result.asset.url).unwrap().exists(),
+            "the first meeting's master"
         );
         assert!(
             matches!(session.state(), CaptureState::Recording { .. }),
