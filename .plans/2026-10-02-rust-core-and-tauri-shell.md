@@ -2807,7 +2807,7 @@ PR off `main`.
 | A device that will not run at 48 kHz (a headset in the hands-free profile) is recorded at its own rate and converted to 48 kHz on the processing thread, at start and after a switch mid-call, instead of failing (`steno-audio`, Swift core) | `t3code/check-rust-audio-sample-rate` | #198 | open |
 | Settings warns under an audio folder on a network mount on Linux and macOS too (`statfs`: NFS, SMB, VM host shares and remote FUSE mounts on Linux; a mount without `MNT_LOCAL`, SMB, NFS, AFP, WebDAV and macFUSE on macOS; `steno-pipeline`) | `fix/network-folder-warning` | #245 | open |
 | The Bonjour record follows a network change on every platform, and the Mac advertises its computer name (`steno-handover`, `whoami` 2) | `fix/handover-republish` | #247 | open |
-| On Windows two writers of one path rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | open |
+| On Windows two writers of one path in the process rename and flush one after the other, and std's rename and the reopen for the flush are retried on a sharing or lock violation or "access denied" for about 0.9 s, so a durable replace no longer fails because of another writer's flush (`steno-pipeline`) | `fix/windows-parallel-replace` | #252 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
