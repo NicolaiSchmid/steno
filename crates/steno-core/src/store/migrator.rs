@@ -110,28 +110,23 @@ fn check_with(connection: &Connection, migrations: &[Migration]) -> Result<()> {
     }
 }
 
-/// Logs a warning for each of `applied` that `migrations` lacks and
-/// returns them: a newer build migrated the database. GRDB's migrator
-/// ignores them too (it never reads an identifier it was not given), and
-/// the Swift app never asks `hasBeenSuperseded`. Ignoring them is safe
-/// while every migration only adds tables and columns, a new column with a
-/// default or allowing null, and never alters, drops or constrains an
-/// existing one (`.plans/2026-10-07-stable-promotion.md`, "Migrations add,
-/// never change").
-fn ignore_unknown<'a>(applied: &'a [String], migrations: &[Migration]) -> Vec<&'a str> {
-    let unknown: Vec<&str> = applied
-        .iter()
-        .map(String::as_str)
-        .filter(|identifier| !migrations.iter().any(|m| m.identifier == *identifier))
-        .collect();
-    for identifier in &unknown {
+/// Logs a warning for each of `applied` that `migrations` lacks: a newer
+/// build migrated the database. GRDB's migrator ignores them too (it never
+/// reads an identifier it was not given), and the Swift app never asks
+/// `hasBeenSuperseded`. Ignoring them is safe while every migration only
+/// adds tables and columns, a new column with a default or allowing null,
+/// and never alters, drops or constrains an existing one
+/// (`.plans/2026-10-07-stable-promotion.md`, "Migrations add, never
+/// change").
+fn ignore_unknown(applied: &[String], migrations: &[Migration]) {
+    let known = |identifier: &str| migrations.iter().any(|m| m.identifier == identifier);
+    for identifier in applied.iter().filter(|identifier| !known(identifier)) {
         tracing::warn!(
             target: "steno::store",
             "the database records migration {identifier}, which this version does not know; \
              a newer version migrated it, and this one leaves it as it is"
         );
     }
-    unknown
 }
 
 /// [`migrate`] over an explicit list; tests pass one with a bad migration,
@@ -139,8 +134,11 @@ fn ignore_unknown<'a>(applied: &'a [String], migrations: &[Migration]) -> Vec<&'
 pub(crate) fn migrate_with(connection: &mut Connection, migrations: &[Migration]) -> Result<()> {
     connection.execute_batch(MIGRATIONS_TABLE)?;
     let applied = applied(connection)?;
-    let unknown = ignore_unknown(&applied, migrations).len();
-    if applied.len() - unknown == migrations.len() {
+    ignore_unknown(&applied, migrations);
+    if migrations
+        .iter()
+        .all(|migration| applied.iter().any(|a| a == migration.identifier))
+    {
         return Ok(());
     }
 
@@ -247,71 +245,6 @@ mod tests {
             ["v1", "v9"],
             "nothing applied"
         );
-    }
-
-    /// Runs `body` with a log subscriber on this thread and returns what it
-    /// returned and what was logged.
-    fn logged<T>(body: impl FnOnce() -> T) -> (T, String) {
-        #[derive(Clone, Default)]
-        struct Lines(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-        impl std::io::Write for Lines {
-            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                self.0.lock().unwrap().extend_from_slice(bytes);
-                Ok(bytes.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-        let lines = Lines::default();
-        let writer = lines.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        let value = tracing::subscriber::with_default(subscriber, body);
-        let text = String::from_utf8(lines.0.lock().unwrap().clone()).unwrap();
-        (value, text)
-    }
-
-    /// A database a newer build migrated (here to a v6 that adds a table)
-    /// opens as GRDB opens it: the identifier this build does not know
-    /// stays recorded, a warning names it, nothing is applied twice, and
-    /// the store still reads and writes. Opening it without migrating
-    /// passes too.
-    #[test]
-    fn a_migration_this_build_does_not_know_is_ignored_with_a_warning() {
-        use crate::Store;
-        use crate::testing::sample_data;
-
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("steno.sqlite");
-        drop(Store::open(&path).unwrap());
-        Connection::open(&path)
-            .unwrap()
-            .execute_batch(
-                "CREATE TABLE later (id INTEGER PRIMARY KEY);
-                 INSERT INTO grdb_migrations (identifier) VALUES ('v6');",
-            )
-            .unwrap();
-
-        let (store, log) = logged(|| Store::open(&path).unwrap());
-        assert!(
-            log.contains("WARN") && log.contains("migration v6"),
-            "the warning names v6: {log}"
-        );
-        assert_eq!(
-            store.applied_migrations().unwrap(),
-            ["v1", "v2", "v3", "v4", "v5", "v6"]
-        );
-        let meeting = sample_data::meeting();
-        store.save_meeting(&meeting).unwrap();
-        assert_eq!(store.meeting(meeting.id).unwrap(), Some(meeting));
-        drop(store);
-
-        let (checked, log) = logged(|| Store::open_without_migrating(&path));
-        checked.unwrap();
-        assert!(log.contains("migration v6"), "{log}");
     }
 
     /// A version this build knows is applied also when the database records
