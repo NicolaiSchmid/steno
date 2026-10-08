@@ -303,9 +303,9 @@ fn handover_listener(
             ListenerHandover::over(service, mac_id, store.clone(), runtime.clone())
         }
         Err(error) if waits_on_the_keyring(&error) => {
-            ListenerHandover::waiting(error.to_string(), store.clone(), runtime.clone())
+            ListenerHandover::waiting(identity_failure(&error), store.clone(), runtime.clone())
         }
-        Err(error) => return Err(error.to_string()),
+        Err(error) => return Err(identity_failure(&error)),
     };
     Ok(Arc::new(handover))
 }
@@ -377,6 +377,18 @@ fn listener_configuration(paths: &StenoPaths) -> steno_handover::HandoverConfigu
         inbox_directory: paths.support_directory.join("handover-inbox"),
         ..configuration
     }
+}
+
+/// Why the identity is not available, for the Phones settings: the
+/// keyring's own sentence when it was not opened at start, as that one
+/// already names the pairing.
+fn identity_failure(error: &IdentityError) -> String {
+    if let IdentityError::Unavailable(Unavailability::Unreadable(source)) = error
+        && let Some(not_opened @ KeyringUnavailable::NotOpened(_)) = source.downcast_ref()
+    {
+        return not_opened.to_string();
+    }
+    error.to_string()
 }
 
 /// Whether the identity could not be read because the keyring was asking
@@ -764,7 +776,14 @@ impl App {
     /// 3. Meetings left queued or processing are processed again, exports
     ///    left unfinished are re-exported
     ///    ([`ProcessingPipeline::redeliver_unfinished`](steno_pipeline::ProcessingPipeline::redeliver_unfinished)),
-    ///    and the retention sweep runs.
+    ///    and the retention sweep runs. Where the secret store can ask (the
+    ///    Secret Service), the meetings and exports wait until it chose and
+    ///    the reread below ran, so none runs on a pipeline built without the
+    ///    key. The choice includes the unlock and the first launch's move or
+    ///    a later launch's tidy; on a locked keyring or `KeePassXC` each of
+    ///    their prompts may stay up for two minutes, so a meeting a crash
+    ///    left processing can show as processing that long (it is not a
+    ///    hang).
     /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
     ///    10 s for a master that is still written): those recordings are
     ///    recovered, left alone or failed, and the list is refreshed.
@@ -774,10 +793,7 @@ impl App {
     /// When the keyring answers later, after a read failed while it asked
     /// the user, the pipeline is built again, the host reads the API key
     /// again, and a handover that waits for its listener reads the identity
-    /// again and starts it when a phone is paired. Where the secret store
-    /// can ask (the Secret Service), the meetings and exports are recovered
-    /// only once it chose, after that rebuild, so none runs on a pipeline
-    /// built without the key.
+    /// again and starts it when a phone is paired.
     ///
     /// Swift: `AppController.launch`, which failed every interrupted
     /// recording instead of recovering it.
@@ -945,7 +961,7 @@ impl App {
                 }
                 Err(error) => {
                     tracing::warn!(%error, "the handover identity could not be read after the unlock");
-                    waiting.still_waiting(error.to_string());
+                    waiting.still_waiting(identity_failure(&error));
                 }
             }
             host.phones_changed();
@@ -1873,6 +1889,12 @@ mod tests {
         async fn set_secret(&self, key: &SecretKey, value: Option<&str>) -> BoundaryResult<()> {
             self.inner.set_secret(key, value).await
         }
+
+        /// Undecided while the keyring asks, as the Linux store.
+        fn place(&self) -> Option<steno_core::SecretPlace> {
+            let asking = *self.failure.lock().unwrap() == Some(KeyringUnavailable::Unlocking);
+            (!asking).then_some(steno_core::SecretPlace::Keyring)
+        }
     }
 
     /// An app launched while the keyring asks the user: its secret store
@@ -2033,6 +2055,13 @@ mod tests {
         assert_eq!(*asked.keys_read.lock().unwrap(), [None]);
         let summaries = asked.snapshot(steno_bridge::BridgeTopic::SettingsSummaries);
         assert_eq!(summaries["hasAPIKey"], false);
+        assert!(summaries.get("keyStore").is_none(), "{summaries}");
+        let onboarding = asked.snapshot(steno_bridge::BridgeTopic::Onboarding);
+        assert_eq!(
+            onboarding["summaries"]["error"],
+            steno_host::settings::KeyRead::UNREADABLE,
+            "{onboarding}"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(
             asked.queued_state(),
@@ -2062,6 +2091,13 @@ mod tests {
         );
         let summaries = asked.snapshot(steno_bridge::BridgeTopic::SettingsSummaries);
         assert_eq!(summaries["hasAPIKey"], true);
+        assert_eq!(summaries["keyStore"], "keyring", "{summaries}");
+        let onboarding = asked.snapshot(steno_bridge::BridgeTopic::Onboarding);
+        assert!(
+            onboarding["summaries"].get("error").is_none(),
+            "onboarding read the key again: {onboarding}"
+        );
+        assert_eq!(onboarding["summaries"]["keyStore"], "keyring");
         assert_eq!(
             asked.handover_state(),
             steno_host::services::ListenerState::Stopped
@@ -2092,6 +2128,36 @@ mod tests {
         );
         let phone = asked.snapshot(steno_bridge::BridgeTopic::SettingsPhone);
         assert_eq!(phone["listener"]["state"], "listening", "{phone}");
+    }
+
+    /// The app quits after the keyring answered: the shutdown stops the
+    /// listener the reread started.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_quit_stops_the_listener_started_after_the_answer() {
+        let mut asked = AskedAtLaunch::new(true).await;
+        asked.answer(None);
+        asked.until_recovered().await;
+        assert!(matches!(
+            asked.handover_state(),
+            steno_host::services::ListenerState::Listening(_)
+        ));
+        let app = &asked.app;
+        tokio::task::block_in_place(|| app.shutdown());
+        assert_eq!(
+            asked.handover_state(),
+            steno_host::services::ListenerState::Stopped
+        );
+    }
+
+    /// The store chose without turning a read away (the commonest Linux
+    /// launch): the meetings are recovered all the same, with no reread.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_choice_that_turned_nothing_away_still_recovers_the_meetings() {
+        let mut asked = AskedAtLaunch::new(false).await;
+        asked.secrets.fail_with(None);
+        drop(asked.answered.take());
+        asked.until_recovered().await;
+        assert_eq!(*asked.keys_read.lock().unwrap(), [None], "no reread");
     }
 
     /// The app quits before the keyring answered: the reread hands no
@@ -2159,7 +2225,12 @@ mod tests {
             )
             .err()
             .unwrap();
-            assert!(error.contains(&failure.to_string()), "{error}");
+            let expected = match failure {
+                // Its own sentence names the pairing.
+                KeyringUnavailable::NotOpened(_) => failure.to_string(),
+                _ => format!("this computer's phone pairing could not be read ({failure})"),
+            };
+            assert_eq!(error, expected);
             assert!(unavailable.inner.keys().is_empty(), "nothing minted");
         }
     }

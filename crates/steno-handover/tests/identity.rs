@@ -263,6 +263,12 @@ async fn with_a_phone_paired_a_missing_identity_is_unavailable_not_minted() {
         matches!(error, IdentityError::Unavailable(Unavailability::Missing)),
         "{error}"
     );
+    assert!(
+        error
+            .to_string()
+            .ends_with("a new identity would make every phone pair again"),
+        "the reason says what a mint would cost: {error}"
+    );
     assert_eq!(places.stored_pem(), None, "nothing minted");
     assert_eq!(places.record.get(), None);
 }
@@ -296,6 +302,12 @@ async fn an_identity_with_another_fingerprint_is_unavailable_and_both_stay() {
     let error = places.load("x").await.unwrap_err();
     assert!(
         matches!(error, IdentityError::Unavailable(Unavailability::Replaced)),
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .ends_with("a new identity would make every phone pair again"),
         "{error}"
     );
     assert_eq!(places.record.get(), Some(hex(&paired.fingerprint())));

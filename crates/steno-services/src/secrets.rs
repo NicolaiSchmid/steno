@@ -73,8 +73,9 @@ pub fn secret_store_with_unlock(
     }
 }
 
-/// Resolves once the secret store chose where the secrets are: true when
-/// it turned a read away while the keyring asked the user, so the caller
+/// Resolves once the secret store chose where the secrets are, the
+/// keyring or the file (so also when nothing was unlocked): true when it
+/// turned a read away while the keyring asked the user, so the caller
 /// reads again.
 pub type SecretsUnlocked = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>;
 
@@ -173,7 +174,8 @@ impl SecretStore for KeyringSecretStore {
 /// ([`KeyringUnavailable::NotOpened`]), not `None`, and a write fails, so
 /// a run that cannot open the keyring never mints a fresh handover
 /// identity or drops the API key. The entries the move left behind are
-/// still read until a later launch deletes them. A build from before the
+/// still read until a later launch deletes them, or the app saves that
+/// key. A build from before the
 /// marker cannot parse the file (the marker is a boolean, and that build
 /// reads only text values), so it fails every secret read and write
 /// instead of minting.
@@ -412,6 +414,20 @@ mod tests {
             env.secret(&identity).await.unwrap().as_deref(),
             Some("pem-env")
         );
+    }
+
+    /// The keyring's message names each secret as the user knows it.
+    #[test]
+    fn a_secret_kept_in_the_keyring_is_named_in_plain_words() {
+        let not_opened = |key: &str| KeyringUnavailable::NotOpened(key.to_owned()).to_string();
+        assert!(
+            not_opened(SecretKey::LLM_API_KEY).starts_with("the API key is kept in the keyring")
+        );
+        assert!(
+            not_opened(steno_handover::HandoverIdentity::SECRET_KEY)
+                .starts_with("this computer's phone pairing is kept in the keyring")
+        );
+        assert!(not_opened("other").starts_with("a secret is kept in the keyring"));
     }
 
     #[tokio::test]
