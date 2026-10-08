@@ -132,6 +132,28 @@ pub fn create_dir_all_durably(directory: &Path) -> std::io::Result<()> {
     create_dir_all_durably_with(&Disk, directory)
 }
 
+/// Creates the folder `directory`, which must not exist yet, with its
+/// missing parents, syncing the parent of every folder it creates as
+/// [`create_dir_all_durably`] does. A folder or file already at `directory`
+/// fails with `AlreadyExists` before anything is written, so a caller that
+/// removes the folder after a later failure removes only what it made; a
+/// sync that fails after the folder was made removes the folder again.
+pub fn create_new_dir_durably(directory: &Path) -> std::io::Result<()> {
+    create_new_dir_durably_with(&Disk, directory)
+}
+
+fn create_new_dir_durably_with(syncs: &dyn Syncs, directory: &Path) -> std::io::Result<()> {
+    let parent = match directory.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    create_dir_all_durably_with(syncs, parent)?;
+    std::fs::create_dir(directory)?;
+    syncs.directory(parent).inspect_err(|_| {
+        let _ = std::fs::remove_dir(directory);
+    })
+}
+
 fn create_dir_all_durably_with(syncs: &dyn Syncs, directory: &Path) -> std::io::Result<()> {
     let missing: Vec<&Path> = directory
         .ancestors()
@@ -704,6 +726,48 @@ mod tests {
         let again = Recorded::new(&meeting);
         create_dir_all_durably_with(&again, &meeting).unwrap();
         assert_eq!(again.events(), Vec::<(String, bool)>::new());
+    }
+
+    /// A new folder is made after its missing parents, each synced into its
+    /// parent, so the parents are durable before the new folder exists; a
+    /// folder already there fails with `AlreadyExists`, syncs nothing, and
+    /// keeps what it holds.
+    #[test]
+    fn a_new_folder_is_synced_and_an_existing_one_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("audio");
+        let meeting = audio.join("0B6F4B1E");
+        let syncs = Recorded::new(&meeting);
+        create_new_dir_durably_with(&syncs, &meeting).unwrap();
+        assert!(meeting.is_dir());
+        assert_eq!(
+            syncs.events(),
+            [
+                (format!("directory {}", dir.path().display()), false),
+                (format!("directory {}", audio.display()), true),
+            ]
+        );
+        std::fs::write(meeting.join("recording.m4a"), b"an earlier recording").unwrap();
+        let again = Recorded::new(&meeting);
+        let error = create_new_dir_durably_with(&again, &meeting).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(again.events(), Vec::<(String, bool)>::new());
+        assert_eq!(
+            std::fs::read(meeting.join("recording.m4a")).unwrap(),
+            b"an earlier recording"
+        );
+    }
+
+    /// A sync that fails once the new folder is made removes that folder,
+    /// so the call leaves nothing it made.
+    #[test]
+    fn a_new_folder_whose_sync_fails_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let meeting = dir.path().join("0B6F4B1E");
+        let mut syncs = Recorded::new(&meeting);
+        syncs.fail_directory_sync = true;
+        assert!(create_new_dir_durably_with(&syncs, &meeting).is_err());
+        assert!(!meeting.exists());
     }
 
     /// A folder sync that fails fails the folder creation and the copy, so
