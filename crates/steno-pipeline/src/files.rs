@@ -150,15 +150,20 @@ pub fn create_new_dir_durably(directory: &Path) -> std::io::Result<()> {
 }
 
 fn create_new_dir_durably_with(syncs: &dyn Syncs, directory: &Path) -> std::io::Result<()> {
-    let parent = match directory.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
+    let parent = folder_of(directory);
     create_dir_all_durably_with(syncs, parent)?;
     std::fs::create_dir(directory)?;
     syncs.directory(parent).inspect_err(|_| {
         let _ = std::fs::remove_dir(directory);
     })
+}
+
+/// The folder that holds `path`: its parent, or `.` for a bare name.
+fn folder_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    }
 }
 
 fn create_dir_all_durably_with(syncs: &dyn Syncs, directory: &Path) -> std::io::Result<()> {
@@ -185,10 +190,7 @@ fn write_durably(
     access: Access,
     write: impl FnOnce(&mut File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let directory = match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    };
+    let directory = folder_of(path);
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -872,11 +874,10 @@ mod tests {
     /// drive: both succeed (on FAT32 the driver treats a flush of a folder
     /// other than the drive's root as a no-op, and flushes the renamed file
     /// with its folders; on exFAT CI shows the same), a folder made at the
-    /// drive's root flushes the root,
-    /// and Settings warns. So the intake does not answer 500 there. CI's
-    /// Windows job mounts both drives and names them in
-    /// `STENO_FAT32_VOLUME` and `STENO_EXFAT_VOLUME`; without one the test
-    /// for it skips.
+    /// drive's root flushes the root, and Settings warns. So the intake does
+    /// not answer 500 there. CI's Windows job mounts both drives and names
+    /// them in `STENO_FAT32_VOLUME` and `STENO_EXFAT_VOLUME`; without one
+    /// the test for it skips.
     #[cfg(windows)]
     fn the_intake_writes_succeed_and_settings_warn(variable: &str, file_system: &str) {
         let Some(volume) = std::env::var_os(variable) else {
