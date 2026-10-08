@@ -905,18 +905,17 @@ fn update(
     }
 }
 
-/// A key the secret store could not read (a locked keyring) shows as
-/// unreadable, a save of the other fields keeps it, and the section shows
-/// it once the store answers again (`Host::secrets_changed`).
-#[test]
-fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(future)
-    }
-    let harness = Harness::builder()
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
+
+/// A harness whose secret store holds `sk-stored` and fails every read
+/// with "the keyring is locked", as a locked keyring.
+fn a_harness_whose_key_cannot_be_read() -> Harness {
+    Harness::builder()
         .seed(|_, fakes| {
             block_on(
                 fakes
@@ -926,7 +925,15 @@ fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
             .unwrap();
             fakes.secrets.fail_reads(Some("the keyring is locked"));
         })
-        .build();
+        .build()
+}
+
+/// A key the secret store could not read (a locked keyring) shows as
+/// unreadable, a save of the other fields keeps it, and the section shows
+/// it once the store answers again (`Host::secrets_changed`).
+#[test]
+fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
+    let harness = a_harness_whose_key_cannot_be_read();
     let summaries = harness.snapshot(BridgeTopic::SettingsSummaries);
     assert_eq!(summaries["error"], KeyRead::UNREADABLE);
     assert_eq!(summaries["errorDetails"], "the keyring is locked");
@@ -973,23 +980,7 @@ fn a_key_that_could_not_be_read_survives_a_save_and_shows_once_read() {
 /// message goes.
 #[test]
 fn only_a_typed_key_replaces_one_that_could_not_be_read() {
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap()
-            .block_on(future)
-    }
-    let harness = Harness::builder()
-        .seed(|_, fakes| {
-            block_on(
-                fakes
-                    .secrets
-                    .set_secret(&SecretKey::llm_api_key(), Some("sk-stored")),
-            )
-            .unwrap();
-            fakes.secrets.fail_reads(Some("the keyring is locked"));
-        })
-        .build();
+    let harness = a_harness_whose_key_cannot_be_read();
     let stored = || {
         harness.fakes.secrets.fail_reads(None);
         let key = block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key())).unwrap();
@@ -1110,11 +1101,7 @@ fn summaries_validate_save_the_key_apart_and_probe() {
     let settings = harness.store.settings().unwrap();
     assert_eq!(settings.llm_model.as_deref(), Some("gpt-4.1-mini"));
     assert_eq!(settings.llm_context_tokens, 16_000);
-    let stored_key = tokio::runtime::Builder::new_current_thread()
-        .build()
-        .unwrap()
-        .block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key()))
-        .unwrap();
+    let stored_key = block_on(harness.fakes.secrets.secret(&SecretKey::llm_api_key())).unwrap();
     assert_eq!(
         stored_key.as_deref(),
         Some("sk-test"),
