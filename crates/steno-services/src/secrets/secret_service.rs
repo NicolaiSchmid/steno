@@ -19,12 +19,16 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use steno_core::{SecretKey, SecretPlace, SecretStore, async_trait, protocols::BoundaryResult};
+use steno_core::{
+    BoxError, SecretKey, SecretPlace, SecretStore, async_trait, protocols::BoundaryResult,
+};
+use steno_handover::{FingerprintRecord as _, HandoverIdentity};
 use tokio::sync::watch;
 use zbus::Connection;
 use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue, Type, Value};
 
 use super::{Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, SecretsUnlocked};
+use crate::handover::FingerprintFile;
 
 /// The Secret Service when a provider answers on the session bus, else the
 /// [`FileSecretStore`] it wraps; `STENO_<KEY>` wins over both.
@@ -37,7 +41,7 @@ use super::{Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, Secr
 /// every secret of this process with the file, never some here and some
 /// there. A call made while the choice runs waits for it, except while the
 /// provider's prompt is on screen: then it fails at once with
-/// [`KeyringUnavailable::Unlocking`], so no caller (the app's start on the
+/// [`KeyringUnavailable::Unlocking`], so no read (the app's start on the
 /// main thread, the host under its lock, a window's close) waits on the
 /// user. [`SecretServiceStore::unlocked_after_prompt`] says when to read
 /// again.
@@ -45,7 +49,10 @@ use super::{Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, Secr
 /// After the choice only a write asks the user, as a write is something
 /// the user did: a read of a collection or an item that is locked again
 /// fails with [`KeyringUnavailable::Locked`] and dismisses the provider's
-/// prompt unseen.
+/// prompt unseen. A write waits for the answer, up to two minutes; the
+/// host saves under its lock, so a keyring locked again while the app runs
+/// holds every window and the tray until the user answers the prompt
+/// Settings' save raised.
 ///
 /// On choosing the service the first time, the store copies what the file
 /// holds into it, reads each value back, and then marks the file as moved
@@ -62,8 +69,11 @@ use super::{Contents, FileSecretStore, KEYRING_SERVICE, KeyringUnavailable, Secr
 /// the newer value; a removal there leaves an empty value, which removes
 /// the item). The handover identity keeps the service's: an identity is
 /// never replaced, as the phones pinned one of them, and the file's stays
-/// in the file for the user to recover. After the marker the service wins
-/// for every key.
+/// in the file for the user to recover. As this computer's phones paired
+/// with the file's identity, its fingerprint is recorded first when none
+/// is ([`FingerprintFile`]), so the handover reports the service's as
+/// replaced instead of adopting it. After the marker the service wins for
+/// every key.
 ///
 /// Items are filed under the attributes `service` ([`KEYRING_SERVICE`])
 /// and `username` (the key's raw value), the names the `keyring` crate
@@ -78,12 +88,18 @@ pub struct SecretServiceStore {
 
 struct Shared {
     file: FileSecretStore,
+    /// Where the handover identity's fingerprint is recorded.
+    record: FingerprintFile,
     /// How long a prompt may stay unanswered.
     prompt_timeout: Duration,
     backend: OnceLock<Backend>,
+    /// Whether the file carries the move's marker, for a choice of the
+    /// file: the secrets are then in the keyring.
+    marked: AtomicBool,
     phase: watch::Sender<Phase>,
-    /// Whether the choice showed a prompt.
-    asked: AtomicBool,
+    /// Whether a call failed with [`KeyringUnavailable::Unlocking`]; set
+    /// and read under the phase's lock.
+    turned_away: AtomicBool,
 }
 
 /// Where the choice is.
@@ -94,9 +110,8 @@ enum Phase {
     /// The provider's prompt is on screen; back to `Choosing` once it is
     /// answered.
     Asking,
-    /// The backend is set: the service or the file, and whether the
-    /// choice asked the user on the way.
-    Chosen { service: bool, asked: bool },
+    /// The backend is set; `reread` when a call failed on the way.
+    Chosen { reread: bool },
 }
 
 impl std::fmt::Debug for SecretServiceStore {
@@ -127,26 +142,44 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(25);
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 
 impl SecretServiceStore {
-    /// The Secret Service on the session bus, falling back to `file`; the
-    /// choice starts now, on the store's own thread.
+    /// The Secret Service on the session bus, falling back to `file`, with
+    /// the handover identity's fingerprint in `record`; the choice starts
+    /// now, on the store's own thread.
     #[must_use]
-    pub fn new(file: FileSecretStore) -> Self {
-        Self::start(file, Bus::Session, PROMPT_TIMEOUT)
+    pub fn new(file: FileSecretStore, record: FingerprintFile) -> Self {
+        Self::start(file, record, Bus::Session, PROMPT_TIMEOUT)
     }
 
     /// The Secret Service on the bus at `address`, falling back to `file`.
     #[cfg(test)]
-    pub(super) fn on_bus(file: FileSecretStore, address: &str, prompt_timeout: Duration) -> Self {
-        Self::start(file, Bus::Address(address.to_owned()), prompt_timeout)
+    pub(super) fn on_bus(
+        file: FileSecretStore,
+        record: FingerprintFile,
+        address: &str,
+        prompt_timeout: Duration,
+    ) -> Self {
+        Self::start(
+            file,
+            record,
+            Bus::Address(address.to_owned()),
+            prompt_timeout,
+        )
     }
 
-    fn start(file: FileSecretStore, bus: Bus, prompt_timeout: Duration) -> Self {
+    fn start(
+        file: FileSecretStore,
+        record: FingerprintFile,
+        bus: Bus,
+        prompt_timeout: Duration,
+    ) -> Self {
         let shared = Arc::new(Shared {
             file,
+            record,
             prompt_timeout,
             backend: OnceLock::new(),
+            marked: AtomicBool::new(false),
             phase: watch::Sender::new(Phase::Choosing),
-            asked: AtomicBool::new(false),
+            turned_away: AtomicBool::new(false),
         });
         let chooser = shared.clone();
         let spawned = std::thread::Builder::new()
@@ -171,34 +204,48 @@ impl SecretServiceStore {
         SecretServiceStore { shared }
     }
 
-    /// Resolves once the store chose the service after asking the user,
-    /// the moment reads that failed with [`KeyringUnavailable::Unlocking`]
-    /// can be made again; never when it chose without asking or chose the
-    /// file.
+    /// Resolves once the choice is made, the service or the file, if a
+    /// call failed with [`KeyringUnavailable::Unlocking`] on the way: the
+    /// moment to make it again. Never when no call was turned away.
+    ///
+    /// Every prompt of the choice counts, whether the provider shows a
+    /// window or not (`KeePassXC` answers every `CreateItem` with a prompt
+    /// that may show nothing, and the Secret Service API does not say
+    /// which); a call is turned away only while one is open.
     pub fn unlocked_after_prompt(&self) -> SecretsUnlocked {
         let mut phase = self.shared.phase.subscribe();
         Box::pin(async move {
-            let opened_after_asking = matches!(
+            let reread = matches!(
                 phase
                     .wait_for(|phase| matches!(phase, Phase::Chosen { .. }))
                     .await
                     .as_deref(),
-                Ok(Phase::Chosen {
-                    service: true,
-                    asked: true
-                })
+                Ok(Phase::Chosen { reread: true })
             );
-            if !opened_after_asking {
+            if !reread {
                 std::future::pending::<()>().await;
             }
         })
     }
 
     /// The chosen backend, waiting for the choice unless it waits on the
-    /// user. The backend is set before the phase turns `Chosen`.
+    /// user. The backend is set before the phase turns `Chosen`; a call
+    /// turned away is noted under the phase's lock, so the choice either
+    /// is made before this look or hears of it.
     async fn backend(&self) -> Result<&Backend, KeyringUnavailable> {
         let mut phase = self.shared.phase.subscribe();
         let _ = phase.wait_for(|phase| *phase != Phase::Choosing).await;
+        let mut chosen = false;
+        self.shared.phase.send_if_modified(|phase| {
+            chosen = matches!(phase, Phase::Chosen { .. });
+            if !chosen {
+                self.shared.turned_away.store(true, Ordering::Relaxed);
+            }
+            false
+        });
+        if !chosen {
+            return Err(KeyringUnavailable::Unlocking);
+        }
         self.shared
             .backend
             .get()
@@ -227,19 +274,20 @@ impl SecretServiceStore {
 
 impl Shared {
     fn settle(&self, backend: Backend) {
-        let service = matches!(backend, Backend::Service(_));
+        if matches!(backend, Backend::File) {
+            let marked = self.file.read().is_ok_and(|contents| contents.moved);
+            self.marked.store(marked, Ordering::Relaxed);
+        }
         let _ = self.backend.set(backend);
-        self.phase.send_replace(Phase::Chosen {
-            service,
-            asked: self.asked.load(Ordering::Relaxed),
+        self.phase.send_modify(|phase| {
+            *phase = Phase::Chosen {
+                reread: self.turned_away.load(Ordering::Relaxed),
+            };
         });
     }
 
     async fn choose(&self, bus: &Bus) -> Backend {
         let asking = |on: bool| {
-            if on {
-                self.asked.store(true, Ordering::Relaxed);
-            }
             self.phase
                 .send_replace(if on { Phase::Asking } else { Phase::Choosing });
         };
@@ -250,8 +298,7 @@ impl Shared {
         let keyring = match Keyring::open(bus, ask).await {
             Ok(keyring) => keyring,
             Err(error) => {
-                tracing::info!(
-                    file = %self.file.path().display(),
+                tracing::warn!(
                     "secrets: no Secret Service ({error}), keeping secrets with the file"
                 );
                 return Backend::File;
@@ -261,7 +308,6 @@ impl Shared {
             Ok(contents) => contents,
             Err(error) => {
                 tracing::warn!(
-                    file = %self.file.path().display(),
                     "secrets: the secrets file could not be read ({error}), keeping secrets \
                      with the file"
                 );
@@ -282,14 +328,16 @@ impl Shared {
             }
             return Backend::Service(keyring);
         }
-        match keyring.take_over(&self.file, &contents, ask).await {
+        match keyring
+            .take_over(&self.file, &self.record, &contents, ask)
+            .await
+        {
             Ok(moved) => {
                 tracing::info!(moved, "secrets: moved the file into the Secret Service");
                 Backend::Service(keyring)
             }
             Err(error) => {
                 tracing::warn!(
-                    file = %self.file.path().display(),
                     "secrets: moving the file into the Secret Service failed ({error}), \
                      keeping secrets with the file"
                 );
@@ -327,10 +375,14 @@ impl SecretStore for SecretServiceStore {
         }
     }
 
-    /// `None` until the choice is made.
+    /// `None` until the choice is made. A marked file says the keyring:
+    /// the secrets moved there, though this run could not open it.
     fn place(&self) -> Option<SecretPlace> {
         match self.shared.backend.get()? {
             Backend::Service(_) => Some(SecretPlace::Keyring),
+            Backend::File if self.shared.marked.load(Ordering::Relaxed) => {
+                Some(SecretPlace::Keyring)
+            }
             Backend::File => Some(SecretPlace::File),
         }
     }
@@ -348,9 +400,9 @@ pub(super) enum ServiceError {
          (Passwords and Keys, KWalletManager, KeePassXC's Secret Service settings)"
     )]
     NoDefaultCollection,
-    #[error("the keyring stayed locked: its prompt was dismissed")]
+    #[error("the Secret Service's prompt was dismissed")]
     Dismissed,
-    #[error("the keyring stayed locked: nobody answered its prompt")]
+    #[error("nobody answered the Secret Service's prompt")]
     PromptTimedOut,
     #[error("the Secret Service closed its prompt without an answer")]
     PromptClosed,
@@ -358,6 +410,8 @@ pub(super) enum ServiceError {
     NotText(String),
     #[error("`{0}` did not read back from the Secret Service as written")]
     ReadBack(String),
+    #[error("the handover identity's fingerprint could not be recorded: {0}")]
+    Record(BoxError),
     #[error(transparent)]
     Unavailable(#[from] KeyringUnavailable),
 }
@@ -462,10 +516,11 @@ impl Keyring {
     async fn take_over(
         &self,
         file: &FileSecretStore,
+        record: &FingerprintFile,
         contents: &Contents,
         ask: Ask<'_>,
     ) -> Result<usize, ServiceError> {
-        let identity = SecretKey::from(steno_handover::HandoverIdentity::SECRET_KEY);
+        let identity = HandoverIdentity::secret_key();
         let mut copied = 0;
         for (key, value) in &contents.entries {
             let key = SecretKey(key.clone());
@@ -474,10 +529,10 @@ impl Keyring {
             {
                 if kept != *value {
                     tracing::warn!(
-                        file = %file.path().display(),
                         "secrets: the Secret Service already holds another handover identity; \
                          it stays, and the file keeps its own"
                     );
+                    pin_file_identity(record, value)?;
                 }
                 continue;
             }
@@ -501,7 +556,7 @@ impl Keyring {
         contents: &Contents,
         ask: Ask<'_>,
     ) -> Result<usize, ServiceError> {
-        let identity = SecretKey::from(steno_handover::HandoverIdentity::SECRET_KEY);
+        let identity = HandoverIdentity::secret_key();
         let mut done = Vec::new();
         for (key, value) in &contents.entries {
             let key = SecretKey(key.clone());
@@ -513,7 +568,6 @@ impl Keyring {
                     self.write_and_check(&key, value, ask).await?;
                 }
                 Some(_) if key == identity => tracing::warn!(
-                    file = %file.path().display(),
                     "secrets: the file and the Secret Service hold different handover \
                      identities; both stay"
                 ),
@@ -587,7 +641,18 @@ impl Keyring {
             .collection
             .create_item(properties, &secret, true)
             .await?;
-        self.complete(prompt, ask).await?;
+        // A create that needs a prompt answers "no object" and names the
+        // item in the prompt's result (`KeePassXC` always does, and updates
+        // the item it replaces in place). An item not named either way
+        // may be any of `items`, so none is deleted.
+        let completed = self.complete(prompt, ask).await?;
+        let Some(created) = [Some(created), completed]
+            .into_iter()
+            .flatten()
+            .find(|path| path.as_str() != NO_OBJECT)
+        else {
+            return Ok(());
+        };
         let extras = items.into_iter().filter(|item| *item != created).collect();
         self.delete(extras, ask).await
     }
@@ -625,14 +690,19 @@ impl Keyring {
     /// when none is.
     async fn unlock(&self, objects: &[ObjectPath<'_>], ask: Ask<'_>) -> Result<(), ServiceError> {
         let (_, prompt) = self.service.unlock(objects).await?;
-        self.complete(prompt, ask).await
+        self.complete(prompt, ask).await.map(drop)
     }
 
     /// Shows `prompt` (unless it is none) and waits for the user's answer,
-    /// or dismisses it unseen when the call may not ask.
-    async fn complete(&self, prompt: OwnedObjectPath, ask: Ask<'_>) -> Result<(), ServiceError> {
+    /// or dismisses it unseen when the call may not ask; the object the
+    /// answer names, when it names one (a created item).
+    async fn complete(
+        &self,
+        prompt: OwnedObjectPath,
+        ask: Ask<'_>,
+    ) -> Result<Option<OwnedObjectPath>, ServiceError> {
         if prompt.as_str() == NO_OBJECT {
-            return Ok(());
+            return Ok(None);
         }
         let prompt = PromptProxy::new(&self.connection, prompt).await?;
         let Ask::User { timeout, asking } = ask else {
@@ -653,11 +723,32 @@ impl Keyring {
             let _ = prompt.dismiss().await;
             return Err(ServiceError::PromptTimedOut);
         };
-        if signal.ok_or(ServiceError::PromptClosed)?.args()?.dismissed {
+        let signal = signal.ok_or(ServiceError::PromptClosed)?;
+        let answer = signal.args()?;
+        if answer.dismissed {
             return Err(ServiceError::Dismissed);
         }
-        Ok(())
+        Ok(OwnedObjectPath::try_from(answer.result.clone()).ok())
     }
+}
+
+/// Records the fingerprint of the file's identity, `pem`, when nothing is
+/// recorded: this computer's phones paired with it, so the handover's load
+/// then finds the service's identity replaced instead of adopting it. A
+/// record that cannot be read, or a file identity that does not parse,
+/// leaves the record as it is (the load refuses over the first, and the
+/// second pins nothing).
+fn pin_file_identity(record: &FingerprintFile, pem: &str) -> Result<(), ServiceError> {
+    if !matches!(record.recorded(), Ok(None)) {
+        return Ok(());
+    }
+    let Ok(identity) = HandoverIdentity::from_pem(pem) else {
+        tracing::warn!("secrets: the file's handover identity does not parse; nothing recorded");
+        return Ok(());
+    };
+    record
+        .record(&steno_handover::identity::hex(&identity.fingerprint()))
+        .map_err(ServiceError::Record)
 }
 
 /// The attributes an item for `key` is filed and found under.

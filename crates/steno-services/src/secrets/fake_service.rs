@@ -3,8 +3,9 @@
 //! `org.freedesktop.Secret.Service`, `Collection`, `Item` and `Prompt`
 //! the store calls, with the `plain` session algorithm, one default
 //! collection that may start locked, items locked one by one as
-//! `KeePassXC` locks them, and prompts the "user" accepts, dismisses or
-//! leaves open until the test answers.
+//! `KeePassXC` locks them, writes confirmed through a prompt as `KeePassXC`
+//! confirms them, and prompts the "user" accepts, dismisses or leaves open
+//! until the test answers.
 
 // The interface macro hands every argument over by value and keeps the
 // D-Bus method's arguments and `&self` whether the fake reads them or not;
@@ -120,10 +121,15 @@ pub struct State {
     pub dismiss: bool,
     /// Whether a prompt stays open until [`answer_held`] answers it.
     pub hold: bool,
-    /// The prompts left open, with the objects each unlocks.
-    pub held: Vec<(OwnedObjectPath, Vec<OwnedObjectPath>)>,
-    /// Whether `CreateItem` and `Delete` ask the user to confirm.
+    /// The prompts left open, with what each answers.
+    pub held: Vec<(OwnedObjectPath, Answer)>,
+    /// Whether `CreateItem` and `Delete` ask the user to confirm. A
+    /// confirmed `CreateItem` answers "no object" and names the item in its
+    /// prompt's `Completed`, as the specification and `KeePassXC` do; an
+    /// item it replaces keeps its path.
     pub confirm_writes: bool,
+    /// Whether a confirmed `CreateItem`'s `Completed` names no item.
+    pub unnamed_creates: bool,
     /// Whether `CreateItem` fails, as a provider that refuses writes.
     pub refuse_writes: bool,
     /// Whether `CreateItem` keeps other bytes than it was sent.
@@ -157,6 +163,13 @@ impl State {
 pub type Shared = Arc<Mutex<State>>;
 
 impl State {
+    /// What accepting a prompt with `answer` does.
+    fn accept(&mut self, answer: &Answer) {
+        if let Answer::Unlock(objects) = answer {
+            self.unlock(objects);
+        }
+    }
+
     /// Unlocks what `objects` names: the collection, or the items.
     fn unlock(&mut self, objects: &[OwnedObjectPath]) {
         for object in objects {
@@ -182,26 +195,48 @@ impl State {
 
 /// Answers the oldest prompt left open, as the user would.
 pub async fn answer_held(fake: &Connection, state: &Shared, accept: bool) {
-    let (prompt, objects) = {
+    let (prompt, answer) = {
         let mut state = state.lock().unwrap();
-        let (prompt, objects) = state.held.remove(0);
+        let (prompt, answer) = state.held.remove(0);
         if accept {
-            state.unlock(&objects);
+            state.accept(&answer);
         }
-        (prompt, objects)
+        (prompt, answer)
     };
     let emitter = SignalEmitter::new(fake, prompt).unwrap();
-    let unlocked = if accept { objects } else { Vec::new() };
-    FakePrompt::completed(&emitter, !accept, Value::from(unlocked))
+    FakePrompt::completed(&emitter, !accept, answer.result(accept))
         .await
         .unwrap();
 }
 
-/// A prompt on the fake's object server; what it unlocks, if anything.
+/// What a prompt does once accepted, and what its `Completed` carries.
+#[derive(Debug, Clone)]
+pub enum Answer {
+    /// Unlocks these objects, and lists them.
+    Unlock(Vec<OwnedObjectPath>),
+    /// Names the item a `CreateItem` wrote.
+    Created(OwnedObjectPath),
+    /// Names nothing.
+    Nothing,
+}
+
+impl Answer {
+    /// The `Completed` result: what was unlocked or created, nothing once
+    /// dismissed.
+    fn result(&self, accepted: bool) -> Value<'static> {
+        match self {
+            Answer::Unlock(objects) if accepted => Value::from(objects.clone()),
+            Answer::Created(item) if accepted => Value::from(item.clone()),
+            _ => Value::from(Vec::<OwnedObjectPath>::new()),
+        }
+    }
+}
+
+/// A prompt on the fake's object server, answering `answer`.
 async fn prompt_at(
     server: &ObjectServer,
     state: &Shared,
-    objects: Vec<OwnedObjectPath>,
+    answer: Answer,
 ) -> fdo::Result<OwnedObjectPath> {
     let prompt = {
         let mut state = state.lock().unwrap();
@@ -216,7 +251,7 @@ async fn prompt_at(
             &prompt,
             FakePrompt {
                 state: state.clone(),
-                objects,
+                answer,
             },
         )
         .await?;
@@ -291,7 +326,7 @@ impl FakeService {
         if !self.state.lock().unwrap().needs_prompt(&objects) {
             return Ok((objects, no_object()));
         }
-        let prompt = prompt_at(server, &self.state, objects).await?;
+        let prompt = prompt_at(server, &self.state, Answer::Unlock(objects)).await?;
         Ok((Vec::new(), prompt))
     }
 }
@@ -345,7 +380,7 @@ impl FakeCollection {
             attributes,
             value: secret.value,
         };
-        let (id, new, confirm) = {
+        let (id, new, confirm, unnamed) = {
             let mut state = self.state.lock().unwrap();
             if state.locked {
                 return Err(fdo::Error::AccessDenied("locked".to_owned()));
@@ -366,7 +401,12 @@ impl FakeCollection {
                 state.next
             });
             state.items.insert(id, item);
-            (id, existing.is_none(), state.confirm_writes)
+            (
+                id,
+                existing.is_none(),
+                state.confirm_writes,
+                state.unnamed_creates,
+            )
         };
         if new {
             server
@@ -379,12 +419,16 @@ impl FakeCollection {
                 )
                 .await?;
         }
-        let prompt = if confirm {
-            prompt_at(server, &self.state, Vec::new()).await?
+        if !confirm {
+            return Ok((item_path(id), no_object()));
+        }
+        let answer = if unnamed {
+            Answer::Nothing
         } else {
-            no_object()
+            Answer::Created(item_path(id))
         };
-        Ok((item_path(id), prompt))
+        let prompt = prompt_at(server, &self.state, answer).await?;
+        Ok((no_object(), prompt))
     }
 }
 
@@ -428,7 +472,7 @@ impl FakeItem {
             state.confirm_writes
         };
         if confirm {
-            return prompt_at(server, &self.state, Vec::new()).await;
+            return prompt_at(server, &self.state, Answer::Nothing).await;
         }
         Ok(no_object())
     }
@@ -436,7 +480,7 @@ impl FakeItem {
 
 struct FakePrompt {
     state: Shared,
-    objects: Vec<OwnedObjectPath>,
+    answer: Answer,
 }
 
 #[zbus::interface(name = "org.freedesktop.Secret.Prompt")]
@@ -450,21 +494,16 @@ impl FakePrompt {
             let mut state = self.state.lock().unwrap();
             state.prompts += 1;
             if state.hold {
-                let held = (emitter.path().to_owned().into(), self.objects.clone());
+                let held = (emitter.path().to_owned().into(), self.answer.clone());
                 state.held.push(held);
                 return Ok(());
             }
             if !state.dismiss {
-                state.unlock(&self.objects);
+                state.accept(&self.answer);
             }
             state.dismiss
         };
-        let unlocked = if dismissed {
-            Vec::new()
-        } else {
-            self.objects.clone()
-        };
-        Self::completed(&emitter, dismissed, Value::from(unlocked)).await?;
+        Self::completed(&emitter, dismissed, self.answer.result(!dismissed)).await?;
         Ok(())
     }
 

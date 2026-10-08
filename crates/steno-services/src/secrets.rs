@@ -47,8 +47,8 @@ pub fn secret_store(keyring: bool, paths: &StenoPaths) -> Arc<dyn SecretStore> {
 }
 
 /// [`secret_store`], and on Linux what resolves once the Secret Service
-/// opened after asking the user for the keyring's password: reads made
-/// while it asked failed with [`KeyringUnavailable::Unlocking`], and the
+/// store made its choice after a read failed with
+/// [`KeyringUnavailable::Unlocking`] while the keyring asked the user: the
 /// app reads its secrets again then. `None` where no store asks.
 #[must_use]
 pub fn secret_store_with_unlock(
@@ -61,7 +61,9 @@ pub fn secret_store_with_unlock(
     }
     #[cfg(target_os = "linux")]
     {
-        let store = SecretServiceStore::new(file());
+        let record =
+            crate::handover::FingerprintFile::in_support_directory(&paths.support_directory);
+        let store = SecretServiceStore::new(file(), record);
         let unlocked = store.unlocked_after_prompt();
         (Arc::new(store), Some(unlocked))
     }
@@ -71,18 +73,22 @@ pub fn secret_store_with_unlock(
     }
 }
 
-/// Resolves once the keyring opened after the store asked the user for
-/// its password; never when it opened without asking or not at all.
+/// Resolves once the secret store chose where the secrets are after it
+/// turned a read away while the keyring asked the user; never when it
+/// turned none away.
 pub type SecretsUnlocked = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 /// A secret Steno cannot reach because the keyring that holds it is
-/// locked, still asking for its password, or was not open when the app
-/// started. Never a reason to treat the secret as absent: a caller that
+/// locked, still waiting for the user to answer its prompt, or was not
+/// open when the app started. Never a reason to treat the secret as absent: a caller that
 /// would mint or delete on `None` stops instead.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyringUnavailable {
-    /// The keyring is asking for its password.
-    #[error("the keyring is asking for its password; answer it and Steno reads it then")]
+    /// The keyring is waiting for the user to answer its prompt.
+    #[error(
+        "the keyring is waiting for an answer in its window; Steno reads its secrets again \
+         once it is answered"
+    )]
     Unlocking,
     /// The keyring was locked again while the app ran.
     #[error("the keyring is locked; unlock it and try again")]
@@ -91,7 +97,7 @@ pub enum KeyringUnavailable {
     /// start: locked, its prompt dismissed, or no provider running.
     #[error(
         "`{0}` is kept in the keyring, which Steno could not open when it started; \
-         unlock the keyring and start Steno again (the command line reads `STENO_<KEY>`)"
+         unlock the keyring and start Steno again"
     )]
     NotOpened(String),
 }
@@ -156,8 +162,9 @@ impl SecretStore for KeyringSecretStore {
 /// a run that cannot open the keyring never mints a fresh handover
 /// identity or drops the API key. The entries the move left behind are
 /// still read until a later launch deletes them. A build from before the
-/// marker cannot parse the file (the marker is not text), so it fails
-/// every secret read and write instead of minting.
+/// marker cannot parse the file (the marker is a boolean, and that build
+/// reads only text values), so it fails every secret read and write
+/// instead of minting.
 pub struct FileSecretStore {
     path: PathBuf,
     environment: BTreeMap<String, String>,
@@ -259,12 +266,6 @@ impl FileSecretStore {
             }
             self.write(contents)
         })
-    }
-
-    /// Where the file lives.
-    #[cfg(target_os = "linux")]
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
     }
 
     pub(crate) fn read(&self) -> std::io::Result<Contents> {

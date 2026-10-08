@@ -14,7 +14,15 @@ fn write_file(path: &Path, entries: &[(&str, &str)]) {
 }
 
 fn identity() -> SecretKey {
-    SecretKey::from(steno_handover::HandoverIdentity::SECRET_KEY)
+    HandoverIdentity::secret_key()
+}
+
+fn minted(name: &str) -> HandoverIdentity {
+    HandoverIdentity::mint(name, chrono::Utc::now()).unwrap()
+}
+
+fn fingerprint(identity: &HandoverIdentity) -> String {
+    steno_handover::identity::hex(&identity.fingerprint())
 }
 
 /// A store over a fresh fake: the daemon, the fake's connection (kept for
@@ -60,9 +68,15 @@ impl Setup {
     ) -> SecretServiceStore {
         SecretServiceStore::on_bus(
             file_at(&self.path(), environment),
+            self.record(),
             &self.daemon.address,
             prompt_timeout,
         )
+    }
+
+    /// The handover identity's fingerprint record beside the file.
+    fn record(&self) -> FingerprintFile {
+        FingerprintFile::in_support_directory(self.folder.path())
     }
 
     /// A launch, once its choice is made.
@@ -272,6 +286,9 @@ async fn a_removal_in_a_run_without_the_keyring_removes_the_item_at_the_move() {
         setup.state().items.is_empty(),
         "the removed key stays removed"
     );
+    drop(store);
+    drop(setup.launch().await);
+    assert_eq!(setup.contents(), moved(&[]), "and leaves the file");
 }
 
 #[tokio::test]
@@ -298,6 +315,61 @@ async fn the_service_keeps_its_handover_identity_and_the_file_keeps_its_own() {
     assert_eq!(
         setup.contents(),
         moved(&[("handover-identity", "pem-file")])
+    );
+}
+
+/// The service's identity (a keyring synced from another computer) is not
+/// the one this computer's phones paired with: with nothing recorded, the
+/// first move records the file's, so the handover finds the service's
+/// replaced instead of adopting it. A recorded fingerprint stays.
+#[tokio::test]
+async fn an_identity_the_service_already_holds_is_not_adopted_over_the_files() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    let (ours, theirs) = (minted("ours"), minted("theirs"));
+    setup
+        .launch()
+        .await
+        .set_secret(&identity(), Some(&theirs.to_pem().unwrap()))
+        .await
+        .unwrap();
+    write_file(
+        &setup.path(),
+        &[("handover-identity", &ours.to_pem().unwrap())],
+    );
+    assert_eq!(setup.record().recorded().unwrap(), None);
+    let store = setup.launch().await;
+    assert!(chose_service(&store));
+    assert_eq!(setup.record().recorded().unwrap(), Some(fingerprint(&ours)));
+    let database = steno_core::Store::in_memory().unwrap();
+    let load = HandoverIdentity::load_or_create(
+        &store,
+        &setup.record(),
+        &database,
+        "x",
+        chrono::Utc::now(),
+    )
+    .await;
+    assert!(
+        matches!(
+            load,
+            Err(steno_handover::IdentityError::Unavailable(
+                steno_handover::Unavailability::Replaced
+            ))
+        ),
+        "{load:?}"
+    );
+
+    setup.record().record("recorded-before").unwrap();
+    write_file(
+        &setup.path(),
+        &[("handover-identity", &ours.to_pem().unwrap())],
+    );
+    drop(setup.launch().await);
+    assert_eq!(
+        setup.record().recorded().unwrap().as_deref(),
+        Some("recorded-before")
     );
 }
 
@@ -459,7 +531,7 @@ async fn a_locked_keyring_is_unlocked_through_one_prompt_and_reads_never_ask() {
 }
 
 #[tokio::test]
-async fn a_dismissed_unlock_keeps_every_secret_in_the_file_for_good() {
+async fn a_dismissed_unlock_keeps_every_secret_in_the_file_for_the_run() {
     let state = State {
         locked: true,
         dismiss: true,
@@ -536,8 +608,32 @@ async fn the_store_opening_without_asking_never_says_it_unlocked() {
     );
 }
 
+/// A prompt that turned no call away leaves nothing to read again.
 #[tokio::test]
-async fn an_unanswered_prompt_is_dismissed_and_the_file_stays() {
+async fn a_choice_that_asked_but_turned_no_call_away_never_says_to_read_again() {
+    let state = State {
+        locked: true,
+        ..State::default()
+    };
+    let Some(setup) = Setup::new(true, state).await else {
+        return;
+    };
+    let store = setup.store(&[]);
+    let unlocked = store.unlocked_after_prompt();
+    store.chosen().await;
+    assert!(chose_service(&store));
+    assert_eq!(setup.state().prompts, 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), unlocked)
+            .await
+            .is_err()
+    );
+}
+
+/// The prompt closed after the timeout and the file chosen: a read turned
+/// away while it was open is made again, and the file answers it.
+#[tokio::test]
+async fn an_unanswered_prompt_is_dismissed_and_the_file_answers_the_read_it_turned_away() {
     let state = State {
         locked: true,
         hold: true,
@@ -546,16 +642,24 @@ async fn an_unanswered_prompt_is_dismissed_and_the_file_stays() {
     let Some(setup) = Setup::new(true, state).await else {
         return;
     };
+    write_file(&setup.path(), &[("llm-api-key", "sk-file")]);
     let store = setup.store_with_timeout(&[], Duration::from_millis(200));
     let unlocked = store.unlocked_after_prompt();
     until_held(&setup).await;
+    let key = SecretKey::llm_api_key();
+    assert!(
+        store.secret(&key).await.is_err(),
+        "turned away while asking"
+    );
     store.chosen().await;
     assert!(chose_file(&store));
     assert_eq!(setup.state().dismissals, 1, "the prompt was closed");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), unlocked)
-            .await
-            .is_err()
+    tokio::time::timeout(Duration::from_secs(2), unlocked)
+        .await
+        .expect("the store says to read again");
+    assert_eq!(
+        store.secret(&key).await.unwrap().as_deref(),
+        Some("sk-file")
     );
 }
 
@@ -625,6 +729,125 @@ async fn writes_the_provider_confirms_complete_through_its_prompt() {
     assert!(setup.state().items.is_empty());
 }
 
+/// `KeePassXC` answers a `CreateItem` that replaces an item with "no
+/// object" and a prompt naming the item it updated in place: that item is
+/// the one written, never an extra to delete.
+#[tokio::test]
+async fn a_confirmed_overwrite_keeps_the_item_it_updated() {
+    let state = State {
+        confirm_writes: true,
+        ..State::default()
+    };
+    let Some(setup) = Setup::new(true, state).await else {
+        return;
+    };
+    let store = setup.launch().await;
+    let key = SecretKey::llm_api_key();
+    for value in ["sk-1", "sk-2", "sk-3"] {
+        store.set_secret(&key, Some(value)).await.unwrap();
+        assert_eq!(setup.values("llm-api-key"), [value]);
+        assert_eq!(store.secret(&key).await.unwrap().as_deref(), Some(value));
+    }
+}
+
+/// The handover identity written again over itself (`HandoverIdentity::store`
+/// over an identity, as an import replaces one) keeps the new identity.
+#[tokio::test]
+async fn a_confirmed_identity_store_over_an_identity_keeps_the_new_one() {
+    let state = State {
+        confirm_writes: true,
+        ..State::default()
+    };
+    let Some(setup) = Setup::new(true, state).await else {
+        return;
+    };
+    let store = setup.launch().await;
+    let record = setup.record();
+    let (first, second) = (minted("first"), minted("second"));
+    first.store(&store, &record).await.unwrap();
+    second.store(&store, &record).await.unwrap();
+    assert_eq!(setup.values("handover-identity").len(), 1);
+    let database = steno_core::Store::in_memory().unwrap();
+    let loaded =
+        HandoverIdentity::load_or_create(&store, &record, &database, "x", chrono::Utc::now())
+            .await
+            .unwrap();
+    assert_eq!(fingerprint(&loaded), fingerprint(&second));
+}
+
+/// The first move over a key the service already holds, through confirmed
+/// writes: the file's value replaces it, and the move goes through.
+#[tokio::test]
+async fn a_confirmed_move_over_a_key_the_service_holds_keeps_the_files_value() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    let key = SecretKey::llm_api_key();
+    setup
+        .launch()
+        .await
+        .set_secret(&key, Some("sk-old"))
+        .await
+        .unwrap();
+    write_file(&setup.path(), &[("llm-api-key", "sk-new")]);
+    setup.state().confirm_writes = true;
+    let store = setup.launch().await;
+    assert!(chose_service(&store), "the move went through");
+    assert_eq!(setup.values("llm-api-key"), ["sk-new"]);
+    assert!(setup.contents().moved);
+}
+
+/// Of two items for one key, a confirmed create deletes the other once its
+/// prompt names the item it wrote; one that names no item may have written
+/// either, so it deletes none.
+#[tokio::test]
+async fn a_confirmed_create_deletes_the_other_item_only_once_it_names_its_own() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    let store = setup.launch().await;
+    let key = SecretKey::llm_api_key();
+    store.set_secret(&key, Some("first")).await.unwrap();
+    store
+        .set_secret(&SecretKey::from("other"), Some("second"))
+        .await
+        .unwrap();
+    {
+        let mut state = setup.state();
+        let first = state.items[&1].attributes.clone();
+        state.items.get_mut(&2).unwrap().attributes = first;
+        state.confirm_writes = true;
+        state.unnamed_creates = true;
+    }
+    store.set_secret(&key, Some("third")).await.unwrap();
+    assert_eq!(setup.values("llm-api-key"), ["third", "second"]);
+    assert_eq!(store.secret(&key).await.unwrap().as_deref(), Some("third"));
+    setup.state().unnamed_creates = false;
+    store.set_secret(&key, Some("fourth")).await.unwrap();
+    assert_eq!(setup.values("llm-api-key"), ["fourth"]);
+}
+
+/// A run that could not open the keyring after the move says the secrets
+/// are in the keyring, not in a file.
+#[tokio::test]
+async fn after_the_move_a_run_on_the_file_says_the_keyring() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    write_file(&setup.path(), &[("llm-api-key", "sk-file")]);
+    let first = setup.launch().await;
+    assert_eq!(first.place(), Some(SecretPlace::Keyring));
+    drop(first);
+    setup.state().no_default = true;
+    let without = setup.launch().await;
+    assert!(chose_file(&without));
+    assert_eq!(without.place(), Some(SecretPlace::Keyring));
+
+    let unmoved = Setup::new(false, State::default()).await.unwrap();
+    let store = unmoved.launch().await;
+    assert_eq!(store.place(), Some(SecretPlace::File));
+}
+
 #[tokio::test]
 async fn the_environment_wins_over_the_service() {
     let Some(setup) = Setup::new(true, State::default()).await else {
@@ -667,4 +890,19 @@ async fn a_value_with_line_breaks_is_stored_on_one_line_and_reads_back_whole() {
         ["sk-one-line"],
         "stored as it is"
     );
+}
+
+#[test]
+fn a_value_with_any_line_break_is_encoded_and_a_damaged_encoding_is_an_error() {
+    let key = SecretKey::llm_api_key();
+    for value in ["a\rb", "a\nb", "a\r\nb"] {
+        let stored = one_line(value);
+        assert!(stored.starts_with(ONE_LINE_PREFIX), "{value:?}");
+        assert_eq!(from_one_line(&key, stored).unwrap(), value);
+    }
+    assert_eq!(one_line("sk-1"), "sk-1");
+    assert!(matches!(
+        from_one_line(&key, format!("{ONE_LINE_PREFIX}not base64!")),
+        Err(ServiceError::NotText(_))
+    ));
 }
