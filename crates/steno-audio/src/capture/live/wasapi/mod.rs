@@ -588,10 +588,7 @@ fn run_watcher(
     let recheck = LiveCaptureBackend::recheck_for(probe.is_fallback);
     watcher.watch(ready, recheck, |judged| {
         // The WASAPI reads run outside the lock.
-        let resolved = baseline
-            .as_ref()
-            .and(enumerator.as_ref())
-            .map(|enumerator| probe.resolve(enumerator));
+        let resolved = enumerator.as_ref().map(|e| probe.resolve(e));
         let reason = LiveCaptureBackend::judgement(judged, resolved.as_ref(), baseline.as_ref());
         if let Some(reason) = reason {
             tracing::info!("device change reported: {reason:?}");

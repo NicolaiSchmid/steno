@@ -48,19 +48,18 @@
 //! default as one without a UID does, until the chosen source, or one of
 //! its ports, is announced again: that is a change too, so the rebuild's
 //! restart records the chosen source again. The stream asks for 48 kHz
-//! `f32` with one `AUXn` channel per
-//! linked port; PipeWire's adapter resamples whatever the graph runs at,
-//! so the rate is always [`SAMPLE_RATE`] and never a mismatch. The stream
-//! is connected without `AUTOCONNECT`, so the session manager leaves it
-//! alone, and once its ports exist Steno creates one link per channel
-//! through the server's `link-factory` (not lingering: the links die with
-//! the connection). `start` returns once the first cycle arrived; a graph
-//! that does not run within `START_TIMEOUT` (3 s) is an error rather than a
-//! silent recording ([`CaptureError::DidNotRun`]), and so is a link that
-//! failed. The latencies come
-//! from the `SPA_PARAM_Latency` of the microphone port (capture side) and
-//! of the sink's first playback port (playback side), in frames of the
-//! first cycle's length.
+//! `f32` with one `AUXn` channel per linked port; PipeWire's adapter
+//! resamples whatever the graph runs at, so the rate is always
+//! [`SAMPLE_RATE`] and never a mismatch. The stream is connected without
+//! `AUTOCONNECT`, so the session manager leaves it alone, and once its
+//! ports exist Steno creates one link per channel through the server's
+//! `link-factory` (not lingering: the links die with the connection).
+//! `start` returns once the first cycle arrived; a graph that does not run
+//! within `START_TIMEOUT` (3 s) is an error rather than a silent recording
+//! ([`CaptureError::DidNotRun`]), and so is a link that failed. The
+//! latencies come from the `SPA_PARAM_Latency` of the microphone port
+//! (capture side) and of the sink's first playback port (playback side),
+//! in frames of the first cycle's length.
 //!
 //! # Device changes
 //!
@@ -623,12 +622,9 @@ impl Connection {
         self.stalled_as(step, CaptureError::BackendFailed)
     }
 
-    /// [`Self::stalled`] for the first cycle: its deadline, with the
-    /// connection and the links intact, is [`CaptureError::DidNotRun`].
-    fn did_not_run(&self) -> CaptureError {
-        self.stalled_as("run the capture", CaptureError::DidNotRun)
-    }
-
+    /// [`Self::stalled`] with the deadline's error made by `timed_out`: the
+    /// first cycle's, with the connection and the links intact, is
+    /// [`CaptureError::DidNotRun`].
     fn stalled_as(&self, step: &str, timed_out: fn(String) -> CaptureError) -> CaptureError {
         if self.shared.lost.get().any() {
             CaptureError::BackendFailed(
@@ -971,7 +967,7 @@ impl Capture {
         let connection = &self.connection;
         let linked = Instant::now();
         if !connection.pump_until(deadline, || self.cycle_frames.load(Ordering::Acquire) > 0) {
-            return Err(connection.did_not_run());
+            return Err(connection.stalled_as("run the capture", CaptureError::DidNotRun));
         }
         let cycle = self.cycle_frames.load(Ordering::Relaxed);
         tracing::debug!(
