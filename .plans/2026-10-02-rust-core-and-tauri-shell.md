@@ -937,7 +937,8 @@ still has to draw the window side. `[ ]` is not ported yet.
     instead of leaving it `processing` (`a_run_that_panics_fails_its_meeting`); a
     meeting `persist` marked ready stays ready, and is delivered, whatever fails or
     panics after that write (`a_panic_after_the_ready_write_leaves_the_meeting_ready`).
-    Swift has no counterpart. The resume guard of P13 is not part of this change.
+    Swift has no counterpart. P13's resume guard is the crash-loop bullet under the
+    services list (#228).
 - No host call holds the host's lock across a network request: the probe and the
   Codex model list, also when confirming ChatGPT (Codex), run with it released, and
   the sign-in the Summaries section reads under the lock comes from the file
@@ -1091,17 +1092,21 @@ still has to draw the window side. `[ ]` is not ported yet.
   and the retired ones, so earlier crashes still count. What is left is the runs that
   ended with the app: an abort, an out-of-memory kill, a power loss. Who is charged:
   every run alive at a crash, so launch recovery runs a meeting with a count alone,
-  after the others and oldest first, and counts it only when its turn comes. When it
-  gives up: after three such runs,
+  after the others and oldest first, and counts it only when its turn comes (a run
+  started at once that never ends holds them back, uncounted, for the session, and
+  the next launch resumes them). When it gives up: after three such runs,
   `resume_unfinished` marks the meeting failed and clears any retention stamp, so
   the sweep keeps the audio. What the user sees: "Steno closed unexpectedly 3 times
   while processing this recording and stopped trying; the recording is kept." How
   to start over: `enqueue` or `reprocess` clears the count. A file, not a column, so
-  no migration.
+  no migration; it is kept only in a folder named after the meeting's id, so two
+  meetings never share one.
 - "Process again": its pipeline entry point, `ProcessingPipeline::reprocess`, has
   landed (refused with a typed `ReprocessError` when the meeting is unfinished or
   busy, its master is gone, or the app is quitting; it drops the retention stamp an
-  earlier run left, so a retry that fails keeps the audio); the bridge method, its button and
+  earlier run left, so a retry that fails keeps the audio, and the retention sweep
+  checks each asset again in the write that removes its files, so a meeting queued
+  after the sweep read its list keeps its audio); the bridge method, its button and
   `steno process --meeting` are P9 in `.plans/2026-10-07-stable-promotion.md`.
 - Ported after WP6b from #154: the room fallback. A `macCall` whose system lane holds
   under 5 % of the mic lane's speech and under ten seconds is diarized on the mic lane
