@@ -11,7 +11,7 @@ fn main() -> ExitCode {
     // beside the app's (`steno_core::crash_log`); stderr still carries the
     // panic to the parent's crash report.
     if let Some(directory) = std::env::var_os(steno_core::crash_log::DIRECTORY_VARIABLE) {
-        steno_core::crash_log::write_crash_logs(directory.into(), Some("sidecar"));
+        steno_core::crash_log::install_crash_log_hook(directory.into(), Some("sidecar"));
     }
     match Options::parse(std::env::args_os().skip(1)) {
         Ok(options) => serve(&options),

@@ -1,6 +1,6 @@
 //! A file for every panic. A release build unwinds a panic, and an app
 //! opened from the Finder, the Dock or at login has its stderr thrown
-//! away, so a panic on the Mac left no trace at all. [`write_crash_logs`]
+//! away, so a panic on the Mac left no trace at all. [`install_crash_log_hook`]
 //! installs a panic hook that writes `crash-<UTC time>.log` into a folder
 //! (the support directory) with the panic's message, its location, the
 //! thread and a backtrace, keeps the newest [`KEPT_CRASH_LOGS`] of them,
@@ -34,12 +34,12 @@ pub const DIRECTORY_VARIABLE: &str = "STENO_CRASH_LOG_DIRECTORY";
 /// is created at the first panic if it is missing.
 ///
 /// ```no_run
-/// steno_core::crash_log::write_crash_logs(
+/// steno_core::crash_log::install_crash_log_hook(
 ///     steno_core::StenoPaths::default_support_directory(),
 ///     None,
 /// );
 /// ```
-pub fn write_crash_logs(folder: PathBuf, process: Option<&'static str>) {
+pub fn install_crash_log_hook(folder: PathBuf, process: Option<&'static str>) {
     prune(&folder, KEPT_CRASH_LOGS);
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {

@@ -12,7 +12,7 @@ fn a_panic_leaves_a_crash_log_and_still_reaches_the_previous_hook() {
             previous_ran.store(true, std::sync::atomic::Ordering::SeqCst);
         }));
     }
-    steno_core::crash_log::write_crash_logs(folder.clone(), None);
+    steno_core::crash_log::install_crash_log_hook(folder.clone(), None);
 
     let caught = std::thread::Builder::new()
         .name("steno-crash-test".into())

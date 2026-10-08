@@ -102,7 +102,7 @@ fn main() {
     // After the log output, whose hook it runs after its own: a panic
     // leaves a file under the support directory, since an app opened from
     // the Finder or at login has no stderr anyone reads.
-    steno_core::crash_log::write_crash_logs(
+    steno_core::crash_log::install_crash_log_hook(
         steno_core::StenoPaths::default_support_directory(),
         None,
     );
