@@ -1354,10 +1354,14 @@ still has to draw the window side. `[ ]` is not ported yet.
   that call fails (a target another handle holds open), they rename with std. Either way
   they then flush the renamed file, which on NTFS commits the journal that holds the
   rename and the folders created before it, and on FAT32 also flushes every folder above
-  the file; a sharing violation on the reopen for that flush is retried for about half a
-  second, and a flush that fails is an error, so the phone intake answers 500 and the
-  phone keeps its copy. `create_dir_all_durably` flushes the parent of each folder it
-  creates, and a durable write flushes the folder it renamed into (`FlushFileBuffers` on
+  the file. A file another handle holds for a moment (a sharing or lock violation, or
+  "access denied" on a file being replaced or deleted that instant) is retried by std's
+  rename and by the reopen for that flush, after waits of 5 ms doubling to 200 ms, about
+  0.9 s in all; two writers of one path in the process rename and flush one after the
+  other, so one writer's flush never makes another's write fail. A flush that fails is
+  an error, so the phone intake answers 500 and the phone keeps its copy.
+  `create_dir_all_durably` flushes the parent of each folder it creates, and a durable
+  write flushes the folder it renamed into (`FlushFileBuffers` on
   the folder). A folder that does not open, or a folder flush that fails to write, is an
   error; a drive that refuses the folder flush ("access denied", "not supported" and the
   like, from some network shares) is logged and passed over, as a failed folder sync is
