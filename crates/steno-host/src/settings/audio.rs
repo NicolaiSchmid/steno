@@ -48,6 +48,9 @@ pub struct AudioSettingsViewModel {
     pub input_device_uid: Option<String>,
     pub audio_folder: PathBuf,
     pub folder_usage: FolderUsageState,
+    /// Whether a power cut may lose recent recordings in the folder (a
+    /// Windows drive that is not NTFS); Settings warns.
+    pub folder_may_lose_recent_writes: bool,
     pub retention_mode: RetentionMode,
     pub retention_days: i64,
     /// How many recordings the last switch to Forever kept; `None` until then.
@@ -66,6 +69,7 @@ impl AudioSettingsViewModel {
             input_device_uid: None,
             audio_folder: PathBuf::new(),
             folder_usage: FolderUsageState::Measuring,
+            folder_may_lose_recent_writes: false,
             retention_mode: RetentionMode::KeepForever,
             retention_days: 30,
             kept_forever: None,
@@ -157,12 +161,16 @@ impl AudioSettingsViewModel {
     }
 
     /// Swift measured off the main actor and dropped a result for a folder
-    /// that changed meanwhile; the blocking host measures in place.
+    /// that changed meanwhile; the blocking host measures in place. The
+    /// folder's drive is checked with it.
     pub fn measure_folder_usage(&mut self, services: &Services) {
         self.folder_usage = match services.folder_usage.measure(&self.audio_folder) {
             Ok(bytes) => FolderUsageState::Bytes(bytes),
             Err(_) => FolderUsageState::Unavailable,
         };
+        self.folder_may_lose_recent_writes = services
+            .folder_usage
+            .may_lose_recent_writes(&self.audio_folder);
     }
 
     /// Saves the rule; Forever also keeps every recording still on disk and

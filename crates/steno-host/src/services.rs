@@ -401,6 +401,10 @@ pub trait AudioDevices: Send + Sync {
 /// every folder it measured and answers the size a test set.
 pub trait FolderUsage: Send + Sync {
     fn measure(&self, folder: &Path) -> BoundaryResult<i64>;
+    /// Whether a power cut may lose a recording just written into `folder`
+    /// (`steno_pipeline::files::may_lose_recent_writes`: a Windows drive
+    /// that is not NTFS); the Swift app never asks.
+    fn may_lose_recent_writes(&self, folder: &Path) -> bool;
 }
 
 /// The files the view models touch: whether one is on disk before offering

@@ -813,11 +813,13 @@ impl AudioDevices for FakeAudioDevices {
     }
 }
 
-/// The folder size a test sets. Swift: `measureFolder`.
+/// The folder size a test sets, and whether the folder's drive may lose
+/// recent writes. Swift: `measureFolder`.
 #[derive(Debug)]
 pub struct FakeFolderUsage {
     pub bytes: Mutex<Result<i64, String>>,
     pub measured: Mutex<Vec<PathBuf>>,
+    pub may_lose_recent_writes: Mutex<bool>,
 }
 
 impl FakeFolderUsage {
@@ -826,6 +828,7 @@ impl FakeFolderUsage {
         FakeFolderUsage {
             bytes: Mutex::new(Ok(bytes)),
             measured: Mutex::new(Vec::new()),
+            may_lose_recent_writes: Mutex::new(false),
         }
     }
 
@@ -839,6 +842,10 @@ impl FolderUsage for FakeFolderUsage {
     fn measure(&self, folder: &Path) -> BoundaryResult<i64> {
         lock(&self.measured).push(folder.to_path_buf());
         lock(&self.bytes).clone().map_err(Into::into)
+    }
+
+    fn may_lose_recent_writes(&self, _folder: &Path) -> bool {
+        *lock(&self.may_lose_recent_writes)
     }
 }
 

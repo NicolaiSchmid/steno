@@ -296,6 +296,36 @@ fn recording_saves_device_folder_and_retention_and_the_chooser_applies_its_answe
     );
 }
 
+/// A folder on a drive that may lose recent recordings in a power cut (a
+/// Windows drive that is not NTFS) shows the warning, and a folder chosen
+/// after is checked again. The Swift app has no such warning.
+#[test]
+fn a_folder_on_a_drive_that_may_lose_recent_writes_shows_the_warning() {
+    let chosen = tempfile::tempdir().unwrap();
+    let chosen_path = chosen.path().join("rec").to_string_lossy().into_owned();
+    let harness = Harness::builder()
+        .choose(Some(&chosen_path))
+        .seed(|_, fakes| *fakes.folder_usage.may_lose_recent_writes.lock().unwrap() = true)
+        .build();
+    assert_eq!(
+        harness.snapshot(BridgeTopic::SettingsRecording)["audioFolderWarning"],
+        "This drive may lose recent recordings in a power cut."
+    );
+    *harness
+        .fakes
+        .folder_usage
+        .may_lose_recent_writes
+        .lock()
+        .unwrap() = false;
+    harness.host.settings_recording_choose_folder().unwrap();
+    assert!(
+        harness
+            .snapshot(BridgeTopic::SettingsRecording)
+            .get("audioFolderWarning")
+            .is_none()
+    );
+}
+
 /// Swift: `testAudioReportsAnUnreadableFolderAsUnavailable`, `testErrorsAreSentencesWithDetailsApart`.
 #[test]
 fn errors_are_sentences_with_the_details_apart() {

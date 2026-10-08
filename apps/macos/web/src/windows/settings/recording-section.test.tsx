@@ -110,6 +110,26 @@ describe("RecordingSection", () => {
 		]);
 	});
 
+	it("warns under the folder only when the host says its drive may lose recordings", async () => {
+		const recording = await fixture();
+		const warning = "This drive may lose recent recordings in a power cut.";
+		const harness = await createBridgeHarness("", {
+			"settings.recording": {
+				...recording,
+				audioFolderWarning: warning,
+			} satisfies RecordingSettingsSnapshot,
+		});
+		const { unmount } = renderWithBridge(<RecordingSection />, harness);
+		expect(screen.getByTestId("audio-folder-warning")).toHaveTextContent(
+			warning,
+		);
+		unmount();
+		renderWithBridge(<RecordingSection />, await createBridgeHarness());
+		expect(
+			screen.queryByTestId("audio-folder-warning"),
+		).not.toBeInTheDocument();
+	});
+
 	it("shows the kept count under Forever and hides the days field", async () => {
 		const recording = await fixture();
 		const harness = await createBridgeHarness("", {

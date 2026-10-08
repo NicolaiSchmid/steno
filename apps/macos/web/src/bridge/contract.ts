@@ -517,6 +517,8 @@ export const recordingSettingsSnapshot = z
 		inputDeviceUID: z.string().optional(),
 		audioFolderPath: z.string(),
 		audioFolderName: z.string(),
+		/** Sent by the Rust host for a Windows drive that is not NTFS. */
+		audioFolderWarning: z.string().optional(),
 		folderUsage: z.enum(["measuring", "measured", "unavailable"]),
 		folderUsageBytes: z.number().optional(),
 		retention,
