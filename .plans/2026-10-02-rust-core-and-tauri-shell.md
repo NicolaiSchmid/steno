@@ -1298,19 +1298,20 @@ still has to draw the window side. `[ ]` is not ported yet.
   on Linux and macOS. Neither the FAT driver's folder flush nor exFAT's unpublished
   driver can be relied on, and a server can acknowledge a flush without writing it, so
   Settings warns under an audio folder on a drive that is neither NTFS nor ReFS, or on a
-  network drive (a share's path, or a drive letter mapped to one), with "This drive may
-  lose recent recordings in a power cut." and "Choose a folder on your computer's main
-  drive to keep them safe." CI's Windows job runs the intake's writes on a FAT32 and an
-  exFAT drive. The intake creates the meeting folder itself (`create_new_dir_durably`),
-  so a folder already at its path (an id that collided) fails the attempt before any
-  write and is left as it is; an attempt whose folder sync or copy fails removes the
-  folder it created. The Swift intake accepts a folder already there and replaces a file
-  at the master's path, reachable only by a UUID collision; it removes the copy whose
-  sync fails and leaves the empty folder. Linux and macOS sync the folder after std's
-  rename, best effort. The Swift app runs only on macOS and has no such warning. The
-  adapters' `AtomicFileWriter` flushes the renamed file on Windows as well, and a failed
-  flush fails the export: with "delete after processing" the vault's copy of the mixdown
-  is the only audio left once the sweep has run.
+  network drive (a share's path, a drive letter mapped to one, or a folder that resolves
+  to a share), with "This drive may lose recent recordings in a power cut." and "Choose
+  a folder on your computer's main drive to keep them safe." CI's Windows job runs the
+  intake's writes on a FAT32 and an exFAT drive. The intake creates the meeting folder
+  itself (`create_new_dir_durably`), so a folder already at its path (an id that
+  collided) fails the attempt before the copy and is left as it is; an attempt whose
+  folder sync or copy fails removes the folder it created. The Swift intake accepts a
+  folder already there and replaces a file at the master's path, reachable only by a
+  UUID collision; it removes the copy whose sync fails and leaves the empty folder.
+  Linux and macOS sync the folder after std's rename, best effort. The Swift app runs
+  only on macOS and has no such warning. The adapters' `AtomicFileWriter` flushes the
+  renamed file on Windows as well, and a failed flush fails the export: with "delete
+  after processing" the vault's copy of the mixdown is the only audio left once the
+  sweep has run.
 
 ### Adapters
 
@@ -2597,13 +2598,14 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   `RecordingIntake::admit` in `crates/steno-pipeline/src/intake.rs` and
   `RecordingIntake.admit` in `Sources/StenoCore/Storage/RecordingIntake.swift`; the
   Store item on `RecordingIntake.admit`. Found: #213.
-- **Unowned.** An audio folder on a network share on macOS or Linux (SMB, NFS) has the
-  durability gap Settings warns about on Windows: a server that acknowledges a flush
-  without writing it (Samba with `strict sync = no`, some NAS firmware) can lose in a
-  power cut a recording the phone has already deleted. Neither app warns there, since
-  only the Rust app on Windows reads the folder's drive; both intakes already sync what
-  a client can. The remedy is the same warning in Settings for a network mount
-  (`statfs`'s `f_type` on Linux, `MNT_LOCAL` on macOS) in both apps. Where:
+- **`fix/network-folder-warning`.** An audio folder on a network share on macOS or
+  Linux (SMB, NFS) has the durability gap Settings warns about on Windows: a server that
+  acknowledges a flush without writing it (Samba with `strict sync = no`, some NAS
+  firmware) can lose in a power cut a recording the phone has already deleted. Neither
+  app warns there, since only the Rust app on Windows reads the folder's drive; both
+  intakes already sync what a client can. The remedy is the same warning in Settings
+  for a network mount (`statfs`'s `f_type` on Linux, `MNT_LOCAL` on macOS) in both
+  apps. Where:
   `may_lose_recent_writes` in `crates/steno-pipeline/src/files.rs`,
   `Sources/StenoCore/Storage/RecordingIntake.swift`. Found: #242.
 - **Unowned.** Linux keeps secrets in the 0600 `secrets.json` under the support
@@ -2683,7 +2685,7 @@ PR off `main`.
 | The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
 | Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
-| On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
+| On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
