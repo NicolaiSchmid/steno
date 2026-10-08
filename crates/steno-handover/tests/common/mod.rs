@@ -424,11 +424,109 @@ impl HandoverIntake for ScriptedIntake {
     }
 }
 
+/// An intake that commits each admission as the real one does
+/// (`RecordingIntake::admit` in `steno-pipeline`, without the copy): the
+/// `complete` receipt, a meeting under a fresh id and its asset in one
+/// durable transaction, which writes the ledger row
+/// (`Store::save_admission_durably`), and it refuses another upload's
+/// receipt the same way. [`StoreIntake::hold_next`] holds the next
+/// admission before its commit until [`StoreIntake::release`].
+pub struct StoreIntake {
+    store: Arc<Store>,
+    meetings: Mutex<Vec<Uuid>>,
+    hold: Mutex<bool>,
+    entered: Notify,
+    released: Notify,
+}
+
+impl StoreIntake {
+    pub fn new(store: &Arc<Store>) -> Arc<Self> {
+        Arc::new(StoreIntake {
+            store: store.clone(),
+            meetings: Mutex::new(Vec::new()),
+            hold: Mutex::new(false),
+            entered: Notify::new(),
+            released: Notify::new(),
+        })
+    }
+
+    /// Holds the next admission before its commit.
+    pub fn hold_next(&self) {
+        *self.hold.lock().unwrap() = true;
+    }
+
+    /// Returns once a held admission is in flight.
+    pub async fn admitting(&self) {
+        signalled("the intake is entered", self.entered.notified()).await;
+    }
+
+    /// Lets the held admission go on to its commit.
+    pub fn release(&self) {
+        self.released.notify_one();
+    }
+
+    /// The meetings committed so far, oldest first.
+    pub fn meetings(&self) -> Vec<Uuid> {
+        self.meetings.lock().unwrap().clone()
+    }
+}
+
+#[steno_core::async_trait]
+impl HandoverIntake for StoreIntake {
+    async fn admit(
+        &self,
+        _file: &Path,
+        metadata: &RecordingMetadata,
+        device: &PairedDevice,
+    ) -> BoundaryResult<Uuid> {
+        let held = std::mem::take(&mut *self.hold.lock().unwrap());
+        if held {
+            self.entered.notify_one();
+            self.released.notified().await;
+        }
+        let recording_id = metadata.recording_id;
+        let mut receipt = self
+            .store
+            .handover_receipt(recording_id)?
+            .ok_or("no receipt")?;
+        if (receipt.device_id, receipt.byte_count, &receipt.sha256)
+            != (device.id, metadata.byte_count, &metadata.sha256)
+        {
+            return Err(steno_core::StoreError::ReceiptOfAnotherUpload(recording_id).into());
+        }
+        let meeting = steno_core::Meeting {
+            id: Uuid::new_v4(),
+            ..steno_core::testing::sample_data::meeting()
+        };
+        let asset = steno_core::AudioAsset {
+            id: Uuid::new_v4(),
+            meeting_id: meeting.id,
+            url: format!("file:///tmp/Audio/{}/master.m4a", meeting.id),
+            format: metadata.format,
+            lanes: vec![steno_core::AudioLane::Mixed],
+            sidecars_16k: std::collections::BTreeMap::new(),
+            mixdown_url: None,
+            retention: steno_core::AudioRetention::KeepForever,
+            expires_at: None,
+        };
+        receipt.state = steno_core::HandoverState::Complete {
+            meeting_id: meeting.id,
+        };
+        self.store
+            .save_admission_durably(&receipt, &meeting, &asset)?;
+        self.meetings.lock().unwrap().push(meeting.id);
+        Ok(meeting.id)
+    }
+}
+
 pub struct Options {
     pub chunk_size: i64,
     pub intake: Option<Arc<dyn HandoverIntake>>,
     pub read_timeout: Duration,
     pub start: bool,
+    /// The store in place of a fresh in-memory one: a second service over
+    /// it is the app after a restart.
+    pub store: Option<Arc<Store>>,
 }
 
 impl Default for Options {
@@ -438,6 +536,7 @@ impl Default for Options {
             intake: None,
             read_timeout: Duration::from_secs(30),
             start: true,
+            store: None,
         }
     }
 }
@@ -477,7 +576,9 @@ impl TestService {
     /// The service, started unless `options.start` is false.
     pub async fn with(options: Options) -> TestService {
         let directory = tempfile::tempdir().unwrap();
-        let store = Arc::new(Store::in_memory().unwrap());
+        let store = options
+            .store
+            .unwrap_or_else(|| Arc::new(Store::in_memory().unwrap()));
         let fake = Arc::new(FakeHandoverIntake::default());
         let intake = taking(options.intake.unwrap_or_else(|| fake.clone()));
         let clock = WallClock::new(date(START));

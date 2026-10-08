@@ -27,9 +27,18 @@ enum Verification {
     Answered(HandoverResponse),
 }
 
-/// The receipt a first announce made, the save's place in line, and what
+/// The receipt an announce made, the save's place in line, and what
 /// [`Engine::open_files`] returned.
 type MadeAndOpened = (HandoverReceipt, super::InOrder, Option<std::io::Result<()>>);
+
+/// Where one decision of an announce ended.
+enum Announced {
+    Answered(HandoverResponse),
+    /// Memory held another receipt of the recording id by the time of the
+    /// change than the one the decision was made on; the announce decides
+    /// again with that one.
+    Changed(HandoverReceipt),
+}
 
 pub(super) fn no_such_recording() -> HandoverResponse {
     HandoverResponse::problem(StatusCode::NOT_FOUND, "no such recording")
@@ -37,8 +46,12 @@ pub(super) fn no_such_recording() -> HandoverResponse {
 
 impl Engine {
     /// `PUT /v1/recordings/{id}` with `RecordingMetadata`: 201 for a new
-    /// recording, 200 for a known one, both with `RecordingStatus`; 401 when
-    /// the device was revoked since its receipt read.
+    /// recording (no receipt, or other bytes than the receipt's), 200 for a
+    /// known one, both with `RecordingStatus`; 200 `complete` with every
+    /// chunk listed for bytes the admission ledger shows admitted; 409 only
+    /// for admitted bytes over another device's unfinished upload of other
+    /// bytes; 401 when the device was revoked since its receipt read. The
+    /// decision table is in `.plans/2026-10-08-handover-admission-ledger.md`.
     pub(super) async fn announce(
         &self,
         recording_id: Uuid,
@@ -64,71 +77,150 @@ impl Engine {
             return HandoverResponse::problem(StatusCode::BAD_REQUEST, problem);
         }
 
-        let existing = match self.receipt(recording_id).await {
+        // The ledger before the receipt. Its rows are never deleted, so a
+        // row read here stays true; an admission that commits after this
+        // read belongs to a receipt memory then holds as `complete`, which
+        // the decision below finds.
+        let (byte_count, sha256) = (metadata.byte_count, metadata.sha256.clone());
+        let admitted = match self
+            .with_store(move |store| store.admitted_meeting(recording_id, byte_count, &sha256))
+            .await
+        {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                return HandoverResponse::internal_error("reading the admissions", &error);
+            }
+        };
+        let mut existing = match self.receipt(recording_id).await {
             Ok(existing) => existing,
             Err(error) => return HandoverResponse::internal_error("reading the receipt", &error),
         };
-        if let Some(existing) = existing {
-            return self.reannounce(existing, device, &metadata).await;
+        // A first announce of the same recording on another thread may have
+        // made its receipt since the read above, and a chunk may have landed
+        // in it; a replacement may meet a receipt changed since the read.
+        // Then the receipt memory holds stays, and this announce decides
+        // again as if the read had found it.
+        loop {
+            let announced = match existing {
+                None => self.first_announce(device, &metadata, admitted).await,
+                Some(existing) => self.reannounce(existing, device, &metadata, admitted).await,
+            };
+            match announced {
+                Announced::Answered(response) => return response,
+                Announced::Changed(held) => existing = Some(held),
+            }
         }
+    }
 
+    /// An announce whose read found no receipt in memory or the store: a
+    /// `complete` receipt with the ledger's meeting id when the ledger
+    /// holds these bytes (200, every chunk listed, nothing opened: the
+    /// phone posts `complete`, takes the meeting id and deletes its copy),
+    /// else a new recording (201).
+    async fn first_announce(
+        &self,
+        device: &PairedDevice,
+        metadata: &RecordingMetadata,
+        admitted: Option<Uuid>,
+    ) -> Announced {
+        match admitted {
+            Some(meeting_id) => {
+                let delivered =
+                    self.fresh(device, metadata, HandoverState::Complete { meeting_id });
+                self.replace(None, delivered, None, StatusCode::OK).await
+            }
+            None => {
+                let fresh = self.fresh(device, metadata, HandoverState::Receiving);
+                self.replace(None, fresh, Some(metadata), StatusCode::CREATED)
+                    .await
+            }
+        }
+    }
+
+    /// A receipt of `metadata`'s bytes for `device` in `state`, no chunk
+    /// received, made now.
+    fn fresh(
+        &self,
+        device: &PairedDevice,
+        metadata: &RecordingMetadata,
+        state: HandoverState,
+    ) -> HandoverReceipt {
         let timestamp = (self.now)();
-        let fresh = HandoverReceipt {
-            recording_id,
+        HandoverReceipt {
+            recording_id: metadata.recording_id,
             device_id: device.id,
-            state: HandoverState::Receiving,
+            state,
             byte_count: metadata.byte_count,
             sha256: metadata.sha256.clone(),
             chunk_size: metadata.chunk_size,
             received_chunks: Vec::new(),
             created_at: timestamp,
             updated_at: timestamp,
-        };
-        // A first announce of the same recording on another thread may have
-        // made its receipt since the read above, and a chunk may have landed
-        // in it. That receipt stays, and this announce is answered as if the
-        // read had found it, without touching the files the other one opens.
-        //
-        // Otherwise the place in line goes to the save whatever the opening
-        // did: nothing between `change` and the save yields. A failed
-        // opening leaves the receipt saved without files, so the phone's
-        // retried announce reopens them as a re-announce. A device revoked
-        // since its receipt read opens none and is answered 401: its
-        // receipt stayed out of memory, or left it. That receipt is still
-        // saved, so a device revoked and paired again since leaves a row
-        // without files, and its retried announce reopens them as a
-        // re-announce.
-        let (receipt, place, opened) = match self.make_and_open(fresh, &metadata) {
+        }
+    }
+
+    /// Makes `fresh` the receipt of its recording id in place of
+    /// `expected`, the one the announce read (`None`: it read none), opens
+    /// its files (`begin`; none for a receipt answered `complete`) and
+    /// answers `status` with it. [`Announced::Changed`] when memory holds
+    /// another receipt by then.
+    ///
+    /// The place in line goes to the save whatever the opening did: nothing
+    /// between `change` and the save yields. A failed opening leaves the
+    /// receipt saved without files, so the phone's retried announce reopens
+    /// them as a re-announce. A device revoked since its receipt read opens
+    /// none and is answered 401: its receipt stayed out of memory, or left
+    /// it. That receipt is still saved, so a device revoked and paired
+    /// again since leaves a row without files, and its retried announce
+    /// reopens them as a re-announce.
+    async fn replace(
+        &self,
+        expected: Option<&HandoverReceipt>,
+        fresh: HandoverReceipt,
+        begin: Option<&RecordingMetadata>,
+        status: StatusCode,
+    ) -> Announced {
+        let (recording_id, device_id) = (fresh.recording_id, fresh.device_id);
+        let (receipt, place, opened) = match self.make_and_open(expected, fresh, begin) {
             Ok(made) => made,
-            Err(held) => return self.reannounce(*held, device, &metadata).await,
+            Err(held) => return Announced::Changed(*held),
         };
         let saved = self.save(receipt.clone(), place).await;
         let Some(opened) = opened else {
-            return Self::unauthorized();
+            return Announced::Answered(Self::unauthorized());
         };
         if let Err(error) = saved {
-            self.discard_own(recording_id, device.id);
-            return HandoverResponse::internal_error("saving the receipt", &error);
+            self.discard_own(recording_id, device_id);
+            return Announced::Answered(HandoverResponse::internal_error(
+                "saving the receipt",
+                &error,
+            ));
         }
         if let Err(error) = opened {
-            return HandoverResponse::internal_error("opening the partial file", &error);
+            return Announced::Answered(HandoverResponse::internal_error(
+                "opening the partial file",
+                &error,
+            ));
         }
-        HandoverResponse::json(StatusCode::CREATED, &Self::status_of(&receipt))
+        Announced::Answered(HandoverResponse::json(status, &Self::status_of(&receipt)))
     }
 
-    /// A first announce's step under the files lock: [`Engine::change`]
-    /// makes `fresh` the receipt memory holds, or declines with the one
-    /// memory holds by then, and [`Engine::open_files`] opens the files of
-    /// the receipt it made. One hold of the lock covers both, so no other
-    /// request creates or discards a file of the recording in between, and
-    /// the sidecar is the metadata of the receipt memory holds. Nothing in
-    /// it yields, and the lock is released before the save. The unit tests
-    /// check the lock is held at `change` and run their in-between step
-    /// where requests on other threads that take no files lock could.
+    /// An announce's step under the files lock: [`Engine::change`] makes
+    /// `fresh` the receipt memory holds while memory holds `expected` or
+    /// none, or declines with the one memory holds by then, and
+    /// [`Engine::open_files`] discards the recording id's files and opens
+    /// those of the receipt it made. One hold of the lock covers both, so
+    /// no other request creates or discards a file of the recording in
+    /// between, and the sidecar is the metadata of the receipt memory
+    /// holds. Nothing in it yields, and the lock is released before the
+    /// save. The unit tests check the lock is held at `change` and run
+    /// their in-between step where requests on other threads that take no
+    /// files lock could.
     fn make_and_open(
         &self,
+        expected: Option<&HandoverReceipt>,
         fresh: HandoverReceipt,
-        metadata: &RecordingMetadata,
+        begin: Option<&RecordingMetadata>,
     ) -> Result<MadeAndOpened, Box<HandoverReceipt>> {
         let files = self.files();
         let (receipt, place) = self.change(
@@ -137,56 +229,68 @@ impl Engine {
                 #[cfg(test)]
                 assert!(
                     self.files.try_lock().is_err(),
-                    "a first announce makes its receipt under the files lock"
+                    "an announce makes its receipt under the files lock"
                 );
-                held.map_or(Ok(fresh), |held| Err(Box::new(held.clone())))
+                match held {
+                    Some(held) if Some(held) != expected => Err(Box::new(held.clone())),
+                    _ => Ok(fresh),
+                }
             },
             |_| {},
         )?;
         #[cfg(test)]
         tests::meanwhile(self, receipt.recording_id);
-        let opened = self.open_files(&files, metadata, receipt.device_id);
+        let opened = self.open_files(&files, receipt.recording_id, receipt.device_id, begin);
         Ok((receipt, place, opened))
     }
 
-    /// A known recording announced again: 200 with the status, 409 when another
-    /// device owns it, its size or SHA-256 changed, or its chunk size changed
-    /// before it is `complete`; a `complete` one in other chunks of the same
-    /// bytes is 200 with every chunk of the announced split. The partial is
-    /// reopened when it or the sidecar is gone (a sweep, a crash before the
-    /// first chunk, a refusal), with the same receipt and an empty chunk set; a
-    /// verified file waiting for a second intake attempt keeps its chunk set,
-    /// so the phone's retry (announce, then complete) sends no chunk twice. 401
-    /// with nothing opened when the device was revoked since its receipt read.
-    /// A receipt a `complete` admitted meanwhile stays `complete`
-    /// ([`Engine::update`]), the answer says so, and the files this announce
-    /// opened go.
+    /// A known recording announced again; the rows of the decision table
+    /// with a receipt. Other bytes than the receipt's: a `complete` receipt
+    /// with the ledger's meeting id when the ledger holds them (as for no
+    /// receipt) and the receipt is `complete` or this device's; 409 over
+    /// another device's unfinished upload, which a `complete` answer would
+    /// end with that phone deleting its copy; else a new recording under
+    /// the same recording id (201), whose own `complete` admits a meeting
+    /// of its own. The same bytes from another device take the receipt over
+    /// ([`Engine::take_over`]). Then, as the owner: a `complete` receipt
+    /// answers 200 with every chunk of the announced split; one in another
+    /// split starts its partial over under the announced one (200, no chunk
+    /// listed); else [`Engine::resume`].
     async fn reannounce(
         &self,
-        mut receipt: HandoverReceipt,
+        receipt: HandoverReceipt,
         device: &PairedDevice,
         metadata: &RecordingMetadata,
-    ) -> HandoverResponse {
-        if receipt.device_id != device.id {
-            return HandoverResponse::problem(
-                StatusCode::CONFLICT,
-                "another device owns this recording",
-            );
-        }
-        let recording_id = receipt.recording_id;
-        // Also for a `complete` receipt: a phone told `complete` posts
-        // `complete`, and the 200 to that deletes its copy. A different file
-        // under an admitted id is refused instead, and stays on the phone.
+        admitted: Option<Uuid>,
+    ) -> Announced {
         let complete = receipt.state.kind() == HandoverStateKind::Complete;
-        if receipt.byte_count != metadata.byte_count
-            || receipt.sha256 != metadata.sha256
-            || (!complete && receipt.chunk_size != metadata.chunk_size)
-        {
-            return HandoverResponse::problem(
-                StatusCode::CONFLICT,
-                "metadata differs from the first announcement",
-            );
+        if receipt.byte_count != metadata.byte_count || receipt.sha256 != metadata.sha256 {
+            return match admitted {
+                Some(meeting_id) if complete || receipt.device_id == device.id => {
+                    let delivered =
+                        self.fresh(device, metadata, HandoverState::Complete { meeting_id });
+                    self.replace(Some(&receipt), delivered, None, StatusCode::OK)
+                        .await
+                }
+                Some(_) => Announced::Answered(HandoverResponse::problem(
+                    StatusCode::CONFLICT,
+                    "another device owns this recording",
+                )),
+                None => {
+                    let fresh = self.fresh(device, metadata, HandoverState::Receiving);
+                    self.replace(Some(&receipt), fresh, Some(metadata), StatusCode::CREATED)
+                        .await
+                }
+            };
         }
+        let receipt = if receipt.device_id == device.id {
+            receipt
+        } else {
+            match self.take_over(&receipt, device).await {
+                Ok(taken) => taken,
+                Err(announced) => return announced,
+            }
+        };
         // The chunk size matters only until the receipt is `complete`: the
         // same bytes split otherwise are the file the computer holds. The
         // answer lists every chunk of the phone's split, so it posts
@@ -196,8 +300,78 @@ impl Engine {
                 chunk_size: metadata.chunk_size,
                 ..receipt
             };
-            return HandoverResponse::json(StatusCode::OK, &Self::status_of(&resplit));
+            return Announced::Answered(HandoverResponse::json(
+                StatusCode::OK,
+                &Self::status_of(&resplit),
+            ));
         }
+        if receipt.chunk_size != metadata.chunk_size {
+            let restarted = HandoverReceipt {
+                state: HandoverState::Receiving,
+                chunk_size: metadata.chunk_size,
+                received_chunks: Vec::new(),
+                ..receipt.clone()
+            };
+            return self
+                .replace(Some(&receipt), restarted, Some(metadata), StatusCode::OK)
+                .await;
+        }
+        Announced::Answered(self.resume(receipt, device, metadata).await)
+    }
+
+    /// The receipt of another device announced with the same size and
+    /// SHA-256 becomes `device`'s, its chunks and files kept: the same
+    /// bytes are the same recording, so whichever device's `complete`
+    /// admits them, the other phone's copy is that recording, and its next
+    /// announce takes the receipt back as `complete` and is answered
+    /// delivered. The older device's requests then find no receipt of
+    /// theirs (404), and its late writes leave this one alone
+    /// ([`Engine::update`]). [`Announced::Changed`] when memory holds
+    /// another receipt by then; a failed save is answered 500, with memory
+    /// holding the receipt as taken over.
+    async fn take_over(
+        &self,
+        receipt: &HandoverReceipt,
+        device: &PairedDevice,
+    ) -> Result<HandoverReceipt, Announced> {
+        let (taken, place) = self
+            .change(
+                receipt.recording_id,
+                |held| match held {
+                    Some(held) if held != receipt => Err(Box::new(held.clone())),
+                    _ => Ok(HandoverReceipt {
+                        device_id: device.id,
+                        ..receipt.clone()
+                    }),
+                },
+                |_| {},
+            )
+            .map_err(|held| Announced::Changed(*held))?;
+        if let Err(error) = self.save(taken.clone(), place).await {
+            return Err(Announced::Answered(HandoverResponse::internal_error(
+                "saving the receipt",
+                &error,
+            )));
+        }
+        Ok(taken)
+    }
+
+    /// The owner's re-announce of the same bytes in the same split: 200
+    /// with the status. The partial is reopened when it or the sidecar is
+    /// gone (a sweep, a crash before the first chunk, a refusal), with the
+    /// same receipt and an empty chunk set; a verified file waiting for a
+    /// second intake attempt keeps its chunk set, so the phone's retry
+    /// (announce, then complete) sends no chunk twice. 401 with nothing
+    /// opened when the device was revoked since its receipt read. A receipt
+    /// a `complete` admitted meanwhile stays `complete` ([`Engine::update`]),
+    /// the answer says so, and the files this announce opened go.
+    async fn resume(
+        &self,
+        mut receipt: HandoverReceipt,
+        device: &PairedDevice,
+        metadata: &RecordingMetadata,
+    ) -> HandoverResponse {
+        let recording_id = receipt.recording_id;
         let received_chunks = match self.reopen_missing_files(metadata, device.id) {
             None => return Self::unauthorized(),
             Some(Ok(reopened)) => reopened.then(Vec::new),
@@ -310,7 +484,7 @@ impl Engine {
         // have been revoked, or a `complete` may have admitted the
         // recording. Fold this chunk into the receipt as it stands now,
         // never into the copy from before the write.
-        match self.add_chunk(recording_id, device.id, index).await {
+        match self.add_chunk(&receipt, index).await {
             None => no_such_recording(),
             Some(Err(error)) => HandoverResponse::internal_error("saving the receipt", &error),
             Some(Ok(())) => HandoverResponse::empty(StatusCode::NO_CONTENT),
@@ -578,7 +752,11 @@ impl Engine {
     /// upload ([`Engine::discard_own`]); no other request creates the
     /// verified file while this `complete` holds the `completing` mark. On
     /// failure the verified file stays for the phone's retry and the reason
-    /// is fixed text, because the error may name the file's path.
+    /// is fixed text, because the error may name the file's path; unless
+    /// memory holds a receipt of other bytes by then (the phone announced
+    /// another file under the id during the intake): that upload's
+    /// `complete` would hand this file to the intake unhashed
+    /// ([`Engine::verified_file`]), so it goes.
     async fn admit(
         &self,
         file: &std::path::Path,
@@ -597,6 +775,16 @@ impl Engine {
                         None,
                     )
                     .await;
+                let replaced =
+                    self.state()
+                        .active_receipts
+                        .get(&recording_id)
+                        .is_some_and(|held| {
+                            held.byte_count != receipt.byte_count || held.sha256 != receipt.sha256
+                        });
+                if replaced {
+                    let _ = std::fs::remove_file(file);
+                }
                 return HandoverResponse::internal_error("the intake", &error);
             }
         };

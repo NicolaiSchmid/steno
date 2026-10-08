@@ -498,12 +498,12 @@ async fn an_announce_that_found_no_receipt_keeps_the_one_made_meanwhile() {
 }
 
 #[tokio::test]
-async fn an_announce_of_another_phone_that_found_no_receipt_is_refused() {
-    // Two phones announce the same recording id at once. Phone B's announce
-    // is held at its clock read, after its receipt read found nothing,
-    // while phone A's announce answers 201 and chunk 0 lands. B's then finds
-    // A's receipt in memory and is refused as a re-announce of another
-    // device's recording, and the receipt stays A's.
+async fn an_announce_of_another_phone_that_found_no_receipt_takes_the_receipt_over() {
+    // Two phones announce the same recording id and bytes at once. Phone
+    // B's announce is held at its clock read, after its receipt read found
+    // nothing, while phone A's announce answers 201 and chunk 0 lands. B's
+    // then finds A's receipt in memory, decides again with it and, the
+    // bytes being the same, takes it over with the chunk A sent.
     let (test, phone, metadata, chunks) = two_chunk_recording(69, None).await;
     let id = metadata.recording_id;
     let other = EngineDevice::paired(&test, "Other iPhone").await;
@@ -516,9 +516,18 @@ async fn an_announce_of_another_phone_that_found_no_receipt_is_refused() {
         assert_eq!(phone.upload(id, 0, &chunks[0]).await.status.as_u16(), 204);
     })
     .await;
-    assert_eq!(refused.status.as_u16(), 409);
+    assert_eq!(refused.status.as_u16(), 200);
+    assert_eq!(
+        refused
+            .decode::<wire::RecordingStatus>()
+            .unwrap()
+            .received_chunks,
+        [0]
+    );
 
-    assert_eq!(owners(&test, id), (phone.device.id, phone.device.id));
+    let other_id = owners(&test, id).0;
+    assert_ne!(other_id, phone.device.id);
+    assert_eq!(owners(&test, id), (other_id, other_id));
     assert_eq!(chunk_sets(&test, id), (vec![0], vec![0]));
 }
 
@@ -662,7 +671,7 @@ fn racing_first_announces(
 }
 
 /// The sidecar is the metadata of the announce that made the receipt, and
-/// the phone's upload is admitted with it.
+/// the upload of `phone`, which owns the receipt, is admitted with it.
 async fn the_sidecar_is_the_receipts(
     test: &TestService,
     phone: &EngineDevice,
@@ -696,16 +705,17 @@ async fn racing_first_announces_with_another_format_keep_the_receipts_sidecar() 
 
 #[tokio::test]
 async fn racing_first_announces_of_two_phones_keep_the_receipts_sidecar() {
-    // Two phones announce the same recording id at once, with other
-    // formats. The late one is refused as another device's recording and
-    // leaves the sidecar of the one that made the receipt alone.
+    // Two phones announce the same recording id and bytes at once, with
+    // other formats. The late one takes the receipt over, the same bytes
+    // being the same recording, and leaves the sidecar of the one that
+    // made the receipt alone: its upload is admitted with that metadata.
     let (test, phone, metadata, chunks) = two_chunk_recording(76, None).await;
     let other = EngineDevice::paired(&test, "Other iPhone").await;
     let (first, late) = racing_first_announces(&test, &phone, &other, &metadata);
     assert_eq!(first.status.as_u16(), 201);
-    assert_eq!(late.status.as_u16(), 409);
+    assert_eq!(late.status.as_u16(), 200);
 
-    the_sidecar_is_the_receipts(&test, &phone, &metadata, &chunks).await;
+    the_sidecar_is_the_receipts(&test, &other, &metadata, &chunks).await;
 }
 
 #[tokio::test]

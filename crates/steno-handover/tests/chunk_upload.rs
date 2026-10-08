@@ -332,26 +332,8 @@ async fn chunk_and_metadata_errors_are_answered_without_side_effects() {
         200,
         "announcing twice is fine"
     );
-    let mut longer = bytes.clone();
-    longer.push(1);
-    assert_eq!(
-        phone
-            .announce(&variant(
-                CHUNK_SIZE,
-                AudioFormat::M4aAac,
-                metadata.recording_id,
-                &longer
-            ))
-            .await
-            .status,
-        409,
-        "different metadata under the same id"
-    );
-    assert_eq!(
-        other.announce(&metadata).await.status,
-        409,
-        "another device's id"
-    );
+    // Other bytes under the id, and the same bytes from another device,
+    // are `tests/admission_ledger.rs`'s.
     assert_eq!(
         other.status(metadata.recording_id).await.status,
         404,
@@ -569,39 +551,22 @@ async fn announce_after_complete_reports_complete_with_every_chunk() {
 }
 
 #[tokio::test]
-async fn a_re_announce_with_other_bytes_is_409_and_other_chunks_only_while_receiving() {
-    // A different file under an admitted id is not answered `complete`: the
-    // phone would post `complete`, take its 200 and delete a recording the
-    // computer does not have. The phone keeps a recording answered 409 and
-    // announces it again after its backoff, until the third 409 in a row
-    // marks it `failed` with Retry. The same bytes in other chunks are the
-    // file the computer holds once it is `complete`, and are delivered.
+async fn a_complete_recording_announced_in_other_chunks_is_delivered() {
+    // The same bytes in other chunks are the file the computer holds once
+    // it is `complete`, and are delivered: every chunk of the phone's split
+    // is listed, so it posts `complete` and takes the meeting id. Other
+    // bytes under the id are `tests/admission_ledger.rs`'s.
     let intake = fake_intake(meeting_id());
     let test = TestService::with_intake(CHUNK_SIZE, intake.clone()).await;
     let phone = Phone::pair(&test).await;
     let bytes = seeded_bytes(2 * CHUNK_SIZE as usize + 1, 7);
     let metadata = phone.metadata(&bytes, CHUNK_SIZE);
-
-    let mut flipped = bytes.clone();
-    flipped[0] ^= 1;
-    let mut other_hash = metadata.clone();
-    other_hash.sha256 = sha256(&flipped);
-    let mut longer = metadata.clone();
-    longer.byte_count += 1;
     let mut smaller_chunks = metadata.clone();
     smaller_chunks.chunk_size = CHUNK_SIZE / 2;
-    let changed = [
-        ("sha256", other_hash),
-        ("byteCount", longer),
-        ("chunkSize", smaller_chunks.clone()),
-    ];
 
-    assert_eq!(phone.announce(&metadata).await.status, 201);
-    assert_metadata_differs(&phone, &changed, "receiving").await;
     phone.upload_all(&metadata, &bytes).await;
     assert_eq!(phone.complete(metadata.recording_id).await.status, 200);
 
-    assert_metadata_differs(&phone, &changed[..2], "complete").await;
     let resplit = phone.announce(&smaller_chunks).await;
     assert_eq!(resplit.status, 200, "complete: chunkSize");
     assert_eq!(
@@ -633,24 +598,6 @@ async fn a_re_announce_with_other_bytes_is_409_and_other_chunks_only_while_recei
     );
     assert_eq!(intake.admissions.count(), 1, "no second admission");
     test.stop().await;
-}
-
-/// Announces each `changed` copy of a recording's metadata and expects the
-/// 409 that keeps the phone's file; `state` names the receipt's state.
-async fn assert_metadata_differs(
-    phone: &Phone,
-    changed: &[(&str, RecordingMetadata)],
-    state: &str,
-) {
-    for (what, metadata) in changed {
-        let refused = phone.announce(metadata).await;
-        assert_eq!(refused.status, 409, "{state}: {what}");
-        assert_eq!(
-            refused.json::<wire::Problem>().error,
-            "metadata differs from the first announcement",
-            "{state}: {what}"
-        );
-    }
 }
 
 #[tokio::test]
