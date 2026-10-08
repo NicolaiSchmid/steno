@@ -21,7 +21,7 @@ use base64::engine::general_purpose::STANDARD;
 use common::{
     EngineDevice, Phone, TestService, chunks, fake_intake, metadata_for, seeded_bytes, sha256,
 };
-use steno_core::{AudioFormat, HandoverState, HandoverStateKind, RecordingMetadata};
+use steno_core::{AudioFormat, HandoverState, HandoverStateKind};
 use steno_handover::upload::MetadataValidation;
 use steno_handover::wire;
 use uuid::Uuid;

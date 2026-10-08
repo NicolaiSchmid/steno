@@ -77,33 +77,19 @@ impl Engine {
             return HandoverResponse::problem(StatusCode::BAD_REQUEST, problem);
         }
 
-        // The ledger before the receipt. Its rows are never deleted, so a
-        // row read here stays true; an admission that commits after this
-        // read belongs to a receipt memory then holds as `complete`, which
-        // the decision below finds.
-        let (byte_count, sha256) = (metadata.byte_count, metadata.sha256.clone());
-        let admitted = match self
-            .with_store(move |store| store.admitted_meeting(recording_id, byte_count, &sha256))
-            .await
-        {
-            Ok(admitted) => admitted,
-            Err(error) => {
-                return HandoverResponse::internal_error("reading the admissions", &error);
-            }
-        };
         let mut existing = match self.receipt(recording_id).await {
             Ok(existing) => existing,
             Err(error) => return HandoverResponse::internal_error("reading the receipt", &error),
         };
         // A first announce of the same recording on another thread may have
         // made its receipt since the read above, and a chunk may have landed
-        // in it; a replacement may meet a receipt changed since the read.
-        // Then the receipt memory holds stays, and this announce decides
-        // again as if the read had found it.
+        // in it; a replacement may meet a receipt changed since the read, or
+        // since the ledger read it waited for. Then the receipt memory holds
+        // stays, and this announce decides again as if the read had found it.
         loop {
             let announced = match existing {
-                None => self.first_announce(device, &metadata, admitted).await,
-                Some(existing) => self.reannounce(existing, device, &metadata, admitted).await,
+                None => self.first_announce(device, &metadata).await,
+                Some(existing) => self.reannounce(existing, device, &metadata).await,
             };
             match announced {
                 Announced::Answered(response) => return response,
@@ -112,17 +98,39 @@ impl Engine {
         }
     }
 
+    /// The meeting the admission ledger holds for `metadata`'s recording
+    /// id, size and SHA-256 ([`steno_core::Store::admitted_meeting`]), or
+    /// the 500 of a failed read. Read only where it decides something: no
+    /// receipt, or one of other bytes. Its rows are never deleted, so a row
+    /// read stays true; an admission that commits after the read belongs to
+    /// a receipt memory then holds, which the replacement's check in
+    /// [`Engine::make_and_open`] finds.
+    async fn admitted(&self, metadata: &RecordingMetadata) -> Result<Option<Uuid>, Announced> {
+        let (recording_id, byte_count, sha256) = (
+            metadata.recording_id,
+            metadata.byte_count,
+            metadata.sha256.clone(),
+        );
+        self.with_store(move |store| store.admitted_meeting(recording_id, byte_count, &sha256))
+            .await
+            .map_err(|error| {
+                Announced::Answered(HandoverResponse::internal_error(
+                    "reading the admissions",
+                    &error,
+                ))
+            })
+    }
+
     /// An announce whose read found no receipt in memory or the store: a
     /// `complete` receipt with the ledger's meeting id when the ledger
     /// holds these bytes (200, every chunk listed, nothing opened: the
     /// phone posts `complete`, takes the meeting id and deletes its copy),
     /// else a new recording (201).
-    async fn first_announce(
-        &self,
-        device: &PairedDevice,
-        metadata: &RecordingMetadata,
-        admitted: Option<Uuid>,
-    ) -> Announced {
+    async fn first_announce(&self, device: &PairedDevice, metadata: &RecordingMetadata) -> Announced {
+        let admitted = match self.admitted(metadata).await {
+            Ok(admitted) => admitted,
+            Err(failed) => return failed,
+        };
         match admitted {
             Some(meeting_id) => {
                 let delivered =
@@ -261,10 +269,13 @@ impl Engine {
         receipt: HandoverReceipt,
         device: &PairedDevice,
         metadata: &RecordingMetadata,
-        admitted: Option<Uuid>,
     ) -> Announced {
         let complete = receipt.state.kind() == HandoverStateKind::Complete;
         if receipt.byte_count != metadata.byte_count || receipt.sha256 != metadata.sha256 {
+            let admitted = match self.admitted(metadata).await {
+                Ok(admitted) => admitted,
+                Err(failed) => return failed,
+            };
             return match admitted {
                 Some(meeting_id) if complete || receipt.device_id == device.id => {
                     let delivered =
