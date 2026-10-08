@@ -767,21 +767,35 @@ fn a_chosen_source_that_does_not_run_leaves_the_recording_on_the_default() {
         assert!(!result.statistics.ended_on_device_loss);
     }
 
-    let notices = session.notices();
-    let started = Instant::now();
-    session.start(Uuid::new_v4()).expect("the start");
-    assert_eq!(input(&session), on_the_fallback, "missing at the start");
-    let _stalled = StalledSource::create();
-    let deadline = Instant::now() + Duration::from_secs(40);
-    let mut seen = Vec::new();
-    while !matches!(seen.last(), Some(CaptureNotice::DeviceResumed { .. })) {
-        let left = deadline.saturating_duration_since(Instant::now());
-        let Ok(notice) = notices.recv_timeout(left) else {
-            panic!("no resume within 40 s: {seen:?}, {:?}", session.state());
-        };
-        seen.push(notice);
-    }
-    println!("notices: {seen:?}");
+    // The arrival races the stop: a rebuild that starts on the source
+    // before `kill -STOP` lands records it, running. That try proves
+    // nothing, so it is stopped and the arrival is redone, up to 3 times.
+    let mut tries = 0;
+    let (seen, started, _stalled) = loop {
+        tries += 1;
+        let notices = session.notices();
+        session.start(Uuid::new_v4()).expect("the start");
+        let started = Instant::now();
+        assert_eq!(input(&session), on_the_fallback, "missing at the start");
+        let stalled = StalledSource::create();
+        let deadline = Instant::now() + Duration::from_secs(40);
+        let mut seen = Vec::new();
+        while !matches!(seen.last(), Some(CaptureNotice::DeviceResumed { .. })) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Ok(notice) = notices.recv_timeout(left) else {
+                panic!("no resume within 40 s: {seen:?}, {:?}", session.state());
+            };
+            seen.push(notice);
+        }
+        println!("notices: {seen:?}");
+        let raced = input(&session) == Some((StalledSource::NAME.to_owned(), false));
+        if !raced || tries == 3 {
+            break (seen, started, stalled);
+        }
+        println!("try {tries}: the rebuild ran on the source before it stopped; again");
+        drop(stalled);
+        session.stop().expect("the raced recording");
+    };
     assert_eq!(
         seen.first(),
         Some(&CaptureNotice::DeviceChanged(
