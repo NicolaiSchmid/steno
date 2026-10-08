@@ -15,6 +15,14 @@
 //! in step.
 //!
 //! `new` allocates everything; `process` allocates nothing.
+//!
+//! Two streaming filters share that table. [`SincStream`] serves the
+//! decoder: it allocates as it goes and keeps a float position, and its
+//! output must stay what it is, sample for sample. This one runs on the
+//! processing thread, so it needs fixed buffers, and an exact position so
+//! the lanes never drift over hours.
+//!
+//! [`SincStream`]: crate::codec::sinc::SincStream
 
 use crate::codec::sinc::SincResampler;
 
@@ -37,8 +45,10 @@ pub struct RateConverter {
 impl RateConverter {
     /// The lowest device rate the converter accepts: narrowband hands-free.
     pub const MIN_RATE: f64 = 8_000.0;
-    /// The highest: four input samples per output at 48 kHz, well inside
-    /// one window.
+    /// The highest: four input samples per output at 48 kHz. The 64 taps
+    /// then leave a transition band about 9 kHz wide, so content just above
+    /// 24 kHz aliases into the top of the band (a 28 kHz tone lands at
+    /// 20 kHz, at -49 dB); below 8 kHz nothing aliases above -97 dB.
     pub const MAX_RATE: f64 = 192_000.0;
 
     /// Whether a device at `rate` hertz can be converted.
@@ -48,11 +58,11 @@ impl RateConverter {
     }
 
     /// `input_rate` to `output_rate` hertz (rounded to whole hertz, both
-    /// [supported](Self::supports)), for calls of at most `max_input`
-    /// samples.
+    /// [supported](Self::supports): the session checks the device's rate
+    /// before it builds one), for calls of at most `max_input` samples.
     #[must_use]
     pub fn new(input_rate: f64, output_rate: f64, max_input: usize) -> Self {
-        assert!(Self::supports(input_rate) && Self::supports(output_rate));
+        debug_assert!(Self::supports(input_rate) && Self::supports(output_rate));
         let taps = SincResampler::TAPS;
         // A window never holds more than `taps - 1` samples it has not
         // consumed, so that plus one call's input always fits.

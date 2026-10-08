@@ -1,7 +1,8 @@
 //! The streaming converter from a device's rate to 48 kHz
 //! (`.plans/2026-10-05-device-sample-rate.md`): chunking changes nothing,
-//! it agrees with the offline sinc resampler, a tone keeps its level and
-//! frequency from every rate a Mac device runs at, and the timing holds.
+//! it agrees with the offline sinc resampler at whole and fractional
+//! phases, a tone keeps its level and frequency from every rate a Mac
+//! device runs at and leaves no spur, and the timing holds.
 //! Swift: `Tests/StenoAudioTests/RateConverterTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
@@ -82,14 +83,57 @@ fn the_output_follows_the_ratio_less_half_a_window() {
     }
 }
 
+/// At 24 kHz every output sits on a whole phase; at 44.1 and 16 kHz most
+/// sit between two, where the adjacent phases are blended.
 #[test]
 fn the_stream_matches_the_offline_sinc_resampler() {
-    let input = tone(440.0, 24_000.0, 0.5);
-    let streamed = convert(24_000.0, &input, &[240]);
-    let offline = SincResampler::new(24_000.0, SAMPLE_RATE).resample(&input);
-    for (index, (a, b)) in streamed.iter().zip(&offline).enumerate() {
-        assert!((a - b).abs() < 1e-4, "sample {index}: {a} against {b}");
+    for rate in [24_000.0, 44_100.0, 16_000.0] {
+        let input = tone(440.0, rate, 0.5);
+        let streamed = convert(rate, &input, &[240]);
+        let offline = SincResampler::new(rate, SAMPLE_RATE).resample(&input);
+        assert!(streamed.len() > 23_000, "{rate} Hz: {}", streamed.len());
+        for (index, (a, b)) in streamed.iter().zip(&offline).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-4,
+                "{rate} Hz, sample {index}: {a} against {b}"
+            );
+        }
     }
+}
+
+/// What a 1 kHz tone leaves once the sine fitted to it is removed, in dB
+/// against the tone: the converter's spurs and images, and nothing of the
+/// tone's own level.
+#[test]
+fn a_tone_from_44_1_khz_leaves_no_spur() {
+    let rate = 44_100.0;
+    let output = convert(rate, &tone(1_000.0, rate, 1.0), &[480]);
+    // The generator's frequency, as its 32-bit phase step gives it.
+    let hertz =
+        f64::from(AudioFixtures::phase_increment_at(1_000.0, rate)) * rate / 4_294_967_296.0;
+    // 800 whole periods of the steady part.
+    let steady = &output[1_000..39_400];
+    let (mut sine, mut cosine) = (0.0f64, 0.0f64);
+    let angle = |index: usize| 2.0 * std::f64::consts::PI * hertz * index as f64 / SAMPLE_RATE;
+    for (offset, sample) in steady.iter().enumerate() {
+        let at = angle(1_000 + offset);
+        sine += f64::from(*sample) * at.sin();
+        cosine += f64::from(*sample) * at.cos();
+    }
+    let count = steady.len() as f64;
+    let (sine, cosine) = (2.0 * sine / count, 2.0 * cosine / count);
+    let residual: f64 = steady
+        .iter()
+        .enumerate()
+        .map(|(offset, sample)| {
+            let at = angle(1_000 + offset);
+            (f64::from(*sample) - sine * at.sin() - cosine * at.cos()).powi(2)
+        })
+        .sum::<f64>()
+        / count;
+    let tone_power = sine.hypot(cosine).powi(2) / 2.0;
+    let decibels = 10.0 * (residual / tone_power).log10();
+    assert!(decibels < -80.0, "the residual is {decibels} dB");
 }
 
 #[test]
@@ -112,7 +156,7 @@ fn content_above_48k_nyquist_is_rejected() {
 }
 
 #[test]
-fn input_zero_is_output_zero() {
+fn an_impulse_lands_on_its_output_sample() {
     // An impulse at device sample 100 lands on output sample 200 at 24 kHz
     // and 300 at 16 kHz: the lanes keep their timing.
     for (rate, at) in [(24_000.0, 200), (16_000.0, 300)] {

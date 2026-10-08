@@ -4,7 +4,8 @@
 //! A successful write can still read back the old rate for a few cycles,
 //! and a device that cannot run at the requested rate keeps its own for
 //! good. `settle` reads until the rate matches or the attempts run out, so
-//! the backend fails loudly instead of labelling a 44.1 kHz master 48 kHz.
+//! the backend reports the rate the device keeps (which the processing
+//! thread converts) instead of labelling a 44.1 kHz master 48 kHz.
 
 use std::time::Duration;
 

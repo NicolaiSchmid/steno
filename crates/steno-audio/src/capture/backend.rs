@@ -55,7 +55,8 @@ pub struct CaptureStream {
     /// headset in the hands-free profile runs at 24 or 16 kHz).
     pub sample_rate: f64,
     /// Latency plus safety offset of the microphone's input path, in frames
-    /// at `sample_rate`.
+    /// at `sample_rate` (a microphone on its own clock has its latency
+    /// rescaled from its own rate).
     pub input_latency_frames: usize,
     /// Latency plus safety offset of the loudspeaker's output path, in
     /// frames at `sample_rate`: the tap sees a sample this long before the
@@ -94,13 +95,23 @@ impl CaptureStream {
         input: None,
     };
 
-    /// `samples` at the stream's rate as samples at [`SAMPLE_RATE`],
-    /// rounded down.
+    /// `samples` counted at the stream's rate as samples at
+    /// [`SAMPLE_RATE`], the rate the processing thread converts to, rounded
+    /// down ([`Self::rescaled`]).
     #[must_use]
-    pub fn resampled(&self, samples: usize) -> usize {
-        if self.sample_rate == SAMPLE_RATE {
-            return samples;
+    pub fn at_output_rate(&self, samples: usize) -> usize {
+        Self::rescaled(samples, self.sample_rate, SAMPLE_RATE)
+    }
+
+    /// `frames` counted at `from` hertz as frames at `to` hertz, rounded
+    /// down: an over-delayed far end is the one error the echo canceller
+    /// cannot recover from. Unchanged when the rates are equal or either
+    /// is not positive (a rate that could not be read).
+    #[must_use]
+    pub fn rescaled(frames: usize, from: f64, to: f64) -> usize {
+        if from == to || !(from > 0.0 && to > 0.0) {
+            return frames;
         }
-        (samples as f64 * SAMPLE_RATE / self.sample_rate).floor() as usize
+        (frames as f64 * to / from).floor() as usize
     }
 }

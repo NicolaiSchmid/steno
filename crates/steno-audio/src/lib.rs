@@ -15,8 +15,8 @@
 //!   session mapping, and the live process-activity source on each
 //!   platform.
 //! - [`realtime`]: the rings, the sink, the IOProc body, the two-stream
-//!   bodies, the processing thread and the relay; everything on the
-//!   real-time path.
+//!   bodies, the processing thread, the rate converter and the relay;
+//!   everything on the real-time path.
 //! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars);
 //!   its thread, which syncs every file every 5 s; `durable`, the one sync
 //!   every file goes through; and the 3:1 resampler.
@@ -39,8 +39,9 @@
 //! `LaneFrameSink` rings        `LaneRings`: all-or-nothing per callback
 //!   │
 //!   ▼
-//! processing thread            `ProcessingThread`: 10 ms frames, echo
-//!   │  cancellation, metering into `LevelSlot` atomics
+//! processing thread            `ProcessingThread`: rate conversion to
+//!   │  48 kHz, 10 ms frames, echo cancellation, metering into `LevelSlot`
+//!   │  atomics
 //!   ▼  ── real-time: no allocation, no locks ──
 //! `FrameRelay` rings           `LaneRings`: all-or-nothing per frame
 //!   │
@@ -95,7 +96,7 @@
 
 // A signal-processing crate: sample counts, frame indices and dB values
 // move between `usize`, `f32` and `f64` on every line, sample rates are
-// compared exactly on purpose (48 000 is 48 000 or the device is wrong),
+// compared exactly on purpose (a rate is 48 000 exactly or it is converted),
 // `#[inline(always)]` marks the real-time path as Swift's
 // `@inline(__always)` does, and the docs are full of HAL names (IOProc,
 // CoreAudio, PipeWire, WASAPI) that are not code.

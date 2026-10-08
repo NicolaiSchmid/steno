@@ -128,7 +128,7 @@ use super::configuration::{
 use crate::aec::SpeexEchoCanceller;
 use crate::clock::{Cancel, Clock, SystemClock};
 use crate::realtime::{
-    FrameRelay, LaneFrameSink, LevelSlot, ProcessingConfiguration, ProcessingThread,
+    FrameRelay, LaneFrameSink, LevelSlot, ProcessingConfiguration, ProcessingThread, RateConverter,
 };
 use crate::writer::{RecordingWriter, RecordingWriting, WriterThread};
 use crate::{FRAME_SIZE, FRAMES_PER_SECOND, SAMPLE_RATE};
@@ -231,9 +231,11 @@ struct Active {
 struct Rebuild {
     cancel: Cancel,
     /// Returns the silence frames the rebuild wrote that no `resume`
-    /// accounted, because a stop overtook it, and the system-lane peak of
-    /// the processing thread it stopped, which `finish()` then folds in.
-    thread: JoinHandle<(usize, f32)>,
+    /// accounted, because a stop overtook it, the system-lane peak of the
+    /// processing thread it stopped, which `finish()` then folds in, and
+    /// the rate of a restarted stream no `resume` took, which the rings
+    /// then carry.
+    thread: JoinHandle<(usize, f32, Option<f64>)>,
 }
 
 enum Restart {
@@ -537,8 +539,8 @@ impl Core {
         }
         // The latencies are device frames; the canceller runs at 48 kHz.
         CaptureSession::far_end_delay_frames(
-            stream.resampled(stream.input_latency_frames),
-            stream.resampled(stream.output_latency_frames),
+            stream.at_output_rate(stream.input_latency_frames),
+            stream.at_output_rate(stream.output_latency_frames),
         )
     }
 
@@ -564,7 +566,18 @@ impl Core {
         let mut configuration =
             ProcessingConfiguration::new(&self.configuration.lanes(), echo_canceller);
         configuration.far_end_delay_frames = self.far_end_delay_frames(stream);
-        configuration.device_rate = stream.sample_rate;
+        // The live backends refuse a rate the converter cannot take; one
+        // that reports such a rate anyway is recorded unconverted rather
+        // than panicking with the session's lock held.
+        configuration.device_rate = if RateConverter::supports(stream.sample_rate) {
+            stream.sample_rate
+        } else {
+            tracing::error!(
+                "the capture runs at {} Hz, which cannot be converted; recording it unconverted",
+                stream.sample_rate
+            );
+            SAMPLE_RATE
+        };
         configuration.keep_raw_mic = self.keep_raw();
         ProcessingThread::new(Arc::clone(sink), Arc::clone(relay), configuration, levels)
     }
@@ -822,6 +835,9 @@ impl Core {
             .active
             .take()
             .ok_or_else(|| CaptureError::InvalidState("nothing to finish".into()))?;
+        // The rate the rings carry: the stream's, or a restarted one's that
+        // the stop overtook before its `resume`.
+        let mut ring_rate = active.stream.sample_rate;
         if let Some(rebuild) = active.rebuild.take() {
             rebuild.cancel.cancel();
             // With `active` gone every step of the rebuild gives up; what
@@ -831,7 +847,9 @@ impl Core {
             // writer's and `clear()`; before or after `backend.stop()` is
             // the same, since a backend stop while the rebuild's own runs
             // finds the backend's state already taken and returns at once.
-            let (unaccounted, peak) = rebuild.thread.join().unwrap_or((0, 0.0));
+            let (unaccounted, peak, restarted_rate) =
+                rebuild.thread.join().unwrap_or((0, 0.0, None));
+            ring_rate = restarted_rate.unwrap_or(ring_rate);
             active.gap_seconds += Self::seconds(unaccounted);
             active.system_peak_so_far = active.system_peak_so_far.max(peak);
         }
@@ -859,7 +877,9 @@ impl Core {
         // processing thread running yet. They count as dropped. The rings
         // hold the device's rate; the counts are 48 kHz frames.
         let ring_drops = active.sink.dropped_samples();
-        let undrained = active.stream.resampled(active.sink.available_to_read()) / FRAME_SIZE;
+        let undrained =
+            CaptureStream::rescaled(active.sink.available_to_read(), ring_rate, SAMPLE_RATE)
+                / FRAME_SIZE;
         active.sink.clear();
         let closing = writer.finish().err();
         let failure = write_failure
@@ -881,7 +901,8 @@ impl Core {
         let lanes = self.configuration.lanes();
         let mut dropped: BTreeMap<AudioLane, usize> = BTreeMap::new();
         for (lane, samples) in ring_drops {
-            *dropped.entry(lane).or_default() += active.stream.resampled(samples) / FRAME_SIZE;
+            *dropped.entry(lane).or_default() +=
+                CaptureStream::rescaled(samples, ring_rate, SAMPLE_RATE) / FRAME_SIZE;
         }
         if undrained > 0 {
             for lane in &lanes {
@@ -1001,7 +1022,7 @@ impl Core {
         generation: usize,
         recording: usize,
         cancel: &Cancel,
-    ) -> (usize, f32) {
+    ) -> (usize, f32, Option<f64>) {
         // `AssertUnwindSafe` holds: every step changes `Inner` under the
         // lock in whole assignments (a poisoned lock is read as is), so
         // a panic leaves it as the last completed step did. What a panic
@@ -1014,7 +1035,7 @@ impl Core {
         std::panic::catch_unwind(steps).unwrap_or_else(|_| {
             tracing::error!("following a device change panicked; the recording ends");
             self.device_lost(recording, generation);
-            (0, 0.0)
+            (0, 0.0, None)
         })
     }
 
@@ -1023,15 +1044,16 @@ impl Core {
     /// is written as silence before the new processing thread starts. The
     /// sink, the relay, the writer thread and the files stay. Nothing here
     /// runs on a real-time thread. Returns the silence frames written that
-    /// `resume` did not account because a stop came first, and the old
+    /// `resume` did not account because a stop came first, the old
     /// processing thread's system-lane peak for a `finish()` that took the
-    /// recording before this thread could fold it in.
+    /// recording before this thread could fold it in, and the rate of a
+    /// restarted stream that stop kept from its `resume`.
     fn rebuild_steps(
         self: &Arc<Self>,
         generation: usize,
         recording: usize,
         cancel: &Cancel,
-    ) -> (usize, f32) {
+    ) -> (usize, f32, Option<f64>) {
         // The stopwatch runs from before the teardown: the HAL calls in
         // `stop()` take tens to hundreds of milliseconds during a device
         // transition, and that is dead time in the master too.
@@ -1039,10 +1061,10 @@ impl Core {
         let (sink, relay, processing, on_the_fallback) = {
             let mut inner = self.lock();
             if !Self::still_rebuilding(&inner, generation) {
-                return (0, 0.0);
+                return (0, 0.0, None);
             }
             let Some(active) = inner.active.as_mut() else {
-                return (0, 0.0);
+                return (0, 0.0, None);
             };
             (
                 Arc::clone(&active.sink),
@@ -1085,8 +1107,10 @@ impl Core {
         // `device_changed` late and costs one more rebuild (see the
         // PipeWire backend's module doc).
         sink.rearm_device_change();
+        let mut restarted_rate = None;
         let unaccounted = match self.restart_backend(&sink, on_the_fallback, generation, cancel) {
             Restart::Started(stream, attempt) => {
+                restarted_rate = Some(stream.sample_rate);
                 // The gap grows through every failed attempt and is written
                 // once, in full, when a start succeeds.
                 let elapsed = self.clock.now().saturating_sub(started);
@@ -1097,6 +1121,7 @@ impl Core {
                     && self.relay_has_room(&sink, &relay, &stream, generation, cancel)
                     && self.resume(stream, attempt, gap_frames, &sink, &relay, generation)
                 {
+                    restarted_rate = None;
                     0
                 } else {
                     written
@@ -1108,7 +1133,7 @@ impl Core {
                 0
             }
         };
-        (unaccounted, peak)
+        (unaccounted, peak, restarted_rate)
     }
 
     /// `start` again, `RESTART_BACKOFF` apart on the clock, and once more on
@@ -1256,13 +1281,15 @@ impl Core {
 
     /// Zeros in every written channel for `frames` relay frames, through
     /// the relay the writer thread keeps draining. The rings under the sink
-    /// are not touched: they hold two seconds and nothing drains them while
-    /// the processing thread is stopped, so a longer gap would silently
-    /// shrink into `dropped_samples`. A full relay (a long gap, or a writer
-    /// still behind the old producer) is waited out in 5 ms steps on the
-    /// clock; `has_room` is asked first because a refused `begin_frame`
-    /// counts as a dropped frame. Returns the frames written, fewer than
-    /// `frames` when the rebuild was abandoned meanwhile.
+    /// are not touched: they hold two seconds at 48 kHz (sized before the
+    /// device's rate is known, so less above it: 0.68 s at 192 kHz) and
+    /// nothing drains them while the processing thread is stopped, so a
+    /// longer gap would silently shrink into `dropped_samples`. A full
+    /// relay (a long gap, or a writer still behind the old producer) is
+    /// waited out in 5 ms steps on the clock; `has_room` is asked first
+    /// because a refused `begin_frame` counts as a dropped frame. Returns
+    /// the frames written, fewer than `frames` when the rebuild was
+    /// abandoned meanwhile.
     fn write_silence(
         &self,
         frames: usize,
@@ -1308,7 +1335,8 @@ impl Core {
     ) -> bool {
         // The rings hold the restarted device's rate.
         let backlog = || {
-            (stream.resampled(sink.available_to_read()) / FRAME_SIZE).min(relay.capacity_frames())
+            (stream.at_output_rate(sink.available_to_read()) / FRAME_SIZE)
+                .min(relay.capacity_frames())
         };
         while relay
             .capacity_frames()

@@ -188,46 +188,51 @@ fn producer_processing_and_relay_allocate_nothing_after_warm_up() {
 
 /// A headset in the hands-free profile: the rings carry 24 kHz and the
 /// loop converts every lane to 48 kHz before the canceller, still without
-/// allocating.
+/// allocating. At 22.05 kHz a frame's worth of device samples is not a
+/// whole number (220.5), so the reads leave a part of one behind.
 #[test]
-fn the_processing_loop_converting_24_khz_allocates_nothing_after_warm_up() {
-    let lanes = [AudioLane::Mic, AudioLane::System];
-    let layout = StreamLayout::resolve(&lanes, &[1, 2], &[vec![], vec![1]], &[2], Some(1)).unwrap();
-    let sink = Arc::new(LaneFrameSink::new(&lanes));
-    let relay = Arc::new(FrameRelay::new(3, FRAME_SIZE, 256));
-    let mut configuration = ProcessingConfiguration::new(
-        &lanes,
-        Some(Box::new(
-            SpeexEchoCanceller::new(48_000.0, FRAME_SIZE).unwrap(),
-        )),
-    );
-    configuration.device_rate = 24_000.0;
-    configuration.far_end_delay_frames = 7_200;
-    configuration.keep_raw_mic = true;
-    let mut thread =
-        ProcessingThread::new(Arc::clone(&sink), Arc::clone(&relay), configuration, None);
+fn the_converting_processing_loop_allocates_nothing_after_warm_up() {
+    // The material's samples, read at the device's rate: 4 800 and then
+    // 52 800 in all. Half a window is held back, so at 24 kHz they convert
+    // to 2 * (4 800 - 32) and 2 * (52 800 - 32) outputs, 19 and then 219
+    // whole frames; at 22.05 kHz to 10 380 and 114 870, 21 and 239.
+    for (rate, warm_frames, frames) in [(24_000.0, 19, 219), (22_050.0, 21, 239)] {
+        let lanes = [AudioLane::Mic, AudioLane::System];
+        let layout =
+            StreamLayout::resolve(&lanes, &[1, 2], &[vec![], vec![1]], &[2], Some(1)).unwrap();
+        let sink = Arc::new(LaneFrameSink::new(&lanes));
+        let relay = Arc::new(FrameRelay::new(3, FRAME_SIZE, 256));
+        let mut configuration = ProcessingConfiguration::new(
+            &lanes,
+            Some(Box::new(
+                SpeexEchoCanceller::new(48_000.0, FRAME_SIZE).unwrap(),
+            )),
+        );
+        configuration.device_rate = rate;
+        configuration.far_end_delay_frames = 7_200;
+        configuration.keep_raw_mic = true;
+        let mut thread =
+            ProcessingThread::new(Arc::clone(&sink), Arc::clone(&relay), configuration, None);
 
-    // The material's samples, read as 24 kHz: 4 800 then 52 800 device
-    // samples convert to 2 * 4 800 - 64 and 2 * 52 800 - 64 outputs (half
-    // a window held back), 19 and then 219 whole frames.
-    let warm_up = Material::new(0.1);
-    warm_up.deliver(&sink, &layout.sources);
-    thread.drain_on_caller();
-    assert_eq!(thread.frames_processed(), 19);
-
-    let second = Material::new(1.0);
-    let allocations = CountingAllocator::allocations_during(|| {
-        second.deliver(&sink, &layout.sources);
+        let warm_up = Material::new(0.1);
+        warm_up.deliver(&sink, &layout.sources);
         thread.drain_on_caller();
-    });
-    assert_eq!(
-        allocations, 0,
-        "{allocations} allocations on the converting path"
-    );
-    assert_eq!(thread.frames_processed(), 219);
-    assert_eq!(sink.available_to_read(), 0);
-    assert!(sink.dropped_samples().is_empty());
-    assert_eq!(relay.dropped_frames(), vec![0, 0, 0]);
+        assert_eq!(thread.frames_processed(), warm_frames, "{rate} Hz");
+
+        let second = Material::new(1.0);
+        let allocations = CountingAllocator::allocations_during(|| {
+            second.deliver(&sink, &layout.sources);
+            thread.drain_on_caller();
+        });
+        assert_eq!(
+            allocations, 0,
+            "{rate} Hz: {allocations} allocations on the converting path"
+        );
+        assert_eq!(thread.frames_processed(), frames, "{rate} Hz");
+        assert_eq!(sink.available_to_read(), 0);
+        assert!(sink.dropped_samples().is_empty());
+        assert_eq!(relay.dropped_frames(), vec![0, 0, 0]);
+    }
 }
 
 /// `work` through the PipeWire capture's gate, as `process` delivers a

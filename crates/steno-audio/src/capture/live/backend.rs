@@ -195,6 +195,13 @@ impl Watcher {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// One notification for the watch loop: the latest of its burst,
+    /// judged once the burst settles.
+    fn notify(&self, selector: AudioObjectPropertySelector) {
+        self.lock().pending = Some((selector, Instant::now()));
+        self.condvar.notify_all();
+    }
 }
 
 /// What one started capture holds, in teardown order: the fields drop in
@@ -302,6 +309,17 @@ impl LiveCaptureBackend {
         }
     }
 
+    /// The notification the aggregate's rate, read again once the
+    /// listeners are in place, stands for: a rate notification when it is
+    /// no longer the rate the capture started at, none otherwise. A device
+    /// that relocks after [`NominalSampleRate::settle`] gave up, but before
+    /// the rate listener was registered, fires no notification of its own,
+    /// and the stream would keep the old rate's label for the whole
+    /// recording.
+    fn late_rate_notification(started: f64, now: f64) -> Option<AudioObjectPropertySelector> {
+        (now != started).then_some(kAudioDevicePropertyNominalSampleRate)
+    }
+
     /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
     /// capture on the fallback, none otherwise.
     fn recheck_for(is_fallback: bool) -> Option<Duration> {
@@ -344,7 +362,7 @@ impl LiveCaptureBackend {
 }
 
 impl CaptureBackend for LiveCaptureBackend {
-    /// Returns the stream it opened: the confirmed 48 kHz rate, both device
+    /// Returns the stream it opened: the confirmed rate, both device
     /// latencies for the far-end delay, and the resolved [`StreamLayout`].
     /// One long function on purpose: it is the Swift `start` step for
     /// step, and every early return tears down what was created by drop.
@@ -413,8 +431,8 @@ impl CaptureBackend for LiveCaptureBackend {
         // a device that cannot run at 48 kHz (a headset in the hands-free
         // profile) keeps its own. The stream then reports that rate, which
         // the processing thread converts; labelling it 48 kHz would leave a
-        // pitch-shifted master. A rate settling late changes the aggregate's
-        // rate, which the watcher reports as a device change.
+        // pitch-shifted master. A rate that settles only after this gave up
+        // is caught once the listeners are in place (below).
         if aggregate.nominal_sample_rate() != SAMPLE_RATE {
             let _ = aggregate.set_nominal_sample_rate(SAMPLE_RATE);
         }
@@ -495,20 +513,33 @@ impl CaptureBackend for LiveCaptureBackend {
                     object,
                     selector,
                     kAudioObjectPropertyScopeGlobal,
-                    Box::new(move |selector| {
-                        watcher.lock().pending = Some((selector, Instant::now()));
-                        watcher.condvar.notify_all();
-                    }),
+                    Box::new(move |selector| watcher.notify(selector)),
                 )
                 .ok()
             })
             .collect();
+        // Any change from here on notifies; one before the rate listener was
+        // in place is judged as if it had.
+        if let Some(selector) =
+            Self::late_rate_notification(sample_rate, aggregate.nominal_sample_rate())
+        {
+            watcher.notify(selector);
+        }
 
         // The far-end delay: the microphone's input path plus the
         // loudspeaker's output path, each latency plus safety offset, read
-        // on the devices themselves rather than the aggregate.
+        // on the devices themselves rather than the aggregate, so each is in
+        // its own device's frames. The output device is the clock master,
+        // at `sample_rate`; a microphone on another device keeps its own
+        // rate (a 48 kHz built-in microphone beside a headset at 24 kHz) and
+        // is rescaled to the stream's.
         let input_latency = mic.as_ref().map_or(0, |m| {
-            hal::latency_frames(m.id, kAudioObjectPropertyScopeInput)
+            let frames = hal::latency_frames(m.id, kAudioObjectPropertyScopeInput);
+            if mic_sub_device == Some(0) {
+                frames
+            } else {
+                CaptureStream::rescaled(frames, hal::nominal_sample_rate(m.id), sample_rate)
+            }
         });
         let output_latency = hal::latency_frames(output.id, kAudioObjectPropertyScopeOutput);
 
@@ -658,6 +689,46 @@ mod tests {
             Ok(Judged::Notification(kAudioHardwarePropertyDevices))
         );
         stop(&watcher, thread);
+    }
+
+    /// A rate that settled after `settle` gave up, before the rate listener
+    /// was registered, is judged as a rate notification and reported, so
+    /// the session rebuilds at the rate the device runs at; an unchanged
+    /// rate raises nothing.
+    #[test]
+    fn a_rate_that_settled_before_its_listener_is_judged_as_a_change() {
+        assert_eq!(
+            LiveCaptureBackend::late_rate_notification(44_100.0, 44_100.0),
+            None
+        );
+        let selector = LiveCaptureBackend::late_rate_notification(44_100.0, 48_000.0);
+        assert_eq!(selector, Some(kAudioDevicePropertyNominalSampleRate));
+
+        let (watcher, thread, judgements) = watching(None);
+        watcher.notify(selector.unwrap());
+        let judged = judgements.recv_timeout(WAIT).unwrap();
+        assert_eq!(
+            judged,
+            Judged::Notification(kAudioDevicePropertyNominalSampleRate)
+        );
+        stop(&watcher, thread);
+
+        let baseline = DeviceSnapshot {
+            output_uid: Some("speakers".into()),
+            default_output_uid: Some("speakers".into()),
+            input_uid: Some("built-in".into()),
+            output_alive: true,
+            input_alive: true,
+            sample_rate: 44_100.0,
+        };
+        let relocked = DeviceSnapshot {
+            sample_rate: 48_000.0,
+            ..baseline.clone()
+        };
+        assert_eq!(
+            LiveCaptureBackend::judgement(judged, &relocked, &baseline),
+            Some(DeviceChangeReason::SampleRateChanged)
+        );
     }
 
     /// Only a capture on the fallback is re-checked.
