@@ -297,20 +297,6 @@ function connectFailed(id: string): UploadFailed {
 	};
 }
 
-/** Fake timers and clock, so a backoff and the resolve timer can elapse. */
-function startFakeClock() {
-	vi.useFakeTimers({
-		shouldAdvanceTime: true,
-		toFake: [
-			"setTimeout",
-			"clearTimeout",
-			"setInterval",
-			"clearInterval",
-			"Date",
-		],
-	});
-}
-
 async function elapse(ms: number) {
 	await act(() => vi.advanceTimersByTimeAsync(ms));
 	await settle();
@@ -568,12 +554,24 @@ describe("useUploadCoordinator", () => {
 	});
 
 	describe("when the Mac's address changes under the same name", () => {
+		// Fake timers and clock, so a backoff and the resolve timer can elapse.
+		beforeEach(() => {
+			vi.useFakeTimers({
+				shouldAdvanceTime: true,
+				toFake: [
+					"setTimeout",
+					"clearTimeout",
+					"setInterval",
+					"clearInterval",
+					"Date",
+				],
+			});
+		});
 		afterEach(() => {
 			vi.useRealTimers();
 		});
 
 		it("resolves again after a request fails to connect, and retries at the new address", async () => {
-			startFakeClock();
 			const h = await mount(EMPTY_INDEX, A);
 			expect(h.reachable()).toBe(true);
 			// A new lease: the old address answers nothing, the name stays.
@@ -626,7 +624,6 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("resolves on the timer only while uploads are queued in the foreground", async () => {
-			startFakeClock();
 			const h = await mount(EMPTY_INDEX, A);
 			const resolved = fake.resolves.length;
 			await elapse(2 * RERESOLVE_INTERVAL_MS);
@@ -656,7 +653,6 @@ describe("useUploadCoordinator", () => {
 		it("retries a failed resolve on the timer", async () => {
 			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 			try {
-				startFakeClock();
 				fake.failResolve = true;
 				const h = await mount(queued("a"), A);
 				expect(h.reachable()).toBe(false);
@@ -679,7 +675,6 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("cancels the chunks out to the old address and sends them to the new one", async () => {
-			startFakeClock();
 			const h = await mount(queued("a"), A);
 			expect(fake.sent.at(-1)?.url).toBe(
 				"https://10.0.0.1:1/v1/recordings/a/chunks/0",
@@ -705,7 +700,6 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("cancels a chunk to the old address whose task was still being created", async () => {
-			startFakeClock();
 			const upload = Promise.withResolvers<void>();
 			fake.holdUpload = upload.promise;
 			await mount(queued("a"), A);
@@ -722,7 +716,6 @@ describe("useUploadCoordinator", () => {
 		});
 
 		it("keeps the address in use while it still answers", async () => {
-			startFakeClock();
 			const h = await mount(queued("a"), A);
 			fake.pending = [taskIDs.chunk("a", 0)];
 			// A Mac on Wi-Fi and Ethernet of one LAN resolves to either.
