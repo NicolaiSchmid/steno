@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
+
 import type {
 	PinnedRequest,
 	UploadFailed,
 	UploadFinished,
 	UploadSpec,
 } from "@modules/steno-link";
+import type { MacEndpoint } from "@modules/steno-link/native";
 import { act, StrictMode, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot, type Root } from "react-dom/client";
@@ -18,7 +20,7 @@ import {
 	type QueueIndex,
 	setState,
 } from "@/features/queue/queue-index";
-import { taskIDs } from "./upload-coordinator";
+import { BACKOFF_BASE_MS, taskIDs } from "./upload-coordinator";
 import {
 	RERESOLVE_INTERVAL_MS,
 	useUploadCoordinator,
@@ -30,8 +32,9 @@ import {
  * pinned request and background upload is recorded with its URL and
  * bearer. The real recording client and executor run on top. The pairing,
  * a re-pairing still saving (`replacing`), the queue, each Mac's address,
- * the addresses that answer nothing and the app state are plain state the
- * test drives. It renders under `StrictMode`, so every effect runs twice.
+ * the addresses that answer nothing or present another certificate, the
+ * address the last process chose and the app state are plain state the test
+ * drives. It renders under `StrictMode`, so every effect runs twice.
  */
 const fake = vi.hoisted(() => {
 	const listeners = new Map<string, Set<(event: unknown) => void>>();
@@ -40,6 +43,8 @@ const fake = vi.hoisted(() => {
 		listeners,
 		appStateListeners,
 		sent: [] as { url: string; auth: string | undefined }[],
+		/** The requests and uploads that got past the pin, in order. */
+		reached: [] as { url: string; auth: string | undefined }[],
 		/** The pin of every request and upload, in order. */
 		pins: [] as string[],
 		/** Every service name resolved, in order. */
@@ -48,6 +53,15 @@ const fake = vi.hoisted(() => {
 		hosts: {} as Record<string, string>,
 		/** Addresses where nothing answers: a request there fails to connect. */
 		down: new Set<string>(),
+		/**
+		 * The certificate an address presents, where it is not the pairing's
+		 * Mac's: a request there with another pin fails as a rejected pin.
+		 */
+		certificates: {} as Record<string, string>,
+		/** The address the last process chose (`adopted-origin.ts`). */
+		adoptedOrigin: null as MacEndpoint | null,
+		/** Every queue file deleted, with the last request sent before it. */
+		deleted: [] as { fileName: string; after: string | undefined }[],
 		/** When set, `resolve` rejects. */
 		failResolve: false,
 		/** When set, the Mac answers a `PUT` with this status. */
@@ -92,6 +106,11 @@ function hostOf(url: string) {
 	return new URL(url).hostname;
 }
 
+function pinRejected(url: string, fingerprint: string) {
+	const certificate = fake.certificates[hostOf(url)];
+	return certificate !== undefined && certificate !== fingerprint;
+}
+
 const link = {
 	addListener(event: string, listener: (event: unknown) => void) {
 		const set = fake.listeners.get(event) ?? new Set();
@@ -116,6 +135,9 @@ const link = {
 	async startUpload(spec: UploadSpec) {
 		fake.sent.push({ url: spec.url, auth: spec.headers.Authorization });
 		fake.pins.push(spec.fingerprint);
+		if (!pinRejected(spec.url, spec.fingerprint)) {
+			fake.reached.push({ url: spec.url, auth: spec.headers.Authorization });
+		}
 		await fake.holdUpload;
 	},
 	async cancelUpload(taskID: string) {
@@ -129,6 +151,13 @@ const link = {
 		if (fake.down.has(hostOf(request.url))) {
 			throw new Error("Could not connect to the server.");
 		}
+		if (pinRejected(request.url, request.fingerprint)) {
+			throw new Error("The certificate for this server is invalid.");
+		}
+		fake.reached.push({
+			url: request.url,
+			auth: request.headers.Authorization,
+		});
 		if (request.method === "PUT" && fake.putStatus !== null) {
 			return { status: fake.putStatus, headers: {}, body: "" };
 		}
@@ -187,8 +216,18 @@ vi.mock("@/features/queue/queue-files", () => ({
 	queuedFile: (fileName: string) => ({
 		exists: true,
 		uri: `file:///queue/${fileName}`,
-		delete() {},
+		delete() {
+			fake.deleted.push({ fileName, after: fake.sent.at(-1)?.url });
+		},
 	}),
+}));
+vi.mock("./adopted-origin", () => ({
+	adoptedOrigins: {
+		read: async () => fake.adoptedOrigin,
+		write: async (endpoint: MacEndpoint) => {
+			fake.adoptedOrigin = endpoint;
+		},
+	},
 }));
 
 (
@@ -302,7 +341,7 @@ async function elapse(ms: number) {
 	await settle();
 }
 
-function appState(state: "active" | "background") {
+function moveApp(state: "active" | "background") {
 	act(() => {
 		for (const listener of fake.appStateListeners) listener(state);
 	});
@@ -320,10 +359,14 @@ beforeEach(() => {
 	fake.listeners.clear();
 	fake.appStateListeners.clear();
 	fake.sent.length = 0;
+	fake.reached.length = 0;
 	fake.pins.length = 0;
 	fake.resolves.length = 0;
 	fake.hosts = { ...HOSTS };
 	fake.down.clear();
+	fake.certificates = {};
+	fake.adoptedOrigin = null;
+	fake.deleted.length = 0;
 	fake.failResolve = false;
 	fake.putStatus = null;
 	fake.pending = [];
@@ -586,7 +629,7 @@ describe("useUploadCoordinator", () => {
 			expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
 			expect(fake.resolves.length).toBe(resolved + 1);
 
-			await elapse(5_000);
+			await elapse(BACKOFF_BASE_MS);
 			expect(fake.sent).toContainEqual({
 				url: "https://10.0.0.9:1/v1/recordings/a",
 				auth: "Bearer token-a",
@@ -602,7 +645,7 @@ describe("useUploadCoordinator", () => {
 			expect(new Set(fake.pins)).toEqual(new Set(["FP-mac-a"]));
 		});
 
-		it("resolves again only after a failure to connect, not after an answer", async () => {
+		it("resolves again after a failure to connect, not after an answer or the app's own cancel", async () => {
 			const h = await mount(EMPTY_INDEX, A);
 			const resolved = fake.resolves.length;
 			fake.putStatus = 500;
@@ -635,10 +678,10 @@ describe("useUploadCoordinator", () => {
 			await elapse(RERESOLVE_INTERVAL_MS);
 			expect(fake.resolves.length).toBe(resolved + 1);
 
-			appState("background");
+			moveApp("background");
 			await elapse(2 * RERESOLVE_INTERVAL_MS);
 			expect(fake.resolves.length).toBe(resolved + 1);
-			appState("active");
+			moveApp("active");
 			await settle();
 			await elapse(RERESOLVE_INTERVAL_MS);
 			expect(fake.resolves.length).toBe(resolved + 2);
@@ -691,12 +734,56 @@ describe("useUploadCoordinator", () => {
 			await act(async () => fake.emit("uploadFailed", cancelled("a")));
 			await settle();
 			expect(h.row("a")).toMatchObject({ state: "queued", attempts: 1 });
-			await elapse(5_000);
+			await elapse(BACKOFF_BASE_MS);
 			expect(fake.sent.at(-1)).toEqual({
 				url: "https://10.0.0.9:1/v1/recordings/a/chunks/0",
 				auth: "Bearer token-a",
 			});
 			expect(h.row("a")?.state).toBe("uploading");
+			expect(fake.adoptedOrigin).toEqual({
+				origin: "https://10.0.0.9:1",
+				fingerprint: "FP-mac-a",
+			});
+
+			// The file stays on the phone until `complete` answers.
+			expect(fake.deleted).toEqual([]);
+			await act(async () => fake.emit("uploadFinished", finished("a")));
+			await settle();
+			expect(h.row("a")?.state).toBe("delivered");
+			expect(fake.deleted).toEqual([
+				{
+					fileName: "a.m4a",
+					after: "https://10.0.0.9:1/v1/recordings/a/complete",
+				},
+			]);
+		});
+
+		it("switches when the old address is held by another certificate, and sends it no bearer", async () => {
+			const h = await mount(queued("a"), A);
+			fake.pending = [taskIDs.chunk("a", 0)];
+			// Another device took the old address: it answers, but not with
+			// the pairing's certificate.
+			fake.hosts["Mac A"] = "10.0.0.9";
+			fake.certificates["10.0.0.1"] = "FP-other";
+			const sentBefore = fake.sent.length;
+			const reachedBefore = fake.reached.length;
+			await elapse(RERESOLVE_INTERVAL_MS);
+			expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
+
+			fake.pending = [];
+			await act(async () => fake.emit("uploadFailed", cancelled("a")));
+			await elapse(BACKOFF_BASE_MS);
+			expect(fake.sent.at(-1)).toEqual({
+				url: "https://10.0.0.9:1/v1/recordings/a/chunks/0",
+				auth: "Bearer token-a",
+			});
+			expect(h.row("a")?.state).toBe("uploading");
+			const toOld = (requests: typeof fake.sent) =>
+				requests.filter((r) => hostOf(r.url) === "10.0.0.1");
+			expect(toOld(fake.reached.slice(reachedBefore))).toEqual([]);
+			expect(toOld(fake.sent.slice(sentBefore))).toEqual([
+				{ url: "https://10.0.0.1:1/v1/hello", auth: undefined },
+			]);
 		});
 
 		it("cancels a chunk to the old address whose task was still being created", async () => {
@@ -732,6 +819,105 @@ describe("useUploadCoordinator", () => {
 			);
 			expect(h.row("a")?.state).toBe("delivered");
 			expect(fake.sent.some((r) => hostOf(r.url) === "10.0.0.9")).toBe(false);
+		});
+
+		it("asks for no second resolve while one is running, and runs one more after it", async () => {
+			const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				await mount(EMPTY_INDEX, B);
+				const resolved = fake.resolves.length;
+				await act(async () => fake.emit("uploadFailed", connectFailed("a")));
+				await act(async () => fake.emit("uploadFailed", connectFailed("a")));
+				await settle();
+				expect(fake.resolves.length).toBe(resolved);
+
+				await act(async () => fake.releaseMacB?.());
+				await settle();
+				expect(fake.resolves.length).toBe(resolved + 1);
+				await act(async () => fake.releaseMacB?.());
+				await settle();
+				expect(fake.resolves.length).toBe(resolved + 1);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
+		it("a resolve superseded by a re-pairing adopts nothing", async () => {
+			const h = await mount(EMPTY_INDEX, B);
+			await h.repair(A);
+			await settle();
+			await act(async () => fake.releaseMacB?.());
+			await settle();
+			await h.add("a");
+			expect(fake.cancelled).toEqual([]);
+			expect(h.row("a")?.state).toBe("uploading");
+			expect(fake.adoptedOrigin).toEqual({
+				origin: "https://10.0.0.1:1",
+				fingerprint: "FP-mac-a",
+			});
+		});
+
+		describe("after a relaunch, with a chunk the last process left out", () => {
+			beforeEach(() => {
+				fake.pending = [taskIDs.chunk("a", 0)];
+				fake.hosts["Mac A"] = "10.0.0.9";
+			});
+			// Two chunks: chunk 0 is the one left out, so the app starts chunk 1.
+			const uploadingA = () =>
+				setState(withRecording(EMPTY_INDEX, "a", 2000), "a", "uploading");
+			const withBearerTo = (host: string) =>
+				fake.sent.filter((r) => r.auth && hostOf(r.url) === host);
+
+			it("cancels nothing while the persisted address still answers", async () => {
+				fake.adoptedOrigin = {
+					origin: "https://10.0.0.1:1",
+					fingerprint: "FP-mac-a",
+				};
+				await mount(uploadingA(), A);
+				await elapse(RERESOLVE_INTERVAL_MS);
+				expect(fake.cancelled).toEqual([]);
+				expect(fake.sent).toContainEqual({
+					url: "https://10.0.0.1:1/v1/recordings/a/chunks/1",
+					auth: "Bearer token-a",
+				});
+				expect(withBearerTo("10.0.0.9")).toEqual([]);
+			});
+
+			it("cancels when it does not", async () => {
+				fake.adoptedOrigin = {
+					origin: "https://10.0.0.1:1",
+					fingerprint: "FP-mac-a",
+				};
+				fake.down.add("10.0.0.1");
+				await mount(uploadingA(), A);
+				expect(fake.cancelled).toEqual([taskIDs.chunk("a", 0)]);
+				expect(fake.adoptedOrigin).toEqual({
+					origin: "https://10.0.0.9:1",
+					fingerprint: "FP-mac-a",
+				});
+				expect(fake.sent).toContainEqual({
+					url: "https://10.0.0.9:1/v1/recordings/a/chunks/1",
+					auth: "Bearer token-a",
+				});
+				expect(withBearerTo("10.0.0.1")).toEqual([]);
+			});
+
+			it("cancels nothing when no earlier address is known for the pairing", async () => {
+				// Persisted under another pairing's certificate, at an address
+				// that answers nothing.
+				fake.adoptedOrigin = {
+					origin: "https://10.0.0.7:1",
+					fingerprint: "FP-mac-b",
+				};
+				fake.down.add("10.0.0.7");
+				await mount(uploadingA(), A);
+				await elapse(RERESOLVE_INTERVAL_MS);
+				expect(fake.cancelled).toEqual([]);
+				expect(fake.sent).toContainEqual({
+					url: "https://10.0.0.9:1/v1/recordings/a/chunks/1",
+					auth: "Bearer token-a",
+				});
+			});
 		});
 	});
 });
