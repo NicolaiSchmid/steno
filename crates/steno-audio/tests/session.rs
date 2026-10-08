@@ -1650,6 +1650,45 @@ fn a_start_that_panics_ends_failed_and_the_session_starts_again() {
     assert_eq!(session.state(), CaptureState::Idle);
 }
 
+/// A start that panics once the backend runs (here the backend's own
+/// `start`, its producer thread already spawned) stops the backend on the
+/// way to `Failed`: the next start finds it free and records.
+#[test]
+fn a_start_that_panics_once_the_backend_runs_stops_it() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&[AudioLane::Mixed], 0.5).start_panics_once_running(),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::InPerson, directory.path(), false),
+        backend.clone(),
+        None,
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.start(Uuid::new_v4())
+    }));
+    assert!(started.is_err(), "the start panicked");
+    assert!(
+        matches!(
+            session.state(),
+            CaptureState::Failed {
+                error: CaptureError::BackendFailed(_),
+                recording: None
+            }
+        ),
+        "{:?}",
+        session.state()
+    );
+    // A backend left running refuses this start ("already started").
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(backend.starts(), 2);
+    backend.wait_until_finished();
+    assert_eq!(master_of(&session.stop().unwrap()).frame_count(), 24_000);
+}
+
 /// The meeting's folder is deleted while recording. On Unix the open files
 /// keep writing and close without an error, so only the missing master
 /// tells: `stop()` fails with `WriterFailed` rather than returning an asset
