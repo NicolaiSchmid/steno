@@ -399,16 +399,22 @@ async fn a_key_removed_or_changed_in_the_move_launch_stays_so() {
             return;
         };
         let (moved_identity, stored) = (minted("moved"), minted("stored"));
+        let moved_pem = moved_identity.to_pem().unwrap();
         write_file(
             &setup.path(),
             &[
                 ("llm-api-key", "sk-file"),
-                ("handover-identity", &moved_identity.to_pem().unwrap()),
+                ("handover-identity", &moved_pem),
             ],
         );
         let first = setup.launch().await;
         assert_eq!(setup.values("llm-api-key"), ["sk-file"]);
         first.set_secret(&key, value).await.unwrap();
+        assert_eq!(
+            setup.contents(),
+            moved(&[("handover-identity", &moved_pem)]),
+            "the key's write keeps the identity's copy for the next launch's check"
+        );
         stored.store(&first, &setup.record()).await.unwrap();
         assert_eq!(
             setup.contents(),
@@ -870,6 +876,65 @@ async fn a_confirmed_create_deletes_the_other_item_only_once_it_names_its_own() 
     setup.state().unnamed_creates = false;
     store.set_secret(&key, Some("fourth")).await.unwrap();
     assert_eq!(setup.values("llm-api-key"), ["fourth"]);
+}
+
+/// A service write whose drop of the file's copy fails reports the
+/// failure, so the save is not taken as complete while the copy remains.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_file_copy_that_could_not_be_dropped_fails_the_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    write_file(&setup.path(), &[("llm-api-key", "sk-file")]);
+    let store = setup.launch().await;
+    assert!(chose_service(&store));
+    let folder = setup.folder.path();
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    // Root writes into a read-only folder anyway: nothing to test then.
+    let writable = std::fs::write(folder.join("probe"), b"").is_ok();
+    let write = store
+        .set_secret(&SecretKey::llm_api_key(), Some("sk-2"))
+        .await;
+    std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    if writable {
+        return;
+    }
+    assert!(write.is_err(), "the copy stayed, so the write is not done");
+    assert_eq!(setup.values("llm-api-key"), ["sk-2"]);
+    assert_eq!(setup.contents(), moved(&[("llm-api-key", "sk-file")]));
+}
+
+/// A write the keyring refuses (its prompt dismissed) leaves the file's
+/// copy, which may be the only one the provider has saved.
+#[tokio::test]
+async fn a_write_the_keyring_refused_keeps_the_files_copy() {
+    let Some(setup) = Setup::new(true, State::default()).await else {
+        return;
+    };
+    write_file(&setup.path(), &[("llm-api-key", "sk-file")]);
+    let store = setup.launch().await;
+    assert!(chose_service(&store));
+    {
+        let mut state = setup.state();
+        state.locked = true;
+        state.dismiss = true;
+    }
+    let key = SecretKey::llm_api_key();
+    assert!(store.set_secret(&key, Some("sk-2")).await.is_err());
+    assert_eq!(setup.values("llm-api-key"), ["sk-file"]);
+    assert_eq!(setup.contents(), moved(&[("llm-api-key", "sk-file")]));
+}
+
+/// A choice that panics settles on the file instead of leaving every call
+/// waiting for it.
+#[test]
+fn a_choice_that_panics_falls_back_to_the_file() {
+    assert!(matches!(
+        or_file_on_panic(|| panic!("a provider's reply broke the parser")),
+        Backend::File
+    ));
 }
 
 /// A run that could not open the keyring after the move says the secrets

@@ -69,8 +69,8 @@ use crate::handover::FingerprintFile;
 /// the newer value; a removal there leaves an empty value, which removes
 /// the item). The handover identity keeps the service's: an identity is
 /// never replaced, as the phones pinned one of them, and the file's stays
-/// in the file until an identity is stored (Pair again), or for the user
-/// to take by hand. As this computer's phones paired
+/// in the file until an identity is stored, or for the user to take by
+/// hand. As this computer's phones paired
 /// with the file's identity, its fingerprint is recorded first when none
 /// is ([`FingerprintFile`]), so the handover reports the service's as
 /// replaced instead of adopting it. After the marker the service wins for
@@ -188,16 +188,7 @@ impl SecretServiceStore {
         let spawned = std::thread::Builder::new()
             .name("steno-secrets".to_owned())
             .spawn(move || {
-                let backend = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime.block_on(chooser.choose(&bus)),
-                    Err(error) => {
-                        tracing::warn!("secrets: no runtime for the Secret Service ({error})");
-                        Backend::File
-                    }
-                };
+                let backend = or_file_on_panic(|| chooser.choose_on_own_runtime(&bus));
                 chooser.settle(backend);
             });
         if let Err(error) = spawned {
@@ -207,9 +198,10 @@ impl SecretServiceStore {
         SecretServiceStore { shared }
     }
 
-    /// Resolves once the choice is made, the service or the file: true
-    /// when a call failed with [`KeyringUnavailable::Unlocking`] on the way,
-    /// so now is the moment to make it again.
+    /// Resolves once the choice is made, the service or the file, whether
+    /// or not anything was unlocked: true when a call failed with
+    /// [`KeyringUnavailable::Unlocking`] on the way, so now is the moment
+    /// to make it again.
     ///
     /// Every prompt of the choice counts, whether the provider shows a
     /// window or not (`KeePassXC` answers every `CreateItem` with a prompt
@@ -286,6 +278,20 @@ impl Shared {
         });
     }
 
+    /// [`Self::choose`] on a runtime of the calling thread's own.
+    fn choose_on_own_runtime(&self, bus: &Bus) -> Backend {
+        match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(self.choose(bus)),
+            Err(error) => {
+                tracing::warn!("secrets: no runtime for the Secret Service ({error})");
+                Backend::File
+            }
+        }
+    }
+
     async fn choose(&self, bus: &Bus) -> Backend {
         let asking = |on: bool| {
             self.phase
@@ -303,7 +309,12 @@ impl Shared {
                 } else {
                     "the Secret Service could not be opened"
                 };
-                tracing::warn!("secrets: {what} ({error}), keeping secrets with the file");
+                let kept = if self.file.read().is_ok_and(|contents| contents.moved) {
+                    "the secrets stay in the keyring, unavailable this run"
+                } else {
+                    "keeping secrets with the file"
+                };
+                tracing::warn!("secrets: {what} ({error}), {kept}");
                 return Backend::File;
             }
         };
@@ -352,10 +363,10 @@ impl Shared {
 
 #[async_trait]
 impl SecretStore for SecretServiceStore {
-    /// Never asks the user. A read of the service has one deadline of
-    /// 25 s, a D-Bus call's, over all its calls, so a provider that stops
-    /// answering holds a caller (the host under its lock) that long once,
-    /// not once per call.
+    /// Never asks the user. A read of the service has one deadline over
+    /// all its calls, as long as one D-Bus call may take (25 s), so a
+    /// provider that stops answering holds a caller (the host under its
+    /// lock) that long once, not once per call.
     async fn secret(&self, key: &SecretKey) -> BoundaryResult<Option<String>> {
         if let Some(value) = self.shared.file.environment_value(key) {
             return Ok(Some(value.to_owned()));
@@ -412,6 +423,18 @@ impl SecretStore for SecretServiceStore {
             Backend::File => Some(SecretPlace::File),
         }
     }
+}
+
+/// The backend `choose` gives, or the file when it panics (inside `zbus`
+/// or `serde`), so the choice still settles and no call waits for it for
+/// good.
+fn or_file_on_panic(choose: impl FnOnce() -> Backend) -> Backend {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(choose)).unwrap_or_else(|_| {
+        tracing::warn!(
+            "secrets: choosing the Secret Service panicked, keeping secrets with the file"
+        );
+        Backend::File
+    })
 }
 
 /// What can go wrong talking to the Secret Service.
