@@ -301,10 +301,7 @@ pub(crate) fn follow(
         match register(&addresses) {
             Ok(()) => {
                 if addresses.is_empty() {
-                    tracing::warn!(
-                        target: "steno::handover",
-                        "no Wi-Fi or wired network: the phone cannot find this computer until it joins one"
-                    );
+                    warn_no_network();
                 } else {
                     tracing::info!(
                         target: "steno::handover",
@@ -319,6 +316,15 @@ pub(crate) fn follow(
             ),
         }
     }
+}
+
+/// Logs that the record carries no address, so no phone can find the
+/// computer.
+fn warn_no_network() {
+    tracing::warn!(
+        target: "steno::handover",
+        "no Wi-Fi or wired network: the phone cannot find this computer until it joins one"
+    );
 }
 
 /// The published record and the thread that registers it again when the
@@ -372,18 +378,15 @@ impl Advertiser {
     /// and filled once the computer joins a network.
     pub fn publish(service_name: &str, mac_id: Uuid, port: u16) -> mdns_sd::Result<Self> {
         let daemon = ServiceDaemon::new()?;
-        let published = Self::start(&daemon, service_name, mac_id, port);
-        match published {
-            Ok((fullname, published)) => Ok(Advertiser {
-                daemon,
-                fullname,
-                published,
-            }),
-            Err(error) => {
+        let (fullname, published) =
+            Self::start(&daemon, service_name, mac_id, port).inspect_err(|_| {
                 let _ = daemon.shutdown();
-                Err(error)
-            }
-        }
+            })?;
+        Ok(Advertiser {
+            daemon,
+            fullname,
+            published,
+        })
     }
 
     fn start(
@@ -398,10 +401,7 @@ impl Advertiser {
         let mut watcher = DaemonWatcher(daemon.monitor()?);
         let addresses = current_lan_addresses();
         if addresses.is_empty() {
-            tracing::warn!(
-                target: "steno::handover",
-                "no Wi-Fi or wired network: the phone cannot find this computer until it joins one"
-            );
+            warn_no_network();
         }
         let info = Self::service_info(service_name, mac_id, port, &addresses)?;
         let fullname = info.get_fullname().to_owned();
