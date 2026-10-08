@@ -47,16 +47,15 @@
 //! An `IMMNotificationClient` (default-device changes, devices added,
 //! removed or changing state) wakes a watcher thread, which coalesces a
 //! burst for [`LiveCaptureBackend::COALESCE_DELAY`] as the macOS backend
-//! does, resolves the devices again and compares them with what the
-//! capture started on ([`DeviceSnapshot::difference`]); a capture on the
-//! fallback also resolves them every
-//! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification and
-//! looks only for another microphone ([`DeviceSnapshot::input_difference`]). A
-//! capture thread whose stream fails (`AUDCLNT_E_DEVICE_INVALIDATED` after
-//! a format change or an unplug) stops and tells the watcher, which
-//! reports the lost device when nothing else differs. The sink gets one
-//! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
-//! `start` again.
+//! does, resolves the devices again and compares them with what the capture
+//! started on ([`DeviceSnapshot::difference`]); a capture on the fallback
+//! also resolves them every [`LiveCaptureBackend::FALLBACK_RECHECK`]
+//! without a notification and looks only for another microphone
+//! ([`DeviceSnapshot::input_difference`]). A capture thread whose stream
+//! fails (`AUDCLNT_E_DEVICE_INVALIDATED` after a format change or an
+//! unplug) stops and tells the watcher, which reports the lost device when
+//! nothing else differs. The sink gets one [`DeviceChangeReason`] and the
+//! session rebuilds by calling `stop()` and `start` again.
 //!
 //! # Threads and COM
 //!
@@ -385,7 +384,7 @@ impl LiveCaptureBackend {
     /// How often a capture that records the fallback resolves the devices
     /// without a notification, so a selected endpoint that becomes active
     /// unannounced (or before the watcher registered) is found; the macOS
-    /// backend's value.
+    /// backend's value. Rust only: Swift has no fallback.
     pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
 
     /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
@@ -1126,8 +1125,9 @@ mod tests {
 
     /// A notification reports the first difference, else the failed
     /// stream's device gone; a re-check only another microphone, so a bad
-    /// read of the outputs costs no rebuild, and an unreadable enumerator
-    /// reports nothing but a failed stream.
+    /// read of the outputs or a microphone that did not resolve costs no
+    /// rebuild, and an unreadable enumerator reports nothing but a failed
+    /// stream.
     #[test]
     fn a_recheck_reports_another_microphone_alone() {
         let baseline = DeviceSnapshot {
@@ -1144,6 +1144,10 @@ mod tests {
         };
         let misread = DeviceSnapshot {
             output_uid: None,
+            ..baseline.clone()
+        };
+        let unresolved = DeviceSnapshot {
+            input_uid: None,
             ..baseline.clone()
         };
         let quiet = Judged::Notification { failed: None };
@@ -1176,6 +1180,7 @@ mod tests {
                 Some(DeviceChangeReason::DefaultInputChanged),
             ),
             (Judged::Recheck, Some(&misread), None),
+            (Judged::Recheck, Some(&unresolved), None),
             (Judged::Recheck, None, None),
         ];
         for (judged, resolved, reported) in table {

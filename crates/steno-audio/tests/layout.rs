@@ -604,7 +604,8 @@ fn identical_devices_are_no_change_and_a_moved_default_is_reported() {
 }
 
 /// The re-check on the fallback sees only another microphone: a bad read
-/// of the outputs or the rate is left to their own notifications.
+/// of the outputs or the rate is left to their own notifications, and a
+/// microphone that did not resolve is no other one.
 #[test]
 fn the_input_difference_is_another_microphone_alone() {
     let base = baseline();
@@ -624,6 +625,13 @@ fn the_input_difference_is_another_microphone_alone() {
         Some(DeviceChangeReason::OutputDeviceGone)
     );
     assert_eq!(misread.input_difference(&base), None);
+    let mut unresolved = baseline();
+    unresolved.input_uid = None;
+    assert_eq!(
+        unresolved.difference(&base),
+        Some(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert_eq!(unresolved.input_difference(&base), None);
 }
 
 #[test]

@@ -18,11 +18,12 @@
 //! capture started on ([`DeviceSnapshot::difference`]); a capture on the
 //! fallback also resolves them every
 //! [`LiveCaptureBackend::FALLBACK_RECHECK`] without a notification and
-//! looks only for another microphone ([`DeviceSnapshot::input_difference`]).
-//! Nothing changed means the burst is logged and ignored; otherwise the
-//! sink gets one [`DeviceChangeReason`] and the session rebuilds by calling
-//! `stop()` and `start` again. Nothing here runs on the IO thread except
-//! [`io_proc`], which only calls [`deliver`].
+//! looks only for another microphone
+//! ([`DeviceSnapshot::input_difference`]). Nothing changed means the burst
+//! is logged and ignored; otherwise the sink gets one
+//! [`DeviceChangeReason`] and the session rebuilds by calling `stop()` and
+//! `start` again. Nothing here runs on the IO thread except [`io_proc`],
+//! which only calls [`deliver`].
 //!
 //! Teardown order: watcher thread, `AudioDeviceStop`,
 //! `AudioDeviceDestroyIOProcID`, the callback context, listeners,
@@ -232,7 +233,7 @@ impl LiveCaptureBackend {
     /// notification of its own: one that read no input channels for a
     /// moment while the device list changed, one that settled after its
     /// `Devices` notification, or one that came back before the
-    /// listeners were registered.
+    /// listeners were registered. Rust only: Swift has no fallback.
     pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
 
     #[must_use]
@@ -664,7 +665,8 @@ mod tests {
     }
 
     /// A notification reports the first difference; a re-check only
-    /// another microphone, so a bad read of the outputs costs no rebuild.
+    /// another microphone, so a bad read of the outputs, or a microphone
+    /// that did not resolve, costs no rebuild.
     #[test]
     fn a_recheck_reports_another_microphone_alone() {
         let baseline = DeviceSnapshot {
@@ -682,6 +684,10 @@ mod tests {
         let misread = DeviceSnapshot {
             default_output_uid: None,
             sample_rate: 0.0,
+            ..baseline.clone()
+        };
+        let unresolved = DeviceSnapshot {
+            input_uid: None,
             ..baseline.clone()
         };
         let notified = Judged::Notification(kAudioHardwarePropertyDevices);
@@ -704,6 +710,7 @@ mod tests {
                 Some(DeviceChangeReason::DefaultInputChanged),
             ),
             (Judged::Recheck, &misread, None),
+            (Judged::Recheck, &unresolved, None),
         ];
         for (judged, resolved, reported) in table {
             assert_eq!(
