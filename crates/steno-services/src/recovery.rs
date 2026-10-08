@@ -655,10 +655,7 @@ struct Orphan {
 /// The meeting id a folder named `name` stands for: a hyphenated UUID, in
 /// uppercase as [`RecordingLayout`] spells it, or in lowercase.
 fn meeting_folder_id(name: &std::ffi::OsStr) -> Option<Uuid> {
-    let name = name.to_str()?;
-    if name.len() != 36 {
-        return None;
-    }
+    let name = name.to_str().filter(|name| name.len() == 36)?;
     Uuid::try_parse(name).ok()
 }
 
@@ -739,14 +736,11 @@ fn adopted(
     } = orphan;
     let (source, mut asset, duration, end_reason) = match format {
         AudioFormat::Caf48kFloat32 => {
-            let header = CafHeader::read(master).map_err(|error| match error {
-                CafReadError::Io(_) => RecoveryError::Unreachable,
-                error => Unrecoverable::Unreadable(error).into(),
-            })?;
-            let source = match header.channel_count {
-                2 => MeetingSource::MacCall,
-                1 => MeetingSource::MacInPerson,
-                found => return Err(Unrecoverable::WrongChannels { found, expected: 2 }.into()),
+            // One channel is an in-person recording; the salvage as a call
+            // fails any other count and a header it cannot read.
+            let source = match CafHeader::read(master) {
+                Ok(header) if header.channel_count == 1 => MeetingSource::MacInPerson,
+                _ => MeetingSource::MacCall,
             };
             let result = salvage(layout, *meeting_id, source)?;
             (
@@ -763,7 +757,6 @@ fn adopted(
                 })
                 .ok()
                 .flatten()
-                .filter(|duration| duration.is_finite() && *duration >= 0.0)
                 .unwrap_or(0.0);
             let asset = AudioAsset {
                 id: Uuid::new_v4(),
@@ -812,11 +805,9 @@ fn adopted(
 /// `recording` are reconciled: a meeting folder (named by a UUID) in the
 /// settings' audio folder, a folder a recording was recorded into, a known
 /// folder or a stored asset's folder, that holds a non-empty master and
-/// has no row. A phone upload copied in before its commit failed or a
-/// crash came, a row lost with the database, a local recording whose save
-/// failed twice all leave one. Each is adopted where it is, as a `queued`
-/// meeting with that id ([`adopted`]), its meeting and asset saved in one
-/// transaction and processed ([`ProcessingPipeline::enqueue`]). A master
+/// has no row. Each is adopted where it is, as a `queued` meeting with
+/// that id ([`adopted`]), its meeting and asset saved in one transaction
+/// and processed ([`ProcessingPipeline::enqueue`]). A master
 /// modified within [`LiveRecordingCheck::fresh_within`] is left for the
 /// next launch: another process (a phone upload still being admitted, the
 /// Swift app) may be writing it. One that cannot be read now, or whose
@@ -1442,12 +1433,7 @@ mod tests {
         let layout = RecordingLayout::new(&harness.audio_folder(), uploaded.id);
         std::fs::create_dir_all(&layout.directory).unwrap();
         let upload = layout.master(AudioFormat::M4aAac);
-        std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../Tests/Fixtures/audio/tone-440-44k1-500ms.m4a"),
-            &upload,
-        )
-        .unwrap();
+        std::fs::copy(audio_fixture("tone-440-44k1-500ms.m4a"), &upload).unwrap();
         let asset = AudioAsset {
             id: Uuid::new_v4(),
             meeting_id: uploaded.id,
@@ -1659,6 +1645,13 @@ mod tests {
         meeting_id
     }
 
+    /// The audio fixture `name` from `Tests/Fixtures/audio`.
+    fn audio_fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../Tests/Fixtures/audio")
+            .join(name)
+    }
+
     /// A Mac master of `lanes` with `frames` frames, its writer dropped
     /// as a crash leaves it.
     fn mac_orphan(harness: &Harness, lanes: &[AudioLane], frames: usize) -> Uuid {
@@ -1672,13 +1665,7 @@ mod tests {
     /// The fixture `name` copied in as a phone's master in `format`.
     fn phone_orphan(harness: &Harness, name: &str, format: AudioFormat) -> Uuid {
         orphan(harness, |layout| {
-            std::fs::copy(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../Tests/Fixtures/audio")
-                    .join(name),
-                layout.master(format),
-            )
-            .unwrap();
+            std::fs::copy(audio_fixture(name), layout.master(format)).unwrap();
         })
     }
 
@@ -1836,8 +1823,7 @@ mod tests {
         let not_a_meeting = harness.audio_folder().join("not-a-meeting");
         std::fs::create_dir_all(&not_a_meeting).unwrap();
         std::fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../Tests/Fixtures/audio/tone-440-44k1-500ms.m4a"),
+            audio_fixture("tone-440-44k1-500ms.m4a"),
             not_a_meeting.join("recording.m4a"),
         )
         .unwrap();
@@ -1915,12 +1901,7 @@ mod tests {
         ]
         .map(|name| inbox.join(name));
         for file in &files {
-            std::fs::copy(
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../Tests/Fixtures/audio/tone-440-44k1-500ms.m4a"),
-                file,
-            )
-            .unwrap();
+            std::fs::copy(audio_fixture("tone-440-44k1-500ms.m4a"), file).unwrap();
         }
         for folder in [&harness.support_directory(), &inbox] {
             crate::audio_folders::remember(&harness.support_directory(), folder).unwrap();
