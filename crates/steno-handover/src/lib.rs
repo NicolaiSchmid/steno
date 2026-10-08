@@ -37,6 +37,8 @@
 //! The contract with the phone is `mobile/modules/steno-link/src/wire.ts`;
 //! `tests/wire_contract.rs` reads it and holds every name here against it.
 
+#![deny(unsafe_code)]
+
 pub mod base64url;
 pub mod configuration;
 pub mod engine;
