@@ -395,6 +395,25 @@ fn a_stereo_wav_decodes_each_channel_on_its_own() {
     ));
 }
 
+/// The phone's m4a and a 16 kHz WAV declare their length in their
+/// headers: half a second (the AAC track's header counts its priming
+/// too), and six seconds.
+#[test]
+fn a_containers_declared_duration_is_read_without_decoding() {
+    let m4a = SymphoniaAudioCodec::declared_duration(&fixture("tone-440-44k1-500ms.m4a"))
+        .unwrap()
+        .unwrap();
+    assert!((0.5..0.6).contains(&m4a), "{m4a}");
+    let wav = SymphoniaAudioCodec::declared_duration(&fixture("conversation-mic-6s.wav"))
+        .unwrap()
+        .unwrap();
+    assert!((wav - 6.0).abs() < 0.01, "{wav}");
+    let dir = tempfile::tempdir().unwrap();
+    let junk = dir.path().join("recording.m4a");
+    std::fs::write(&junk, b"not audio").unwrap();
+    assert!(SymphoniaAudioCodec::declared_duration(&junk).is_err());
+}
+
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../Tests/Fixtures/audio")

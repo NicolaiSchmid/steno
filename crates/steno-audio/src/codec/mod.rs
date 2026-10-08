@@ -189,6 +189,19 @@ impl SymphoniaAudioCodec {
         })
     }
 
+    /// Seconds in the file at `path` as its container declares them (an
+    /// m4a's track header, a WAV's data chunk), read without decoding it;
+    /// `None` when the container does not say. For a recording that has no
+    /// stored duration, such as one the launch adopts from the audio
+    /// folder.
+    pub fn declared_duration(path: &Path) -> Result<Option<f64>, CodecError> {
+        let frames = SymphoniaFrames::open(path)?;
+        Ok(frames
+            .frames
+            .zip(frames.rate.filter(|rate| *rate > 0))
+            .map(|(frames, rate)| frames as f64 / f64::from(rate)))
+    }
+
     /// `samples` at `rate` to 16 kHz in one pass: exact length `round(len *
     /// 16000 / rate)`, trimmed or zero-padded so the 16 kHz lane lasts
     /// exactly as long as the master and segment counts stay stable.
@@ -375,6 +388,8 @@ struct SymphoniaFrames {
     frames: Option<u64>,
     /// The encoder priming to drop: AAC in MP4 only.
     priming: Option<Trim>,
+    /// The track's rate in hertz, as its header declares it.
+    rate: Option<u32>,
 }
 
 /// The frames before a track's first presented sample, and how to place a
@@ -455,6 +470,7 @@ impl SymphoniaFrames {
         let track_id = track.id;
         let frames = track.codec_params.n_frames;
         let priming = Trim::for_track(path, &track.codec_params);
+        let rate = track.codec_params.sample_rate;
         let decoder = symphonia::default::get_codecs()
             .make(&track.codec_params, &DecoderOptions::default())
             .map_err(|e| CodecError::UnsupportedFormat(e.to_string()))?;
@@ -465,6 +481,7 @@ impl SymphoniaFrames {
             track_id,
             frames,
             priming,
+            rate,
         })
     }
 
