@@ -1303,45 +1303,50 @@ parity item until a plan says otherwise:
   new recording running, and its caller does not get the failed recording.
 - **`steno dev` tooling** (`capture-spike`, `aec-bench`, `audio-devices`)
   is not ported; it arrives with the CLI in WP6.
-- **A chosen microphone that is missing records the default input**, a
-  deliberate parity change under the rule that no recording is lost. Swift
-  fails the start with `InputDeviceUnavailable`, and a microphone lost
-  during a recording ends it in `DeviceLost` after the rebuild's four
-  restarts. In Rust every live backend (Core Audio, PipeWire, WASAPI)
-  records the default input in its place (the fallback,
-  `CaptureInput::is_fallback`), at `start` and at a rebuild's restart
-  alike (`CaptureBackend::start`), logs one warning, and names the device
-  in `CaptureStream::input`. A chosen microphone that is connected but
-  does not open (still settling after it was plugged in, held by another
-  app, a link that never runs) fails the backend's `start`; the session
-  then starts it once more without a UID, at the start and after a
-  rebuild's last restart, and marks that input as the fallback. A rebuild
-  tries the default already after its first failed restart when the
-  stream it replaces was on the fallback (the default worked a moment
-  ago), or when the chosen microphone was linked but did not run
-  (`CaptureError::DidNotRun`, PipeWire's 3 s first-cycle deadline): the
-  gap is then one failed start long (about 3.5 s of wall time on
-  PipeWire), inside the 10 s the silence for a gap fills, so the master
-  stays on wall time. After all four restarts it was about 14 s on
-  PipeWire, 4 s of it missing from the master. The recorder sets the recording snapshot's
-  `warning` to "Recording from <name>. The microphone chosen in Settings
-  is not available." (or "from the system default microphone" when the
-  input has no name) until a rebuild returns to the chosen one, the user
-  dismisses it or the recording stops; a recording that ended on the
-  fallback leaves "Recorded from <name>. The microphone chosen in Settings
-  was not available." Each backend watches for the chosen device (the
-  Mac's device list, PipeWire's registry, WASAPI's endpoint notifications,
-  and on the Mac and WASAPI a re-check every 5 s while on the fallback,
-  which looks only for another microphone); its return reads as
-  `DefaultInputChanged`, and the rebuild records it again. A fallback the
-  session chose watches for nothing: the next rebuild asks for the chosen
-  microphone again. A Bluetooth headset gone for a second while it changes
-  profile is recorded on the default input meanwhile, with a short gap at
-  each switch, where four failed restarts used to end the recording. A
-  chosen microphone that is missing or cannot be opened no longer ends a
-  recording while the default input can be opened. Settings lists the stored device as "Microphone not connected"
-  until the user picks again or it comes back. Swift keeps its behaviour
-  until the cutover.
+- **A chosen microphone that is missing or cannot be opened no longer ends
+  a recording while the default input can be opened**, a deliberate parity
+  change under the rule that no recording is lost. Swift fails the start
+  with `InputDeviceUnavailable`, and a microphone lost during a recording
+  ends it in `DeviceLost` after the rebuild's four restarts. Swift keeps its
+  behaviour until the cutover.
+  - **Missing.** Every live backend (Core Audio, PipeWire, WASAPI) records
+    the default input in its place (the fallback,
+    `CaptureInput::is_fallback`), at `start` and at a rebuild's restart
+    alike (`CaptureBackend::start`), logs one warning, and names the device
+    in `CaptureStream::input`.
+  - **Connected but does not open** (still settling after it was plugged
+    in, held by another app, a link that never runs). The backend's `start`
+    fails; the session then starts the backend once more without a UID, at
+    the start and after a rebuild's last restart, and marks that input as
+    the fallback.
+  - **The gap.** A rebuild tries the default already after its first failed
+    restart when the stream it replaces was on the fallback (the default
+    worked a moment ago), or after the first restart on which the graph did
+    not run (`CaptureError::DidNotRun`, PipeWire's 3 s first-cycle
+    deadline). The gap is then one failed start long (about 3 s of wall time
+    on PipeWire), within the 10 s a gap is filled with silence
+    (`MAXIMUM_GAP`), so the master stays on wall time. Waiting out all four
+    restarts would cost about 14 s on PipeWire, 4 s of it missing from the
+    master.
+  - **The warning.** The recorder sets the recording snapshot's `warning` to
+    "Recording from <name>. The microphone chosen in Settings is not
+    available." (or "from the system default microphone" when the input has
+    no name) until a rebuild returns to the chosen one, the user dismisses
+    it or the recording stops. A recording that was on the fallback at any
+    point, unless the warning was dismissed, leaves "Steno recorded from
+    <name> while the microphone chosen in Settings was not available."
+  - **The return.** Each backend watches for the chosen device (the Mac's
+    device list, PipeWire's registry, WASAPI's endpoint notifications, and
+    on the Mac and WASAPI a re-check every 5 s while on the fallback, which
+    looks only for another microphone and ignores one that did not
+    resolve); its return reads as `DefaultInputChanged`, and the rebuild
+    records it again. A fallback the session chose watches for nothing: the
+    next rebuild asks for the chosen microphone again. A Bluetooth headset
+    gone for a second while it changes profile is recorded on the default
+    input meanwhile, with a short gap at each switch, where Swift's four
+    failed restarts end the recording.
+  - **Settings** lists the stored device as "Microphone not connected" until
+    the user picks again or it comes back.
 - **Steno's own aggregates are not inputs.** On the Mac,
   `AudioDevices::inputs` leaves out the private aggregates Steno's
   captures create (`uno.schmid.steno.aggregate.*`); Swift lists them as a
@@ -1715,25 +1720,26 @@ item to settle before the Linux release:
 - **Device UIDs are `node.name`s.** A Core Audio UID from a synced or
   copied settings file names no Linux node, so it records the default
   source, as any missing chosen microphone does on every platform (see "A
-  chosen microphone that is missing records the default input" in the
-  first Audio list). On the fallback, the capture's snapshot follows the
-  default as one without a UID does, and the chosen node, or one of its
-  ports, announced again counts as a change (`Graph::followed_source`). A virtual
-  source (a null sink with `media.class = Audio/Source/Virtual`) records
-  from its monitor output, the only output it has.
+  chosen microphone that is missing or cannot be opened no longer ends a
+  recording" in the first Audio list). On the fallback, the capture's
+  snapshot follows the default as one without a UID does, and the chosen
+  node, or one of its ports, announced again counts as a change
+  (`Graph::followed_source`). A virtual source (a null sink with
+  `media.class = Audio/Source/Virtual`) records from its monitor output,
+  the only output it has.
 - **The input device list** (`capture::live::pipewire::AudioDevices`) is
   every source the capture's UID lookup accepts (`Audio/Source` nodes,
   virtual sources, duplex devices), named by `node.description`, else
-  `node.nick`, else its `node.name`. One short connection per call on a thread of its own, one
-  roundtrip, bounded by `START_TIMEOUT`. It does not bind the `default`
-  metadata, so no device is marked the default (Settings shows none): a
-  bind dropped before the session manager answered its ping, as a list
-  during a WirePlumber stall would leave one, stops the metadata's events
-  for every client (see "A default move can go unreported"). That
-  includes a capture recording the default source as the fallback. A
-  live test lists with
-  WirePlumber stopped and checks a capture still hears the next move. The
-  rate reads 0 and `is_running_somewhere` is not read.
+  `node.nick`, else its `node.name`. One short connection per call on a
+  thread of its own, one roundtrip, bounded by `START_TIMEOUT`. It does
+  not bind the `default` metadata, so no device is marked the default
+  (Settings shows none): a bind dropped before the session manager
+  answered its ping, as a list during a WirePlumber stall would leave one,
+  stops the metadata's events for every client (see "A default move can go
+  unreported"). That includes a capture recording the default source as
+  the fallback. A live test lists with WirePlumber stopped and checks a
+  capture still hears the next move. The rate reads 0 and
+  `is_running_somewhere` is not read.
 - **Meeting detection** (`detection::pipewire`, the Linux
   `LiveProcessAudioActivity`) reads the registry from one PipeWire thread
   per source, which starts with the first call and ends when the source
@@ -2379,15 +2385,16 @@ plan's tables names belongs to that row's package (S, A, P or X), whatever its l
   ship; for one on 1.4, file the backport request whose text is ready (not filed); on
   1.0 or 1.2 only the distribution's own package can carry the fix. Where: "A default move can go
   unreported" in the Linux list under "Audio". Found: #197, #201.
-- **First Linux release.** Meeting detection on PipeWire names a holder by its
-  binary (`application.process.binary`, else `application.name`), so WP9b's prompt
-  needs a display name for it, from the app's `.desktop` entry or `application.name`.
-  A Flatpak app's pid is its pid inside the sandbox, so two sandboxed apps can merge
+- **First Linux release.** Meeting detection on PipeWire names a holder by its binary
+  (`application.process.binary`, else `application.name`), so WP9b's prompt needs a
+  display name for it, from the app's `.desktop` entry or `application.name`. A
+  Flatpak app's pid is its pid inside the sandbox, so two sandboxed apps can merge
   into one holder; check with a Flatpak browser on a real desktop, where
   `pipewire.access.portal.app_id` may name the app better. `MeetingDetector::start`
   fails while PipeWire is unreachable (its first snapshot answers the error), so the
-  services retry it when PipeWire comes up after Steno (autostart at login). Where:
-  "Meeting detection" in the Linux list under "Audio". Found: #222.
+  services (the controller of S2 in `.plans/2026-10-07-stable-promotion.md`) must
+  retry it when PipeWire comes up after Steno (autostart at login). Where: "Meeting
+  detection" in the Linux list under "Audio". Found: #222.
 - **First Linux release.** WebKitGTK leaks a file descriptor per destroyed webview
   (issue #160). Where: `apps/desktop/README.md`. Found: #172.
 - **First Windows release.** Gate G4 is open: no Windows machine with a GPU has
@@ -2568,7 +2575,7 @@ PR off `main`.
 | A first announce, one that finds no receipt in memory or the store, discards every inbox file of the recording id before it opens its own, so an old verified file is never admitted unhashed; Swift's announce answers a failed receipt read with 500 (`steno-handover`, Swift core) | `fix/handover-first-announce-discard` | #239 | open |
 | The decoder and the mixdown stream each lane in bounded blocks, a sidecar is taken only at the master's length, launch recovery gives up on a meeting whose processing keeps ending the app, and `reprocess` lands (`steno-audio`, `steno-pipeline`) | `fix/decoder-streams-lanes` | #228 | open |
 | The phone intake's receipt, meeting and asset commit in one durable transaction before `complete` answers, completing only the admitting device's receipt; a failed commit keeps the copy until a durable `failed` receipt is saved; a `complete` receipt without its meeting is not admitted; pairings and revokes are durable; the handover starts only after a durable checkpoint at launch (both apps) | `fix/handover-durable-intake` | #213 | open |
-| Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming it, and a return once it is back), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
+| Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported
