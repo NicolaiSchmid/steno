@@ -229,11 +229,11 @@ pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
 
 /// The LLM API key from the CLI's secret store: `STENO_LLM_API_KEY` or
 /// the 0600 secrets file in the support directory. After the Linux app
-/// moved the file's secrets into the Secret Service, which the command line
-/// does not read, the file keeps a copy of the key only until the app's
-/// next launch removes it or the app saves the key; a key it no longer holds is read as none and
-/// the run goes on without one, saying so on stderr, as on the Mac, whose
-/// app keeps the key in the Keychain.
+/// moved the file's secrets into the Secret Service, which the command
+/// line does not read, the file keeps a copy of the key only until the
+/// app's next launch removes it or the app saves the key; a key it no
+/// longer holds is read as none and the run goes on without one, saying so
+/// on stderr, as on the Mac, whose app keeps the key in the Keychain.
 pub async fn api_key() -> Result<Option<String>, Failure> {
     api_key_under(&paths()?).await
 }
@@ -275,8 +275,17 @@ fn key_or_none(
 pub async fn llm_passes(
     settings: &Settings,
 ) -> Result<Option<steno_services::llm::Passes>, Failure> {
+    passes_reading(settings, api_key).await
+}
+
+/// [`llm_passes`] with the key from `read`, called only when
+/// [`sends_key`].
+async fn passes_reading(
+    settings: &Settings,
+    read: impl AsyncFnOnce() -> Result<Option<String>, Failure>,
+) -> Result<Option<steno_services::llm::Passes>, Failure> {
     let key = if sends_key(settings) {
-        api_key().await?
+        read().await?
     } else {
         None
     };
@@ -390,9 +399,10 @@ mod tests {
         assert!(key_or_none(Err("the file is damaged".into()), &key).is_err());
     }
 
-    /// Only a configured server endpoint reads the key.
-    #[test]
-    fn only_a_server_endpoint_sends_the_key() {
+    /// Only a configured server endpoint reads the key, and the passes
+    /// get the key it read.
+    #[tokio::test]
+    async fn only_a_server_endpoint_sends_the_key() {
         let endpoint = Settings {
             llm_provider: steno_core::LlmProvider::Endpoint,
             llm_base_url: Some("https://api.openai.com/v1".to_owned()),
@@ -409,10 +419,23 @@ mod tests {
             llm_provider: steno_core::LlmProvider::Codex,
             codex_model: Some("gpt-5".to_owned()),
             codex_confirmed_at: Some(chrono::DateTime::UNIX_EPOCH),
-            ..endpoint
+            ..endpoint.clone()
         };
         assert!(steno_llm::LlmEndpoint::from_settings(&codex).is_some());
         assert!(!sends_key(&codex));
+
+        let reads = std::cell::Cell::new(0);
+        let read = async || {
+            reads.set(reads.get() + 1);
+            Ok(Some("sk-1".to_owned()))
+        };
+        let passes = passes_reading(&endpoint, read).await.unwrap();
+        assert!(passes.is_some());
+        assert_eq!(reads.get(), 1, "an endpoint reads the key");
+        for settings in [&without_address, &codex] {
+            passes_reading(settings, read).await.unwrap();
+        }
+        assert_eq!(reads.get(), 1, "no other provider reads it");
     }
 
     /// The command's own read over a file the app marked: a copy the move
