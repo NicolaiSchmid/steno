@@ -1,82 +1,91 @@
-//! The encoder priming an MP4 (m4a) file declares for its audio track,
-//! which symphonia 0.5 parses and does not apply. AVFoundation dropped it,
-//! so the decode starts on the first sample the encoder was given.
+//! The encoder priming of an MP4 (m4a) file's AAC track. symphonia 0.5
+//! parses the edit list and ignores it, and does not read iTunes' gapless
+//! tag at all; AVFoundation dropped the priming, so the decode starts on
+//! the first sample the encoder was given.
 //! Swift: `AVAudioFile`, which applies it (no code of Steno's).
 //!
-//! Two places hold it:
+//! Where it comes from, first match wins:
 //!
 //! - the track's edit list (`moov/trak/edts/elst`): the media time of its
-//!   first edit that is not empty, in the track's timescale (`mdhd`). ffmpeg writes it (1 024
-//!   samples for its AAC encoder), as do other ISO writers;
+//!   first edit that is not empty, in the track's timescale (`mdhd`).
+//!   ffmpeg writes it (1 024 samples for its AAC encoder), as do other ISO
+//!   writers;
 //! - iTunes' gapless tag (`moov/udta/meta/ilst/----`, named `iTunSMPB`):
-//!   its second field, in samples. Apple's own writer stores the priming
-//!   (2 112 samples) only there; the AVFoundation mixdowns of the Swift app
-//!   carry no edit list.
+//!   its second field, in samples, counted in the same timescale. Apple's
+//!   `AVAudioFile` and `afconvert` write it (2 112 samples), with no edit
+//!   list: the Swift app's mixdowns;
+//! - neither: [`APPLE_PRIMING`], the 2 112 samples AVFoundation assumes for
+//!   AAC in MP4. `AVAudioRecorder`, the phone's recorder, writes neither
+//!   box, yet primes 2 112 samples like every Apple AAC encoder.
 //!
-//! The edit list wins when a file has both. Only the boxes on the way to
-//! those two are read, by seeking; the sample tables are skipped. An empty
-//! edit (media time -1, a delay before the track) and an edit list that
-//! starts later than [`MAX_PRIMING_SECONDS`] are not applied: the first
-//! is silence nobody recorded (the next edit's media time is the
-//! priming), the second would cut audio an editor kept; either way
-//! nothing of the recording is lost. The padding after the last sample
-//! stays: under a packet of silence.
+//! The edit list wins even when its edit starts at media time 0 next to a
+//! gapless tag that names a priming (some remuxers write that): the edit
+//! list is what ISO players apply, so the decode starts where ffmpeg's
+//! does, and the most it can cost is a lane that keeps 48 ms of the
+//! encoder's quiet start; nothing is cut. Only the boxes on the way are
+//! read, by seeking; the sample tables are skipped. An empty edit (media
+//! time -1, a delay before the track) is skipped, as silence nobody
+//! recorded; the next edit's media time is the priming. A priming longer
+//! than [`MAX_PRIMING_FRAMES`] is not applied: it would cut audio an
+//! editor kept, and keeping it loses nothing. The padding after the last
+//! sample stays: under a packet of silence.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-/// The longest start the decoder trims: about four times Apple's priming
-/// at 44.1 kHz. A longer edit is an edit, not priming.
-pub const MAX_PRIMING_SECONDS: f64 = 0.2;
+/// The longest priming the decoder trims, in frames at the track's rate:
+/// nearly twice Apple's 2 112 and four of ffmpeg's 1 024-sample packets.
+/// A longer start is an edit, not priming. A frame count rather than a
+/// time, as the encoders prime a number of samples at any rate.
+pub const MAX_PRIMING_FRAMES: u64 = 4_096;
 
-/// Where the priming is counted.
+/// The priming AVFoundation assumes for AAC in MP4 that declares none:
+/// what Apple's AAC encoder primes, in samples at the track's rate.
+pub const APPLE_PRIMING: u64 = 2_112;
+
+/// The priming of an MP4 file's sound track, in ticks of its timescale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Priming {
-    /// The edit list's media time, in ticks of the track's `timescale`.
-    EditList {
-        /// Media time of the first edit.
-        media_time: u64,
-        /// The track's ticks per second.
-        timescale: u32,
-    },
-    /// iTunes' gapless tag, in samples at the track's rate.
-    Gapless {
-        /// Samples to drop.
-        samples: u64,
-    },
+pub struct Priming {
+    /// Ticks before the first sample the encoder was given.
+    pub ticks: u64,
+    /// The track's ticks per second (`mdhd`): its sample rate for every
+    /// writer seen, and the full rate of an HE-AAC track, which the
+    /// decoder reads as LC at half of it.
+    pub timescale: u32,
+    /// Where `ticks` came from.
+    pub source: PrimingSource,
+}
+
+/// Where a [`Priming`] was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrimingSource {
+    /// The edit list's first media time.
+    EditList,
+    /// iTunes' gapless tag.
+    Gapless,
+    /// Neither: [`APPLE_PRIMING`].
+    Unstated,
 }
 
 impl Priming {
-    /// The frames at `rate` hertz to drop, `None` past
-    /// [`MAX_PRIMING_SECONDS`] or for a zero rate or timescale.
+    /// The frames at `rate` hertz to drop, rounded to the nearest frame
+    /// (exact when the timescale is the rate); `None` past
+    /// [`MAX_PRIMING_FRAMES`] or for a zero rate or timescale.
     #[must_use]
     pub fn frames(self, rate: u32) -> Option<u64> {
-        let frames = match self {
-            Self::EditList {
-                media_time,
-                timescale,
-            } => {
-                if timescale == 0 {
-                    return None;
-                }
-                // Rounded to the nearest frame; exact when the timescale is
-                // the rate, as every writer seen makes it.
-                let scaled = u128::from(media_time) * u128::from(rate);
-                let timescale = u128::from(timescale);
-                u64::try_from((scaled + timescale / 2) / timescale).ok()?
-            }
-            Self::Gapless { samples } => samples,
-        };
-        // The bound is a fraction of a second, so the cast is exact.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let limit = (MAX_PRIMING_SECONDS * f64::from(rate)) as u64;
-        (rate > 0 && frames <= limit).then_some(frames)
+        if self.timescale == 0 || rate == 0 {
+            return None;
+        }
+        let scaled = u128::from(self.ticks) * u128::from(rate);
+        let timescale = u128::from(self.timescale);
+        let frames = u64::try_from((scaled + timescale / 2) / timescale).ok()?;
+        (frames <= MAX_PRIMING_FRAMES).then_some(frames)
     }
 
-    /// The priming the MP4 file at `path` declares for its first audio
-    /// track, `None` when it declares none, is not an MP4 file, or cannot
-    /// be read (the decode then starts where symphonia starts it).
+    /// The priming of the first sound track of the MP4 file at `path`;
+    /// `None` when it is not an MP4 file, has no sound track, or cannot be
+    /// read (the decode then starts where symphonia starts it).
     #[must_use]
     pub fn read(path: &Path) -> Option<Self> {
         let mut file = File::open(path).ok()?;
@@ -87,22 +96,30 @@ impl Priming {
             return None;
         }
         let moov = std::iter::from_fn(|| boxes.next()).find(|b| &b.kind == b"moov")?;
-        let mut audio_seen = false;
-        let mut edit = None;
+        // The first sound track, as symphonia's default track is.
+        let mut sound = None;
         let mut gapless = None;
         for child in children(&mut file, moov) {
             match &child.kind {
-                b"trak" if !audio_seen => {
-                    if let Some(mdia) = sound_media(&mut file, child) {
-                        audio_seen = true;
-                        edit = edit_list_priming(&mut file, child, mdia);
-                    }
+                b"trak" if sound.is_none() => {
+                    sound = sound_media(&mut file, child)
+                        .map(|mdia| timescale_and_edit(&mut file, child, mdia));
                 }
                 b"udta" if gapless.is_none() => gapless = gapless_priming(&mut file, child),
                 _ => {}
             }
         }
-        edit.or(gapless)
+        let (timescale, edit) = sound??;
+        let (ticks, source) = match (edit, gapless) {
+            (Some(ticks), _) => (ticks, PrimingSource::EditList),
+            (None, Some(ticks)) => (ticks, PrimingSource::Gapless),
+            (None, None) => (APPLE_PRIMING, PrimingSource::Unstated),
+        };
+        Some(Self {
+            ticks,
+            timescale,
+            source,
+        })
     }
 }
 
@@ -208,8 +225,9 @@ fn sound_media(file: &mut File, trak: Mp4Box) -> Option<Mp4Box> {
     (handler.get(8..12)? == b"soun").then_some(mdia)
 }
 
-/// The priming a sound track's edit list declares, in its timescale.
-fn edit_list_priming(file: &mut File, trak: Mp4Box, mdia: Mp4Box) -> Option<Priming> {
+/// A sound track's timescale and the media time its edit list starts at,
+/// `None` for the second when it has no edit list or only empty edits.
+fn timescale_and_edit(file: &mut File, trak: Mp4Box, mdia: Mp4Box) -> Option<(u32, Option<u64>)> {
     let mdhd = child(file, mdia, *b"mdhd")?;
     let mdhd = body(file, mdhd, 32)?;
     // Version 1 has 64-bit creation and modification times.
@@ -217,14 +235,12 @@ fn edit_list_priming(file: &mut File, trak: Mp4Box, mdia: Mp4Box) -> Option<Prim
         1 => field(&mdhd, 20),
         _ => field(&mdhd, 12),
     }
-    .map(u32::from_be_bytes);
-    let edts = child(file, trak, *b"edts")?;
-    let elst = child(file, edts, *b"elst")?;
-    let media_time = first_media_time(&body(file, elst, 8 + 4 * 20)?)?;
-    Some(Priming::EditList {
-        media_time,
-        timescale: timescale?,
-    })
+    .map(u32::from_be_bytes)?;
+    let edit = child(file, trak, *b"edts")
+        .and_then(|edts| child(file, edts, *b"elst"))
+        .and_then(|elst| body(file, elst, 8 + 4 * 20))
+        .and_then(|elst| first_media_time(&elst));
+    Some((timescale, edit))
 }
 
 /// The media time of the first edit that is not empty (-1, a delay).
@@ -244,8 +260,8 @@ fn first_media_time(elst: &[u8]) -> Option<u64> {
     })
 }
 
-/// The priming in iTunes' gapless tag under `udta`.
-fn gapless_priming(file: &mut File, udta: Mp4Box) -> Option<Priming> {
+/// The priming in iTunes' gapless tag under `udta`, in samples.
+fn gapless_priming(file: &mut File, udta: Mp4Box) -> Option<u64> {
     let meta = child(file, udta, *b"meta")?;
     // An ISO `meta` is a full box (four bytes of version and flags before
     // its children); QuickTime's starts with a child at once.
@@ -273,7 +289,7 @@ fn gapless_priming(file: &mut File, udta: Mp4Box) -> Option<Priming> {
         let data = parts.iter().find(|b| &b.kind == b"data")?;
         // Type and locale, then the text.
         let text = body(file, *data, 8 + 256)?;
-        return parse_smpb(text.get(8..)?).map(|samples| Priming::Gapless { samples });
+        return parse_smpb(text.get(8..)?);
     }
     None
 }
@@ -290,32 +306,35 @@ fn parse_smpb(text: &[u8]) -> Option<u64> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn an_edit_list_converts_to_frames_at_the_rate() {
-        let edit = |media_time, timescale| Priming::EditList {
-            media_time,
+    fn priming(ticks: u64, timescale: u32) -> Priming {
+        Priming {
+            ticks,
             timescale,
-        };
-        assert_eq!(edit(1_024, 44_100).frames(44_100), Some(1_024));
-        assert_eq!(edit(2_112, 48_000).frames(48_000), Some(2_112));
+            source: PrimingSource::EditList,
+        }
+    }
+
+    #[test]
+    fn a_priming_converts_to_frames_at_the_rate() {
+        assert_eq!(priming(1_024, 44_100).frames(44_100), Some(1_024));
+        assert_eq!(priming(2_112, 48_000).frames(48_000), Some(2_112));
         // A timescale other than the rate: 23.2 ms at 1 kHz ticks.
-        assert_eq!(edit(23, 1_000).frames(44_100), Some(1_014));
-        assert_eq!(edit(1, 0).frames(44_100), None, "no timescale");
-        assert_eq!(edit(0, 44_100).frames(44_100), Some(0));
+        assert_eq!(priming(23, 1_000).frames(44_100), Some(1_014));
+        // HE-AAC: a full-rate timescale, decoded at the core rate.
+        assert_eq!(priming(2_112, 44_100).frames(22_050), Some(1_056));
+        assert_eq!(priming(1, 0).frames(44_100), None, "no timescale");
+        assert_eq!(priming(0, 44_100).frames(44_100), Some(0));
     }
 
     #[test]
     fn a_start_past_the_bound_is_not_priming() {
-        let limit = (MAX_PRIMING_SECONDS * 44_100.0) as u64;
-        let gapless = |samples| Priming::Gapless { samples };
-        assert_eq!(gapless(limit).frames(44_100), Some(limit));
-        assert_eq!(gapless(limit + 1).frames(44_100), None);
-        assert_eq!(gapless(2_112).frames(0), None, "no rate");
-        let edit = Priming::EditList {
-            media_time: 44_100,
-            timescale: 44_100,
-        };
-        assert_eq!(edit.frames(44_100), None, "a second is an edit");
+        let limit = MAX_PRIMING_FRAMES;
+        assert_eq!(priming(limit, 44_100).frames(44_100), Some(limit));
+        assert_eq!(priming(limit + 1, 44_100).frames(44_100), None);
+        // A frame count at any rate: Apple's priming at 8 kHz is trimmed.
+        assert_eq!(priming(2_112, 8_000).frames(8_000), Some(2_112));
+        assert_eq!(priming(2_112, 44_100).frames(0), None, "no rate");
+        assert_eq!(priming(44_100, 44_100).frames(44_100), None, "a second");
     }
 
     #[test]

@@ -1,10 +1,14 @@
 //! Decode and mixdown on files built in setup: a two-channel 48 kHz CAF
 //! from the recording writer, a 16 kHz WAV master, and the sinc resampler
-//! on a 44.1 kHz tone; plus the phone path's containers on three committed
-//! synthetic fixtures (`Tests/Fixtures/audio/tone-440-44k1-500ms.{m4a,mp3}`,
-//! ffmpeg encodes of half a second of a 440 Hz sine, and
-//! `tone-440-44k1-onset-200ms.m4a`, the same sine after 0.2 s of silence;
-//! there is no AAC or MP3 encoder in pure Rust to build them in setup).
+//! on a 44.1 kHz tone; plus the phone path's containers on committed
+//! synthetic fixtures in `Tests/Fixtures/audio/` (ffmpeg encodes of half a
+//! second of a 440 Hz sine, `tone-440-44k1-500ms.{m4a,mp3}`; of the same
+//! sine after 0.2 s of silence, mono and with a second channel,
+//! `tone-440-44k1-onset-200ms.m4a` and `tone-440-1000-44k1-stereo-onset.m4a`;
+//! and two files from Apple's encoder in the phone recorder's layout,
+//! `tone-440-44k1-onset-200ms-apple.m4a` and
+//! `silence-44k1-avaudiorecorder.m4a`; there is no AAC or MP3 encoder in
+//! pure Rust to build them in setup).
 //! Swift: `Tests/StenoAudioTests/AVFoundationAudioCodecTests.swift`.
 
 // Test arithmetic: sample counts and dB values cast freely, and sample
@@ -25,6 +29,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use steno_audio::EchoMetrics;
+use steno_audio::codec::priming::{MAX_PRIMING_FRAMES, Priming, PrimingSource};
 use steno_audio::codec::sinc::SincResampler;
 use steno_audio::codec::{CodecError, SymphoniaAudioCodec};
 use steno_audio::testing::AudioFixtures;
@@ -454,15 +459,37 @@ fn box_offset(bytes: &[u8], path: &[&[u8; 4]]) -> usize {
     at
 }
 
-/// The onset fixture as Apple's writer lays the priming out: its edit
-/// list renamed `free` (the box stays, so no offset moves), and, when
-/// `priming` is given, iTunes' gapless tag naming it appended to `moov`,
-/// the file's last box.
-fn without_edit_list(bytes: &[u8], priming: Option<u32>) -> Vec<u8> {
+/// What happens to an ffmpeg onset fixture's edit list in [`rewritten`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditList {
+    /// Kept as ffmpeg wrote it (1 024).
+    Kept,
+    /// Its one edit's media time set to 0.
+    Zero,
+    /// Renamed `free` (the box stays, so no offset moves).
+    Dropped,
+}
+
+/// An ffmpeg onset fixture with its edit list changed as `edit` says and,
+/// when `gapless` is given, iTunes' gapless tag naming that priming
+/// appended to `moov`, the file's last box. Dropped with a tag is the
+/// layout of `AVAudioFile` and `afconvert`; dropped without,
+/// `AVAudioRecorder`'s.
+fn rewritten(bytes: &[u8], edit: EditList, gapless: Option<u32>) -> Vec<u8> {
     let mut bytes = bytes.to_vec();
     let edts = box_offset(&bytes, &[b"moov", b"trak", b"edts"]);
-    bytes[edts + 4..edts + 8].copy_from_slice(b"free");
-    let Some(priming) = priming else {
+    match edit {
+        EditList::Kept => {}
+        EditList::Zero => {
+            // `edts`'s header, `elst`'s, its version and flags, its count,
+            // then the one entry's duration and its media time.
+            let media_time = edts + 8 + 8 + 4 + 4 + 4;
+            assert_eq!(&bytes[edts + 12..edts + 16], b"elst");
+            bytes[media_time..media_time + 4].copy_from_slice(&0u32.to_be_bytes());
+        }
+        EditList::Dropped => bytes[edts + 4..edts + 8].copy_from_slice(b"free"),
+    }
+    let Some(priming) = gapless else {
         return bytes;
     };
     let moov = box_offset(&bytes, &[b"moov"]);
@@ -507,86 +534,208 @@ fn without_edit_list(bytes: &[u8], priming: Option<u32>) -> Vec<u8> {
     bytes
 }
 
+/// A sine at 0.5 from sample `start` of 22 050 at 44.1 kHz: what ffmpeg
+/// was given for the onset fixtures.
+fn sine_after(start: usize, hz: f64) -> Vec<f32> {
+    (0..22_050)
+        .map(|n| {
+            if n < start {
+                return 0.0;
+            }
+            let t = (n - start) as f64 / 44_100.0;
+            (0.5 * (2.0 * std::f64::consts::PI * hz * t).sin()) as f32
+        })
+        .collect()
+}
+
+/// Each channel of `path` at its own rate, decoded by the streaming
+/// decoder, until a channel is missing.
+fn channels_of(path: &Path) -> Vec<Vec<f32>> {
+    (0..)
+        .map_while(|channel| {
+            SymphoniaAudioCodec::read_channel(path, channel, AudioLane::Mixed)
+                .ok()
+                .map(|decoded| decoded.samples)
+        })
+        .collect()
+}
+
+/// `bytes`, an ffmpeg onset fixture, rewritten as `declared` says, in
+/// `directory`.
+fn variant(directory: &Path, bytes: &[u8], declared: Declared) -> PathBuf {
+    let bytes = match declared {
+        Declared::EditList => bytes.to_vec(),
+        Declared::Gapless(priming) => rewritten(bytes, EditList::Dropped, Some(priming)),
+        Declared::EditListAndGapless(priming) => rewritten(bytes, EditList::Kept, Some(priming)),
+        Declared::ZeroEditAndGapless(priming) => rewritten(bytes, EditList::Zero, Some(priming)),
+        Declared::Neither => rewritten(bytes, EditList::Dropped, None),
+    };
+    let path = directory.join(format!("{declared:?}.m4a"));
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// What a rewritten onset fixture declares of its priming.
+#[derive(Debug, Clone, Copy)]
+enum Declared {
+    /// ffmpeg's own edit list: 1 024.
+    EditList,
+    /// No edit list, iTunes' gapless tag naming this many samples.
+    Gapless(u32),
+    /// ffmpeg's edit list and a gapless tag naming this many.
+    EditListAndGapless(u32),
+    /// An edit list starting at 0 and a gapless tag naming this many.
+    ZeroEditAndGapless(u32),
+    /// Neither, as `AVAudioRecorder` writes it.
+    Neither,
+}
+
+/// The priming ffmpeg's AAC encoder adds and its edit list declares.
+const PRIMING: usize = 1_024;
+
+/// What the decoder makes of a file one past its bound: no trim.
+const PAST_THE_BOUND: Declared = Declared::Gapless(4_097);
+
+/// The cases of [`the_aac_priming_is_trimmed_to_the_sample`] and its
+/// stereo sibling, each with the frames the decoder should cut: the
+/// declared priming one packet (1 024), Apple's 2 112 (two packets and 64
+/// frames, a cut inside a packet), the decoder's bound and one past it,
+/// nothing declared, and an edit list that wins over a gapless tag, even
+/// at 0.
+const DECLARATIONS: [(Declared, usize); 8] = [
+    (Declared::EditList, PRIMING),
+    (Declared::Gapless(1_024), 1_024),
+    (Declared::Gapless(2_112), 2_112),
+    (Declared::Gapless(4_096), 4_096),
+    (PAST_THE_BOUND, 0),
+    (Declared::Neither, 2_112),
+    (Declared::EditListAndGapless(2_112), PRIMING),
+    (Declared::ZeroEditAndGapless(2_112), 0),
+];
+
 /// The AAC priming trimmed to the sample. The fixture is 0.2 s of silence
 /// and then a 440 Hz sine at 0.5 from sample 8 820 (ffmpeg's AAC encoder,
-/// which primes 1 024 samples and says so in the edit list). The lane
-/// starts on the encoder's first sample, so the tone crosses the onset
-/// threshold on the sample the PCM given to the encoder does (8 822), and
-/// at 3 201 at 16 kHz; the same through iTunes' gapless tag, Apple's
-/// layout. Without either the decode keeps the priming and the tone
-/// starts 1 024 samples late, the decoder's old offset: the trim comes
-/// from the container, not from a constant.
+/// which primes 1 024 samples and says so in the edit list). With the
+/// edit list, or iTunes' gapless tag naming 1 024 (Apple's layout), the
+/// lane starts on the encoder's first sample, so the tone crosses the
+/// onset threshold on the sample the PCM given to the encoder does
+/// (8 822), and at 3 201 at 16 kHz. A tag naming more cuts that many
+/// frames, inside a packet too; one past [`MAX_PRIMING_FRAMES`] cuts
+/// nothing; a file that declares neither loses Apple's 2 112, as
+/// AVFoundation assumes; an edit list beside a tag wins, even at 0. Every
+/// trimmed decode is the untrimmed one less exactly its cut, bit for bit:
+/// the trim comes from the container.
 #[test]
 fn the_aac_priming_is_trimmed_to_the_sample() {
     const ONSET: usize = 8_820;
-    const PRIMING: usize = 1_024;
-    // Where the threshold catches the sine as ffmpeg was given it.
-    let pcm: Vec<f32> = (0..22_050)
-        .map(|n| {
-            if n < ONSET {
-                return 0.0;
-            }
-            let t = (n - ONSET) as f64 / 44_100.0;
-            (0.5 * (2.0 * std::f64::consts::PI * 440.0 * t).sin()) as f32
-        })
-        .collect();
-    let pcm_onset = onset(&pcm, 0.05);
+    let pcm_onset = onset(&sine_after(ONSET, 440.0), 0.05);
     assert_eq!(pcm_onset, ONSET + 2);
     let original = std::fs::read(fixture("tone-440-44k1-onset-200ms.m4a")).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let variants = [
-        ("edit list", original.clone(), 0),
-        (
-            "gapless tag",
-            without_edit_list(&original, Some(PRIMING as u32)),
-            0,
-        ),
-        ("neither", without_edit_list(&original, None), PRIMING),
-    ];
-    let mut untrimmed = None;
-    for (name, bytes, late) in variants {
-        let path = directory.path().join(format!("{name}.m4a"));
-        std::fs::write(&path, bytes).unwrap();
-        let source = SymphoniaAudioCodec::read_channel(&path, 0, AudioLane::Mixed).unwrap();
-        let at_source = onset(&source.samples, 0.05);
+    assert_eq!(
+        MAX_PRIMING_FRAMES, 4_096,
+        "the bound the cases are built on"
+    );
+    let untrimmed = variant(directory.path(), &original, PAST_THE_BOUND);
+    let untrimmed = channels_of(&untrimmed).remove(0);
+    assert_eq!(onset(&untrimmed, 0.05), pcm_onset + PRIMING, "untrimmed");
+    for (declared, trim) in DECLARATIONS {
+        let path = variant(directory.path(), &original, declared);
+        let source = channels_of(&path).remove(0);
+        let at_source = onset(&source, 0.05);
         let decoded = SymphoniaAudioCodec::decode_path(&path, 0, AudioLane::Mixed).unwrap();
         let at_16k = onset(&decoded.samples, 0.05);
         println!(
-            "{name}: {} samples, onset at {at_source}; at 16 kHz {} samples, onset at {at_16k}",
-            source.samples.len(),
+            "{declared:?}: {} samples, onset at {at_source}; at 16 kHz {} samples, onset at {at_16k}",
+            source.len(),
             decoded.len()
         );
-        let expected = pcm_onset + late;
-        assert_eq!(at_source, expected, "{name}: onset");
+        let expected = pcm_onset + PRIMING - trim;
+        assert_eq!(at_source, expected, "{declared:?}: onset");
         let expected_16k = (expected * 16_000 + 22_050) / 44_100;
         assert!(
             at_16k.abs_diff(expected_16k) <= 1,
-            "{name}: onset at {at_16k} at 16 kHz, expected {expected_16k}"
+            "{declared:?}: onset at {at_16k} at 16 kHz, expected {expected_16k}"
         );
         // Nothing before the tone but the encoder's quiet pre-echo.
-        let before = rms_decibels(&source.samples[..ONSET + late - 1_024]);
-        assert!(before < -60.0, "{name}: {before} dB before the onset");
-        if late > 0 {
-            untrimmed = Some(source.samples);
+        let before = rms_decibels(&source[..expected - 1_024]);
+        assert!(before < -60.0, "{declared:?}: {before} dB before the onset");
+        assert!(
+            same_bits(&source, &untrimmed[trim..]),
+            "{declared:?}: the untrimmed samples less {trim}"
+        );
+    }
+}
+
+/// The same cuts on two channels, a 440 Hz sine from sample 8 820 on the
+/// first and a 1 kHz one from 11 025 on the second (ffmpeg, as the mono
+/// fixture): each channel's onset moves by the cut, and each channel is
+/// the untrimmed one less exactly its cut, so the cut drops whole frames,
+/// never one channel's samples.
+#[test]
+fn a_stereo_track_loses_the_same_frames_on_each_channel() {
+    let pcm_onsets = [
+        onset(&sine_after(8_820, 440.0), 0.05),
+        onset(&sine_after(11_025, 1_000.0), 0.05),
+    ];
+    let original = std::fs::read(fixture("tone-440-1000-44k1-stereo-onset.m4a")).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let untrimmed = channels_of(&variant(directory.path(), &original, PAST_THE_BOUND));
+    assert_eq!(untrimmed.len(), 2, "two channels");
+    for (declared, trim) in DECLARATIONS {
+        let path = variant(directory.path(), &original, declared);
+        let channels = channels_of(&path);
+        assert_eq!(channels.len(), 2, "{declared:?}: two channels");
+        for (channel, samples) in channels.iter().enumerate() {
+            assert_eq!(
+                onset(samples, 0.05),
+                pcm_onsets[channel] + PRIMING - trim,
+                "{declared:?}: channel {channel}'s onset"
+            );
+            assert!(
+                same_bits(samples, &untrimmed[channel][trim..]),
+                "{declared:?}: channel {channel}, the untrimmed samples less {trim}"
+            );
         }
     }
-    // The trimmed decode is the untrimmed one less exactly its priming.
-    let untrimmed = untrimmed.unwrap();
-    let trimmed = SymphoniaAudioCodec::read_channel(
-        &fixture("tone-440-44k1-onset-200ms.m4a"),
-        0,
-        AudioLane::Mixed,
-    )
-    .unwrap()
-    .samples;
-    assert_eq!(trimmed.len(), untrimmed.len() - PRIMING);
-    assert!(
-        trimmed
-            .iter()
-            .zip(&untrimmed[PRIMING..])
-            .all(|(a, b)| a.to_bits() == b.to_bits()),
-        "the same samples, the priming dropped"
-    );
+}
+
+/// The phone's own layout: `AVAudioRecorder` writes AAC in MP4 with no
+/// edit list and no gapless tag, though Apple's encoder primed 2 112
+/// samples, and AVFoundation drops them. Two fixtures made on a Mac with
+/// the phone's settings (AAC, 44.1 kHz mono, 64 kbps, quality 96; recipe
+/// in `Tests/Fixtures/README.md`): half a second of silence from
+/// `AVAudioRecorder` itself (the microphone gave zeros), and the onset
+/// fixture's PCM through `AVAudioFile`, its gapless tag dropped to match
+/// the recorder's layout. The decoder's lengths and onset are
+/// AVFoundation's, read off the same files.
+#[test]
+fn the_phones_recorder_layout_decodes_as_avfoundation_reads_it() {
+    let recorder = fixture("silence-44k1-avaudiorecorder.m4a");
+    let apple = fixture("tone-440-44k1-onset-200ms-apple.m4a");
+    for path in [&recorder, &apple] {
+        assert_eq!(
+            Priming::read(path).map(|p| (p.ticks, p.source)),
+            Some((2_112, PrimingSource::Unstated)),
+            "{}",
+            path.display()
+        );
+    }
+    // AVAudioFile: 22 528 frames in the track, 20 416 read.
+    let silence = channels_of(&recorder);
+    assert_eq!(silence.len(), 1);
+    assert_eq!(silence[0].len(), 20_416, "AVFoundation's length");
+    // AVAudioFile: 24 576 frames in the track, 22 464 read, onset at 8 823.
+    let tone = channels_of(&apple).remove(0);
+    assert_eq!(tone.len(), 22_464, "AVFoundation's length");
+    assert_eq!(onset(&tone, 0.05), 8_823, "AVFoundation's onset");
+    let decoded = SymphoniaAudioCodec::decode_path(&apple, 0, AudioLane::Mixed).unwrap();
+    let at_16k = onset(&decoded.samples, 0.05);
+    assert!(at_16k.abs_diff(3_201) <= 1, "onset at {at_16k} at 16 kHz");
+}
+
+fn same_bits(a: &[f32], b: &[f32]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
 }
 
 /// The phone's 44.1 kHz through the sinc resampler: level within 0.1 dB,

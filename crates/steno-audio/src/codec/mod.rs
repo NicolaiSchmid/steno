@@ -32,19 +32,21 @@
 //!   WAV (`audio.wav`) and `mixdown_format()` says `Wav16kInt16`, so the
 //!   persist stage names the file right. The Swift codec writes AAC 64 kbps.
 //! - **AAC-LC only.** HE-AAC files (unlikely from the iOS recorder, which
-//!   uses `AVAudioFile` with `kAudioFormatMPEG4AAC`) decode as LC and sound
-//!   wrong. Not seen in practice.
+//!   uses `AVAudioRecorder` with `kAudioFormatMPEG4AAC`) decode as LC and
+//!   sound wrong. Not seen in practice.
 //! - **Encoder priming.** AVFoundation trimmed the encoder's priming
 //!   samples; symphonia 0.5 trims them for MP3 (the LAME tag, with
 //!   `enable_gapless`) but not for MP4, whose edit list it parses and
-//!   ignores. For AAC in MP4 the decoder reads the priming itself
-//!   ([`priming`]: the edit list, else iTunes' gapless tag) and drops
-//!   exactly that many frames from the start, by the packets' timestamps,
-//!   so the lane starts on the first sample the encoder was given (1 024
-//!   samples at 44.1 kHz, 23 ms, for an ffmpeg encode; 2 112, 48 ms, for
-//!   Apple's; `tests/codec.rs`). Every other input decodes as before, bit
-//!   for bit. The padding after the last sample stays (under a packet of
-//!   silence), as the exact-length rule counts what was decoded.
+//!   ignores. For AAC in MP4 the decoder finds the priming itself
+//!   ([`priming`]: the edit list, else iTunes' gapless tag, else the
+//!   2 112 samples AVFoundation assumes, which is what the phone's
+//!   `AVAudioRecorder` files need) and drops exactly that many frames from
+//!   the start, by the packets' timestamps, so the lane starts on the
+//!   first sample the encoder was given (1 024 samples at 44.1 kHz, 23 ms,
+//!   for an ffmpeg encode; 2 112, 48 ms, for Apple's; `tests/codec.rs`).
+//!   Every other input decodes as before, bit for bit. The padding after
+//!   the last sample stays (under a packet of silence), as the
+//!   exact-length rule counts what was decoded.
 //! - **CAF**: PCM only (what the writer produces); a CAF holding AAC fails.
 //! - An unfinished master (data chunk size -1) decodes to its last whole
 //!   frame through the crate's own CAF reader (the chunk walk
@@ -386,7 +388,7 @@ struct Trim {
 }
 
 impl Trim {
-    /// For AAC in an MP4 file that declares its priming.
+    /// For AAC in an MP4 file; see [`priming`].
     fn for_track(path: &Path, params: &CodecParameters) -> Option<Self> {
         if params.codec != CODEC_TYPE_AAC {
             return None;
