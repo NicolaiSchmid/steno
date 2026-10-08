@@ -1580,17 +1580,18 @@ touch lines; each fix is ported to Swift before cutover.
   as `complete` stays `complete`, and a late write of a revoked device leaves another
   device's receipt alone (`Engine::update`, `HandoverEngine.transition`; Swift #209).
   In both, a first announce whose store read found nothing answers as a re-announce
-  when memory holds the receipt by then, so the chunks folded into it and a
-  `complete` stay (Swift's `RecordingHandler.readReceipt`). Rust opens a new recording's
-  files under the same hold of the files lock as the `change` that made its receipt
-  (`Engine::open_files`), so of two first announces that race, the sidecar is the
-  metadata of the one whose receipt memory holds, and the late one leaves it alone; a
-  failed opening still saves the receipt at its place in line, and the phone's retried
-  announce opens the files as a re-announce. A first announce whose receipt memory no
-  longer holds by its opening (its device was revoked since its receipt read) also
-  saves the receipt at its place in line, opens no files and answers 401. Swift checks
-  memory, runs `begin` and makes the receipt in one step on the actor. The intake's own receipt saves (`RecordingIntake::admit`,
-  `RecordingIntake.admit`) run outside the line in both apps.
+  when memory holds the receipt by then, so the chunks folded into it and a `complete`
+  stay (Swift's `RecordingHandler.readReceipt`). Rust opens a new recording's files
+  under the same hold of the files lock as the `change` that made its receipt
+  (`Engine::make_and_open`, `Engine::open_files`), so of two first announces that
+  race, the sidecar is the metadata of the one whose receipt memory holds, and the
+  late one leaves it alone; a failed opening still saves the receipt at its place in
+  line, and the phone's retried announce opens the files as a re-announce. A first
+  announce whose device was revoked since its receipt read also saves the receipt at
+  its place in line, opens no files and answers 401. Swift checks memory, discards the
+  recording id's files, runs `begin` and makes the receipt in one step on the actor.
+  The intake's own receipt saves (`RecordingIntake::admit`, `RecordingIntake.admit`)
+  run outside the line in both apps.
 - Touch: both apps (Swift #205) run an `UPDATE` of the row that still holds the token
   (`Store::touch_paired_device`, `MeetingStore.touchPairedDevice`), so a revoke that
   commits between the gate's read and its touch stands.
@@ -1683,67 +1684,65 @@ touch lines; each fix is ported to Swift before cutover.
   device's receipt of that recording id (`Engine::discard_own`,
   `Engine::discard_own_while_revoked`, `Engine::discard_and_forget_own`,
   `Engine::forget_own`). And files are created only for a device that `revoked` does
-  not hold: by a first announce while memory holds the receipt its `change` made, or
-  by a re-announce of the receipt's owner; a first announce or re-announce whose
-  device was revoked since its receipt read opens none and answers 401
-  (`Engine::open_files`, `Engine::reopen_missing_files`). The check and the discard,
-  like the creation, hold the engine's files lock (taken before the state lock, held
-  across synchronous calls only), so no announce opens files between the two; a first
-  announce holds it from its `change` through its opening. Two stretches with no yield
-  in them, on other threads, still leave files whose receipt memory does not hold at
-  the check: a pairing again after a re-announce's read and before its opening (the
-  re-announce's write puts the receipt in memory right after); and a second revoke
-  between `Engine::reopen_missing_files` and the re-announce's write (the reopened
-  partial and sidecar belong to no receipt in memory or the store until the next
-  start's sweep or a first announce of that id). A first announce, one whose read
-  found no receipt in memory or the store, discards every file of the recording id
-  before `begin`, in `Engine::open_files`, within the hold of the files lock that made
-  its receipt. Those files belong to no receipt: a verified file an intake failure
-  left whose receipt a revoke deleted after a restart (the revoke found no receipt in
-  memory, and its delete cascades the row), or a partial a refusal or a second revoke
-  left. Kept, `complete` would admit the old verified file unhashed (the early return
-  of `verified_file`), or `begin` would add the new chunks to the old partial. No live
-  upload of another device can be in them: every recording route reads its device's
-  receipt into memory before it touches a file, memory drops it only when that device
-  is revoked, and `change` made the new receipt only because memory held none. So only
-  a revoked device's request can still be at work on those files. The phone deletes
-  its copy only on a 200 from `complete`, and such a request answers a refusal, an
-  error or a re-announce's status, after which the phone keeps its recording, or the
-  200 of an admission whose intake opened the verified file before the discard and
-  copies it whole. Of two first announces that race, only the one whose `change` made
-  the receipt opens files; the other answers 409. A first announce whose device was
-  revoked between its `change` and its opening opens nothing and answers 401, also
-  when the device paired again and a request wrote another device's receipt back
-  meanwhile, so it never writes its sidecar over that device's. Every discard but the
-  start's sweep follows the rules, the first announce's through its own check in
-  `Engine::open_files`: the failed save of a first announce (`announce` in
-  `crates/steno-handover/src/engine/recording.rs`), the admission, a `complete`
-  refused for a revoke (after the read, which also forgets the receipt, and after the
-  verify), the revoke, the 422 and a re-announce that finds the receipt `complete`; so
-  does the forget of a recording admitted before, whose `complete` answers 200 after a
-  revoke. So when a phone is revoked while its recording is verified or in the intake
-  and another phone announces the same recording id, that phone keeps its receipt,
-  partial and sidecar, and its upload goes on. On success the admission removes every
-  file of the recording, also the partial and sidecar a re-announce opened during the
-  intake, else an empty partial would wait for the next start's sweep. Swift keeps the
-  first rule: nothing goes, and no receipt is forgotten, while memory holds another
-  device's receipt of that recording id (`RecordingHandler.ownedByAnotherDevice`), and
-  the actor makes each check and its discard one step, with no `await` between them,
-  so no announce lands between the two. The rule covers the admission, a `complete`
-  refused for a revoke (`refusal`, after the read and after the verify, both of which
-  also forget the receipt) and the discard after a first announce's failed receipt
-  save (`announce` in `Sources/StenoHandover/Routing/RecordingHandler.swift`), which
-  runs after the save's suspension, so a revoke and another phone's announce can land
-  before it. After the intake `admit` removes the verified file it handed over
-  whatever memory holds (no other request creates it while the `complete` holds its
-  `completing` mark), then the rest of the recording's files under the rule. Four
-  discards need no check: the revoke removes the files of its own device's receipts in
-  memory; the 422 after the hash follows the revocation check in the same actor step,
-  so memory holds the phone's own receipt or none; nothing suspends between the
-  receipt read and the forget of a recording admitted before, whose `complete` answers
-  200 after a revoke; and a first announce, one whose read found no receipt in memory
-  or the store, discards every file of the recording id before `begin`, in the same
-  actor step as the read's last look at memory and the receipt's `remember` in
+  not hold: by a first announce (one whose read found no receipt in memory or the
+  store) while memory holds the receipt its `change` made, or by a re-announce of the
+  receipt's owner; a first announce or re-announce whose device was revoked since its
+  receipt read opens none and answers 401 (`Engine::open_files`,
+  `Engine::reopen_missing_files`). The check and the discard, like the creation, hold
+  the engine's files lock (taken before the state lock, held across synchronous calls
+  only), so no announce opens files between the two; a first announce holds it from
+  its `change` through its opening. Two stretches with no yield in them, on other
+  threads, still leave files whose receipt memory does not hold at the check: a
+  pairing again after a re-announce's read and before its opening (the re-announce's
+  write puts the receipt in memory right after); and a second revoke between
+  `Engine::reopen_missing_files` and the re-announce's write (the reopened partial and
+  sidecar belong to no receipt in memory or the store until the next start's sweep or
+  a first announce of that id). A first announce discards every file of the recording
+  id before `begin`, in `Engine::open_files`, within the hold of the files lock that
+  made its receipt. Those files belong to no receipt: a verified file an intake
+  failure left whose receipt a revoke deleted after a restart (the revoke found no
+  receipt in memory, and its delete cascades the row), or a partial a refusal or a
+  second revoke left. Kept, `complete` would admit the old verified file unhashed (the
+  early return of `verified_file`), or `begin` would add the new chunks to the old
+  partial. No live upload of another device can be in them: every recording route
+  reads its device's receipt into memory before it touches a file, memory drops it
+  only when that device is revoked, and `change` made the new receipt only because
+  memory held none. So only a revoked device's request can still be at work on those
+  files. Such a request answers a refusal, an error or a re-announce's status, and the
+  phone deletes its copy only on a 200 from `complete`, so it keeps its recording; or
+  it answers the 200 of an admission whose intake opened the verified file before the
+  discard and copies it whole. A first announce whose device was revoked since its
+  receipt read opens nothing, also when the device paired again and a request wrote
+  another device's receipt back meanwhile, so it never writes its sidecar over that
+  device's. Every discard but the start's sweep follows the rules, the first
+  announce's through its own check in `Engine::open_files`: the failed save of a first
+  announce (`announce` in `crates/steno-handover/src/engine/recording.rs`), the
+  admission, a `complete` refused for a revoke (after the read, which also forgets the
+  receipt, and after the verify), the revoke, the 422 and a re-announce that finds the
+  receipt `complete`; so does the forget of a recording admitted before, whose
+  `complete` answers 200 after a revoke. So when a phone is revoked while its
+  recording is verified or in the intake and another phone announces the same
+  recording id, that phone keeps its receipt, partial and sidecar, and its upload goes
+  on. On success the admission removes every file of the recording, also the partial
+  and sidecar a re-announce opened during the intake, else an empty partial would wait
+  for the next start's sweep. Swift keeps the first rule: nothing goes, and no receipt
+  is forgotten, while memory holds another device's receipt of that recording id
+  (`RecordingHandler.ownedByAnotherDevice`), and the actor makes each check and its
+  discard one step, with no `await` between them, so no announce lands between the
+  two. The rule covers the admission, a `complete` refused for a revoke (`refusal`,
+  after the read and after the verify, both of which also forget the receipt) and the
+  discard after a first announce's failed receipt save (`announce` in
+  `Sources/StenoHandover/Routing/RecordingHandler.swift`), which runs after the save's
+  suspension, so a revoke and another phone's announce can land before it. After the
+  intake `admit` removes the verified file it handed over whatever memory holds (no
+  other request creates it while the `complete` holds its `completing` mark), then the
+  rest of the recording's files under the rule. Four discards need no check: the
+  revoke removes the files of its own device's receipts in memory; the 422 after the
+  hash follows the revocation check in the same actor step, so memory holds the
+  phone's own receipt or none; nothing suspends between the receipt read and the
+  forget of a recording admitted before, whose `complete` answers 200 after a revoke;
+  and a first announce discards every file of the recording id before `begin`, in the
+  same actor step as the read's last look at memory and the receipt's `remember` in
   `persist`, so no request lands in between. As in Rust, those files belong to no
   receipt (the verified file of an intake failure whose receipt a revoke deleted after
   a restart, the files of a revoked phone's re-announce below), and no live upload of
@@ -1751,15 +1750,15 @@ touch lines; each fix is ported to Swift before cutover.
   (`readReceipt`), so a receipt only in the store keeps its files. A re-announce that
   finds the receipt `complete` needs no discard: it reads memory and calls `begin` in
   one step, and `readReceipt` checks memory again after its store read, so no file is
-  opened once memory holds the `complete` receipt.
-  Swift has no second rule: `announce` does not check `revoked`. A revoked phone's
-  first announce before the revoke's delete commits (the phone still passes the gate)
-  remembers nothing, its save queues behind the delete and fails on the foreign key,
-  and the discard after the failed save removes its files under the rule. Its
-  re-announce in that window finds the store row and opens files that belong to no
-  receipt in memory (`remember` skips that device); its save fails the same way, with
-  no discard, so the files wait for the next start's sweep or another phone's first
-  announce of that id, which discards them.
+  opened once memory holds the `complete` receipt. Swift has no second rule:
+  `announce` does not check `revoked`. A revoked phone's first announce before the
+  revoke's delete commits (the phone still passes the gate) remembers nothing, its
+  save queues behind the delete and fails on the foreign key, and the discard after
+  the failed save removes its files under the rule. Its re-announce in that window
+  finds the store row and opens files that belong to no receipt in memory (`remember`
+  skips that device); its save fails the same way, with no discard, so the files wait
+  for the next start's sweep or another phone's first announce of that id, which
+  discards them.
 - Service name: Swift's `HandoverConfiguration.defaultServiceName` uses
   `Host.current().localizedName` (the computer name in System Settings), else
   `ProcessInfo.processInfo.hostName`. The Rust default reads `HOSTNAME` or
