@@ -375,8 +375,7 @@ fn the_caf_header_counts_whole_frames_only() {
 #[test]
 fn the_caf_header_rejects_garbage_and_a_truncated_header() {
     let header = CafStreamWriter::header(48_000.0, 2);
-    let read =
-        |bytes: &[u8]| CafHeader::read_from(&mut std::io::Cursor::new(bytes), bytes.len() as u64);
+    let read = |bytes: &[u8]| CafHeader::read_bytes(bytes);
     assert!(matches!(read(&[0x41; 64]), Err(CafReadError::Malformed(_))));
     assert!(matches!(read(b"caff"), Err(CafReadError::Malformed(_))));
     for cut in [8, 30, 40, 60, CafStreamWriter::HEADER_SIZE - 1] {

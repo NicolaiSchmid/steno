@@ -19,7 +19,8 @@
 //!   real-time path.
 //! - [`writer`]: the recording writer (CAF master, 16 kHz WAV sidecars);
 //!   its thread, which syncs every file every 5 s; `durable`, the one sync
-//!   every file goes through; and the 3:1 resampler.
+//!   every file goes through; the 3:1 resampler; and what crash recovery
+//!   reads: the CAF header alone, and a sidecar finished from its length.
 //! - [`clock`]: the injectable [`Clock`] the rebuild and the detector
 //!   sleep on.
 //! - [`testing`]: the synthetic backend, the manual clock, fixtures,

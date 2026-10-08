@@ -41,6 +41,9 @@ impl WavStreamWriter {
     pub const RIFF_SIZE_BEFORE_DATA: usize = Self::HEADER_SIZE - 8;
     /// Int16.
     pub const BYTES_PER_SAMPLE: usize = 2;
+    /// Every sidecar's rate in hertz, which [`WavFile::read_16k_mono`]
+    /// demands and [`Self::recover`] checks.
+    pub const SIDECAR_SAMPLE_RATE: u32 = 16_000;
 
     /// Writes a header with zero sizes; `sample_rate` in hertz.
     pub fn create(path: &Path, sample_rate: u32) -> Result<Self, CaptureError> {
@@ -127,9 +130,8 @@ impl WavStreamWriter {
     /// Finishes a sidecar whose writer died before [`Self::finish`]: the
     /// sizes come from the file's length, whole samples only (a sample cut
     /// short at the end is cut off), and the file is synced. Only a file
-    /// whose header is this writer's at 16 kHz, sizes aside, is touched
-    /// (every sidecar's rate, which [`WavFile::read_16k_mono`] demands); a
-    /// finished one is written back as it was. Returns the samples it
+    /// whose header is this writer's at [`Self::SIDECAR_SAMPLE_RATE`],
+    /// sizes aside, is touched; a finished one is written back as it was. Returns the samples it
     /// holds. Crash recovery calls it, so the lane reads from its sidecar
     /// rather than being rebuilt from the master. Rust only: Swift had no
     /// recovery.
@@ -146,7 +148,7 @@ impl WavStreamWriter {
         }
         let mut header = [0u8; Self::HEADER_SIZE];
         file.read_exact(&mut header).map_err(io)?;
-        let sample_rate = 16_000;
+        let sample_rate = Self::SIDECAR_SAMPLE_RATE;
         let expected = Self::header(sample_rate, 0);
         // Everything but the two sizes: RIFF size at 4, data size at 40.
         if header[..4] != expected[..4] || header[8..40] != expected[8..40] {
@@ -268,7 +270,7 @@ impl WavFile {
         let io = |e: std::io::Error| WavReadError::Io(e.to_string());
         let mut file = WindowedFile::open(path).map_err(io)?;
         let layout = WavLayout::read(&mut file)?;
-        if layout.sample_rate != 16_000 || layout.channels != 1 {
+        if layout.sample_rate != WavStreamWriter::SIDECAR_SAMPLE_RATE || layout.channels != 1 {
             return Err(WavReadError::UnsupportedFormat(format!(
                 "{} Hz, {} channel(s); need 16000 Hz mono",
                 layout.sample_rate, layout.channels
