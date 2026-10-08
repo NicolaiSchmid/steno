@@ -3793,13 +3793,17 @@ async fn a_launch_skips_a_meeting_the_user_exported_meanwhile() {
         Some(|vault| FakeDestination::new(vault)),
         AudioRetention::KeepForever,
     );
-    let ids: Vec<Uuid> = (0..2)
-        .map(|_| enqueue_call(&world, &world.pipeline))
-        .collect();
-    world.pipeline.wait_until_idle().await;
-    for id in &ids {
-        mark_delivery(&world, *id, DeliveryStatus::Pending, Some(world.now));
+    for _ in 0..2 {
+        let id = enqueue_call(&world, &world.pipeline);
+        world.pipeline.wait_until_idle().await;
+        mark_delivery(&world, id, DeliveryStatus::Pending, Some(world.now));
     }
+    // In the launch's order.
+    let ids = world
+        .store
+        .meetings_with_unfinished_deliveries(world.now, ExportRetries::INTERVAL)
+        .unwrap();
+    assert_eq!(ids.len(), 2);
     let dispatcher = Arc::new(HoldsOne {
         store: world.store.clone(),
         held: ids[0],
