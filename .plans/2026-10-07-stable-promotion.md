@@ -1397,7 +1397,8 @@ interrupted" after one. On the GNOME machine,
      prompt appears at boot; `journalctl -b | grep -i 'unrecognized format'` is
      empty; `secret-tool search --all service uno.schmid.steno.mac` lists
      `llm-api-key` and `handover-identity`; `~/.local/share/Steno/secrets.json`
-     does not exist; Chromium's saved passwords still open (P8).
+     holds only `"movedToSecretService": true`; Chromium's saved passwords still
+     open (P8).
   5. The phone uploads a recording through the firewall (X4).
   6. Steps 4 to 6 of the GNOME gate, with the call in Chromium and the logout
      through the system menu, which is `uwsm stop`. Also `hyprctl dispatch exit`

@@ -922,29 +922,38 @@ still has to draw the window side. `[ ]` is not ported yet.
   crate sets no label, where Swift wrote "Steno <key>"; lookups ignore it. The CLI and
   the app do not read each other on macOS and Windows, as Keychain and the file did
   not. On Linux the app keeps its secrets in the Secret Service (`SecretServiceStore`:
-  attributes `service` and `username`, label "Steno <key>"), chosen once per process on
-  a thread of the store's own; a read never asks for the keyring's password (only that
-  choice and a write do), and a read made while the prompt is up fails, after which
-  `App::launch` builds the pipeline again and the host reads the key again once the
-  keyring opens (the handover stays off until the next start). The first launch with a
-  provider copies the file's entries into the service, reads them back and marks the
-  file (`"movedToSecretService": true`); a later launch whose own connection reads
-  every value back deletes the entries, and writes again any the provider lost. Before
-  the mark, a key both hold takes the file's value, except the handover identity, which
-  keeps the service's. After the mark, the file is no store: a key it lacks is an error
-  (`KeyringUnavailable::NotOpened`), not `None`, and a write fails, so a run that cannot
-  open the keyring neither mints an identity nor drops the API key. The CLI then reads
-  `STENO_<KEY>`, as on the Mac (an entry written into the file later is the app's to take
-  over at its next start). A value with a line break (the identity's PEM) is stored
-  base64 behind `steno-base64:`, as GNOME Keyring's unencrypted file (Omarchy's
-  default) rejects a whole keyring over one. A build
-  from before the mark cannot parse the marked file and fails every secret read and
-  write (no summaries key, no handover) rather than minting. With no provider, no
-  default collection, or a keyring the user leaves locked before the first move, the
-  app keeps every secret in the file for that run, shared with the CLI under the lock.
-  Tested against a fake Secret Service on a private `dbus-daemon` and once against
-  GNOME Keyring 50; `KWallet` and `KeePassXC` are untried (the manual checks are in
-  #221).
+  attributes `service` and `username`, label "Steno <key>"):
+  - The choice is made once per process, on a thread of the store's own. A read never
+    asks for the keyring's password; one made while a prompt is up fails, and once the
+    choice is made `App::launch` builds the pipeline again, the host reads the key
+    again and a handover that waited reads its identity again and starts. A write may
+    wait on the user, under the host's lock for Settings' save.
+  - The move: the first launch with a provider copies the file's entries into the
+    service, reads them back and marks the file (`"movedToSecretService": true`); a
+    later launch whose own connection reads every value back deletes the entries, and
+    writes again any the provider lost. Before the mark, a key both hold takes the
+    file's value, except the handover identity, which keeps the service's; with no
+    fingerprint recorded, the file identity's is recorded first, so the handover
+    reports the service's as replaced instead of adopting it.
+  - After the mark the service wins for every key, and the file is no store: a key it
+    lacks is an error (`KeyringUnavailable::NotOpened`), not `None`, and a write fails,
+    so a run that cannot open the keyring neither mints an identity nor drops the API
+    key. At a later launch an API key the file still holds goes when the service holds
+    another; the file holds no key written after the mark, as writes fail.
+  - The CLI reads `STENO_<KEY>` or the file; once the file is marked its API key reads
+    as none, with a line on stderr, so `steno process` runs without summaries, as on
+    the Mac.
+  - A value with a line break (the identity's PEM) is stored base64 behind
+    `steno-base64:`, as GNOME Keyring's unencrypted file (Omarchy's default) rejects a
+    whole keyring over one.
+  - Fallback and downgrade: with no provider, no default collection, or a keyring the
+    user leaves locked before the first move, the app keeps every secret in the file for
+    that run, shared with the CLI under the lock. A build from before the mark cannot
+    parse the marked file and fails every secret read and write (no summaries key, no
+    handover) rather than minting.
+  - Tested against a fake Secret Service on a private `dbus-daemon`, and against GNOME
+    Keyring 50 and `KeePassXC` 2.7.12 on private buses; `KWallet` is untried (the
+    manual checks are in #221).
 - Handover identity guard, every platform: the identity's SHA-256 fingerprint is
   recorded outside the secret store and the settings, in `handover-identity.json`
   under the support directory (`steno.handoverIdentityFingerprint`, written
@@ -953,7 +962,8 @@ still has to draw the window side. `[ ]` is not ported yet.
   returns `IdentityError::Unavailable` and mints nothing when the secret store cannot
   be read, when it holds no identity while a fingerprint is recorded or a phone is
   paired, or when the identity's fingerprint is not the recorded one; the handover is
-  then off for the run. It mints only with no phone paired, no fingerprint and no
+  then off for the run (an identity read while the Linux keyring asked the user is read
+  again once it answered). It mints only with no phone paired, no fingerprint and no
   identity. A rollback to the Swift app leaves the file alone; a lost record is
   rewritten from the identity found while the paired phones, which the Swift app keeps,
   hold the guard. Swift keeps its own identity in the Keychain and has no guard.
