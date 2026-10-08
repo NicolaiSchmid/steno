@@ -598,10 +598,12 @@ mod tests {
     }
 
     /// Runs `follow` over `steps`, each a change and the addresses the
-    /// computer has then, from `published`; the registrations it made.
+    /// computer has then, from `published`; the registrations it tried, of
+    /// which the ones numbered in `failing` (from 1) fail.
     fn registrations(
         published: &Mutex<Published>,
         steps: Vec<(Change, Vec<Ipv4Addr>)>,
+        failing: &[usize],
     ) -> Vec<Vec<Ipv4Addr>> {
         let lan = Mutex::new(Vec::new());
         let mut steps = steps.into_iter();
@@ -617,7 +619,11 @@ mod tests {
             published,
             |addresses| {
                 registered.push(addresses.to_vec());
-                Ok(())
+                if failing.contains(&registered.len()) {
+                    Err(mdns_sd::Error::Again)
+                } else {
+                    Ok(())
+                }
             },
         );
         registered
@@ -646,6 +652,7 @@ mod tests {
                 quiet(vec![]),
                 quiet(vec![home]),
             ],
+            &[],
         );
         assert_eq!(
             registered,
@@ -670,6 +677,7 @@ mod tests {
                 (Change::Reported, vec![]),
                 (Change::Reported, vec![]),
             ],
+            &[],
         );
         assert_eq!(
             registered,
@@ -681,34 +689,21 @@ mod tests {
     #[test]
     fn a_failed_registration_is_tried_again_at_the_next_change_even_a_quiet_one() {
         let office = Ipv4Addr::new(10, 0, 0, 5);
-        let mut changes = [
+        let record = published(&[]);
+        let steps = [
             Change::Quiet,
             Change::Quiet,
             Change::Reported,
             Change::Quiet,
             Change::Quiet,
         ]
-        .into_iter();
-        let mut watcher = Watch(|| changes.next());
-        let record = published(&[]);
-        let mut attempts = 0;
-        follow(
-            &mut watcher,
-            || vec![office],
-            &record,
-            |_| {
-                attempts += 1;
-                // The first registration, after a move, and the one the
-                // report forces, with nothing moved.
-                if attempts == 1 || attempts == 3 {
-                    Err(mdns_sd::Error::Again)
-                } else {
-                    Ok(())
-                }
-            },
-        );
+        .map(|change| (change, vec![office]));
+        // The first registration, after a move, and the one the report
+        // forces, with nothing moved.
+        let registered = registrations(&record, steps.into(), &[1, 3]);
         assert_eq!(
-            attempts, 4,
+            registered.len(),
+            4,
             "each failure is tried again at the next change"
         );
         assert_eq!(record.lock().unwrap().addresses, vec![office]);
