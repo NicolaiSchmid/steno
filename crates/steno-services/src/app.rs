@@ -786,7 +786,9 @@ impl App {
     ///    hang).
     /// 4. On a blocking task (`reconcile_at_launch`, which may wait up to
     ///    10 s for a master that is still written): those recordings are
-    ///    recovered, left alone or failed, and the list is refreshed.
+    ///    recovered, left alone or failed, and the list is refreshed. This
+    ///    does not wait for the secret store, so a recording recovered while
+    ///    the keyring asks runs on the pipeline built without the API key.
     /// 5. Meanwhile the login item is registered the first time, and the
     ///    handover listener starts when a phone is already paired.
     ///
