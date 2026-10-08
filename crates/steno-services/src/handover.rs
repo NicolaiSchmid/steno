@@ -10,7 +10,10 @@ use std::sync::Arc;
 use steno_core::protocols::BoundaryResult;
 use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store};
 use steno_handover::{FingerprintRecord, HandoverConfiguration, HandoverIdentity, HandoverService};
+use steno_host::services::{Handover, ListenerState, PairingCode};
+use uuid::Uuid;
 
+use crate::block_on;
 use crate::files::{Access, replace_file};
 
 /// The handover identity's fingerprint in `handover-identity.json` under
@@ -64,10 +67,6 @@ impl FingerprintRecord for FingerprintFile {
         Ok(())
     }
 }
-use steno_host::services::{Handover, ListenerState, PairingCode};
-use uuid::Uuid;
-
-use crate::block_on;
 
 /// The listener over the store and the recording intake.
 pub fn service(
