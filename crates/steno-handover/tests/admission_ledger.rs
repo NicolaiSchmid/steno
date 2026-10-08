@@ -10,7 +10,12 @@
 //! `.plans/2026-10-08-handover-admission-ledger.md`. Swift:
 //! `AdmissionLedgerTests`.
 
-#![allow(clippy::large_futures)]
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::large_futures,
+    clippy::too_many_lines
+)]
 
 mod common;
 

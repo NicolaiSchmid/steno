@@ -62,11 +62,16 @@ answers only once the new meeting committed.
 
 ## Which receipt an announce lands on
 
-The announce reads the ledger for the announced recording id, size and
-SHA-256 first, then the receipt from memory or the store. Ledger rows are
-never deleted, so a row read once stays true; a row that commits after the
-read belongs to an admission whose receipt memory then holds as `complete`.
-`E` is the receipt found, `A` the admission of the announced bytes.
+The announce reads the receipt from memory or the store, then, only where
+it decides something (no receipt, or one of other bytes), the ledger for the
+announced recording id, size and SHA-256; a re-announce of the receipt's own
+bytes reaches its save without another read, as before. Ledger rows are
+never deleted, so a row read once stays true. The ledger read yields, so a
+replacement checks that memory still holds the receipt it decided on, or
+none, and otherwise decides again with the one memory holds (`Engine::replace`
+through `Engine::make_and_open`; Swift's loop around the ledger read in
+`RecordingHandler.announce`). `E` is the receipt found, `A` the admission of
+the announced bytes.
 
 | Receipt `E` | Admission `A` | Answer |
 |---|---|---|
@@ -101,7 +106,15 @@ by then: another device's receipt, as today, or one of other bytes
 chunk fold), and a chunk is also dropped under another chunk size. Otherwise
 a late `complete` of the replaced bytes would mark the new upload's receipt
 `complete` with the old meeting, and the phone would delete a recording the
-computer does not have.
+computer does not have. For the same reason the intake, and the admission's
+transaction, refuse a stored receipt of another upload, another device's or
+one of other bytes (`StoreError::ReceiptOfAnotherUpload`,
+`MeetingStoreError.receiptOfAnotherUpload`, renamed from
+`...ReceiptOfAnotherDevice`): built from that receipt, the admission would
+commit it `complete` with the replaced bytes' meeting and write a ledger row
+for bytes never admitted. When the intake refuses a `complete` that way, the
+engine removes its verified file if memory holds a receipt of other bytes, so
+the new upload's `complete` cannot admit it unhashed.
 
 The files of a replaced receipt go under the rules of the first announce
 (`Engine::open_files`, the actor step in `RecordingHandler.announce`): the
@@ -164,8 +177,10 @@ Both apps, each failing on the code before this change:
   split.
 - The takeover: another device's announce of the same bytes takes over a
   receipt not yet `complete`, uploads the rest and completes.
-- The upload guard: a late `complete` of replaced bytes leaves the new
-  receipt unfinished.
+- The upload guard: a late `complete` of replaced bytes, refused by the
+  intake or committed before the announce, leaves the new receipt
+  unfinished; a late chunk of another split or of other bytes is not folded
+  in; the intake refuses another upload's receipt.
 - The migrator ignores a v6 applied to a copy, with a warning; the store
   still writes.
 - The desktop shell refuses to start, with the dialog, on a store error.

@@ -37,7 +37,7 @@ enum Announced {
     /// Memory held another receipt of the recording id by the time of the
     /// change than the one the decision was made on; the announce decides
     /// again with that one.
-    Changed(HandoverReceipt),
+    Changed(Box<HandoverReceipt>),
 }
 
 pub(super) fn no_such_recording() -> HandoverResponse {
@@ -93,7 +93,7 @@ impl Engine {
             };
             match announced {
                 Announced::Answered(response) => return response,
-                Announced::Changed(held) => existing = Some(held),
+                Announced::Changed(held) => existing = Some(*held),
             }
         }
     }
@@ -135,18 +135,13 @@ impl Engine {
             Ok(admitted) => admitted,
             Err(failed) => return failed,
         };
-        match admitted {
-            Some(meeting_id) => {
-                let delivered =
-                    self.fresh(device, metadata, HandoverState::Complete { meeting_id });
-                self.replace(None, delivered, None, StatusCode::OK).await
-            }
-            None => {
-                let fresh = self.fresh(device, metadata, HandoverState::Receiving);
-                self.replace(None, fresh, Some(metadata), StatusCode::CREATED)
-                    .await
-            }
+        if let Some(meeting_id) = admitted {
+            let delivered = self.fresh(device, metadata, HandoverState::Complete { meeting_id });
+            return self.replace(None, delivered, None, StatusCode::OK).await;
         }
+        let fresh = self.fresh(device, metadata, HandoverState::Receiving);
+        self.replace(None, fresh, Some(metadata), StatusCode::CREATED)
+            .await
     }
 
     /// A receipt of `metadata`'s bytes for `device` in `state`, no chunk
@@ -195,7 +190,7 @@ impl Engine {
         let (recording_id, device_id) = (fresh.recording_id, fresh.device_id);
         let (receipt, place, opened) = match self.make_and_open(expected, fresh, begin) {
             Ok(made) => made,
-            Err(held) => return Announced::Changed(*held),
+            Err(held) => return Announced::Changed(held),
         };
         let saved = self.save(receipt.clone(), place).await;
         let Some(opened) = opened else {
@@ -361,7 +356,7 @@ impl Engine {
                 },
                 |_| {},
             )
-            .map_err(|held| Announced::Changed(*held))?;
+            .map_err(Announced::Changed)?;
         if let Err(error) = self.save(taken.clone(), place).await {
             return Err(Announced::Answered(HandoverResponse::internal_error(
                 "saving the receipt",
