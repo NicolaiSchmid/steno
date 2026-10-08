@@ -1,14 +1,23 @@
 //! No download inside a pipeline run: the speech engine and the diarizer
 //! the app's pipelines run, each behind a gate that refuses a call while
 //! its models are not installed. The refusal is
-//! [`PipelineFailure::models_missing`], so the meeting stays `queued`
-//! without a reason and is processed once Settings or onboarding installed
-//! the models ([`ResumeAfterInstall`] then calls `resume_unfinished`). The
-//! speech sidecar's own install is turned off as well
+//! [`PipelineFailure::models_missing`], so the meeting stays `queued` with
+//! no failure reason on its row and is processed once Settings or
+//! onboarding installed the models ([`ResumingSpeechModels`] then resumes
+//! it). The speech sidecar's own install is turned off as well
 //! (`SidecarConfig::install_models`), so a file removed between the gate's
-//! check and the child's load is refused too, never fetched; its
-//! `NotInstalled` is the same refusal. The CLI's engines keep downloading
-//! on first use. Rust only: the Swift pipeline downloaded inside the run.
+//! check and the child's load is refused too, never fetched; an engine's
+//! error while its models are gone is the same refusal. The `steno`
+//! command's engines (`crates/steno-cli/src/wiring.rs`) keep downloading
+//! on first use, for a command a user runs. Rust only: the Swift pipeline
+//! downloaded inside the run.
+//!
+//! | Item | What it does |
+//! |------|--------------|
+//! | [`InstalledCheck`] | Whether a boundary's models are on disk now |
+//! | [`GatedSpeechEngine`] | A speech engine that refuses while its models are missing |
+//! | [`GatedDiarizer`] | The same for the diarizer |
+//! | [`ResumingSpeechModels`] | The model service that resumes the waiting meetings after an install |
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -23,11 +32,13 @@ use steno_host::speech::ModelAsset;
 use steno_pipeline::PipelineFailure;
 use steno_speech::SpeechError;
 
+use crate::pipeline::CurrentPipeline;
+
 /// Whether the models a boundary loads are installed now.
-pub type Installed = Arc<dyn Fn() -> bool + Send + Sync>;
+pub type InstalledCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// `Ok` while `installed` holds, else the refusal for `stage`.
-fn check(installed: &Installed, stage: PipelineStage) -> BoundaryResult<()> {
+fn check(installed: &InstalledCheck, stage: PipelineStage) -> BoundaryResult<()> {
     if installed() {
         Ok(())
     } else {
@@ -35,14 +46,18 @@ fn check(installed: &Installed, stage: PipelineStage) -> BoundaryResult<()> {
     }
 }
 
-/// An engine's `NotInstalled` (the speech sidecar's refusal with its
-/// install turned off) as the refusal for `stage`; any other error as it
-/// is.
-fn refusing(stage: PipelineStage, error: BoxError) -> BoxError {
-    if matches!(
+/// An error of the boundary behind the gate as the refusal for `stage`
+/// when it is the speech sidecar's `NotInstalled` (its install turned
+/// off), or when `installed` no longer holds: the models went between the
+/// gate's check and the load (Remove in Settings), and the `CoreML`
+/// engine's or the diarizer's failed load says so in its own words. Any
+/// other error as it is.
+fn refusing(installed: &InstalledCheck, stage: PipelineStage, error: BoxError) -> BoxError {
+    let not_installed = matches!(
         error.downcast_ref::<SpeechError>(),
         Some(SpeechError::NotInstalled { .. })
-    ) {
+    );
+    if not_installed || !installed() {
         Box::new(PipelineFailure::models_missing(stage))
     } else {
         error
@@ -53,12 +68,12 @@ fn refusing(stage: PipelineStage, error: BoxError) -> BoxError {
 /// attributes it) and `transcribe` while its models are not installed.
 pub struct GatedSpeechEngine {
     inner: Arc<dyn SpeechEngine>,
-    installed: Installed,
+    installed: InstalledCheck,
 }
 
 impl GatedSpeechEngine {
     #[must_use]
-    pub fn new(inner: Arc<dyn SpeechEngine>, installed: Installed) -> Self {
+    pub fn new(inner: Arc<dyn SpeechEngine>, installed: InstalledCheck) -> Self {
         GatedSpeechEngine { inner, installed }
     }
 }
@@ -78,7 +93,7 @@ impl SpeechEngine for GatedSpeechEngine {
         self.inner
             .prepare()
             .await
-            .map_err(|error| refusing(PipelineStage::Decode, error))
+            .map_err(|error| refusing(&self.installed, PipelineStage::Decode, error))
     }
 
     async fn transcribe(
@@ -90,7 +105,7 @@ impl SpeechEngine for GatedSpeechEngine {
         self.inner
             .transcribe(audio, hint)
             .await
-            .map_err(|error| refusing(PipelineStage::Transcribe, error))
+            .map_err(|error| refusing(&self.installed, PipelineStage::Transcribe, error))
     }
 
     async fn release(&self) -> BoundaryResult<()> {
@@ -102,12 +117,12 @@ impl SpeechEngine for GatedSpeechEngine {
 /// while its models are not installed, before its loader can fetch them.
 pub struct GatedDiarizer {
     inner: Arc<dyn Diarizer>,
-    installed: Installed,
+    installed: InstalledCheck,
 }
 
 impl GatedDiarizer {
     #[must_use]
-    pub fn new(inner: Arc<dyn Diarizer>, installed: Installed) -> Self {
+    pub fn new(inner: Arc<dyn Diarizer>, installed: InstalledCheck) -> Self {
         GatedDiarizer { inner, installed }
     }
 }
@@ -116,33 +131,46 @@ impl GatedDiarizer {
 impl Diarizer for GatedDiarizer {
     async fn prepare(&self) -> BoundaryResult<()> {
         check(&self.installed, PipelineStage::Diarize)?;
-        self.inner.prepare().await
+        self.inner
+            .prepare()
+            .await
+            .map_err(|error| refusing(&self.installed, PipelineStage::Diarize, error))
     }
 
     async fn diarize(&self, audio: &AudioBuffer16k) -> BoundaryResult<DiarizationResult> {
         check(&self.installed, PipelineStage::Diarize)?;
-        self.inner.diarize(audio).await
+        self.inner
+            .diarize(audio)
+            .await
+            .map_err(|error| refusing(&self.installed, PipelineStage::Diarize, error))
     }
 }
 
 /// The host's model service with one addition: once a download from
 /// Settings or onboarding installed its models, `resume` runs, so the
-/// meetings a run left `queued` for them are processed
-/// (`ProcessingPipeline::resume_unfinished`). Every other call goes to
-/// `inner` as it is.
-pub struct ResumeAfterInstall<M> {
+/// meetings a run left `queued` for them are processed. Every other call
+/// goes to `inner` as it is.
+pub struct ResumingSpeechModels<M> {
     inner: M,
     resume: Box<dyn Fn() + Send + Sync>,
 }
 
-impl<M: SpeechModels> ResumeAfterInstall<M> {
+impl<M: SpeechModels> ResumingSpeechModels<M> {
     #[must_use]
     pub fn new(inner: M, resume: Box<dyn Fn() + Send + Sync>) -> Self {
-        ResumeAfterInstall { inner, resume }
+        ResumingSpeechModels { inner, resume }
+    }
+
+    /// The app's: an install resumes, on `pipeline`'s current pipeline,
+    /// the meetings its pipelines left waiting
+    /// ([`CurrentPipeline::resume_unfinished`]).
+    #[must_use]
+    pub fn resuming(inner: M, pipeline: Arc<CurrentPipeline>) -> Self {
+        Self::new(inner, Box::new(move || pipeline.resume_unfinished()))
     }
 }
 
-impl<M: SpeechModels> SpeechModels for ResumeAfterInstall<M> {
+impl<M: SpeechModels> SpeechModels for ResumingSpeechModels<M> {
     fn is_installed(&self, asset: ModelAsset) -> bool {
         self.inner.is_installed(asset)
     }
@@ -194,7 +222,7 @@ mod tests {
 
     use super::*;
 
-    fn flag(value: bool) -> (Arc<AtomicBool>, Installed) {
+    fn flag(value: bool) -> (Arc<AtomicBool>, InstalledCheck) {
         let flag = Arc::new(AtomicBool::new(value));
         let read = flag.clone();
         (flag, Arc::new(move || read.load(Ordering::SeqCst)))
@@ -248,22 +276,108 @@ mod tests {
     }
 
     /// The sidecar's own `NotInstalled` (its install turned off) is the
-    /// same refusal; any other error passes as it is.
+    /// same refusal; any other error passes as it is while the models are
+    /// installed.
     #[test]
     fn a_not_installed_from_the_engine_is_the_refusal() {
+        let (_, installed) = flag(true);
         let not_installed: BoxError = Box::new(SpeechError::NotInstalled {
             asset: "x".to_owned(),
             directory: "/m/x".into(),
             missing: vec!["a".to_owned()],
         });
         assert_eq!(
-            refusal(&refusing(PipelineStage::Transcribe, not_installed)),
+            refusal(&refusing(
+                &installed,
+                PipelineStage::Transcribe,
+                not_installed
+            )),
             Some(PipelineStage::Transcribe)
         );
         let other: BoxError = "the child died".into();
-        let passed = refusing(PipelineStage::Transcribe, other);
+        let passed = refusing(&installed, PipelineStage::Transcribe, other);
         assert_eq!(refusal(&passed), None);
         assert_eq!(passed.to_string(), "the child died");
+    }
+
+    /// A speech engine or diarizer whose load fails because its models
+    /// went after the gate let the call through (Remove in Settings), in
+    /// its own words as the `CoreML` engine and the diarizer's loader put
+    /// it: the call is the refusal, so the meeting waits instead of
+    /// failing.
+    #[tokio::test]
+    async fn a_load_that_fails_once_the_models_are_gone_is_the_refusal() {
+        struct Removing {
+            installed: Arc<AtomicBool>,
+        }
+
+        impl Removing {
+            fn fail(&self) -> BoundaryResult<()> {
+                self.installed.store(false, Ordering::SeqCst);
+                Err("loading /m/Encoder.mlmodelc: no such file".into())
+            }
+        }
+
+        #[async_trait]
+        impl SpeechEngine for Removing {
+            fn id(&self) -> &'static str {
+                "removing"
+            }
+
+            fn supported_languages(&self) -> &BTreeSet<LanguageTag> {
+                static NONE: BTreeSet<LanguageTag> = BTreeSet::new();
+                &NONE
+            }
+
+            async fn prepare(&self) -> BoundaryResult<()> {
+                self.fail()
+            }
+
+            async fn transcribe(
+                &self,
+                _: &AudioBuffer16k,
+                _: Option<&LanguageTag>,
+            ) -> BoundaryResult<Vec<RawSegment>> {
+                self.fail().map(|()| Vec::new())
+            }
+        }
+
+        #[async_trait]
+        impl Diarizer for Removing {
+            async fn prepare(&self) -> BoundaryResult<()> {
+                self.fail()
+            }
+
+            async fn diarize(&self, _: &AudioBuffer16k) -> BoundaryResult<DiarizationResult> {
+                Err("unused".into())
+            }
+        }
+
+        let (installed, check) = flag(true);
+        let removing = Arc::new(Removing {
+            installed: installed.clone(),
+        });
+        let engine = GatedSpeechEngine::new(removing.clone(), check.clone());
+        assert_eq!(
+            refusal(&engine.prepare().await.unwrap_err()),
+            Some(PipelineStage::Decode)
+        );
+        installed.store(true, Ordering::SeqCst);
+        assert_eq!(
+            refusal(
+                &engine
+                    .transcribe(&AudioBuffer16k::silence(1.0), None)
+                    .await
+                    .unwrap_err()
+            ),
+            Some(PipelineStage::Transcribe)
+        );
+        installed.store(true, Ordering::SeqCst);
+        let diarizer = GatedDiarizer::new(removing, check);
+        assert_eq!(
+            refusal(&diarizer.prepare().await.unwrap_err()),
+            Some(PipelineStage::Diarize)
+        );
     }
 
     /// A download that installed its models resumes the waiting meetings;
@@ -271,7 +385,7 @@ mod tests {
     #[test]
     fn an_install_resumes_the_waiting_meetings_and_a_failed_one_does_not() {
         let resumed = Arc::new(AtomicUsize::new(0));
-        let models = ResumeAfterInstall::new(steno_host::fakes::FakeSpeechModels::default(), {
+        let models = ResumingSpeechModels::new(steno_host::fakes::FakeSpeechModels::default(), {
             let resumed = resumed.clone();
             Box::new(move || {
                 resumed.fetch_add(1, Ordering::SeqCst);
@@ -288,6 +402,40 @@ mod tests {
                 .is_err()
         );
         assert_eq!(resumed.load(Ordering::SeqCst), 1);
+    }
+
+    /// The speech sidecar behind a gate that lets every call through,
+    /// over an empty models directory and a mirror on a closed port: the
+    /// app's engines turn the sidecar's install off, so the child's load
+    /// is refused for the missing models before any download starts, and
+    /// nothing is written.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_apps_sidecar_refuses_missing_models_past_its_gate() {
+        use crate::speech::{SpeechEngines, testing};
+        use steno_speech::{SpeechRuntime, SpeechSettings};
+
+        let dir = tempfile::tempdir().unwrap();
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mirror = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        let engines = SpeechEngines::gated(
+            testing::setup(
+                dir.path(),
+                SpeechSettings {
+                    models_mirror: Some(mirror),
+                    ..SpeechSettings::default()
+                },
+            ),
+            Arc::new(|_| true),
+            Arc::new(|| true),
+        );
+        let error = engines
+            .engine(SpeechRuntime::OnnxSidecar)
+            .prepare()
+            .await
+            .unwrap_err();
+        assert_eq!(refusal(&error), Some(PipelineStage::Decode), "{error}");
+        assert!(testing::files_under(dir.path()).is_empty());
     }
 
     /// The app's engines over an empty models directory, with a mirror

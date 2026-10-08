@@ -10,8 +10,8 @@ use steno_core::protocols::BoundaryResult;
 use steno_core::{AudioRetention, MeetingStateKind};
 use steno_host::services::{Pipeline, ProcessAgainRefusal};
 use steno_pipeline::{
-    ExportRetries, InFlight, Operation, PipelineDependencies, PipelineFailure, ProcessingPipeline,
-    QuitLatch, ReprocessError, RetentionSweep, SweepIncomplete,
+    ExportRetries, InFlight, ModelWaits, Operation, PipelineDependencies, PipelineFailure,
+    ProcessingPipeline, QuitLatch, ReprocessError, RetentionSweep, SweepIncomplete,
 };
 use steno_speech::SpeechRuntime;
 use uuid::Uuid;
@@ -53,14 +53,20 @@ struct Current {
 }
 
 impl Current {
-    /// The pipeline over `built`, sharing `latch` and `in_flight`.
-    fn new(built: BuiltPipeline, latch: &QuitLatch, in_flight: &InFlight) -> Self {
+    /// The pipeline over `built`, sharing `latch`, `in_flight` and `waits`.
+    fn new(
+        built: BuiltPipeline,
+        latch: &QuitLatch,
+        in_flight: &InFlight,
+        waits: &ModelWaits,
+    ) -> Self {
         Current {
             pipeline: ProcessingPipeline::new(
                 built
                     .dependencies
                     .with_quit_latch(latch.clone())
-                    .with_in_flight(in_flight.clone()),
+                    .with_in_flight(in_flight.clone())
+                    .with_model_waits(waits.clone()),
             ),
             engine: built.engine,
         }
@@ -73,9 +79,12 @@ impl Current {
 /// started with. Everything that enqueues resolves `current()` per call,
 /// so a recording that ends after a reload goes through the new one.
 /// Every pipeline it builds shares one [`QuitLatch`], so
-/// [`quit`](Self::quit) reaches the retired ones too, and one in-flight
-/// set ([`InFlight`]), so the new one refuses a meeting a retired one
-/// still holds. Held by `App`, the recorder, the phone intake and
+/// [`quit`](Self::quit) reaches the retired ones too, one in-flight set
+/// ([`InFlight`]), so the new one refuses a meeting a retired one still
+/// holds, and one [`ModelWaits`], so
+/// [`resume_unfinished`](Self::resume_unfinished) starts the meetings any
+/// of them left waiting for models and none that a retired one still
+/// runs. Held by `App`, the recorder, the phone intake and
 /// [`HostPipeline`].
 pub struct CurrentPipeline {
     current: Mutex<Current>,
@@ -83,6 +92,7 @@ pub struct CurrentPipeline {
     runtime: tokio::runtime::Handle,
     quit_latch: QuitLatch,
     in_flight: InFlight,
+    model_waits: ModelWaits,
 }
 
 impl CurrentPipeline {
@@ -95,12 +105,14 @@ impl CurrentPipeline {
     ) -> Self {
         let quit_latch = QuitLatch::default();
         let in_flight = InFlight::default();
+        let model_waits = ModelWaits::default();
         CurrentPipeline {
-            current: Mutex::new(Current::new(built, &quit_latch, &in_flight)),
+            current: Mutex::new(Current::new(built, &quit_latch, &in_flight, &model_waits)),
             make,
             runtime,
             quit_latch,
             in_flight,
+            model_waits,
         }
     }
 
@@ -125,14 +137,14 @@ impl CurrentPipeline {
         (current.pipeline.clone(), current.engine.clone())
     }
 
-    /// [`ProcessingPipeline::resume_unfinished`] on the current pipeline,
-    /// from any thread: the meetings left `queued` or `processing` start
-    /// on the runtime. Called once a model install finished, so the
-    /// meetings a run refused for missing models are processed; a failure
-    /// is logged.
+    /// [`ProcessingPipeline::resume_waiting`] on the current pipeline,
+    /// from any thread: the meetings a run on any of its pipelines left
+    /// `queued` for missing models since the last resume start on the
+    /// runtime, and a meeting a retired pipeline still runs is left to it.
+    /// Called once a model install finished; a failure is logged.
     pub fn resume_unfinished(&self) {
         let _entered = self.runtime.enter();
-        match self.current().resume_unfinished() {
+        match self.current().resume_waiting() {
             Ok(resumed) if !resumed.is_empty() => {
                 tracing::info!(count = resumed.len(), "resumed meetings waiting for models");
             }
@@ -156,7 +168,12 @@ impl CurrentPipeline {
     /// the retired pipeline's jobs and the new one's share them and the
     /// one sidecar child.
     pub fn reload(&self) -> Result<(), BuildError> {
-        let replacement = Current::new((self.make)()?, &self.quit_latch, &self.in_flight);
+        let replacement = Current::new(
+            (self.make)()?,
+            &self.quit_latch,
+            &self.in_flight,
+            &self.model_waits,
+        );
         let retired = std::mem::replace(&mut *self.lock(), replacement).pipeline;
         self.runtime
             .spawn(async move { retired.wait_until_idle().await });
@@ -1339,5 +1356,121 @@ mod tests {
             ),
             "{event:?}"
         );
+    }
+
+    /// A reload while a retired pipeline still transcribes meeting M, then
+    /// a model install's resume on the current pipeline: M is not started
+    /// again there, so it is processed once (one LLM pass, one export).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_resume_after_a_reload_does_not_run_an_in_flight_meeting_twice() {
+        let (dir, store) = temp_store();
+        let children = Arc::new(Children::default());
+        let sidecar = Arc::new(std::sync::Mutex::new(None::<Arc<FakeSidecar>>));
+        let engines = Arc::new(SpeechEngines::with_builder(
+            crate::speech::testing::setup(dir.path(), steno_speech::SpeechSettings::default()),
+            Box::new({
+                let (children, sidecar) = (children.clone(), sidecar.clone());
+                move |_runtime| -> Arc<dyn SpeechEngine> {
+                    let engine = Arc::new(FakeSidecar {
+                        inner: FakeSpeechEngine::default(),
+                        children: children.clone(),
+                        child: AtomicBool::new(false),
+                    });
+                    *sidecar.lock().unwrap() = Some(engine.clone());
+                    engine
+                }
+            }),
+        ));
+        let make: MakeDependencies = {
+            let (store, engines) = (store.clone(), engines.clone());
+            Arc::new(move || {
+                Ok(BuiltPipeline {
+                    dependencies: fake_dependencies(&store, "fake-engine")
+                        .with_speech_engine(engines.engine(SpeechRuntime::OnnxSidecar)),
+                    engine: BuiltEngine {
+                        engine_id: "parakeet-v3".to_owned(),
+                        runtime: SpeechRuntime::OnnxSidecar,
+                    },
+                })
+            })
+        };
+        let current =
+            CurrentPipeline::new(make().unwrap(), make, tokio::runtime::Handle::current());
+        let retired = current.current();
+        let held = enqueue_call(dir.path(), &retired);
+        tokio::time::timeout(PATIENCE, children.entered.notified())
+            .await
+            .expect("the first job is transcribing");
+        current.reload().unwrap();
+        current.resume_unfinished();
+        let twice = current.current().in_flight().contains(&held);
+        children.open.notify_one();
+        eventually("the meeting is ready and every run is done", || {
+            meeting_state(&store, held) == MeetingState::Ready
+                && current.current().in_flight().is_empty()
+                && retired.in_flight().is_empty()
+        })
+        .await;
+        current.current().wait_until_idle().await;
+        let engine = sidecar.lock().unwrap().clone().unwrap();
+        let after_held = engine.inner.transcriptions.count();
+        let control = enqueue_call(dir.path(), &current.current());
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, control), MeetingState::Ready);
+        let one_run = engine.inner.transcriptions.count() - after_held;
+        assert!(
+            !twice && after_held == one_run,
+            "the in-flight meeting started again on the new pipeline: twice={twice}, \
+             transcriptions {after_held} for it vs {one_run} for one run"
+        );
+    }
+
+    /// A meeting a run left waiting for models before a reload is started
+    /// by the app's model service once an install finished, on the
+    /// pipeline the reload built: every pipeline a `CurrentPipeline`
+    /// builds shares its waiting meetings.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_install_after_a_reload_resumes_the_meeting_the_retired_pipeline_left_waiting() {
+        use steno_host::services::SpeechModels as _;
+        let (dir, store) = temp_store();
+        let installed = Arc::new(AtomicBool::new(false));
+        let make: MakeDependencies = {
+            let (store, installed) = (store.clone(), installed.clone());
+            Arc::new(move || {
+                let installed = installed.clone();
+                let gated = crate::model_gate::GatedSpeechEngine::new(
+                    Arc::new(FakeSpeechEngine::default()),
+                    Arc::new(move || installed.load(Ordering::SeqCst)),
+                );
+                Ok(BuiltPipeline {
+                    dependencies: fake_dependencies(&store, "fake-engine").with_speech_engine(
+                        steno_pipeline::SharedSpeechEngine::new(Arc::new(gated)),
+                    ),
+                    engine: BuiltEngine {
+                        engine_id: "parakeet-v3".to_owned(),
+                        runtime: SpeechRuntime::OnnxSidecar,
+                    },
+                })
+            })
+        };
+        let current = Arc::new(CurrentPipeline::new(
+            make().unwrap(),
+            make,
+            tokio::runtime::Handle::current(),
+        ));
+        let models = crate::model_gate::ResumingSpeechModels::resuming(
+            steno_host::fakes::FakeSpeechModels::default(),
+            current.clone(),
+        );
+        let waiting = enqueue_call(dir.path(), &current.current());
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Queued);
+        current.reload().unwrap();
+        installed.store(true, Ordering::SeqCst);
+        models
+            .download(steno_host::speech::ModelAsset::ParakeetV3, &mut |_, _| {})
+            .unwrap();
+        current.current().wait_until_idle().await;
+        assert_eq!(meeting_state(&store, waiting), MeetingState::Ready);
     }
 }

@@ -266,7 +266,8 @@ impl ModelAsset {
     /// ([`ModelStore::coreml_in_models_directory`]) installs it where the
     /// Swift app does. The other bundles of the repository (the int4 and v2
     /// encoders, the older joints, the `.mlpackage` sources) are not
-    /// fetched.
+    /// fetched. Swift: `ModelAsset.modelFolder` and `requiredFiles` in
+    /// `Sources/StenoSpeech/Models/ModelAsset.swift`.
     #[must_use]
     pub fn parakeet_v3_coreml() -> Self {
         let file = |name: &str, sha256: &str, size: u64| ModelFile {
@@ -316,7 +317,7 @@ impl ModelAsset {
     /// The `CoreML` Parakeet ([`Self::parakeet_v3_coreml`]) lives in its
     /// own store and is not among them.
     #[must_use]
-    pub fn all() -> Vec<Self> {
+    pub fn onnx() -> Vec<Self> {
         vec![Self::silero_vad(), Self::parakeet_v3_fp32()]
     }
 
@@ -471,6 +472,8 @@ impl ModelStore {
 
     /// The folder of the models directory the `CoreML` models live in, as
     /// the Swift app's `FluidAudio` lays them out.
+    /// Swift: `ModelAsset.frameworkRoot`
+    /// (`Sources/StenoSpeech/Models/ModelAsset.swift`).
     pub const FLUIDAUDIO_FOLDER: &'static str = "fluidaudio";
 
     /// The store in the models directory `models_directory`:
@@ -2754,7 +2757,7 @@ mod tests {
         // GitHub release assets cap at 2 GB a file, so a file that large
         // can only come from Hugging Face.
         let hosted = ModelAsset::parakeet_v3_fp32();
-        for asset in ModelAsset::all() {
+        for asset in ModelAsset::onnx() {
             for file in &asset.files {
                 match &file.source {
                     Some(ModelSource::Url(url)) => {
@@ -2852,7 +2855,7 @@ mod tests {
             ));
             assert!(!store.is_installed(&bad));
         }
-        for asset in ModelAsset::all() {
+        for asset in ModelAsset::onnx() {
             asset.validate().unwrap();
         }
         ModelAsset::parakeet_v3_coreml().validate().unwrap();
@@ -2867,7 +2870,7 @@ mod tests {
 
     #[test]
     fn the_manifest_is_consistent_and_the_root_follows_the_support_directory() {
-        for asset in ModelAsset::all() {
+        for asset in ModelAsset::onnx() {
             assert!(!asset.files.is_empty());
             for file in &asset.files {
                 assert_eq!(file.sha256.len(), 64, "{}", file.name);
@@ -2948,7 +2951,7 @@ mod tests {
             Path::new("/models/fluidaudio/parakeet-tdt-0.6b-v3")
         );
         assert!(
-            ModelAsset::all().iter().all(|onnx| onnx.id != asset.id),
+            ModelAsset::onnx().iter().all(|onnx| onnx.id != asset.id),
             "the ONNX assets stay the sidecar's"
         );
     }

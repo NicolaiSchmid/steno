@@ -2463,7 +2463,7 @@ mod tests {
     async fn a_recording_start_checks_the_models_of_the_configured_engine() {
         let models_dir = tempfile::tempdir().unwrap();
         let models = Arc::new(crate::speech::testing::models_in(models_dir.path()));
-        crate::speech::testing::install_coreml_parakeet(&models.coreml);
+        crate::speech::testing::install_coreml_parakeet(&models);
         crate::speech::testing::install_onnx_diarizer(&models);
         assert!(models.is_installed(ModelAsset::OfflineDiarizer));
         let before = crate::speech::testing::files_under(models_dir.path());

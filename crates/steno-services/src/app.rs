@@ -26,7 +26,7 @@ use steno_pipeline::{
 use crate::block_on;
 use crate::handover::{ListenerHandover, start_if_paired};
 use crate::llm::{ClientLlmService, codex_store};
-use crate::model_gate::ResumeAfterInstall;
+use crate::model_gate::ResumingSpeechModels;
 use crate::pipeline::{
     BuiltEngine, BuiltPipeline, CurrentPipeline, HostPipeline, MakeDependencies, run_sweep,
 };
@@ -548,10 +548,9 @@ pub fn build(options: AppOptions) -> Result<App, BuildError> {
     let permissions = Arc::new(FakePermissions::all_granted());
     // Settings and onboarding install the models; the pipeline never does
     // (`model_gate`), so an install resumes the meetings waiting for it.
-    let resume = pipeline.clone();
-    let speech_models = Arc::new(ResumeAfterInstall::new(
+    let speech_models = Arc::new(ResumingSpeechModels::resuming(
         ModelStoreSpeechModels::new(speech),
-        Box::new(move || resume.resume_unfinished()),
+        pipeline.clone(),
     ));
     let recorder = CaptureRecorder::new(
         store.clone(),
@@ -1601,8 +1600,8 @@ mod tests {
         );
         std::fs::create_dir_all(&first).unwrap();
         let full = models_in(&reloaded);
-        install_coreml_parakeet(&full.coreml);
-        for asset in steno_speech::ModelAsset::all() {
+        install_coreml_parakeet(&full);
+        for asset in steno_speech::ModelAsset::onnx() {
             install_speech_asset(&full, &asset);
         }
         install_onnx_diarizer(&full);
