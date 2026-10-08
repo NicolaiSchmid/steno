@@ -231,7 +231,7 @@ pub fn speech_setup(models_directory: PathBuf) -> SpeechSetup {
 /// the 0600 secrets file in the support directory. After the Linux app
 /// moved the file's secrets into the Secret Service, which the command line
 /// does not read, the file keeps a copy of the key only until the app's
-/// next launch removes it; a key it no longer holds is read as none and
+/// next launch removes it or the app saves the key; a key it no longer holds is read as none and
 /// the run goes on without one, saying so on stderr, as on the Mac, whose
 /// app keeps the key in the Keychain.
 pub async fn api_key() -> Result<Option<String>, Failure> {
@@ -271,19 +271,28 @@ fn key_or_none(
 }
 
 /// The LLM passes from the settings, `None` without an endpoint. The API
-/// key is read only for a server endpoint, the one kind that sends it.
+/// key is read only when [`sends_key`].
 pub async fn llm_passes(
     settings: &Settings,
 ) -> Result<Option<steno_services::llm::Passes>, Failure> {
-    let sends_key = settings.llm_provider == steno_core::LlmProvider::Endpoint
-        && steno_llm::LlmEndpoint::from_settings(settings).is_some();
-    let key = if sends_key { api_key().await? } else { None };
+    let key = if sends_key(settings) {
+        api_key().await?
+    } else {
+        None
+    };
     Ok(steno_services::llm::passes(
         settings,
         key.as_deref(),
         &steno_services::llm::codex_store(),
         steno_adapters::runtime::local_time_zone(),
     ))
+}
+
+/// Whether the settings name a server endpoint, the one provider that
+/// sends the API key.
+fn sends_key(settings: &Settings) -> bool {
+    settings.llm_provider == steno_core::LlmProvider::Endpoint
+        && steno_llm::LlmEndpoint::from_settings(settings).is_some()
 }
 
 /// The pipeline dependencies: core's fakes for speech and diarization
@@ -379,6 +388,31 @@ mod tests {
             Some("sk")
         );
         assert!(key_or_none(Err("the file is damaged".into()), &key).is_err());
+    }
+
+    /// Only a configured server endpoint reads the key.
+    #[test]
+    fn only_a_server_endpoint_sends_the_key() {
+        let endpoint = Settings {
+            llm_provider: steno_core::LlmProvider::Endpoint,
+            llm_base_url: Some("https://api.openai.com/v1".to_owned()),
+            llm_model: Some("gpt-4.1-mini".to_owned()),
+            ..Settings::default()
+        };
+        assert!(sends_key(&endpoint));
+        let without_address = Settings {
+            llm_base_url: None,
+            ..endpoint.clone()
+        };
+        assert!(!sends_key(&without_address));
+        let codex = Settings {
+            llm_provider: steno_core::LlmProvider::Codex,
+            codex_model: Some("gpt-5".to_owned()),
+            codex_confirmed_at: Some(chrono::DateTime::UNIX_EPOCH),
+            ..endpoint
+        };
+        assert!(steno_llm::LlmEndpoint::from_settings(&codex).is_some());
+        assert!(!sends_key(&codex));
     }
 
     /// The command's own read over a file the app marked: a copy the move
