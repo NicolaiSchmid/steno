@@ -92,28 +92,26 @@ fn the_asset_validates_and_keeps_the_diarizers_folder_and_names() {
 #[test]
 fn a_mirror_serves_the_files_from_its_diarization_folder() {
     let asset = models::asset();
-    let mirrored = ModelStore::new("/tmp/steno-models/onnx")
+    let urls = |store: &ModelStore| -> Vec<String> {
+        asset
+            .files
+            .iter()
+            .map(|file| store.url_for(&asset, file).unwrap())
+            .collect()
+    };
+    let hosts = ModelStore::new("/tmp/steno-models/onnx");
+    let mirrored = hosts
+        .clone()
         .with_mirror(Some("http://mirror.example:8000/models/".to_owned()));
-    let urls: Vec<String> = asset
-        .files
-        .iter()
-        .map(|file| mirrored.url_for(&asset, file).unwrap())
-        .collect();
     assert_eq!(
-        urls,
+        urls(&mirrored),
         [
             "http://mirror.example:8000/models/diarization/pyannote-segmentation-3.0.onnx",
             "http://mirror.example:8000/models/diarization/wespeaker-en-voxceleb-resnet34-lm.onnx",
         ]
     );
-    let hosts = ModelStore::new("/tmp/steno-models/onnx");
-    let urls: Vec<String> = asset
-        .files
-        .iter()
-        .map(|file| hosts.url_for(&asset, file).unwrap())
-        .collect();
     assert_eq!(
-        urls,
+        urls(&hosts),
         [
             "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_resnet34_LM.onnx",

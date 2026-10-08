@@ -516,8 +516,7 @@ impl SpeechEngine for LanguageTaggingEngine {
 /// fails the call with `DiarizeError::NotInstalled` and no request
 /// (`Install::Never`, for a pipeline once it checks for missing models
 /// itself; `steno_diarize::models::installed` is the same check without a
-/// load).
-/// A load that fails fails that call only; the next call tries again,
+/// load). A load that fails fails that call only; the next call tries again,
 /// resuming a cut-off download where downloads are allowed.
 #[must_use]
 pub fn diarizer(setup: &SpeechSetup, install: Install) -> Arc<dyn Diarizer> {
@@ -666,9 +665,7 @@ impl SpeechModels for ModelStoreSpeechModels {
         progress: &mut dyn FnMut(f64, &str),
     ) -> BoundaryResult<()> {
         match asset {
-            ModelAsset::OfflineDiarizer => {
-                self.install(&[steno_diarize::models::asset()], progress)
-            }
+            ModelAsset::OfflineDiarizer => self.install(&[steno_diarize::models::asset()], progress),
             ModelAsset::ParakeetV3 if self.parakeet_on_coreml() => Err(
                 "This build cannot download the CoreML Parakeet v3 model; install it from the Steno Mac app."
                     .into(),
