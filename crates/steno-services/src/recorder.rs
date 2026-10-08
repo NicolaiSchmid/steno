@@ -730,7 +730,7 @@ impl CaptureRecorder {
     /// too ([`StopUnwinding`]), so the next recording can start and a quit
     /// does not wait for good.
     fn finish_stop(&self, active: Active, reason: RecordingEndReason, error: Option<String>) {
-        let unwinding = StopUnwinding::arm(self);
+        let unwinding = StopUnwinding(self);
         self.notify();
         let intake = self.intake();
         let mut ended = error;
@@ -800,7 +800,7 @@ impl CaptureRecorder {
             Err(error) => inner.status.error = Some(error),
         }
         drop(inner);
-        unwinding.disarm();
+        std::mem::forget(unwinding);
         self.notify();
     }
 
@@ -819,32 +819,12 @@ impl CaptureRecorder {
 /// Held through [`CaptureRecorder::finish_stop`]: if it unwinds, the drop
 /// leaves the recorder `Idle` with an error instead of `Stopping` for good,
 /// which `settle` (a quit) would wait on forever and which no start or
-/// Stop leaves.
-/// Disarmed once the outcome is in the status.
-struct StopUnwinding<'a> {
-    recorder: &'a CaptureRecorder,
-    armed: bool,
-}
-
-impl<'a> StopUnwinding<'a> {
-    fn arm(recorder: &'a CaptureRecorder) -> Self {
-        Self {
-            recorder,
-            armed: true,
-        }
-    }
-
-    fn disarm(mut self) {
-        self.armed = false;
-    }
-}
+/// Stop leaves. Forgotten once the outcome is in the status.
+struct StopUnwinding<'a>(&'a CaptureRecorder);
 
 impl Drop for StopUnwinding<'_> {
     fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let recorder = self.recorder;
+        let recorder = self.0;
         let mut inner = recorder.inner();
         CaptureRecorder::idle(&mut inner);
         inner.status.warning = None;
@@ -1996,23 +1976,12 @@ mod tests {
     /// with `deviceLost`, saved, and the status says so.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_device_that_stays_lost_ends_and_saves_the_recording() {
-        let harness = harness(&[]);
-        harness.capture_with(failing_capture(None, |options| {
+        ends_as_a_lost_device(|options| {
             options
                 .change_device_after(0.2)
                 .restarts_that_fail(CaptureSession::RESTART_ATTEMPTS)
-        }));
-        start(&harness.recorder).await;
-        let meeting_id = harness.recorder.status().meeting_id.unwrap();
-        let meeting = ended_on_its_own(&harness, meeting_id).await;
-        assert_eq!(
-            harness.recorder.status().error.as_deref(),
-            Some(
-                "The recording stopped early: an audio device disappeared. What was recorded until then is saved."
-            )
-        );
-        assert_eq!(meeting.end_reason, Some(RecordingEndReason::DeviceLost));
-        assert!(harness.store.asset(meeting_id).unwrap().is_some());
+        })
+        .await;
     }
 
     /// A rebuild that panics after a device change ends the recording as a
@@ -2020,10 +1989,15 @@ mod tests {
     /// error, and the meeting is saved with `deviceLost`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_rebuild_that_panics_ends_and_saves_the_recording() {
+        ends_as_a_lost_device(|options| options.change_device_after(0.2).restart_panics()).await;
+    }
+
+    /// A recording over the synthetic tone as `device` changes it ends on
+    /// its own as a lost device: the status says so, and the meeting is
+    /// saved with `deviceLost`.
+    async fn ends_as_a_lost_device(device: fn(SyntheticOptions) -> SyntheticOptions) {
         let harness = harness(&[]);
-        harness.capture_with(failing_capture(None, |options| {
-            options.change_device_after(0.2).restart_panics()
-        }));
+        harness.capture_with(failing_capture(None, device));
         start(&harness.recorder).await;
         let meeting_id = harness.recorder.status().meeting_id.unwrap();
         let meeting = ended_on_its_own(&harness, meeting_id).await;
