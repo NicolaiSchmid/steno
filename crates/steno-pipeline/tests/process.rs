@@ -3527,7 +3527,48 @@ async fn pipelines_that_share_the_in_flight_set_refuse_each_others_meetings() {
     let stored = world.store.meeting(id).unwrap().unwrap();
     let asset = world.store.asset(id).unwrap().unwrap();
     assert!(replacement.enqueue(&stored, &asset).is_err());
+    assert_eq!(replacement.reprocess(id), Err(ReprocessError::Busy(id)));
     drop(held);
+    assert_eq!(replacement.in_flight(), Vec::<Uuid>::new());
+}
+
+/// A processing run on a retired pipeline holds its asset in the shared
+/// in-flight set, so the replacement starts no second run of the meeting,
+/// even when the row reads `ready` again (a reprocess is refused as busy,
+/// an enqueue too), and starts one once the retired run has ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reprocess_is_refused_while_a_retired_pipeline_runs_the_meeting() {
+    let world = world(false, None, AudioRetention::KeepForever);
+    let asset = ready_with_count(&world, 0);
+    let id = asset.meeting_id;
+    let in_flight = InFlight::default();
+    let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let retired =
+        ProcessingPipeline::new(with_engine(&world, engine.clone()).with_in_flight(in_flight.clone()));
+    let replacement = ProcessingPipeline::new(
+        world
+            .pipeline
+            .dependencies()
+            .clone()
+            .with_in_flight(in_flight.clone()),
+    );
+
+    retired.reprocess(id).unwrap();
+    engine.wait_until_entered().await;
+    world
+        .store
+        .set_state(id, MeetingState::Ready, world.now)
+        .unwrap();
+    assert_eq!(replacement.reprocess(id), Err(ReprocessError::Busy(id)));
+    let meeting = world.store.meeting(id).unwrap().unwrap();
+    assert!(replacement.enqueue(&meeting, &asset).is_err());
+
+    engine.open.notify_one();
+    retired.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, id), MeetingState::Ready);
+    replacement.reprocess(id).unwrap();
+    replacement.wait_until_idle().await;
+    assert_eq!(meeting_state(&world, id), MeetingState::Ready);
     assert_eq!(replacement.in_flight(), Vec::<Uuid>::new());
 }
 

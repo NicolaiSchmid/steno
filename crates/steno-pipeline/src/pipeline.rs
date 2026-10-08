@@ -257,8 +257,9 @@ struct InFlightSet {
     /// Counts every admission to `meetings`; a stage whose count moved
     /// was not alone for its whole span.
     admissions: u64,
-    /// The assets of the background runs `enqueue` and `resume_unfinished`
-    /// started.
+    /// The assets claimed for a background run
+    /// ([`ProcessingPipeline::claim_start`], for `enqueue`, `reprocess` and
+    /// `resume_unfinished`), from the claim to the run's end.
     assets: BTreeSet<Uuid>,
 }
 
