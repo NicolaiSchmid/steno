@@ -20,18 +20,19 @@
 //! only. The listener reads them again, at most once a second, while it
 //! accepts. The record follows them as `NWListener` follows a network
 //! change ([`Advertiser`]): it is registered again under the same name,
-//! TXT record and port. A daemon report of an address added or removed
-//! ([`IP_CHECK_SECONDS`]) always registers it while the computer has an
-//! address, because only a registration made after the daemon joined a
-//! new network is announced there; a quiet [`RECHECK`] registers it only
-//! when the addresses moved. The record's host is `steno-<name>.local.`
-//! ([`Advertiser::host_name`]), a name only Steno answers for, where
-//! Swift's record uses mDNSResponder's own host.
+//! TXT record and port. The daemon's report that it added an IPv4 address
+//! the record carries ([`IP_CHECK_SECONDS`]) always registers it, because
+//! only a registration made after the daemon joined a new network is
+//! announced there; any other wake, including a quiet [`RECHECK`] a minute
+//! after the last, registers it only when the addresses moved. The
+//! record's host is `steno-<name>-<id>.local.` ([`Advertiser::host_name`]),
+//! a name only Steno answers for, where Swift's record uses mDNSResponder's
+//! own host.
 //! Swift: `Network/HandoverServer.swift`.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use if_addrs::{IfAddr, Interface};
 use mdns_sd::{DaemonEvent, RecvTimeoutError, ServiceDaemon, ServiceInfo};
@@ -226,25 +227,28 @@ mod windows_adapters {
 /// read every 5 s and no phone a retry.
 pub const IP_CHECK_SECONDS: u32 = 5;
 
-/// How long the advertiser waits for a report from the daemon before it
-/// reads the addresses anyway: a report the daemon dropped (its channel to
-/// the advertiser was full), or a change it does not report (a Windows
-/// adapter that stopped counting as hardware), is followed within a
-/// minute.
+/// How long the advertiser waits after a wake before it reads the
+/// addresses anyway, whatever else the daemon sends meanwhile: a report the
+/// daemon dropped (its channel to the advertiser was full), a removed
+/// address, or a change it does not report (a Windows adapter that stopped
+/// counting as hardware), is followed within a minute. Until then the
+/// daemon sends a removed address only on an interface in its subnet, so
+/// only a second interface on the same LAN can still carry it.
 pub const RECHECK: Duration = Duration::from_secs(60);
 
 /// Why the advertiser woke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Change {
-    /// The daemon reported an address added or removed. It sends the
-    /// report after its interface check joined the multicast group of
-    /// every address it added, and on its own it announces only records
-    /// that let it choose the addresses, which this one does not; so the
-    /// record reaches a network the daemon has just joined only through a
-    /// registration made after the report, even when a recheck already
-    /// published that network's address.
-    Reported,
-    /// [`RECHECK`] passed without a report.
+    /// The daemon reported that it added this IPv4 LAN address. It sends
+    /// the report after its interface check joined the address's multicast
+    /// group, and on its own it announces only records that let it choose
+    /// the addresses, which this one does not; so the record reaches a
+    /// network the daemon has just joined only through a registration made
+    /// after the report, even when a recheck already published that
+    /// network's address.
+    Reported(Ipv4Addr),
+    /// [`RECHECK`] passed since the last wake, whatever else the daemon
+    /// sent.
     Quiet,
 }
 
@@ -257,9 +261,12 @@ pub(crate) trait InterfaceWatcher {
     fn changed(&mut self) -> Option<Change>;
 }
 
-/// The daemon's reports, `IpAdd` and `IpDel`, sent during its interface
-/// check, and a quiet spell of `recheck` ([`RECHECK`] in the product)
-/// without one; the watch ends with the daemon.
+/// The daemon's report of an IPv4 LAN address it added (`IpAdd`), sent
+/// during its interface check, or `recheck` ([`RECHECK`] in the product)
+/// passed since the wait began. Every other event (an IPv6 or non-LAN
+/// address, a removed address, an answered query) is passed over under the
+/// same deadline, so a busy network never postpones the recheck. The watch
+/// ends with the daemon.
 struct DaemonWatcher {
     events: mdns_sd::Receiver<DaemonEvent>,
     recheck: Duration,
@@ -267,9 +274,12 @@ struct DaemonWatcher {
 
 impl InterfaceWatcher for DaemonWatcher {
     fn changed(&mut self) -> Option<Change> {
+        let deadline = Instant::now() + self.recheck;
         loop {
-            match self.events.recv_timeout(self.recheck) {
-                Ok(DaemonEvent::IpAdd(_) | DaemonEvent::IpDel(_)) => return Some(Change::Reported),
+            match self.events.recv_deadline(deadline) {
+                Ok(DaemonEvent::IpAdd(IpAddr::V4(address))) if is_lan_address(address) => {
+                    return Some(Change::Reported(address));
+                }
                 Ok(_) => {}
                 Err(RecvTimeoutError::Timeout) => return Some(Change::Quiet),
                 Err(RecvTimeoutError::Disconnected) => return None,
@@ -283,7 +293,8 @@ impl InterfaceWatcher for DaemonWatcher {
 #[derive(Debug)]
 pub(crate) struct Published {
     pub(crate) addresses: Vec<Ipv4Addr>,
-    /// Set by [`Advertiser::withdraw`]: nothing is registered after it.
+    /// Set when the [`Advertiser`] is withdrawn or dropped: nothing is
+    /// registered after it.
     pub(crate) withdrawn: bool,
 }
 
@@ -291,12 +302,11 @@ pub(crate) struct Published {
 /// after each change it reads `lan` (sorted and without duplicates, as
 /// [`lan_addresses`] gives them, so the order never counts as a move) and
 /// registers the record with those addresses when they moved, or when the
-/// daemon reported a change and the computer has an address
-/// ([`Change::Reported`]). A failed registration keeps the old addresses as
-/// the published ones and is owed: the next change, quiet or not, tries
-/// again. The lock is held across `register`, so [`Advertiser::withdraw`],
-/// which takes it too, never sees a registration land after its own
-/// goodbye.
+/// daemon reported adding one of them ([`Change::Reported`]). A failed
+/// registration keeps the old addresses as the published ones and is owed:
+/// the next change, quiet or not, tries again. The lock is held across
+/// `register`, so withdrawing or dropping the [`Advertiser`], which takes
+/// it too, never sees a registration land after its goodbye.
 pub(crate) fn follow(
     watcher: &mut impl InterfaceWatcher,
     lan: impl Fn() -> Vec<Ipv4Addr>,
@@ -311,7 +321,7 @@ pub(crate) fn follow(
             return;
         }
         let moved = addresses != published.addresses;
-        let reported = change == Change::Reported && !addresses.is_empty();
+        let reported = matches!(change, Change::Reported(added) if addresses.contains(&added));
         if !moved && !reported && !owed {
             continue;
         }
@@ -328,7 +338,7 @@ pub(crate) fn follow(
                 } else {
                     tracing::debug!(
                         target: "steno::handover",
-                        "the daemon reported an address change: the Bonjour record is announced again with {addresses:?}"
+                        "the Bonjour record is announced again with {addresses:?} ({change:?})"
                     );
                 }
                 published.addresses = addresses;
@@ -369,22 +379,30 @@ impl Advertiser {
     /// The longest instance name a DNS label holds, in bytes.
     pub const INSTANCE_NAME_BYTES: usize = 63;
 
-    /// The record's host, `steno-<label>.local.`, where the label is
+    /// The longest first label of the record's host, in bytes: one DNS
+    /// label.
+    const HOST_LABEL_BYTES: usize = 63;
+
+    /// The record's host, `steno-<name>-<id>.local.`: `<name>` is
     /// [`HandoverIdentity::san_label`]'s of `service_name`, cut so the
-    /// whole fits one DNS label. A name only Steno uses: the computer's
-    /// own host name belongs to mDNSResponder, Avahi or Windows, and a
-    /// second responder claiming it would send a goodbye for it at
-    /// withdraw and, with an address the system no longer holds, make
-    /// mDNSResponder rename the computer.
+    /// whole fits one DNS label, and `<id>` the first 8 hex digits of
+    /// `mac_id`, which the TXT record publishes anyway. A name only Steno
+    /// uses: the computer's own host name belongs to mDNSResponder, Avahi or
+    /// Windows, and a second responder claiming it would send a goodbye for
+    /// it at withdraw and, with an address the system no longer holds, make
+    /// mDNSResponder rename the computer. The id tells two computers of
+    /// one name apart without the daemon's probe, whose rename (`-2`) would
+    /// not fit a label already cut to the limit.
     #[must_use]
-    pub fn host_name(service_name: &str) -> String {
+    pub fn host_name(service_name: &str, mac_id: Uuid) -> String {
         const PREFIX: &str = "steno-";
-        let label = HandoverIdentity::san_label(service_name);
-        let label = label.strip_suffix(".local").unwrap_or(&label);
+        let id = format!("-{:08x}", mac_id.as_fields().0);
+        let name = HandoverIdentity::san_label(service_name);
+        let name = name.strip_suffix(".local").unwrap_or(&name);
+        let room = Self::HOST_LABEL_BYTES - PREFIX.len() - id.len();
         // `san_label` is ASCII, so any byte is a character boundary.
-        let label = label[..label.len().min(Self::INSTANCE_NAME_BYTES - PREFIX.len())]
-            .trim_end_matches('-');
-        format!("{PREFIX}{label}.local.")
+        let name = name[..name.len().min(room)].trim_end_matches('-');
+        format!("{PREFIX}{name}{id}.local.")
     }
 
     /// The record for `service_name` on `port` at `addresses`, before it
@@ -402,7 +420,7 @@ impl Advertiser {
             ("v", wire::PROTOCOL_VERSION.to_string()),
             ("id", mac_id.hyphenated().to_string()),
         ];
-        let host = Self::host_name(service_name);
+        let host = Self::host_name(service_name, mac_id);
         let addresses: Vec<IpAddr> = addresses.iter().copied().map(IpAddr::V4).collect();
         let mut end = service_name.len().min(Self::INSTANCE_NAME_BYTES);
         while !service_name.is_char_boundary(end) {
@@ -426,7 +444,7 @@ impl Advertiser {
         let daemon = ServiceDaemon::new()?;
         let (fullname, published) =
             Self::start(&daemon, service_name, mac_id, port).inspect_err(|_| {
-                let _ = daemon.shutdown();
+                stop(&daemon);
             })?;
         Ok(Advertiser {
             daemon,
@@ -484,8 +502,9 @@ impl Advertiser {
     }
 
     /// Withdraws the record and stops the daemon; the thread that follows
-    /// the network registers nothing after this and ends with the daemon.
-    /// The same as dropping the advertiser, which does the work, once.
+    /// the network registers nothing after this and ends with the daemon,
+    /// or at its next wake when the daemon would not stop (logged). The
+    /// same as dropping the advertiser, which does the work, once.
     pub fn withdraw(self) {
         drop(self);
     }
@@ -499,7 +518,18 @@ impl Drop for Advertiser {
             .unwrap_or_else(PoisonError::into_inner);
         published.withdrawn = true;
         let _ = self.daemon.unregister(&self.fullname);
-        let _ = self.daemon.shutdown();
+        stop(&self.daemon);
+    }
+}
+
+/// Stops the daemon. A failure (its command queue full) leaves the
+/// daemon's thread running, so it is logged.
+fn stop(daemon: &ServiceDaemon) {
+    if let Err(error) = daemon.shutdown() {
+        tracing::warn!(
+            target: "steno::handover",
+            "stopping the Bonjour daemon: {error}"
+        );
     }
 }
 
@@ -556,21 +586,34 @@ mod tests {
             info.get_addresses_v4().into_iter().collect::<Vec<_>>(),
             vec![&address]
         );
-        assert_eq!(info.get_hostname(), "steno-nicolai-s-mac.local.");
+        assert_eq!(info.get_hostname(), "steno-nicolai-s-mac-0f8fad5b.local.");
     }
 
     #[test]
-    fn the_host_is_a_name_only_steno_uses_and_fits_one_label() {
+    fn the_host_is_a_name_only_steno_uses_told_apart_by_the_id_and_fits_one_label() {
+        let mac_id = Uuid::parse_str("0F8FAD5B-D9CB-469F-A165-70867728950E").unwrap();
+        let other = Uuid::parse_str("00000001-0000-0000-0000-000000000000").unwrap();
         assert_eq!(
-            Advertiser::host_name("MacBook Pro"),
-            "steno-macbook-pro.local."
+            Advertiser::host_name("MacBook Pro", mac_id),
+            "steno-macbook-pro-0f8fad5b.local."
         );
-        assert_eq!(Advertiser::host_name("---"), "steno-steno.local.");
-        let long = Advertiser::host_name(&format!("{}-b", "a".repeat(56)));
-        assert_eq!(long, format!("steno-{}.local.", "a".repeat(56)));
-        let label = Advertiser::host_name(&"c".repeat(80));
+        assert_eq!(
+            Advertiser::host_name("MacBook Pro", other),
+            "steno-macbook-pro-00000001.local.",
+            "two computers of one name"
+        );
+        assert_eq!(
+            Advertiser::host_name("---", mac_id),
+            "steno-steno-0f8fad5b.local."
+        );
+        // `steno-`, 47 bytes of name, then `-` and 8 hex digits fit; the
+        // name's `-` at the cut is dropped.
+        let long = Advertiser::host_name(&format!("{}-b", "a".repeat(47)), mac_id);
+        assert_eq!(long, format!("steno-{}-0f8fad5b.local.", "a".repeat(47)));
+        let label = Advertiser::host_name(&"c".repeat(80), mac_id);
         let label = label.strip_suffix(".local.").unwrap();
-        assert_eq!(label.len(), Advertiser::INSTANCE_NAME_BYTES);
+        assert_eq!(label.len(), Advertiser::HOST_LABEL_BYTES);
+        assert!(label.ends_with("c-0f8fad5b"), "the cut takes the name");
     }
 
     #[test]
@@ -597,9 +640,9 @@ mod tests {
         }
     }
 
-    /// Runs `follow` over `steps`, each a change and the addresses the
-    /// computer has then, from `published`; the registrations it tried, of
-    /// which the ones numbered in `failing` (from 1) fail.
+    /// Runs `follow` from `published` over `steps`, each a change and the
+    /// addresses the computer has then, and returns every registration it
+    /// tried; the attempts numbered in `failing` (from 1) fail.
     fn registrations(
         published: &Mutex<Published>,
         steps: Vec<(Change, Vec<Ipv4Addr>)>,
@@ -663,8 +706,9 @@ mod tests {
     }
 
     #[test]
-    fn a_daemon_report_registers_the_record_again_even_when_the_addresses_did_not_move() {
+    fn a_report_of_an_address_the_record_carries_registers_it_again_even_when_nothing_moved() {
         let office = Ipv4Addr::new(10, 0, 0, 5);
+        let docker = Ipv4Addr::new(172, 17, 0, 1);
         let record = published(&[]);
         let registered = registrations(
             &record,
@@ -672,17 +716,18 @@ mod tests {
                 // A recheck reads the address before the daemon has joined
                 // its network; the daemon's report then comes with it.
                 (Change::Quiet, vec![office]),
-                (Change::Reported, vec![office]),
+                (Change::Reported(office), vec![office]),
                 (Change::Quiet, vec![office]),
-                (Change::Reported, vec![]),
-                (Change::Reported, vec![]),
+                (Change::Reported(docker), vec![office]),
+                (Change::Reported(office), vec![]),
+                (Change::Reported(office), vec![]),
             ],
             &[],
         );
         assert_eq!(
             registered,
             vec![vec![office], vec![office], vec![]],
-            "a report registers while there is an address; with none, only a move does"
+            "a report registers only for an address the record carries; otherwise only a move does"
         );
     }
 
@@ -693,7 +738,7 @@ mod tests {
         let steps = [
             Change::Quiet,
             Change::Quiet,
-            Change::Reported,
+            Change::Reported(office),
             Change::Quiet,
             Change::Quiet,
         ]
@@ -720,7 +765,7 @@ mod tests {
                 "the watch goes on after a withdraw"
             );
             record.lock().unwrap().withdrawn = true;
-            Some(Change::Reported)
+            Some(Change::Reported(office))
         });
         follow(
             &mut watcher,
@@ -732,8 +777,8 @@ mod tests {
     }
 
     #[test]
-    fn an_address_report_or_a_quiet_recheck_is_a_change_and_a_gone_daemon_ends_the_watch() {
-        let address = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+    fn an_added_ipv4_lan_address_or_a_quiet_recheck_is_a_change_and_a_gone_daemon_ends_the_watch() {
+        let office = Ipv4Addr::new(10, 0, 0, 5);
         let (daemon, events) = flume::unbounded();
         // A zero recheck times out at once on an empty channel.
         let mut watcher = DaemonWatcher {
@@ -741,23 +786,65 @@ mod tests {
             recheck: Duration::ZERO,
         };
         assert_eq!(watcher.changed(), Some(Change::Quiet));
-        daemon.send(DaemonEvent::IpAdd(address)).unwrap();
-        assert_eq!(watcher.changed(), Some(Change::Reported));
-        daemon.send(DaemonEvent::Respond("en0".to_owned())).unwrap();
-        daemon
-            .send(DaemonEvent::Announce(String::new(), String::new()))
-            .unwrap();
-        daemon.send(DaemonEvent::IpDel(address)).unwrap();
+        daemon.send(DaemonEvent::IpAdd(office.into())).unwrap();
+        assert_eq!(watcher.changed(), Some(Change::Reported(office)));
+        let passed_over = [
+            DaemonEvent::Respond("en0".to_owned()),
+            DaemonEvent::Announce(String::new(), String::new()),
+            DaemonEvent::IpAdd("fe80::1".parse().unwrap()),
+            DaemonEvent::IpAdd("2001:db8::7".parse().unwrap()),
+            DaemonEvent::IpAdd(Ipv4Addr::new(169, 254, 7, 7).into()),
+            DaemonEvent::IpAdd(Ipv4Addr::new(100, 64, 0, 2).into()),
+            DaemonEvent::IpDel(office.into()),
+        ];
+        for event in passed_over {
+            daemon.send(event).unwrap();
+        }
         assert_eq!(
             watcher.changed(),
-            Some(Change::Reported),
-            "other events are passed over"
+            Some(Change::Quiet),
+            "other events, an IPv6, non-LAN or removed address too, are passed over"
         );
-        assert_eq!(watcher.changed(), Some(Change::Quiet));
-        daemon.send(DaemonEvent::IpAdd(address)).unwrap();
+        daemon.send(DaemonEvent::IpAdd(office.into())).unwrap();
         drop(daemon);
-        assert_eq!(watcher.changed(), Some(Change::Reported));
+        assert_eq!(watcher.changed(), Some(Change::Reported(office)));
         assert_eq!(watcher.changed(), None, "the watch ends with the daemon");
+    }
+
+    #[test]
+    fn events_passed_over_do_not_postpone_the_quiet_recheck() {
+        let (daemon, events) = flume::unbounded();
+        let recheck = Duration::from_millis(300);
+        let mut watcher = DaemonWatcher { events, recheck };
+        // A busy network: an answered query, an IPv6 address and a removed
+        // address every 100 ms, for up to 5 s or until the watcher is gone.
+        let feeder = std::thread::spawn(move || {
+            for _ in 0..50 {
+                let busy = [
+                    DaemonEvent::Respond("en0".to_owned()),
+                    DaemonEvent::IpAdd("fe80::1".parse().unwrap()),
+                    DaemonEvent::IpDel(Ipv4Addr::new(10, 0, 0, 5).into()),
+                ];
+                for event in busy {
+                    if daemon.send(event).is_err() {
+                        return;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        });
+        let began = Instant::now();
+        assert_eq!(watcher.changed(), Some(Change::Quiet));
+        let waited = began.elapsed();
+        drop(watcher);
+        feeder.join().unwrap();
+        // The recheck comes 300 ms after the wait began; a wait restarted at
+        // each event would last as long as the feeder, 5 s. The bound
+        // leaves room for a loaded machine.
+        assert!(
+            waited >= recheck && waited < Duration::from_secs(2),
+            "{waited:?}"
+        );
     }
 
     #[test]

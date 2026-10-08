@@ -2050,34 +2050,35 @@ touch and admission lines; each fix is ported to Swift before cutover.
 - Network change, both apps: the record follows the computer's addresses. Swift's
   `NWListener` does it in mDNSResponder. Rust's advertiser
   (`crates/steno-handover/src/server/advertise.rs`) registers the record again under
-  the same name, TXT record and port. A report from the `mdns-sd` daemon of an
-  address added or removed (its interface check, every 5 s, sent after it joined the
-  new network's multicast group) always registers it while the computer has an
-  address, because only a registration made after the report is announced on a
-  network the daemon has just joined. A quiet recheck, once a minute without a
-  report, registers it only when the LAN addresses moved. A failed registration is
-  tried again at the next change, and a record with no address waits for the next
-  network. The listener binds every IPv4 address on one port, so an address gained
-  after start is served on the same port. Its LAN check runs once per connection at
-  accept, so the listener closes no connection; one on an address that leaves breaks
-  with it, and the phone resumes from the partial.
-- Network change, Rust differs: the record's host is `steno-<name>.local.`
-  (`Advertiser::host_name`), a name only Steno answers for, where Swift's record uses
-  mDNSResponder's own host; the computer's host name stays with mDNSResponder, Avahi
-  or Windows. A withdraw within one interface check of a switch sends its goodbye
-  only on the old network, which is gone, so a phone that kept browsing can show the
-  record until its TTL runs out, and its connection fails and is retried; a limit of
-  `mdns-sd`.
+  the same name, TXT record and port. A report from the `mdns-sd` daemon that it
+  added an IPv4 address the record carries (its interface check, every 5 s, sent
+  after it joined the new network's multicast group) always registers it, because
+  only a registration made after the report is announced on a network the daemon has
+  just joined. Any other wake registers it only when the LAN addresses moved: a quiet
+  recheck a minute after the last wake, whatever else the daemon sends, catches a
+  dropped report, a removed address or a change the daemon does not report. A failed
+  registration is tried again at the next change, and a record with no address waits
+  for the next network. The listener binds every IPv4 address on one port, so an
+  address gained after start is served on the same port. Its LAN check runs once per
+  connection at accept, so the listener closes no connection; one on an address that
+  leaves breaks with it, and the phone resumes from the partial.
+- Network change, Rust differs: the record's host is `steno-<name>-<id>.local.`, with
+  the first 8 hex digits of the `macID` (`Advertiser::host_name`), a name only Steno
+  answers for, where Swift's record uses mDNSResponder's own host; the computer's
+  host name stays with mDNSResponder, Avahi or Windows, and two computers of one name
+  get two hosts without `mdns-sd`'s probe. A withdraw within one interface check of a
+  switch sends its goodbye only on the old network, which is gone, so a phone that
+  kept browsing can show the record until its TTL runs out, and its connection fails
+  and is retried; a limit of `mdns-sd`.
 - Network, Rust differs: layer-2 tunnels (a TAP device, `feth`) and bridges
   (`docker0`, `bridge100`) are not point-to-point, and are served; Swift classes
-  bridges `.other`. A LAN numbered in
-  `100.64.0.0/10` is refused, on every platform. Rust judges a connection by its local
-  address where Swift judges the interface it arrives on, so on Linux and macOS (weak
-  host model) a packet addressed to the LAN address that arrives over a tunnel is
-  served: the computer is a subnet router or exit node, or a peer's allowed IPs cover
-  the LAN. On Windows the hardware rule refuses a LAN address on a Hyper-V external
-  switch's or a Network Bridge's vEthernet adapter, so a computer whose LAN address
-  moved there is unreachable.
+  bridges `.other`. A LAN numbered in `100.64.0.0/10` is refused, on every platform.
+  Rust judges a connection by its local address where Swift judges the interface it
+  arrives on, so on Linux and macOS (weak host model) a packet addressed to the LAN
+  address that arrives over a tunnel is served: the computer is a subnet router or
+  exit node, or a peer's allowed IPs cover the LAN. On Windows the hardware rule
+  refuses a LAN address on a Hyper-V external switch's or a Network Bridge's
+  vEthernet adapter, so a computer whose LAN address moved there is unreachable.
 - Write order: both apps commit every store write of the engine (receipt saves, the
   revoke's delete, the pairing's save, the touch) in the order it was asked for: each
   waits until the one asked for before it has returned, also when the request that
@@ -2336,7 +2337,8 @@ touch and admission lines; each fix is ported to Swift before cutover.
   an identity is minted. A phone keeps the name it paired under (`Steno` from an
   earlier Rust build) until it pairs again. While the Swift and the Rust app run at
   once during the handoff, both claim the same instance name and one is renamed
-  "(2)"; both are display only, since the phone finds the computer by its `id`.
+  "(2)"; the name and the rename are display only, since the phone finds the
+  computer by its `id`.
 - Phone queue (`mobile/src/features/`):
   - Adoption. Every load lists `Documents/queue/` and adds a row for each recording
     file of 1 KiB or more (`MIN_RECORDING_BYTES`; smaller holds no meaningful audio)
