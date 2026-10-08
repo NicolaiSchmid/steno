@@ -211,11 +211,10 @@ enum Renamed {
 /// file then flushed through `syncs`, with std's rename before the same
 /// flush where the written-through one fails ([`windows`]). The renamed
 /// file is reopened for the flush, and a sharing violation (a sync or
-/// antivirus client that opened the new file) is retried as
-/// [`rename_with_std`] retries. A flush that fails after the rename is an error with the
-/// new file already in place: the phone intake answers 500 and copies the
-/// phone's retry into a new folder, leaving this copy an orphan, and
-/// [`replace_file`] reports a write that happened.
+/// antivirus client that opened the new file) is retried ([`retried`]). A
+/// flush that fails after the rename is an error with the new file already
+/// in place: the phone intake answers 500 and removes the meeting folder
+/// it made, and [`replace_file`] reports a write that happened.
 fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Renamed> {
     #[cfg(windows)]
     {
