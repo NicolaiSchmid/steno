@@ -100,13 +100,16 @@ impl Inbox {
     /// Renames the complete partial to its final name. On Windows the
     /// removal of a verified file there and the rename are tried again
     /// while another handle (a sync or antivirus client) holds a file for a
-    /// moment (`steno_core::busy_file`). A failure leaves the partial in
-    /// place, and `complete` answers 500, so the phone keeps its copy and
-    /// tries again.
+    /// moment (`steno_core::busy_file`); a verified file already gone is
+    /// fine. A failure leaves the partial in place, and `complete` answers
+    /// 500, so the phone keeps its copy and tries again.
     pub fn promote(&self, recording_id: Uuid, format: AudioFormat) -> std::io::Result<PathBuf> {
         let destination = self.verified(recording_id, format);
         if destination.exists() {
-            busy_file::retried(|| std::fs::remove_file(&destination))?;
+            match busy_file::retried(|| std::fs::remove_file(&destination)) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            }
         }
         busy_file::rename(&self.partial(recording_id), &destination)?;
         Ok(destination)
