@@ -12,7 +12,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use clap::Args;
 use steno_adapters::{DeliveryCoordinator, ObsidianFolderDestination};
-use steno_core::{DeliveryStatus, Destination, ObsidianSettings};
+use steno_core::{DeliveryReceipt, DeliveryStatus, Destination, ObsidianSettings};
 use steno_pipeline::{MeetingEventBus, ProcessingPipeline};
 use uuid::Uuid;
 
@@ -120,18 +120,11 @@ impl Deliver {
             .filter(|delivery| ids.contains(&delivery.destination_id))
         {
             match &delivery.status {
-                DeliveryStatus::Delivered => {
-                    let folder = delivery
-                        .receipt
-                        .as_ref()
-                        .map(|receipt| {
-                            steno_adapters::runtime::receipt_folder_path(receipt)
-                                .to_string_lossy()
-                                .into_owned()
-                        })
-                        .unwrap_or_default();
-                    println!("{}\tdelivered\t{folder}", delivery.destination_id);
-                }
+                DeliveryStatus::Delivered => println!(
+                    "{}\t{}",
+                    delivery.destination_id,
+                    delivered(delivery.receipt.as_ref())
+                ),
                 DeliveryStatus::Failed(reason) => {
                     println!("{}\tfailed\t{reason}", delivery.destination_id);
                     failures.push(format!("{}: {reason}", delivery.destination_id));
@@ -149,9 +142,52 @@ impl Deliver {
     }
 }
 
+/// A delivered row's status and folder: `delivered`, then ` · <warning>`
+/// for each warning the receipt carries (the export line's separator), a
+/// tab and the meeting folder.
+fn delivered(receipt: Option<&DeliveryReceipt>) -> String {
+    let mut line = "delivered".to_owned();
+    let mut folder = String::new();
+    if let Some(receipt) = receipt {
+        for warning in &receipt.warnings {
+            line.push_str(" · ");
+            line.push_str(warning);
+        }
+        folder = steno_adapters::runtime::receipt_folder_path(receipt)
+            .to_string_lossy()
+            .into_owned();
+    }
+    format!("{line}\t{folder}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_delivered_row_prints_each_warning_after_delivered() {
+        let receipt = DeliveryReceipt {
+            root: "vault".to_owned(),
+            folder: "Meetings/x".to_owned(),
+            files: Vec::new(),
+            renderer_version: 1,
+            warnings: vec!["one".to_owned(), "two".to_owned()],
+        };
+        let folder = std::path::Path::new("vault").join("Meetings/x");
+        assert_eq!(
+            delivered(Some(&receipt)),
+            format!("delivered · one · two\t{}", folder.display())
+        );
+        let quiet = DeliveryReceipt {
+            warnings: Vec::new(),
+            ..receipt
+        };
+        assert_eq!(
+            delivered(Some(&quiet)),
+            format!("delivered\t{}", folder.display())
+        );
+        assert_eq!(delivered(None), "delivered\t");
+    }
 
     #[test]
     fn the_vault_destination_is_named_after_the_standardized_path() {
