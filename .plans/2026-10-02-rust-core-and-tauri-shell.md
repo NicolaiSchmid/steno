@@ -766,16 +766,23 @@ still has to draw the window side. `[ ]` is not ported yet.
   detection prompt; the detector and the capture session exist, the policy is WP5's
   and the panel WP8's.
 - The recorder watches each recording on its own thread (the stable plan's P18 and P20): a
-  session that fails on its own (a device that stayed lost, a write that failed) is
-  saved and queued at once with `deviceLost` or `failed` and the status says why, as
-  Swift's `RecordingController.observe` did (`CaptureResult::failure` carries the
-  failure to Stop too); and the free space under the recordings folder is read every
-  5 s (`DiskWatch`, `fs4`): no start below 512 MiB free, a warning under 30 minutes
-  of recording left, and a stop that saves before the disk fills (Rust only). A panic
-  in the shell leaves `crash-<UTC time>.log` in the support directory, and one in the
-  speech sidecar `crash-<UTC time>-sidecar.log`, the newest 20 kept
-  (`steno_core::crash_log`, P38), since an app opened from the Finder or at login has no
-  stderr anyone reads.
+  session that fails on its own (a device that stayed lost, a write that failed, a
+  rebuild that panicked, which ends as a lost device) is saved and queued at once with
+  `deviceLost` or `failed` and the status says why in plain words, as Swift's
+  `RecordingController.observe` did (`CaptureResult::failure` carries the failure to
+  Stop too, and a Stop or a quit that met a failed write or close says the recording may
+  be incomplete); and the free space is read every 5 s on the volumes of the recordings
+  folder and of the database, the smaller counting (`DiskWatch`, `fs4::statvfs`): no
+  start below 512 MiB free, a warning under 30 minutes of recording left, and a stop
+  that saves before the disk fills (Rust only). A volume that reports no size or more
+  free than its size counts as unreadable and never stops a recording. On the Mac
+  `statvfs` leaves out APFS's purgeable space, which
+  `NSURLVolumeAvailableCapacityForImportantUsageKey` counts; reading that key takes
+  `unsafe`, so it waits for `steno-macos` (the stable plan's D10) and the floor is met
+  early there. A panic in the shell leaves `crash-<UTC time>.log` in the support
+  directory, and one in the speech sidecar `crash-<UTC time>-sidecar.log`, the newest
+  20 kept (`steno_core::crash_log::install_crash_log_hook`, P38), since an app opened
+  from the Finder or at login has no stderr anyone reads.
 - `STENO_MODELS_DIR` names the models directory for the app (without one in its
   settings), the CLI, the `transcribe` example and the FLEURS test alike; the ONNX
   models sit in its `onnx/` (`steno_speech::ModelStore::in_models_directory`).
