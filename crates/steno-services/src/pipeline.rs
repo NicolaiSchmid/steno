@@ -193,10 +193,9 @@ impl Pipeline for HostPipeline {
         Ok(())
     }
 
-    /// Any re-export the user causes (Export again, or the re-export after
-    /// a speaker change), which starts the meeting's count of launch
-    /// re-exports from 0 once the meeting is claimed: a refused one leaves
-    /// the count.
+    /// Export again, or the re-export after a speaker change. Once the
+    /// meeting is claimed, its count of launch re-exports starts again from
+    /// 0; a refused one leaves the count.
     fn redeliver(&self, meeting_id: Uuid) -> BoundaryResult<()> {
         self.pipeline
             .claim_and_spawn(|pipeline| pipeline.claim_redeliver(meeting_id))?;
@@ -495,9 +494,9 @@ mod tests {
     }
 
     /// A summary re-run exports the new summary, so it starts the count of
-    /// failed launch re-exports from 0 as Export again does.
+    /// launch re-exports from 0 as Export again does.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_re_run_resets_the_failed_launch_re_exports() {
+    async fn a_re_run_resets_the_launch_re_export_count() {
         let (dir, store) = temp_store();
         let id = ready_meeting(&store).id;
         let path = dir.path().join(ExportRetries::FILE_NAME);
@@ -626,12 +625,12 @@ mod tests {
         .await;
     }
 
-    /// The user's Export again starts the meeting's count of failed launch
+    /// The user's Export again starts the meeting's count of launch
     /// re-exports from 0, on disk too, so the detail no longer says the
     /// export keeps failing and the next launch retries it. One refused
     /// because the meeting is busy leaves the count.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn export_again_resets_the_failed_launch_re_exports() {
+    async fn export_again_resets_the_launch_re_export_count() {
         let (dir, store) = temp_store();
         let id = ready_meeting(&store).id;
         let path = dir.path().join(ExportRetries::FILE_NAME);
