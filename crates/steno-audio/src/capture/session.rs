@@ -35,7 +35,7 @@
 //! graph did not run on the chosen microphone
 //! ([`CaptureError::DidNotRun`]), not after the last: the gap then stays
 //! under [`CaptureSession::MAXIMUM_GAP`] when that is the first restart,
-//! so the master stays on wall time.
+//! so the restarts take nothing from the master.
 //!
 //! A recording cut short (device loss, a failed write) is finalised and
 //! travels in the state: `Failed { error, recording }`. So does the whole
@@ -1062,8 +1062,10 @@ impl Core {
     /// the chosen one after all; `None` without a chosen microphone or when
     /// this start fails too (the caller keeps the chosen one's error). A
     /// backend started without a UID watches for no chosen device, so this
-    /// cannot loop; the next rebuild asks for the chosen one again. Called
-    /// with the mutex held, as every `backend.start`.
+    /// cannot loop; the next rebuild asks for the chosen one again, and that
+    /// comes when a default device moves or one in use goes, not when the
+    /// chosen one is plugged in again. Called with the mutex held, as every
+    /// `backend.start`.
     fn start_on_the_default(&self, sink: &Arc<LaneFrameSink>) -> Option<CaptureStream> {
         let chosen = self.configuration.input_device_uid.as_deref()?;
         let mut stream = self

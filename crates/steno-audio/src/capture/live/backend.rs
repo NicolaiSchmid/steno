@@ -4,8 +4,8 @@
 //! Swift: `Sources/StenoAudio/Capture/LiveCaptureBackend.swift`.
 //!
 //! `System` comes from the tap, `Mic` and `Mixed` from the first channel of
-//! the selected input device, which the aggregate resamples to the output
-//! device's 48 kHz clock. A selected device that is not connected records
+//! the chosen input device, which the aggregate resamples to the output
+//! device's 48 kHz clock. A chosen device that is not connected records
 //! the default input instead ([`chosen_or_default_input`]), and the device
 //! list is watched so the rebuild returns to it once it is back; Swift
 //! fails the start with `InputDeviceUnavailable` there (a deliberate parity

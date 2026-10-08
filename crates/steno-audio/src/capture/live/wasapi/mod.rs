@@ -22,10 +22,10 @@
 //!   Where that activation fails for any reason, its timeout included,
 //!   loopback of the default render endpoint, which records Steno's own
 //!   output too; the switch is only logged.
-//! - **Microphone:** the selected capture endpoint by id, or the default
-//!   (`eCapture`, `eConsole`), shared mode, event-driven. A selected
+//! - **Microphone:** the chosen capture endpoint by id, or the default
+//!   (`eCapture`, `eConsole`), shared mode, event-driven. A chosen
 //!   endpoint that is not active records the default instead, and the
-//!   watcher reports the selected one coming back, so the rebuild returns
+//!   watcher reports the chosen one coming back, so the rebuild returns
 //!   to it (the macOS backend does the same; Swift, macOS-only, fails the
 //!   start there).
 //!
@@ -300,7 +300,7 @@ impl DeviceProbe {
 
     /// The devices as they are now, in [`DeviceSnapshot`]'s terms: the
     /// default render endpoint (`eConsole`, the one both loopbacks follow),
-    /// the microphone as [`chosen_or_default_input`] picks it (so the explicit
+    /// the microphone as [`chosen_or_default_input`] picks it (so the chosen
     /// one coming back reads as a change, as on the Mac), whether the
     /// endpoints the capture started on are still active.
     /// `default_output_uid` stays empty: no stream opens the
@@ -382,7 +382,7 @@ impl LiveCaptureBackend {
     pub const COALESCE_DELAY: Duration = Duration::from_millis(500);
 
     /// How often a capture that records the fallback resolves the devices
-    /// without a notification, so a selected endpoint that becomes active
+    /// without a notification, so a chosen endpoint that becomes active
     /// unannounced (or before the watcher registered) is found; the macOS
     /// backend's value. Rust only: Swift has no fallback.
     pub const FALLBACK_RECHECK: Duration = Duration::from_secs(5);
