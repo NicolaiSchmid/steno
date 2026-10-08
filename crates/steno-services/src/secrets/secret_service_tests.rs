@@ -979,14 +979,24 @@ async fn a_bus_that_is_not_a_local_socket_keeps_the_secrets_with_the_file() {
     let folder = tempfile::tempdir().unwrap();
     let path = folder.path().join("secrets.json");
     write_file(&path, &[("llm-api-key", "sk-file")]);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
     let store = SecretServiceStore::on_bus(
         file_at(&path, &[]),
         FingerprintFile::in_support_directory(folder.path()),
-        "tcp:host=127.0.0.1,port=9",
+        &format!("tcp:host=127.0.0.1,port={port}"),
         PROMPT_TIMEOUT,
     );
-    store.chosen().await;
+    tokio::time::timeout(Duration::from_secs(10), store.chosen())
+        .await
+        .expect("chosen without waiting on the bus");
     assert!(chose_file(&store));
+    assert_eq!(
+        listener.accept().err().map(|error| error.kind()),
+        Some(std::io::ErrorKind::WouldBlock),
+        "nothing connected"
+    );
     assert_eq!(
         store
             .secret(&SecretKey::llm_api_key())
