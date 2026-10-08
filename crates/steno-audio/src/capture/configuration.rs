@@ -8,8 +8,6 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use steno_core::{AudioAsset, AudioLane};
 
-use crate::SAMPLE_RATE;
-
 steno_core::string_enum! {
     /// How a meeting is captured; the raw values are Swift's `CaptureMode`
     /// cases as `Settings` and the bridge spell them.
@@ -109,11 +107,13 @@ pub enum CaptureError {
     /// The aggregate's input streams did not match the expected lanes.
     #[error("unexpected input stream layout: {0}")]
     UnexpectedStreamLayout(String),
-    /// The aggregate would not run at [`SAMPLE_RATE`] (the output device is
-    /// fixed at another rate); the user changes it in Audio MIDI Setup or
-    /// picks another output. The rate is carried as whole hertz.
-    #[error("the audio devices run at {actual} Hz, not {} Hz", SAMPLE_RATE as u32)]
-    SampleRateMismatch {
+    /// The aggregate runs at a rate the processing thread cannot convert
+    /// to [`SAMPLE_RATE`](crate::SAMPLE_RATE) (outside
+    /// [`RateConverter::supports`](crate::realtime::RateConverter::supports),
+    /// or 0 for an aggregate that is gone). The rate is carried as whole
+    /// hertz.
+    #[error("the audio devices run at {actual} Hz, which Steno cannot record")]
+    UnsupportedSampleRate {
         /// The rate the devices run at, whole hertz.
         actual: u32,
     },
@@ -271,9 +271,10 @@ pub enum DeviceChangeReason {
     OutputDeviceGone,
     /// The input device the capture started on is gone.
     InputDeviceGone,
-    /// The aggregate no longer runs at [`SAMPLE_RATE`]. macOS only:
-    /// PipeWire's adapter and the WASAPI engine resample, so the Linux and
-    /// Windows backends never report it.
+    /// The aggregate no longer runs at the rate the capture started at
+    /// (a Bluetooth headset entering or leaving the hands-free profile).
+    /// macOS only: PipeWire's adapter and the WASAPI engine resample, so the
+    /// Linux and Windows backends never report it.
     SampleRateChanged,
 }
 

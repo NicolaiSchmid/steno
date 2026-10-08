@@ -5,14 +5,18 @@
 //!
 //! `System` comes from the tap, `Mic` and `Mixed` from the first channel of
 //! the chosen input device, which the aggregate resamples to the output
-//! device's 48 kHz clock. A chosen device that is not connected records
-//! the default input instead ([`chosen_or_default_input`]), and the device
-//! list is watched so the rebuild returns to it once it is back; Swift
-//! fails the start with `InputDeviceUnavailable` there (a deliberate parity
-//! change: no recording is lost to a missing microphone).
+//! device's clock. That clock is 48 kHz where the output device accepts it;
+//! a Bluetooth headset in the hands-free profile keeps 24, 16 or 8 kHz,
+//! and the stream then reports that rate for the processing thread to
+//! convert.
+//! A chosen device that is not connected records the default input
+//! instead ([`chosen_or_default_input`]), and the device list is watched so
+//! the rebuild returns to it once it is back; Swift fails the start with
+//! `InputDeviceUnavailable` there (a deliberate parity change: no recording
+//! is lost to a missing microphone).
 //!
 //! Device notifications (a default device moving, a sub-device dying, the
-//! aggregate leaving 48 kHz) arrive on the HAL's notification thread and
+//! aggregate changing rate) arrive on the HAL's notification thread and
 //! are coalesced for [`LiveCaptureBackend::COALESCE_DELAY`] on a watcher
 //! thread, then the devices are resolved again and compared with what the
 //! capture started on ([`DeviceSnapshot::difference`]); a capture on the
@@ -64,7 +68,7 @@ use crate::capture::{
     CaptureBackend, CaptureError, CaptureInput, CaptureStream, DeviceChangeReason, DeviceSnapshot,
     LaneSource, NominalSampleRate, StreamLayout,
 };
-use crate::realtime::{BufferView, LaneFrameSink, deliver};
+use crate::realtime::{BufferView, LaneFrameSink, RateConverter, deliver};
 
 /// Shared with the IOProc through a raw pointer; boxed so it never moves,
 /// alive until the `IoProc` is dropped.
@@ -192,6 +196,13 @@ impl Watcher {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    /// One notification for the watch loop: the latest of its burst,
+    /// judged once the burst settles.
+    fn notify(&self, selector: AudioObjectPropertySelector) {
+        self.lock().pending = Some((selector, Instant::now()));
+        self.condvar.notify_all();
+    }
 }
 
 /// What one started capture holds, in teardown order: the fields drop in
@@ -299,6 +310,34 @@ impl LiveCaptureBackend {
         }
     }
 
+    /// The notification the aggregate's rate, read again once the
+    /// listeners are in place, stands for: a rate notification when it is
+    /// no longer the rate the capture started at, none otherwise. A device
+    /// that relocks after [`NominalSampleRate::settle`] gave up, but before
+    /// the rate listener was registered, fires no notification of its own,
+    /// and the stream would keep the old rate's label for the whole
+    /// recording.
+    fn late_rate_notification(started: f64, now: f64) -> Option<AudioObjectPropertySelector> {
+        (now != started).then_some(kAudioDevicePropertyNominalSampleRate)
+    }
+
+    /// The microphone's latency of `frames` in the stream's frames: as it
+    /// is when the microphone is the clock master, rescaled from its own
+    /// `mic_rate` to `stream_rate` otherwise (rounded down; an unreadable
+    /// rate leaves it as it is).
+    fn mic_latency_frames(
+        frames: usize,
+        on_clock_master: bool,
+        mic_rate: f64,
+        stream_rate: f64,
+    ) -> usize {
+        if on_clock_master {
+            frames
+        } else {
+            CaptureStream::rescaled(frames, mic_rate, stream_rate)
+        }
+    }
+
     /// The watcher's re-check interval: [`Self::FALLBACK_RECHECK`] for a
     /// capture on the fallback, none otherwise.
     fn recheck_for(is_fallback: bool) -> Option<Duration> {
@@ -341,7 +380,7 @@ impl LiveCaptureBackend {
 }
 
 impl CaptureBackend for LiveCaptureBackend {
-    /// Returns the stream it opened: the confirmed 48 kHz rate, both device
+    /// Returns the stream it opened: the confirmed rate, both device
     /// latencies for the far-end delay, and the resolved [`StreamLayout`].
     /// One long function on purpose: it is the Swift `start` step for
     /// step, and every early return tears down what was created by drop.
@@ -406,9 +445,12 @@ impl CaptureBackend for LiveCaptureBackend {
             AggregateDevice::new("Steno capture", &output.uid, &sub_device_uids, &tap_uids)?;
 
         // The aggregate inherits the clock master's rate. Ask for 48 kHz,
-        // then read it back: the HAL applies the change asynchronously and a
-        // device that cannot run at 48 kHz keeps its own, which would leave
-        // a pitch-shifted master labelled 48 kHz. Fail loud instead.
+        // then read it back: the HAL applies the change asynchronously, and
+        // a device that cannot run at 48 kHz (a headset in the hands-free
+        // profile) keeps its own. The stream then reports that rate, which
+        // the processing thread converts; labelling it 48 kHz would leave a
+        // pitch-shifted master. A rate that settles only after this gave up
+        // is caught once the listeners are in place (below).
         if aggregate.nominal_sample_rate() != SAMPLE_RATE {
             let _ = aggregate.set_nominal_sample_rate(SAMPLE_RATE);
         }
@@ -418,9 +460,9 @@ impl CaptureBackend for LiveCaptureBackend {
             || aggregate.nominal_sample_rate(),
             || std::thread::sleep(NominalSampleRate::INTERVAL),
         );
-        if sample_rate != SAMPLE_RATE {
+        if !RateConverter::supports(sample_rate) {
             // Whole hertz.
-            return Err(CaptureError::SampleRateMismatch {
+            return Err(CaptureError::UnsupportedSampleRate {
                 actual: sample_rate as u32,
             });
         }
@@ -453,7 +495,7 @@ impl CaptureBackend for LiveCaptureBackend {
         };
 
         // Device changes: the default devices moving, a sub-device dying,
-        // the aggregate leaving 48 kHz. The tap mirrors the default output
+        // the aggregate changing rate. The tap mirrors the default output
         // device (where the call plays), the clock follows the system
         // output device (alerts); a change of either moves the far-end
         // alignment, so both are watched. The listener carries no value,
@@ -489,20 +531,33 @@ impl CaptureBackend for LiveCaptureBackend {
                     object,
                     selector,
                     kAudioObjectPropertyScopeGlobal,
-                    Box::new(move |selector| {
-                        watcher.lock().pending = Some((selector, Instant::now()));
-                        watcher.condvar.notify_all();
-                    }),
+                    Box::new(move |selector| watcher.notify(selector)),
                 )
                 .ok()
             })
             .collect();
+        // Any change from here on notifies; one before the rate listener was
+        // in place is judged as if it had.
+        if let Some(selector) =
+            Self::late_rate_notification(sample_rate, aggregate.nominal_sample_rate())
+        {
+            watcher.notify(selector);
+        }
 
         // The far-end delay: the microphone's input path plus the
         // loudspeaker's output path, each latency plus safety offset, read
-        // on the devices themselves rather than the aggregate.
+        // on the devices themselves rather than the aggregate, so each is in
+        // its own device's frames. The output device is the clock master,
+        // at `sample_rate`; a microphone on another device keeps its own
+        // rate (a 48 kHz built-in microphone beside a headset at 24 kHz) and
+        // is rescaled to the stream's.
         let input_latency = mic.as_ref().map_or(0, |m| {
-            hal::latency_frames(m.id, kAudioObjectPropertyScopeInput)
+            Self::mic_latency_frames(
+                hal::latency_frames(m.id, kAudioObjectPropertyScopeInput),
+                mic_sub_device == Some(0),
+                hal::nominal_sample_rate(m.id),
+                sample_rate,
+            )
         });
         let output_latency = hal::latency_frames(output.id, kAudioObjectPropertyScopeOutput);
 
@@ -652,6 +707,65 @@ mod tests {
             Ok(Judged::Notification(kAudioHardwarePropertyDevices))
         );
         stop(&watcher, thread);
+    }
+
+    /// A rate that settled after `settle` gave up, before the rate listener
+    /// was registered, is judged as a rate notification and reported, so
+    /// the session rebuilds at the rate the device runs at; an unchanged
+    /// rate raises nothing.
+    #[test]
+    fn a_rate_that_settled_before_its_listener_is_judged_as_a_change() {
+        assert_eq!(
+            LiveCaptureBackend::late_rate_notification(44_100.0, 44_100.0),
+            None
+        );
+        let selector = LiveCaptureBackend::late_rate_notification(44_100.0, 48_000.0);
+        assert_eq!(selector, Some(kAudioDevicePropertyNominalSampleRate));
+
+        let (watcher, thread, judgements) = watching(None);
+        watcher.notify(selector.unwrap());
+        let judged = judgements.recv_timeout(WAIT).unwrap();
+        assert_eq!(
+            judged,
+            Judged::Notification(kAudioDevicePropertyNominalSampleRate)
+        );
+        stop(&watcher, thread);
+
+        let baseline = DeviceSnapshot {
+            output_uid: Some("speakers".into()),
+            default_output_uid: Some("speakers".into()),
+            input_uid: Some("built-in".into()),
+            output_alive: true,
+            input_alive: true,
+            sample_rate: 44_100.0,
+        };
+        let relocked = DeviceSnapshot {
+            sample_rate: 48_000.0,
+            ..baseline.clone()
+        };
+        assert_eq!(
+            LiveCaptureBackend::judgement(judged, &relocked, &baseline),
+            Some(DeviceChangeReason::SampleRateChanged)
+        );
+    }
+
+    /// A 48 kHz built-in microphone beside a headset at 24 kHz: its
+    /// latency is halved into the stream's frames, never doubled, while a
+    /// microphone on the clock master keeps its own count.
+    #[test]
+    fn a_microphone_on_its_own_clock_has_its_latency_rescaled() {
+        assert_eq!(
+            LiveCaptureBackend::mic_latency_frames(481, false, 48_000.0, 24_000.0),
+            240
+        );
+        assert_eq!(
+            LiveCaptureBackend::mic_latency_frames(481, true, 48_000.0, 24_000.0),
+            481
+        );
+        assert_eq!(
+            LiveCaptureBackend::mic_latency_frames(481, false, 0.0, 24_000.0),
+            481
+        );
     }
 
     /// Only a capture on the fallback is re-checked.

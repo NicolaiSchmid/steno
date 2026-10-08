@@ -4,6 +4,10 @@ import Testing
 
 @testable import StenoAudio
 
+#if canImport(CoreAudio)
+  import CoreAudio
+#endif
+
 /// The comparison the live backend makes after a notification burst settles,
 /// without a HAL: the same devices, alive, at 48 kHz mean nothing to do; the
 /// first difference names the reason, loss before movement.
@@ -66,6 +70,37 @@ import Testing
     rate.sampleRate = 0
     #expect(rate.difference(from: Self.baseline) == .sampleRateChanged, "an unreadable aggregate")
   }
+
+  #if canImport(CoreAudio)
+    /// A rate that settled after `settle` gave up, before the rate listener
+    /// was registered, is judged as a rate notification, which then reports
+    /// the change, so the session rebuilds at the rate the device runs at; an
+    /// unchanged rate raises nothing.
+    @Test func aRateThatSettledBeforeItsListenerIsJudgedAsAChange() {
+      #expect(LiveCaptureBackend.lateRateNotification(started: 44_100, now: 44_100) == nil)
+      #expect(
+        LiveCaptureBackend.lateRateNotification(started: 44_100, now: 48_000)
+          == kAudioDevicePropertyNominalSampleRate)
+      var started = Self.baseline
+      started.sampleRate = 44_100
+      #expect(Self.baseline.difference(from: started) == .sampleRateChanged)
+    }
+
+    /// A 48 kHz built-in microphone beside a headset at 24 kHz: its latency
+    /// is halved into the stream's frames, never doubled, while a microphone
+    /// on the clock master keeps its own count.
+    @Test func aMicrophoneOnItsOwnClockHasItsLatencyRescaled() {
+      #expect(
+        LiveCaptureBackend.micLatencyFrames(
+          481, onClockMaster: false, micRate: 48_000, streamRate: 24_000) == 240)
+      #expect(
+        LiveCaptureBackend.micLatencyFrames(
+          481, onClockMaster: true, micRate: 48_000, streamRate: 24_000) == 481)
+      #expect(
+        LiveCaptureBackend.micLatencyFrames(
+          481, onClockMaster: false, micRate: 0, streamRate: 24_000) == 481)
+    }
+  #endif
 
   /// `[.system]` alone (the Continuity spike) records no microphone: no input
   /// in either snapshot is not a change, and the default input moving is

@@ -18,6 +18,8 @@
     clippy::unnecessary_wraps
 )]
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -43,6 +45,8 @@ use steno_audio::{
 use steno_core::paths::file_url_path;
 use steno_core::{AudioFormat, AudioLane, AudioRetention, EchoCanceller, RecordingLayout};
 use uuid::Uuid;
+
+use common::{frequency, level_against_sine};
 
 const RECV: Duration = Duration::from_secs(10);
 
@@ -1235,6 +1239,29 @@ fn every_start_resets_the_echo_canceller_before_the_first_frame() {
     );
 }
 
+/// Frame counts move between rates rounded down: a device's to 48 kHz,
+/// and a microphone on its own clock to the stream's; a rate that could
+/// not be read leaves the count alone.
+#[test]
+fn frame_counts_are_rescaled_between_rates_rounding_down() {
+    let hands_free = CaptureStream {
+        sample_rate: 24_000.0,
+        ..CaptureStream::SYNTHETIC
+    };
+    assert_eq!(hands_free.at_output_rate(240 + 4_800), 10_080);
+    assert_eq!(CaptureStream::SYNTHETIC.at_output_rate(5_041), 5_041);
+    // 1 000 * 48 000 / 44 100 = 1 088.4.
+    let consumer = CaptureStream {
+        sample_rate: 44_100.0,
+        ..CaptureStream::SYNTHETIC
+    };
+    assert_eq!(consumer.at_output_rate(1_000), 1_088);
+    // A 48 kHz microphone beside a 24 kHz clock master.
+    assert_eq!(CaptureStream::rescaled(481, 48_000.0, 24_000.0), 240);
+    assert_eq!(CaptureStream::rescaled(481, 0.0, 24_000.0), 481);
+    assert_eq!(CaptureStream::rescaled(481, f64::NAN, 24_000.0), 481);
+}
+
 /// The far-end is delayed by both device paths whenever their sum reaches
 /// one processing frame; the Speex tail keeps the room.
 #[test]
@@ -1731,6 +1758,19 @@ fn a_folder_deleted_while_recording_ends_writer_failed() {
 /// session handed over.
 struct HandsOverTheSink {
     sink: Mutex<Option<Arc<LaneFrameSink>>>,
+    stream: CaptureStream,
+    /// What every start after the first reports, when it should differ.
+    stream_after_restart: Option<CaptureStream>,
+}
+
+impl HandsOverTheSink {
+    fn new(stream: CaptureStream) -> Self {
+        Self {
+            sink: Mutex::new(None),
+            stream,
+            stream_after_restart: None,
+        }
+    }
 }
 
 impl CaptureBackend for HandsOverTheSink {
@@ -1740,8 +1780,11 @@ impl CaptureBackend for HandsOverTheSink {
         _: Option<&str>,
         sink: Arc<LaneFrameSink>,
     ) -> Result<CaptureStream, CaptureError> {
-        *self.sink.lock().unwrap() = Some(sink);
-        Ok(CaptureStream::SYNTHETIC)
+        let restarted = self.sink.lock().unwrap().replace(sink).is_some();
+        Ok(match &self.stream_after_restart {
+            Some(stream) if restarted => stream.clone(),
+            _ => self.stream.clone(),
+        })
     }
     fn stop(&self) {}
 }
@@ -1771,10 +1814,22 @@ impl EchoCanceller for GatedCanceller {
 /// `dropped_frames`.
 #[test]
 fn ring_overruns_are_reported_in_dropped_frames() {
+    ring_overruns_are_reported(SAMPLE_RATE);
+}
+
+/// The same at 24 kHz: a refused 480-sample callback is two 48 kHz frames.
+#[test]
+fn ring_overruns_at_24_khz_are_reported_in_48_khz_frames() {
+    ring_overruns_are_reported(24_000.0);
+}
+
+/// The two tests above, with the rings at `rate`.
+fn ring_overruns_are_reported(rate: f64) {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(HandsOverTheSink {
-        sink: Mutex::new(None),
-    });
+    let backend = Arc::new(HandsOverTheSink::new(CaptureStream {
+        sample_rate: rate,
+        ..CaptureStream::SYNTHETIC
+    }));
     let open = Arc::new((Mutex::new(false), Condvar::new()));
     let session = CaptureSession::with_backend(
         configuration(CaptureMode::Call, directory.path(), false),
@@ -1804,11 +1859,106 @@ fn ring_overruns_are_reported_in_dropped_frames() {
         refused > 0 && accepted >= 200,
         "the rings hold two seconds: {accepted} accepted"
     );
-    assert_eq!(master_of(&result).frame_count(), accepted * 480);
+    // 48 kHz frames per callback; at 24 kHz half a converter window is held
+    // back, one frame less in the master.
+    let frames = (SAMPLE_RATE / rate) as usize;
+    let held = usize::from(rate != SAMPLE_RATE);
+    assert_eq!(
+        master_of(&result).frame_count(),
+        (accepted * frames - held) * 480
+    );
+    let dropped = refused * frames;
+    assert_eq!(
+        result.statistics.dropped_frames,
+        BTreeMap::from([(AudioLane::Mic, dropped), (AudioLane::System, dropped)])
+    );
+}
+
+/// Overruns at 48 kHz, then a headset that switches to 16 kHz mid-call:
+/// the overruns are counted at the rate of the stream they happened on, not
+/// the rate the recording ends at (which would read them three times over).
+#[test]
+fn ring_overruns_before_a_rate_change_keep_their_rate() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(HandsOverTheSink {
+        stream_after_restart: Some(CaptureStream {
+            sample_rate: 16_000.0,
+            ..CaptureStream::SYNTHETIC
+        }),
+        ..HandsOverTheSink::new(CaptureStream::SYNTHETIC)
+    });
+    let open = Arc::new((Mutex::new(false), Condvar::new()));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        Some(Box::new(GatedCanceller { open: open.clone() })),
+        2_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    let sink = backend.sink.lock().unwrap().clone().unwrap();
+    let buffer = [0.25f32; 480];
+    let mut refused = 0;
+    for _ in 0..400 {
+        if sink.begin_callback(480) {
+            sink.write_slice(0, &buffer);
+            sink.write_slice(1, &buffer);
+            sink.end_callback();
+        } else {
+            refused += 1;
+        }
+    }
+    assert!(refused > 0, "the rings overran");
+    *open.0.lock().unwrap() = true;
+    open.1.notify_all();
+    sink.report_device_change(DeviceChangeReason::SampleRateChanged);
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::SampleRateChanged)
+    );
+    assert!(matches!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed { attempt: 1, .. }
+    ));
+    assert_eq!(session.stream().unwrap().sample_rate, 16_000.0);
+    let result = session.stop().unwrap();
+    // One refused 480-sample callback at 48 kHz is one frame.
     assert_eq!(
         result.statistics.dropped_frames,
         BTreeMap::from([(AudioLane::Mic, refused), (AudioLane::System, refused)])
     );
+}
+
+/// A backend that reports a rate the converter cannot take (the live
+/// backends refuse one at `start`) is recorded unconverted, sample for
+/// sample, instead of panicking with the session's lock held. 1.2 s at
+/// 4 kHz is ten whole frames, so no remainder is left in the rings.
+#[test]
+fn a_stream_at_a_rate_the_converter_cannot_take_is_recorded_unconverted() {
+    let directory = tempfile::tempdir().unwrap();
+    let backend = Arc::new(SyntheticCaptureBackend::new(tones(&call(), 1.2).stream(
+        CaptureStream {
+            sample_rate: 4_000.0,
+            ..CaptureStream::SYNTHETIC
+        },
+    )));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+
+    assert_eq!(backend.frames_delivered(), 4_800);
+    assert!(result.statistics.dropped_frames.is_empty());
+    assert_eq!(master_of(&result).frame_count(), 4_800);
 }
 
 struct Failing;
@@ -1945,6 +2095,139 @@ fn a_device_change_keeps_recording_on_the_same_files() {
         "cold filter after"
     );
     assert_eq!(clock.pending_sleepers(), 0);
+}
+
+/// Keeps every far-end sample it is handed and passes the microphone
+/// through.
+struct FarEndRecorder {
+    far_end: Arc<Mutex<Vec<f32>>>,
+}
+
+impl EchoCanceller for FarEndRecorder {
+    fn process(&mut self, near_end: &[f32], far_end: &[f32], out: &mut [f32]) {
+        self.far_end.lock().unwrap().extend_from_slice(far_end);
+        let count = near_end.len().min(out.len());
+        out[..count].copy_from_slice(&near_end[..count]);
+    }
+}
+
+/// A headset in the hands-free profile keeps the Mac's aggregate at
+/// 24 kHz: the recording still starts, the master and the sidecars are 48
+/// and 16 kHz with the tones at their frequencies and levels, and the far
+/// end reaches the canceller delayed by the device latencies in 48 kHz
+/// frames.
+#[test]
+fn a_device_at_24_khz_records_the_usual_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let hands_free = CaptureStream {
+        sample_rate: 24_000.0,
+        input_latency_frames: 240,
+        output_latency_frames: 4_800,
+        ..CaptureStream::SYNTHETIC
+    };
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 3.0).stream(hands_free),
+    ));
+    let far_end = Arc::new(Mutex::new(Vec::new()));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        Some(Box::new(FarEndRecorder {
+            far_end: far_end.clone(),
+        })),
+        1_000,
+        Arc::new(SystemClock::new()),
+    )
+    .unwrap();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(session.stream().unwrap().sample_rate, 24_000.0);
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+
+    assert_eq!(backend.frames_delivered(), 3 * 24_000);
+    assert!(result.statistics.dropped_frames.is_empty());
+    // 72 000 device samples less half a converter window convert to
+    // 2 * (72 000 - 32) = 143 936 outputs: 299 whole frames.
+    let master = master_of(&result);
+    assert_eq!(master.frame_count(), 143_520);
+    assert_eq!(result.statistics.duration, 143_520.0 / SAMPLE_RATE);
+    assert_eq!(master.sample_rate, SAMPLE_RATE);
+    assert_eq!(master.channels.len(), 2);
+    for (channel, hertz) in [(0, 440.0), (1, 1_000.0)] {
+        let steady = &master.channels[channel][4_800..140_000];
+        let measured = frequency(steady, SAMPLE_RATE);
+        assert!((measured - hertz).abs() < 2.0, "{measured} Hz");
+        let level = level_against_sine(steady, 0.5);
+        assert!(level.abs() < 0.1, "{level} dB");
+    }
+    let mic = sidecar_of(&result, AudioLane::Mic);
+    assert_eq!(mic.len(), 143_520 / 3);
+    // 240 + 4 800 frames at 24 kHz are 10 080 at 48 kHz: the far end is
+    // the system lane that many samples late, zeros before.
+    let far_end = far_end.lock().unwrap();
+    let system = &master.channels[1];
+    assert_eq!(far_end.len(), system.len());
+    assert!(far_end[..10_080].iter().all(|s| *s == 0.0));
+    assert_eq!(&far_end[10_080..], &system[..system.len() - 10_080]);
+}
+
+/// The call starts and the headset enters the hands-free profile while
+/// recording: the rebuilt backend comes back at 24 kHz and the recording
+/// carries on instead of ending as a lost device.
+#[test]
+fn a_change_to_24_khz_resumes_the_recording() {
+    let directory = tempfile::tempdir().unwrap();
+    let clock = Arc::new(ManualClock::new());
+    let hands_free = CaptureStream {
+        sample_rate: 24_000.0,
+        input_latency_frames: 240,
+        output_latency_frames: 4_800,
+        ..CaptureStream::SYNTHETIC
+    };
+    let backend = Arc::new(SyntheticCaptureBackend::new(
+        tones(&call(), 2.0)
+            .change_device_after(1.0)
+            .stream_after_restart(hands_free.clone()),
+    ));
+    let session = CaptureSession::with_backend(
+        configuration(CaptureMode::Call, directory.path(), false),
+        backend.clone(),
+        passthrough(),
+        1_000,
+        clock.clone(),
+    )
+    .unwrap();
+    let notices = session.notices();
+    session.start(Uuid::new_v4()).unwrap();
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceChanged(DeviceChangeReason::DefaultInputChanged)
+    );
+    assert_eq!(
+        notices.recv_timeout(RECV).unwrap(),
+        CaptureNotice::DeviceResumed {
+            attempt: 1,
+            gap_seconds: 0.0
+        }
+    );
+    assert_eq!(session.stream(), Some(hands_free.clone()));
+    backend.wait_until_finished();
+    let result = session.stop().unwrap();
+
+    assert_eq!(backend.frames_delivered(), 48_000 + 2 * 24_000);
+    assert_eq!(result.statistics.device_changes, 1);
+    assert!(!result.statistics.ended_on_device_loss);
+    assert!(result.statistics.dropped_frames.is_empty());
+    // 100 frames at 48 kHz, then 48 000 samples at 24 kHz less half a
+    // window: 2 * (48 000 - 32) = 95 936 outputs, 199 whole frames.
+    let master = master_of(&result);
+    assert_eq!(master.frame_count(), (100 + 199) * 480);
+    let after = &master.channels[0][52_800..140_000];
+    let measured = frequency(after, SAMPLE_RATE);
+    assert!(
+        (measured - 440.0).abs() < 2.0,
+        "{measured} Hz after the change"
+    );
 }
 
 /// The contiguity claim: a gap longer than the two seconds the sink's rings
@@ -2203,9 +2486,7 @@ fn a_device_change_while_idle_or_after_stop_is_ignored() {
 #[test]
 fn a_report_from_an_earlier_recordings_backend_is_ignored() {
     let directory = tempfile::tempdir().unwrap();
-    let backend = Arc::new(HandsOverTheSink {
-        sink: Mutex::new(None),
-    });
+    let backend = Arc::new(HandsOverTheSink::new(CaptureStream::SYNTHETIC));
     let session = CaptureSession::with_backend(
         configuration(CaptureMode::InPerson, directory.path(), false),
         backend.clone(),
@@ -2954,12 +3235,29 @@ fn a_gap_wider_than_the_relay_waits_for_the_writer_and_writes_all_its_silence() 
 /// `a_stalled_writer_refuses_old_audio_and_the_gap_waits_behind_it`).
 #[test]
 fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
+    stop_while_the_gap_waits_for_the_relay(SAMPLE_RATE);
+}
+
+/// The same with the restarted device at 24 kHz: what it left in the rings
+/// is counted in 48 kHz frames, at its own rate and not the stream's the
+/// stop replaced.
+#[test]
+fn stop_while_the_gap_waits_counts_a_restarted_24_khz_device_in_48_khz_frames() {
+    stop_while_the_gap_waits_for_the_relay(24_000.0);
+}
+
+/// The two tests above, with the restarted backend at `restarted_rate`.
+fn stop_while_the_gap_waits_for_the_relay(restarted_rate: f64) {
     let directory = tempfile::tempdir().unwrap();
     let clock = Arc::new(ManualClock::new());
     let backend = Arc::new(SyntheticCaptureBackend::new(
         tones(&[AudioLane::Mixed], 1.0)
             .change_device_after(0.5)
             .restarts_that_fail(3)
+            .stream_after_restart(CaptureStream {
+                sample_rate: restarted_rate,
+                ..CaptureStream::SYNTHETIC
+            })
             .real_time(true),
     ));
     let session = CaptureSession::with_backend(
@@ -3002,7 +3300,9 @@ fn stop_while_the_gap_waits_for_the_relay_reports_the_silence_written() {
     // backend delivered into the rings with no processing thread to drain
     // it: dropped, and counted.
     let refused = (24_000 - audio) / 480;
-    let undrained = (backend.frames_delivered() - 24_000) / 480;
+    // The restarted device's samples, in 48 kHz frames.
+    let undrained =
+        (backend.frames_delivered() - 24_000) * (SAMPLE_RATE / restarted_rate) as usize / 480;
     assert_eq!(
         result
             .statistics

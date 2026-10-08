@@ -222,7 +222,7 @@ fn failure_kind(failure: &CaptureError) -> &'static str {
         CaptureError::WriterFailed(_) => "write failed",
         CaptureError::InputDeviceUnavailable => "no input device",
         CaptureError::OutputDeviceUnavailable => "no output device",
-        CaptureError::SampleRateMismatch { .. } => "sample rate",
+        CaptureError::UnsupportedSampleRate { .. } => "sample rate",
         _ => "capture failed",
     }
 }
@@ -263,8 +263,8 @@ fn capture_refused(error: &CaptureError) -> String {
     let reason = match error {
         CaptureError::InputDeviceUnavailable => "no microphone is available.".to_owned(),
         CaptureError::OutputDeviceUnavailable => "no sound output is available.".to_owned(),
-        CaptureError::SampleRateMismatch { actual } => {
-            format!("the audio devices run at {actual} Hz, and Steno records at 48000 Hz.")
+        CaptureError::UnsupportedSampleRate { actual } => {
+            format!("the audio devices run at {actual} Hz, which Steno cannot record.")
         }
         CaptureError::DeviceLost => "an audio device disappeared.".to_owned(),
         CaptureError::WriterFailed(_) => {
@@ -2467,8 +2467,8 @@ mod tests {
                 "no microphone is available.",
             ),
             (
-                CaptureError::SampleRateMismatch { actual: 44_100 },
-                "the audio devices run at 44100 Hz, and Steno records at 48000 Hz.",
+                CaptureError::UnsupportedSampleRate { actual: 384_000 },
+                "the audio devices run at 384000 Hz, which Steno cannot record.",
             ),
             (
                 CaptureError::WriterFailed(path.to_owned()),

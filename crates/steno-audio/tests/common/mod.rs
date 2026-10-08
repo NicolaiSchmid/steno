@@ -1,4 +1,5 @@
-//! The tone measurements the codec, processing and writer tests share.
+//! The tone measurements the codec, processing, writer, session and rate
+//! converter tests share.
 
 #![allow(dead_code)]
 

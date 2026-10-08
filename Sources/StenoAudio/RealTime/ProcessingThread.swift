@@ -9,10 +9,18 @@ import Synchronization
 /// to the writer through `FrameRelay`. Every buffer is allocated in `init`;
 /// the loop allocates nothing, takes no locks and never blocks on the
 /// writer.
+///
+/// The rings carry the device's rate. A device that does not run at
+/// `StenoAudio.sampleRate` has every lane converted to it by a
+/// `RateConverter` first, so everything below works at 48 kHz.
 final class ProcessingThread: @unchecked Sendable {
   struct Configuration {
     var lanes: [AudioLane]
     var frameSize: Int = StenoAudio.frameSize
+    /// The rate the rings carry, the device's; anything but
+    /// `StenoAudio.sampleRate` is converted to it, so it must be a rate
+    /// `RateConverter.supports`.
+    var deviceRate: Double = StenoAudio.sampleRate
     var echoCanceller: (any EchoCanceller)?
     /// Frames the far-end is delayed by before cancellation (0: none).
     var farEndDelayFrames: Int = 0
@@ -29,6 +37,8 @@ final class ProcessingThread: @unchecked Sendable {
   private let systemIndex: Int?
   /// What the rings deliver, one buffer per lane.
   private let laneBuffers: [UnsafeMutablePointer<Float>]
+  /// Set when the device does not run at `StenoAudio.sampleRate`.
+  private let conversion: Conversion?
   /// What is metered and written: `laneBuffers`, except that the mic lane
   /// points at the canceller's output while echo cancellation runs. The raw
   /// mic channel is then `laneBuffers[micIndex]`, untouched.
@@ -66,6 +76,12 @@ final class ProcessingThread: @unchecked Sendable {
       pointer.initialize(repeating: 0, count: frameSize)
       return pointer
     }
+    conversion =
+      configuration.deviceRate == StenoAudio.sampleRate
+      ? nil
+      : Conversion(
+        laneCount: configuration.lanes.count, frameSize: frameSize,
+        deviceRate: configuration.deviceRate)
     processedMic = .allocate(capacity: frameSize)
     processedMic.initialize(repeating: 0, count: frameSize)
     delayedFar = .allocate(capacity: frameSize)
@@ -128,12 +144,18 @@ final class ProcessingThread: @unchecked Sendable {
     finished.signal()
   }
 
-  /// Processes every whole frame the rings hold right now. Internal (not
-  /// private) only so `RealTimeAllocationTests` can run the loop body on the
-  /// test's own thread under an allocation hook; production calls it from
-  /// `run()` alone.
+  /// Processes every whole frame the rings hold right now; with a
+  /// conversion, everything they hold, and the converted remainder of less
+  /// than a frame waits for the next drain. Internal (not private) only so
+  /// `RealTimeAllocationTests` can run the loop body on the test's own
+  /// thread under an allocation hook; production calls it from `run()`
+  /// alone.
   @inline(__always)
   func drain() {
+    if let conversion {
+      drainConverted(conversion)
+      return
+    }
     let frameSize = configuration.frameSize
     while sink.availableToRead >= frameSize {
       var index = 0
@@ -142,6 +164,44 @@ final class ProcessingThread: @unchecked Sendable {
         index += 1
       }
       processFrame()
+    }
+  }
+
+  /// Reads every lane in equal counts, converts them in step and processes
+  /// each whole 48 kHz frame.
+  @inline(__always)
+  private func drainConverted(_ conversion: Conversion) {
+    let frameSize = configuration.frameSize
+    while true {
+      let count = min(sink.availableToRead, conversion.read)
+      if count == 0 { return }
+      var written = 0
+      var index = 0
+      while index < laneBuffers.count {
+        sink.ring(index).read(into: conversion.input, count: count)
+        written = conversion.converters[index].process(
+          conversion.input, count: count,
+          into: conversion.output[index] + conversion.pending)
+        index += 1
+      }
+      conversion.pending += written
+      var start = 0
+      while conversion.pending - start >= frameSize {
+        index = 0
+        while index < laneBuffers.count {
+          laneBuffers[index].update(from: conversion.output[index] + start, count: frameSize)
+          index += 1
+        }
+        start += frameSize
+        processFrame()
+      }
+      index = 0
+      while index < laneBuffers.count {
+        conversion.output[index].update(
+          from: conversion.output[index] + start, count: conversion.pending - start)
+        index += 1
+      }
+      conversion.pending -= start
     }
   }
 
@@ -198,5 +258,39 @@ final class ProcessingThread: @unchecked Sendable {
       relay.write(channel: outputs.count, from: laneBuffers[micIndex])
     }
     relay.endFrame()
+  }
+}
+
+/// The rate conversion in front of the frames, one converter per lane.
+private final class Conversion: @unchecked Sendable {
+  let converters: [RateConverter]
+  /// One read of device samples: a frame's worth.
+  let read: Int
+  /// One read's samples, reused lane after lane.
+  let input: UnsafeMutablePointer<Float>
+  /// Converted samples per lane; the first `pending` are not yet framed.
+  let output: [UnsafeMutablePointer<Float>]
+  var pending = 0
+
+  init(laneCount: Int, frameSize: Int, deviceRate: Double) {
+    let read = Int((Double(frameSize) * deviceRate / StenoAudio.sampleRate).rounded(.up))
+    self.read = read
+    converters = (0..<laneCount).map { _ in
+      RateConverter(inputRate: deviceRate, outputRate: StenoAudio.sampleRate, maximumInput: read)
+    }
+    // No lanes, no converters: nothing is ever read.
+    let outputCapacity = frameSize + (converters.first?.maximumOutput ?? 0)
+    input = .allocate(capacity: read)
+    input.initialize(repeating: 0, count: read)
+    output = (0..<laneCount).map { _ in
+      let pointer = UnsafeMutablePointer<Float>.allocate(capacity: outputCapacity)
+      pointer.initialize(repeating: 0, count: outputCapacity)
+      return pointer
+    }
+  }
+
+  deinit {
+    input.deallocate()
+    for buffer in output { buffer.deallocate() }
   }
 }

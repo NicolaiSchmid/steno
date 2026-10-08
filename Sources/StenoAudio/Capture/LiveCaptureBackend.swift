@@ -37,10 +37,13 @@ struct DeviceSnapshot: Sendable, Equatable {
   /// The real backend: process tap + private aggregate device + one IOProc.
   /// `.system` comes from the tap, `.mic` and `.mixed` from the first channel
   /// of the selected input device, which the aggregate resamples to the
-  /// output device's 48 kHz clock.
+  /// output device's clock. That clock is 48 kHz where the output device
+  /// accepts it; a Bluetooth headset in the hands-free profile keeps 24, 16
+  /// or 8 kHz, and the stream then reports that rate for the processing
+  /// thread to convert.
   ///
   /// Device notifications (a default device moving, a sub-device dying, the
-  /// aggregate leaving 48 kHz) are coalesced for `coalesceDelay` on
+  /// aggregate changing rate) are coalesced for `coalesceDelay` on
   /// `listenerQueue`, then the devices are resolved again and compared with
   /// what the capture started on. Nothing changed means the burst is logged
   /// and ignored; otherwise the sink gets one `DeviceChangeReason` and the
@@ -98,14 +101,11 @@ struct DeviceSnapshot: Sendable, Equatable {
             input = try? AudioDevices.defaultInput()
           }
         }
-        let rate =
-          (try? aggregateID.readFloat64(
-            AudioObjectPropertyAddress(kAudioDevicePropertyNominalSampleRate))) ?? 0
         return DeviceSnapshot(
           outputUID: output?.uid, defaultOutputUID: Self.defaultOutputUID(), inputUID: input?.uid,
           outputAlive: AudioDevices.isAlive(outputID),
           inputAlive: micID.map(AudioDevices.isAlive) ?? false,
-          sampleRate: rate)
+          sampleRate: AudioDevices.nominalSampleRate(of: aggregateID))
       }
     }
 
@@ -127,7 +127,7 @@ struct DeviceSnapshot: Sendable, Equatable {
     /// property destruction order.
     deinit { stop() }
 
-    /// Returns the stream it opened: the confirmed 48 kHz rate, both device
+    /// Returns the stream it opened: the confirmed rate, both device
     /// latencies for the far-end delay, and the resolved `StreamLayout` so
     /// `steno dev capture-spike` can attribute buffers to lanes.
     public func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
@@ -194,19 +194,22 @@ struct DeviceSnapshot: Sendable, Equatable {
         throw error
       }
       // The aggregate inherits the clock master's rate. Ask for 48 kHz, then
-      // read it back: the HAL applies the change asynchronously and a device
-      // that cannot run at 48 kHz keeps its own, which would leave a
-      // pitch-shifted master labelled 48 kHz. Fail loud instead.
+      // read it back: the HAL applies the change asynchronously, and a
+      // device that cannot run at 48 kHz (a headset in the hands-free
+      // profile) keeps its own. The stream then reports that rate, which the
+      // processing thread converts; labelling it 48 kHz would leave a
+      // pitch-shifted master. A rate that settles only after this gave up is
+      // caught once the listeners are in place (below).
       if aggregate.nominalSampleRate != StenoAudio.sampleRate {
         try? aggregate.setNominalSampleRate(StenoAudio.sampleRate)
       }
       let sampleRate = NominalSampleRate.settle(
         to: StenoAudio.sampleRate, read: { aggregate.nominalSampleRate },
         wait: { Thread.sleep(forTimeInterval: NominalSampleRate.interval) })
-      guard sampleRate == StenoAudio.sampleRate else {
+      guard RateConverter.supports(sampleRate) else {
         aggregate.destroy()
         tap?.destroy()
-        throw CaptureError.sampleRateMismatch(actual: sampleRate)
+        throw CaptureError.unsupportedSampleRate(actual: sampleRate)
       }
 
       let layout: StreamLayout
@@ -230,7 +233,7 @@ struct DeviceSnapshot: Sendable, Equatable {
       }
 
       // Device changes: the default devices moving, a sub-device dying, the
-      // aggregate leaving 48 kHz (a Bluetooth profile switch can change the
+      // aggregate changing rate (a Bluetooth profile switch can change the
       // rate without moving a default). The tap mirrors the default output
       // device (where the call plays), the clock follows the system output
       // device (alerts); a change of either moves the far-end alignment, so
@@ -257,11 +260,18 @@ struct DeviceSnapshot: Sendable, Equatable {
 
       // The far-end delay: the microphone's input path plus the loudspeaker's
       // output path, each latency plus safety offset, read on the devices
-      // themselves rather than the aggregate.
+      // themselves rather than the aggregate, so each is in its own device's
+      // frames. The output device is the clock master, at `sampleRate`; a
+      // microphone on another device keeps its own rate (a 48 kHz built-in
+      // microphone beside a headset at 24 kHz) and is rescaled to the
+      // stream's.
       let inputLatency =
-        mic.map {
-          AudioDevices.latencyFrames(
-            of: AudioObjectID($0.id), scope: kAudioObjectPropertyScopeInput)
+        mic.map { mic in
+          let id = AudioObjectID(mic.id)
+          return Self.micLatencyFrames(
+            AudioDevices.latencyFrames(of: id, scope: kAudioObjectPropertyScopeInput),
+            onClockMaster: micSubDevice == 0, micRate: AudioDevices.nominalSampleRate(of: id),
+            streamRate: sampleRate)
         } ?? 0
       let outputLatency = AudioDevices.latencyFrames(
         of: AudioObjectID(output.id), scope: kAudioObjectPropertyScopeOutput)
@@ -274,6 +284,13 @@ struct DeviceSnapshot: Sendable, Equatable {
         probe: DeviceProbe(
           outputID: AudioObjectID(output.id), micID: mic.map { AudioObjectID($0.id) },
           inputDeviceUID: inputDeviceUID, aggregateID: aggregate.deviceID))
+      // Any change from here on notifies; one before the rate listener was in
+      // place is judged as if it had, once `start` lets go of the lock.
+      if let selector = Self.lateRateNotification(
+        started: sampleRate, now: aggregate.nominalSampleRate)
+      {
+        listenerQueue.async { [weak self] in self?.noteNotification(selector) }
+      }
       return CaptureStream(
         sampleRate: sampleRate, inputLatencyFrames: inputLatency,
         outputLatencyFrames: outputLatency, layout: layout)
@@ -290,6 +307,28 @@ struct DeviceSnapshot: Sendable, Equatable {
       for listener in active.listeners { listener.remove() }
       active.aggregate.destroy()
       active.tap?.destroy()
+    }
+
+    /// The notification the aggregate's rate, read again once the listeners
+    /// are in place, stands for: a rate notification when it is no longer the
+    /// rate the capture started at, nil otherwise. A device that relocks
+    /// after `NominalSampleRate.settle` gave up, but before the rate listener
+    /// was registered, fires no notification of its own, and the stream would
+    /// keep the old rate's label for the whole recording.
+    static func lateRateNotification(started: Double, now: Double)
+      -> AudioObjectPropertySelector?
+    {
+      now != started ? kAudioDevicePropertyNominalSampleRate : nil
+    }
+
+    /// The microphone's latency of `frames` in the stream's frames: as it is
+    /// when the microphone is the clock master, rescaled from its own
+    /// `micRate` to `streamRate` otherwise (rounded down; an unreadable rate
+    /// leaves it as it is).
+    static func micLatencyFrames(
+      _ frames: Int, onClockMaster: Bool, micRate: Double, streamRate: Double
+    ) -> Int {
+      onClockMaster ? frames : CaptureStream.rescaled(frames, from: micRate, to: streamRate)
     }
 
     /// A property listener fired, on `listenerQueue`. Bluetooth transitions

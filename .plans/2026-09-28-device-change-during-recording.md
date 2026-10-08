@@ -19,6 +19,11 @@ created by this plan's app PR. The auto-stop is a new behaviour, approved by the
 Deferred section of the audio capture plan pointing here.
 Line numbers are as of commit `9cd7cf5` (source identical to `bcf5eef` on `main`).
 
+Partly superseded by [`2026-10-05-device-sample-rate.md`](2026-10-05-device-sample-rate.md):
+Decisions 2 and 3 compare the aggregate's rate with the rate the capture started at, not with
+48 kHz, so a capture that stays at 24 kHz is no change, and a rate the converter takes rebuilds
+at that rate instead of failing.
+
 ## Goal
 
 A recording survives the audio device changes that happen during and at the end of a normal
@@ -154,14 +159,16 @@ labelled with, or the tap delivering zeros.
 2. **Rebuild only when something actually changed.** The backend's listener, on its own queue
    and after a 500 ms coalescing delay, resolves the default devices again and compares: same
    output UID, same microphone UID, both alive, aggregate still at 48 kHz means nothing to do
-   (logged as an ignored notification). Otherwise it reports a `DeviceChange` with the reason
+   (logged as an ignored notification; superseded: still at the started rate, see the note
+   at the top). Otherwise it reports a `DeviceChange` with the reason
    (`defaultOutputChanged`, `defaultInputChanged`, `outputDeviceGone`, `inputDeviceGone`,
    `sampleRateChanged`). Reason: a Bluetooth transition produces several notifications in a
    burst and some of them change nothing; rebuilding on each would re-open the microphone and
    can itself re-trigger HFP negotiation.
 3. **Also watch the aggregate's nominal sample rate.** `kAudioDevicePropertyNominalSampleRate`
    on the aggregate joins the watched list; a rate other than 48 kHz is a `sampleRateChanged`
-   change and rebuilds. Reason: the unwatched hazard above.
+   change and rebuilds (superseded: a rate other than the started one, see the note at the
+   top). Reason: the unwatched hazard above.
 4. **The session, not the backend, orchestrates the rebuild.** `CaptureBackend` keeps `start`
    and `stop`; the session calls them again. Reason: the retry policy, the gap accounting and
    the processing thread swap belong with the state machine, and `SyntheticCaptureBackend`

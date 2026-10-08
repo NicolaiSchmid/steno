@@ -1647,13 +1647,9 @@ it:
   after the detector stopped, the next notification arrives. A detector
   started and stopped many times holds that many idle threads until then.
 
-Six Swift defects the port does not share; fix them in Swift if it ships
+Five Swift defects the port does not share; fix them in Swift if it ships
 another release, otherwise the cutover closes them:
 
-- `CaptureSession.finish()` should read the sink's ring overrun counts
-  before `sink.clear()`, as the Rust `finish()` does; today `clear()` zeroes
-  them first (`CaptureSession.swift`, the `clear()` before the
-  `droppedSamples` read), so `droppedFrames` never holds a ring overrun.
 - `CaptureSession` should count the silence a stop cut short in
   `gapSeconds`, as the Rust session does; today a stop while the gap waits
   for relay room leaves that silence in the master and reports 0.
@@ -2726,6 +2722,7 @@ PR off `main`.
 | Linux input device list and meeting detection over PipeWire, the services reading every platform's device list, a missing chosen microphone recording the default input on every platform (with a warning naming the microphone in use, and a return once it is back and opens; one that does not open waits for the next rebuild), `start`'s first-cycle wait settled, the latency steps for real hardware | `fix/linux-devices-and-detection` | #222 | merged |
 | On Windows the durable writes (`replace_file`, `copy_durably`, `create_dir_all_durably`, `create_new_dir_durably`) rename written through (`MoveFileExW` with `MOVEFILE_WRITE_THROUGH`) or with std, then flush the renamed file and the folders; a failed flush answers the phone 500 or fails the export, a drive that refuses a folder flush is passed over, and Settings warns under an audio folder on a drive that is neither NTFS nor ReFS or on a network drive; the phone intake never writes into a meeting folder it did not create (`steno-pipeline`, `steno-adapters`, `steno-host`, web UI) | `fix/windows-durable-rename` | #242 | open |
 | Schema v5's admission ledger: an announce of admitted bytes is answered delivered after a revoke or a meeting delete, other bytes under a recording id are a new recording, the same bytes from another device take the receipt over and are admitted once, the same bytes in another split restart the partial; the migrator ignores later migrations and the desktop shows a dialog when the store cannot be opened (both apps) | `fix/handover-lost-complete-answer` | #243 | open |
+| A device that will not run at 48 kHz (a headset in the hands-free profile) is recorded at its own rate and converted to 48 kHz on the processing thread, at start and after a switch mid-call, instead of failing (`steno-audio`, Swift core) | `t3code/check-rust-audio-sample-rate` | #198 | open |
 
 WP4b is `crates/steno-speech-coreml`: `objc2-core-ml` behind one safe module,
 the four backend calls, the FluidAudio 0.17.4 heuristics ported

@@ -41,10 +41,10 @@ pub struct DeviceSnapshot {
     /// and links have not failed; on Windows, it is still
     /// `DEVICE_STATE_ACTIVE`.
     pub input_alive: bool,
-    /// The aggregate's nominal rate; 0 once it is gone. On Linux and
-    /// Windows always 48 kHz: PipeWire's adapter or the WASAPI engine
-    /// resamples (on Windows a format change invalidates the stream
-    /// instead).
+    /// The aggregate's nominal rate, 48 kHz or whatever the clock master
+    /// kept; 0 once it is gone. On Linux and Windows always 48 kHz:
+    /// PipeWire's adapter or the WASAPI engine resamples (on Windows a
+    /// format change invalidates the stream instead).
     pub sample_rate: f64,
 }
 

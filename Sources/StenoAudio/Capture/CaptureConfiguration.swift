@@ -68,10 +68,10 @@ public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConv
   case outputDeviceUnavailable
   /// The aggregate's input streams did not match the expected lanes.
   case unexpectedStreamLayout(String)
-  /// The aggregate would not run at `StenoAudio.sampleRate` (the output
-  /// device is fixed at another rate); the user changes it in Audio MIDI
-  /// Setup or picks another output.
-  case sampleRateMismatch(actual: Double)
+  /// The aggregate runs at a rate the processing thread cannot convert to
+  /// `StenoAudio.sampleRate` (outside `RateConverter.supports`, or 0 for an
+  /// aggregate that is gone).
+  case unsupportedSampleRate(actual: Double)
   /// The tap never rose above `LaneLevel.silentPeakLinear` during the whole
   /// session.
   case systemAudioSilent
@@ -90,8 +90,8 @@ public enum CaptureError: Error, Sendable, Equatable, Hashable, CustomStringConv
     case .inputDeviceUnavailable: "the input device is not available"
     case .outputDeviceUnavailable: "the output device is not available"
     case .unexpectedStreamLayout(let detail): "unexpected input stream layout: \(detail)"
-    case .sampleRateMismatch(let actual):
-      "the audio devices run at \(Int(actual)) Hz, not \(Int(StenoAudio.sampleRate)) Hz"
+    case .unsupportedSampleRate(let actual):
+      "the audio devices run at \(Int(actual)) Hz, which Steno cannot record"
     case .systemAudioSilent: "the system lane stayed silent"
     case .deviceLost: "an audio device disappeared"
     case .writerFailed(let detail): "writing the recording failed: \(detail)"
@@ -179,7 +179,8 @@ public enum DeviceChangeReason: Sendable, Equatable, Hashable {
   case defaultInputChanged
   case outputDeviceGone
   case inputDeviceGone
-  /// The aggregate no longer runs at `StenoAudio.sampleRate`.
+  /// The aggregate no longer runs at the rate the capture started at (a
+  /// Bluetooth headset entering or leaving the hands-free profile).
   case sampleRateChanged
 }
 

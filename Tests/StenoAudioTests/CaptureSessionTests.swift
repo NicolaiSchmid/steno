@@ -482,6 +482,24 @@ import Testing
       CaptureSession.farEndDelayFrames(inputLatencyFrames: 0, outputLatencyFrames: 480) == 480)
   }
 
+  /// Frame counts move between rates rounded down: a device's to 48 kHz, and
+  /// a microphone on its own clock to the stream's; a rate that could not be
+  /// read leaves the count alone.
+  @Test func frameCountsAreRescaledBetweenRatesRoundingDown() {
+    let handsFree = CaptureStream(
+      sampleRate: 24_000, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil)
+    #expect(handsFree.atOutputRate(240 + 4_800) == 10_080)
+    #expect(CaptureStream.synthetic.atOutputRate(5_041) == 5_041)
+    // 1 000 * 48 000 / 44 100 = 1 088.4.
+    let consumer = CaptureStream(
+      sampleRate: 44_100, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil)
+    #expect(consumer.atOutputRate(1_000) == 1_088)
+    // A 48 kHz microphone beside a 24 kHz clock master.
+    #expect(CaptureStream.rescaled(481, from: 48_000, to: 24_000) == 240)
+    #expect(CaptureStream.rescaled(481, from: 0, to: 24_000) == 481)
+    #expect(CaptureStream.rescaled(481, from: .nan, to: 24_000) == 481)
+  }
+
   /// The backend describes the stream it opened; the session keeps it while
   /// recording (capture-spike prints it) and drops it with the recording.
   @Test func theSessionExposesTheBackendsStreamWhileRecording() async throws {
@@ -672,6 +690,287 @@ import Testing
     #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).count == 1)
     #expect(canceller.log == ["reset", "process", "reset", "process"], "cold filter after")
     #expect(clock.pendingSleepers == 0)
+  }
+
+  /// Keeps every far-end sample it is handed and passes the microphone
+  /// through.
+  final class FarEndRecorder: EchoCanceller, @unchecked Sendable {
+    let sampleRate: Double
+    let frameSize: Int
+    private let lock = NSLock()
+    private var samples: [Float] = []
+
+    init(sampleRate: Double, frameSize: Int) throws {
+      self.sampleRate = sampleRate
+      self.frameSize = frameSize
+    }
+
+    var farEnd: [Float] {
+      lock.lock()
+      defer { lock.unlock() }
+      return samples
+    }
+
+    func process(
+      nearEnd: UnsafeBufferPointer<Float>, farEnd: UnsafeBufferPointer<Float>,
+      out: UnsafeMutableBufferPointer<Float>
+    ) {
+      lock.lock()
+      samples.append(contentsOf: farEnd)
+      lock.unlock()
+      for index in 0..<min(nearEnd.count, out.count) { out[index] = nearEnd[index] }
+    }
+  }
+
+  /// A headset in the hands-free profile keeps the aggregate at 24 kHz: the
+  /// recording still starts, the master and the sidecars are 48 and 16 kHz
+  /// with the tones at their frequencies and levels, and the far end reaches
+  /// the canceller delayed by the device latencies in 48 kHz frames.
+  @Test func aDeviceAt24KilohertzRecordsTheUsualFiles() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let handsFree = CaptureStream(
+      sampleRate: 24_000, inputLatencyFrames: 240, outputLatencyFrames: 4_800, layout: nil)
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 3, stream: handsFree)
+    let recorder = try FarEndRecorder(sampleRate: 48_000, frameSize: 480)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: recorder, writerHeadroomFrames: 1_000)
+    try await session.start(meetingID: UUID())
+    #expect(await session.stream?.sampleRate == 24_000)
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+
+    #expect(backend.framesDelivered == 3 * 24_000)
+    #expect(result.statistics.droppedFrames == [:])
+    // 72 000 device samples less half a converter window convert to
+    // 2 * (72 000 - 32) = 143 936 outputs: 299 whole frames.
+    let master = try CAFFile.read(result.asset.url)
+    #expect(master.frameCount == 143_520)
+    #expect(result.statistics.duration == 143_520 / StenoAudio.sampleRate)
+    #expect(master.sampleRate == StenoAudio.sampleRate)
+    #expect(master.channels.count == 2)
+    for (channel, hertz) in [(0, 440.0), (1, 1_000.0)] {
+      let steady = master.channels[channel][4_800..<140_000]
+      let measured = RateConverterTests.frequency(steady)
+      #expect(abs(measured - hertz) < 2, "\(measured) Hz")
+      #expect(abs(RateConverterTests.levelAgainstHalfScaleSine(steady)) < 0.1)
+    }
+    let mic = try WAVAudioDecoder.read(result.asset.sidecars16k[.mic]!)
+    #expect(mic.samples.count == 143_520 / 3)
+    // 240 + 4 800 frames at 24 kHz are 10 080 at 48 kHz: the far end is the
+    // system lane that many samples late, zeros before.
+    let farEnd = recorder.farEnd
+    let system = master.channels[1]
+    #expect(farEnd.count == system.count)
+    #expect(farEnd.prefix(10_080).allSatisfy { $0 == 0 })
+    #expect(Array(farEnd.dropFirst(10_080)) == Array(system.prefix(system.count - 10_080)))
+  }
+
+  /// The call starts and the headset enters the hands-free profile while
+  /// recording: the rebuilt backend comes back at 24 kHz and the recording
+  /// carries on instead of ending as a lost device.
+  @Test func aChangeTo24KilohertzResumesTheRecording() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let clock = ManualClock()
+    let handsFree = CaptureStream(
+      sampleRate: 24_000, inputLatencyFrames: 240, outputLatencyFrames: 4_800, layout: nil)
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 2, changeDeviceAfter: 1,
+      streamAfterRestart: handsFree)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000, clock: clock)
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    #expect(await notices.next() == .deviceChanged(.defaultInputChanged))
+    #expect(await notices.next() == .deviceResumed(attempt: 1, gapSeconds: 0))
+    #expect(await session.stream == handsFree)
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+
+    #expect(backend.framesDelivered == 48_000 + 2 * 24_000)
+    #expect(result.statistics.deviceChanges == 1)
+    #expect(!result.statistics.endedOnDeviceLoss)
+    #expect(result.statistics.droppedFrames == [:])
+    // 100 frames at 48 kHz, then 48 000 samples at 24 kHz less half a window:
+    // 2 * (48 000 - 32) = 95 936 outputs, 199 whole frames.
+    let master = try CAFFile.read(result.asset.url)
+    #expect(master.frameCount == (100 + 199) * 480)
+    let after = master.channels[0][52_800..<140_000]
+    let measured = RateConverterTests.frequency(after)
+    #expect(abs(measured - 440) < 2, "\(measured) Hz after the change")
+  }
+
+  /// Hands the test the sink it is given and delivers nothing; every start
+  /// after the first reports `streamAfterRestart` when one is set.
+  final class HandsOverTheSink: CaptureBackend, @unchecked Sendable {
+    let stream: CaptureStream
+    let streamAfterRestart: CaptureStream?
+    private let lock = NSLock()
+    private var handed: LaneFrameSink?
+
+    init(stream: CaptureStream, streamAfterRestart: CaptureStream? = nil) {
+      self.stream = stream
+      self.streamAfterRestart = streamAfterRestart
+    }
+
+    var sink: LaneFrameSink? {
+      lock.lock()
+      defer { lock.unlock() }
+      return handed
+    }
+
+    func start(lanes: [AudioLane], inputDeviceUID: String?, sink: LaneFrameSink) throws
+      -> CaptureStream
+    {
+      lock.lock()
+      let restarted = handed != nil
+      handed = sink
+      lock.unlock()
+      return restarted ? streamAfterRestart ?? stream : stream
+    }
+
+    func stop() {}
+  }
+
+  /// Passes the near end through once the gate opens; until then the
+  /// processing thread is stuck in its first frame.
+  final class GatedCanceller: EchoCanceller, @unchecked Sendable {
+    private let condition = NSCondition()
+    private var isOpen = false
+
+    init(sampleRate: Double, frameSize: Int) throws {}
+
+    func open() {
+      condition.lock()
+      isOpen = true
+      condition.broadcast()
+      condition.unlock()
+    }
+
+    func process(
+      nearEnd: UnsafeBufferPointer<Float>, farEnd: UnsafeBufferPointer<Float>,
+      out: UnsafeMutableBufferPointer<Float>
+    ) {
+      condition.lock()
+      while !isOpen { condition.wait() }
+      condition.unlock()
+      for index in 0..<min(nearEnd.count, out.count) { out[index] = nearEnd[index] }
+    }
+  }
+
+  /// `count` callbacks of 480 samples on both lanes; returns how many the
+  /// rings refused.
+  func overrun(_ sink: LaneFrameSink, callbacks count: Int) -> Int {
+    let buffer = [Float](repeating: 0.25, count: 480)
+    var refused = 0
+    buffer.withUnsafeBufferPointer { samples in
+      for _ in 0..<count {
+        if sink.beginCallback(frameCount: 480) {
+          sink.write(lane: 0, from: samples.baseAddress!)
+          sink.write(lane: 1, from: samples.baseAddress!)
+          sink.endCallback()
+        } else {
+          refused += 1
+        }
+      }
+    }
+    return refused
+  }
+
+  /// Three seconds of callbacks while the processing thread is stuck: the
+  /// two-second rings take what fits (plus what the thread read before it
+  /// stuck), refuse the rest and count it, and those overruns reach
+  /// `droppedFrames`. At 24 kHz a refused 480-sample callback is two 48 kHz
+  /// frames.
+  @Test(arguments: [48_000.0, 24_000.0])
+  func ringOverrunsAreReportedIn48KilohertzFrames(rate: Double) async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = HandsOverTheSink(
+      stream: CaptureStream(
+        sampleRate: rate, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil))
+    let gate = try GatedCanceller(sampleRate: 48_000, frameSize: 480)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend, echoCanceller: gate,
+      writerHeadroomFrames: 2_000)
+    try await session.start(meetingID: UUID())
+    let sink = try #require(backend.sink)
+    let refused = overrun(sink, callbacks: 300)
+    let accepted = 300 - refused
+    gate.open()
+    let result = try await session.stop()
+
+    #expect(refused > 0 && accepted >= 200, "the rings hold two seconds: \(accepted) accepted")
+    // 48 kHz frames per callback; at 24 kHz half a converter window is held
+    // back, one frame less in the master.
+    let frames = Int(StenoAudio.sampleRate / rate)
+    let held = rate == StenoAudio.sampleRate ? 0 : 1
+    #expect(try CAFFile.read(result.asset.url).frameCount == (accepted * frames - held) * 480)
+    let dropped = refused * frames
+    #expect(result.statistics.droppedFrames == [.mic: dropped, .system: dropped])
+  }
+
+  /// Overruns at 48 kHz, then a headset that switches to 16 kHz mid-call:
+  /// the overruns are counted at the rate of the stream they happened on,
+  /// not the rate the recording ends at (which would read them three times
+  /// over).
+  @Test func ringOverrunsBeforeARateChangeKeepTheirRate() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = HandsOverTheSink(
+      stream: .synthetic,
+      streamAfterRestart: CaptureStream(
+        sampleRate: 16_000, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil))
+    let gate = try GatedCanceller(sampleRate: 48_000, frameSize: 480)
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend, echoCanceller: gate,
+      writerHeadroomFrames: 2_000)
+    var notices = await session.notices.makeAsyncIterator()
+    try await session.start(meetingID: UUID())
+    let sink = try #require(backend.sink)
+    let refused = overrun(sink, callbacks: 400)
+    #expect(refused > 0, "the rings overran")
+    gate.open()
+    sink.reportDeviceChange(.sampleRateChanged)
+    #expect(await notices.next() == .deviceChanged(.sampleRateChanged))
+    guard case .deviceResumed(attempt: 1, _) = await notices.next() else {
+      Issue.record("the recording did not resume")
+      return
+    }
+    #expect(await session.stream?.sampleRate == 16_000)
+    let result = try await session.stop()
+
+    // One refused 480-sample callback at 48 kHz is one frame.
+    #expect(result.statistics.droppedFrames == [.mic: refused, .system: refused])
+  }
+
+  /// A backend that reports a rate the converter cannot take (the live
+  /// backend refuses one at `start`) is recorded unconverted, sample for
+  /// sample, instead of trapping in `RateConverter.init`. 1.2 s at 4 kHz is
+  /// ten whole frames, so no remainder is left in the rings.
+  @Test func aStreamAtARateTheConverterCannotTakeIsRecordedUnconverted() async throws {
+    let directory = try Fixtures.temporaryDirectory("session")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let backend = SyntheticCaptureBackend(
+      lanes: [.mic, .system], tone: [.mic: 440, .system: 1_000], seconds: 1.2,
+      stream: CaptureStream(
+        sampleRate: 4_000, inputLatencyFrames: 0, outputLatencyFrames: 0, layout: nil))
+    let session = try CaptureSession(
+      configuration: configuration(.call, in: directory), backend: backend,
+      echoCanceller: try PassthroughEchoCanceller(sampleRate: 48_000, frameSize: 480),
+      writerHeadroomFrames: 1_000)
+    try await session.start(meetingID: UUID())
+    await backend.waitUntilFinished()
+    let result = try await session.stop()
+
+    #expect(backend.framesDelivered == 4_800)
+    #expect(result.statistics.droppedFrames == [:])
+    #expect(try CAFFile.read(result.asset.url).frameCount == 4_800)
   }
 
   /// The contiguity claim. A gap longer than the two seconds the sink's

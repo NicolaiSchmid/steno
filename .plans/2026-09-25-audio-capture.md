@@ -11,6 +11,10 @@ API names marked "(unverified)" were seen only in blog posts or recalled from me
 correctness review verified the rest against Apple documentation and package sources (cited
 inline); the remaining markers are confirmed against the macOS 15 SDK headers in step 2.
 
+Partly superseded by [`2026-10-05-device-sample-rate.md`](2026-10-05-device-sample-rate.md): an
+output device that keeps another rate between 8 and 192 kHz is recorded and converted to 48 kHz
+on the processing thread; `start()` throws (`unsupportedSampleRate`) only outside that range.
+
 ## Goal
 
 Capture a meeting on the Mac as two time-aligned lanes at 48 kHz, "me" from the microphone and "them"
@@ -443,7 +447,7 @@ elegance), each behaviour change with a test that failed before it. Departures f
 - The aggregate's nominal sample rate is read back after it is set (ten reads 20 ms apart; the HAL
   applies the change asynchronously) and `start()` throws `CaptureError.sampleRateMismatch(actual:)`
   when it is not 48 kHz. A silent 44.1 kHz master labelled 48 kHz is no longer possible; the user
-  fixes the output device's rate or picks another output.
+  fixes the output device's rate or picks another output. (Superseded: see the note at the top.)
 - `SystemAudioPermission.request(timeout:)` waits for the TCC decision: the tap starts first (where
   the prompt appears), `afplay` is restarted whenever its one-second tone has finished, the ring is
   polled every 100 ms, and only the 30 s bound means denied. The loop is pure
