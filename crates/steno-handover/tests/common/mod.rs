@@ -242,6 +242,18 @@ pub fn fake_intake(meeting_id: Uuid) -> Arc<FakeHandoverIntake> {
     })
 }
 
+/// The meeting row a real intake commits with the `complete` receipt; the
+/// fake intakes write none. The engine reads a stored `complete` receipt
+/// whose meeting is missing as not admitted.
+pub fn save_admitted_meeting(store: &Store, meeting_id: Uuid) {
+    store
+        .save_meeting(&steno_core::Meeting {
+            id: meeting_id,
+            ..steno_core::testing::sample_data::meeting()
+        })
+        .unwrap();
+}
+
 /// Runs `sql` on the store's connection; the tests make a store write or
 /// read fail with a temporary trigger or table.
 pub fn execute_batch(store: &Store, sql: &str) {

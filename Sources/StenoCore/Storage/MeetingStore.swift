@@ -12,6 +12,12 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
   case meetingBusy(UUID, MeetingState.Kind)
   /// `resolvePerson(named:)` with nothing but whitespace.
   case blankPersonName
+  /// The phone intake's admission of a recording whose receipt belongs to
+  /// another device, thrown at `RecordingIntake.admit`'s own read and by
+  /// `saveDurably(_:meeting:asset:)`: the admitting phone was revoked and
+  /// another one announced the same recording id. Rust:
+  /// `StoreError::ReceiptOfAnotherDevice`.
+  case receiptOfAnotherDevice(UUID)
 
   public var description: String {
     switch self {
@@ -22,6 +28,7 @@ public enum MeetingStoreError: Error, Sendable, Equatable, CustomStringConvertib
     case .speakersInDifferentMeetings(let a, let b):
       "speakers \(a) and \(b) belong to different meetings"
     case .blankPersonName: "a person needs a name"
+    case .receiptOfAnotherDevice(let id): "recording \(id) belongs to another device"
     }
   }
 }
@@ -74,6 +81,89 @@ public final class MeetingStore: Sendable {
       try MeetingRow(meeting).save(db)
       try AudioAssetRow(asset).save(db)
     }
+  }
+
+  /// One write transaction whose commit is on the disk when this returns,
+  /// for the commits an answer to another device depends on: the phone
+  /// intake's admission, before `complete` tells the phone to delete its
+  /// copy; the `failed` receipt after a failed admission commit, which
+  /// writes over that commit's frames before the intake removes its copy;
+  /// a pairing, whose token the phone keeps; and a revoke. The pool's
+  /// writer commits under `synchronous = NORMAL`, which syncs the WAL only
+  /// at a checkpoint, so a power loss can roll a commit back.
+  /// This transaction runs under `synchronous = FULL` with `fullfsync` on,
+  /// so its commit syncs the WAL with `F_FULLFSYNC`, which also flushes the
+  /// drive's cache; the sync covers every earlier commit in the WAL too.
+  /// That costs one WAL fsync per commit, plus a flush of the drive's cache,
+  /// all while the writer is held, so other writes wait for it.
+  /// SQLite refuses to change `synchronous` inside a transaction, so the
+  /// levels are set before `BEGIN` and set back once the transaction has
+  /// committed or rolled back, in the same writer access: no other write
+  /// runs under them. Rust: `Store::write_durably`.
+  public func writeDurably<T: Sendable>(_ body: @escaping @Sendable (Database) throws -> T)
+    async throws -> T
+  {
+    try await writer.writeWithoutTransaction { db in
+      try Self.underFullSync(db) {
+        var value: T?
+        try db.inTransaction(.immediate) {
+          value = try body(db)
+          return .commit
+        }
+        return value!
+      }
+    }
+  }
+
+  /// Copies every commit in the WAL into the database file, syncs it, and
+  /// starts the WAL over, so a power loss afterwards brings back what the store
+  /// reads now. `HandoverService.checkpointStore(_:)` runs it at launch, before
+  /// the handover listener starts, and says why. `checkpoint(.truncate)` under
+  /// `synchronous = FULL` with `fullfsync` on copies the frames, syncs the
+  /// database file, waits until no reader is left in the WAL and truncates the
+  /// WAL file, keeping a new salt for its next header. The truncation is not
+  /// synced: after a power loss the file can come back with its old header and
+  /// frames, and recovery replays every frame under the header's salt, which
+  /// would put older pages back over the checkpointed ones. So one durable
+  /// write that changes a page follows, in the same writer access: a private
+  /// table created and dropped, which leaves the schema and the applied
+  /// migrations as they were. Its commit writes the WAL header with the new
+  /// salt and syncs it with its frames, so recovery replays only those frames:
+  /// every older one carries the old salt. A failed sync throws, and so does a
+  /// checkpoint that another connection (a writer, or a reader still in the
+  /// WAL) blocks when the busy timeout runs out (`SQLITE_BUSY`), since the
+  /// commits it could not copy are not known to be on the disk. An in-memory
+  /// store has no WAL and returns at once. Rust: `Store::checkpoint_durably`.
+  public func checkpointDurably() async throws {
+    try await writer.writeWithoutTransaction { db in
+      try Self.underFullSync(db) {
+        let (walFrameCount, _) = try db.checkpoint(.truncate)
+        guard walFrameCount >= 0 else { return }
+        // A commit that changes no page writes no frame, and so no WAL
+        // header; creating a table always changes one.
+        try db.inTransaction(.immediate) {
+          try db.execute(sql: "CREATE TABLE stenoWalRestart(x); DROP TABLE stenoWalRestart")
+          return .commit
+        }
+      }
+    }
+  }
+
+  /// `body` with the connection at `synchronous = FULL` and `fullfsync` on,
+  /// and the levels it found set back afterwards. Outside a transaction
+  /// only: SQLite refuses to change `synchronous` inside one.
+  private static func underFullSync<T>(_ db: Database, _ body: () throws -> T) throws -> T {
+    let synchronous = try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? 1
+    let fullfsync = try Bool.fetchOne(db, sql: "PRAGMA fullfsync") ?? false
+    // Neither pragma fails outside a transaction, and the transaction has
+    // ended by now.
+    defer {
+      try? db.execute(sql: "PRAGMA synchronous = \(synchronous)")
+      try? db.execute(sql: "PRAGMA fullfsync = \(fullfsync ? 1 : 0)")
+    }
+    try db.execute(sql: "PRAGMA synchronous = FULL")
+    try db.execute(sql: "PRAGMA fullfsync = ON")
+    return try body()
   }
 
   /// The meeting and its participants in one transaction;

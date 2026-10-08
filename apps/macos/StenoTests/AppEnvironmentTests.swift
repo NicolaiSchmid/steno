@@ -1,4 +1,5 @@
 import StenoCore
+import StenoHandover
 import XCTest
 
 @MainActor
@@ -16,6 +17,44 @@ final class AppEnvironmentTests: XCTestCase {
     let settings = try await environment.settings.load()
     XCTAssertFalse(settings.launchAtLogin)
     XCTAssertNil(environment.handover)
+  }
+
+  /// The handover listener is built only over a store whose commits are on the
+  /// disk: a checkpoint that fails (here one another connection blocks) throws
+  /// before the identity is read, which `live` turns into a startup warning
+  /// with the handover off; once the checkpoint succeeds the listener is built.
+  /// Rust: `a_store_that_cannot_sync_keeps_the_handover_off`.
+  func testAStoreThatCannotSyncKeepsTheHandoverOff() async throws {
+    let directory = try TestSupport.temporaryDirectory("steno-sync")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let (store, other) = try MeetingStore.checkpointBlocked(
+      at: directory.appendingPathComponent("steno.sqlite"))
+    let configuration = HandoverConfiguration(
+      serviceName: "Test Mac", advertise: false,
+      inboxDirectory: directory.appendingPathComponent("inbox", isDirectory: true))
+    var identityReads = 0
+    let identity = {
+      identityReads += 1
+      return try TestSupport.testIdentity()
+    }
+
+    do {
+      _ = try await AppEnvironment.makeHandover(
+        store: store, intake: FakeHandoverIntake(), configuration: configuration,
+        identity: identity)
+      XCTFail("a store that cannot sync gets no listener")
+    } catch let error as StoreNotSynced {
+      XCTAssertTrue(
+        "\(error)".hasPrefix("the database could not be synced to the disk: "), "\(error)")
+    }
+    XCTAssertEqual(identityReads, 0, "the identity is not read")
+
+    try other.release()
+    let handover = try await AppEnvironment.makeHandover(
+      store: store, intake: FakeHandoverIntake(), configuration: configuration,
+      identity: identity)
+    XCTAssertEqual(identityReads, 1)
+    XCTAssertEqual(handover.state, .stopped)
   }
 
   /// `preview()` grants every permission; `preview(permissions:)` takes the

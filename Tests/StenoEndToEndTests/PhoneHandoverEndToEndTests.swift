@@ -22,16 +22,13 @@ import Testing
     settings.defaultRetention = .keepDays(30)
     try await settingsStore.save(settings)
 
-    // The real intake, wired the way the CLI and app wire it: enqueue is the
-    // pipeline's persist-and-run. Here it saves the meeting and asset so the
-    // meeting is observable and the intake stays idempotent.
+    // The real intake, which commits the receipt, the meeting and the asset
+    // itself; enqueue, the pipeline's run of that meeting in the app, only
+    // records it here.
     let enqueued = CallLog<UUID>()
     let intake = RecordingIntake(
       store: store, settings: settingsStore,
-      enqueue: { meeting, asset in
-        try await store.save(meeting, asset: asset)
-        await enqueued.record(meeting.id)
-      })
+      enqueue: { meeting, _ in await enqueued.record(meeting.id) })
 
     let service = HandoverService(
       configuration: HandoverConfiguration(

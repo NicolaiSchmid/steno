@@ -514,6 +514,7 @@ async fn an_admitted_recording_answers_its_meeting_after_a_revoke_during_the_rea
     let admitted = before.complete(restarted.id()).await;
     assert_eq!(admitted.status.as_u16(), 200);
     let meeting: wire::CompleteResponse = admitted.decode().unwrap();
+    common::save_admitted_meeting(&restarted.first.store, meeting.meeting_id);
 
     let (response, _) = restarted.complete_with_a_revoke_during_the_read(true).await;
 

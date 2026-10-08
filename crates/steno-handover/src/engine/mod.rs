@@ -323,6 +323,10 @@ impl Engine {
     pub const ABANDONED_AFTER_SECONDS: i64 = 14 * 24 * 60 * 60;
     /// The `failed` reason after the intake refused; the detail is logged.
     pub const INTAKE_REFUSED: &'static str = "the intake refused the file";
+    /// The `failed` reason a stored `complete` receipt reads as when its
+    /// meeting is missing (`stored_receipt`). Swift:
+    /// `HandoverEngine.meetingMissing`.
+    pub const MEETING_MISSING: &'static str = "the admitted meeting is missing";
 
     /// The two answers of the gate. `unauthorized` is the phone's "the
     /// computer revoked me" signal; `pairing_rejected` a bad, used or
@@ -410,14 +414,17 @@ impl Engine {
     /// announce and the first save, a device revoked while offline), that a
     /// completed intake left behind (it copied the file before writing
     /// `complete`), or whose receipt has not moved in
-    /// [`Engine::ABANDONED_AFTER_SECONDS`]. Best effort: a receipt the
-    /// store cannot read keeps its files, which a later start sweeps.
+    /// [`Engine::ABANDONED_AFTER_SECONDS`]. A `complete` receipt whose
+    /// meeting is missing counts as not admitted (`stored_receipt`), so
+    /// its verified file stays for the phone's retry. Best effort: a
+    /// receipt the store cannot read keeps its files, which a later start
+    /// sweeps.
     pub async fn sweep_orphans(&self) {
         let _ = self.inbox.prepare();
         let cutoff = (self.now)() - Duration::seconds(Self::ABANDONED_AFTER_SECONDS);
         for recording_id in self.inbox.recording_ids() {
             let Ok(receipt) = self
-                .with_store(move |store| store.handover_receipt(recording_id))
+                .with_store(move |store| stored_receipt(store, recording_id))
                 .await
             else {
                 continue;
@@ -958,11 +965,13 @@ impl Engine {
         result
     }
 
-    /// The receipt from memory or the store. Another request may have loaded
-    /// and advanced it while the store read ran; memory wins then. A failed
-    /// read is an error, not "no receipt": taken for a new recording, it
-    /// would let an announce overwrite a `complete` receipt and the next
-    /// `complete` admit the meeting a second time.
+    /// The receipt from memory or the store ([`stored_receipt`], so a
+    /// `complete` one whose meeting is missing comes back not admitted).
+    /// Another request may have loaded and advanced it while the store read
+    /// ran; memory wins then. A failed read is an error, not "no receipt":
+    /// taken for a new recording, it would let an announce overwrite a
+    /// `complete` receipt and the next `complete` admit the meeting a
+    /// second time.
     pub(crate) async fn receipt(
         &self,
         recording_id: Uuid,
@@ -971,7 +980,7 @@ impl Engine {
             return Ok(Some(active.clone()));
         }
         let Some(stored) = self
-            .with_store(move |store| store.handover_receipt(recording_id))
+            .with_store(move |store| stored_receipt(store, recording_id))
             .await?
         else {
             return Ok(None);
@@ -1012,6 +1021,27 @@ impl Engine {
             recording_id,
         })
     }
+}
+
+/// The stored receipt of `recording_id`, with a `complete` one whose
+/// meeting row is missing read as `failed` ([`Engine::MEETING_MISSING`]):
+/// not admitted. Deleting a meeting deletes its receipt, so only an
+/// admission whose meeting never committed leaves one behind (the separate
+/// receipt and meeting commits of earlier releases, a crash or a full disk
+/// between them). Its phone never got the 200 and still holds the
+/// recording, so the receipt must neither answer 200 nor let the sweep
+/// take the verified file; the phone's retried `complete` admits that file
+/// again. Swift: `HandoverEngine.storedReceipt`.
+fn stored_receipt(store: &Store, recording_id: Uuid) -> store::Result<Option<HandoverReceipt>> {
+    let Some(mut receipt) = store.handover_receipt(recording_id)? else {
+        return Ok(None);
+    };
+    if let Some(meeting_id) = receipt.state.meeting_id()
+        && store.meeting(meeting_id)?.is_none()
+    {
+        receipt.state = HandoverState::Failed(Engine::MEETING_MISSING.to_owned());
+    }
+    Ok(Some(receipt))
 }
 
 /// `body` on the blocking pool; a panic there is an I/O error.

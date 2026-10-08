@@ -1,4 +1,5 @@
 import Foundation
+import GRDB
 import StenoCore
 import Synchronization
 import Testing
@@ -176,7 +177,9 @@ final class ScriptedIntake: HandoverIntake, Sendable {
       let completed = UUID()
       _ = try seed(completed)
       _ = try inbox.promote(completed, format: .m4aAAC)
-      try await first.store.save(receipt(completed, .complete(meetingID: UUID())))
+      let completedMeeting = UUID()
+      try await first.store.saveAdmittedMeeting(completedMeeting)
+      try await first.store.save(receipt(completed, .complete(meetingID: completedMeeting)))
       let refused = UUID()
       _ = try seed(refused)
       _ = try inbox.promote(refused, format: .m4aAAC)
@@ -316,5 +319,107 @@ final class ScriptedIntake: HandoverIntake, Sendable {
     #expect(await resumed.complete(id).code == 200)
     let admissions = await intake.admissions.entries
     #expect(try Data(contentsOf: try #require(admissions.first?.file)) == bytes)
+  }
+
+  /// A `.complete` receipt whose meeting never committed (earlier releases committed the two
+  /// separately, and a crash or a full disk could land in between) is not admitted. The phone never
+  /// got the 200 and holds the recording, so after a restart the sweep keeps the verified file, a
+  /// re-announce lists every chunk without saying `.complete`, and `complete`, with or without that
+  /// announce, admits the file again instead of answering the missing meeting. Rust:
+  /// `a_complete_receipt_without_its_meeting_is_admitted_again_after_a_restart`.
+  @Test func aCompleteReceiptWithoutItsMeetingIsAdmittedAgainAfterARestart() async throws {
+    try await TestService.run(chunkSize: Self.chunkSize) { first in
+      let phone = try await Phone.pair(first.service)
+      let inbox = first.service.engine.inbox
+      let missing = UUID()
+      var uploads: [(RecordingMetadata, Data)] = []
+      for seed in [80, 81] {
+        let bytes = Phone.seededBytes(count: 2 * Self.chunkSize, seed: UInt64(seed))
+        let metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
+        try await phone.uploadAll(metadata, bytes)
+        // Verified and handed to the intake, whose receipt committed and
+        // whose meeting did not.
+        _ = try inbox.promote(metadata.recordingID, format: metadata.format)
+        var receipt = try #require(
+          try await first.store.handoverReceipt(recordingID: metadata.recordingID))
+        receipt.state = .complete(meetingID: missing)
+        try await first.store.save(receipt)
+        uploads.append((metadata, bytes))
+      }
+      await first.service.stop()
+
+      // The Mac comes back over the same store and inbox.
+      let intake = FakeHandoverIntake(meetingID: Self.meetingID)
+      let now = first.now
+      let second = HandoverService(
+        configuration: first.service.configuration, store: first.store,
+        intake: first.moving(intake),
+        identity: try TestIdentity.load(), now: { now })
+      try await second.start()
+      defer { Task { await second.stop() } }
+
+      for (metadata, _) in uploads {
+        #expect(
+          inbox.hasVerified(metadata.recordingID, format: metadata.format),
+          "the sweep keeps the verified file")
+      }
+      let resumed = Phone(
+        client: try LoopbackClient.forService(second), token: phone.token,
+        deviceID: phone.deviceID, deviceName: phone.deviceName)
+      let announced = try await resumed.announce(uploads[0].0)
+      #expect(announced.status == 200)
+      #expect(
+        try announced.json(Wire.RecordingStatus.self)
+          == Wire.RecordingStatus(state: .receiving, receivedChunks: [0, 1]),
+        "not complete: the phone goes on to complete")
+      for (metadata, _) in uploads {
+        let completed = try await resumed.complete(metadata.recordingID)
+        #expect(completed.status == 200)
+        #expect(
+          try completed.json(Wire.CompleteResponse.self).meetingID == Self.meetingID,
+          "the new admission's meeting, not the missing one")
+      }
+      let admissions = await intake.admissions.entries
+      #expect(admissions.count == 2, "both files are admitted again")
+      for ((_, bytes), admission) in zip(uploads, admissions) {
+        #expect(try Data(contentsOf: admission.file) == bytes)
+      }
+      await second.stop()
+    }
+  }
+
+  /// A receipt the store cannot read is an error, not a missing receipt:
+  /// the sweep keeps the upload's files, which a later start sweeps once
+  /// the store reads again. Taken for a missing receipt, the failed read
+  /// would delete a resumable upload. The read fails because a temporary
+  /// table of the same name shadows `handoverReceipt` on the in-memory
+  /// store's one connection. Rust:
+  /// `a_failed_receipt_read_keeps_the_upload_and_answers_500`.
+  @Test func aReceiptTheStoreCannotReadKeepsTheUploadThroughTheSweep() async throws {
+    try await TestService.run(chunkSize: Self.chunkSize) { test in
+      let phone = try await Phone.pair(test.service)
+      let bytes = Phone.seededBytes(count: 2 * Self.chunkSize, seed: 83)
+      let metadata = phone.metadata(for: bytes, chunkSize: Self.chunkSize)
+      let chunks = Phone.chunks(of: bytes, size: Self.chunkSize)
+      #expect(try await phone.announce(metadata).status == 201)
+      #expect(try await phone.upload(metadata.recordingID, chunk: 0, chunks[0]).status == 204)
+      let engine = test.service.engine
+
+      try await test.store.writer.write { db in
+        try db.execute(sql: "CREATE TEMP TABLE handoverReceipt (unreadable INTEGER)")
+      }
+      await engine.sweepOrphans()
+      #expect(engine.inbox.hasPartial(metadata.recordingID), "the resumable upload is kept")
+      #expect(engine.inbox.loadMetadata(metadata.recordingID) == metadata)
+
+      // Once the store reads again, the upload resumes where it stood.
+      try await test.store.writer.write { db in
+        try db.execute(sql: "DROP TABLE temp.handoverReceipt")
+      }
+      await engine.sweepOrphans()
+      #expect(engine.inbox.hasPartial(metadata.recordingID))
+      #expect(try await phone.upload(metadata.recordingID, chunk: 1, chunks[1]).status == 204)
+      #expect(try await phone.complete(metadata.recordingID).status == 200)
+    }
   }
 }

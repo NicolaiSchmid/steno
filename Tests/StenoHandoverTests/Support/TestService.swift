@@ -137,3 +137,14 @@ final class WallClock: Sendable {
     time.withLock { $0 = $0.addingTimeInterval(duration / .seconds(1)) }
   }
 }
+
+extension MeetingStore {
+  /// The meeting row a real intake commits with the `.complete` receipt;
+  /// the fake intakes write none. The engine reads a stored `.complete`
+  /// receipt whose meeting is missing as not admitted.
+  func saveAdmittedMeeting(_ meetingID: UUID) async throws {
+    var meeting = SampleData.meeting()
+    meeting.id = meetingID
+    try await save(meeting)
+  }
+}

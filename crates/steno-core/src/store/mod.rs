@@ -75,6 +75,13 @@ pub enum StoreError {
     /// the meeting's files.
     #[error("meeting {0} is {1} and cannot be deleted")]
     MeetingBusy(Uuid, MeetingStateKind),
+    /// The phone intake's admission of a recording whose receipt belongs to
+    /// another device, raised at the intake's own read and by
+    /// `save_admission_durably`: the admitting phone was revoked and another
+    /// one announced the same recording id. Swift:
+    /// `MeetingStoreError.receiptOfAnotherDevice`.
+    #[error("recording {0} belongs to another device")]
+    ReceiptOfAnotherDevice(Uuid),
     /// The database has a migration this build does not know: a newer app
     /// wrote it, and this one must not touch it.
     #[error("the database was migrated by a newer version ({0})")]
@@ -142,7 +149,14 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 /// retryable.
 pub struct Store {
     connection: Mutex<Connection>,
+    /// [`Store::probe_commits`].
+    #[cfg(any(test, feature = "testing"))]
+    commit_probe: std::sync::OnceLock<CommitProbe>,
 }
+
+/// What [`Store::probe_commits`] runs inside each write transaction.
+#[cfg(any(test, feature = "testing"))]
+type CommitProbe = Box<dyn Fn(&Connection) + Send + Sync>;
 
 impl std::fmt::Debug for Store {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -158,7 +172,12 @@ impl Store {
     /// commit waits for an fsync only when it runs a checkpoint or is the
     /// first commit after one, so a power loss or OS crash can roll back
     /// commits that no checkpoint has copied into the database yet; an app
-    /// crash loses nothing.
+    /// crash loses nothing. A commit that must be on the disk when it
+    /// returns goes through [`Store::write_durably`]. `checkpoint_fullfsync`
+    /// is on, as in Apple's system SQLite that GRDB uses (the bundled SQLite
+    /// here defaults it off), so a checkpoint on Apple platforms flushes the
+    /// drive's cache before the WAL it copied can be overwritten, and a
+    /// power loss after it cannot undo a durable commit.
     /// Swift: `MeetingStore.onDisk`, whose `DatabasePool` runs GRDB's
     /// `Database.setUpWALMode`.
     ///
@@ -187,9 +206,7 @@ impl Store {
         let connection = set_up(Connection::open_with_flags(path, flags)?)?;
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::check(&connection)?;
-        Ok(Store {
-            connection: Mutex::new(connection),
-        })
+        Ok(Self::over(connection))
     }
 
     /// A private in-memory database; tests use this.
@@ -200,9 +217,17 @@ impl Store {
     fn new(mut connection: Connection) -> Result<Store> {
         connection.pragma_update(None, "foreign_keys", true)?;
         migrator::migrate(&mut connection)?;
-        Ok(Store {
+        Ok(Self::over(connection))
+    }
+
+    /// The store over a connection that is set up and at the current
+    /// schema.
+    fn over(connection: Connection) -> Store {
+        Store {
             connection: Mutex::new(connection),
-        })
+            #[cfg(any(test, feature = "testing"))]
+            commit_probe: std::sync::OnceLock::new(),
+        }
     }
 
     /// A panic while a caller held the connection has already rolled its
@@ -243,11 +268,107 @@ impl Store {
     /// writer waits on the busy timeout instead of failing with
     /// `database is locked`.
     pub fn write<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
-        let mut connection = self.lock();
+        self.commit_on(&mut self.lock(), body)
+    }
+
+    /// [`Store::write`] whose commit is on the disk when it returns, for
+    /// the commits an answer to another device depends on: the phone
+    /// intake's admission, before `complete` tells the phone to delete its
+    /// copy; the `failed` receipt after a failed admission commit, which
+    /// writes over that commit's frames before the intake removes its copy;
+    /// a pairing, whose token the phone keeps; and a revoke.
+    /// The transaction runs under `synchronous = FULL` with `fullfsync`
+    /// on, so its commit syncs the WAL (with `F_FULLFSYNC` on Apple
+    /// platforms, which also flushes the drive's cache) instead of leaving
+    /// that to the next checkpoint; the sync covers every earlier commit
+    /// in the WAL too. That costs one WAL fsync per commit, plus a flush
+    /// of the drive's cache on Apple platforms, all while the lock is held,
+    /// so other writes wait for it. SQLite refuses to change `synchronous`
+    /// inside a transaction, so the levels are set before `BEGIN` and set
+    /// back once the transaction has ended (committed, rolled back or
+    /// unwound by a panic), all under one hold of the lock: no other write
+    /// runs under them. Swift: `MeetingStore.writeDurably`.
+    pub fn write_durably<T>(&self, body: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        let mut full = FullSync::hold(self.lock())?;
+        self.commit_on(&mut full.connection, body)
+    }
+
+    /// Copies every commit in the WAL into the database file, syncs it, and
+    /// starts the WAL over, so a power loss afterwards brings back what the
+    /// store reads now. `HandoverService::checkpoint_store` runs it at launch,
+    /// before the handover listener starts, and says why.
+    /// `PRAGMA wal_checkpoint(TRUNCATE)` under `synchronous = FULL` with
+    /// `fullfsync` on copies the frames, syncs the database file, waits until
+    /// no reader is left in the WAL and truncates the WAL file, keeping a new
+    /// salt for its next header. The truncation is not synced: after a power
+    /// loss the file can come back with its old header and frames, and recovery
+    /// replays every frame under the header's salt, which would put older pages
+    /// back over the checkpointed ones. So one durable write that changes a
+    /// page follows, under the same hold of the lock: a private table created
+    /// and dropped, which leaves the schema and the applied migrations as they
+    /// were. Its commit writes the WAL header with the new salt and syncs it
+    /// with its frames, so recovery replays only those frames: every older one
+    /// carries the old salt. A failed sync is an error, and so is a checkpoint
+    /// that another connection (a writer, or a reader still in the WAL) blocks
+    /// when the busy timeout runs out: SQLite's `SQLITE_BUSY`, which GRDB
+    /// throws too and [`StoreError::is_busy`] recognises, since the commits it
+    /// could not copy are not known to be on the disk. An in-memory store has
+    /// no WAL and returns at once. Swift: `MeetingStore.checkpointDurably`.
+    pub fn checkpoint_durably(&self) -> Result<()> {
+        let mut full = FullSync::hold(self.lock())?;
+        let (blocked, wal_frames): (bool, i64) =
+            full.connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })?;
+        if blocked {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some("another connection blocked the checkpoint".to_owned()),
+            )
+            .into());
+        }
+        if wal_frames < 0 {
+            return Ok(());
+        }
+        // A commit that changes no page writes no frame, and so no WAL
+        // header; creating a table always changes one.
+        self.commit_on(&mut full.connection, |transaction| {
+            transaction
+                .execute_batch("CREATE TABLE stenoWalRestart(x); DROP TABLE stenoWalRestart;")?;
+            Ok(())
+        })
+    }
+
+    /// The `IMMEDIATE` transaction of [`Store::write`] on `connection`,
+    /// committed when `body` returns `Ok`. `self` carries the commit probe,
+    /// which only test builds have.
+    #[cfg_attr(not(any(test, feature = "testing")), allow(clippy::unused_self))]
+    fn commit_on<T>(
+        &self,
+        connection: &mut Connection,
+        body: impl FnOnce(&Transaction<'_>) -> Result<T>,
+    ) -> Result<T> {
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let value = body(&transaction)?;
+        #[cfg(any(test, feature = "testing"))]
+        if let Some(probe) = self.commit_probe.get() {
+            probe(&transaction);
+        }
         transaction.commit()?;
         Ok(value)
+    }
+
+    /// Runs `probe` inside every write transaction from now on, right before it
+    /// commits, so a test can read what the commit will write and the
+    /// connection's pragmas then. One probe per store; a second call is
+    /// ignored. `probe` must not call the store: the lock is held. Swift: the
+    /// tests' `CommitLog`, which folds the writer's statements into its
+    /// commits.
+    #[cfg(any(test, feature = "testing"))]
+    #[doc(hidden)]
+    pub fn probe_commits(&self, probe: impl Fn(&Connection) + Send + Sync + 'static) {
+        let _ = self.commit_probe.set(Box::new(probe));
     }
 
     /// The migration identifiers recorded in `grdb_migrations`, in
@@ -284,12 +405,53 @@ impl Store {
 }
 
 /// The file connection set up as [`Store::open`] says: the busy timeout,
-/// WAL mode and `synchronous = NORMAL`.
+/// WAL mode, `synchronous = NORMAL` and `checkpoint_fullfsync` on.
 fn set_up(connection: Connection) -> Result<Connection> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     enable_wal(&connection)?;
     connection.pragma_update(None, "synchronous", "NORMAL")?;
+    connection.pragma_update(None, "checkpoint_fullfsync", true)?;
     Ok(connection)
+}
+
+/// The connection under `synchronous = FULL` and `fullfsync = ON` for as
+/// long as it is held; dropping it sets back the levels it found. A
+/// transaction borrows it, so the transaction has ended (a dropped one
+/// rolls back) before the levels go back, which SQLite requires.
+struct FullSync<'a> {
+    connection: MutexGuard<'a, Connection>,
+    synchronous: i64,
+    fullfsync: bool,
+}
+
+impl<'a> FullSync<'a> {
+    fn hold(connection: MutexGuard<'a, Connection>) -> Result<FullSync<'a>> {
+        let synchronous = connection.pragma_query_value(None, "synchronous", |row| row.get(0))?;
+        let fullfsync = connection.pragma_query_value(None, "fullfsync", |row| row.get(0))?;
+        // Built before the first change, so a failing second pragma still
+        // sets the first one back.
+        let held = FullSync {
+            connection,
+            synchronous,
+            fullfsync,
+        };
+        held.connection.pragma_update(None, "synchronous", "FULL")?;
+        held.connection.pragma_update(None, "fullfsync", true)?;
+        Ok(held)
+    }
+}
+
+impl Drop for FullSync<'_> {
+    fn drop(&mut self) {
+        // Neither pragma fails outside a transaction, and the transaction
+        // has ended by now.
+        let _ = self
+            .connection
+            .pragma_update(None, "synchronous", self.synchronous);
+        let _ = self
+            .connection
+            .pragma_update(None, "fullfsync", self.fullfsync);
+    }
 }
 
 /// `PRAGMA journal_mode = WAL`, checked: the pragma answers with the mode
@@ -377,14 +539,39 @@ fn upsert_sql(table: &str, columns: &str) -> String {
     )
 }
 
-// `unix-none` exists only in SQLite's unix VFS set.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
+
+    /// The write that restarts the WAL after a durable checkpoint commits
+    /// under `synchronous = FULL` (2), in the checkpoint's hold of the
+    /// lock, and is its only commit. Swift:
+    /// `aDurableCheckpointRestartsTheWAL`.
+    #[test]
+    fn the_wal_restart_write_commits_under_full() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("steno.sqlite")).unwrap();
+        let levels: Arc<Mutex<Vec<i64>>> = Arc::default();
+        let seen = levels.clone();
+        store.probe_commits(move |connection| {
+            let level = connection
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            seen.lock().unwrap().push(level);
+        });
+
+        store.checkpoint_durably().unwrap();
+
+        assert_eq!(*levels.lock().unwrap(), [2]);
+    }
 
     /// `unix-none` is SQLite's VFS without shared memory, the one a network
     /// volume ends up with: the pragma leaves the file on its rollback
-    /// journal and answers `delete`, and the store refuses the file.
+    /// journal and answers `delete`, and the store refuses the file. It
+    /// exists only in SQLite's unix VFS set.
+    #[cfg(unix)]
     #[test]
     fn a_vfs_without_shared_memory_is_refused() {
         let directory = tempfile::tempdir().unwrap();

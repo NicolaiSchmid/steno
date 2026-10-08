@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension as _, params};
 use steno_core::store::convert::{DbDate, DbUuid};
 use steno_core::*;
 
-use common::{PERSON_ID, date, populated, uuid};
+use common::{MEETING_ID, PERSON_ID, date, populated, uuid};
 
 fn count(store: &Store, table: &str) -> i64 {
     store
@@ -714,4 +714,230 @@ fn processing_results_leave_the_template_and_a_typed_title_to_the_user() {
     assert_eq!(stored.template_id, "interview");
     assert_eq!(stored.title, "Typed by the user");
     assert_eq!(stored.title_origin, TitleOrigin::User);
+}
+
+/// A checkpoint syncs with `F_FULLFSYNC` on Apple platforms, as Apple's
+/// system SQLite under GRDB does by default, so no checkpoint can undo a
+/// durable commit; the bundled SQLite defaults it off.
+#[test]
+fn an_opened_store_checkpoints_with_fullfsync() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+    let checkpoint_fullfsync: bool = store
+        .read(|connection| {
+            Ok(connection.query_row("PRAGMA checkpoint_fullfsync", [], |row| row.get(0))?)
+        })
+        .unwrap();
+    assert!(checkpoint_fullfsync);
+}
+
+/// `synchronous` and `fullfsync` as the connection has them now.
+fn sync_levels(connection: &rusqlite::Connection) -> steno_core::store::Result<(i64, bool)> {
+    let synchronous = connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?;
+    let fullfsync = connection.query_row("PRAGMA fullfsync", [], |row| row.get(0))?;
+    Ok((synchronous, fullfsync))
+}
+
+/// A durable write commits under `FULL` with `fullfsync` (2, on), and the
+/// connection is back at `NORMAL` (1, off) after a commit, a failed body and a
+/// panic in the body; a plain write never sees `FULL`. That the commit then
+/// survives a power loss is SQLite's and cannot be tested. Swift:
+/// `aDurableWriteCommitsUnderFullAndSetsNormalBack`.
+#[test]
+fn a_durable_write_commits_under_full_and_sets_normal_back_on_every_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path().join("steno.sqlite")).unwrap();
+    let normal = (1, false);
+    assert_eq!(store.read(sync_levels).unwrap(), normal);
+
+    let inside = store
+        .write_durably(|transaction| {
+            // A change of a page, so the commit writes a frame to the WAL.
+            transaction.execute_batch("CREATE TABLE probe(x)")?;
+            sync_levels(transaction)
+        })
+        .unwrap();
+    assert_eq!(inside, (2, true), "the transaction runs under FULL");
+    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a commit");
+    assert_eq!(
+        store.write(|transaction| sync_levels(transaction)).unwrap(),
+        normal,
+        "a plain write stays NORMAL"
+    );
+
+    let missing = uuid(MEETING_ID);
+    let error = store
+        .write_durably(|_| -> steno_core::store::Result<()> {
+            Err(StoreError::MeetingNotFound(missing))
+        })
+        .unwrap_err();
+    assert!(matches!(error, StoreError::MeetingNotFound(id) if id == missing));
+    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a failure");
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        store.write_durably(|_| -> steno_core::store::Result<()> { panic!("in the body") })
+    }));
+    assert!(panicked.is_err());
+    assert_eq!(store.read(sync_levels).unwrap(), normal, "after a panic");
+    assert_eq!(
+        store.write(|transaction| sync_levels(transaction)).unwrap(),
+        normal,
+        "the lock the panic poisoned is reused at NORMAL"
+    );
+}
+
+/// A durable checkpoint leaves every commit in the database file itself:
+/// a copy of that file without its WAL holds the last commit. It runs
+/// under `FULL` and sets `NORMAL` back, like a durable write. Swift:
+/// `aDurableCheckpointCopiesEveryCommitIntoTheDatabaseFile`.
+#[test]
+fn a_durable_checkpoint_copies_every_commit_into_the_database_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .write(|transaction| {
+            transaction.execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (42);")?;
+            Ok(())
+        })
+        .unwrap();
+
+    store.checkpoint_durably().unwrap();
+    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
+
+    let copy = dir.path().join("copy.sqlite");
+    std::fs::copy(&path, &copy).unwrap();
+    let probed: i64 = rusqlite::Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT x FROM probe", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(probed, 42);
+}
+
+/// A checkpoint another connection blocks past the busy timeout (here
+/// none, so the test does not wait) fails as busy, as GRDB's does, and
+/// sets `NORMAL` back; once the other connection lets go it succeeds.
+/// Swift: `aCheckpointAnotherConnectionBlocksThrowsBusy`.
+#[test]
+fn a_checkpoint_another_connection_blocks_fails_as_busy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+        .unwrap();
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let error = store.checkpoint_durably().unwrap_err();
+    assert!(error.is_busy(), "{error}");
+    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
+
+    writer.execute_batch("ROLLBACK").unwrap();
+    store.checkpoint_durably().unwrap();
+}
+
+/// The WAL file of the database at `database`.
+fn wal_file(database: &std::path::Path) -> Vec<u8> {
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    std::fs::read(wal).unwrap()
+}
+
+/// The salt in the WAL file's header (bytes 16 to 24), which every valid
+/// frame repeats: recovery replays only frames under the header's salt.
+fn wal_salt(database: &std::path::Path) -> Vec<u8> {
+    wal_file(database)
+        .get(16..24)
+        .expect("the WAL file has a header")
+        .to_vec()
+}
+
+/// A durable checkpoint starts the WAL over: the file was truncated, so it
+/// holds only the frames written since, under a header with a new salt, and
+/// recovery after a power loss replays none of the frames before it. The
+/// write that restarts it leaves the schema and the applied migrations as
+/// they were. Swift: `aDurableCheckpointRestartsTheWAL`.
+#[test]
+fn a_durable_checkpoint_restarts_the_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .write(|transaction| {
+            transaction.execute_batch("CREATE TABLE probe(x); INSERT INTO probe VALUES (42);")?;
+            Ok(())
+        })
+        .unwrap();
+    let salt = wal_salt(&path);
+    let schema = store.schema_dump().unwrap();
+
+    store.checkpoint_durably().unwrap();
+
+    assert_ne!(wal_salt(&path), salt, "the WAL restarted");
+    // A passive checkpoint answers with the frames in the WAL and leaves
+    // the file as it is.
+    let (frames, page_size): (i64, i64) = store
+        .read(|connection| {
+            let frames =
+                connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| row.get(1))?;
+            let page_size = connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+            Ok((frames, page_size))
+        })
+        .unwrap();
+    assert_eq!(
+        i64::try_from(wal_file(&path).len()).unwrap(),
+        32 + frames * (24 + page_size),
+        "the WAL file holds the header and the write's frames only: it was truncated first"
+    );
+    assert_eq!(store.schema_dump().unwrap(), schema);
+    assert_eq!(store.read(sync_levels).unwrap(), (1, false));
+}
+
+/// A reader still in the WAL blocks the checkpoint, on an older snapshot
+/// and on the newest one alike: the WAL cannot restart under it. The
+/// checkpoint fails as busy (no busy timeout here, so the test does not
+/// wait) and succeeds once the reader has ended. Swift:
+/// `aReaderInTheWALBlocksTheCheckpoint`.
+#[test]
+fn a_reader_in_the_wal_blocks_the_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("steno.sqlite");
+    let store = Store::open(&path).unwrap();
+    store
+        .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+        .unwrap();
+    let insert = |value: i64| {
+        store
+            .write(|transaction| {
+                transaction.execute("INSERT INTO probe VALUES (?1)", [value])?;
+                Ok(())
+            })
+            .unwrap();
+    };
+    store
+        .write(|transaction| Ok(transaction.execute_batch("CREATE TABLE probe(x)")?))
+        .unwrap();
+    let reader = rusqlite::Connection::open(&path).unwrap();
+    let begin_reading = || {
+        reader.execute_batch("BEGIN").unwrap();
+        let _: i64 = reader
+            .query_row("SELECT count(*) FROM setting", [], |row| row.get(0))
+            .unwrap();
+    };
+    insert(1);
+
+    begin_reading();
+    insert(2);
+    let error = store.checkpoint_durably().unwrap_err();
+    assert!(error.is_busy(), "older snapshot: {error}");
+    reader.execute_batch("COMMIT").unwrap();
+
+    insert(3);
+    begin_reading();
+    let error = store.checkpoint_durably().unwrap_err();
+    assert!(error.is_busy(), "newest snapshot: {error}");
+    reader.execute_batch("COMMIT").unwrap();
+
+    store.checkpoint_durably().unwrap();
 }

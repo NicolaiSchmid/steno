@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store, store};
+use steno_core::{HandoverIntake, HandoverReceipt, PairedDevice, Store, StoreError, store};
 use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
@@ -25,6 +25,12 @@ pub enum ListenerState {
     Listening { port: u16 },
     Failed(String),
 }
+
+/// [`HandoverService::checkpoint_store`] failed: the store's commits are
+/// not known to be on the disk. Swift: `StoreNotSynced`.
+#[derive(Debug, thiserror::Error)]
+#[error("the database could not be synced to the disk: {0}")]
+pub struct StoreNotSynced(pub StoreError);
 
 /// The computer's side of the handover: one per host, created with
 /// [`HandoverService::new`], started and stopped with the app. The fields
@@ -49,6 +55,21 @@ impl std::fmt::Debug for HandoverService {
 }
 
 impl HandoverService {
+    /// The launch checkpoint, which the app and `steno dev handover serve`
+    /// run before they read the identity and build the service:
+    /// [`Store::checkpoint_durably`], which copies every commit into the
+    /// synced database file and restarts the WAL. The intake answers a
+    /// phone's retry `complete` from a stored receipt with no write of its
+    /// own, and after a crash recovery can read back an admission whose
+    /// WAL sync failed (Linux keeps a page whose fsync failed in its cache,
+    /// marked clean). The checkpoint puts that admission on the disk, and
+    /// the restart keeps a power loss from replaying older WAL frames over
+    /// it, before any phone is answered. On an error the caller builds no
+    /// listener. Swift: `HandoverService.checkpointStore(_:)`.
+    pub fn checkpoint_store(store: &Store) -> Result<(), StoreNotSynced> {
+        store.checkpoint_durably().map_err(StoreNotSynced)
+    }
+
     /// The service before `start`. `now` is the one time source.
     ///
     /// ```no_run

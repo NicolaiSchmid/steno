@@ -18,6 +18,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{EngineDevice, Phone, ScriptedIntake, TestService, chunks, fake_intake, seeded_bytes};
+use steno_core::testing::FakeHandoverIntake;
 use steno_core::{
     AudioFormat, HandoverReceipt, HandoverState, HandoverStateKind, RecordingMetadata,
 };
@@ -29,6 +30,36 @@ const CHUNK_SIZE: i64 = 256 * 1024;
 
 fn meeting_id() -> Uuid {
     Uuid::parse_str("1ABE1000-0000-4000-8000-0000000000AD").unwrap()
+}
+
+/// The computer comes back over `first`'s store and inbox with `intake`
+/// (behind [`common::taking`], as the real intake takes the file), and the
+/// phone resumes with the token it holds. The identity is new, so the
+/// phone pins the new fingerprint.
+async fn restart(
+    first: &TestService,
+    phone: &Phone,
+    intake: Arc<FakeHandoverIntake>,
+) -> (HandoverService, Phone) {
+    let now = first.now;
+    let second = HandoverService::new(
+        first.service.configuration.clone(),
+        first.store.clone(),
+        common::taking(intake),
+        Arc::new(HandoverIdentity::mint("Steno test identity", now).unwrap()),
+        Arc::new(move || now),
+    );
+    second.start().await.unwrap();
+    let steno_handover::ListenerState::Listening { port } = second.state() else {
+        panic!("not listening");
+    };
+    let resumed = Phone {
+        client: common::LoopbackClient::new(port, &second.identity.fingerprint()),
+        token: phone.token.clone(),
+        device_id: phone.device_id,
+        device_name: phone.device_name.clone(),
+    };
+    (second, resumed)
 }
 
 #[tokio::test]
@@ -220,12 +251,14 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
     let completed = Uuid::new_v4();
     seed(completed);
     inbox.promote(completed, AudioFormat::M4aAac).unwrap();
+    let completed_meeting = Uuid::new_v4();
+    common::save_admitted_meeting(&first.store, completed_meeting);
     first
         .store
         .save_handover_receipt(&receipt(
             completed,
             HandoverState::Complete {
-                meeting_id: Uuid::new_v4(),
+                meeting_id: completed_meeting,
             },
         ))
         .unwrap();
@@ -241,17 +274,8 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
         .unwrap();
     first.stop().await;
 
-    // The computer comes back over the same store and inbox.
     let intake = fake_intake(meeting_id());
-    let now = first.now;
-    let second = HandoverService::new(
-        first.service.configuration.clone(),
-        first.store.clone(),
-        common::taking(intake.clone()),
-        Arc::new(HandoverIdentity::mint("Steno test identity", now).unwrap()),
-        Arc::new(move || now),
-    );
-    second.start().await.unwrap();
+    let (second, resumed) = restart(&first, &phone, intake.clone()).await;
 
     assert!(
         inbox.has_partial(metadata.recording_id),
@@ -276,16 +300,7 @@ async fn a_restarted_computer_resumes_from_the_stored_receipt_and_sweeps_only_or
     );
 
     // The phone resumes with the token it holds; the receipt comes from the
-    // store. The identity is new, so the phone pins the new fingerprint.
-    let steno_handover::ListenerState::Listening { port } = second.state() else {
-        panic!("not listening");
-    };
-    let resumed = Phone {
-        client: common::LoopbackClient::new(port, &second.identity.fingerprint()),
-        token: phone.token.clone(),
-        device_id: phone.device_id,
-        device_name: phone.device_name.clone(),
-    };
+    // store.
     let status = resumed.status(metadata.recording_id).await;
     assert_eq!(status.status, 200);
     assert_eq!(
@@ -382,4 +397,77 @@ async fn another_phones_first_announce_after_a_restart_and_a_revoke_admits_its_o
         bytes,
         "the other phone's own bytes, hashed"
     );
+}
+
+/// A `complete` receipt whose meeting never committed (earlier releases
+/// committed the two separately, and a crash or a full disk could land in
+/// between) is not admitted. The phone never got the 200 and holds the
+/// recording, so after a restart the sweep keeps the verified file, a
+/// re-announce lists every chunk without saying `complete`, and `complete`,
+/// with or without that announce, admits the file again instead of answering
+/// the missing meeting. Swift:
+/// `aCompleteReceiptWithoutItsMeetingIsAdmittedAgainAfterARestart`.
+#[tokio::test]
+async fn a_complete_receipt_without_its_meeting_is_admitted_again_after_a_restart() {
+    let first = TestService::with_chunk_size(CHUNK_SIZE).await;
+    let phone = Phone::pair(&first).await;
+    let inbox = first.inbox().clone();
+    let missing = Uuid::new_v4();
+    let mut uploads = Vec::new();
+    for seed in [80, 81] {
+        let bytes = seeded_bytes(2 * CHUNK_SIZE as usize, seed);
+        let metadata = phone.metadata(&bytes, CHUNK_SIZE);
+        phone.upload_all(&metadata, &bytes).await;
+        // Verified and handed to the intake, whose receipt committed and
+        // whose meeting did not.
+        inbox
+            .promote(metadata.recording_id, metadata.format)
+            .unwrap();
+        let mut receipt = first
+            .store
+            .handover_receipt(metadata.recording_id)
+            .unwrap()
+            .unwrap();
+        receipt.state = HandoverState::Complete {
+            meeting_id: missing,
+        };
+        first.store.save_handover_receipt(&receipt).unwrap();
+        uploads.push((metadata, bytes));
+    }
+    first.stop().await;
+
+    let intake = fake_intake(meeting_id());
+    let (second, resumed) = restart(&first, &phone, intake.clone()).await;
+
+    for (metadata, _) in &uploads {
+        assert!(
+            inbox.has_verified(metadata.recording_id, metadata.format),
+            "the sweep keeps the verified file"
+        );
+    }
+    let announced = resumed.announce(&uploads[0].0).await;
+    assert_eq!(announced.status, 200);
+    assert_eq!(
+        announced.json::<wire::RecordingStatus>(),
+        wire::RecordingStatus {
+            state: HandoverStateKind::Receiving,
+            received_chunks: vec![0, 1]
+        },
+        "not complete: the phone goes on to complete"
+    );
+    for (metadata, _) in &uploads {
+        let completed = resumed.complete(metadata.recording_id).await;
+        assert_eq!(completed.status, 200);
+        assert_eq!(
+            completed.json::<wire::CompleteResponse>().meeting_id,
+            meeting_id(),
+            "the new admission's meeting, not the missing one"
+        );
+    }
+    let admissions = intake.admissions.entries();
+    assert_eq!(admissions.len(), 2, "both files are admitted again");
+    for ((_, bytes), admission) in uploads.iter().zip(&admissions) {
+        assert_eq!(&std::fs::read(&admission.file).unwrap(), bytes);
+    }
+    second.stop().await;
 }

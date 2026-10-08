@@ -17,7 +17,8 @@ import StenoSpeech
 @Observable
 final class AppEnvironment {
   typealias MakeCaptureSession = @Sendable (CaptureConfiguration) throws -> CaptureSession
-  typealias MakeDependencies = @Sendable (Settings, _ apiKey: String?) throws ->
+  typealias MakeDependencies =
+    @Sendable (Settings, _ apiKey: String?) throws ->
     PipelineDependencies
 
   let store: MeetingStore
@@ -268,17 +269,31 @@ final class AppEnvironment {
       clock: ContinuousClock())
     environment.startupWarnings = warnings
     do {
-      let identity = try IdentityKeychain.loadOrCreate(
-        commonName: "Steno on \(HandoverConfiguration.defaultServiceName())")
-      environment.handover = HandoverService(
-        configuration: HandoverConfiguration(),
-        store: store,
-        intake: environment.makeIntake(),
-        identity: identity)
+      environment.handover = try await makeHandover(
+        store: store, intake: environment.makeIntake(), configuration: HandoverConfiguration()
+      ) {
+        try IdentityKeychain.loadOrCreate(
+          commonName: "Steno on \(HandoverConfiguration.defaultServiceName())")
+      }
     } catch {
       environment.startupWarnings.append("Phone handover is unavailable: \(error)")
     }
     return environment
+  }
+
+  /// The handover listener over `identity()`, after the launch checkpoint
+  /// (`HandoverService.checkpointStore(_:)`, which says why it comes
+  /// first). A failed checkpoint throws `StoreNotSynced` before the
+  /// identity is read, and `live` keeps the handover off until the next
+  /// launch with a startup warning; the rest of the app runs.
+  /// Rust: `handover_listener` in `crates/steno-services/src/app.rs`.
+  static func makeHandover(
+    store: MeetingStore, intake: any HandoverIntake, configuration: HandoverConfiguration,
+    identity: () throws -> HandoverIdentity
+  ) async throws -> HandoverService {
+    try await HandoverService.checkpointStore(store)
+    return HandoverService(
+      configuration: configuration, store: store, intake: intake, identity: try identity())
   }
 
   /// Beside `-steno-ui-testing`: the preview's `FakeSpeechEngine` sleeps in
@@ -405,15 +420,16 @@ final class AppEnvironment {
   }
 
   /// Core's `RecordingIntake` over whatever pipeline is current when a phone
-  /// recording completes, so a pipeline reload never strands the listener.
+  /// recording completes, so a pipeline reload never strands the listener
+  /// (`init(currentPipeline:)`).
   func makeIntake() -> RecordingIntake {
     RecordingIntake(
       store: store, settings: settings,
-      enqueue: { [weak self] meeting, asset in
+      currentPipeline: { [weak self] in
         guard let pipeline = await MainActor.run(body: { self?.pipeline }) else {
           throw PipelineFailure(stage: .decode, reason: "the app is shutting down")
         }
-        try await pipeline.enqueue(meeting, asset: asset)
+        return pipeline
       },
       now: now)
   }

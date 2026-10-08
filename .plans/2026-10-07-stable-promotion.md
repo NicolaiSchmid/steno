@@ -384,7 +384,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 
 | ID | What can be lost, and the fix | Owner |
 |---|---|---|
-| P1 | A recording: the intake's receipt and meeting commits run under `synchronous = NORMAL`, so a power loss after `complete` can roll back the meeting while the phone has deleted its copy (#213) | handover (#213) |
+| P1 | A recording: a power loss after `complete` must not roll back the meeting once the phone has deleted its copy. The intake commits its receipt, meeting and asset in one durable transaction, and the handover starts only after a durable checkpoint at launch that also restarts the WAL (#213) | handover (#213) |
 | P2 | A recording, or a second meeting: a `complete` answer that never reaches the phone. A `handoverAdmission` table answers the retry "delivered", also for a recording whose meeting was deleted; the Rust migrator ignores later migrations and shows a dialog instead of panicking; the backfill runs on every open (`fix/handover-lost-complete-answer`, D11) | handover |
 | P3 | A recording ended by a kill, a crash or a power loss: salvage the CAF at launch into a meeting that processes, instead of leaving it failed and unprocessed. The salvage writes the existing end reason `failed` (the interrupted row has none), so the Swift app still decodes the row during the rollback window (a new value in a stored enum column would break that); a recovered meeting is told apart additively, by a log line now and, if the UI needs it, a nullable column in a later add-only migration | capture and recovery (`wp-cap-*`, `fix/recording-recovery`) |
 | P4 | A recording's stop: a `stop()` that waited behind a writer failure's or a device loss's finalise returns that recording, as Swift's actor did | capture and recovery (`wp-cap-*`) |
@@ -418,7 +418,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P32 | Preferences, the panel anchor and the Codex sign-in: each is written atomically, and the Codex `auth.json` is synced | pipeline, store and export (`wp-pse-*`) |
 | P33 | Another phone's upload: the first announce's discard, and a re-announce whose hash differs, leave other devices' files alone; an old device's 409 hands over cleanly (with P2) | handover (#219, #212) |
 | P34 | Recordings on the phone: the mobile queue index rebuilds after a failed load, and recorder files left by the audio module are found again (#223) | handover (#223) |
-| P35 | Pairings: the pairing writes are durable and the intake runs in one transaction (beyond #213, which makes the receipt and meeting commits durable); the identity-fingerprint guard gets a macOS test and its Swift mirror | handover |
+| P35 | Pairings: the identity-fingerprint guard gets a macOS test and its Swift mirror (#213 makes the pairing writes durable and the intake one transaction) | handover |
 | P36 | Secrets and files on Windows: credentials persist, and renames are durable | handover |
 | P37 | A recording through a cancelled logout: the save that a logout started is undone cleanly when the logout is cancelled (#220) | Linux desktop (#220) |
 | P38 | Evidence of a crash: a panic that unwinds leaves no report on the Mac and nothing where stderr goes nowhere. The app's and the sidecar's panic hooks write one `crash-<UTC>.log` file per panic in the support directory, with the message, the location and the backtrace; the newest 20 are kept | capture and recovery (`wp-cap-*`) |

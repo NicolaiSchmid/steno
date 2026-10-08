@@ -7,8 +7,8 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
 use super::convert::{DbDate, DbEnum, DbJson, DbUuid, RowExt as _};
-use super::{Result, Store, query_all, upsert_sql};
-use crate::model::{HandoverReceipt, HandoverState, PairedDevice};
+use super::{Result, Store, StoreError, assets, meetings, query_all, upsert_sql};
+use crate::model::{AudioAsset, HandoverReceipt, HandoverState, Meeting, PairedDevice};
 
 const DEVICE_COLUMNS: &str = "id, name, pairedAt, lastSeenAt, tokenHash";
 
@@ -69,9 +69,12 @@ impl Store {
     }
 
     /// Inserts or replaces the device (GRDB's `save`). `token_hash` is the
-    /// SHA-256 of the bearer token; the token itself is never stored.
+    /// SHA-256 of the bearer token; the token itself is never stored. On
+    /// the disk when it returns ([`Store::write_durably`]): the phone keeps
+    /// the token from the answer that follows, and a pairing a power loss
+    /// rolled back would unpair it.
     pub fn save_paired_device(&self, device: &PairedDevice, token_hash: &[u8]) -> Result<()> {
-        self.write(|transaction| {
+        self.write_durably(|transaction| {
             transaction.execute(
                 &upsert_sql("pairedDevice", DEVICE_COLUMNS),
                 params![
@@ -117,9 +120,10 @@ impl Store {
     }
 
     /// Revokes the phone; its handover receipts go with it (the foreign key
-    /// cascades).
+    /// cascades). On the disk when it returns ([`Store::write_durably`]), so
+    /// a power loss cannot bring a revoked phone back.
     pub fn delete_paired_device(&self, id: Uuid) -> Result<()> {
-        self.write(|transaction| {
+        self.write_durably(|transaction| {
             transaction.execute("DELETE FROM pairedDevice WHERE id = ?1", [DbUuid(id)])?;
             Ok(())
         })
@@ -142,29 +146,121 @@ impl Store {
 
     /// Inserts or replaces the receipt (GRDB's `save`).
     pub fn save_handover_receipt(&self, receipt: &HandoverReceipt) -> Result<()> {
-        let kind = receipt.state.kind();
-        let failure_message = match &receipt.state {
-            HandoverState::Failed(message) => Some(message.as_str()),
-            _ => None,
-        };
-        self.write(|transaction| {
-            transaction.execute(
-                &upsert_sql("handoverReceipt", RECEIPT_COLUMNS),
-                params![
-                    DbUuid(receipt.recording_id),
-                    DbUuid(receipt.device_id),
-                    DbEnum(kind),
-                    receipt.state.meeting_id().map(DbUuid),
-                    failure_message,
-                    receipt.byte_count,
-                    receipt.sha256,
-                    receipt.chunk_size,
-                    DbJson(&receipt.received_chunks),
-                    DbDate(receipt.created_at),
-                    DbDate(receipt.updated_at),
-                ],
-            )?;
-            Ok(())
+        self.write(|transaction| save_receipt(transaction, receipt))
+    }
+
+    /// [`Store::save_handover_receipt`], on the disk when it returns
+    /// ([`Store::write_durably`]): the phone intake's `failed` receipt
+    /// after a failed admission commit, whose frames may still sit in the
+    /// WAL for recovery to replay. This commit writes over them, or voids
+    /// them when the WAL restarts, so once it returns no restart brings
+    /// the admission back. Swift: `MeetingStore.saveDurably(_:)`.
+    pub fn save_handover_receipt_durably(&self, receipt: &HandoverReceipt) -> Result<()> {
+        self.write_durably(|transaction| save_receipt(transaction, receipt))
+    }
+
+    /// The phone intake's admission: the `complete` receipt, the meeting
+    /// and its asset in one transaction, on the disk when it returns
+    /// ([`Store::write_durably`]). The phone deletes its copy once
+    /// `complete` answers 200, so no commit may hold the receipt without
+    /// the meeting, and a power loss must not roll either back.
+    /// Fails with [`StoreError::ReceiptOfAnotherDevice`], writing nothing,
+    /// when the stored receipt belongs to another device than `receipt`:
+    /// completed, it would answer that device's `complete` with this
+    /// meeting.
+    /// Swift: `MeetingStore.saveDurably(_:meeting:asset:)`.
+    pub fn save_admission_durably(
+        &self,
+        receipt: &HandoverReceipt,
+        meeting: &Meeting,
+        asset: &AudioAsset,
+    ) -> Result<()> {
+        self.write_durably(|transaction| {
+            let owner = transaction
+                .query_row(
+                    "SELECT deviceID FROM handoverReceipt WHERE recordingID = ?1",
+                    [DbUuid(receipt.recording_id)],
+                    |row| row.col::<DbUuid>("deviceID"),
+                )
+                .optional()?;
+            if owner.is_some_and(|owner| owner != receipt.device_id) {
+                return Err(StoreError::ReceiptOfAnotherDevice(receipt.recording_id));
+            }
+            meetings::save(transaction, meeting)?;
+            assets::save(transaction, asset)?;
+            save_receipt(transaction, receipt)
         })
+    }
+}
+
+fn save_receipt(connection: &Connection, receipt: &HandoverReceipt) -> Result<()> {
+    let kind = receipt.state.kind();
+    let failure_message = match &receipt.state {
+        HandoverState::Failed(message) => Some(message.as_str()),
+        _ => None,
+    };
+    connection.execute(
+        &upsert_sql("handoverReceipt", RECEIPT_COLUMNS),
+        params![
+            DbUuid(receipt.recording_id),
+            DbUuid(receipt.device_id),
+            DbEnum(kind),
+            receipt.state.meeting_id().map(DbUuid),
+            failure_message,
+            receipt.byte_count,
+            receipt.sha256,
+            receipt.chunk_size,
+            DbJson(&receipt.received_chunks),
+            DbDate(receipt.created_at),
+            DbDate(receipt.updated_at),
+        ],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use chrono::Utc;
+
+    use super::*;
+
+    /// A pairing and a revoke commit under `synchronous = FULL` (2): the phone
+    /// keeps the token from the pairing's answer, so a power loss must not
+    /// forget the pairing, nor bring a revoked phone back. That the commit then
+    /// survives a power loss is SQLite's and cannot be tested. Swift:
+    /// `aPairingAndARevokeCommitDurably`.
+    #[test]
+    fn a_pairing_and_a_revoke_commit_durably() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path().join("steno.sqlite")).unwrap();
+        let levels: Arc<Mutex<Vec<i64>>> = Arc::default();
+        let seen = levels.clone();
+        store.probe_commits(move |connection| {
+            let level = connection
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            seen.lock().unwrap().push(level);
+        });
+        let device = PairedDevice {
+            id: Uuid::new_v4(),
+            name: "Phone".to_owned(),
+            paired_at: Utc::now(),
+            last_seen_at: None,
+        };
+
+        store.save_paired_device(&device, &[1; 32]).unwrap();
+        store
+            .touch_paired_device(device.id, &[1; 32], Utc::now())
+            .unwrap();
+        store.delete_paired_device(device.id).unwrap();
+
+        assert_eq!(
+            *levels.lock().unwrap(),
+            [2, 1, 2],
+            "the pairing and the revoke under FULL, the last-seen touch at NORMAL"
+        );
+        assert_eq!(store.paired_device(device.id).unwrap(), None);
     }
 }

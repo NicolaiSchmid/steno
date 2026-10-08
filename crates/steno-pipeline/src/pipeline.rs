@@ -782,19 +782,40 @@ impl ProcessingPipeline {
     }
 
     /// Writes `Meeting(queued)` plus the asset in one transaction and starts
-    /// `process` in the background. The app (Mac recordings) and the phone
-    /// intake both call this. Fails when the asset or the meeting is
-    /// already in flight. Needs a `tokio` runtime. Once the pipeline
-    /// [quits](Self::quit), the meeting is saved and stays `queued` for the
-    /// next launch.
+    /// `process` in the background. The app (Mac recordings) calls this;
+    /// the phone intake saves its rows itself and calls
+    /// [`ProcessingPipeline::enqueue_saved`]. Fails when the asset or the
+    /// meeting is already in flight. Needs a `tokio` runtime. Once the
+    /// pipeline [quits](Self::quit), the meeting is saved and stays
+    /// `queued` for the next launch.
     pub fn enqueue(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
-        let starting = self.claim_start(meeting.id, asset.id).ok_or_else(|| {
+        let starting = self.claim_or_refuse(meeting, asset)?;
+        self.enqueue_claimed(meeting, asset, &starting)
+    }
+
+    /// [`ProcessingPipeline::enqueue`] of a meeting the caller saved
+    /// `queued` with its asset: starts `process` in the background and
+    /// writes nothing. The phone intake's, which commits the meeting with
+    /// its `complete` receipt in one durable transaction
+    /// ([`Store::save_admission_durably`]). Fails when the asset or the
+    /// meeting is already in flight. Once the pipeline [quits](Self::quit),
+    /// nothing starts and the meeting waits `queued` for the next launch.
+    /// Swift: `ProcessingPipeline.enqueueSaved`.
+    pub fn enqueue_saved(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<()> {
+        let _starting = self.claim_or_refuse(meeting, asset)?;
+        self.start(asset, Turn::Now(None));
+        Ok(())
+    }
+
+    /// [`ProcessingPipeline::claim_start`] for `enqueue` and
+    /// `enqueue_saved`, refused as a failed `decode`.
+    fn claim_or_refuse(&self, meeting: &Meeting, asset: &AudioAsset) -> Result<Starting> {
+        self.claim_start(meeting.id, asset.id).ok_or_else(|| {
             PipelineFailure::new(
                 PipelineStage::Decode,
                 format!("meeting {} is already being processed", meeting.id),
             )
-        })?;
-        self.enqueue_claimed(meeting, asset, &starting)
+        })
     }
 
     /// `enqueue` once the asset is claimed: the claim is held from the

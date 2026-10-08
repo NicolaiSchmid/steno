@@ -238,7 +238,10 @@ fn make_dependencies(
 }
 
 /// The phone intake over whichever pipeline is current when a recording
-/// arrives, so a reload is not bypassed. Swift: `AppEnvironment.makeIntake`.
+/// arrives, so a reload is not bypassed. The intake commits the meeting
+/// with its receipt and the pipeline only processes it
+/// ([`steno_pipeline::ProcessingPipeline::enqueue_saved`]), as in
+/// `RecordingIntake::over`. Swift: `AppEnvironment.makeIntake`.
 pub fn handover_intake(
     store: Arc<Store>,
     pipeline: Arc<CurrentPipeline>,
@@ -249,7 +252,7 @@ pub fn handover_intake(
         store,
         Arc::new(move |meeting, asset| {
             let pipeline = pipeline.current();
-            Box::pin(async move { pipeline.enqueue(&meeting, &asset) })
+            Box::pin(async move { pipeline.enqueue_saved(&meeting, &asset) })
         }),
         now,
         zone,
@@ -257,8 +260,11 @@ pub fn handover_intake(
 }
 
 /// The handover listener over a loaded or minted identity, with the mac id
-/// the Phones settings show; `None`, with the reason, when the identity
-/// could not be read or stored.
+/// the Phones settings show; `None`, with the reason, when the launch
+/// checkpoint failed ([`HandoverService::checkpoint_store`], which says why
+/// it comes first) or the identity could not be read or stored. A failed
+/// checkpoint keeps the handover off until the next launch, and the rest of
+/// the app runs. Swift: `AppEnvironment.makeHandover`.
 fn handover_listener(
     store: &Arc<Store>,
     pipeline: &Arc<CurrentPipeline>,
@@ -266,6 +272,7 @@ fn handover_listener(
     zone: FixedOffset,
     runtime: &tokio::runtime::Handle,
 ) -> Result<(Arc<HandoverService>, uuid::Uuid), String> {
+    HandoverService::checkpoint_store(store).map_err(|error| error.to_string())?;
     let identity = block_on(
         runtime,
         steno_handover::HandoverIdentity::load_or_create(
@@ -729,7 +736,7 @@ mod tests {
     use crate::testing::{PATIENCE, built, fake_dependencies, on_own_thread, temp_store};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_phone_intake_enqueues_through_the_pipeline_current_at_admission() {
+    async fn the_phone_intake_commits_durably_and_enqueues_on_the_current_pipeline() {
         let (dir, store) = temp_store();
         let mut settings = store.settings().unwrap();
         settings.audio_folder = file_url(&dir.path().join("audio"), true);
@@ -778,12 +785,42 @@ mod tests {
             format: AudioFormat::Wav16kInt16,
             device_name: "Phone".to_owned(),
         };
+        // The level and the meeting's state of each commit that holds a
+        // phone meeting. The intake's commit is the first, and the only one
+        // with the meeting `queued`: the enqueue writes nothing.
+        let commits: Arc<std::sync::Mutex<Vec<(i64, String)>>> = Arc::default();
+        let seen = commits.clone();
+        store.probe_commits(move |connection| {
+            let state: Option<String> = connection
+                .query_row(
+                    "SELECT (SELECT state FROM meeting WHERE source = 'phone')",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if let Some(state) = state {
+                let level = connection
+                    .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                    .unwrap();
+                seen.lock().unwrap().push((level, state));
+            }
+        });
         let meeting_id = intake.admit(&upload, &metadata, &device).await.unwrap();
         // The retired pipeline never saw the meeting; the current one did.
         let current_pipeline = current.current();
         current_pipeline.wait_until_idle().await;
         let meeting = store.meeting(meeting_id).unwrap().unwrap();
         assert_ne!(meeting.state.kind(), steno_core::MeetingStateKind::Queued);
+        let commits = commits.lock().unwrap().clone();
+        let queued: Vec<_> = commits
+            .iter()
+            .filter(|(_, state)| state == "queued")
+            .collect();
+        assert_eq!(
+            queued,
+            [&(2, "queued".to_owned())],
+            "the intake's commit under FULL is the only one with the meeting queued: {commits:?}"
+        );
         assert_eq!(
             store
                 .stage_rates()
@@ -1468,6 +1505,36 @@ mod tests {
                 .starts_with("Could not create the database folder: "),
             "{error}"
         );
+    }
+
+    /// The handover listener is built only over a store whose commits are on
+    /// the disk: a checkpoint that fails (here one another connection blocks,
+    /// with no busy timeout so the test does not wait) keeps the handover off,
+    /// before an identity is minted; once the checkpoint succeeds the listener
+    /// is built. Swift: `testAStoreThatCannotSyncKeepsTheHandoverOff`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_store_that_cannot_sync_keeps_the_handover_off() {
+        let (dir, store) = temp_store();
+        let pipeline = crate::testing::current_pipeline(fake_dependencies(&store, "fake-engine"));
+        let memory = Arc::new(steno_core::testing::InMemorySecretStore::new());
+        let secrets: Arc<dyn SecretStore> = memory.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let listener = || handover_listener(&store, &pipeline, &secrets, local_zone(), &runtime);
+        store
+            .read(|connection| Ok(connection.busy_timeout(std::time::Duration::ZERO)?))
+            .unwrap();
+        let writer = rusqlite::Connection::open(dir.path().join("steno.sqlite")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        let error = listener().err().unwrap();
+        assert!(
+            error.starts_with("the database could not be synced to the disk: "),
+            "{error}"
+        );
+        assert!(memory.keys().is_empty(), "no identity is minted");
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(listener().is_ok());
     }
 
     /// A secret store whose reads fail, as the keyring does without a

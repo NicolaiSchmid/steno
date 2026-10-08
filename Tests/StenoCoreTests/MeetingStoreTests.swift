@@ -665,6 +665,208 @@ import Testing
     #expect(try await reopened.meeting(id: SampleData.meetingID) == SampleData.meeting())
   }
 
+  /// `[synchronous, fullfsync]` as `db` has them now.
+  static func syncLevels(_ db: Database) throws -> [Int] {
+    [
+      try Int.fetchOne(db, sql: "PRAGMA synchronous") ?? -1,
+      try Int.fetchOne(db, sql: "PRAGMA fullfsync") ?? -1,
+    ]
+  }
+
+  /// A durable write commits under `FULL` with `fullfsync` (2, 1), and the pool's writer is back at
+  /// `NORMAL` (1, 0) after a commit and after a failed body; a plain write never sees `FULL`. That
+  /// the commit then survives a power loss is SQLite's and cannot be tested. Rust:
+  /// `a_durable_write_commits_under_full_and_sets_normal_back_on_every_path`.
+  @Test func aDurableWriteCommitsUnderFullAndSetsNormalBack() async throws {
+    struct Boom: Error {}
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
+    let writerLevels = {
+      try await store.writer.writeWithoutTransaction { db in try Self.syncLevels(db) }
+    }
+    #expect(try await writerLevels() == [1, 0])
+
+    let inside = try await store.writeDurably { db in
+      try MeetingRow(SampleData.meeting()).save(db)
+      return try Self.syncLevels(db)
+    }
+    #expect(inside == [2, 1], "the transaction runs under FULL")
+    #expect(try await writerLevels() == [1, 0], "after a commit")
+    #expect(try await store.meeting(id: SampleData.meetingID) != nil)
+    #expect(try await store.writer.write { db in try Self.syncLevels(db) } == [1, 0])
+
+    await #expect(throws: Boom.self) {
+      try await store.writeDurably { _ in throw Boom() }
+    }
+    #expect(try await writerLevels() == [1, 0], "after a failure")
+  }
+
+  /// A pairing and a revoke commit under `synchronous = FULL` (2): the phone
+  /// keeps the token from the pairing's answer, so a power loss must not forget
+  /// the pairing, nor bring a revoked phone back. The last-seen touch stays at
+  /// `NORMAL`. Rust: `a_pairing_and_a_revoke_commit_durably` in
+  /// `store/handover.rs`.
+  @Test func aPairingAndARevokeCommitDurably() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = try MeetingStore.onDisk(at: directory.appendingPathComponent("steno.sqlite"))
+    let device = SampleData.pairedDevice()
+    let tokenHash = Data(repeating: 1, count: 32)
+    let log = try await CommitLog.install(on: store)
+
+    try await store.save(device, tokenHash: tokenHash)
+    try await store.touchPairedDevice(id: device.id, tokenHash: tokenHash, seenAt: Date())
+    try await store.delete(deviceID: device.id)
+
+    let commits = log.commits.filter { $0.tables.contains("pairedDevice") }
+    #expect(commits.map(\.synchronous) == [2, 1, 2])
+    #expect(try await store.pairedDevice(id: device.id) == nil)
+    #expect(try await CommitLog.synchronous(of: store) == 1)
+  }
+
+  /// A durable checkpoint leaves every commit in the database file itself:
+  /// a copy of that file without its WAL holds the last commit. It runs
+  /// under `FULL` and sets `NORMAL` back, like a durable write.
+  /// Rust: `a_durable_checkpoint_copies_every_commit_into_the_database_file`.
+  @Test func aDurableCheckpointCopiesEveryCommitIntoTheDatabaseFile() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("steno.sqlite")
+    let store = try MeetingStore.onDisk(at: url)
+    try await store.save(SampleData.meeting())
+
+    try await store.checkpointDurably()
+    #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
+
+    let copy = directory.appendingPathComponent("copy.sqlite")
+    try FileManager.default.copyItem(at: url, to: copy)
+    let copied = try DatabaseQueue(path: copy.path)
+    #expect(
+      try await copied.read { db in try Int.fetchOne(db, sql: "SELECT count(*) FROM meeting") } == 1
+    )
+  }
+
+  /// A checkpoint another connection blocks past the busy timeout (here
+  /// none, so the test does not wait) throws `SQLITE_BUSY` and sets
+  /// `NORMAL` back; once the other connection lets go it succeeds.
+  /// Rust: `a_checkpoint_another_connection_blocks_fails_as_busy`.
+  @Test func aCheckpointAnotherConnectionBlocksThrowsBusy() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let (store, other) = try MeetingStore.checkpointBlocked(
+      at: directory.appendingPathComponent("steno.sqlite"))
+
+    let error = await #expect(throws: DatabaseError.self) { try await store.checkpointDurably() }
+    #expect(error?.resultCode == .SQLITE_BUSY)
+    #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
+
+    try other.release()
+    try await store.checkpointDurably()
+  }
+
+  /// The WAL file of the database at `database`.
+  static func walFile(_ database: URL) throws -> Data {
+    try Data(contentsOf: URL(fileURLWithPath: database.path + "-wal"))
+  }
+
+  /// The salt in the WAL file's header (bytes 16 to 24), which every valid
+  /// frame repeats: recovery replays only frames under the header's salt.
+  static func walSalt(_ database: URL) throws -> Data {
+    let wal = try walFile(database)
+    try #require(wal.count >= 24, "the WAL file has a header")
+    return wal.subdata(in: 16..<24)
+  }
+
+  /// The schema rows and the applied migrations, as the schema dump reads
+  /// them.
+  static func schema(_ db: Database) throws -> [String] {
+    try String.fetchAll(
+      db,
+      sql: """
+        SELECT type || ' ' || name || ' ' || ifnull(sql, '') FROM sqlite_master ORDER BY name
+        """) + String.fetchAll(db, sql: "SELECT identifier FROM grdb_migrations")
+  }
+
+  /// A durable checkpoint starts the WAL over: the file was truncated, so it
+  /// holds only the frames written since, under a header with a new salt, and
+  /// recovery after a power loss replays none of the frames before it. The
+  /// write that restarts it is the checkpoint's only commit and runs under
+  /// `synchronous = FULL` (2), and it leaves the schema and the applied
+  /// migrations as they were. Rust: `a_durable_checkpoint_restarts_the_wal`,
+  /// and `the_wal_restart_write_commits_under_full` in `store/mod.rs`.
+  @Test func aDurableCheckpointRestartsTheWAL() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("steno.sqlite")
+    let store = try MeetingStore.onDisk(at: url)
+    try await store.save(SampleData.meeting())
+    let salt = try Self.walSalt(url)
+    let schema = try await store.writer.read(Self.schema)
+    let log = try await CommitLog.install(on: store)
+
+    try await store.checkpointDurably()
+
+    #expect(try Self.walSalt(url) != salt, "the WAL restarted")
+    #expect(log.commits == [CommitLog.Commit(synchronous: 2, tables: [])])
+    // A passive checkpoint answers with the frames in the WAL and leaves the
+    // file as it is. Apple's SQLite cuts a restarted WAL down to 32 KiB
+    // (`journal_size_limit`), so only the exact length shows the truncation.
+    let (frames, _) = try await store.writer.writeWithoutTransaction { db in
+      try db.checkpoint(.passive)
+    }
+    let pageSize = try await store.writer.read { db in
+      try Int.fetchOne(db, sql: "PRAGMA page_size") ?? 0
+    }
+    #expect(
+      try Self.walFile(url).count == 32 + frames * (24 + pageSize),
+      "the WAL file holds the header and the write's frames only: it was truncated first")
+    #expect(try await store.writer.read(Self.schema) == schema)
+    #expect(try await store.writer.writeWithoutTransaction(Self.syncLevels) == [1, 0])
+  }
+
+  /// A reader still in the WAL blocks the checkpoint, on an older snapshot
+  /// and on the newest one alike: the WAL cannot restart under it. The
+  /// checkpoint throws `SQLITE_BUSY` (the store does not wait on a busy
+  /// lock here, so the test does not wait) and succeeds once the reader
+  /// has ended. Rust: `a_reader_in_the_wal_blocks_the_checkpoint`.
+  @Test func aReaderInTheWALBlocksTheCheckpoint() async throws {
+    let directory = try Fixtures.temporaryDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("steno.sqlite")
+    let store = try MeetingStore(writer: DatabasePool(path: url.path))
+    var configuration = Configuration()
+    configuration.allowsUnsafeTransactions = true
+    let reader = try DatabaseQueue(path: url.path, configuration: configuration)
+    let beginReading = {
+      try reader.inDatabase { db in
+        try db.execute(sql: "BEGIN")
+        _ = try Int.fetchOne(db, sql: "SELECT count(*) FROM meeting")
+      }
+    }
+    let endReading = { try reader.inDatabase { db in try db.execute(sql: "COMMIT") } }
+    let save = { (n: Int) in
+      var meeting = SampleData.meeting()
+      meeting.id = SampleData.uuid(n)
+      try await store.save(meeting)
+    }
+    try await save(1)
+
+    try beginReading()
+    try await save(2)
+    let older = await #expect(throws: DatabaseError.self) { try await store.checkpointDurably() }
+    #expect(older?.resultCode == .SQLITE_BUSY, "older snapshot")
+    try endReading()
+
+    try await save(3)
+    try beginReading()
+    let newest = await #expect(throws: DatabaseError.self) { try await store.checkpointDurably() }
+    #expect(newest?.resultCode == .SQLITE_BUSY, "newest snapshot")
+    try endReading()
+
+    try await store.checkpointDurably()
+  }
+
   @Test func derivedIDsAreStableDistinctAndWellFormed() {
     let a = UUID(derivedFrom: SampleData.meetingID, salt: "decision-0")
     #expect(a == UUID(derivedFrom: SampleData.meetingID, salt: "decision-0"))
