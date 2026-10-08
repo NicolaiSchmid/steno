@@ -8,7 +8,8 @@
 //! - [`EchoCanceller`]: the one synchronous, real-time boundary.
 //! - [`LanguageModel`]: one completion; sends text and only text.
 //! - [`Destination`]: a one-way push target.
-//! - [`SecretStore`] and [`SecretKey`]: the API key and whatever follows it.
+//! - [`SecretStore`] and [`SecretKey`]: the API key and whatever follows it;
+//!   [`SecretPlace`] says where a store keeps them.
 //! - [`SpeakerMemory`]: known voices across meetings.
 //! - [`AudioDecoder`], [`TranscriptCleaner`], [`MeetingSummarizer`],
 //!   [`DeliveryDispatcher`], [`HandoverIntake`]: the pipeline's stage

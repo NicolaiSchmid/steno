@@ -342,8 +342,8 @@ pub struct SummariesSettingsSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_details: Option<String>,
     /// Where a saved key lives; absent when the host does not say (the
-    /// Swift app) or has not decided yet (the Linux keyring still asking
-    /// for its password).
+    /// Swift app) or has not chosen yet (the Linux store, while it
+    /// connects or its keyring asks the user).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_store: Option<SummariesKeyStore>,
 }

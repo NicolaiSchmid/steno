@@ -962,7 +962,7 @@ still has to draw the window side. `[ ]` is not ported yet.
     parse the marked file and fails every secret read and write (no summaries key, no
     handover) rather than minting.
   - Tested against a fake Secret Service on a private `dbus-daemon`, and against GNOME
-    Keyring 50 and `KeePassXC` 2.7.12 on private buses; `KWallet` is untried (the
+    Keyring 50 and KeePassXC 2.7.12 on private buses; KWallet is untried (the
     manual checks are in #221).
 - Handover identity guard, every platform: the identity's SHA-256 fingerprint is
   recorded outside the secret store and the settings, in `handover-identity.json`
