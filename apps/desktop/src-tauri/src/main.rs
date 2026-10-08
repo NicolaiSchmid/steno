@@ -251,7 +251,9 @@ enum Refusal {
     DatabaseHeld,
     /// The host could not be built for another reason: the database cannot
     /// be opened, migrated or read, or the support directory cannot be
-    /// created. The error goes to the log; the database is as it was.
+    /// created. The error goes to the log. Nothing in the database is lost:
+    /// what may have committed before the failure (a migration, the
+    /// admission backfill) only adds.
     Unavailable,
 }
 
@@ -284,8 +286,8 @@ impl Refusal {
                  Quit it, then open Steno again."
             }
             Refusal::Unavailable => {
-                "Steno could not open your meetings. Nothing was changed. \
-                 Install the latest Steno, then open it again."
+                "Steno could not open your meetings. Your meetings are safe. \
+                 Open Steno again; if this keeps happening, the log says why."
             }
         }
     }
@@ -323,20 +325,24 @@ fn platform_app_running(bundle_id: &str) -> bool {
 }
 
 /// Says why this app does not start ([`Refusal`]), logs `reason`, and ends
-/// with [`REFUSED_CODE`] once the alert is closed, before it opens a window
-/// or writes to the database: two apps on one database would fail each
-/// other's recordings at launch, and a database this build cannot open is
-/// left as it is. Its run loop has no host to shut down
-/// (`host::is_running`). Should the alert never show, or its callback never
-/// run, the process ends after [`REFUSED_PATIENCE`] all the same: it holds
-/// nothing to save. Rust only: the Swift app relied on macOS opening one
-/// copy per bundle id.
+/// with [`REFUSED_CODE`] once the alert is closed, before it opens a window:
+/// two apps on one database would fail each other's recordings at launch,
+/// and a host that could not be built writes nothing more. Its run loop has
+/// no host to shut down (`host::is_running`). Should the alert never show,
+/// or its callback never run, the process ends after [`REFUSED_PATIENCE`]
+/// all the same, or after the wait of a smoke run (`STENO_SMOKE_SECONDS`,
+/// so the smoke sees the refusal end): it holds nothing to save. Rust only:
+/// the Swift app relied on macOS opening one copy per bundle id.
 fn refuse_to_start(handle: &tauri::AppHandle, refusal: Refusal, reason: &dyn std::fmt::Display) {
     use tauri_plugin_dialog::{DialogExt as _, MessageDialogButtons, MessageDialogKind};
 
     stderr_line!("[steno-desktop] not starting: {reason}");
-    std::thread::spawn(|| {
-        std::thread::sleep(REFUSED_PATIENCE);
+    let patience = match smoke::wait_from(std::env::var(smoke::SECONDS_VARIABLE).ok().as_deref()) {
+        smoke::Wait::Seconds(seconds) => std::time::Duration::from_secs(seconds),
+        smoke::Wait::NotASmokeRun | smoke::Wait::Invalid(_) => REFUSED_PATIENCE,
+    };
+    std::thread::spawn(move || {
+        std::thread::sleep(patience);
         std::process::exit(REFUSED_CODE);
     });
     let app = handle.clone();
@@ -782,12 +788,14 @@ mod tests {
         assert_eq!(Refusal::OlderSteno.title(), "An older Steno is running");
     }
 
-    /// A host that cannot be built is refused with the alert, not a panic:
-    /// a store that cannot be opened is [`Refusal::Unavailable`], a
-    /// database another process holds [`Refusal::DatabaseHeld`].
+    /// A host that cannot be built maps to its refusal: a store that cannot
+    /// be opened is [`Refusal::Unavailable`], a database another process
+    /// holds [`Refusal::DatabaseHeld`]. That `setup` shows it and exits
+    /// with [`REFUSED_CODE`] is the Linux smoke's refusal run
+    /// (`apps/desktop/scripts/smoke-linux.sh`).
     #[cfg(not(feature = "fixture-host"))]
     #[test]
-    fn a_store_that_cannot_be_opened_is_refused_with_the_alert() {
+    fn a_host_that_cannot_be_built_maps_to_its_refusal() {
         let unopened = host::ShellHostError::Build(steno_services::BuildError::Store(
             steno_core::StoreError::PendingMigration("v5".to_owned()),
         ));
