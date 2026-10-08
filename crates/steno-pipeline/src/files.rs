@@ -349,9 +349,8 @@ fn remove_stale_temporaries(directory: &Path, prefix: &str) {
 /// name is free comes first and is all that guards it there. If the old
 /// name cannot be removed after the link, the error is returned and both
 /// names hold the bytes; on every platform an old name already gone is
-/// no error. On Windows
-/// that removal and the rename are tried again while the file is busy
-/// (`steno_core::busy_file`).
+/// no error. On Windows that removal and the rename are tried again while
+/// the file is busy (`steno_core::busy_file`).
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
