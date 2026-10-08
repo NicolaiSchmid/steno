@@ -1044,11 +1044,12 @@ still has to draw the window side. `[ ]` is not ported yet.
 - A meeting a previous process left recording is recovered at launch from its master
   on disk and queued with the end reason `failed` (`steno_services::recovery`; Rust
   only). Only when no audio folder it may be in holds its master, and the folder it
-  was recorded into and the settings' folder can both be read, does it fail, with Swift's "Recording was interrupted before it finished."
+  was recorded into and the settings' folder can both be read, does it fail, with
+  Swift's "Recording was interrupted before it finished."
   (`Store::INTERRUPTED_RECORDING_REASON`). Around it, also Rust only (P3 and P17 of
   `.plans/2026-10-07-stable-promotion.md`):
   - a stop's commit that finds the database busy is tried again, three tries in all
-    and one when quitting, and a commit that still fails leaves the meeting
+    and none more once the app quits, and a commit that still fails leaves the meeting
     `recording` for the next launch's recovery, where Swift marked it failed without
     its asset;
   - a stop whose capture failed recovers what the writer wrote from the master, where

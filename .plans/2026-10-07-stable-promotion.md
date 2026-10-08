@@ -725,8 +725,12 @@ The table above names each package and its owner. Their tests:
   After a kill past the first flush, the next launch lists the meeting `queued`
   with `endReason` `failed` and no failure reason, with audio up to the last
   flush, and processes it. A kill before the first flush leaves state `failed`,
-  not a missing meeting. Each flush is followed by
-  `sync_data` (P21), asserted through a counting file.
+  not a missing meeting. Each flush is followed by `sync_data` (P21): the CAF and
+  WAV writers' tests count the full syncs they run in place of the disk's, one
+  per writer sync and one at the finish, and a test pins the product's
+  `FullSyncs::DISK` to `File::sync_data` and `File::sync_all`, so the syncs
+  counted are the ones the product runs (a kill keeps the page cache, so the
+  kill test cannot show it).
 - **P4.** The interleaving forced with a gate.
 - **P5.** The save of a two-hour recording is measured on Nicolai's slowest
   Linux machine, and on Windows in the Windows gate; it passes under 10 s. The
