@@ -163,11 +163,21 @@ impl Store {
     /// The phone intake's admission: the `complete` receipt, the meeting,
     /// its asset and the admission's ledger row (see
     /// [`Store::admitted_meeting`]) in one transaction, on the disk when it
-    /// returns ([`Store::write_durably`]). The phone deletes its copy once
-    /// `complete` answers 200, so no commit may hold the receipt without
-    /// the meeting, and a power loss must not roll either back. A ledger
-    /// row of the same recording id, size and SHA-256 stays as it is
-    /// (`INSERT OR IGNORE`): the first admission of those bytes stands.
+    /// returns ([`Store::write_durably`]), and the meeting the receipt was
+    /// completed with. The phone deletes its copy once `complete` answers
+    /// 200, so no commit may hold the receipt without the meeting, and a
+    /// power loss must not roll either back.
+    ///
+    /// When the ledger already holds these bytes (the same recording id,
+    /// size and SHA-256) and their meeting still exists, the receipt is
+    /// completed with that meeting, `meeting` and `asset` are not written,
+    /// and that meeting's id comes back: the same bytes are one recording.
+    /// Another device's upload of them can reach the intake after the
+    /// first admission committed (it took the receipt over during that
+    /// intake), and a second meeting would be a duplicate. A row whose
+    /// meeting the user deleted stays as it is (`INSERT OR IGNORE`), and
+    /// the admission writes `meeting`.
+    ///
     /// Fails with [`StoreError::ReceiptOfAnotherUpload`], writing nothing,
     /// when the stored receipt belongs to another device than `receipt` or
     /// holds another size or SHA-256: completed, it would answer that
@@ -179,7 +189,7 @@ impl Store {
         receipt: &HandoverReceipt,
         meeting: &Meeting,
         asset: &AudioAsset,
-    ) -> Result<()> {
+    ) -> Result<Uuid> {
         self.write_durably(|transaction| {
             let stored = transaction
                 .query_row(
@@ -205,6 +215,27 @@ impl Store {
             }) {
                 return Err(StoreError::ReceiptOfAnotherUpload(receipt.recording_id));
             }
+            let earlier = transaction
+                .query_row(
+                    "SELECT meetingID FROM handoverAdmission \
+                     WHERE recordingID = ?1 AND byteCount = ?2 AND sha256 = ?3 \
+                     AND meetingID IN (SELECT id FROM meeting)",
+                    params![
+                        DbUuid(receipt.recording_id),
+                        receipt.byte_count,
+                        receipt.sha256
+                    ],
+                    |row| row.col::<DbUuid>("meetingID"),
+                )
+                .optional()?;
+            if let Some(meeting_id) = earlier {
+                let completed = HandoverReceipt {
+                    state: HandoverState::Complete { meeting_id },
+                    ..receipt.clone()
+                };
+                save_receipt(transaction, &completed)?;
+                return Ok(meeting_id);
+            }
             meetings::save(transaction, meeting)?;
             assets::save(transaction, asset)?;
             save_receipt(transaction, receipt)?;
@@ -220,7 +251,7 @@ impl Store {
                     DbDate(receipt.updated_at),
                 ],
             )?;
-            Ok(())
+            Ok(meeting.id)
         })
     }
 
@@ -256,7 +287,7 @@ impl Store {
     /// those an older app committed during a rollback, since it ignores v5
     /// and writes no row. [`Store::open`] runs it every time. Swift: the
     /// backfill in `MeetingStore.init`.
-    pub fn backfill_handover_admissions(&self) -> Result<()> {
+    pub(crate) fn backfill_handover_admissions(&self) -> Result<()> {
         self.write(|transaction| {
             transaction.execute_batch(BACKFILL_ADMISSIONS)?;
             Ok(())

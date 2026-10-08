@@ -428,8 +428,9 @@ impl HandoverIntake for ScriptedIntake {
 /// (`RecordingIntake::admit` in `steno-pipeline`, without the copy): the
 /// `complete` receipt, a meeting under a fresh id and its asset in one
 /// durable transaction, which writes the ledger row
-/// (`Store::save_admission_durably`), and it refuses another upload's
-/// receipt the same way. [`StoreIntake::hold_next`] holds the next
+/// (`Store::save_admission_durably`), or the receipt alone with the meeting
+/// the ledger holds for the same bytes; it refuses another upload's receipt
+/// the same way. [`StoreIntake::hold_next`] holds the next
 /// admission before or after its commit until [`StoreIntake::release`].
 pub struct StoreIntake {
     store: Arc<Store>,
@@ -524,11 +525,14 @@ impl HandoverIntake for StoreIntake {
         receipt.state = steno_core::HandoverState::Complete {
             meeting_id: meeting.id,
         };
-        self.store
+        let admitted = self
+            .store
             .save_admission_durably(&receipt, &meeting, &asset)?;
-        self.meetings.lock().unwrap().push(meeting.id);
+        if admitted == meeting.id {
+            self.meetings.lock().unwrap().push(meeting.id);
+        }
         self.held_at(hold, Hold::AfterTheCommit).await;
-        Ok(meeting.id)
+        Ok(admitted)
     }
 }
 

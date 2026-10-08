@@ -3,8 +3,9 @@
 //! happened to its receipt (a revoke, a meeting delete, a line save after
 //! the intake's commit, a restart); other bytes under a recording id are a
 //! new recording; the same bytes in another split restart the partial; the
-//! same bytes from another device take the receipt over; and a late
-//! `complete` of replaced bytes never completes the new upload. The intake
+//! same bytes from another device take the receipt over, and admitted
+//! twice are one meeting; and a late `complete` of replaced bytes never
+//! completes the new upload. The intake
 //! commits like the real one ([`StoreIntake`]), so the ledger row exists
 //! exactly when an admission committed. The design is
 //! `.plans/2026-10-08-handover-admission-ledger.md`. Swift:
@@ -396,6 +397,51 @@ async fn another_device_takes_over_an_unfinished_upload_of_the_same_bytes() {
     );
     assert_eq!(completed(&older, id).await, meeting_id);
     assert_eq!(intake.meetings(), [meeting_id], "admitted once");
+    test.stop().await;
+}
+
+#[tokio::test]
+async fn a_takeover_during_the_first_admission_completes_with_its_meeting() {
+    // The older device's `complete` is in the intake, past its commit,
+    // when the newer device announces the same bytes and takes the receipt
+    // over: its save puts the newer device's unfinished receipt over the
+    // `complete` one. The partial went to the intake, so the newer
+    // device's `complete` finds none and its upload starts over. When it
+    // reaches the intake, the ledger holds those bytes, and its `complete`
+    // answers the first meeting: the same bytes are one recording, and a
+    // second meeting would be a duplicate.
+    let (store, intake) = store_and_intake();
+    let test = service(&store, &intake).await;
+    let older = Phone::pair(&test).await;
+    let bytes = seeded_bytes(2 * CHUNK_SIZE as usize + 3, 41);
+    let metadata = older.metadata(&bytes, CHUNK_SIZE);
+    let id = metadata.recording_id;
+    older.upload_all(&metadata, &bytes).await;
+    let newer = Phone::pair(&test).await;
+
+    intake.hold_next(Hold::AfterTheCommit);
+    let (first, ()) = tokio::join!(older.complete(id), async {
+        intake.admitting().await;
+        assert_eq!(newer.announce(&metadata).await.status, 200, "taken over");
+        intake.release();
+    });
+    assert_eq!(first.status, 200);
+    let meeting_id = first.json::<wire::CompleteResponse>().meeting_id;
+    assert_eq!(
+        store.handover_receipt(id).unwrap().unwrap().state,
+        HandoverState::Receiving,
+        "the takeover's save landed after the commit"
+    );
+    assert_eq!(newer.complete(id).await.status, 409, "no partial left");
+
+    newer.upload_all(&metadata, &bytes).await;
+    assert_eq!(completed(&newer, id).await, meeting_id, "the first meeting");
+    assert_eq!(intake.meetings(), [meeting_id], "admitted once");
+    assert_eq!(
+        store.handover_receipt(id).unwrap().unwrap().state,
+        HandoverState::Complete { meeting_id }
+    );
+    delivered(&test, &older, &metadata).await;
     test.stop().await;
 }
 

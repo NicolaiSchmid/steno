@@ -86,7 +86,10 @@ pub fn default_title(
 /// `failed` durably ([`Store::save_handover_receipt_durably`]), and the
 /// copy is removed only once that save succeeds: a failed commit can still
 /// be replayed after a crash, and its meeting then needs the copy. The
-/// phone keeps its own copy either way.
+/// phone keeps its own copy either way. Bytes the admission ledger already
+/// holds with a meeting (another device's upload of them, taken over
+/// during the first admission) are that meeting: the receipt is completed
+/// with it, the copy goes, and nothing is enqueued.
 /// The enqueue after the commit is [`ProcessingPipeline::enqueue_saved`]
 /// in [`RecordingIntake::over`]; its failure does not undo the admission,
 /// the meeting waits `queued` for the next launch's resume.
@@ -211,30 +214,41 @@ impl HandoverIntake for RecordingIntake {
         receipt.state = HandoverState::Complete { meeting_id };
         receipt.updated_at = timestamp;
 
-        if let Err(error) = self
+        let admitted = match self
             .store
             .save_admission_durably(&receipt, &meeting, &asset)
         {
-            if matches!(error, StoreError::ReceiptOfAnotherUpload(_)) {
-                // The refusal wrote nothing, and another phone's receipt is
-                // left as it is.
-                let _ = std::fs::remove_file(&destination);
-            } else {
-                // A failed commit is not proof that nothing committed: a
-                // WAL sync that fails leaves the commit's frames in the WAL,
-                // and recovery after a crash replays them. The durable
-                // `failed` save writes over them, or voids them when the WAL
-                // restarts, so the copy goes only once that save is on the
-                // disk; otherwise it stays, an orphan at worst, and a
-                // replayed admission still finds its master.
-                receipt.state = HandoverState::Failed(format!("admit: {error}"));
-                if self.store.save_handover_receipt_durably(&receipt).is_ok() {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                if matches!(error, StoreError::ReceiptOfAnotherUpload(_)) {
+                    // The refusal wrote nothing, and another upload's
+                    // receipt is left as it is.
                     let _ = std::fs::remove_file(&destination);
+                } else {
+                    // A failed commit is not proof that nothing committed: a
+                    // WAL sync that fails leaves the commit's frames in the
+                    // WAL, and recovery after a crash replays them. The
+                    // durable `failed` save writes over them, or voids them
+                    // when the WAL restarts, so the copy goes only once that
+                    // save is on the disk; otherwise it stays, an orphan at
+                    // worst, and a replayed admission still finds its master.
+                    receipt.state = HandoverState::Failed(format!("admit: {error}"));
+                    if self.store.save_handover_receipt_durably(&receipt).is_ok() {
+                        let _ = std::fs::remove_file(&destination);
+                    }
                 }
+                return Err(error.into());
             }
-            return Err(error.into());
-        }
+        };
         let _ = std::fs::remove_file(file);
+        if admitted != meeting_id {
+            // The ledger held these bytes with a meeting: the receipt is
+            // complete with it, and this copy and its folder belong to no
+            // meeting.
+            let _ = std::fs::remove_file(&destination);
+            let _ = std::fs::remove_dir(&layout.directory);
+            return Ok(admitted);
+        }
         // Admitted: a pipeline that cannot take the meeting now leaves it
         // `queued`, and the next launch resumes it.
         if let Err(failure) = (self.enqueue)(meeting, asset).await {
@@ -1174,6 +1188,70 @@ mod tests {
         );
         assert_eq!(files_under(&audio), Vec::<std::path::PathBuf>::new());
         assert_eq!(synchronous(&store), 1);
+    }
+
+    /// The same bytes admitted under another device's receipt (it took the
+    /// receipt over while the first admission ran, and wrote it back
+    /// unfinished) are the meeting the ledger holds: the receipt is
+    /// completed with it, no second meeting is written or enqueued, and
+    /// neither the copy nor its folder stays. Swift:
+    /// `bytesTheLedgerHoldsAreAdmittedAsTheirMeeting`.
+    #[tokio::test]
+    async fn bytes_the_ledger_holds_are_admitted_as_their_meeting() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_audio_folder(dir.path());
+        let audio = dir.path().join("audio");
+        let now = Utc::now();
+        let (enqueue, admitted) = recording_enqueue();
+        let intake = phone_intake(&store, enqueue, Arc::new(move || now));
+        let (older, metadata) = paired_phone(&store, now);
+        let first = intake
+            .admit(&upload_in(dir.path()), &metadata, &older)
+            .await
+            .unwrap();
+        let newer = PairedDevice {
+            id: Uuid::new_v4(),
+            ..older.clone()
+        };
+        store.save_paired_device(&newer, &[2; 32]).unwrap();
+        store
+            .save_handover_receipt(&receipt_of(
+                &newer,
+                &metadata,
+                HandoverState::Receiving,
+                now,
+            ))
+            .unwrap();
+        let upload = upload_in(dir.path());
+
+        let again = intake.admit(&upload, &metadata, &newer).await.unwrap();
+
+        assert_eq!(again, first, "the ledger's meeting");
+        assert_eq!(store.all_meetings().unwrap().len(), 1);
+        assert_eq!(
+            admitted.lock().unwrap().len(),
+            1,
+            "nothing more is enqueued"
+        );
+        let receipt = store
+            .handover_receipt(metadata.recording_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (receipt.device_id, receipt.state),
+            (newer.id, HandoverState::Complete { meeting_id: first })
+        );
+        assert_eq!(
+            files_under(&audio),
+            vec![RecordingLayout::new(&audio, first).master(AudioFormat::M4aAac)],
+            "the second copy is gone"
+        );
+        assert_eq!(
+            std::fs::read_dir(&audio).unwrap().count(),
+            1,
+            "and so is its folder"
+        );
+        assert!(!upload.exists());
     }
 
     /// A `complete` receipt whose meeting is gone (the separate receipt and

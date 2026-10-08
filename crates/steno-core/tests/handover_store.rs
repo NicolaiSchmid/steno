@@ -208,8 +208,10 @@ fn admission(meeting_id: &str, sha256: Vec<u8>) -> (HandoverReceipt, Meeting, Au
 /// size and SHA-256 with its meeting. A revoke's cascade takes the receipt
 /// and a meeting delete takes the meeting and the receipt, and both leave
 /// the row. Other bytes under the same recording id are a second
-/// admission with a row of their own; the same bytes admitted again keep
-/// the first row. Swift: `anAdmissionWritesItsLedgerRow`.
+/// admission with a row of their own. The same bytes admitted again are
+/// the meeting the ledger holds while it exists, and once it is deleted a
+/// new meeting whose admission keeps the first row. Swift:
+/// `anAdmissionWritesItsLedgerRow`.
 #[test]
 fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave() {
     let store = Store::in_memory().unwrap();
@@ -279,9 +281,20 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
     store
         .save_handover_receipt(&unfinished(&same_bytes))
         .unwrap();
-    store
-        .save_admission_durably(&same_bytes, &third, &third_asset)
-        .unwrap();
+    assert_eq!(
+        store
+            .save_admission_durably(&same_bytes, &third, &third_asset)
+            .unwrap(),
+        meeting.id,
+        "the same bytes are the meeting the ledger holds"
+    );
+    assert_eq!(store.meeting(third.id).unwrap(), None, "no second meeting");
+    assert_eq!(
+        store.handover_receipt(recording_id).unwrap().unwrap().state,
+        HandoverState::Complete {
+            meeting_id: meeting.id
+        }
+    );
     assert_eq!(
         store
             .admitted_meeting(recording_id, byte_count, &[8; 32])
@@ -289,17 +302,20 @@ fn an_admission_writes_its_ledger_row_which_a_revoke_and_a_meeting_delete_leave(
         Some(second.id),
         "other bytes are an admission of their own"
     );
+
+    // Once the user deleted that meeting, the same bytes are admitted as a
+    // new one, and the first admission's row stands.
+    store.delete_meeting(meeting.id).unwrap();
+    assert_eq!(store.handover_receipt(recording_id).unwrap(), None);
+    store
+        .save_handover_receipt(&unfinished(&same_bytes))
+        .unwrap();
     assert_eq!(
         store
-            .admitted_meeting(recording_id, byte_count, &[7; 32])
+            .save_admission_durably(&same_bytes, &third, &third_asset)
             .unwrap(),
-        Some(meeting.id),
-        "the first admission of the same bytes stands"
+        third.id
     );
-
-    store.delete_meeting(third.id).unwrap();
-    assert_eq!(store.handover_receipt(recording_id).unwrap(), None);
-    store.save_handover_receipt(&first).unwrap();
     store.delete_paired_device(device().id).unwrap();
     assert_eq!(
         store.handover_receipt(recording_id).unwrap(),

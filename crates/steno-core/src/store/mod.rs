@@ -164,10 +164,10 @@ impl std::fmt::Debug for Store {
 
 impl Store {
     /// Opens (creating) the database at `path`, applies every pending
-    /// migration and backfills the admission ledger
-    /// ([`Store::backfill_handover_admissions`]). The parent directory is
-    /// created. The connection is set up
-    /// like the Swift app's writer: WAL mode, `synchronous = NORMAL`, foreign
+    /// migration and backfills the admission ledger from the admitted
+    /// receipts (`Store::backfill_handover_admissions`). The parent
+    /// directory is created. The connection is set up like the Swift app's
+    /// writer: WAL mode, `synchronous = NORMAL`, foreign
     /// keys on and a five-second busy timeout. With `NORMAL` in WAL mode a
     /// commit waits for an fsync only when it runs a checkpoint or is the
     /// first commit after one, so a power loss or OS crash can roll back
