@@ -1354,36 +1354,36 @@ still has to draw the window side. `[ ]` is not ported yet.
   that call fails (a target another handle holds open), they rename with std. Either way
   they then flush the renamed file, which on NTFS commits the journal that holds the
   rename and the folders created before it, and on FAT32 also flushes every folder above
-  the file. A file another handle holds for a moment (a sharing or lock violation, or
-  "access denied" on a file being replaced or deleted that instant) is retried by std's
-  rename and by the reopen for that flush, after waits of 5 ms doubling to 200 ms, about
-  0.9 s in all; two writers of one path in the process rename and flush one after the
-  other, so one writer's flush never makes another's write fail. A flush that fails is
-  an error, so the phone intake answers 500 and the phone keeps its copy.
-  `create_dir_all_durably` flushes the parent of each folder it creates, and a durable
-  write flushes the folder it renamed into (`FlushFileBuffers` on
-  the folder). A folder that does not open, or a folder flush that fails to write, is an
-  error; a drive that refuses the folder flush ("access denied", "not supported" and the
-  like, from some network shares) is logged and passed over, as a failed folder sync is
-  on Linux and macOS. Neither the FAT driver's folder flush nor exFAT's unpublished
-  driver can be relied on, and a server can acknowledge a flush without writing it, so
-  Settings warns under an audio folder on a drive that is neither NTFS nor ReFS, or on a
-  network drive (a share's path, a drive letter mapped to one, or a folder that resolves
-  to a share), with "This drive may lose recent recordings in a power cut." and "Choose
-  a folder on your computer's main drive to keep them safe." CI's Windows job runs the
-  intake's writes on a FAT32 and an exFAT drive. The intake creates the meeting folder
-  itself (`create_new_dir_durably`), so a folder already at its path (an id that
-  collided) fails the attempt before the copy and is left as it is; an attempt whose
-  folder sync or copy fails removes the folder it created. The Swift intake accepts a
-  folder already there and replaces a file at the master's path, reachable only by a
-  UUID collision; it removes the copy whose sync fails and leaves the empty folder.
-  Linux and macOS sync the folder after std's rename, best effort, and Settings shows the
-  same warning under an audio folder on a network mount, read with `statfs` (NFS, SMB,
-  VM host shares, remote FUSE and macFUSE; `files/mount.rs` names them). The Swift app
-  has no such warning; it ships no further release. The adapters' `AtomicFileWriter`
-  flushes the renamed file on Windows as well, and a failed flush fails the export:
-  with "delete after processing" the vault's copy of the mixdown is the only audio left
-  once the sweep has run.
+  the file. std's rename and the reopen for that flush try again when another handle
+  holds the file for a moment (a sharing or lock violation, or "access denied" on a
+  target such a handle holds open or on a file being replaced or deleted that instant),
+  after waits of 5 ms doubling to 200 ms, about 0.9 s in all; two writers of one path
+  (spelled the same) in the process rename and flush one after the other, so one
+  writer's flush does not make another's write fail. A flush that fails is an error, so
+  the phone intake answers 500 and the phone keeps its copy. `create_dir_all_durably`
+  flushes the parent of each folder it creates, and a durable write flushes the folder
+  it renamed into (`FlushFileBuffers` on the folder). A folder that does not open, or a
+  folder flush that fails to write, is an error; a drive that refuses the folder flush
+  ("access denied", "not supported" and the like, from some network shares) is logged
+  and passed over, as a failed folder sync is on Linux and macOS. Neither the FAT
+  driver's folder flush nor exFAT's unpublished driver can be relied on, and a server
+  can acknowledge a flush without writing it, so Settings warns under an audio folder on
+  a drive that is neither NTFS nor ReFS, or on a network drive (a share's path, a drive
+  letter mapped to one, or a folder that resolves to a share), with "This drive may lose
+  recent recordings in a power cut." and "Choose a folder on your computer's main drive
+  to keep them safe." CI's Windows job runs the intake's writes on a FAT32 and an exFAT
+  drive. The intake creates the meeting folder itself (`create_new_dir_durably`), so a
+  folder already at its path (an id that collided) fails the attempt before the copy and
+  is left as it is; an attempt whose folder sync or copy fails removes the folder it
+  created. The Swift intake accepts a folder already there and replaces a file at the
+  master's path, reachable only by a UUID collision; it removes the copy whose sync
+  fails and leaves the empty folder. Linux and macOS sync the folder after std's rename,
+  best effort, and Settings shows the same warning under an audio folder on a network
+  mount, read with `statfs` (NFS, SMB, VM host shares, remote FUSE and macFUSE;
+  `files/mount.rs` names them). The Swift app has no such warning; it ships no further
+  release. The adapters' `AtomicFileWriter` flushes the renamed file on Windows as well,
+  and a failed flush fails the export: with "delete after processing" the vault's copy
+  of the mixdown is the only audio left once the sweep has run.
 
 ### Adapters
 
