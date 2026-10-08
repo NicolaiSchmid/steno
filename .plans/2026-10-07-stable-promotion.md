@@ -150,8 +150,9 @@ Forge and atlas.
   and is off without a transcript. The pipeline can process a meeting again
   (`ProcessingPipeline::reprocess`), but neither the bridge nor the CLI calls it
   yet, and the CLI reads WAV only. P9 adds them.
-- **A recording ended by a kill is marked failed at the next launch**
-  (`fail_interrupted_recordings`), and nothing salvages its CAF yet (P3).
+- **A recording ended by a kill is recovered at the next launch** from its CAF
+  on disk and queued with the end reason `failed`; one with no audio on disk is
+  marked failed as before (P3, `fix/recording-recovery`).
 - **Omarchy 4** (Arch with Hyprland, Wayland):
   - it is a `uwsm` session: logout is `uwsm stop`, which stops the app's unit
     with SIGTERM while Hyprland still runs, so the app's signal handler saves;
@@ -398,7 +399,7 @@ capture and recovery (branches `wp-cap-*`); pipeline, store and export
 | P12 | A summary: `summarize` without a summarizer clears it. It keeps the existing one | pipeline, store and export (`wp-pse-*`) |
 | P13 | A meeting stuck in a crash loop: a panic in `process()` marks the meeting failed, and a guard on resume attempts stops the loop | pipeline, store and export (`wp-pse-*`) (the panic wrap); audio (the crash-loop guard, #228) |
 | P14 | Audio deleted by the retention sweep before its stamp is durable: the stamp commits durably first, and a meeting with no segments that is over 30 s long gets no stamp | pipeline, store and export (`wp-pse-*`) |
-| P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run without migrating, and refuse beside an older app. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); a Swift app started after the Rust app is not kept out | capture and recovery (`wp-cap-*`, #225) |
+| P15 | Anything two processes write at once: one exclusive lock beside the database for the app's lifetime (#225). A second app instance that the single-instance guard does not hand over is refused with "Steno is already running"; the CLI's writing commands refuse while the app runs, and its read-only commands run without migrating, and refuse beside an older app. On the Mac the Rust app also refuses to start while the Swift Steno (`uno.schmid.steno.mac`) runs in the same login session (`NSRunningApplication`); a Swift app started after the Rust app is not kept out, and its launch fails every `recording` row, the one the Rust app is still recording among them, so that recording's stop cannot save it and its folder stays on disk unlisted (a known limit, accepted because the handoff runs one app at a time) | capture and recovery (`wp-cap-*`, #225) |
 | P16 | A meeting processed twice: the in-flight set is shared across pipeline reloads | pipeline, store and export (`wp-pse-*`) |
 | P17 | A local recording's folder: a save that fails leaves the meeting `recording` with its folder on disk, and the next launch's recovery (P3) rebuilds the asset row from the master and queues the meeting, so the folder is not orphaned (`fix/recording-recovery`); the recorder's rebuild thread survives a panic (still open: not in `fix/recording-recovery`) | capture and recovery (`wp-cap-*`) |
 | P18 | A recording that silently stopped: the recorder subscribes to session failures | capture and recovery (`wp-cap-*`) |
