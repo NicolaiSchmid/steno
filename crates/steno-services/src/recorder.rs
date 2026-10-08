@@ -267,6 +267,12 @@ struct Active {
     /// Re-reads the microphone after each rebuild, joined once the session
     /// is dropped.
     notice_thread: JoinHandle<()>,
+    /// The disk watch's warning ([`low_space_warning`]), set at the start
+    /// and by the watcher, cleared by a reading with room again and by
+    /// `clear_messages`. Kept apart from the status's own warning so it
+    /// does not hide the fallback warning or outlive the low room. Rust
+    /// only.
+    disk_warning: Option<String>,
 }
 
 /// The input a recording records in place of the chosen microphone, as
@@ -598,10 +604,7 @@ impl CaptureRecorder {
             inner.status.meeting_id = Some(meeting_id);
             inner.status.levels = None;
             inner.status.error = None;
-            inner.status.warning = match room {
-                Room::Low { minutes } => Some(low_space_warning(minutes, disk.stops)),
-                Room::Enough | Room::Full => None,
-            };
+            inner.status.warning = None;
             inner.active = Some(Active {
                 session,
                 meeting_id,
@@ -610,6 +613,10 @@ impl CaptureRecorder {
                 level_thread,
                 fallback,
                 notice_thread,
+                disk_warning: match room {
+                    Room::Low { minutes } => Some(low_space_warning(minutes, disk.stops)),
+                    Room::Enough | Room::Full => None,
+                },
             });
         }
         // Not joined: it may be the thread that finishes the recording,
@@ -667,9 +674,10 @@ impl CaptureRecorder {
                         continue;
                     };
                     match Room::of(free, rate, disk.stops) {
-                        Room::Enough => {}
+                        Room::Enough => recorder.warn(meeting_id, None),
                         Room::Low { minutes } => {
-                            recorder.warn(meeting_id, low_space_warning(minutes, disk.stops));
+                            let warning = low_space_warning(minutes, disk.stops);
+                            recorder.warn(meeting_id, Some(warning));
                         }
                         Room::Full => {
                             recorder.stop_recording(
@@ -718,17 +726,25 @@ impl CaptureRecorder {
         }
     }
 
-    /// Shows `warning` while the recording of `meeting_id` runs; not once
-    /// it is stopping, whose outcome sets the messages.
-    fn warn(&self, meeting_id: Uuid, warning: String) {
+    /// Shows the disk watch's `warning` while the recording of
+    /// `meeting_id` runs, or clears it with `None` ([`Active::disk_warning`]);
+    /// not once it is stopping, whose outcome sets the messages.
+    fn warn(&self, meeting_id: Uuid, warning: Option<String>) {
         let mut inner = self.inner();
-        if inner.status.state != RecordingState::Recording
-            || inner.status.meeting_id != Some(meeting_id)
-            || inner.status.warning.as_ref() == Some(&warning)
-        {
+        if inner.status.state != RecordingState::Recording {
             return;
         }
-        inner.status.warning = Some(warning);
+        let Some(active) = inner
+            .active
+            .as_mut()
+            .filter(|active| active.meeting_id == meeting_id)
+        else {
+            return;
+        };
+        if active.disk_warning == warning {
+            return;
+        }
+        active.disk_warning = warning;
         drop(inner);
         self.notify();
     }
@@ -910,15 +926,18 @@ impl Recorder for CaptureRecorder {
                 .levels
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if status.warning.is_none() {
-                status.warning = active
-                    .fallback
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .current
-                    .as_deref()
-                    .map(fallback_warning);
-            }
+            let fallback = active
+                .fallback
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .current
+                .as_deref()
+                .map(fallback_warning);
+            // Every warning that applies, the disk's first.
+            status.warning = [status.warning.take(), active.disk_warning.clone(), fallback]
+                .into_iter()
+                .flatten()
+                .reduce(|warning, next| format!("{warning} {next}"));
         }
         status
     }
@@ -978,12 +997,14 @@ impl Recorder for CaptureRecorder {
         let mut inner = self.inner();
         inner.status.warning = None;
         inner.status.error = None;
-        // The warning and the note, until the next rebuild says otherwise.
-        if let Some(active) = &inner.active {
+        // The fallback's warning and note until the next rebuild says
+        // otherwise, the disk's until the next low reading.
+        if let Some(active) = inner.active.as_mut() {
             *active
                 .fallback
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) = Fallback::default();
+            active.disk_warning = None;
         }
         drop(inner);
         self.notify();
@@ -2271,6 +2292,34 @@ mod tests {
                 .is_some_and(|warning| warning.contains("about 1 minute of recording left"))
         })
         .await;
+        harness.free.store(u64::MAX, Ordering::SeqCst);
+        eventually("the warning goes with room again", || {
+            harness.recorder.status().warning.is_none()
+        })
+        .await;
+        stop(&harness.recorder).await;
+    }
+
+    /// The disk's warning and the fallback microphone's show side by side.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_disk_warning_does_not_hide_the_fallback_microphone() {
+        let harness = harness_on_inputs(
+            input(Some("Built-in Audio"), true),
+            input(Some("Built-in Audio"), true),
+        );
+        harness.free.store(
+            DiskWatch::STOP_BELOW_BYTES + 60 * (48_000 * 4 + 16_000 * 2),
+            Ordering::SeqCst,
+        );
+        start(&harness.recorder).await;
+        assert_eq!(
+            harness.recorder.status().warning,
+            Some(format!(
+                "{} Recording from Built-in Audio. The microphone chosen in Settings is not \
+                 available.",
+                low_space_warning(1, true)
+            ))
+        );
         stop(&harness.recorder).await;
     }
 
@@ -2473,7 +2522,7 @@ mod tests {
         stop_seen.recv_timeout(PATIENCE).expect("the stop began");
         harness
             .recorder
-            .warn(meeting_id, low_space_warning(5, true));
+            .warn(meeting_id, Some(low_space_warning(5, true)));
         let status = harness.recorder.status();
         assert_eq!(status.state, RecordingState::Stopping);
         assert_eq!(status.warning, None);
