@@ -6,7 +6,10 @@ audio path, D9).
 
 Supersedes one decision of [`2026-09-25-audio-capture.md`](2026-09-25-audio-capture.md):
 `start()` no longer throws `sampleRateMismatch` when the output device keeps a rate other
-than 48 kHz, and the user no longer has to change the device's rate.
+than 48 kHz, and the user no longer has to change the device's rate. Supersedes part of
+Decisions 2 and 3 of
+[`2026-09-28-device-change-during-recording.md`](2026-09-28-device-change-during-recording.md):
+the rate is compared with the rate the capture started at, not with 48 kHz.
 
 ## Problem
 
@@ -58,10 +61,12 @@ Windows and Linux never fail here. WASAPI opens both streams with
    device's frames: the output device is the clock master and runs at the stream's
    rate, while a microphone on another device keeps its own (a 48 kHz built-in
    microphone beside a headset at 24 kHz), so the backend rescales the microphone's
-   latency to the stream's rate first. A stop that overtakes a rebuild counts what
-   the rings hold at the restarted stream's rate.
+   latency to the stream's rate first. The sink counts ring overruns across a
+   rebuild, so each stream's are rescaled at that stream's rate once the rebuild has
+   stopped it. A stop that overtakes a rebuild counts what the rings hold at the
+   restarted stream's rate.
 5. **No setting.** Recording just works with the headset, at the quality the
-   headset delivers. The one changed text is the error for a rate outside the
+   headset delivers (every lane gets the clock master's band; see Limits). The one changed text is the error for a rate outside the
    range: "the audio devices run at N Hz, which Steno cannot record" replaces "the
    audio devices run at N Hz, not 48000 Hz". An aggregate that is gone reads as
    0 Hz there. The desktop app's status line says the same in its own words:
@@ -72,8 +77,12 @@ Windows and Linux never fail here. WASAPI opens both streams with
 
 D9's bar for the resampler holds here too: within 0.3 dB to 6 kHz, and nothing
 aliased into the speech band (less than -60 dB below 8 kHz). A9's 44.1 kHz sweep
-proves the offline `SincResampler`, not this loop, so the converter has its own
-tests. Measured on 2026-10-08: from 16, 24, 44.1, 96 and 192 kHz the level
+measured the offline `SincResampler`. The Rust loop is tied to it by a test that
+holds it within 1e-4 of `SincResampler` at 24, 44.1 and 16 kHz, so that sweep
+carries over to the Rust loop; Swift has no such test. The committed tests pin a
+tone's level within 0.1 dB, a residual under -80 dB at 44.1 kHz and a rejection
+below -50 dB at 96 kHz. The wider figures come from a sweep run in review on
+2026-10-08, not from a committed test: from 16, 24, 44.1, 96 and 192 kHz the level
 stays within 0.01 dB from 100 Hz to 6 kHz, and a 44.1 kHz sweep to 22 kHz leaves
 -99.8 dB at most below 8 kHz. From 8 kHz the band is the device's own (-0.38 dB at
 3.4 kHz).
@@ -95,7 +104,8 @@ stays within 0.01 dB from 100 Hz to 6 kHz, and a 44.1 kHz sweep to 22 kHz leaves
   - reset starts a new signal; the range is 8 to 192 kHz.
 - Real-time: the converting processing loop allocates nothing after warm-up at
   24 kHz and at 22.05 kHz, where a frame's worth of device samples is not whole,
-  with exact frame counts (`tests/realtime.rs`, `RealTimeAllocationTests.swift`).
+  with exact frame counts (`tests/realtime.rs`, `RealTimeAllocationTests.swift`);
+  Rust only: a converting thread without lanes does nothing.
 - Session over the synthetic backend:
   - a three-second recording at 24 kHz is exactly 299 frames of 48 kHz master and
     its 16 kHz sidecars, with the tones intact, and the far end reaches the
@@ -103,11 +113,16 @@ stays within 0.01 dB from 100 Hz to 6 kHz, and a 44.1 kHz sweep to 22 kHz leaves
   - a device change that restarts at 24 kHz resumes instead of ending the
     recording, with an exact master length;
   - frame counts rescale between rates rounding down;
+  - ring overruns at 24 kHz are counted in 48 kHz frames, and overruns at 48 kHz
+    before a switch to 16 kHz keep their 48 kHz count;
+  - a stream at a rate the converter cannot take (4 kHz) is recorded unconverted;
   - Rust only: a stop that overtakes a rebuild at 24 kHz counts the rings' leftovers
     in 48 kHz frames.
-- The backend: a rate read again after the listeners that differs from the
-  started rate is judged as a rate notification and reports `sampleRateChanged`
-  (`capture/live/backend.rs`, `DeviceSnapshotTests.swift`; macOS only).
+- The backend (`capture/live/backend.rs`, `DeviceSnapshotTests.swift`; macOS only):
+  - a rate read again after the listeners that differs from the started rate is
+    judged as a rate notification and reports `sampleRateChanged`;
+  - a 48 kHz microphone beside a 24 kHz clock master has its latency halved, one on
+    the clock master keeps its own.
 - Manual, on a Mac: AirPods in a call, start a recording, then switch a running
   recording into a call.
 
@@ -120,18 +135,26 @@ stays within 0.01 dB from 100 Hz to 6 kHz, and a 44.1 kHz sweep to 22 kHz leaves
   20 kHz, at -49 dB); below 8 kHz nothing aliases above -97 dB, so the bar holds.
 - **A late rate costs one rebuild.** A rate that settles after the 200 ms of reads
   is caught by the read after the listeners. The audio until the rebuild (the
-  500 ms coalesce delay plus the teardown) goes through the old rate's path, so it
-  is mislabelled for that half second. The same holds for every rate change mid
-  recording: the notification burst is judged as a whole.
-- **Under 11 ms per rebuild across rates.** The old converter's held half window
-  and its last partial frame go with the old processing thread (7.3 ms measured per
-  rebuild); `dropped_frames` does not count them. Going down in rate, the residue
-  of less than a frame the old thread leaves in the rings is read at the new rate.
+  500 ms coalesce delay plus the teardown) goes through the old rate's path: about
+  half a second plays at the wrong speed and pitch (an octave off between 48 and
+  24 kHz) and is likely lost to transcription. A rate change mid recording has the
+  same window, since its rebuild waits for the same coalesce delay.
+- **Under 14 ms per rebuild across rates.** The old converter's held half window
+  (32 device samples: 1.3 ms at 24 kHz, 4 ms at 8 kHz) and its last partial frame
+  (under 10 ms) go with the old processing thread (7.3 ms measured per rebuild at
+  24 kHz); `dropped_frames` does not count them. Going down in rate, the residue of
+  less than a frame the old thread leaves in the rings is read at the new rate.
 - **The rings are sized for 48 kHz.** The sink is built before the device's rate is
-  known, for two seconds at 48 kHz (131 072 samples per lane). That is 5.5 s at
-  24 kHz but 1.37 s at 96 kHz and 0.68 s at 192 kHz. A writer stalled during a
-  rebuild overruns them sooner at those rates; the overrun is counted in
-  `dropped_frames`. Main refused such devices, so it is not a regression.
+  known. It asks for two seconds at 48 kHz, rounded up to 131 072 samples per lane:
+  2.7 s at 48 kHz, 5.5 s at 24 kHz, but 1.37 s at 96 kHz and 0.68 s at 192 kHz. A
+  writer stalled during a rebuild overruns them sooner at those rates; the overrun
+  is counted in `dropped_frames`. Main refused such devices, so it is not a
+  regression.
+- **Every lane gets the clock master's band.** The aggregate resamples the
+  microphone to the clock master's rate before Steno reads it, so a 48 kHz built-in
+  microphone beside a 16 kHz headset is captured with about 7 kHz of band, and
+  beside an 8 kHz headset with 3.6 kHz.
 - **A rate the converter cannot take.** The live backends refuse it at `start`. A
   backend that reports one anyway is recorded unconverted rather than crashing the
-  session (Rust logs it).
+  session (Rust logs it): that is the pitch-shifted master labelled 48 kHz that the
+  check at `start` exists to prevent. No live backend reaches it.
