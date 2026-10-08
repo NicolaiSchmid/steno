@@ -322,14 +322,12 @@ pub fn delivery_line(delivery: &Delivery, zone: FixedOffset) -> String {
         ),
         DeliveryStatus::Failed(message) => format!("Failed: {message}"),
     };
-    let warnings = match (&delivery.status, &delivery.receipt) {
-        (DeliveryStatus::Delivered, Some(receipt)) => receipt.warnings.as_slice(),
-        _ => &[],
-    };
     let mut line = format!("{} · {status}", destination_display_name(delivery));
-    for warning in warnings {
-        line.push_str(" · ");
-        line.push_str(warning);
+    if let (DeliveryStatus::Delivered, Some(receipt)) = (&delivery.status, &delivery.receipt) {
+        for warning in &receipt.warnings {
+            line.push_str(" · ");
+            line.push_str(warning);
+        }
     }
     line
 }
