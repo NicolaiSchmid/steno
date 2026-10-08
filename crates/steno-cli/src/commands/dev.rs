@@ -10,7 +10,9 @@ use std::sync::Arc;
 use chrono::Utc;
 use clap::{Args, Subcommand, ValueEnum};
 use steno_audio::testing::AudioFixtures;
-use steno_audio::{EchoMetrics, PassthroughEchoCanceller, SpeexEchoCanceller, WavFile};
+use steno_audio::{
+    EchoMetrics, PassthroughEchoCanceller, SpeexEchoCanceller, SymphoniaAudioCodec, WavFile,
+};
 use steno_core::{
     AudioBuffer16k, AudioLane, Diarizer, EchoCanceller, MeetingExport, MeetingSummarizer,
     SpeechEngine, SummaryTemplate, TranscriptCleaner, paths::file_url_path,
@@ -459,30 +461,19 @@ impl Onsets {
         #[allow(clippy::cast_possible_truncation)]
         let level = 10f64.powf(self.threshold / 20.0) as f32;
         for file in &self.files {
+            // Channel 0 says how many follow.
+            let mut channels = 1;
             let mut channel = 0;
-            loop {
-                let decoded = match steno_audio::SymphoniaAudioCodec::read_channel(
-                    file,
-                    channel,
-                    AudioLane::Mixed,
-                ) {
-                    Ok(decoded) => decoded,
-                    Err(steno_audio::codec::CodecError::ChannelMissing { .. }) if channel > 0 => {
-                        break;
-                    }
-                    Err(error) => {
-                        return Err(Failure::runtime(format!("{}: {error}", file.display())));
-                    }
-                };
+            while channel < channels {
+                let decoded = SymphoniaAudioCodec::read_channel(file, channel, AudioLane::Mixed)
+                    .map_err(|error| Failure::runtime(format!("{}: {error}", file.display())))?;
                 println!(
                     "{} channel {channel}: {}",
                     file.display(),
                     onset_line(&decoded.samples, decoded.sample_rate, self.after, level)
                 );
+                channels = decoded.channels;
                 channel += 1;
-                if channel >= decoded.channels {
-                    break;
-                }
             }
         }
         Ok(())
@@ -725,7 +716,7 @@ impl Bakeoff {
             .clone()
             .unwrap_or_else(|| self.audio_directory.join("bakeoff"));
         std::fs::create_dir_all(&output).map_err(Failure::runtime)?;
-        let decoder = steno_audio::SymphoniaAudioCodec::new();
+        let decoder = SymphoniaAudioCodec::new();
         let cleaner: Option<Arc<dyn TranscriptCleaner>> = if self.cleanup {
             let store = self.models.database.open_to_read()?;
             let settings = store.settings().map_err(Failure::runtime)?;
@@ -922,10 +913,7 @@ fn render_bakeoff(rows: &[BakeoffRow]) -> String {
     out
 }
 
-async fn decode_any(
-    decoder: &steno_audio::SymphoniaAudioCodec,
-    file: &Path,
-) -> Result<AudioBuffer16k, Failure> {
+async fn decode_any(decoder: &SymphoniaAudioCodec, file: &Path) -> Result<AudioBuffer16k, Failure> {
     use steno_core::AudioDecoder as _;
     let asset = steno_core::AudioAsset {
         id: uuid::Uuid::nil(),
