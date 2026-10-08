@@ -367,7 +367,17 @@ mod tests {
         v1.extend_from_slice(&1u32.to_be_bytes());
         v1.extend_from_slice(&500u64.to_be_bytes());
         v1.extend_from_slice(&2_112i64.to_be_bytes());
+        v1.extend_from_slice(&[0, 1, 0, 0]);
         assert_eq!(first_media_time(&v1), Some(2_112));
+        // Version 1 entries are 20 bytes: a delay, then the priming.
+        let mut delay = vec![1u8, 0, 0, 0];
+        delay.extend_from_slice(&2u32.to_be_bytes());
+        for media_time in [-1i64, 1_024] {
+            delay.extend_from_slice(&500u64.to_be_bytes());
+            delay.extend_from_slice(&media_time.to_be_bytes());
+            delay.extend_from_slice(&[0, 1, 0, 0]);
+        }
+        assert_eq!(first_media_time(&delay), Some(1_024));
         let no_entries = [0u8, 0, 0, 0, 0, 0, 0, 0];
         assert_eq!(first_media_time(&no_entries), None);
     }
