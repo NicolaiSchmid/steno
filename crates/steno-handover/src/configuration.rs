@@ -63,10 +63,7 @@ impl HandoverConfiguration {
     /// Swift: `HandoverConfiguration.defaultServiceName`.
     #[must_use]
     pub fn default_service_name() -> String {
-        NAME_SOURCES
-            .iter()
-            .find_map(|source| source.read())
-            .unwrap_or_else(|| "Steno".to_owned())
+        first_name(NAME_SOURCES, NameSource::read)
     }
 
     /// `<support>/handover-inbox`; [`StenoPaths`] decides the root so a
@@ -110,8 +107,17 @@ impl NameSource {
     }
 }
 
+/// The first name `read` gives for `sources`, in order; `Steno` when none
+/// gives one.
+fn first_name(sources: &[NameSource], read: impl Fn(NameSource) -> Option<String>) -> String {
+    sources
+        .iter()
+        .find_map(|&source| read(source))
+        .unwrap_or_else(|| "Steno".to_owned())
+}
+
 /// The sources of the service name on this platform, in order: the Mac
-/// asks for the computer name first, as Swift did; Linux and Windows keep
+/// asks for the computer name first, as Swift did; Linux and Windows use
 /// the host name. The host name sources are the Mac's fallback, as
 /// Swift's `ProcessInfo.processInfo.hostName` was.
 pub const NAME_SOURCES: &[NameSource] = if cfg!(target_os = "macos") {
@@ -168,12 +174,31 @@ mod tests {
     }
 
     #[test]
-    fn the_default_is_the_first_name_a_source_gives() {
-        let first = NAME_SOURCES.iter().find_map(|source| source.read());
+    fn the_default_is_the_first_name_a_source_gives_in_order() {
+        let mac = [
+            NameSource::ComputerName,
+            NameSource::HostnameVariable,
+            NameSource::EtcHostname,
+            NameSource::SystemHostname,
+        ];
+        let reader = |names: [Option<&'static str>; 4]| {
+            move |source: NameSource| {
+                let index = mac.iter().position(|&known| known == source).unwrap();
+                names[index].map(str::to_owned)
+            }
+        };
+        let all = reader([Some("Studio"), Some("env"), Some("etc"), Some("host")]);
+        assert_eq!(first_name(&mac, all), "Studio");
+        assert_eq!(first_name(&mac[1..], all), "env");
         assert_eq!(
-            HandoverConfiguration::default_service_name(),
-            first.unwrap_or_else(|| "Steno".to_owned())
+            first_name(&mac, reader([None, None, Some("etc"), Some("host")])),
+            "etc"
         );
+        assert_eq!(
+            first_name(&mac, reader([None, None, None, Some("host")])),
+            "host"
+        );
+        assert_eq!(first_name(&mac, reader([None; 4])), "Steno");
         assert!(
             NameSource::SystemHostname.read().is_some(),
             "every platform has a host name"
