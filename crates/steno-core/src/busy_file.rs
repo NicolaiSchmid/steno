@@ -13,8 +13,9 @@
 //!
 //! [`is_busy`] names the errors of such a handle; [`retried_with`] takes
 //! the tries, the predicate and the wait as arguments, for the tests and
-//! for the durable writes' recorded waits; [`RETRIES`], [`FIRST_WAIT`]
-//! and [`LONGEST_WAIT`] set the backoff.
+//! for `steno_pipeline::files`, which waits through its `Syncs` so its
+//! tests can record the waits; [`RETRIES`], [`FIRST_WAIT`] and
+//! [`LONGEST_WAIT`] set the backoff.
 
 use std::io;
 use std::path::Path;
@@ -71,7 +72,7 @@ pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
 /// accepts is tried again up to `retries` times, after `wait`s of
 /// [`FIRST_WAIT`] doubling to [`LONGEST_WAIT`]. The tests give a predicate
 /// and a clock of their own; `steno_pipeline::files` waits through its
-/// recorded syncs.
+/// `Syncs` so its tests can record the waits.
 pub fn retried_with<T>(
     retries: u32,
     busy: impl Fn(&io::Error) -> bool,
