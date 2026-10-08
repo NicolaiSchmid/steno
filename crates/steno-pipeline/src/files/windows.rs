@@ -181,25 +181,52 @@ pub(super) fn file_system_name(path: &Path) -> io::Result<String> {
 }
 
 /// Whether `path` is on a network drive: a share (`\\server\share`, also
-/// with the `\\?\UNC\` prefix), read from the path alone, or a drive letter
-/// Windows reports as mapped to one (`GetDriveTypeW`). A relative path is
-/// made absolute first; a device path is not a network drive.
+/// with the `\\?\UNC\` or `\\.\UNC\` prefix), read from the path alone; a
+/// drive letter Windows reports as mapped to one (`GetDriveTypeW`); or a
+/// folder that resolves to a share, such as a directory symlink to one
+/// (`std::fs::canonicalize` of the nearest folder of it that exists). A
+/// relative path is made absolute first; a device path is not a network
+/// drive.
 pub(super) fn is_on_a_network_drive(path: &Path) -> bool {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-    let Some(Component::Prefix(prefix)) = absolute.components().next() else {
+    names_a_share(&absolute)
+        || is_a_mapped_drive(&absolute)
+        || absolute
+            .ancestors()
+            .find(|ancestor| ancestor.exists())
+            .and_then(|existing| std::fs::canonicalize(existing).ok())
+            .is_some_and(|resolved| names_a_share(&resolved))
+}
+
+/// The prefix `path` starts with, if any.
+fn prefix_of(path: &Path) -> Option<Prefix<'_>> {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => Some(prefix.kind()),
+        _ => None,
+    }
+}
+
+/// Whether `path` names a share: `\\server\share`, `\\?\UNC\server\share`
+/// or `\\.\UNC\server\share`.
+fn names_a_share(path: &Path) -> bool {
+    match prefix_of(path) {
+        Some(Prefix::UNC(..) | Prefix::VerbatimUNC(..)) => true,
+        Some(Prefix::DeviceNS(device)) => device.eq_ignore_ascii_case("UNC"),
+        _ => false,
+    }
+}
+
+/// Whether `path` starts with a drive letter Windows reports as mapped to a
+/// share.
+fn is_a_mapped_drive(path: &Path) -> bool {
+    let Some(Prefix::Disk(letter) | Prefix::VerbatimDisk(letter)) = prefix_of(path) else {
         return false;
     };
-    match prefix.kind() {
-        Prefix::UNC(..) | Prefix::VerbatimUNC(..) => true,
-        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
-            let root = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
-            // SAFETY: `root` is a NUL-terminated UTF-16 string owned by this
-            // frame and alive until the call returns; `GetDriveTypeW` only
-            // reads it and keeps no pointer to it after it returns.
-            unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
-        }
-        Prefix::Verbatim(_) | Prefix::DeviceNS(_) => false,
-    }
+    let root = [u16::from(letter), u16::from(b':'), u16::from(b'\\'), 0];
+    // SAFETY: `root` is a NUL-terminated UTF-16 string owned by this frame
+    // and alive until the call returns; `GetDriveTypeW` only reads it and
+    // keeps no pointer to it after it returns.
+    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
 }
 
 /// `path` as the NUL-terminated UTF-16 string the Win32 calls take, with
@@ -365,7 +392,7 @@ mod tests {
         assert!(!is_sharing_violation(&error(ERROR_ACCESS_DENIED)));
     }
 
-    /// A share is a network drive from its path alone, with or without the
+    /// A share is a network drive from its path alone, with or without a
     /// prefix; the runner's temporary folder, on a local drive, is not, and
     /// neither is a device path.
     #[test]
@@ -373,6 +400,9 @@ mod tests {
         assert!(is_on_a_network_drive(Path::new(r"\\server\share\audio")));
         assert!(is_on_a_network_drive(Path::new(
             r"\\?\UNC\server\share\audio"
+        )));
+        assert!(is_on_a_network_drive(Path::new(
+            r"\\.\UNC\server\share\audio"
         )));
         let directory = tempfile::tempdir().unwrap();
         assert!(!is_on_a_network_drive(directory.path()));
