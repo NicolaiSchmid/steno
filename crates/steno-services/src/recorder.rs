@@ -2699,7 +2699,7 @@ mod tests {
     /// stopping thread, before the save) leaves the recorder idle with an
     /// error rather than stopping for good, and the next recording starts.
     /// The meeting's row stays `recording` for the next launch, over a
-    /// master the session's drop closed.
+    /// master the session's drop closed, its recorded folder kept.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_stop_that_panics_leaves_the_recorder_idle_with_an_error() {
         let harness = harness(&[]);
@@ -2734,6 +2734,11 @@ mod tests {
         let master = steno_core::RecordingLayout::new(&audio_folder, meeting_id)
             .master(steno_core::AudioFormat::Caf48kFloat32);
         assert!(steno_audio::CafFile::read(&master).unwrap().frame_count() > 0);
+        let support = harness.dir.path().join("support");
+        assert_eq!(
+            crate::audio_folders::recorded(&support).unwrap()[&meeting_id],
+            audio_folder
+        );
         start(&harness.recorder).await;
         stop(&harness.recorder).await;
     }
@@ -2767,7 +2772,8 @@ mod tests {
 
     /// A start that panics once its meeting is begun and its writer made
     /// the files (here the backend's start, once it runs) fails the
-    /// meeting and leaves no folder, and the next recording starts.
+    /// meeting, forgets its recorded folder and leaves no folder, and the
+    /// next recording starts.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_start_that_panics_after_the_meeting_began_fails_it_and_leaves_no_folder() {
         let harness = harness(&[]);
@@ -2799,6 +2805,8 @@ mod tests {
                 .directory
                 .exists()
         );
+        let support = harness.dir.path().join("support");
+        assert!(crate::audio_folders::recorded(&support).unwrap().is_empty());
         harness.capture_with(synthetic_capture());
         start(&harness.recorder).await;
         stop(&harness.recorder).await;
