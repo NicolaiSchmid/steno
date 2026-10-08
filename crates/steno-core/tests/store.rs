@@ -129,35 +129,6 @@ fn state_updates_touch_only_their_columns() {
     ));
 }
 
-#[test]
-fn interrupted_recordings_fail_at_launch() {
-    let store = Store::in_memory().unwrap();
-    let mut meeting = common::meeting();
-    meeting.state = MeetingState::Recording;
-    store.save_meeting(&meeting).unwrap();
-    let now = date("2026-09-30T09:00:00.000Z");
-    assert_eq!(
-        store
-            .fail_interrupted_recordings("interrupted", now)
-            .unwrap(),
-        vec![meeting.id]
-    );
-    let read = store.meeting(meeting.id).unwrap().unwrap();
-    assert_eq!(
-        read.state,
-        MeetingState::Failed {
-            reason: "interrupted".to_owned()
-        }
-    );
-    assert_eq!(read.updated_at, now);
-    assert_eq!(
-        store
-            .fail_interrupted_recordings("interrupted", now)
-            .unwrap(),
-        Vec::<uuid::Uuid>::new()
-    );
-}
-
 /// Only the rows named, and only while they still record: a recording
 /// left alone, or one started since, keeps recording.
 #[test]

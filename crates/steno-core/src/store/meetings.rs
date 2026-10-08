@@ -251,38 +251,17 @@ impl Store {
     pub const INTERRUPTED_RECORDING_REASON: &'static str =
         "Recording was interrupted before it finished.";
 
-    /// Launch reconciliation: every meeting still `recording` belongs to a
-    /// process that died mid-meeting. One transaction marks them
-    /// `failed(reason)` with `updatedAt = now` and returns their ids,
-    /// oldest first. The app recovers what it can first and fails the rest
-    /// through [`Self::fail_recordings`], with
-    /// [`Self::INTERRUPTED_RECORDING_REASON`].
-    pub fn fail_interrupted_recordings(
-        &self,
-        reason: &str,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<Uuid>> {
-        self.write(|transaction| {
-            let mut meetings = query_all(
-                transaction,
-                &format!("SELECT {COLUMNS} FROM meeting WHERE state = ?1 ORDER BY startedAt, id"),
-                [MeetingStateKind::Recording.as_str()],
-                from_row,
-            )?;
-            for meeting in &mut meetings {
-                save_failed(transaction, meeting, reason, now)?;
-            }
-            Ok(meetings.into_iter().map(|meeting| meeting.id).collect())
-        })
-    }
-
-    /// [`Self::fail_interrupted_recordings`] for the meetings in `ids`
-    /// alone, each only while it is still `recording`; returns the ones it
-    /// marked, in `ids` order. The launch passes the rows its recovery
-    /// could not salvage, so a row it left alone (a recording another
-    /// process is still writing) and a recording started since it listed
-    /// them stay `recording`. Swift: `MeetingStore.failInterruptedRecordings`,
-    /// which failed every such row.
+    /// Launch reconciliation's failing half: marks the meetings in `ids`
+    /// `failed(reason)` with `updatedAt = now`, each only while it is still
+    /// `recording`, in one transaction, and returns the ones it marked, in
+    /// `ids` order. The launch recovers what it can first and passes the
+    /// rows it could not salvage, with
+    /// [`Self::INTERRUPTED_RECORDING_REASON`], so a row it left alone (a
+    /// recording another process is still writing) and a recording started
+    /// since it listed them stay `recording`. Swift:
+    /// `MeetingStore.failInterruptedRecordings` in
+    /// `Sources/StenoCore/Storage/MeetingStore.swift`, which failed every
+    /// `recording` row.
     pub fn fail_recordings(
         &self,
         ids: &[Uuid],
