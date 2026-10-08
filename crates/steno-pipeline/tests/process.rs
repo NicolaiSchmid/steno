@@ -2321,17 +2321,22 @@ fn runs_file(asset: &AudioAsset) -> PathBuf {
         .processing_runs()
 }
 
-/// A launch whose run of the meeting never ends: the run is left
-/// mid-transcription, as a crash leaves it, and the pipeline is dropped.
-/// Each launch here has a quit latch and an in-flight set of its own, as a
-/// new process has, so the run left held claims nothing in the next.
-async fn launch_that_crashes(world: &World, first: Option<(&Meeting, &AudioAsset)>) -> Vec<Uuid> {
-    let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
-    let pipeline = ProcessingPipeline::new(
-        with_engine(world, engine.clone())
+/// A pipeline over `dependencies` as a new process builds it: with a quit
+/// latch and an in-flight set of its own, so a run an earlier launch left
+/// held claims nothing in it.
+fn new_process(dependencies: PipelineDependencies) -> ProcessingPipeline {
+    ProcessingPipeline::new(
+        dependencies
             .with_quit_latch(QuitLatch::default())
             .with_in_flight(InFlight::default()),
-    );
+    )
+}
+
+/// A launch whose run of the meeting never ends: the run is left
+/// mid-transcription, as a crash leaves it, and the pipeline is dropped.
+async fn launch_that_crashes(world: &World, first: Option<(&Meeting, &AudioAsset)>) -> Vec<Uuid> {
+    let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
+    let pipeline = new_process(with_engine(world, engine.clone()));
     let resumed = match first {
         Some((meeting, asset)) => {
             pipeline.enqueue(meeting, asset).unwrap();
@@ -2620,11 +2625,7 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
     let [(a, a_asset), (b, b_asset)] = two;
     for launch in 1..=MAX_CRASHED_RUNS {
         let engine = Arc::new(GatedEngine::new(Gate::EveryTranscription));
-        let pipeline = ProcessingPipeline::new(
-            with_engine(&world, engine.clone())
-                .with_quit_latch(QuitLatch::default())
-                .with_in_flight(InFlight::default()),
-        );
+        let pipeline = new_process(with_engine(&world, engine.clone()));
         assert_eq!(
             pipeline.resume_unfinished().unwrap(),
             [a.id, b.id],
@@ -2639,14 +2640,7 @@ async fn a_meeting_that_waits_its_turn_is_not_charged_for_another_meetings_crash
         drop(pipeline);
     }
 
-    let next_launch = ProcessingPipeline::new(
-        world
-            .pipeline
-            .dependencies()
-            .clone()
-            .with_quit_latch(QuitLatch::default())
-            .with_in_flight(InFlight::default()),
-    );
+    let next_launch = new_process(world.pipeline.dependencies().clone());
     assert_eq!(next_launch.resume_unfinished().unwrap(), [b.id]);
     next_launch.wait_until_idle().await;
     assert_eq!(
@@ -2668,11 +2662,7 @@ async fn a_run_started_at_once_holds_back_a_run_that_goes_alone() {
     let (fresh, fresh_asset) = processing_with_count(&world, 0);
     let (counted, counted_asset) = processing_with_count(&world, 1);
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
-    let pipeline = ProcessingPipeline::new(
-        with_engine(&world, engine.clone())
-            .with_quit_latch(QuitLatch::default())
-            .with_in_flight(InFlight::default()),
-    );
+    let pipeline = new_process(with_engine(&world, engine.clone()));
     assert_eq!(
         pipeline.resume_unfinished().unwrap(),
         [fresh.id, counted.id]
@@ -2702,11 +2692,7 @@ async fn a_quit_while_a_run_waits_its_turn_leaves_its_count() {
     let (fresh, fresh_asset) = processing_with_count(&world, 0);
     let (counted, counted_asset) = processing_with_count(&world, 1);
     let engine = Arc::new(GatedEngine::new(Gate::FirstTranscription));
-    let pipeline = ProcessingPipeline::new(
-        with_engine(&world, engine.clone())
-            .with_quit_latch(QuitLatch::default())
-            .with_in_flight(InFlight::default()),
-    );
+    let pipeline = new_process(with_engine(&world, engine.clone()));
     assert_eq!(
         pipeline.resume_unfinished().unwrap(),
         [fresh.id, counted.id]
@@ -2727,14 +2713,7 @@ async fn a_quit_while_a_run_waits_its_turn_leaves_its_count() {
     assert_eq!(meeting_state(&world, counted.id), MeetingState::Processing);
     assert!(!runs_file(&fresh_asset).exists());
 
-    let next_launch = ProcessingPipeline::new(
-        world
-            .pipeline
-            .dependencies()
-            .clone()
-            .with_quit_latch(QuitLatch::default())
-            .with_in_flight(InFlight::default()),
-    );
+    let next_launch = new_process(world.pipeline.dependencies().clone());
     let resumed = next_launch.resume_unfinished().unwrap();
     assert!(resumed.contains(&counted.id), "{resumed:?}");
     next_launch.wait_until_idle().await;
@@ -2754,11 +2733,7 @@ async fn alone_runs_are_serial_and_oldest_first() {
     ];
     three.sort_by_key(|(meeting, _)| meeting.id);
     let engine = Arc::new(GatedEngine::new(Gate::EveryTranscription));
-    let pipeline = ProcessingPipeline::new(
-        with_engine(&world, engine.clone())
-            .with_quit_latch(QuitLatch::default())
-            .with_in_flight(InFlight::default()),
-    );
+    let pipeline = new_process(with_engine(&world, engine.clone()));
     let ids: Vec<Uuid> = three.iter().map(|(m, _)| m.id).collect();
     assert_eq!(pipeline.resume_unfinished().unwrap(), ids);
     engine.wait_until_entered().await;
@@ -2824,14 +2799,7 @@ async fn a_quit_takes_back_a_run_held_mid_transcription() {
     assert_eq!(read_runs(&asset), "2", "the exit took its run back");
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Processing);
 
-    let next_launch = ProcessingPipeline::new(
-        world
-            .pipeline
-            .dependencies()
-            .clone()
-            .with_quit_latch(QuitLatch::default())
-            .with_in_flight(InFlight::default()),
-    );
+    let next_launch = new_process(world.pipeline.dependencies().clone());
     assert_eq!(next_launch.resume_unfinished().unwrap(), [meeting.id]);
     next_launch.wait_until_idle().await;
     assert_eq!(meeting_state(&world, meeting.id), MeetingState::Ready);
