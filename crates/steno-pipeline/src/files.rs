@@ -275,7 +275,7 @@ fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Ren
             rename_with_std(syncs, from, to)?;
             Renamed::WithStd
         };
-        let renamed_file = retried(syncs, is_busy, || OpenOptions::new().write(true).open(to))?;
+        let renamed_file = retried(syncs, || OpenOptions::new().write(true).open(to))?;
         syncs.file(&renamed_file, to)?;
         Ok(renamed)
     }
@@ -289,19 +289,23 @@ fn rename_over(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<Ren
 /// `std::fs::rename`, retried on Windows while the file is busy
 /// ([`retried`]); elsewhere tried once.
 fn rename_with_std(syncs: &dyn Syncs, from: &Path, to: &Path) -> std::io::Result<()> {
-    retried(syncs, is_busy, || std::fs::rename(from, to))
+    retried(syncs, || std::fs::rename(from, to))
 }
 
-/// Runs `attempt`, tried again on Windows while `busy` accepts its error
-/// (`steno_core::busy_file`: nine retries after waits of 5 ms doubling to
-/// 200 ms, about 0.9 s in all), waiting through `syncs`; elsewhere
-/// `attempt` runs once.
+/// `busy_file::retried`, waiting through `syncs`: `attempt` runs, and on
+/// Windows a busy file ([`is_busy`]) is tried again nine times after waits
+/// of 5 ms doubling to 200 ms, about 0.9 s in all; elsewhere `attempt`
+/// runs once.
 fn retried<T>(
     syncs: &dyn Syncs,
-    busy: impl Fn(&std::io::Error) -> bool,
     attempt: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
-    busy_file::retried_with(busy_file::RETRIES, busy, |delay| syncs.wait(delay), attempt)
+    busy_file::retried_with(
+        busy_file::RETRIES,
+        is_busy,
+        |delay| syncs.wait(delay),
+        attempt,
+    )
 }
 
 /// Removes this file's temporaries in `directory` that are older than
@@ -621,6 +625,7 @@ mod tests {
             self.events.lock().unwrap().clone()
         }
 
+        #[cfg(windows)]
         fn waits(&self) -> Vec<Duration> {
             self.waits.lock().unwrap().clone()
         }
@@ -811,50 +816,6 @@ mod tests {
         assert!(create_new_dir_durably_with(&syncs, &meeting).is_err());
         assert!(!meeting.exists());
         assert_eq!(std::fs::read(&earlier).unwrap(), b"an earlier recording");
-    }
-
-    /// An error `busy` accepts is retried nine times on Windows, after
-    /// waits of 5 ms doubling to 200 ms, under a second in all, and not at
-    /// all elsewhere; any other error, or a success, ends the attempts.
-    #[test]
-    fn retried_tries_ten_times_within_a_second_on_windows_and_once_elsewhere() {
-        let syncs = Recorded::new(Path::new("unused"));
-        let attempts = std::cell::Cell::new(0);
-        let outcome: std::io::Result<()> = retried(
-            &syncs,
-            |_| true,
-            || {
-                attempts.set(attempts.get() + 1);
-                Err(std::io::Error::other("busy"))
-            },
-        );
-        assert!(outcome.is_err());
-        let (expected_attempts, expected_waits) = if cfg!(windows) {
-            (10, vec![5, 10, 20, 40, 80, 160, 200, 200, 200])
-        } else {
-            (1, Vec::new())
-        };
-        assert_eq!(attempts.get(), expected_attempts);
-        let waits = syncs.waits();
-        assert_eq!(
-            waits,
-            expected_waits
-                .into_iter()
-                .map(Duration::from_millis)
-                .collect::<Vec<_>>()
-        );
-        assert!(waits.iter().sum::<Duration>() < Duration::from_secs(1));
-        attempts.set(0);
-        let outcome: std::io::Result<()> = retried(
-            &syncs,
-            |_| false,
-            || {
-                attempts.set(attempts.get() + 1);
-                Err(std::io::Error::other("not busy"))
-            },
-        );
-        assert!(outcome.is_err());
-        assert_eq!(attempts.get(), 1);
     }
 
     /// A folder sync that fails fails the folder creation and the copy, so
