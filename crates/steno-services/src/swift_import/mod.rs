@@ -686,13 +686,15 @@ impl ImportStep {
         *self.gate.key() == KeyGate::Open
     }
 
-    /// The run under way, or `None` when another one is.
+    /// Held for a run or a skip; `None` when another run is under way or
+    /// the step is over, and the caller answers the status.
     fn one_at_a_time(&self) -> Option<MutexGuard<'_, ()>> {
-        match self.running.try_lock() {
-            Ok(guard) => Some(guard),
-            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
-            Err(TryLockError::WouldBlock) => None,
-        }
+        let running = match self.running.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+            Err(TryLockError::WouldBlock) => return None,
+        };
+        (self.state().stage != SwiftImportStage::Done).then_some(running)
     }
 
     /// The step had no Swift key to read: the store answers from now on.
@@ -776,9 +778,6 @@ impl SwiftImport for ImportStep {
         let Some(_running) = self.one_at_a_time() else {
             return self.status();
         };
-        if self.state().stage == SwiftImportStage::Done {
-            return self.status();
-        }
         if self.state().items.read_key {
             // A key saved in Settings since the launch wins: the Swift
             // key is not read over it.
@@ -824,9 +823,6 @@ impl SwiftImport for ImportStep {
         let Some(_running) = self.one_at_a_time() else {
             return self.status();
         };
-        if self.state().stage == SwiftImportStage::Done {
-            return self.status();
-        }
         // Not now brings up no prompt: a key item is left unread for this
         // launch, whoever stored it.
         let items = self.state().items;
