@@ -20,8 +20,9 @@ final class StoreGate: Sendable {
   /// The next save of an existing handover receipt, executed but not
   /// committed; every later write queues behind it.
   let receiptWrite = Hold(matching: "UPDATE \"handoverReceipt\"")
-  /// The next admission ledger read (`MeetingStore.admittedMeeting`); the
-  /// engine resumes with what the ledger held when the read ran.
+  /// The next admission ledger read (the announce's `admittedMeeting`, or
+  /// the admission's reuse check); the engine resumes with what the ledger
+  /// held when the read ran.
   let admissionRead = Hold(matching: "FROM \"handoverAdmission\"")
   /// The next paired device read by token hash (the auth gate); the engine
   /// resumes with a device that may no longer be in the store.

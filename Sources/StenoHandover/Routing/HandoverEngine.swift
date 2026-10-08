@@ -392,10 +392,10 @@ actor HandoverEngine: RequestHandling {
   ///   `receipt` comes back as memory holds it.
   ///
   /// A chunk set is one split's, so `receivedChunks` is not written over a
-  /// receipt memory holds in another chunk size (the phone announced the
-  /// same bytes split otherwise since): a late `complete` of the earlier
-  /// split would empty the new split's chunks, and the phone would send them
-  /// again. Nothing changes then, and `receipt` comes back as the caller
+  /// receipt memory holds in another chunk size (the phone has since
+  /// announced the same bytes in another split): a late `complete` of the
+  /// earlier split would empty the new split's chunks, and the phone would
+  /// send them again. Nothing changes then, and `receipt` comes back as the caller
   /// passed it.
   ///
   /// Callers that answer the phone whatever the write did use `try?`

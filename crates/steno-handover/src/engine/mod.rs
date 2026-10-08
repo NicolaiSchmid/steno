@@ -874,10 +874,11 @@ impl Engine {
     /// read it before the phone's `complete` admitted the recording must
     /// not put it back, or the phone's next `complete` would start over and
     /// admit it again. A chunk set is one split's, so it is not written
-    /// over a receipt memory holds in another chunk size (the phone
-    /// announced the same bytes split otherwise since): a late `complete`
+    /// over a receipt memory holds in another chunk size (the phone has
+    /// since announced the same bytes in another split): a late `complete`
     /// of the earlier split would empty the new split's chunks, and the
-    /// phone would send them again.
+    /// phone would send them again. Nothing changes then, `receipt`
+    /// included.
     async fn update(
         &self,
         receipt: &mut HandoverReceipt,
